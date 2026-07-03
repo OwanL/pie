@@ -38,6 +38,23 @@ function applyPrepassUsage(details: PruningResult, usage: PrepassUsage | undefin
 	details.prepassCacheWriteTokens = usage.cacheWrite;
 }
 
+/**
+ * Render prepass latency as a compact `· prepass Xs` / `· prepass Xms` note.
+ * Returns "" when there is no latency to report. Surfacing this lets the user
+ * distinguish a genuinely slow prepass (often a slow provider TTFT, since the
+ * prepass makes its own model call) from a normal keep-all outcome — the
+ * keep-all result itself is *expected* under the keep-biased design and is
+ * not a warning.
+ */
+export function formatLatencyNote(latencyMs: number | undefined): string {
+	if (!latencyMs || latencyMs <= 0) return "";
+	if (latencyMs >= 1000) {
+		const seconds = latencyMs / 1000;
+		return ` · prepass ${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)}s`;
+	}
+	return ` · prepass ${latencyMs}ms`;
+}
+
 /** Display shape returned from `buildFeedbackMessage`. */
 export interface PruningFeedbackMessage {
 	customType: "pruning-result";
@@ -277,10 +294,13 @@ export function buildFeedbackMessage(
 
 	const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
 	const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
+	const latencyNote = formatLatencyNote(prepass?.latencyMs);
 
-	const content = hasSkillPruning || hasToolPruning
-		? `${parts.join(", ")}${tokenNote}`
-		: `Pruning: ${parts.join(", ")} (nothing removed)`;
+	// Note: a keep-all outcome (nothing pruned) is the *expected* result of the
+	// keep-biased prepass, not a warning. Frame it identically to the pruned
+	// case — just the kept counts plus any notes — so it never reads as a
+	// prepass failure. The latency note is the real signal for a slow prepass.
+	const content = `${parts.join(", ")}${tokenNote}${latencyNote}`;
 
 	return {
 		customType: "pruning-result",

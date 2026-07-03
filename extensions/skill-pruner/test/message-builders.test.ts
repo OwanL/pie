@@ -425,15 +425,46 @@ test("buildFeedbackMessage: omits fail-open reason when absent", () => {
 	assert.equal(msg!.details.prepassLatencyMs, 5);
 });
 
-test("buildFeedbackMessage: nothing pruned -> '(nothing removed)' content and no token note", () => {
+test("buildFeedbackMessage: nothing pruned -> neutral keep-all content, no token note, no alarming framing", () => {
 	const msg = buildFeedbackMessage(
 		skillResult({ included: ["a", "b"], excluded: [], tokensSaved: 0 }),
 		toolResult({ included: ["read"], excluded: [], tokensSaved: 0 }),
 		"auto",
 	);
 	assert.ok(msg);
-	assert.match(msg!.content, /nothing removed/);
+	// Keep-all is the expected keep-biased outcome — frame it as kept counts,
+	// not as a "(nothing removed)" / "Pruning:" warning.
+	assert.match(msg!.content, /All 2 skills kept/);
+	assert.match(msg!.content, /All 1 tools kept/);
+	assert.doesNotMatch(msg!.content, /nothing removed/);
+	assert.doesNotMatch(msg!.content, /^Pruning:/);
 	assert.doesNotMatch(msg!.content, /Saved/);
+	assert.doesNotMatch(msg!.content, /prepass/);
+});
+
+test("buildFeedbackMessage: nothing pruned -> surfaces prepass latency when provided", () => {
+	const msg = buildFeedbackMessage(
+		skillResult({ included: ["a", "b"], excluded: [], tokensSaved: 0 }),
+		toolResult({ included: ["read"], excluded: [], tokensSaved: 0 }),
+		"auto",
+		{ model: "gpt-5-mini", thinkingLevel: "minimal", response: "", thinking: "", systemPrompt: "", userMessage: "", latencyMs: 8200 },
+	);
+	assert.ok(msg);
+	assert.match(msg!.content, /All 2 skills kept/);
+	assert.match(msg!.content, /· prepass 8\.2s/);
+});
+
+test("buildFeedbackMessage: pruned -> surfaces prepass latency alongside token savings", () => {
+	const msg = buildFeedbackMessage(
+		skillResult({ included: ["a"], excluded: ["b"], tokensSaved: 100 }),
+		toolResult({ included: ["read"], excluded: ["edit"], tokensSaved: 50 }),
+		"auto",
+		{ model: "gpt-5-mini", thinkingLevel: "minimal", response: "", thinking: "", systemPrompt: "", userMessage: "", latencyMs: 450 },
+	);
+	assert.ok(msg);
+	assert.match(msg!.content, /Kept 1\/2 skills/);
+	assert.match(msg!.content, /Saved ~150 tokens/);
+	assert.match(msg!.content, /· prepass 450ms/);
 });
 
 test("buildFeedbackMessage: prepass fields absent when prepass undefined", () => {

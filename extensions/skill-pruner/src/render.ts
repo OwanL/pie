@@ -1,5 +1,6 @@
 import type { PruningResult } from "../types.js";
 import { Box, Text } from "@earendil-works/pi-tui";
+import { formatLatencyNote } from "./message-builders.js";
 
 export const pruningResultRenderer = {
 	messageType: "pruning-result" as const,
@@ -23,16 +24,16 @@ export const pruningResultRenderer = {
 			? `Kept ${details.includedTools.length}/${details.includedTools.length + details.excludedTools.length} tools`
 			: "";
 		const parts = [skillSummary, toolSummary].filter(Boolean);
-		const tokenNote = details.skillTokensSaved + details.toolTokensSaved > 0
-			? ` · Saved ~${details.skillTokensSaved + details.toolTokensSaved} tokens`
-			: "";
+		const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
+		const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
+		const latencyNote = formatLatencyNote(details.prepassLatencyMs);
 		const hasError = !!details.prepassError;
 		const errorNote = hasError ? ` · ${details.prepassError}` : "";
 
 		if (!expanded) {
 			const compact = hasError
 				? `${modeLabel}${theme.fg("error", "Pruning error")}${errorNote}`
-				: `${modeLabel}${parts.join(", ")}${tokenNote}`;
+				: `${modeLabel}${parts.join(", ")}${tokenNote}${latencyNote}`;
 			const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(compact, 0, 0));
 			return box;
@@ -55,6 +56,9 @@ export const pruningResultRenderer = {
 		}
 		if (tokenNote) {
 			lines.push(theme.fg("accent", `  ${tokenNote.trim()}`));
+		}
+		if (latencyNote) {
+			lines.push(theme.fg("dim", `  Prepass latency: ${details.prepassLatencyMs}ms`));
 		}
 
 		const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
