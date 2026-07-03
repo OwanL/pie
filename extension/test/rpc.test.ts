@@ -86,7 +86,22 @@ test('validateSessionCreate accepts an optional selection token', () => {
 test('validateSessionOpen accepts an optional selection token', () => {
   assert.deepEqual(
     validateSessionOpen({ sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2' }),
-    { sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2' },
+    { sessionPath: '/workspace/session.jsonl', selectionToken: 'selection:2', transcript: undefined },
+  );
+});
+
+test('validateSessionOpen accepts an optional transcript mode', () => {
+  assert.equal(
+    validateSessionOpen({ sessionPath: '/s.jsonl', transcript: 'skip' }).transcript,
+    'skip',
+  );
+  assert.equal(
+    validateSessionOpen({ sessionPath: '/s.jsonl', transcript: 'tail' }).transcript,
+    'tail',
+  );
+  assert.throws(
+    () => validateSessionOpen({ sessionPath: '/s.jsonl', transcript: 'bogus' }),
+    /transcript must be 'tail' or 'skip'/,
   );
 });
 

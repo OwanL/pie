@@ -464,6 +464,7 @@ export class BackendServer {
   private async buildSessionOpenedPayload(
     sessionPath: string,
     selectionToken?: string,
+    transcript?: import('../shared/protocol').TranscriptMode,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', () => buildSessionOpenedPayloadHelper(sessionPath, {
       getContextUsage: (context) => this.getContextUsage(context),
@@ -474,7 +475,7 @@ export class BackendServer {
       getSessionContext: (path) => this.getSessionContext(path),
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
-    }, selectionToken));
+    }, selectionToken, transcript));
   }
 
   private async emitSessionListChanged(): Promise<void> {
@@ -533,8 +534,8 @@ export class BackendServer {
       setViewedSessionPath: (sessionPath) => {
         this.viewedSessionPath = sessionPath;
       },
-      buildSessionOpenedPayload: (sessionPath, selectionToken) => (
-        this.buildSessionOpenedPayload(sessionPath, selectionToken)
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript) => (
+        this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript)
       ),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)

@@ -74,6 +74,13 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   let next: ArchState = state;
 
   const localTranscript = state.transcript.bySession[sessionPath] ?? [];
+  // Skip-transcript path: the backend omitted the tail window (host requested
+  // `transcript: 'skip'` because it already has the session loaded and idle).
+  // Keep the existing transcript + window rather than replacing with the empty
+  // incoming snapshot. Metadata (session summary, busy, analytics, models,
+  // contextUsage, systemPrompts) is still applied below.
+  const skipped = payload.transcriptSkipped === true
+    && state.transcript.windowBySession[sessionPath] !== undefined;
   // Mirror the preserve decision made in attach.resolveAndDispatch: the
   // backend's `busy` flag is false during an EDIT's intermediate truncate
   // snapshot (emitted right after `session.truncateAfter` rewrites the file,
@@ -90,12 +97,14 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     transcript: resolvedTranscript,
     transcriptWindow: resolvedWindow,
     aliases: resolvedAliases,
-  } = resolveSessionOpenedTranscript({
-    busy: payload.busy || hostRunning,
-    incomingTranscript: payload.transcript,
-    incomingTranscriptWindow: payload.transcriptWindow,
-    localTranscript,
-  });
+  } = skipped
+    ? { transcript: localTranscript, transcriptWindow: state.transcript.windowBySession[sessionPath]!, aliases: [] as Array<{ aliasId: string; canonicalId: string }> }
+    : resolveSessionOpenedTranscript({
+        busy: payload.busy || hostRunning,
+        incomingTranscript: payload.transcript,
+        incomingTranscriptWindow: payload.transcriptWindow,
+        localTranscript,
+      });
 
   // Sessions: running state, backend ready, upsert summary
   const nextRunningSessionPaths = payload.busy

@@ -115,12 +115,26 @@ export interface SessionOpenedPayload {
   transcriptWindow: TranscriptWindow;
   busy: boolean;
   selectionToken?: string;
+  /** When true, `transcript`/`transcriptWindow` are NOT authoritative — the
+   *  host already holds the loaded transcript and must keep its existing
+   *  `bySession`/`windowBySession` entries. The backend omits the (potentially
+   *  multi-MB) tail window in this case, shipping only metadata (busy,
+   *  contextUsage, modelSettings, availableModels, session summary). Set only
+   *  in response to a `session.open` whose `transcript` param was `'skip'`. */
+  transcriptSkipped?: boolean;
   systemPrompts?: SystemPromptEntry[];
   analyticsFactors?: SessionAnalyticsFactors;
   modelSettings?: ModelSettings;
   availableModels?: ModelInfo[];
   contextUsage?: ContextWindowUsage;
 }
+
+/** How much transcript the host wants in a `session.open` response.
+ *  - `'tail'` (default): ship the tail window (full content) — used on first
+ *    load and whenever the host needs the authoritative snapshot.
+ *  - `'skip'`: omit the transcript; the host already has it loaded. The
+ *    backend sets `transcriptSkipped: true` on the `session.opened` payload. */
+export type TranscriptMode = 'tail' | 'skip';
 
 export interface SessionListChangedPayload {
   sessions: SessionSummary[];

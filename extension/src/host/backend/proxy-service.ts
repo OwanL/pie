@@ -79,12 +79,32 @@ export class ProxyService implements vscode.Disposable {
     const { configPath, proxyDir, port, host } = options;
     const baseUrl = `http://${host}:${port}`;
 
-    // Guard against an orphaned litellm from a prior session still bound to
-    // `port`. Without this, uvicorn silently falls back to an EPHEMERAL port
-    // (e.g. 25962) and the pidfile/basetURL pi is configured for points at a
-    // port nothing is listening on — random "session stopped" failures with
-    // no error. The holder with no tracked child is orphaned by definition,
-    // so auto-reclaim it. Mirrors scripts/proxy.mjs startBackground().
+    // Fast path: a healthy litellm from a prior run may already be bound to
+    // `port`. Reuse it instead of killing + respawning an identical process.
+    // The /health/liveness 200 confirms a litellm is up (the path is litellm-
+    // specific, so a stray non-litellm holder won't satisfy it), and the probe
+    // is a plain HTTP GET — connection-refused returns in ~1ms, so the common
+    // "nothing on the port" case pays no spawnSync cost at all. We do NOT
+    // track the reused child (this.proc stays undefined), so dispose()/stop()
+    // leaves it running — correct, since we didn't spawn it and it may belong
+    // to another window.
+    //
+    // Limitation: if UMANS_API_KEY changed since the holder was started, its
+    // master_key is stale and umans will 401. This is a rare edge case (key
+    // rotation between VS Code launches) traded for ~4.5s saved per boot; the
+    // user can recover by killing the port holder or changing pie.proxyPort.
+    if (await this.healthCheck(baseUrl, 1500)) {
+      bootLog('proxy-service', 'start.reused', { port });
+      return { port, baseUrl, pid: 0 };
+    }
+
+    // No healthy proxy on the port. Guard against an orphaned litellm from a
+    // prior session still bound to `port` — without this, uvicorn silently
+    // falls back to an EPHEMERAL port (e.g. 25962) and the pidfile/baseURL pi
+    // is configured for points at a port nothing is listening on — random
+    // "session stopped" failures with no error. The holder with no tracked
+    // child is orphaned by definition, so auto-reclaim it. Mirrors
+    // scripts/proxy.mjs startBackground().
     await this.reclaimOrphanedPort(port, host);
 
     bootLog('proxy-service', 'start.spawn', { uv: resolveUv(), proxyDir, port });

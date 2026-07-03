@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ThinkingLevel } from '../../shared/protocol';
+import type { ChatPrefs, PruningSettings, ThinkingLevel, TranscriptMode } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -141,6 +141,13 @@ export class SessionService implements vscode.Disposable {
    *  the optimistic tab setup. */
   handleSelectionFailure(selectionToken: string, notice: string): void {
     this.state.handleSelectionFailure(selectionToken, notice);
+  }
+
+  getOpenTranscriptMode(sessionPath: string): TranscriptMode {
+    const arch = this.getArchState();
+    const loaded = arch.transcript.windowBySession[sessionPath] !== undefined;
+    const running = arch.sessions.runningSessionPaths.includes(sessionPath);
+    return loaded && !running ? 'skip' : 'tail';
   }
 
   openSession(sessionPath: string): void {

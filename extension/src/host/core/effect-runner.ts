@@ -117,6 +117,11 @@ export interface SessionServiceLike {
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
   handleSelectionFailure(selectionToken: string, notice: string): void;
+  /** Decide whether a `session.open` for `sessionPath` can skip the
+   *  transcript round-trip: returns `'skip'` when the host already has the
+   *  session's transcript window loaded and the session is not actively
+   *  streaming, otherwise `'tail'` (full authoritative snapshot). */
+  getOpenTranscriptMode(sessionPath: string): import('../../shared/protocol').TranscriptMode;
 }
 
 export interface StatsServiceLike {
@@ -897,7 +902,13 @@ export class EffectRunner {
       // OpenSessionResult handler stays a no-op, matching CreateSession.
       void queues.enqueueLifecycle(async () => {
         try {
-          await backend.request('session.open', { sessionPath: effect.sessionPath, selectionToken: effect.selectionToken });
+          // Skip-transcript optimization: when the host already has this
+          // session's transcript loaded AND it isn't actively streaming,
+          // request a metadata-only `session.opened` (no multi-MB tail window).
+          // First load and any running session get the full authoritative
+          // snapshot.
+          const transcript = service.getOpenTranscriptMode(effect.sessionPath);
+          await backend.request('session.open', { sessionPath: effect.sessionPath, selectionToken: effect.selectionToken, transcript });
           dispatch({
             kind: 'OpenSessionResult',
             corrId: effect.corrId,

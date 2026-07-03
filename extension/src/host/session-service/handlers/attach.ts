@@ -125,12 +125,20 @@ function resolveAndDispatch(
   // transcript still wins.
   const hostRunning = deps.getArchState().sessions.runningSessionPaths.includes(sessionPath);
   const preserveBusy = payload.busy || staleSessionData || hostRunning;
-  const transcriptResolution = resolveSessionOpenedTranscript({
-    busy: preserveBusy,
-    incomingTranscript: payload.transcript,
-    incomingTranscriptWindow: payload.transcriptWindow,
-    localTranscript,
-  });
+  // Skip-transcript path: the backend omitted the tail window because the
+  // host requested `transcript: 'skip'` (it already has the transcript loaded
+  // and the session is idle). Keep the host's existing transcript + window
+  // instead of merging/replacing with the empty incoming snapshot — otherwise
+  // the view would clear. File-change derivation below uses the kept transcript.
+  const existingWindow = deps.getArchState().transcript.windowBySession[sessionPath];
+  const transcriptResolution = payload.transcriptSkipped && existingWindow
+    ? { preserveLocal: true, transcript: localTranscript, transcriptWindow: existingWindow, aliases: [] as Array<{ aliasId: string; canonicalId: string }> }
+    : resolveSessionOpenedTranscript({
+        busy: preserveBusy,
+        incomingTranscript: payload.transcript,
+        incomingTranscriptWindow: payload.transcriptWindow,
+        localTranscript,
+      });
   const preserveStreamingState = transcriptResolution.preserveLocal && preserveBusy;
 
   const resolvedPayload: SessionOpenedPayload = {

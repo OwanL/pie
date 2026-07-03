@@ -161,6 +161,9 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },
+    getOpenTranscriptMode() {
+      return 'tail' as const;
+    },
   };
   if (opts.serviceOverrides) {
     Object.assign(service, opts.serviceOverrides);

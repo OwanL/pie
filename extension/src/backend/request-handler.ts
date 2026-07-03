@@ -51,6 +51,7 @@ export interface BackendRequestHandlerDeps {
   buildSessionOpenedPayload(
     sessionPath: string,
     selectionToken?: string,
+    transcript?: import('../shared/protocol').TranscriptMode,
   ): Promise<SessionOpenedPayload>;
   loadTranscriptPage(
     sessionPath: string,
@@ -146,6 +147,7 @@ async function handleSessionOpen(
   const openPayload = await deps.buildSessionOpenedPayload(
     context.sessionPath,
     params.selectionToken,
+    params.transcript,
   );
   deps.emit('session.opened', openPayload);
   deps.emitBusyChanged(context, context.session.isStreaming || !!context.activeRequest);

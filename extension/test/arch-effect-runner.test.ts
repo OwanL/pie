@@ -121,10 +121,25 @@ test('EffectRunner OpenSession issues session.open (with the pre-minted token) o
   // The runner only issues the backend session.open RPC, serialized on the
   // lifecycle queue, carrying that token — mirroring CreateSession.
   assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
-  assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.open', params: { sessionPath: '/existing', selectionToken: 'tok' } });
+  assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.open', params: { sessionPath: '/existing', selectionToken: 'tok', transcript: 'tail' } });
   assert.equal(events[0]?.kind, 'OpenSessionResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.sessionPath, '/existing');
+});
+
+test('EffectRunner OpenSession forwards the service-chosen transcript mode (skip) on session.open', async () => {
+  const { deps, calls } = makeEffectRunnerDeps({
+    serviceOverrides: { getOpenTranscriptMode: () => 'skip' },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'OpenSession', corrId: 'c3-skip', sessionPath: '/cached', selectionToken: 'tok-skip' });
+  await settle();
+
+  assert.deepEqual(
+    calls.find((c) => c.kind === 'request'),
+    { kind: 'request', method: 'session.open', params: { sessionPath: '/cached', selectionToken: 'tok-skip', transcript: 'skip' } },
+  );
 });
 
 test('EffectRunner OpenSession calls handleSelectionFailure + dispatches OpenSessionResult{ok:false} when session.open rejects', async () => {

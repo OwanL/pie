@@ -1,4 +1,4 @@
-import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptPageDirection } from '../shared/protocol';
+import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection } from '../shared/protocol';
 import { ALL_NESTED_BUCKETS_ALLOWED } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
@@ -61,6 +61,10 @@ export interface SessionCreateParams {
 
 export interface SessionOpenParams extends SessionPathParams {
   selectionToken?: string;
+  /** How much transcript to ship back. Defaults to `'tail'` (full tail window)
+   *  for backward compatibility; `'skip'` requests a metadata-only response
+   *  (host already has the transcript loaded). See {@link TranscriptMode}. */
+  transcript?: TranscriptMode;
 }
 
 export interface SessionDuplicateParams {
@@ -126,9 +130,14 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
 export function validateSessionOpen(params: unknown): SessionOpenParams {
   if (!isObj(params)) fail('session.open', 'expected an object');
   const { sessionPath } = validateSessionPath('session.open', params);
+  const transcript = (params as Record<string, unknown>)['transcript'];
+  if (transcript !== undefined && transcript !== 'tail' && transcript !== 'skip') {
+    fail('session.open', `transcript must be 'tail' or 'skip' when provided`);
+  }
   return {
     sessionPath,
     selectionToken: readSelectionToken('session.open', params),
+    transcript: transcript as SessionOpenParams['transcript'],
   };
 }
 
