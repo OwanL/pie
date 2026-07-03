@@ -14,7 +14,7 @@
 import test, { describe, it, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import { existsSync, symlinkSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -207,7 +207,27 @@ describe('skills exists but is not a directory', () => {
 // ---------------------------------------------------------------------------
 
 describe('symlink edge cases', () => {
+  /** On Windows without Developer Mode / admin, fs.symlinkSync throws EPERM.
+   *  These edge-case tests need real symlinks; skip them gracefully when the
+   *  host can't create one, rather than reporting a false failure. */
+  function assumeSymlinksSupported(t: { skip: (reason: string) => void }): boolean {
+    const probe = path.join(os.tmpdir(), `pie-symlink-probe-${process.pid}-${Date.now()}`);
+    try {
+      symlinkSync(probe, `${probe}.link`);
+      rmSync(`${probe}.link`, { force: true });
+      return true;
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'EPERM' || code === 'ENOSYS' || code === 'EACCES') {
+        t.skip(`symlinks not supported on this host (${code})`);
+        return false;
+      }
+      throw error;
+    }
+  }
+
   it('accepts a symlink that points to a real directory', async (t) => {
+    if (!assumeSymlinksSupported(t)) return;
     const cwd = await makeTempDir();
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
 
@@ -224,6 +244,7 @@ describe('symlink edge cases', () => {
   });
 
   it('returns {} when skills is a symlink pointing to a plain file', async (t) => {
+    if (!assumeSymlinksSupported(t)) return;
     const cwd = await makeTempDir();
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
 
@@ -242,6 +263,7 @@ describe('symlink edge cases', () => {
   });
 
   it('returns {} for a broken symlink — existsSync follows the link target', async (t) => {
+    if (!assumeSymlinksSupported(t)) return;
     const cwd = await makeTempDir();
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
 
