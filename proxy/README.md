@@ -72,16 +72,14 @@ pi --provider umans --model umans-glm-5.2 "hello"
 
 ## Configuring limits and providers
 
-Edit [`litellm_config.yaml`](litellm_config.yaml):
+[`litellm_config.yaml`](litellm_config.yaml) is generated from the `upstream` blocks in [`models.yaml`](../models.yaml) — edit there and run `npm run sync-models` (do not edit `litellm_config.yaml` directly):
 
 - `umans` upstream has `max_parallel_requests: 4` — the real umans account limit (4 concurrent
   active sessions). Raise only if your tier changes. The setting lives in each entry's
   `litellm_params` (NOT `router_settings`), and every umans variant shares `model_info.id:
   umans-shared` so LiteLLM creates ONE 4-slot queue across all variants (umans' limit is
   account-wide, not per-model). See `litellm_config.yaml` for details.
-- To add a future API-key provider: add a `model_list` entry with its own `litellm_params`
-  (api key from env, real base URL, `max_parallel_requests`) and a DISTINCT `model_info.id`,
-  then add a matching `baseUrl` redirect block in `models.json`.
+- To add a future API-key provider: add an `upstream` block to that provider in [`models.yaml`](../models.yaml) (api key from env, real base URL, `maxConcurrentRequests`), then run `npm run sync-models` — it regenerates both the `model_list` entry here and the matching `baseUrl` block in `models.json` from that one source.
 
 ## The master key
 

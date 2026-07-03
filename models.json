@@ -76,8 +76,8 @@
         {
           "id": "gemini-3-flash-preview:cloud",
           "name": "Ollama Cloud: Gemini 3 Flash Preview",
-          "family": "gemini-3-flash-preview",
           "reasoning": true,
+          "family": "gemini-3-flash-preview",
           "input": [
             "text",
             "image"
@@ -137,8 +137,8 @@
         {
           "id": "glm-5.1:cloud",
           "name": "Ollama Cloud: GLM 5.1",
-          "family": "glm-5.1",
           "reasoning": true,
+          "family": "glm-5.1",
           "contextWindow": 202752,
           "maxTokens": 65536,
           "cost": {
@@ -151,8 +151,8 @@
         {
           "id": "glm-5.2:cloud",
           "name": "Ollama Cloud: GLM 5.2",
-          "family": "glm-5.2",
           "reasoning": true,
+          "family": "glm-5.2",
           "contextWindow": 1000000,
           "maxTokens": 65536,
           "cost": {
@@ -208,8 +208,8 @@
         {
           "id": "kimi-k2.6:cloud",
           "name": "Ollama Cloud: Kimi K2.6",
-          "family": "kimi-k2.6",
           "reasoning": true,
+          "family": "kimi-k2.6",
           "input": [
             "text",
             "image"
@@ -226,8 +226,8 @@
         {
           "id": "kimi-k2.7-code:cloud",
           "name": "Ollama Cloud: Kimi K2.7 Code",
-          "family": "kimi-k2.7-code",
           "reasoning": true,
+          "family": "kimi-k2.7-code",
           "input": [
             "text",
             "image"
@@ -749,12 +749,6 @@
           ],
           "contextWindow": 262144,
           "maxTokens": 32768,
-          "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": null,
             "minimal": "minimal",
@@ -762,6 +756,12 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
           }
         },
         {
@@ -774,12 +774,6 @@
           ],
           "contextWindow": 262144,
           "maxTokens": 32768,
-          "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": "none",
             "minimal": "minimal",
@@ -787,25 +781,25 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
           }
         },
         {
           "id": "umans-kimi-k2.7",
           "name": "Umans: Kimi K2.7 Code",
-          "family": "kimi-k2.7-code",
           "reasoning": true,
+          "family": "kimi-k2.7-code",
           "input": [
             "text",
             "image"
           ],
           "contextWindow": 262144,
           "maxTokens": 32768,
-          "cost": {
-            "input": 0.74,
-            "output": 3.5,
-            "cacheRead": 0.15,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": null,
             "minimal": "minimal",
@@ -813,25 +807,25 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0.74,
+            "output": 3.5,
+            "cacheRead": 0.15,
+            "cacheWrite": 0
           }
         },
         {
           "id": "umans-kimi-k2.6",
           "name": "Umans: Kimi K2.6",
-          "family": "kimi-k2.6",
           "reasoning": true,
+          "family": "kimi-k2.6",
           "input": [
             "text",
             "image"
           ],
           "contextWindow": 262144,
           "maxTokens": 32768,
-          "cost": {
-            "input": 0.67,
-            "output": 3.5,
-            "cacheRead": 0.2,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": "none",
             "minimal": "minimal",
@@ -839,25 +833,25 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0.67,
+            "output": 3.5,
+            "cacheRead": 0.2,
+            "cacheWrite": 0
           }
         },
         {
           "id": "umans-glm-5.1",
           "name": "Umans: GLM 5.1",
-          "family": "glm-5.1",
           "reasoning": true,
+          "family": "glm-5.1",
           "input": [
             "text",
             "image"
           ],
           "contextWindow": 202752,
           "maxTokens": 65536,
-          "cost": {
-            "input": 0.98,
-            "output": 3.08,
-            "cacheRead": 0.182,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": "none",
             "minimal": "minimal",
@@ -865,25 +859,25 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0.98,
+            "output": 3.08,
+            "cacheRead": 0.182,
+            "cacheWrite": 0
           }
         },
         {
           "id": "umans-glm-5.2",
           "name": "Umans: GLM 5.2",
-          "family": "glm-5.2",
           "reasoning": true,
+          "family": "glm-5.2",
           "input": [
             "text",
             "image"
           ],
           "contextWindow": 405504,
           "maxTokens": 65536,
-          "cost": {
-            "input": 1.2,
-            "output": 3.2,
-            "cacheRead": 0.2,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": "none",
             "minimal": "minimal",
@@ -891,6 +885,12 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 1.2,
+            "output": 3.2,
+            "cacheRead": 0.2,
+            "cacheWrite": 0
           }
         },
         {
@@ -903,12 +903,6 @@
           ],
           "contextWindow": 262144,
           "maxTokens": 32768,
-          "cost": {
-            "input": 0,
-            "output": 0,
-            "cacheRead": 0,
-            "cacheWrite": 0
-          },
           "thinkingLevelMap": {
             "off": "none",
             "minimal": "minimal",
@@ -916,6 +910,12 @@
             "medium": "medium",
             "high": "high",
             "xhigh": "xhigh"
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
           }
         }
       ]

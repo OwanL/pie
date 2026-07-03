@@ -61,6 +61,17 @@ Both installers are idempotent and safe to re-run. On each run they:
 
 The macOS/Linux script (`install.sh`) is intentionally lighter: it covers steps 1–5 and 9. Full feature parity (session migration, sessionDir repair, VSIX packaging) is planned — see [docs/internal/code-review/TODO-archive.md](docs/internal/code-review/TODO-archive.md).
 
+## Model Configuration
+
+Model configuration (providers, pricing, eligibility flags, LiteLLM proxy routing, and the default model/provider/retry/pruning settings) has a single source of truth: [`models.yaml`](models.yaml). After editing it, regenerate the derived files:
+
+```bash
+npm run sync-models            # regenerate models.json, model-profiles.yaml, proxy/litellm_config.yaml, settings.json model fields
+npm run sync-models -- --check  # dry-run: exit 1 if any derived file is out of sync
+```
+
+Do not edit `models.json`, `model-profiles.yaml`, `proxy/litellm_config.yaml`, or the model fields of `settings.json` directly — the `model-config-sync` test fails on drift.
+
 ## Authentication
 
 The pie panel needs provider credentials to send messages. There are two ways to authenticate:

@@ -24,7 +24,8 @@
     "proxy:bg": "node ./scripts/proxy.mjs start",
     "proxy:down": "node ./scripts/proxy.mjs stop",
     "proxy:health": "node ./scripts/proxy.mjs health",
-    "proxy:test": "cd proxy && uv run python test/test_config.py"
+    "proxy:test": "cd proxy && uv run python test/test_config.py",
+    "sync-models": "node ./scripts/sync-models.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
