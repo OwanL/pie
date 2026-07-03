@@ -227,7 +227,7 @@ function details(mode: "single" | "parallel" | "chain", results: SingleResult[])
 // renderSubagentCall (the tool's renderCall)
 // ---------------------------------------------------------------------------
 
-test("renderSubagentCall: single mode renders title, agent, default scope, and task preview", () => {
+test("renderSubagentCall: single mode renders compact one-line title, agent, scope, and task preview", () => {
 	const node = renderSubagentCall({ agent: "worker", task: "summarize the code" }, theme(), {});
 	assert.equal(nodeType(node), "Text");
 	const text = allText(node);
@@ -235,6 +235,7 @@ test("renderSubagentCall: single mode renders title, agent, default scope, and t
 	assert.ok(text.includes("worker"), "agent name present");
 	assert.ok(text.includes("[user]"), "default user scope present");
 	assert.ok(text.includes("summarize the code"), "task preview present");
+	assert.ok(!text.includes("\n"), "single call is one line");
 });
 
 test("renderSubagentCall: respects an explicit agentScope", () => {
@@ -330,7 +331,7 @@ test("renderSubagentResult: single mode with !=1 results hits the final no-detai
 	assert.equal(allText(node), "raw");
 });
 
-test("renderSubagentResult: single expanded success renders header/task/output sections", () => {
+test("renderSubagentResult: single expanded success renders compact header/task/output", () => {
 	const r1 = sr({ agent: "worker", task: "do thing", messages: [assistantMsg(textPart("final answer"))] });
 	const node = renderSubagentResult({ details: details("single", [r1]) }, { expanded: true }, theme(), {});
 	assert.equal(nodeType(node), "Container");
@@ -338,12 +339,11 @@ test("renderSubagentResult: single expanded success renders header/task/output s
 	assert.ok(text.includes("✓"), "success icon");
 	assert.ok(text.includes("worker"), "agent in header");
 	assert.ok(text.includes("(user)"), "agent source in header");
-	assert.ok(text.includes("─── Task ───"), "task section header");
 	assert.ok(text.includes("do thing"), "task text");
-	assert.ok(text.includes("─── Output ───"), "output section header");
 	assert.ok(text.includes("final answer"), "final output text");
 	assert.ok(childrenOfType(node, "Markdown").length >= 1, "final output rendered as Markdown");
-	assert.ok(childrenOfType(node, "Spacer").length >= 2, "section spacers present");
+	assert.ok(!text.includes("─── Task ───"), "task section header removed");
+	assert.ok(!text.includes("─── Output ───"), "output section header removed");
 });
 
 test("renderSubagentResult: single expanded error renders error icon, stopReason, and error message", () => {
@@ -435,7 +435,7 @@ test("renderSubagentResult: single collapsed appends usage and selection info", 
 	assert.ok(text.includes("🎯"), "selection info in collapsed view");
 });
 
-test("renderSubagentResult: chain expanded renders header, each step, and total", () => {
+test("renderSubagentResult: chain expanded renders compact header, each step, and total", () => {
 	const r1 = sr({ agent: "scout", task: "find", step: 1, messages: [assistantMsg(textPart("found"))], usage: usage({ input: 10, output: 5, cost: 0.01 }) });
 	const r2 = sr({ agent: "worker", task: "build", step: 2, messages: [assistantMsg(textPart("built"))], usage: usage({ input: 20, output: 10, cost: 0.02 }) });
 	const node = renderSubagentResult({ details: details("chain", [r1, r2]) }, { expanded: true }, theme(), {});
@@ -447,10 +447,11 @@ test("renderSubagentResult: chain expanded renders header, each step, and total"
 	assert.ok(text.includes("Total:"), "chain total");
 	// Each step header is its own Text child; verify step index maps to the right agent.
 	const stepTexts = childrenOfType(node, "Text").map((c) => c.text ?? "");
-	const step1 = stepTexts.find((t) => t.includes("Step 1"));
-	const step2 = stepTexts.find((t) => t.includes("Step 2"));
+	const step1 = stepTexts.find((t) => t.includes("1."));
+	const step2 = stepTexts.find((t) => t.includes("2."));
 	assert.ok(step1 && step1.includes("scout"), "step 1 header names scout");
 	assert.ok(step2 && step2.includes("worker"), "step 2 header names worker");
+	assert.ok(!text.includes("─── Step"), "old step divider removed");
 });
 
 test("renderSubagentResult: chain collapsed shows summary, total, and expand hint", () => {
@@ -507,6 +508,25 @@ test("renderSubagentResult: parallel with a running task shows running icon and 
 	assert.ok(!text.includes("(Ctrl+O to expand)"), "no expand hint while running (expanded=true)");
 });
 
+test("renderSubagentResult: parallel running collapsed hides expand hint", () => {
+	const r1 = sr({ agent: "scout", task: "explore", exitCode: -1, messages: [] });
+	const node = renderSubagentResult({ details: details("parallel", [r1]) }, { expanded: false }, theme(), {});
+	const text = allText(node);
+	assert.ok(text.includes("⏳"), "running icon");
+	assert.ok(!text.includes("(Ctrl+O to expand)"), "no expand hint while running");
+});
+
+test("renderSubagentResult: parallel partial stays collapsed", () => {
+	const r1 = sr({ agent: "scout", task: "explore", exitCode: -1, messages: [] });
+	const r2 = sr({ agent: "worker", task: "build", exitCode: -1, messages: [] });
+	const node = renderSubagentResult({ details: details("parallel", [r1, r2]) }, { expanded: true, isPartial: true }, theme(), {});
+	assert.equal(nodeType(node), "Text", "partial parallel renders collapsed Text");
+	const text = allText(node);
+	assert.ok(text.includes("⏳"), "running indicator");
+	assert.ok(text.includes("running"), "running status text");
+	assert.ok(!text.includes("(Ctrl+O to expand)"), "no expand hint while partial");
+});
+
 test("renderSubagentResult: parallel mixed success/fail (no running) shows partial icon", () => {
 	const r1 = sr({ agent: "scout", task: "explore", messages: [assistantMsg(textPart("ok"))], usage: usage({ input: 10, output: 5, cost: 0.01 }) });
 	const r2 = sr({ agent: "worker", task: "build", exitCode: 1, stopReason: "error", errorMessage: "boom", messages: [], usage: usage({ input: 5 }) });
@@ -514,4 +534,44 @@ test("renderSubagentResult: parallel mixed success/fail (no running) shows parti
 	assert.ok(text.includes("◐"), "partial-failure warning icon");
 	assert.ok(text.includes("1/2 tasks"), "one success of two");
 	assert.ok(text.includes("Total:"), "total shown when not running");
+});
+
+// ---------------------------------------------------------------------------
+// Compact running / partial rendering
+// ---------------------------------------------------------------------------
+
+test("renderSubagentResult: single partial stays collapsed with running indicator", () => {
+	const r1 = sr({ agent: "worker", task: "do thing", exitCode: -1, messages: [] });
+	const node = renderSubagentResult({ details: details("single", [r1]) }, { expanded: true, isPartial: true }, theme(), {});
+	assert.equal(nodeType(node), "Text", "partial single renders collapsed Text");
+	const text = allText(node);
+	assert.ok(text.includes("⏳"), "running indicator");
+	assert.ok(text.includes("running..."), "running status text");
+	assert.ok(text.includes("do thing"), "task still visible");
+	assert.ok(!text.includes("─── Task ───"), "no expanded section headers");
+	assert.ok(!text.includes("(Ctrl+O to expand)"), "no expand hint while running");
+});
+
+test("renderSubagentResult: chain partial stays collapsed with running indicator", () => {
+	const r1 = sr({ agent: "scout", task: "find", step: 1, exitCode: -1, messages: [] });
+	const r2 = sr({ agent: "worker", task: "build", step: 2, exitCode: -1, messages: [] });
+	const node = renderSubagentResult({ details: details("chain", [r1, r2]) }, { expanded: true, isPartial: true }, theme(), {});
+	assert.equal(nodeType(node), "Text", "partial chain renders collapsed Text");
+	const text = allText(node);
+	assert.ok(text.includes("⏳"), "running indicator");
+	assert.ok(text.includes("2 steps, 2 running"), "running status text");
+	assert.ok(text.includes("1."), "step 1 shown");
+	assert.ok(text.includes("scout"), "step 1 agent shown");
+	assert.ok(text.includes("2."), "step 2 shown");
+	assert.ok(text.includes("worker"), "step 2 agent shown");
+	assert.ok(!text.includes("Total:"), "no total while running");
+	assert.ok(!text.includes("(Ctrl+O to expand)"), "no expand hint while running");
+});
+
+test("renderSubagentResult: single collapsed running result shows running indicator", () => {
+	const r1 = sr({ agent: "worker", task: "t", exitCode: -1, messages: [] });
+	const text = allText(renderSubagentResult({ details: details("single", [r1]) }, { expanded: false }, theme(), {}));
+	assert.ok(text.includes("⏳"), "running indicator");
+	assert.ok(text.includes("running..."), "running status text");
+	assert.ok(!text.includes("(no output)"), "no output marker not shown while running");
 });

@@ -28,11 +28,16 @@ function renderNoDetails(result: any): RenderResult {
 	return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 }
 
+function isRunningResult(r: SingleResult): boolean {
+	return r.exitCode === -1;
+}
+
 function isErrorResult(r: SingleResult): boolean {
-	return r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+	return !isRunningResult(r) && (r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted");
 }
 
 function resultIcon(theme: Theme, r: SingleResult): string {
+	if (isRunningResult(r)) return theme.fg("warning", "⏳");
 	return isErrorResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 }
 
@@ -109,13 +114,10 @@ function renderSingleExpanded(r: SingleResult, theme: Theme, mdTheme: any): Cont
 	const finalOutput = getFinalOutput(r.messages);
 
 	const container = new Container();
-	container.addChild(new Text(resultHeader(theme, r, icon), 0, 0));
+	let header = resultHeader(theme, r, icon);
+	if (r.task) header += ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}`;
+	container.addChild(new Text(header, 0, 0));
 	if (isError && r.errorMessage) container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-	container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
 
 	if (displayItems.length === 0 && !finalOutput) {
 		container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
@@ -126,7 +128,6 @@ function renderSingleExpanded(r: SingleResult, theme: Theme, mdTheme: any): Cont
 
 	const usageStr = formatUsageStats(r.usage, r.model);
 	if (usageStr) {
-		container.addChild(new Spacer(1));
 		container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
 	}
 	const selInfoExp = formatSelectionInfo(r, theme.fg.bind(theme));
@@ -137,10 +138,16 @@ function renderSingleExpanded(r: SingleResult, theme: Theme, mdTheme: any): Cont
 function renderSingleCollapsed(r: SingleResult, theme: Theme): Text {
 	const icon = resultIcon(theme, r);
 	const isError = isErrorResult(r);
+	const isRunning = isRunningResult(r);
 	const displayItems = getDisplayItems(r.messages);
 
 	let text = resultHeader(theme, r, icon);
-	if (isError && r.errorMessage) {
+	if (isRunning && r.task) {
+		text += ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}`;
+	}
+	if (isRunning) {
+		text += `\n${theme.fg("warning", "running...")}`;
+	} else if (isError && r.errorMessage) {
 		text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 	} else if (displayItems.length === 0) {
 		text += `\n${theme.fg("muted", "(no output)")}`;
@@ -157,33 +164,40 @@ function renderSingleResult(r: SingleResult, expanded: boolean, theme: Theme, md
 }
 
 function chainStepHeader(theme: Theme, r: SingleResult, rIcon: string): string {
-	return `${theme.fg("muted", `─── Step ${r.step}: `) + theme.fg("accent", r.agent)} ${rIcon}`;
+	const step = r.step ? `${r.step}. ` : "";
+	return `${theme.fg("muted", step) + theme.fg("accent", r.agent)} ${rIcon}`;
 }
 
 function parallelStepHeader(theme: Theme, r: SingleResult, rIcon: string): string {
-	return `${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`;
+	return `${theme.fg("accent", r.agent)} ${rIcon}`;
 }
 
 function chainIcon(theme: Theme, results: SingleResult[]): string {
+	const running = results.filter((r) => r.exitCode === -1).length;
+	if (running > 0) return theme.fg("warning", "⏳");
 	const successCount = results.filter((r) => r.exitCode === 0).length;
 	return successCount === results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 }
 
 function chainExpandedHeader(theme: Theme, results: SingleResult[]): string {
+	const running = results.filter((r) => r.exitCode === -1).length;
 	const successCount = results.filter((r) => r.exitCode === 0).length;
 	const icon = chainIcon(theme, results);
+	const status = running > 0 ? `${successCount}/${results.length} steps, ${running} running` : `${successCount}/${results.length} steps`;
 	return (
 		icon +
 		" " +
 		theme.fg("toolTitle", theme.bold("chain ")) +
-		theme.fg("accent", `${successCount}/${results.length} steps`)
+		theme.fg("accent", status)
 	);
 }
 
 function chainCollapsedHeader(theme: Theme, results: SingleResult[]): string {
+	const running = results.filter((r) => r.exitCode === -1).length;
 	const successCount = results.filter((r) => r.exitCode === 0).length;
 	const icon = chainIcon(theme, results);
-	return icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", `${successCount}/${results.length} steps`);
+	const status = running > 0 ? `${successCount}/${results.length} steps, ${running} running` : `${successCount}/${results.length} steps`;
+	return icon + " " + theme.fg("toolTitle", theme.bold("chain ")) + theme.fg("accent", status);
 }
 
 function renderChainStepExpanded(container: Container, r: SingleResult, theme: Theme, mdTheme: any): void {
@@ -191,21 +205,20 @@ function renderChainStepExpanded(container: Container, r: SingleResult, theme: T
 	const displayItems = getDisplayItems(r.messages);
 	const finalOutput = getFinalOutput(r.messages);
 
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(chainStepHeader(theme, r, rIcon), 0, 0));
-	container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+	const header = chainStepHeader(theme, r, rIcon) + (r.task ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}` : "");
+	container.addChild(new Text(header, 0, 0));
 	appendToolCalls(container, displayItems, theme);
 	appendFinalOutput(container, finalOutput, mdTheme);
 	appendStepTrailers(container, r, theme);
 }
 
 function renderChainStepCollapsed(text: string, r: SingleResult, theme: Theme): string {
-	const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+	const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : r.exitCode === -1 ? theme.fg("warning", "⏳") : theme.fg("error", "✗");
 	const displayItems = getDisplayItems(r.messages);
 	text += `\n\n${chainStepHeader(theme, r, rIcon)}`;
 	const selInfoChainCol = formatSelectionInfo(r, theme.fg.bind(theme));
 	if (selInfoChainCol) text += `\n${selInfoChainCol}`;
-	if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
+	if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 	else text += `\n${renderDisplayItems(displayItems, theme, false, PARALLEL_RESULT_PREVIEW_LIMIT)}`;
 	return text;
 }
@@ -231,11 +244,16 @@ function renderChainExpanded(results: SingleResult[], theme: Theme, mdTheme: any
 	return container;
 }
 
-function renderChainCollapsed(results: SingleResult[], theme: Theme): Text {
+function renderChainCollapsed(results: SingleResult[], theme: Theme, expanded: boolean = false): Text {
+	const isRunning = results.some((r) => r.exitCode === -1);
 	let text = chainCollapsedHeader(theme, results);
 	for (const r of results) text = renderChainStepCollapsed(text, r, theme);
-	text = appendChainTotal(text, results, theme, "\n\n");
-	text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+	if (!isRunning) {
+		text = appendChainTotal(text, results, theme, "\n\n");
+	}
+	if (!expanded && !isRunning) {
+		text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+	}
 	return new Text(text, 0, 0);
 }
 
@@ -266,13 +284,12 @@ function parallelHeader(theme: Theme, results: SingleResult[]): string {
 }
 
 function renderParallelStepExpanded(container: Container, r: SingleResult, theme: Theme, mdTheme: any): void {
-	const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+	const rIcon = parallelStepIcon(theme, r);
 	const displayItems = getDisplayItems(r.messages);
 	const finalOutput = getFinalOutput(r.messages);
 
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(parallelStepHeader(theme, r, rIcon), 0, 0));
-	container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+	const header = parallelStepHeader(theme, r, rIcon) + (r.task ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}` : "");
+	container.addChild(new Text(header, 0, 0));
 	appendToolCalls(container, displayItems, theme);
 	appendFinalOutput(container, finalOutput, mdTheme);
 	appendStepTrailers(container, r, theme);
@@ -309,7 +326,7 @@ function renderParallelCollapsed(results: SingleResult[], theme: Theme, expanded
 	let text = parallelHeader(theme, results);
 	for (const r of results) text = renderParallelStepCollapsed(text, r, theme);
 	if (!isRunning) text = appendChainTotal(text, results, theme, "\n\n");
-	if (!expanded) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
+	if (!expanded && !isRunning) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 	return new Text(text, 0, 0);
 }
 
@@ -366,13 +383,13 @@ function renderSingleCall(args: any, scope: AgentScope, theme: Theme): Text {
 		theme.fg("toolTitle", theme.bold("subagent ")) +
 		theme.fg("accent", agentName) +
 		theme.fg("muted", ` [${scope}]`);
-	text += `\n  ${theme.fg("dim", preview)}`;
+	text += ` ${theme.fg("dim", "·")} ${theme.fg("dim", preview)}`;
 	return new Text(text, 0, 0);
 }
 
 export function renderSubagentResult(
 	result: any,
-	{ expanded }: { expanded: boolean },
+	{ expanded, isPartial }: { expanded: boolean; isPartial?: boolean },
 	theme: Theme,
 	_context: Ctx,
 ): RenderResult {
@@ -382,12 +399,15 @@ export function renderSubagentResult(
 	const mdTheme = getMarkdownTheme();
 
 	if (details.mode === "single" && details.results.length === 1) {
+		if (isPartial) return renderSingleCollapsed(details.results[0], theme);
 		return renderSingleResult(details.results[0], expanded, theme, mdTheme);
 	}
 	if (details.mode === "chain") {
+		if (isPartial) return renderChainCollapsed(details.results, theme);
 		return renderChainResult(details.results, expanded, theme, mdTheme);
 	}
 	if (details.mode === "parallel") {
+		if (isPartial) return renderParallelCollapsed(details.results, theme, expanded);
 		return renderParallelResult(details.results, expanded, theme, mdTheme);
 	}
 	return renderNoDetails(result);
