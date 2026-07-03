@@ -33,6 +33,14 @@ import type { Event } from './core/events';
 import { selectViewState } from './core/projection';
 import { auditLog, bootLog, isRuntimeAuditLogEnabled } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
+import {
+  getPieLogDir,
+  getPieLogPath,
+  getLogLevel,
+  LOG_LEVELS,
+  parseLogLevel,
+  setLogLevel,
+} from './util/pie-logger';
 import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
@@ -286,6 +294,74 @@ export class PieExtension implements vscode.Disposable {
           `pie stream diagnostics: ${next ? 'ON' : 'OFF'} — log: ${getDiagPath()}`,
         );
       }),
+      vscode.commands.registerCommand('pie.setLogLevel', async () => {
+        const current = getLogLevel();
+        const items = LOG_LEVELS.map((level) => ({
+          label: level,
+          description: level === current ? '$(check) current' : undefined,
+          picked: level === current,
+          level,
+        }));
+        const pick = await vscode.window.showQuickPick(items, {
+          placeHolder: `Select pie log verbosity (current: ${current})`,
+          title: 'pie: Set Log Level',
+        });
+        if (!pick) {
+          return;
+        }
+        setLogLevel(pick.level);
+        // Persist the choice so it survives reloads.
+        await vscode.workspace
+          .getConfiguration('pie')
+          .update('logLevel', pick.level, vscode.ConfigurationTarget.Global);
+        void vscode.window.showInformationMessage(
+          `pie log level: ${pick.level} — persistent log: ${getPieLogPath()}`,
+        );
+      }),
+      vscode.commands.registerCommand('pie.openLogFile', async () => {
+        const logPath = getPieLogPath();
+        const rotated = `${logPath}.1`;
+        let target = logPath;
+        try {
+          await fs.access(logPath);
+        } catch {
+          // Active log missing (nothing written yet) — fall back to the
+          // rotated backup so the command still shows something useful.
+          try {
+            await fs.access(rotated);
+            target = rotated;
+          } catch {
+            void vscode.window.showWarningMessage(
+              `pie log file does not exist yet. Path: ${logPath}`,
+            );
+            return;
+          }
+        }
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+          await vscode.window.showTextDocument(doc, { preview: true });
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `Failed to open pie log: ${toErrorMessage(err)}`,
+          );
+        }
+      }),
+      vscode.commands.registerCommand('pie.revealLogFolder', async () => {
+        const dir = getPieLogDir();
+        try {
+          await fs.mkdir(dir, { recursive: true });
+        } catch {
+          // mkdir failures are non-fatal; reveal may still succeed.
+        }
+        const uri = vscode.Uri.file(dir);
+        try {
+          await vscode.commands.executeCommand('revealFileInOS', uri);
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `Failed to reveal pie log folder: ${toErrorMessage(err)} (${dir})`,
+          );
+        }
+      }),
       vscode.commands.registerCommand('pie.newSession', async () => {
         this.service.createNewSession();
         this.sidebarProvider.reveal();
@@ -311,6 +387,12 @@ export class PieExtension implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('pie.experimentAssignment')) {
           this.statsService.onExperimentAssignmentChanged(this.getExperimentAssignment());
+        }
+        if (event.affectsConfiguration('pie.logLevel')) {
+          const configured = vscode.workspace
+            .getConfiguration('pie')
+            .get<string>('logLevel', 'info');
+          setLogLevel(parseLogLevel(configured, 'info'));
         }
       }),
     );

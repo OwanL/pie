@@ -27,6 +27,8 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024;
 let pieLogChannel: vscode.OutputChannel | undefined;
 let minLevel: LogLevel = 'info';
 let devMode = false;
+/** User-facing log level options, ordered from most to least verbose. */
+export const LOG_LEVELS: readonly LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'] as const;
 let runtimeAuditLogEnabled = false;
 let bootTraceEnabled = process.env.PI_BOOT_LOG === '1';
 
@@ -45,6 +47,16 @@ export function setLogLevel(level: LogLevel): void {
 
 export function getLogLevel(): LogLevel {
   return minLevel;
+}
+
+/** Parse a level name from configuration into a `LogLevel`, falling back to
+ *  `fallback` when the value is missing or unrecognised. Keeps activation
+ *  resilient to hand-edited settings without throwing. */
+export function parseLogLevel(value: string | undefined, fallback: LogLevel): LogLevel {
+  if (value && (LOG_LEVELS as readonly string[]).includes(value)) {
+    return value as LogLevel;
+  }
+  return fallback;
 }
 
 /** Enable or disable boot tracing at runtime. */
@@ -219,8 +231,26 @@ export function appendPieError(scope: string, message: string, error: unknown, d
   pieError(scope, message, error, data as Record<string, unknown> | undefined);
 }
 
+/** Absolute path of the persistent pie log file (`pie.log` in the OS temp
+ *  dir, rotated to `pie.log.1` once it exceeds 5 MiB). Survives extension
+ *  reloads, unlike the in-memory OutputChannel buffer. */
+export function getPieLogPath(): string {
+  return PIE_LOG_PATH;
+}
+
+/** Directory containing the persistent pie log file. */
+export function getPieLogDir(): string {
+  return PIE_LOG_DIR;
+}
+
 export function showPieLogs(preserveFocus = true): void {
-  getPieLogChannel()?.show(preserveFocus);
+  const channel = getPieLogChannel();
+  if (channel) {
+    // Surface the persistent log file path so the user knows where the
+    // surviving history lives — the OutputChannel buffer is lost on reload.
+    channel.appendLine(`[pie] persistent log file: ${PIE_LOG_PATH}`);
+    channel.show(preserveFocus);
+  }
 }
 
 function appendBootTraceSync(record: Record<string, unknown>): void {

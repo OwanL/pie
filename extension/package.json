@@ -62,6 +62,18 @@
       {
         "command": "pie.toggleStreamDiag",
         "title": "pie: Toggle Stream Diagnostics"
+      },
+      {
+        "command": "pie.setLogLevel",
+        "title": "pie: Set Log Level"
+      },
+      {
+        "command": "pie.openLogFile",
+        "title": "pie: Open Log File"
+      },
+      {
+        "command": "pie.revealLogFolder",
+        "title": "pie: Reveal Log Folder"
       }
     ],
     "menus": {
@@ -110,6 +122,19 @@
           "type": "number",
           "default": 4000,
           "description": "Port for the local LiteLLM proxy spawned by pie.useProxy. Must match the port models.json bases umans on."
+        },
+        "pie.logLevel": {
+          "type": "string",
+          "enum": ["trace", "debug", "info", "warn", "error"],
+          "default": "info",
+          "enumDescriptions": [
+            "Very verbose: include every log call site. High volume.",
+            "Verbose: include stream-telemetry snapshots and other diagnostic detail.",
+            "Default: informational, warnings, and errors.",
+            "Warnings and errors only.",
+            "Errors only."
+          ],
+          "description": "Minimum verbosity for pie's host-side logger (the `pie` OutputChannel, the persistent log file in the OS temp dir, and the extension-host console). Raising this surfaces existing debug/trace instrumentation (e.g. stream-telemetry snapshots) without restarting. Can also be changed live via the `pie: Set Log Level` command."
         }
       }
     }
