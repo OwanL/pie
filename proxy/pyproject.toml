@@ -1,0 +1,14 @@
+[project]
+name = "pie-proxy"
+version = "0.1.0"
+description = "pie LLM proxy — LiteLLM in front of API-key providers (umans)"
+requires-python = ">=3.13"
+# Pin the proxy version so a `uv run` is reproducible across machines and
+# across time. Bump deliberately after testing a new LiteLLM release.
+dependencies = [
+  "litellm[proxy]>=1.74,<2",
+]
+
+[tool.uv]
+# Isolated to proxy/.venv — no global install, no system Python touched.
+package = false

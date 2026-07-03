@@ -27,6 +27,11 @@ node_modules/
 .pnpm-store/
 .pnpm-debug.log
 
+# LiteLLM proxy (pie/proxy/) — uv venv + runtime data
+proxy/.venv/
+proxy/.uv-cache/
+data/proxy/
+
 # Note: keep lockfiles (package-lock.json, yarn.lock, pnpm-lock.yaml) tracked
 
 # Package build artifacts
