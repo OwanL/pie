@@ -201,7 +201,17 @@ function scoredRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
   return runs.filter((run) => run.satisfaction !== null);
 }
 
-function applyFilters(runs: PreparedRunRow[], filters: FilterState): PreparedRunRow[] {
+/**
+ * Canonical provider-agnostic model key. Provider-specific ids that resolve
+ * to the same family (e.g. `umans-glm-5.2` and `glm-5.2:cloud`) collapse into one
+ * row. Mirrors the expression used by the persisted site-data bundle so the
+ * in-browser views and the artifacts stay consistent.
+ */
+function modelFamilyKey(run: { modelFamily: string | null; modelId?: string | null }): string {
+  return run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
+}
+
+export function applyFilters(runs: PreparedRunRow[], filters: FilterState): PreparedRunRow[] {
   return runs.filter((run) => {
     if (filters.startDate && run.startedDay < filters.startDate) {
       return false;
@@ -209,7 +219,7 @@ function applyFilters(runs: PreparedRunRow[], filters: FilterState): PreparedRun
     if (filters.endDate && run.startedDay > filters.endDate) {
       return false;
     }
-    if (filters.modelId && (run.modelId ?? '').trim() !== filters.modelId) {
+    if (filters.modelId && modelFamilyKey(run) !== filters.modelId) {
       return false;
     }
     const runThinkingLevel = normalizeThinkingLevel(run.thinkingLevel);
@@ -779,9 +789,9 @@ function dailyOutcomeRows(runs: PreparedRunRow[]): DailyOutcomeRow[] {
     });
 }
 
-function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] {
+export function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] {
   const groups = groupRunsBy(selectedCompletedRuns(runs), (run) => JSON.stringify([
-    run.modelId ?? '(unknown)',
+    modelFamilyKey(run),
     formatThinkingLevelLabel(normalizeThinkingLevel(run.thinkingLevel) ?? '(unspecified)'),
   ]));
 
@@ -803,8 +813,8 @@ function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] {
     .slice(0, 14);
 }
 
-function compositionByModelRows(runs: PreparedRunRow[]): CompositionRow[] {
-  const groups = groupRunsBy(selectedScoredCompletedRuns(runs), (run) => run.modelId ?? '(unknown)');
+export function compositionByModelRows(runs: PreparedRunRow[]): CompositionRow[] {
+  const groups = groupRunsBy(selectedScoredCompletedRuns(runs), (run) => modelFamilyKey(run));
   const ranked = [...groups.entries()]
     .sort(([, leftRuns], [, rightRuns]) => rightRuns.length - leftRuns.length)
     .slice(0, 12);
@@ -4328,12 +4338,20 @@ function emptyPruningImpactData(schemaVersion: number): PruningImpactData {
   return {
     schemaVersion,
     rows: [],
+    signalRows: [],
     summary: {
       totalEvents: 0,
       totalSkillTokensSaved: 0,
       totalToolTokensSaved: 0,
       medianLlmLatencyMs: null,
       modeCounts: {},
+      skillReadCount: 0,
+      skillMissCount: 0,
+      shadowMissCandidateCount: 0,
+      toolRecoveredCount: 0,
+      decisionsThatPrunedTools: 0,
+      pruneRecoveredRate: null,
+      skillMissRate: null,
     },
   };
 }
@@ -4404,7 +4422,7 @@ async function main(): Promise<void> {
   setText('data-mode', data.manifest.dataMode);
 
   const allRuns = data.runSummary.rows;
-  populateSelect('filter-model', sortNatural(uniqueNonEmpty(allRuns.map((run) => run.modelId))), 'All models');
+  populateSelect('filter-model', sortNatural(uniqueNonEmpty(allRuns.map((run) => modelFamilyKey(run)))), 'All models');
   populateSelect(
     'filter-thinking',
     sortThinkingLevels(uniqueNonEmpty(allRuns.map((run) => normalizeThinkingLevel(run.thinkingLevel)))),
