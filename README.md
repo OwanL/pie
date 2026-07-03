@@ -25,7 +25,7 @@ These are the *original* design drivers. The architecture is being adjusted so e
 
 - Node.js 20+ (Node 24+ for the `analysis/` workspace)
 - npm 10+
-- [`pi`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) installed globally if you want the runtime flow end-to-end
+- [`pi`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) installed globally **only if you want the standalone `pi` CLI** in a terminal. The pie VS Code extension backend resolves its SDK from a pinned `dependency` in `extension/package.json` (installed by `npm install` in `extension/`), so it does not depend on the global install.
 - VS Code, for interactive extension work
 
 ## Install
@@ -146,7 +146,13 @@ Copy-Item "$env:USERPROFILE\Documents\GitHub\pie\auth.json" "$env:LOCALAPPDATA\p
 
 **Cause:** The SDK is installed under a path not in the `isPathAllowed` allowlist.
 
-**Fix:** The extension host derives `PIE_TRUSTED_SDK_ROOT` from the resolved `sdkPath` and passes it to the backend. If using a custom SDK location, set `pie.sdkPath` in VS Code settings to the SDK package directory.
+**Fix:** The extension host derives `PIE_TRUSTED_SDK_ROOT` from the resolved `sdkPath` and passes it to the backend, and the repo-local pinned SDK (`extension/node_modules/@earendil-works/pi-coding-agent`) is trusted by construction. If overriding with a custom SDK location, set `pie.sdkPath` in VS Code *User* settings (or the `PI_SDK_PATH` env var) to the SDK package directory — avoid committing an absolute `pie.sdkPath` to the tracked `.vscode/settings.json`, since it is machine-specific and breaks other machines on pull.
+
+### SDK version drift / backend breaks after a pull
+
+**Cause:** The extension backend previously loaded whatever `@earendil-works/pi-coding-agent` `npm root -g` resolved, so a `npm i -g` upgrade (or a different version on another machine) could silently swap the SDK out from under the backend.
+
+**Fix:** The SDK is now a pinned `extension/package.json` dependency. `cd extension && npm install` (or `npm ci` for a reproducible install from the lockfile) installs the exact version into `extension/node_modules/`, and the backend resolves that copy first. Run `npm install` in `extension/` after pulling if the SDK version in the lockfile changed.
 
 ### `pi` command not found after install
 

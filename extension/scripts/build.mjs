@@ -74,6 +74,23 @@ async function chooseInstalledExtensionDir(pkg) {
   return null;
 }
 
+async function writeSdkLocalManifest() {
+  // Record the absolute path of the SDK pinned in this checkout's
+  // node_modules so the running extension can load the lockfile-pinned version
+  // instead of whatever `npm root -g` resolves. Written under out/ (gitignored)
+  // so it is carried to the installed extension dir by syncToInstalledExtension
+  // and is regenerated per-machine by `npm install && npm run build` — never
+  // committed, never machine-specific in git.
+  const sdkPath = path.join(rootDir, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  try {
+    await stat(path.join(sdkPath, 'package.json'));
+    await writeFile(path.join(outDir, 'sdk-local-path.json'), `${JSON.stringify({ sdkPath }, null, 2)}\n`);
+  } catch {
+    // SDK not installed in the source node_modules yet; skip — resolution
+    // falls back to extensionPath/node_modules (dev-host) then npm root -g.
+  }
+}
+
 async function syncToInstalledExtension() {
   if (noSync) {
     return;
@@ -174,6 +191,7 @@ async function buildOnce() {
 
   runViteBuild('--mode node');
   runViteBuild();
+  await writeSdkLocalManifest();
   await syncToInstalledExtension();
 }
 
@@ -186,6 +204,7 @@ if (watchMode) {
   const builtWebviewWatcher = createBuiltWebviewWatcher();
 
   // Sync once after initial Node build; the webview watcher will handle subsequent changes.
+  await writeSdkLocalManifest();
   await syncToInstalledExtension();
 
   const shutdown = async () => {

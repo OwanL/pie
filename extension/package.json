@@ -183,6 +183,7 @@
     "vite": "^6.0.0"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
     "gpt-tokenizer": "^3.4.0",
     "highlight.js": "^11.11.1",
     "immer": "^11.1.8",

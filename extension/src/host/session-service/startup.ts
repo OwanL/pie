@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { readFileSync } from 'node:fs';
 
 import * as vscode from 'vscode';
 
@@ -138,6 +139,24 @@ function bootLogRestorePrepared(
   });
 }
 
+/**
+ * Read the build-generated `out/sdk-local-path.json` pointing at the SDK
+ * pinned in this checkout's `node_modules`. Returns undefined when the
+ * manifest is absent (e.g. build not yet run, or the SDK isn't installed
+ * locally), so resolution falls back to the extensionPath-relative candidate
+ * then the globalState cache and `npm root -g`.
+ */
+function readSdkLocalManifest(context: vscode.ExtensionContext): string | undefined {
+  const manifestPath = context.asAbsolutePath(path.join('out', 'sdk-local-path.json'));
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as { sdkPath?: unknown };
+    const sdkPath = typeof parsed.sdkPath === 'string' ? parsed.sdkPath.trim() : '';
+    return sdkPath || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions): Promise<{ nodePath: string; sdkPath: string } | null> {
   try {
     const config = vscode.workspace.getConfiguration('pie');
@@ -151,6 +170,19 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
       || rootConfig.get<string>('piAssistant.sdkPath')?.trim()
       || undefined;
     const envSdkPath = process.env.PI_SDK_PATH?.trim() || undefined;
+    // Portable default: the SDK pinned as an extension `dependency` in this
+    // checkout's node_modules. The build writes out/sdk-local-path.json with
+    // the absolute source node_modules path (regenerated per-machine, never
+    // committed), so the synced install can still find the lockfile-pinned SDK
+    // in the source tree. In Extension Development Host (extensionPath IS the
+    // source dir) the extensionPath-relative candidate works directly.
+    const localCandidatePath = readSdkLocalManifest(options.context)
+      ?? path.join(
+        options.context.extensionPath,
+        'node_modules',
+        '@earendil-works',
+        'pi-coding-agent',
+      );
     const shouldUseSdkCache = !configuredSdkPath && !envSdkPath;
     const cachedSdkPath = shouldUseSdkCache
       ? options.context.globalState.get<string>(SDK_PATH_CACHE_KEY)
@@ -163,10 +195,14 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
     const sdkPath = await resolveSdkPath({
       configuredPath: configuredSdkPath,
       cachedPath: cachedSdkPath,
+      localCandidatePath,
       env: process.env as NodeJS.ProcessEnv,
       exec: createCommandExecutor(),
     });
-    if (shouldUseSdkCache) {
+    // Only persist the resolved path when we actually had to discover it via
+    // the cache/npm-root fallback. The local candidate is re-discovered
+    // cheaply on every start and would go stale if the repo is relocated.
+    if (shouldUseSdkCache && sdkPath !== localCandidatePath) {
       void Promise.resolve(options.context.globalState.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
         appendPieLog('warn', 'startup', 'globalState.update failed for resolvedSdkPath', { error: toErrorMessage(error) });
       });

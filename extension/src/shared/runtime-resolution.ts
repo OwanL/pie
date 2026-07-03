@@ -21,6 +21,15 @@ export interface ResolveNodePathOptions extends CommonOptions {
 export interface ResolveSdkPathOptions extends CommonOptions {
   configuredPath?: string;
   cachedPath?: string;
+  /**
+   * Repo-local candidate: the SDK installed as a pinned `dependencies` entry
+   * of the extension (i.e. `<extension>/node_modules/@earendil-works/pi-coding-agent`).
+   * Tried after explicit overrides (setting + env) but BEFORE the globalState
+   * cache and `npm root -g`, so the SDK version is locked to the extension's
+   * package-lock.json — cross-machine reproducible via `npm ci` and immune to
+   * a `npm i -g` upgrade silently swapping the SDK out from under the backend.
+   */
+  localCandidatePath?: string;
   exec: CommandExecutor;
 }
 
@@ -129,6 +138,20 @@ export function resolveNodePath(options: ResolveNodePathOptions): string {
   );
 }
 
+/**
+ * Resolve the directory of the installed PI SDK package.
+ *
+ * Candidate priority:
+ *   1. `configuredPath` (`pie.sdkPath` setting — explicit override; validated)
+ *   2. `PI_SDK_PATH` env var (explicit override; validated)
+ *   3. `localCandidatePath` — the SDK pinned as an extension `dependency`
+ *      (`<extension>/node_modules/@earendil-works/pi-coding-agent`); validated.
+ *      This is the portable default: version-locked by package-lock.json, so
+ *      `git pull` + `npm ci` reproduces the exact SDK on every machine.
+ *   4. `cachedPath` (globalState cache from a previous start, unless it points
+ *      at the legacy `@mariozechner` global package)
+ *   5. `npm root -g` discovery of the maintained or legacy global package
+ */
 export async function resolveSdkPath(options: ResolveSdkPathOptions): Promise<string> {
   const exists = options.exists ?? defaultExists;
 
@@ -146,6 +169,12 @@ export async function resolveSdkPath(options: ResolveSdkPathOptions): Promise<st
       throw new Error(`PI_SDK_PATH is not a valid SDK install: ${envPath}`);
     }
     return envPath;
+  }
+
+  // 3. Repo-local pinned dependency (preferred over cache + npm root -g).
+  const localCandidate = options.localCandidatePath;
+  if (localCandidate && isValidSdkPath(localCandidate, exists)) {
+    return localCandidate;
   }
 
   if (

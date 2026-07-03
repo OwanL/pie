@@ -116,10 +116,16 @@ test('resolveNodePath rejects missing configured and environment paths and error
 test('resolveSdkPath prefers configured sdk path', async () => {
   const packageJsonPath = path.join('/opt/pi-sdk', 'package.json');
   const indexJsPath = path.join('/opt/pi-sdk', 'dist', 'index.js');
+  const localSdkPath = path.join('/ext/node_modules', '@earendil-works', 'pi-coding-agent');
   const sdkPath = await resolveSdkPath({
     configuredPath: '/opt/pi-sdk',
+    localCandidatePath: localSdkPath,
     env: {},
-    exists: (filePath) => filePath === packageJsonPath || filePath === indexJsPath,
+    exists: (filePath) =>
+      filePath === packageJsonPath ||
+      filePath === indexJsPath ||
+      filePath === path.join(localSdkPath, 'package.json') ||
+      filePath === path.join(localSdkPath, 'dist', 'index.js'),
     exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
   });
 
@@ -261,6 +267,69 @@ test('resolveSdkPath falls back to the legacy global SDK when the maintained pac
   });
 
   assert.equal(sdkPath, expectedSdkPath);
+});
+
+test('resolveSdkPath prefers a valid local candidate over cache and npm root -g', async () => {
+  const localSdkPath = path.join('/ext/node_modules', '@earendil-works', 'pi-coding-agent');
+  const cachedSdkPath = '/cache/pi-sdk';
+  let execCalls = 0;
+
+  const sdkPath = await resolveSdkPath({
+    localCandidatePath: localSdkPath,
+    cachedPath: cachedSdkPath,
+    env: {},
+    exists: (filePath) =>
+      filePath === path.join(localSdkPath, 'package.json') ||
+      filePath === path.join(localSdkPath, 'dist', 'index.js') ||
+      filePath === path.join(cachedSdkPath, 'package.json') ||
+      filePath === path.join(cachedSdkPath, 'dist', 'index.js'),
+    exec: async () => {
+      execCalls += 1;
+      return { stdout: '', stderr: '', exitCode: 0 };
+    },
+  });
+
+  assert.equal(sdkPath, localSdkPath);
+  assert.equal(execCalls, 0, 'must not shell out to npm when the local candidate validates');
+});
+
+test('resolveSdkPath honors PI_SDK_PATH before the local candidate', async () => {
+  const envSdkPath = '/env/pi-sdk';
+  const localSdkPath = path.join('/ext/node_modules', '@earendil-works', 'pi-coding-agent');
+
+  const sdkPath = await resolveSdkPath({
+    localCandidatePath: localSdkPath,
+    env: { PI_SDK_PATH: envSdkPath },
+    exists: (filePath) =>
+      filePath === path.join(envSdkPath, 'package.json') ||
+      filePath === path.join(envSdkPath, 'dist', 'index.js') ||
+      filePath === path.join(localSdkPath, 'package.json') ||
+      filePath === path.join(localSdkPath, 'dist', 'index.js'),
+    exec: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+  });
+
+  assert.equal(sdkPath, envSdkPath);
+});
+
+test('resolveSdkPath skips an invalid local candidate and falls back to the cache', async () => {
+  const cachedSdkPath = '/cache/pi-sdk';
+  let execCalls = 0;
+
+  const sdkPath = await resolveSdkPath({
+    localCandidatePath: path.join('/ext/node_modules', '@earendil-works', 'pi-coding-agent'),
+    cachedPath: cachedSdkPath,
+    env: {},
+    exists: (filePath) =>
+      filePath === path.join(cachedSdkPath, 'package.json') ||
+      filePath === path.join(cachedSdkPath, 'dist', 'index.js'),
+    exec: async () => {
+      execCalls += 1;
+      return { stdout: '', stderr: '', exitCode: 0 };
+    },
+  });
+
+  assert.equal(sdkPath, cachedSdkPath);
+  assert.equal(execCalls, 0, 'cache hit must not shell out to npm');
 });
 
 // ─── execCommand / createCommandExecutor ────────────────────────────────────
