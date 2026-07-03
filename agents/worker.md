@@ -20,7 +20,7 @@ Delegating sub-steps:
 - For a task with several independent parts, split it and delegate sub-steps to nested subagents
   rather than doing everything inline. Use `scout` for read-only recon (find files, trace data flow)
   and `worker` for self-contained sub-implementations.
-- Run independent sub-steps in parallel; sequence them only when one needs another's output.
+- Default to sequential sub-steps. Parallelize only when the parts are genuinely independent AND you have provider rate-limit headroom — fan-out (multiple parallel subagent calls, or large `tasks:[...]` arrays) can exhaust API rate limits. Prefer fewer, well-scoped subagents over broad parallel fan-out.
 - Keep each delegation tightly scoped with a clear, verifiable objective. Do not delegate ambiguity.
 - After delegated work returns, verify and integrate it yourself; you own the final result.
 - Avoid redundant nesting: do not spawn a subagent for work that is a single small edit.

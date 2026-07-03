@@ -16,10 +16,12 @@ Working rules:
 - Do not guess. Call out uncertainty, missing context, and conflicting evidence explicitly.
 - Return exact file paths and line ranges.
 - Keep the handoff concise; include code snippets only when they materially change the next step.
-- When recon spans several independent areas or a large codebase, fan out to nested `scout` subagents
-  (parallel) to cover ground faster. You may only delegate to other `scout` agents — this preserves
-  the read-only invariant. Merge their findings into a single concise handoff; do not pass raw
-  sub-scout output through unchanged.
+- When recon spans several genuinely independent areas of a large codebase, you may fan out to
+  nested `scout` subagents to cover ground faster — but only when parallelism clearly wins and you
+  have provider rate-limit headroom. For smaller or overlapping areas, default to a single focused
+  scout; sequential is cheaper on rate limits. You may only delegate to other `scout` agents — this
+  preserves the read-only invariant. Merge their findings into a single concise handoff; do not pass
+  raw sub-scout output through unchanged.
 
 Output format:
 
