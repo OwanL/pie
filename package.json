@@ -19,7 +19,12 @@
     "extension:test": "node ./scripts/run-tests.mjs --package extension",
     "extension:typecheck": "npm --prefix extension run typecheck --",
     "extensions:test": "node ./scripts/run-tests.mjs --package cwd-skills --package safeguard --package skill-pruner --package subagent --package web-access-compat",
-    "extensions:typecheck": "npm --prefix extension run typecheck:skill-pruner -- && npm --prefix extension run typecheck:web-access-compat --"
+    "extensions:typecheck": "npm --prefix extension run typecheck:skill-pruner -- && npm --prefix extension run typecheck:web-access-compat --",
+    "proxy": "node ./scripts/proxy.mjs run",
+    "proxy:bg": "node ./scripts/proxy.mjs start",
+    "proxy:down": "node ./scripts/proxy.mjs stop",
+    "proxy:health": "node ./scripts/proxy.mjs health",
+    "proxy:test": "cd proxy && uv run python test/test_config.py"
   },
   "devDependencies": {
     "@types/node": "^25.9.3",

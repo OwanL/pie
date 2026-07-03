@@ -732,7 +732,7 @@
       ]
     },
     "umans": {
-      "baseUrl": "https://api.code.umans.ai/v1",
+      "baseUrl": "http://localhost:4000/v1",
       "api": "openai-completions",
       "apiKey": "$UMANS_API_KEY",
       "compat": {
