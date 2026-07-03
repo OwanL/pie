@@ -148,6 +148,7 @@ test('noticeActionsFor maps each kind to its recovery actions (single source of 
     'prepass-failed': ['retry', 'retry-without-pruning'],
     'dropped-line': ['retry', 'show-logs'],
     'backend-exit': ['restart-backend', 'show-logs'],
+    'operational-error': ['show-logs'],
     'send-failed': ['retry'],
     'edit-failed': [], // re-editing is a separate affordance Brief E owns
   };

@@ -100,6 +100,16 @@
           "type": "boolean",
           "default": false,
           "description": "Allow loading auth credentials from inside a Git working tree."
+        },
+        "pie.useProxy": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the local LiteLLM proxy (pie/proxy/) on activation and route API-key providers (umans + future) through it for concurrency limiting. GitHub Copilot and Ollama stay direct. When true, the extension health-checks the proxy on startup and fails loud (notice shown) if it can't boot — umans will be unavailable until fixed. Set false to bypass the proxy entirely (providers route direct, no concurrency limit)."
+        },
+        "pie.proxyPort": {
+          "type": "number",
+          "default": 4000,
+          "description": "Port for the local LiteLLM proxy spawned by pie.useProxy. Must match the port models.json bases umans on."
         }
       }
     }

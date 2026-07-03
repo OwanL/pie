@@ -35,6 +35,7 @@ import {
   isToolProgressPayload,
   isToolStartedPayload,
 } from '../../shared/protocol/event-payloads.js';
+import { appendPieLog } from '../util/pie-log.js';
 
 export interface SessionBackendEventHandlers {
   onSessionOpened(payload: SessionOpenedPayload): void;
@@ -68,8 +69,10 @@ function dispatch<TPayload>(
 ): void {
   const payload = event.payload;
   if (!guard(payload)) {
-    console.warn(
-      `[pie] dropped malformed backend event '${event.event}' (payload failed validation)`,
+    appendPieLog(
+      'warn',
+      'event-dispatch',
+      `dropped malformed backend event '${event.event}' (payload failed validation)`,
     );
     return;
   }

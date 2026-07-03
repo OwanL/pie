@@ -14,6 +14,8 @@ import { SessionMessageActions } from './message-actions';
 import { SessionServiceState } from './state';
 import { startSessionBackend } from './startup';
 import { toErrorMessage } from '../util/error-message';
+import { setRuntimeAuditLogEnabled } from '../util/audit';
+import { appendPieLog } from '../util/pie-log';
 import { SessionTabActions } from './tab-actions';
 import type { OnSessionCompleted, PostImperative, ScheduleRender } from './types';
 import type { Event } from '../core/events';
@@ -210,6 +212,10 @@ export class SessionService implements vscode.Disposable {
       }),
     };
     const merged = resolveChatPrefs({ ...current, ...deepMerged });
+    // Apply the runtime-audit-log toggle to the audit module so emit decisions
+    // take effect immediately on live updates AND on cold-start restore (which
+    // also routes through this method via the SetPrefs → SetPrefsRpc pipeline).
+    setRuntimeAuditLogEnabled(merged.runtimeAuditLog);
     // NOTE: This method is the *effect handler* for SetPrefsRpc. The caller
     // (webview message router or startup restore) already dispatched a SetPrefs
     // Command through the reducer, which updated ArchState — including the
@@ -219,8 +225,7 @@ export class SessionService implements vscode.Disposable {
     // the reducer → EffectRunner → service.setPrefs → Command → ... and
     // overflow the stack.
     void Promise.resolve(this.context.globalState.update(PREFS_STORAGE_KEY, merged)).catch((error) => {
-      // Non-fatal: persistence failure must not break the in-memory prefs update.
-      console.warn('[pie] globalState.update failed for prefs:', toErrorMessage(error));
+      appendPieLog('warn', 'prefs', 'globalState.update failed for prefs', { error: toErrorMessage(error) });
     });
     void this.backend.request('runtimePrefs.set', {
       providerToggles: merged.providerToggles,
@@ -228,11 +233,13 @@ export class SessionService implements vscode.Disposable {
       subagentAlwaysParentModel: merged.subagentAlwaysParentModel,
       subagentMaxDepth: merged.subagentMaxDepth,
       subagentMaxTreeSessions: merged.subagentMaxTreeSessions,
+      subagentMaxInflight: merged.subagentMaxInflight,
+      subagentMaxConcurrency: merged.subagentMaxConcurrency,
+      subagentMaxParallelTasks: merged.subagentMaxParallelTasks,
       subagentBuckets: merged.subagentBuckets,
       subagentNestedAllowedBuckets: merged.subagentNestedAllowedBuckets,
     }).catch((error) => {
-      // Non-fatal: the backend may be restarting or may not support runtime prefs yet.
-      console.warn('[pie] runtimePrefs.set failed (non-fatal):', toErrorMessage(error));
+      appendPieLog('warn', 'prefs', 'runtimePrefs.set failed', { error: toErrorMessage(error) });
     });
   }
 

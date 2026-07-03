@@ -5,6 +5,7 @@
  */
 
 import type { ViewState } from '../../shared/protocol';
+import { webviewLog } from './utils/log';
 
 interface FieldSpec {
   path: string;
@@ -62,11 +63,11 @@ export function validateViewState(state: ViewState): string[] {
   }
 
   if (violations.length > 0) {
-    console.error(
-      `[pie-state-validator] Host delivered ViewState with ${violations.length} invalid field(s):\n` +
-      violations.map((v) => `  • ${v}`).join('\n') +
-      '\n\nThis will likely cause a render crash. Check that protocol.ts DEFAULT_* constants ' +
-      'include all fields that components access.',
+    webviewLog(
+      'error',
+      'state-validator',
+      `Host delivered ViewState with ${violations.length} invalid field(s)`,
+      { violations },
     );
   }
 

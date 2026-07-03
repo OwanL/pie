@@ -40,6 +40,7 @@ export type NoticeKind =
   | 'prepass-failed'
   | 'dropped-line'
   | 'backend-exit'
+  | 'operational-error'
   | 'send-failed'
   | 'edit-failed';
 
@@ -246,6 +247,8 @@ export function noticeActionsFor(kind: NoticeKind): NoticeAction[] {
       return ['retry', 'show-logs'];
     case 'backend-exit':
       return ['restart-backend', 'show-logs'];
+    case 'operational-error':
+      return ['show-logs'];
     case 'send-failed':
       return ['retry'];
     case 'edit-failed':

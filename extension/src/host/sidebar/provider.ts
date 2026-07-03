@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { assertInvariant, auditLog, bootLog, isBootLogEnabled } from '../util/audit';
 import { recordSnapshotPost } from '../util/stream-telemetry';
 import { toErrorMessage } from '../util/error-message';
+import { appendPieLog } from '../util/pie-log';
 import {
   buildStateEnvelope,
   canPostSnapshotToWebview,
@@ -120,6 +121,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       getGlobalDirty: () => this.syncState.globalDirty,
       isReloading: () => this.hotReloader.isReloading(),
       onProbe: () => this.probePost(),
+      onForceClearReloading: () => this.hotReloader.clearReloading(),
     });
   }
 
@@ -206,7 +208,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       // to rejection once the audit log is clean.
       const validation = validateWebviewToHostMessage(msg);
       if (!validation.ok) {
-        auditLog(this.context, 'sidebar-provider', 'message.invalid', {
+        auditLog('sidebar-provider', 'message.invalid', {
           reason: validation.reason,
           type: (msg as { type?: unknown })?.type ?? null,
         });
@@ -298,14 +300,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     );
     this.syncState = result.nextSyncState;
 
-    auditLog(this.context, 'sidebar-provider', 'snapshot.postState', {
-      globalDirty: this.syncState.globalDirty,
-      posted: !!result.message,
-      ready: this.webviewReady,
-      revision: this.syncState.globalRevision,
-      visible: this.view?.visible ?? false,
-    });
-
+    // Note: `postState` runs on every debounced snapshot post (the high-
+    // frequency happy path), so it intentionally has no `auditLog` entry —
+    // that channel is reserved for notable snapshot transitions (markDirty /
+    // flushDirty). Detailed per-post tracing is available via the opt-in
+    // `bootLog` (PI_BOOT_LOG=1) below.
     bootLog('sidebar-provider', 'snapshot.postState', {
       activeSessionPath: viewState.activeSession?.path ?? null,
       backendReady: viewState.backendReady,
@@ -320,7 +319,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     });
 
     assertInvariant(
-      this.context,
       'sidebar-provider',
       !result.message || this.syncState.globalRevision > previousRevision,
       'State snapshots must advance revision monotonically.',
@@ -339,7 +337,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   scheduleState(): void {
     if (!this.canPostSnapshotToView()) {
       this.syncState = { ...this.syncState, globalDirty: true };
-      auditLog(this.context, 'sidebar-provider', 'snapshot.markDirty', {
+      auditLog('sidebar-provider', 'snapshot.markDirty', {
         reason: 'scheduleState',
         ready: this.webviewReady,
         revision: this.syncState.globalRevision,
@@ -442,7 +440,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     const result = flushDirtySnapshot(this.syncState, viewState, this.canPostSnapshotToView());
     this.syncState = result.nextSyncState;
 
-    auditLog(this.context, 'sidebar-provider', 'snapshot.flushDirty', {
+    auditLog('sidebar-provider', 'snapshot.flushDirty', {
       globalDirty: this.syncState.globalDirty,
       posted: !!result.message,
       ready: this.webviewReady,
@@ -495,7 +493,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       })
       .catch((error: unknown) => {
         this.syncState = reconcilePostedMessageDelivery(this.syncState, message, false);
-        console.warn(`[pie] Failed to post ${message.type} message to webview: ${toErrorMessage(error)}`);
+        appendPieLog('warn', 'sidebar-provider', `failed to post ${message.type} message to webview`, {
+          error: toErrorMessage(error),
+        });
       });
   }
 
@@ -568,7 +568,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       return delivered;
     } catch (error: unknown) {
       this.syncState = reconcilePostedMessageDelivery(this.syncState, message, false);
-      console.warn(`[pie] Readiness probe post failed: ${toErrorMessage(error)}`);
+      appendPieLog('warn', 'sidebar-provider', 'readiness probe post failed', {
+        error: toErrorMessage(error),
+      });
       return false;
     }
   }

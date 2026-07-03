@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 
 import { auditLog } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
+import { pieWarn } from '../util/pie-logger';
 import {
   DEFAULT_WEBVIEW_VIEW_NAME,
   getWebviewAssetDir,
@@ -81,7 +82,7 @@ export class SidebarHotReloader {
       clearTimeout(this.hotReloadTimer);
     }
 
-    auditLog(this.deps.getContext(), 'sidebar-provider', 'hotReload.schedule', {
+    auditLog('sidebar-provider', 'hotReload.schedule', {
       changedPath,
       visible: this.deps.getView()?.visible ?? false,
     });
@@ -116,7 +117,7 @@ export class SidebarHotReloader {
       this.reloadingForAssetMismatch = false;
       this.reloadingForStateAppliedTimeout = false;
 
-      auditLog(this.deps.getContext(), 'sidebar-provider', 'hotReload.apply', {
+      auditLog('sidebar-provider', 'hotReload.apply', {
         changedPath,
         revision: this.deps.getSyncState().globalRevision,
         visible: view.visible,
@@ -124,7 +125,7 @@ export class SidebarHotReloader {
     } catch (error) {
       this.reloadingForAssetMismatch = false;
       this.reloadingForStateAppliedTimeout = false;
-      console.warn(`[pie] Failed to hot reload webview assets after ${changedPath}: ${toErrorMessage(error)}`);
+      pieWarn('sidebar-provider', 'failed to hot reload webview assets', { changedPath, error: toErrorMessage(error) });
     } finally {
       // A non-applied reload (view swapped mid-await, or a throw) leaves no new
       // renderer to send a `ready` handshake, so `clearReloading` (called by the

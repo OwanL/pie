@@ -29,6 +29,33 @@ const FIRST_CONTENT_EVENT_TYPES = new Set([
   'toolcall_delta',
 ]);
 
+const DEFAULT_UNEXPECTED_INTERRUPT_REASON =
+  'The session stopped unexpectedly before the assistant finished responding.';
+
+function logBackendDiagnostic(event: string, payload: Record<string, unknown>): void {
+  process.stderr.write(`[pie:backend] ${JSON.stringify({
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    scope: 'backend-session',
+    event,
+    ...payload,
+  })}\n`);
+}
+
+function summarizePayload(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    return value.slice(0, 500);
+  }
+  try {
+    return JSON.stringify(value).slice(0, 500);
+  } catch {
+    return String(value).slice(0, 500);
+  }
+}
+
 export interface BackendSessionEventHandlerDeps {
   emit(event: string, payload?: unknown): void;
   emitBusyChanged(context: SessionContext, busy: boolean): void;
@@ -73,6 +100,17 @@ export function handleSdkSessionEvent(
       // Reset the per-message first-content marker so each assistant message
       // measures its own provider TTFT.
       context.activeRequest.providerFirstDeltaAt = undefined;
+      // Commit point (first assistant message of this request): clear the
+      // pre-commit safety-net timer armed in `handleMessageSend`. The timer is
+      // a PRE-COMMIT guard only — without this clear it would act as a
+      // whole-run ceiling (it is otherwise only cleared on `session.prompt()`
+      // settle) and abort any healthy multi-turn agentic run exceeding
+      // `PROMPT_TIMEOUT_MS` mid-stream. Only the first message_start clears
+      // (subsequent turns re-enter with `promptSafetyTimer === undefined`).
+      if (context.activeRequest.messageIndex === 1 && context.activeRequest.promptSafetyTimer) {
+        clearTimeout(context.activeRequest.promptSafetyTimer);
+        context.activeRequest.promptSafetyTimer = undefined;
+      }
 
       deps.emit('message.started', {
         requestId: context.activeRequest.id,
@@ -193,6 +231,16 @@ export function handleSdkSessionEvent(
       // anchor on the last tool to finish.
       context.activeRequest.turnBoundaryAt = Date.now();
 
+      if (event.isError) {
+        logBackendDiagnostic('tool.failed', {
+          requestId: context.activeRequest.id,
+          sessionPath: context.sessionPath,
+          toolCallId: event.toolCallId ?? '',
+          toolName: event.toolName ?? '',
+          result: summarizePayload(event.result),
+        });
+      }
+
       deps.emit('tool.finished', {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
@@ -284,10 +332,22 @@ export function handleSdkSessionEvent(
       } satisfies MessageFinishedPayload);
 
       if (message.status === 'interrupted') {
+        const userInitiated = context.activeRequest.aborted === true;
+        if (!userInitiated) {
+          logBackendDiagnostic('message.interrupted', {
+            requestId: context.activeRequest.id,
+            sessionPath: context.sessionPath,
+            messageId,
+            modelId: context.activeRequest.modelId,
+            reason: resolveUnexpectedInterruptReason(message.errorDetail),
+          });
+        }
         deps.emit('message.aborted', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
           messageId,
+          userInitiated,
+          reason: userInitiated ? undefined : resolveUnexpectedInterruptReason(message.errorDetail),
         } satisfies MessageAbortedPayload);
       }
 
@@ -298,7 +358,9 @@ export function handleSdkSessionEvent(
     case 'agent_end': {
       const requestId = context.activeRequest?.id;
       const messageId = context.activeRequest?.lastAssistantMessageId;
-      const abortedWithoutMessage = context.activeRequest?.aborted && !messageId;
+      const modelId = context.activeRequest?.modelId;
+      const userInitiated = context.activeRequest?.aborted === true;
+      const interruptedWithoutMessage = !!requestId && !messageId;
 
       deps.emitBusyChanged(context, false);
       deps.emitContextUsageChanged(context);
@@ -310,10 +372,20 @@ export function handleSdkSessionEvent(
       void deps.emitSessionOpened(context.sessionPath);
       void deps.emitSessionListChanged();
 
-      if (requestId && abortedWithoutMessage) {
+      if (requestId && interruptedWithoutMessage) {
+        if (!userInitiated) {
+          logBackendDiagnostic('request.interruptedWithoutMessage', {
+            requestId,
+            sessionPath: context.sessionPath,
+            modelId,
+            reason: DEFAULT_UNEXPECTED_INTERRUPT_REASON,
+          });
+        }
         deps.emit('message.aborted', {
           requestId,
           sessionPath: context.sessionPath,
+          userInitiated,
+          reason: userInitiated ? undefined : DEFAULT_UNEXPECTED_INTERRUPT_REASON,
         } satisfies MessageAbortedPayload);
       }
 
@@ -330,6 +402,11 @@ export function handleSdkSessionEvent(
  * start timestamp recorded at `tool_execution_start`. Falls back to 0 when the
  * start was never seen (e.g. an end event arrives without a matching start).
  */
+function resolveUnexpectedInterruptReason(reason: string | undefined): string {
+  const trimmed = reason?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_UNEXPECTED_INTERRUPT_REASON;
+}
+
 function resolveToolDurationMs(context: SessionContext, toolCallId: string): number {
   const startedAt = context.activeRequest?.toolStartTimes?.get(toolCallId);
   context.activeRequest?.toolStartTimes?.delete(toolCallId);

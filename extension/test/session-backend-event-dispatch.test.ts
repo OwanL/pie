@@ -71,12 +71,40 @@ test('dispatchSessionBackendEvent routes preflight.failed payloads', () => {
   assert.deepEqual(calls, [{ name: 'preflight.failed', payload }]);
 });
 
+test('dispatchSessionBackendEvent routes message.aborted payloads with interruption metadata', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    requestId: 'req-2',
+    sessionPath: '/workspace/session.jsonl',
+    messageId: 'req-2:1',
+    userInitiated: false,
+    reason: 'The session stopped unexpectedly before the assistant finished responding.',
+  };
+
+  dispatchSessionBackendEvent({ event: 'message.aborted', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'message.aborted', payload }]);
+});
+
 test('dispatchSessionBackendEvent drops a malformed preflight.failed payload', () => {
   const { handlers, calls } = createHandlers();
   // Missing `error` — fails the guard, must be dropped (not cast-and-hoped).
   const payload = { requestId: 'req-9', sessionPath: '/workspace/session.jsonl' };
 
   dispatchSessionBackendEvent({ event: 'preflight.failed', payload }, handlers);
+
+  assert.deepEqual(calls, []);
+});
+
+test('dispatchSessionBackendEvent drops a malformed message.aborted payload', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    requestId: 'req-2',
+    sessionPath: '/workspace/session.jsonl',
+    userInitiated: 'nope',
+  };
+
+  dispatchSessionBackendEvent({ event: 'message.aborted', payload }, handlers);
 
   assert.deepEqual(calls, []);
 });

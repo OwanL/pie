@@ -10,6 +10,17 @@ export const READINESS_PROBE_INTERVAL_MS = 1_500;
  *  next visibility transition / user refocus / watchdog force-reload handles
  *  recovery. */
 export const READINESS_PROBE_MAX_ATTEMPTS = 40;
+/** Consecutive reloading-skips after which a reload is treated as stale (a
+ *  reload loop whose every `ready` is consumed by the asset-mismatch branch,
+ *  or a lost `ready` from a renderer that never finished loading) and
+ *  force-cleared, so the probe can heal the stall it exists to heal. At 1.5s
+ *  intervals this is ~6s — well beyond any legitimate reload (re-render +
+ *  renderer load, typically <2s) but well inside an annoying freeze. Without
+ *  this, `tick()` would bail on every firing while `reloading` is stuck, never
+ *  increment `attempts`, and never heal — and with the watchdog force-reload
+ *  suppressed while streaming, the webview would freeze until the user
+ *  interrupts. */
+export const RELOAD_STUCK_SKIPS = 4;
 
 export interface WebviewReadinessProbeDeps {
   getViewExists(): boolean;
@@ -25,6 +36,11 @@ export interface WebviewReadinessProbeDeps {
    *  was stale and the caller has adopted readiness. May return a boolean
    *  synchronously (kept on the fast path; no microtask yield). */
   onProbe(): Promise<boolean> | boolean;
+  /** Force-clear a stale `reloading` flag. Called once a reload has been "in
+   *  progress" past {@link RELOAD_STUCK_SKIPS} consecutive probe skips — a
+   *  reload loop or a lost `ready` — so the probe can post and adopt readiness,
+   *  healing the stall. */
+  onForceClearReloading(): void;
 }
 
 /**
@@ -55,6 +71,7 @@ export interface WebviewReadinessProbeDeps {
 export class WebviewReadinessProbe {
   private timer?: ReturnType<typeof setTimeout>;
   private attempts = 0;
+  private reloadingSkips = 0;
 
   constructor(private readonly deps: WebviewReadinessProbeDeps) {}
 
@@ -75,6 +92,7 @@ export class WebviewReadinessProbe {
       this.timer = undefined;
     }
     this.attempts = 0;
+    this.reloadingSkips = 0;
   }
 
   /** Alias for {@link clear} (mirrors `StateAppliedWatchdog.dispose`). */
@@ -94,14 +112,34 @@ export class WebviewReadinessProbe {
     // readiness between arming and firing.
     if (!this.deps.getViewExists() || this.deps.getWebviewReady() || !this.deps.getGlobalDirty()) {
       this.attempts = 0;
+      this.reloadingSkips = 0;
       return;
     }
 
-    // A reload is in progress — the renderer is being replaced. Don't post to a
-    // dying/loading renderer; the reload's `ready` handshake owns readiness, and
-    // `scheduleState` re-arms once it settles if still stuck.
+    // A reload is in progress — the renderer is being replaced. For the first
+    // few skips we honour that: don't post to a dying/loading renderer; the
+    // reload's `ready` handshake owns readiness, and `scheduleState` re-arms
+    // once it settles if still stuck. But a reload that never settles (a reload
+    // loop whose every `ready` is consumed by the asset-mismatch branch, or a
+    // lost `ready` from a renderer that never finished loading) would otherwise
+    // trap the probe here forever — `attempts` never increments on a skip, so
+    // the probe neither heals nor exhausts, and with the watchdog force-reload
+    // suppressed while streaming the webview freezes until the user interrupts.
+    // Past the stuck threshold we treat `reloading` as stale, force-clear it,
+    // and fall through to the probe below so the self-heal actually fires.
     if (this.deps.isReloading()) {
-      return;
+      this.reloadingSkips += 1;
+      if (this.reloadingSkips < RELOAD_STUCK_SKIPS) {
+        return;
+      }
+      this.deps.onForceClearReloading();
+      this.reloadingSkips = 0;
+      bootLog('sidebar-provider', 'readinessProbe.forceClearedReloading', {
+        attempts: this.attempts,
+      });
+      // fall through — post and adopt readiness as normal.
+    } else {
+      this.reloadingSkips = 0;
     }
 
     if (this.attempts >= READINESS_PROBE_MAX_ATTEMPTS) {

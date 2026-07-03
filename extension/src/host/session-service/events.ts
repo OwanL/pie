@@ -16,6 +16,7 @@ import { onMessageDelta, onMessageThinking, onMessageStarted, onMessageFinished,
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
+import { auditLog } from '../util/audit.js';
 
 interface SessionServiceEventsOptions {
   context: vscode.ExtensionContext;
@@ -139,10 +140,7 @@ export class SessionServiceEvents {
       return sessionPath;
     }
 
-    const auditLog = (context: vscode.ExtensionContext, category: string, event: string, data: Record<string, unknown>) => {
-      console.log(`[audit:${category}]`, event, data);
-    };
-    auditLog(this.context, 'session-service', 'protocol.defect', {
+    auditLog('session-service', 'protocol.defect', {
       eventName,
       reason: 'missing sessionPath',
     });

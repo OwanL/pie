@@ -6,7 +6,8 @@ export type BooleanPrefKey =
   | 'autoExpandSubagentCalls'
   | 'suppressCompletionNotifications'
   | 'showPruningMessages'
-  | 'subagentAlwaysParentModel';
+  | 'subagentAlwaysParentModel'
+  | 'runtimeAuditLog';
 
 export type ChatPrefKey = keyof ChatPrefs;
 export type ChatPrefContextType = 'reasoning' | 'toolCalls' | 'subagentCalls';
@@ -60,6 +61,16 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
       {
         key: 'suppressCompletionNotifications',
         label: 'Suppress completion alerts',
+      },
+    ],
+  },
+  {
+    id: 'diagnostics',
+    label: 'Diagnostics',
+    items: [
+      {
+        key: 'runtimeAuditLog',
+        label: 'Emit audit logs to exthost.log',
       },
     ],
   },

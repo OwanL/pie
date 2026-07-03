@@ -210,6 +210,10 @@ export interface MessageAbortedPayload {
   requestId: string;
   sessionPath: string;
   messageId?: string;
+  /** True when the interruption came from an explicit user action (e.g. Stop). */
+  userInitiated?: boolean;
+  /** Plain-language reason shown to the user for unexpected interruptions. */
+  reason?: string;
 }
 
 export interface BusyChangedPayload {

@@ -9,6 +9,7 @@ import {
 } from '../run-analytics/types';
 import { MIGRATION_FAILED, migrateCheckpoint } from './checkpoint-migrations';
 import { parseJsonOrThrow, toErrorMessage } from '../../shared/error-message';
+import { appendPieLog } from '../util/pie-log';
 
 // Import choice / cycle-avoidance:
 //  - RUN_ANALYTICS_SCHEMA_VERSION + PersistedSessionRunState + RunCheckpoint come from
@@ -67,7 +68,7 @@ export function parseCheckpoint(raw: string): RunCheckpoint | null {
       sessions?: unknown;
     }>(raw, 'checkpoint file');
     if (typeof value.schemaVersion !== 'number' || typeof value.seq !== 'number') {
-      console.warn(`[checkpoint-io] checkpoint has unexpected top-level shape (missing/invalid schemaVersion or seq); dropping checkpoint`);
+      appendPieLog('warn', 'checkpoint-io', 'checkpoint has invalid top-level shape; dropping checkpoint');
       return null;
     }
     const fileVersion = value.schemaVersion;
@@ -82,21 +83,23 @@ export function parseCheckpoint(raw: string): RunCheckpoint | null {
     } else if (fileVersion < RUN_ANALYTICS_SCHEMA_VERSION) {
       const migrated = migrateCheckpoint(value, fileVersion, RUN_ANALYTICS_SCHEMA_VERSION);
       if (migrated === MIGRATION_FAILED) {
-        console.warn(
-          `[pie] checkpoint migration failed: cannot migrate schema version ${fileVersion} to ${RUN_ANALYTICS_SCHEMA_VERSION} (missing migration step or up threw); dropping checkpoint`,
-        );
+        appendPieLog('warn', 'checkpoint-io', 'checkpoint migration failed; dropping checkpoint', {
+          fromVersion: fileVersion,
+          toVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+        });
         return null;
       }
       resolved = migrated as typeof value;
     } else {
-      console.warn(
-        `[pie] checkpoint from newer schema version ${fileVersion} (this build understands up to ${RUN_ANALYTICS_SCHEMA_VERSION}); dropping (upgrade pi to read it)`,
-      );
+      appendPieLog('warn', 'checkpoint-io', 'checkpoint is from a newer schema version; dropping checkpoint', {
+        fileVersion,
+        supportedVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      });
       return null;
     }
 
     if (!isObjectRecord(resolved.sessions)) {
-      console.warn(`[checkpoint-io] checkpoint.sessions has unexpected shape; dropping checkpoint`);
+      appendPieLog('warn', 'checkpoint-io', 'checkpoint.sessions has unexpected shape; dropping checkpoint');
       return null;
     }
 
@@ -112,7 +115,7 @@ export function parseCheckpoint(raw: string): RunCheckpoint | null {
     }
 
     if (invalidSessions > 0) {
-      console.warn(`[checkpoint-io] dropped ${invalidSessions} invalid session entries from checkpoint`);
+      appendPieLog('warn', 'checkpoint-io', 'dropped invalid session entries from checkpoint', { invalidSessions });
     }
 
     return {
@@ -121,10 +124,7 @@ export function parseCheckpoint(raw: string): RunCheckpoint | null {
       sessions,
     };
   } catch (err) {
-    // Log parse / migration exceptions so corruption is observable (missing files are
-    // expected to be handled by callers via readOptionalText returning null).
-    // Prefer the audit logger if available; fall back to console.warn.
-console.warn(`[checkpoint-io] failed to parse checkpoint: ${toErrorMessage(err)}`);
+    appendPieLog('warn', 'checkpoint-io', 'failed to parse checkpoint', { error: toErrorMessage(err) });
     return null;
   }
 }

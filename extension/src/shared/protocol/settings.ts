@@ -140,13 +140,30 @@ export interface ChatPrefs {
   showPruningMessages: boolean;
   /** When true, sub-agents always use the parent's active model (skip bucket selection). */
   subagentAlwaysParentModel: boolean;
-  /** Max nesting depth for subagents (main → L1 → L2 → ...). Default 3.
+  /** When true, host-side `auditLog` events are emitted to the extension host
+   *  console (exthost.log) even in production/installed mode. Off by default;
+   *  dev mode (`extensionMode === 1`) always emits regardless of this flag.
+   *  Audit events are always written to the unified `pie` OutputChannel and the
+   *  persistent pie log file; this flag only gates console emission.
+   *  Useful for debugging pie behaviour without running the extension from source. */
+  runtimeAuditLog: boolean;
+  /** Max nesting depth for subagents (main → L1 → L2 → ...). 0 disables
+   *  subagents entirely; higher values allow deeper nesting. Default 3.
    *  Mirrored to the in-process subagent extension via PIE_SUBAGENT_MAX_DEPTH. */
   subagentMaxDepth: number;
   /** Max total subagent sessions permitted across an entire nested tree
-   *  (independent of the per-reply cap). Default 50. Mirrored to the in-process
+   *  (independent of the per-reply cap). Default 10. Mirrored to the in-process
    *  subagent extension via PIE_SUBAGENT_MAX_TREE_SESSIONS. */
   subagentMaxTreeSessions: number;
+  /** Max concurrent in-flight subagent sessions across the whole process.
+   *  Default 2. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
+  subagentMaxInflight: number;
+  /** Max concurrency within one parallel `tasks[]` array. Default 2.
+   *  Mirrored via PIE_SUBAGENT_MAX_CONCURRENCY. */
+  subagentMaxConcurrency: number;
+  /** Max parallel tasks allowed in a single `subagent` call. Default 4.
+   *  Mirrored via PIE_SUBAGENT_MAX_PARALLEL_TASKS. */
+  subagentMaxParallelTasks: number;
   /** User-configured model ids per bucket for subagent model selection. The
    *  subagent tool picks uniformly at random from the requested bucket; an empty
    *  bucket falls back to the parent's active model. Mirrored to the in-process
@@ -264,8 +281,12 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   suppressCompletionNotifications: false,
   showPruningMessages: true,
   subagentAlwaysParentModel: false,
+  runtimeAuditLog: false,
   subagentMaxDepth: 3,
-  subagentMaxTreeSessions: 50,
+  subagentMaxTreeSessions: 10,
+  subagentMaxInflight: 2,
+  subagentMaxConcurrency: 2,
+  subagentMaxParallelTasks: 4,
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
   completionSoundVolume: 50,

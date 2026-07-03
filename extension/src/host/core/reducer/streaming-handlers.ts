@@ -2,6 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { ChatMessage } from '../../../shared/protocol.js';
+import { stripReqIds } from '../../../shared/error-mapping.js';
 import {
   appendAssistantTextPart,
   appendContinuationSeparator,
@@ -251,6 +252,9 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
     );
     if (message) {
       message.status = 'interrupted';
+      if (!event.userInitiated && event.reason && !message.errorDetail) {
+        message.errorDetail = stripReqIds(event.reason);
+      }
     }
   });
 

@@ -32,6 +32,15 @@ export interface ActiveRequest {
    */
   providerFirstDeltaAt?: number;
   aborted: boolean;
+  /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
+   *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared
+   *  at the commit point (first `message_start`) so a healthy multi-turn
+   *  agentic run is never aborted mid-stream. Without this clear, the timer
+   *  acts as a whole-run ceiling (only cleared on `session.prompt()`
+   *  `.finally`), killing any run exceeding `PROMPT_TIMEOUT_MS` even while it
+   *  is actively streaming. Cleared in `session-event-handler.ts` on the first
+   *  `message_start`, and defensively in `clearActiveRequest`. */
+  promptSafetyTimer?: ReturnType<typeof setTimeout>;
 }
 
 export interface SessionContext {

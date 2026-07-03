@@ -67,7 +67,7 @@ export class SessionTabActions {
       isPlaceholder: true,
     };
 
-    auditLog(this.context, 'session-service', 'session.create.requested', {
+    auditLog('session-service', 'session.create.requested', {
       cwd,
       pendingPath,
       selectionToken,
@@ -116,7 +116,7 @@ export class SessionTabActions {
       requestEpoch,
     );
 
-    auditLog(this.context, 'session-service', 'session.open.requested', {
+    auditLog('session-service', 'session.open.requested', {
       selectionToken,
       sessionPath,
     });
@@ -188,7 +188,7 @@ export class SessionTabActions {
     // saveOpenTabs (replaced by PersistTabs Effect). NO SelectSession dispatch
     // (the reducer already selected nextPath). NO placeholder creation (moved
     // to openSession).
-    auditLog(this.context, 'session-service', 'session.close.requested', {
+    auditLog('session-service', 'session.close.requested', {
       nextPath,
       sessionPath,
     });
@@ -259,7 +259,7 @@ export class SessionTabActions {
       isPlaceholder: true,
     };
 
-    auditLog(this.context, 'session-service', 'session.duplicate.requested', {
+    auditLog('session-service', 'session.duplicate.requested', {
       sourceSessionPath,
       pendingPath,
       selectionToken,

@@ -40,9 +40,12 @@ test('SubagentFlyout renders the flyout chrome, toggle, buckets, and nesting con
   assert.match(html, /Sonnet-class main development</);
   assert.match(html, /Opus-class hardest problems</);
 
-  // Nesting controls.
-  assert.match(html, /Max depth</);
+  // Nesting + throughput controls.
+  assert.match(html, /Nesting levels</);
   assert.match(html, /Tree session budget</);
+  assert.match(html, /Max in-flight</);
+  assert.match(html, /Max concurrency</);
+  assert.match(html, /Max parallel tasks</);
 });
 
 test('SubagentFlyout renders the nested-bucket allowlist toggles reflecting prefs', () => {

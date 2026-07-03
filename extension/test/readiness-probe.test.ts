@@ -5,6 +5,7 @@ import {
   WebviewReadinessProbe,
   READINESS_PROBE_INTERVAL_MS,
   READINESS_PROBE_MAX_ATTEMPTS,
+  RELOAD_STUCK_SKIPS,
   type WebviewReadinessProbeDeps,
 } from '../src/host/sidebar/readiness-probe';
 
@@ -58,6 +59,7 @@ interface FakeState {
   probeCalls: number;
   deliver: boolean;
   reloading: boolean;
+  forceClears: number;
 }
 
 function makeDeps(state: FakeState, onProbe?: WebviewReadinessProbeDeps['onProbe']): WebviewReadinessProbeDeps {
@@ -74,11 +76,15 @@ function makeDeps(state: FakeState, onProbe?: WebviewReadinessProbeDeps['onProbe
       }
       return state.deliver;
     }),
+    onForceClearReloading: () => {
+      state.forceClears += 1;
+      state.reloading = false;
+    },
   };
 }
 
 function stuckState(): FakeState {
-  return { viewExists: true, webviewReady: false, globalDirty: true, probeCalls: 0, deliver: false, reloading: false };
+  return { viewExists: true, webviewReady: false, globalDirty: true, probeCalls: 0, deliver: false, reloading: false, forceClears: 0 };
 }
 
 test('probe adopts readiness when onProbe delivers, and does not re-arm', () => {
@@ -218,6 +224,7 @@ test('probe does not fire while a webview reload is in progress', () => {
     timers.advance(READINESS_PROBE_INTERVAL_MS);
     assert.equal(state.probeCalls, 0, 'no probe while reloading');
     assert.equal(probe.isArmed(), false, 'bail does not re-arm (scheduleState re-arms post-reload)');
+    assert.equal(state.forceClears, 0, 'a brief reload is not force-cleared');
 
     // After the reload settles (reloading=false), re-arming fires normally.
     state.reloading = false;
@@ -226,6 +233,40 @@ test('probe does not fire while a webview reload is in progress', () => {
     timers.advance(READINESS_PROBE_INTERVAL_MS);
     assert.equal(state.probeCalls, 1);
     assert.equal(state.webviewReady, true);
+  } finally {
+    timers.restore();
+  }
+});
+
+test('probe force-clears a stuck reloading (reload loop / lost ready) and heals instead of freezing', () => {
+  const timers = useFakeTimers();
+  try {
+    const state = stuckState();
+    state.reloading = true; // stuck — a reload loop or lost `ready` never clears it
+    state.deliver = true; // the webview is actually alive; postMessage will deliver
+    const probe = new WebviewReadinessProbe(makeDeps(state));
+
+    probe.arm();
+    // The first (RELOAD_STUCK_SKIPS - 1) ticks bail like a legitimate reload:
+    // no probe, no force-clear. `scheduleState` re-arms between ticks during
+    // streaming (simulated here by re-arming).
+    for (let i = 0; i < RELOAD_STUCK_SKIPS - 1; i++) {
+      timers.advance(READINESS_PROBE_INTERVAL_MS);
+      probe.arm();
+    }
+    assert.equal(state.probeCalls, 0, 'no probe during the legitimate-reload bail window');
+    assert.equal(state.forceClears, 0, 'no force-clear during the bail window');
+
+    // The RELOAD_STUCK_SKIPS-th tick treats the reload as stale, force-clears
+    // it, and probes — healing the stall that would otherwise freeze the
+    // webview until the user interrupts (the probe neither heals nor exhausts
+    // while reloading is stuck, and the watchdog can't force-reload mid-stream).
+    timers.advance(READINESS_PROBE_INTERVAL_MS);
+    assert.equal(state.forceClears, 1, 'stuck reloading force-cleared');
+    assert.equal(state.reloading, false, 'reloading flag cleared');
+    assert.equal(state.probeCalls, 1, 'probe fired after force-clear');
+    assert.equal(state.webviewReady, true, 'readiness adopted');
+    assert.equal(probe.isArmed(), false, 'healed probe does not re-arm');
   } finally {
     timers.restore();
   }

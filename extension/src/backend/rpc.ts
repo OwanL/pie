@@ -339,6 +339,9 @@ export interface RuntimePrefsSetParams {
   subagentAlwaysParentModel?: boolean;
   subagentMaxDepth?: number;
   subagentMaxTreeSessions?: number;
+  subagentMaxInflight?: number;
+  subagentMaxConcurrency?: number;
+  subagentMaxParallelTasks?: number;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
 }
@@ -457,11 +460,14 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const rawAlwaysParent = (params as Record<string, unknown>)['subagentAlwaysParentModel'];
   const subagentAlwaysParentModel =
     rawAlwaysParent === undefined ? undefined : typeof rawAlwaysParent === 'boolean' ? rawAlwaysParent : fail('runtimePrefs.set', 'subagentAlwaysParentModel must be a boolean when provided');
-  const subagentMaxDepth = validateOptionalInt('runtimePrefs.set', 'subagentMaxDepth', (params as Record<string, unknown>)['subagentMaxDepth'], 1, 8);
+  const subagentMaxDepth = validateOptionalInt('runtimePrefs.set', 'subagentMaxDepth', (params as Record<string, unknown>)['subagentMaxDepth'], 0, 8);
   const subagentMaxTreeSessions = validateOptionalInt('runtimePrefs.set', 'subagentMaxTreeSessions', (params as Record<string, unknown>)['subagentMaxTreeSessions'], 5, 200);
   const subagentBuckets = validateOptionalSubagentBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentBuckets']);
   const subagentNestedAllowedBuckets = validateOptionalNestedAllowedBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentNestedAllowedBuckets']);
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentBuckets, subagentNestedAllowedBuckets };
+  const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
+  const subagentMaxConcurrency = validateOptionalInt('runtimePrefs.set', 'subagentMaxConcurrency', (params as Record<string, unknown>)['subagentMaxConcurrency'], 1, 16);
+  const subagentMaxParallelTasks = validateOptionalInt('runtimePrefs.set', 'subagentMaxParallelTasks', (params as Record<string, unknown>)['subagentMaxParallelTasks'], 1, 16);
+  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, subagentBuckets, subagentNestedAllowedBuckets };
 }
 
 export function validateSettingsSet(params: unknown): SettingsSetParams {

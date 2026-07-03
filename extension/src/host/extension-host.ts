@@ -31,10 +31,11 @@ import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
 import type { Event } from './core/events';
 import { selectViewState } from './core/projection';
-import { auditLog, bootLog } from './util/audit';
+import { auditLog, bootLog, isRuntimeAuditLogEnabled } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
 import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
+import { appendPieLog } from './util/pie-log';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -204,8 +205,10 @@ export class PieExtension implements vscode.Disposable {
       },
       log: {
         log: (level, message, data) => {
-          auditLog(context, 'arch-effect-runner', message, (data as Record<string, unknown>) ?? {});
-          if (level === 'error') console.error('[arch]', message, data);
+          auditLog('arch-effect-runner', message, (data as Record<string, unknown>) ?? {});
+          if (level !== 'info' || isRuntimeAuditLogEnabled()) {
+            appendPieLog(level, 'arch-effect-runner', message, data);
+          }
         },
       },
       postImperative: {

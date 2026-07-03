@@ -153,6 +153,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'suppressCompletionNotifications',
     'showPruningMessages',
     'subagentAlwaysParentModel',
+    'runtimeAuditLog',
   ];
   const toggleKeys: Array<keyof ChatPrefs> = [
     'extensionToggles',
@@ -160,8 +161,11 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
   ];
   const numericRanges: Record<string, [number, number]> = {
     completionSoundVolume: [0, 100],
-    subagentMaxDepth: [1, 8],
+    subagentMaxDepth: [0, 8],
     subagentMaxTreeSessions: [5, 200],
+    subagentMaxInflight: [1, 16],
+    subagentMaxConcurrency: [1, 16],
+    subagentMaxParallelTasks: [1, 16],
     uiBaseFontSize: [10, 24],
     uiComposerFontSize: [11, 28],
     expandedSectionFontSize: [8, 32],

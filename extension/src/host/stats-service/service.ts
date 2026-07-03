@@ -1,4 +1,5 @@
 import { defaultCreateId, defaultNow } from './helpers';
+import { appendPieLog } from '../util/pie-log';
 import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-analytics/query';
 import type { TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
 import type {
@@ -36,6 +37,15 @@ export class StatsService implements RunObserver {
       legacyWorkspaceIds: options.legacyWorkspaceIds,
       now,
       serializeSessions: () => trackerRef.current?.serializeSessions() ?? {},
+      onPersistError: ({ message, at }) => {
+        appendPieLog('warn', 'run-analytics', 'persistence error surfaced to UI', { at, error: message });
+        dispatchArchEvent({
+          kind: 'NoticeShown',
+          notice: 'pie could not write run analytics to disk. Some diagnostics may be missing until this is fixed.',
+          noticeKind: 'operational-error',
+          noticeRaw: `Run analytics persistence failed at ${at}: ${message}`,
+        });
+      },
     });
     const tracker = new SessionRunTracker({
       getArchState,

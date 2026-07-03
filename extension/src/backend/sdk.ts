@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 import type { SessionEntryLike } from './transcript';
@@ -220,8 +221,54 @@ function assertAllowedSdkPath(sdkPath: string): void {
   }
 }
 
+const RETRY_HOT_PATCH_FILE = path.join('dist', 'core', 'agent-session.js');
+const RETRY_HOT_PATCH_NEEDLE = 'stream ended before message_stop';
+const RETRY_HOT_PATCH_INSERT = 'stream ended before a terminal response event';
+
+function logRetryHotPatchResult(sdkPath: string, result: SdkRetryHotPatchResult): void {
+  console.warn(`[pie:backend] ${JSON.stringify({
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    scope: 'backend-sdk',
+    event: 'retry-hotpatch',
+    sdkPath,
+    result,
+  })}`);
+}
+
+export type SdkRetryHotPatchResult =
+  | 'patched'
+  | 'already-present'
+  | 'missing-target'
+  | 'unsupported-shape';
+
+export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHotPatchResult> {
+  assertAllowedSdkPath(sdkPath);
+
+  const filePath = path.join(sdkPath, RETRY_HOT_PATCH_FILE);
+  let source: string;
+  try {
+    source = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing-target';
+    throw error;
+  }
+
+  if (source.includes(RETRY_HOT_PATCH_INSERT)) return 'already-present';
+  if (!source.includes(RETRY_HOT_PATCH_NEEDLE)) return 'unsupported-shape';
+
+  await fs.writeFile(
+    filePath,
+    source.replace(RETRY_HOT_PATCH_NEEDLE, `${RETRY_HOT_PATCH_NEEDLE}|${RETRY_HOT_PATCH_INSERT}`),
+    'utf8',
+  );
+  return 'patched';
+}
+
 export async function loadSdk(sdkPath: string): Promise<SdkModule> {
   assertAllowedSdkPath(sdkPath);
+  const patchResult = await applySdkRetryHotPatch(sdkPath);
+  logRetryHotPatchResult(sdkPath, patchResult);
 
   const entryUrl = pathToFileURL(path.join(sdkPath, 'dist', 'index.js')).href;
   const mod = (await dynamicImport(entryUrl)) as Partial<SdkModule>;

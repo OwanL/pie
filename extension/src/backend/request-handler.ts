@@ -16,23 +16,31 @@ import {
   validateTruncateAfter,
   validateExtensionUiResponse,
 } from './rpc';
-import type { SdkModule, SdkSessionManager, SdkImageContent } from './sdk';
+import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { SessionContext, SessionContextCreationReason } from './server-types';
 import { BackendError } from './server-io';
 
 /**
- * Backend safety-net timeout for a hung `session.prompt()`. `message.send`
- * early-acks and fire-and-forgets the prompt promise (see `handleMessageSend`);
- * without a bound, a prompt that neither reaches a commit point (first
- * `MessageStarted`) nor rejects would leave `activeRequest` set forever,
- * blocking all future sends with `REQUEST_IN_PROGRESS`. On fire it aborts the
- * session and emits `preflight.failed` (a post-ack, pre-commit failure) so the
- * host reverts via `pending.promoted`. The SDK `prompt()` does not accept an
- * `AbortSignal`, so the abort is effected via `session.abort()`. Generous by
- * design — a healthy turn clears the timer via `.finally` long before this
- * fires. Distinct from the host-side send-timer (prepass phase) and the
- * streaming watchdog (streaming hangs), which own their own windows.
+ * Backend safety-net timeout for the PRE-COMMIT phase of a `message.send`.
+ * `message.send` early-acks and fire-and-forgets the prompt promise (see
+ * `handleMessageSend`); without a bound, a prompt that never reaches a commit
+ * point (first `message_start`) nor rejects would leave `activeRequest` set
+ * forever, blocking all future sends with `REQUEST_IN_PROGRESS`. On fire it
+ * aborts the session and emits `preflight.failed` (a post-ack, pre-commit
+ * failure) so the host reverts via `pending.promoted`. The SDK `prompt()` does
+ * not accept an `AbortSignal`, so the abort is effected via `session.abort()`.
+ *
+ * SCOPE (critical): this timer is cleared at the commit point — the first
+ * `message_start` for this request, handled in `session-event-handler.ts` —
+ * NOT only on `session.prompt()` settle. A multi-turn agentic run keeps
+ * `session.prompt()` pending across all internal turns until the whole run
+ * completes; clearing only on `.finally` would make this a whole-run ceiling
+ * that aborts any healthy run exceeding the budget mid-stream. Clearing at the
+ * commit point confines the guard to the prepass + first-token window, which
+ * is the only phase that can hang without observable SDK events. Distinct from
+ * the host-side send-timer (prepass phase) and any streaming watchdog, which
+ * own their own windows.
  */
 const PROMPT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — tunable
 
@@ -102,6 +110,15 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentMaxTreeSessions !== undefined) {
     process.env['PIE_SUBAGENT_MAX_TREE_SESSIONS'] = String(params.subagentMaxTreeSessions);
+  }
+  if (params.subagentMaxInflight !== undefined) {
+    process.env['PIE_SUBAGENT_MAX_INFLIGHT'] = String(params.subagentMaxInflight);
+  }
+  if (params.subagentMaxConcurrency !== undefined) {
+    process.env['PIE_SUBAGENT_MAX_CONCURRENCY'] = String(params.subagentMaxConcurrency);
+  }
+  if (params.subagentMaxParallelTasks !== undefined) {
+    process.env['PIE_SUBAGENT_MAX_PARALLEL_TASKS'] = String(params.subagentMaxParallelTasks);
   }
   if (params.subagentBuckets !== undefined) {
     process.env[SUBAGENT_BUCKETS_ENV] = JSON.stringify(params.subagentBuckets);
@@ -257,6 +274,13 @@ function clearActiveRequest(
   requestId: string,
 ): void {
   if (context.activeRequest?.id === requestId) {
+    // Defensive: clear the pre-commit safety-net timer if it is still armed
+    // (e.g. interrupt / preflight failure paths). The primary clear is the
+    // commit-point clear in `session-event-handler.ts`.
+    if (context.activeRequest.promptSafetyTimer) {
+      clearTimeout(context.activeRequest.promptSafetyTimer);
+      context.activeRequest.promptSafetyTimer = undefined;
+    }
     context.activeRequest = undefined;
   }
 }
@@ -343,10 +367,15 @@ async function handleMessageSend(
 
   // Backend safety net (see PROMPT_TIMEOUT_MS): bound the fire-and-forget
   // prompt promise so a hung SDK call cannot pin `activeRequest` forever. It
-  // is cleared on settle via `.finally` below, so it never fires for a healthy
-  // turn. The `activeRequest` identity check guards the edge case where this
-  // request was already superseded (turn completed or a new send started) but
-  // the old promise has not yet settled — it must not abort an unrelated turn.
+  // is cleared at the commit point (first `message_start`) — see
+  // `session-event-handler.ts` — and defensively on settle via `.finally`
+  // below, so it never fires for a healthy turn. The `activeRequest` identity
+  // check guards the edge case where this request was already superseded (turn
+  // completed or a new send started) but the old promise has not yet settled —
+  // it must not abort an unrelated turn. The handle is stashed on
+  // `activeRequest.promptSafetyTimer` so `session-event-handler.ts` can clear
+  // it at the commit point; clearing only on `.finally` would make this a
+  // whole-run ceiling that aborts healthy multi-turn runs mid-stream.
   const promptTimer = setTimeout(() => {
     if (!context.activeRequest || context.activeRequest.id !== requestId) return;
     if (preflightFailed) return;
@@ -361,6 +390,7 @@ async function handleMessageSend(
       `Prompt timed out after ${PROMPT_TIMEOUT_MS}ms without reaching a commit point.`,
     );
   }, PROMPT_TIMEOUT_MS);
+  context.activeRequest.promptSafetyTimer = promptTimer;
 
   try {
     context.session
@@ -397,12 +427,24 @@ async function handleMessageSend(
         preflightFailed = true;
         emitPreflightFailed(deps, context, requestId, error.message || 'Prompt failed before streaming started.');
       })
-      .finally(() => clearTimeout(promptTimer));
+      .finally(() => {
+        // Defensive clear: the commit-point clear in `session-event-handler.ts`
+        // is the primary clear (so a healthy long run is never aborted); this
+        // covers the settle-without-commit case (reject) and any race where the
+        // commit-point clear was skipped.
+        clearTimeout(promptTimer);
+        if (context.activeRequest?.promptSafetyTimer === promptTimer) {
+          context.activeRequest.promptSafetyTimer = undefined;
+        }
+      });
   } catch (syncError) {
     // `session.prompt` threw synchronously before returning a promise — treat
     // as a pre-ack failure: clear activeRequest and let the RPC reject so the
     // host dispatches `SendResult{ok:false}` and reverts via `pending.ops`.
     clearTimeout(promptTimer);
+    if (context.activeRequest?.promptSafetyTimer === promptTimer) {
+      context.activeRequest.promptSafetyTimer = undefined;
+    }
     clearActiveRequest(context, requestId);
     throw syncError;
   }
@@ -491,16 +533,25 @@ async function handleSettingsSet(
   const previousSettings = await deps.readModelSettings();
   const targetContext = sessionPath ? await deps.ensureSessionContext(sessionPath) : undefined;
   const currentModelId = targetContext?.session.model?.id ?? previousSettings.defaultModel;
-  const isChangingModel = !!params.defaultModel && params.defaultModel !== currentModelId;
+  const currentThinkingLevel = targetContext?.session.thinkingLevel ?? previousSettings.defaultThinkingLevel;
+  const requestedModelId = params.defaultModel ?? previousSettings.defaultModel;
+  const requestedThinkingLevel = params.defaultThinkingLevel ?? previousSettings.defaultThinkingLevel;
+  const isChangingModel = requestedModelId !== currentModelId;
+  const isChangingThinkingLevel = params.defaultThinkingLevel !== undefined
+    && requestedThinkingLevel !== currentThinkingLevel;
+  const hasPersistedChanges = (params.defaultModel !== undefined && params.defaultModel !== previousSettings.defaultModel)
+    || (params.defaultThinkingLevel !== undefined && params.defaultThinkingLevel !== previousSettings.defaultThinkingLevel);
 
-  if (isChangingModel && targetContext && (targetContext.activeRequest || targetContext.session.isStreaming)) {
-    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model while a request is in progress for this session.');
+  if ((isChangingModel || isChangingThinkingLevel) && targetContext && (targetContext.activeRequest || targetContext.session.isStreaming)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model or thinking level while a request is in progress for this session.');
   }
 
-  const result = await deps.writeModelSettings(settingsUpdates);
+  const result = hasPersistedChanges
+    ? await deps.writeModelSettings(settingsUpdates)
+    : previousSettings;
 
   try {
-    if (params.defaultModel && targetContext) {
+    if (targetContext && (params.defaultModel || params.defaultThinkingLevel)) {
       if (isChangingModel) {
         const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
         const info = available.find((model) => model.id === params.defaultModel);
@@ -523,7 +574,7 @@ async function handleSettingsSet(
         }
       }
 
-      if (params.defaultThinkingLevel) {
+      if (params.defaultThinkingLevel && isChangingThinkingLevel) {
         targetContext.session.setThinkingLevel?.(params.defaultThinkingLevel);
       }
 
@@ -534,7 +585,9 @@ async function handleSettingsSet(
       // emitContextUsageChanged resolves the new model's window and the last
       // assistant prompt footprint, and no-ops via change-detection when
       // nothing differs.
-      deps.emitContextUsageChanged(targetContext);
+      if (isChangingModel || isChangingThinkingLevel) {
+        deps.emitContextUsageChanged(targetContext);
+      }
     }
 
     return result;

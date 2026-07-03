@@ -216,20 +216,20 @@ export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntrie
       <UiGroupLabel label="Nesting" />
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Max depth</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxDepth}</span>
+          <span class="toolbar-settings-ui-control-label">Nesting levels</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxDepth === 0 ? 'Off' : prefs.subagentMaxDepth}</span>
         </div>
         <input
           type="range"
           class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="1"
+          min="0"
           max="8"
           step="1"
           value={prefs.subagentMaxDepth}
           onInput={(e) => onSetPrefs({ subagentMaxDepth: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Max subagent nesting depth"
+          aria-label="Subagent nesting levels"
         />
-        <div class="toolbar-settings-item-hint">How deep subagents may delegate to further subagents (main → L1 → L2 → ...). Higher unlocks more nesting at higher cost.</div>
+        <div class="toolbar-settings-item-hint">How many levels subagents may delegate to further subagents (main → L1 → L2 → ...). 0 turns subagents off entirely. Higher values allow more nesting at higher cost.</div>
       </div>
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
@@ -247,6 +247,62 @@ export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntrie
           aria-label="Max subagent sessions across the nested tree"
         />
         <div class="toolbar-settings-item-hint">Cap on total subagent sessions spawned across an entire nested tree, so increased nesting can't run away on cost.</div>
+      </div>
+
+      <UiGroupLabel label="Throughput" />
+      <div class="toolbar-settings-item-hint">
+        These caps throttle subagent fan-out to protect providers from bursts. Lower values reduce concurrency; 0 is not allowed.
+      </div>
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Max in-flight</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxInflight}</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="1"
+          max="16"
+          step="1"
+          value={prefs.subagentMaxInflight}
+          onInput={(e) => onSetPrefs({ subagentMaxInflight: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Max concurrent in-flight subagent sessions"
+        />
+        <div class="toolbar-settings-item-hint">Global cap on concurrent subagent sessions across all tool calls in the process.</div>
+      </div>
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Max concurrency</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxConcurrency}</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="1"
+          max="16"
+          step="1"
+          value={prefs.subagentMaxConcurrency}
+          onInput={(e) => onSetPrefs({ subagentMaxConcurrency: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Max concurrency within one parallel subagent call"
+        />
+        <div class="toolbar-settings-item-hint">How many tasks inside one parallel subagent call may run at the same time.</div>
+      </div>
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Max parallel tasks</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxParallelTasks}</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="1"
+          max="16"
+          step="1"
+          value={prefs.subagentMaxParallelTasks}
+          onInput={(e) => onSetPrefs({ subagentMaxParallelTasks: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Max parallel tasks per subagent call"
+        />
+        <div class="toolbar-settings-item-hint">Maximum number of tasks allowed in a single parallel subagent call.</div>
       </div>
     </FlyoutPanel>
   );

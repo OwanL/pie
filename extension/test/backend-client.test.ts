@@ -5,7 +5,16 @@ import Module from 'node:module';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
+import { deriveTrustedSdkRoot } from '../src/host/backend/trusted-sdk-root';
 import { PROTOCOL_VERSION } from '../src/shared/protocol';
+
+test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => {
+  assert.equal(
+    deriveTrustedSdkRoot('C:\\tools\\node_modules\\@earendil-works\\pi-coding-agent'),
+    'C:\\tools\\node_modules',
+  );
+  assert.equal(deriveTrustedSdkRoot('C:\\tools\\pi-coding-agent'), undefined);
+});
 
 class ImmediateReadyStream extends PassThrough {
   private emitted = false;
@@ -41,6 +50,13 @@ class FakeChildProcess extends EventEmitter {
 }
 
 test('BackendClient.start resolves when backend.ready arrives immediately as stdout listener attaches', async () => {
+  // client.start spreads process.env into the spawn env, so a stale
+  // PIE_TRUSTED_SDK_ROOT inherited from the parent environment would leak
+  // through when the derived trusted root is undefined. Isolate the var so
+  // the assertion below is deterministic regardless of the host environment.
+  const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
+  delete process.env.PIE_TRUSTED_SDK_ROOT;
+
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
   const fakeProc = new FakeChildProcess() as unknown as cp.ChildProcess;
@@ -94,8 +110,11 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(payload.protocolVersion, PROTOCOL_VERSION);
     assert.equal(payload.sdkPath, '/mock/sdk');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
+    assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
   } finally {
     client.dispose();
     moduleWithLoad._load = originalLoad;
+    if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
+    else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
   }
 });

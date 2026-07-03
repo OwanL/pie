@@ -8,6 +8,7 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
+import { webviewLog } from './utils/log';
 
 // ─── VS Code API ─────────────────────────────────────────────────────────────
 
@@ -72,14 +73,14 @@ function showRenderErrorOverlay(error: unknown) {
 
 const prevCatchError = (options as any).__e;
 (options as any).__e = (error: any, vnode: any, oldVNode: any) => {
-  console.error('[pie] Preact render error:', error);
+  webviewLog('error', 'panel', 'Preact render error', { error: String(error?.stack || error) });
   postMessage({ type: 'stateApplied', payload: { revision: -999, backendReady: false, transcriptLoaded: false, openTabCount: 0, transcriptCount: 0, systemPromptCount: 0, domTranscriptLoaderPresent: false, domTabsConnectingPresent: false, renderError: String(error?.stack || error) } } as any);
   showRenderErrorOverlay(error);
   if (prevCatchError) prevCatchError(error, vnode, oldVNode);
 };
 
 window.addEventListener('error', (e) => {
-  console.error('[pie] Uncaught error:', e.error);
+  webviewLog('error', 'panel', 'Uncaught error', { error: String(e.error?.stack || e.error) });
 });
 
 // ─── Mount ───────────────────────────────────────────────────────────────────

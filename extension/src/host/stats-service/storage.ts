@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { serializeJsonLine } from '../../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../../shared/error-message';
 import { parseCheckpoint, readOptionalText } from '../shared/checkpoint-io';
+import { appendPieError, appendPieLog } from '../util/pie-log';
 import { workspaceHash } from './helpers';
 import {
   readCheckpointFromDisk,
@@ -32,6 +33,7 @@ interface RunAnalyticsStorageOptions {
   legacyWorkspaceIds?: string[];
   now: () => Date;
   serializeSessions: () => Record<string, PersistedSessionRunState>;
+  onPersistError?: (error: { message: string; at: string }) => void;
 }
 
 export class RunAnalyticsStorage {
@@ -40,6 +42,7 @@ export class RunAnalyticsStorage {
   private readonly autoExportPath: string;
   private readonly now: () => Date;
   private readonly serializeSessions: () => Record<string, PersistedSessionRunState>;
+  private readonly onPersistError?: (error: { message: string; at: string }) => void;
 
   private persistenceQueue: Promise<void> = Promise.resolve();
   private seq = 0;
@@ -92,6 +95,7 @@ export class RunAnalyticsStorage {
     this.autoExportPath = path.join(this.storageDir, 'run-analytics.json');
     this.now = options.now;
     this.serializeSessions = options.serializeSessions;
+    this.onPersistError = options.onPersistError;
   }
 
   async start(): Promise<RunCheckpoint | null> {
@@ -216,8 +220,12 @@ export class RunAnalyticsStorage {
   private recordPersistError(error: unknown): void {
     const message = toErrorMessage(error);
     const at = this.isoNow();
+    const previous = this.lastPersistError;
     this.lastPersistError = { message, at };
-    console.warn(`[pie] run-analytics persist failed at ${at}: ${message}`);
+    appendPieError('run-analytics', 'persist failed', error, { at, storageDir: this.storageDir });
+    if (!previous || previous.message !== message) {
+      this.onPersistError?.(this.lastPersistError);
+    }
   }
 
   private stagePendingAppend(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
@@ -498,7 +506,10 @@ export class RunAnalyticsStorage {
       await this.writeAutoExport();
     } catch (error) {
       const message = toErrorMessage(error);
-      console.warn(`[pie] Failed to refresh run analytics export at ${this.autoExportPath}: ${message}`);
+      appendPieLog('warn', 'run-analytics', 'failed to refresh auto-export', {
+        path: this.autoExportPath,
+        error: message,
+      });
     }
   }
 

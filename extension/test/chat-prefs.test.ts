@@ -21,8 +21,12 @@ const prefs: ChatPrefs = {
   suppressCompletionNotifications: false,
   showPruningMessages: true,
   subagentAlwaysParentModel: false,
+  runtimeAuditLog: false,
   subagentMaxDepth: 3,
-  subagentMaxTreeSessions: 50,
+  subagentMaxTreeSessions: 10,
+  subagentMaxInflight: 2,
+  subagentMaxConcurrency: 2,
+  subagentMaxParallelTasks: 4,
   subagentBuckets: { small: [], medium: [], frontier: [] },
   subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
   completionSoundVolume: 50,
@@ -46,8 +50,8 @@ const prefs: ChatPrefs = {
   activityTailLines: 2,
 };
 
-test('chat pref menu sections expose transcript and notifications toggles', () => {
-  assert.equal(CHAT_PREF_MENU_SECTIONS.length, 2);
+test('chat pref menu sections expose transcript, notifications, and diagnostics toggles', () => {
+  assert.equal(CHAT_PREF_MENU_SECTIONS.length, 3);
   assert.equal(CHAT_PREF_MENU_SECTIONS[0]?.id, 'transcript');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[0]?.items.map((item) => item.key),
@@ -57,6 +61,11 @@ test('chat pref menu sections expose transcript and notifications toggles', () =
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[1]?.items.map((item) => item.key),
     ['suppressCompletionNotifications'],
+  );
+  assert.equal(CHAT_PREF_MENU_SECTIONS[2]?.id, 'diagnostics');
+  assert.deepEqual(
+    CHAT_PREF_MENU_SECTIONS[2]?.items.map((item) => item.key),
+    ['runtimeAuditLog'],
   );
 });
 
@@ -79,6 +88,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
   assert.deepEqual(toggleChatPref(prefs, 'suppressCompletionNotifications'), {
     suppressCompletionNotifications: true,
   });
+  assert.deepEqual(toggleChatPref(prefs, 'runtimeAuditLog'), { runtimeAuditLog: true });
   assert.deepEqual(toggleChatPrefForContext(prefs, 'toolCalls'), { autoExpandToolCalls: false });
   assert.deepEqual(toggleChatPrefForContext(prefs, 'subagentCalls'), { autoExpandSubagentCalls: true });
   assert.deepEqual(prefs, {
@@ -88,8 +98,12 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     suppressCompletionNotifications: false,
     showPruningMessages: true,
     subagentAlwaysParentModel: false,
+    runtimeAuditLog: false,
     subagentMaxDepth: 3,
-    subagentMaxTreeSessions: 50,
+    subagentMaxTreeSessions: 10,
+    subagentMaxInflight: 2,
+    subagentMaxConcurrency: 2,
+    subagentMaxParallelTasks: 4,
     subagentBuckets: { small: [], medium: [], frontier: [] },
     subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
     completionSoundVolume: 50,

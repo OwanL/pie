@@ -12,6 +12,7 @@ import type {
   PreflightFailedPayload,
 } from '../../../shared/protocol';
 import type { TurnThroughputStatus } from '../../run-analytics';
+import { stripReqIds } from '../../../shared/error-mapping.js';
 
 /**
  * Map a finished assistant message's status onto the throughput-sample
@@ -27,6 +28,9 @@ function toTurnThroughputStatus(status: string | undefined): TurnThroughputStatu
   }
   return 'completed';
 }
+
+const DEFAULT_UNEXPECTED_INTERRUPT_REASON =
+  'The session stopped unexpectedly before the assistant finished responding.';
 
 interface HandlerDeps {
   getArchState: () => ArchState;
@@ -149,11 +153,46 @@ export function onMessageAborted(payload: MessageAbortedPayload, deps: HandlerDe
     return;
   }
 
+  const userInitiated = payload.userInitiated === true;
+  const reason = userInitiated
+    ? undefined
+    : stripReqIds(payload.reason?.trim() || DEFAULT_UNEXPECTED_INTERRUPT_REASON);
+
   deps.dispatchArch({
     kind: 'MessageAborted',
     sessionPath,
     messageId: payload.messageId,
+    userInitiated,
+    reason,
   });
+
+  if (reason) {
+    // Always alert the user about an unexpected (non-user-initiated)
+    // interruption — even when an unrelated error notice is already showing.
+    // Previously this was suppressed whenever `noticeRaw`/`noticeKind` was
+    // non-null, which could hide the interrupt alert behind an unrelated
+    // error notice. The per-message `errorDetail` is already stamped inline
+    // by the reducer, but the global notice banner is the discoverable
+    // signal at the top of the panel, so it must reflect the interruption
+    // too. De-dupe only against the *same* reason (avoid an identical
+    // re-show), and otherwise append to the existing notice so the user sees
+    // both the prior context and the new interruption.
+    const settings = deps.getArchState().settings;
+    const existing = settings.notice;
+    if (existing === reason) {
+      // Already showing this exact reason — no-op.
+    } else if (existing && !existing.includes(reason) && !reason.includes(existing)) {
+      deps.dispatchArch({
+        kind: 'NoticeShown',
+        notice: `${existing} — ${reason}`,
+      });
+    } else {
+      deps.dispatchArch({
+        kind: 'NoticeShown',
+        notice: reason,
+      });
+    }
+  }
 
   if (payload.messageId) {
     deps.runObserver.onAssistantTurnEnded(

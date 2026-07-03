@@ -302,11 +302,45 @@ test('message_end emits finished and aborted payloads and clears the current mes
       requestId: 'req-3',
       sessionPath: '/workspace/session.jsonl',
       messageId: 'req-3:1',
+      userInitiated: false,
+      reason: 'The session stopped unexpectedly before the assistant finished responding.',
     });
     assert.equal(getContextUsageChangedCount(), 1);
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('message_end marks user-initiated interruptions without surfacing an unexpected-stop reason', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-user-stop',
+      messageIndex: 1,
+      currentMessageId: 'req-user-stop:1',
+      aborted: true,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Stopped' }],
+      stopReason: 'aborted',
+    },
+  });
+
+  assert.deepEqual(emitted[1], {
+    event: 'message.aborted',
+    payload: {
+      requestId: 'req-user-stop',
+      sessionPath: '/workspace/session.jsonl',
+      messageId: 'req-user-stop:1',
+      userInitiated: true,
+      reason: undefined,
+    },
+  });
 });
 
 test('message_end emits custom transcript messages for displayed extension output', () => {
@@ -389,9 +423,34 @@ test('agent_end emits busy false, refreshes session state, and aborts requests w
     payload: {
       requestId: 'req-4',
       sessionPath: '/workspace/session.jsonl',
+      userInitiated: true,
+      reason: undefined,
     },
   }]);
   assert.equal(context.activeRequest, undefined);
+});
+
+test('agent_end reports unexpected interruptions when the run ends without any assistant message', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-no-message',
+      messageIndex: 0,
+      aborted: false,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'agent_end' });
+
+  assert.deepEqual(emitted, [{
+    event: 'message.aborted',
+    payload: {
+      requestId: 'req-no-message',
+      sessionPath: '/workspace/session.jsonl',
+      userInitiated: false,
+      reason: 'The session stopped unexpectedly before the assistant finished responding.',
+    },
+  }]);
 });
 
 test('message_end falls back to the last or inferred message id and agent_end skips duplicate abort events', () => {

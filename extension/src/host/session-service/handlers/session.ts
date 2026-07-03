@@ -13,6 +13,7 @@ import type {
   SessionListChangedPayload,
 } from '../../../shared/protocol';
 import { requestWindowAttention } from '../../sidebar/completion-notification';
+import { auditLog } from '../../util/audit.js';
 
 interface HandlerDeps {
   context: vscode.ExtensionContext;
@@ -74,11 +75,7 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
   if (sessionPath) {
     deps.dispatchArch({ kind: 'AssistantMessageErrorStamped', sessionPath, errorMessage: payload.message });
   } else {
-    const auditLog = (context: vscode.ExtensionContext, category: string, event: string, data: Record<string, unknown>) => {
-      // Inline auditLog to avoid circular dependency - just use console for now
-      console.log(`[audit:${category}]`, event, data);
-    };
-    auditLog(deps.context, 'session-service', 'protocol.defect', {
+    auditLog('session-service', 'protocol.defect', {
       eventName: 'error',
       reason: 'missing or unresolved requestId',
       code: payload.code ?? null,

@@ -63,6 +63,10 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
+function isOptionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean';
+}
+
 function isOptionalFiniteNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === 'number' && Number.isFinite(value));
 }
@@ -186,6 +190,8 @@ export function isMessageAbortedPayload(value: unknown): value is MessageAborted
     && isString(value.requestId)
     && isString(value.sessionPath)
     && isOptionalString(value.messageId)
+    && isOptionalBoolean(value.userInitiated)
+    && isOptionalString(value.reason)
   );
 }
 

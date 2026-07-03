@@ -1,6 +1,7 @@
 import { extractTransferFiles } from './files';
 import type { DataTransferLike, FileLike } from './types';
 import { toErrorMessage } from '../../../shared/error-message';
+import { webviewLog } from '../utils/log';
 
 const FILES_TYPE = 'Files';
 const CODE_FILES_TYPE = 'CodeFiles';
@@ -155,7 +156,7 @@ function extractPathsFromCodeEditors(value: string): string[] {
     parsed = JSON.parse(value);
   } catch (err) {
     // Non-fatal: a malformed CodeEditors drop payload just yields no paths.
-    console.warn(`CodeEditors drop payload JSON parse failed: ${toErrorMessage(err)}`);
+    webviewLog('warn', 'file-drop', 'CodeEditors drop payload JSON parse failed', { error: toErrorMessage(err) });
     return [];
   }
 
@@ -249,7 +250,7 @@ function parseJsonStringArray(value: string): string[] {
     parsed = JSON.parse(value);
   } catch (err) {
     // Non-fatal: a malformed drop payload just yields no string entries.
-    console.warn(`Drop payload JSON parse failed: ${toErrorMessage(err)}`);
+    webviewLog('warn', 'file-drop', 'drop payload JSON parse failed', { error: toErrorMessage(err) });
     return [];
   }
 

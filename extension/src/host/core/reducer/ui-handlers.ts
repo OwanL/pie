@@ -86,13 +86,8 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
   return {
     state: produce(state, (draft) => {
       draft.settings.notice = event.notice;
-      // Plain NoticeShown notices carry no recovery actions — clear any
-      // prior error kind so a stale kind doesn't outlive its notice
-      // (Brief H invariant: noticeKind non-null only for H-category errors).
-      draft.settings.noticeKind = null;
-      // Plain notices also carry no raw backend error — clear any prior raw
-      // detail so a stale 'show more' doesn't outlive its notice.
-      draft.settings.noticeRaw = null;
+      draft.settings.noticeKind = event.noticeKind ?? null;
+      draft.settings.noticeRaw = event.noticeRaw ?? null;
     }),
     effects: [],
   };

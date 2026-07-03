@@ -13,7 +13,7 @@
  *  - watchdog events (resnapshot / throttled / reload) — the force-reload path
  *
  * Output: one JSON line per active second to `pie-diag.jsonl` in the OS temp dir
- * AND to the extension host console (`[pie:diag]`).
+ * AND to the unified pie logger at debug level (`[pie][debug][stream-telemetry]`).
  *
  * Interpretation:
  *  - high stream-event rate + watchdog events / high ack latency
@@ -24,6 +24,8 @@
 import * as fsSync from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+import { pieDebug } from './pie-logger.js';
 
 const DIAG_PATH = path.join(os.tmpdir(), 'pie-diag.jsonl');
 const FLUSH_INTERVAL_MS = 1000;
@@ -105,8 +107,7 @@ function flush(): void {
     wdReload: w.wdReload,
   };
 
-  const line = `[pie:diag] ${JSON.stringify(record)}`;
-  console.warn(line);
+  pieDebug('stream-telemetry', 'diagnostic snapshot', record);
   try {
     fsSync.mkdirSync(path.dirname(DIAG_PATH), { recursive: true });
     fsSync.appendFileSync(DIAG_PATH, `${JSON.stringify(record)}\n`, 'utf8');

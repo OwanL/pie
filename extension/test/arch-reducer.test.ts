@@ -856,6 +856,31 @@ test('reducer: MessageAborted resolves alias and sets status directly in state',
   assert.equal(result.effects.length, 0);
 });
 
+test('reducer: MessageAborted stamps unexpected interruption reason onto the message when available', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: {
+        '/s': [{ id: 'assistant-1', role: 'assistant' as const, createdAt: '', markdown: 'text', status: 'streaming' as const, parts: [], toolCalls: [] }],
+      },
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'MessageAborted',
+    sessionPath: '/s',
+    messageId: 'assistant-1',
+    userInitiated: false,
+    reason: 'Backend dropped req-99 before completion.',
+  });
+  const msg = result.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'assistant-1');
+  assert.ok(msg, 'assistant message should exist');
+  assert.equal(msg!.status, 'interrupted');
+  assert.equal(msg!.errorDetail, 'Backend dropped request before completion.');
+  assert.equal(result.effects.length, 0);
+});
+
 test('reducer: MessageAborted without messageId is a no-op', () => {
   const result = reducer(initialArchState, { kind: 'MessageAborted', sessionPath: '/s', messageId: undefined });
   assert.deepEqual(result.state, initialArchState);

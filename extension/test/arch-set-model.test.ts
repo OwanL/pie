@@ -163,6 +163,28 @@ test('SetModel to an image-capable model with pending images applies without a m
   assert.equal(out.effects[0]?.kind, 'SetModelRpc');
 });
 
+test('SetModel is a no-op when the requested model settings already match state and session summary', () => {
+  const base = buildState({
+    defaultModel: 'image-model',
+    defaultThinkingLevel: 'high',
+    sessionModelId: 'image-model',
+  });
+  const state: ArchState = {
+    ...base,
+    sessions: {
+      ...base.sessions,
+      sessions: [{
+        ...base.sessions.sessions[0],
+        thinkingLevel: 'high',
+      }],
+    },
+  };
+  const out = reducer(state, cmd('c1', 'image-model', SESSION, 'high'));
+
+  assert.deepEqual(out.state, state);
+  assert.deepEqual(out.effects, []);
+});
+
 // ─── Modal path: ShowModelSwitchConfirm gates the optimistic apply ────────────
 
 test('SetModel that would drop pending images emits ShowModelSwitchConfirm and changes nothing', () => {

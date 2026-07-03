@@ -6,6 +6,8 @@ import { attachJsonlLineReader, serializeJsonLine } from '../../shared/jsonl';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
+import { appendPieLog } from '../util/pie-log';
+import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import {
   assertProtocolVersion,
   type BackendReadyPayload,
@@ -65,6 +67,7 @@ export class BackendClient implements vscode.Disposable {
   private proc?: cp.ChildProcess;
   private requestCounter = 0;
   private stderrBuffer = '';
+  private stderrLineBuffer = '';
   private detachReader?: () => void;
 
   readonly onEvent = this.events.event;
@@ -80,13 +83,16 @@ export class BackendClient implements vscode.Disposable {
     }
 
     this.stderrBuffer = '';
+    this.stderrLineBuffer = '';
     // The backend's assertAllowedSdkPath only loads SDKs under trusted roots
     // (user profile / program files / npm prefix). VS Code's extension host
     // doesn't always set NPM_CONFIG_PREFIX, so derive the trusted root from
     // the sdkPath we already resolved via `npm root -g` and pass it through.
-    // path.dirname('.../node_modules/@scope/pkg') -> '.../node_modules/@scope';
-    // we want '.../node_modules' so the whole global tree is trusted.
-    const trustedRoot = path.dirname(path.dirname(options.sdkPath));
+    const trustedRoot = deriveTrustedSdkRoot(options.sdkPath);
+    const trustedRootEnv = trustedRoot ? { PIE_TRUSTED_SDK_ROOT: trustedRoot } : {};
+    const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
+    const sessionDirEnv = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
+      || (agentDir ? path.join(agentDir, 'data', 'outcomes', 'sessions') : undefined);
     const proc = cp.spawn(
       options.nodePath,
       [options.backendPath, '--sdkPath', options.sdkPath, '--cwd', options.cwd],
@@ -95,12 +101,20 @@ export class BackendClient implements vscode.Disposable {
         env: {
           ...process.env,
           PIE_EDITOR_VERSION: vscode.version,
-          PIE_TRUSTED_SDK_ROOT: trustedRoot,
+          ...(sessionDirEnv ? { PI_CODING_AGENT_SESSION_DIR: sessionDirEnv } : {}),
+          ...trustedRootEnv,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
       },
     );
+
+    appendPieLog('info', 'backend', 'starting pie backend', {
+      backendPath: options.backendPath,
+      cwd: options.cwd,
+      sdkPath: options.sdkPath,
+      sessionDir: sessionDirEnv ?? null,
+    });
 
     this.proc = proc;
 
@@ -115,12 +129,17 @@ export class BackendClient implements vscode.Disposable {
     });
 
     proc.on('exit', (code) => {
+      this.flushStderrLines(true);
       this.detachReader?.();
       this.detachReader = undefined;
       this.proc = undefined;
       this.requests.rejectAll(
         new Error(`Backend exited unexpectedly${code === null ? '' : ` with code ${code}`}.`),
       );
+      appendPieLog('error', 'backend', 'backend process exited', {
+        code,
+        stderrTail: this.stderrBuffer.trim().slice(-4000) || null,
+      });
       this.exits.fire({ code, stderr: this.stderrBuffer.trim() });
     });
 
@@ -182,6 +201,13 @@ export class BackendClient implements vscode.Disposable {
 
       const errorListener = (error: Error) => {
         this.proc = undefined;
+        appendPieLog('error', 'backend', 'failed to spawn backend process', {
+          backendPath: options.backendPath,
+          cwd: options.cwd,
+          nodePath: options.nodePath,
+          sdkPath: options.sdkPath,
+          error: error.message,
+        });
         finishReject(
           new Error(
             `Failed to spawn pie backend with node=${options.nodePath}, backend=${options.backendPath}, cwd=${options.cwd}: ${error.message}`,
@@ -297,7 +323,7 @@ export class BackendClient implements vscode.Disposable {
     // it) — log loudly so the failure mode stays debuggable.
     const preview = line.length > 200 ? `${line.slice(0, 200)}…` : line;
     const reason = parseError ? toErrorMessage(parseError) : 'unrecognized envelope';
-    console.warn(`[pie] dropped unparseable backend line: ${reason} :: ${preview}`);
+    appendPieLog('warn', 'backend-client', 'dropped unparseable backend line', { reason, preview });
   }
 
   /** Build a descriptive rejection error for a dropped line correlated to a
@@ -324,6 +350,38 @@ export class BackendClient implements vscode.Disposable {
       // Keep only the trailing window — most diagnostics live near the end.
       this.stderrBuffer = this.stderrBuffer.slice(-STDERR_BUFFER_LIMIT);
     }
+
+    this.stderrLineBuffer += chunk;
+    this.flushStderrLines(false);
+  }
+
+  private flushStderrLines(flushPartial: boolean): void {
+    let newlineIndex = this.stderrLineBuffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const line = this.stderrLineBuffer.slice(0, newlineIndex).replace(/\r$/, '');
+      this.stderrLineBuffer = this.stderrLineBuffer.slice(newlineIndex + 1);
+      this.logStderrLine(line);
+      newlineIndex = this.stderrLineBuffer.indexOf('\n');
+    }
+
+    if (flushPartial && this.stderrLineBuffer.trim()) {
+      const line = this.stderrLineBuffer.replace(/\r$/, '');
+      this.stderrLineBuffer = '';
+      this.logStderrLine(line);
+    }
+  }
+
+  private logStderrLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    appendPieLog(
+      /\b(error|failed|exception|unexpectedly)\b/i.test(trimmed) ? 'warn' : 'info',
+      'backend-stderr',
+      trimmed,
+    );
   }
 
   dispose(): void {

@@ -387,7 +387,6 @@ export class SessionServiceState {
     const archState = this.getArchState();
     const activeSessionPath = archState.sessions.activeSessionPath;
     assertInvariant(
-      this.context,
       'session-service',
       !activeSessionPath || archState.sessions.openTabPaths.includes(activeSessionPath),
       'Active session path must always reference an open tab.',
@@ -435,7 +434,7 @@ export class SessionServiceState {
         this.onPreloadedSessionOpened?.(payload);
       })
       .catch((error) => {
-        auditLog(this.context, 'session-service', 'session.preload.failed', {
+        auditLog('session-service', 'session.preload.failed', {
           sessionPath,
           message: toErrorMessage(error),
         });

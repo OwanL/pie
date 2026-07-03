@@ -50,10 +50,14 @@ test('EffectRunner routes InterruptRpc through enqueueLifecycle → enqueueSessi
   runner.run(effect);
   await settle();
 
+  const callsSansEffectDispatch = calls.filter(
+    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+  );
+
   // Expected order: outer lifecycle wrap, inner session wrap, then the RPC.
-  assert.equal(calls[0]?.kind, 'lifecycle');
-  assert.deepEqual(calls[1], { kind: 'session', sessionPath: '/a' });
-  assert.deepEqual(calls[2], {
+  assert.equal(callsSansEffectDispatch[0]?.kind, 'lifecycle');
+  assert.deepEqual(callsSansEffectDispatch[1], { kind: 'session', sessionPath: '/a' });
+  assert.deepEqual(callsSansEffectDispatch[2], {
     kind: 'request',
     method: 'message.interrupt',
     params: { sessionPath: '/a' },
@@ -225,8 +229,12 @@ test('EffectRunner runs PersistTabs synchronously without queueing', async () =>
   });
   await settle();
 
-  assert.equal(calls.some((c) => c.kind === 'lifecycle'), false);
-  assert.deepEqual(calls[0], {
+  const callsSansEffectDispatch = calls.filter(
+    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+  );
+
+  assert.equal(callsSansEffectDispatch.some((c) => c.kind === 'lifecycle'), false);
+  assert.deepEqual(callsSansEffectDispatch[0], {
     kind: 'persistTabs',
     openTabPaths: ['/a', '/b'],
     active: '/a',
@@ -244,7 +252,10 @@ test('EffectRunner runs Log directly via the log sink (no dispatch event)', asyn
   runner.run({ kind: 'Log', corrId: 'c5', level: 'warn', message: 'hello' });
   await settle();
 
-  assert.deepEqual(calls, [{ kind: 'log', level: 'warn', message: 'hello' }]);
+  assert.deepEqual(calls, [
+    { kind: 'log', level: 'info', message: 'effect.dispatch' },
+    { kind: 'log', level: 'warn', message: 'hello' },
+  ]);
   assert.equal(events.length, 0);
 });
 
@@ -262,7 +273,10 @@ test('EffectRunner ShowModelSwitchConfirm dispatches ModelSwitchConfirmResult ma
   });
   await settle();
 
-  assert.deepEqual(calls, [{ kind: 'showWarningModal', message: 'remove images?', confirmChoice: 'Switch Model' }]);
+  const callsSansEffectDispatch = calls.filter(
+    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+  );
+  assert.deepEqual(callsSansEffectDispatch, [{ kind: 'showWarningModal', message: 'remove images?', confirmChoice: 'Switch Model' }]);
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'ModelSwitchConfirmResult');
   assert.equal(events[0]?.corrId, 'm1');
@@ -299,14 +313,18 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
   });
   await settle();
 
+  const callsSansEffectDispatch = calls.filter(
+    (c) => !(c.kind === 'log' && c.level === 'info' && c.message === 'effect.dispatch'),
+  );
+
   // Serialized through the lifecycle queue (single-wrap, matching the old
   // service path), then the backend write.
-  assert.equal(calls[0]?.kind, 'lifecycle');
-  const req = calls.find((c) => c.kind === 'request');
+  assert.equal(callsSansEffectDispatch[0]?.kind, 'lifecycle');
+  const req = callsSansEffectDispatch.find((c) => c.kind === 'request');
   assert.deepEqual(req, { kind: 'request', method: 'settings.set', params: { sessionPath: '/s', defaultModel: 'image-model', defaultThinkingLevel: 'medium' } });
   // Effect-side concerns (host-local epoch + disk-persisting analytics).
-  assert.deepEqual(calls.find((c) => c.kind === 'bumpEpoch'), { kind: 'bumpEpoch', sessionPath: '/s' });
-  assert.deepEqual(calls.find((c) => c.kind === 'onModelConfigChanged'), { kind: 'onModelConfigChanged', sessionPath: '/s', modelId: 'image-model', thinkingLevel: 'medium' });
+  assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'bumpEpoch'), { kind: 'bumpEpoch', sessionPath: '/s' });
+  assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'onModelConfigChanged'), { kind: 'onModelConfigChanged', sessionPath: '/s', modelId: 'image-model', thinkingLevel: 'medium' });
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'SetModelResult');
   assert.equal(events[0]?.corrId, 'sm1');

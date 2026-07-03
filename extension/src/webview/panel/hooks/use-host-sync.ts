@@ -21,6 +21,7 @@ import type {
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
+import { webviewLog } from '../utils/log';
 
 export const EMPTY_VIEW_STATE: ViewState = {
   sessions: [],
@@ -305,9 +306,11 @@ function warnOnProtocolMismatch(hostProtocolVersion: number): void {
   }
   if (hostProtocolVersion !== WEBVIEW_PROTOCOL_VERSION) {
     warnedProtocolMismatch = true;
-    console.warn(
-      `[pie] Webview protocol mismatch: host posted version ${hostProtocolVersion} but this webview build expects ${WEBVIEW_PROTOCOL_VERSION}. ` +
-        'This usually means a stale hot-reload — rebuild and reload both sides together.',
+    webviewLog(
+      'warn',
+      'host-sync',
+      `webview protocol mismatch: host posted version ${hostProtocolVersion} but this webview build expects ${WEBVIEW_PROTOCOL_VERSION}`,
+      { note: 'This usually means a stale hot-reload — rebuild and reload both sides together.' },
     );
   }
 }

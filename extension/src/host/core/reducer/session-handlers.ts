@@ -3,7 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, removeFromArray, upsertSessionSummary, evictSession } from './helpers.js';
+import { addToArray, removeFromArray, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
 import type { SessionSummary } from '../../../shared/protocol.js';
 import { reorderOpenTabsPinnedFirst } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
@@ -295,6 +295,50 @@ export function handleRunningSessionsChanged(state: ArchState, event: Extract<Ev
     },
     effects: [],
   };
+}
+
+/**
+ * Mark every still-streaming assistant message in each listed session as
+ * `interrupted` and stamp `errorDetail` with the supplied reason. Dispatched by
+ * the backend `onExit` handler when the PI backend dies while sessions are
+ * running — no `message.aborted` event ever fires in that case (the backend is
+ * gone), so without this handler those sessions' streaming messages would stay
+ * `status: 'streaming'` forever and the user would never be alerted that the
+ * interruption was not their doing. Idempotent over alias resolution so an
+ * aliased streaming turn (continuation) is stamped on its canonical message.
+ */
+export function handleSessionsInterrupted(state: ArchState, event: Extract<Event, { kind: 'SessionsInterrupted' }>): ReducerResult {
+  const { sessionPaths, reason } = event;
+  if (sessionPaths.length === 0) {
+    return { state, effects: [] };
+  }
+
+  const nextState = produce(state, (draft) => {
+    for (const sessionPath of sessionPaths) {
+      const list = draft.transcript.bySession[sessionPath];
+      if (!list) continue;
+      // Walk newest-first because the streaming message is almost always the
+      // last assistant message; resolving via alias on the underlying state
+      // (read-only) covers continuation turns whose `id` is an alias of the
+      // canonical streaming entry. The target is always looked up on the
+      // draft so its mutations persist through `produce`.
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const message = list[i];
+        if (message.role !== 'assistant' || message.status !== 'streaming') continue;
+        const canonicalId = resolveAlias(state, message.id);
+        const target = canonicalId === message.id
+          ? message
+          : list.find((m) => m.id === canonicalId);
+        if (!target) continue;
+        target.status = 'interrupted';
+        if (!target.errorDetail) {
+          target.errorDetail = reason;
+        }
+      }
+    }
+  });
+
+  return { state: nextState, effects: [] };
 }
 
 export function handleUnreadFinishedSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'UnreadFinishedSessionsChanged' }>): ReducerResult {

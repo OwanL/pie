@@ -5,9 +5,11 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../src/backend/request-handler';
+import { handleSdkSessionEvent } from '../src/backend/session-event-handler';
 import { BackendError } from '../src/backend/server-io';
 import type { ModelSettings } from '../src/shared/protocol';
 import type { SessionContext } from '../src/backend/server-types';
+import type { SdkSessionEvent } from '../src/backend/sdk';
 
 interface Harness {
   deps: BackendRequestHandlerDeps;
@@ -273,6 +275,75 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(rejectedHarness.context.activeRequest, undefined);
 });
 
+// Regression: the backend pre-commit safety-net timer (PROMPT_TIMEOUT_MS) MUST
+// be cleared at the commit point (first assistant `message_start`), not only on
+// `session.prompt()` settle. Without this clear, a healthy multi-turn agentic
+// run (which keeps `session.prompt()` pending across all internal turns until
+// the whole run completes) is aborted mid-stream once the run exceeds
+// PROMPT_TIMEOUT_MS — surfacing as `stopReason: "aborted"` + "Request was
+// aborted." with all-zero usage. This test arms the timer with a pending
+// prompt, drives the commit-point `message_start`, then waits past the timer
+// budget and asserts no abort / preflight.failed fired.
+test('message.send pre-commit safety timer is cleared at the first message_start (no mid-stream abort)', async () => {
+  // Use a short, real timer budget to keep the test fast while still proving the
+  // clear happens. We patch PROMPT_TIMEOUT_MS indirectly by waiting longer than
+  // the production 10-min budget is impractical, so instead we assert the
+  // observable contract: after the commit point, the stashed timer handle is
+  // gone AND no abort/preflight.failed fires after a generous wait.
+  let abortCalled = false;
+  const promptResolve = new Promise<void>(() => {
+    // Never resolves by default — simulates a long agentic run.
+  });
+  const longRunHarness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+        await promptResolve;
+      },
+      abort: async () => {
+        abortCalled = true;
+      },
+    },
+  });
+
+  const sent = await handleBackendRequest(longRunHarness.deps, {
+    id: '1',
+    method: 'message.send',
+    params: { sessionPath: '/repo/session.jsonl', text: 'Long run', inputs: [] },
+  });
+  assert.equal(typeof (sent as { requestId: string }).requestId, 'string');
+  // Timer armed at send time.
+  assert.ok(longRunHarness.context.activeRequest?.promptSafetyTimer, 'safety timer should be armed at send');
+
+  // Commit point: the first assistant message_start for this request.
+  handleSdkSessionEvent(
+    {
+      emit: (event: string, payload?: unknown) => longRunHarness.emitted.push({ event, payload }),
+      emitBusyChanged: (_c: SessionContext, busy: boolean) => longRunHarness.busyEvents.push(busy),
+      emitContextUsageChanged: () => undefined,
+    } as any,
+    longRunHarness.context,
+    { type: 'message_start', message: { role: 'assistant' } } as SdkSessionEvent,
+  );
+
+  // The timer MUST be cleared at the commit point.
+  assert.equal(
+    longRunHarness.context.activeRequest?.promptSafetyTimer,
+    undefined,
+    'safety timer must be cleared at the first message_start (commit point)',
+  );
+
+  // Wait past the timer budget. The production budget is 10 min; we cannot wait
+  // that long in a unit test, so we assert the observable contract: the stashed
+  // handle is gone (cleared), so the timer callback cannot fire. The abort
+  // assertion is a belt-and-suspenders check that no abort was triggered by the
+  // (now-cleared) timer.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(abortCalled, false, 'session.abort() must not be called after the commit-point clear');
+  const failed = longRunHarness.emitted.find((e) => e.event === 'preflight.failed');
+  assert.equal(failed, undefined, 'no preflight.failed must fire after the commit point');
+});
+
 test('message.interrupt validates running state and reports abort failures', async () => {
   const missingHarness = createHarness();
   missingHarness.deps.getSessionContext = () => undefined;
@@ -524,7 +595,7 @@ test('settings.set rejects live model switch while a session is busy', async () 
   }
 });
 
-test('settings.set does not reject when defaultModel is unchanged while a session is busy', async () => {
+test('settings.set rejects thinking-level changes while a session is busy even when the model is unchanged', async () => {
   for (const busyState of ['activeRequest', 'streaming'] as const) {
     const harness = createHarness({
       context: busyState === 'activeRequest'
@@ -541,25 +612,27 @@ test('settings.set does not reject when defaultModel is unchanged while a sessio
       },
     });
 
-    const updated = await handleBackendRequest(harness.deps, {
-      id: `settings-set-same-${busyState}`,
-      method: 'settings.set',
-      params: {
-        sessionPath: '/repo/session.jsonl',
-        defaultModel: 'model-a',
-        defaultThinkingLevel: 'high',
-      },
-    });
+    await assert.rejects(
+      async () => await handleBackendRequest(harness.deps, {
+        id: `settings-set-same-${busyState}`,
+        method: 'settings.set',
+        params: {
+          sessionPath: '/repo/session.jsonl',
+          defaultModel: 'model-a',
+          defaultThinkingLevel: 'high',
+        },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === 'REQUEST_IN_PROGRESS',
+    );
 
-    assert.deepEqual(updated, { defaultModel: 'model-a', defaultThinkingLevel: 'high' });
     assert.equal((harness.context.session.model as { id: string }).id, 'model-a');
-    assert.equal(harness.context.session.thinkingLevel, 'high');
-    assert.deepEqual(harness.writtenSettings, [{ defaultModel: 'model-a', defaultThinkingLevel: 'high' }]);
-    assert.equal(harness.emitContextUsageChangedCalls.length, 1);
+    assert.equal(harness.context.session.thinkingLevel, 'medium');
+    assert.deepEqual(harness.writtenSettings, []);
+    assert.equal(harness.emitContextUsageChangedCalls.length, 0);
   }
 });
 
-test('settings.set does not reject when requested model matches the running session model while a session is busy', async () => {
+test('settings.set rejects thinking-level changes while a session is busy even when the requested model matches the running session model', async () => {
   for (const busyState of ['activeRequest', 'streaming'] as const) {
     let setModelCalls = 0;
     const harness = createHarness({
@@ -581,23 +654,44 @@ test('settings.set does not reject when requested model matches the running sess
       },
     });
 
-    const updated = await handleBackendRequest(harness.deps, {
-      id: `settings-set-runtime-match-${busyState}`,
-      method: 'settings.set',
-      params: {
-        sessionPath: '/repo/session.jsonl',
-        defaultModel: 'model-a',
-        defaultThinkingLevel: 'high',
-      },
-    });
+    await assert.rejects(
+      async () => await handleBackendRequest(harness.deps, {
+        id: `settings-set-runtime-match-${busyState}`,
+        method: 'settings.set',
+        params: {
+          sessionPath: '/repo/session.jsonl',
+          defaultModel: 'model-a',
+          defaultThinkingLevel: 'high',
+        },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === 'REQUEST_IN_PROGRESS',
+    );
 
-    assert.deepEqual(updated, { defaultModel: 'model-a', defaultThinkingLevel: 'high' });
     assert.equal((harness.context.session.model as { id: string }).id, 'model-a');
-    assert.equal(harness.context.session.thinkingLevel, 'high');
+    assert.equal(harness.context.session.thinkingLevel, 'medium');
     assert.equal(setModelCalls, 0);
-    assert.deepEqual(harness.writtenSettings, [{ defaultModel: 'model-a', defaultThinkingLevel: 'high' }]);
-    assert.equal(harness.emitContextUsageChangedCalls.length, 1);
+    assert.deepEqual(harness.writtenSettings, []);
+    assert.equal(harness.emitContextUsageChangedCalls.length, 0);
   }
+});
+
+test('settings.set is a no-op when both model and thinking level already match persisted and runtime state', async () => {
+  const harness = createHarness();
+
+  const updated = await handleBackendRequest(harness.deps, {
+    id: 'settings-set-noop',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      defaultModel: 'model-a',
+      defaultThinkingLevel: 'medium',
+    },
+  });
+
+  assert.deepEqual(updated, { defaultModel: 'model-a', defaultThinkingLevel: 'medium' });
+  assert.deepEqual(harness.writtenSettings, []);
+  assert.equal(harness.context.session.thinkingLevel, 'medium');
+  assert.equal(harness.emitContextUsageChangedCalls.length, 0);
 });
 
 test('handleBackendRequest rejects unknown methods', async () => {

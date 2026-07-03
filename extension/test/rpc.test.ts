@@ -166,6 +166,9 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       subagentAlwaysParentModel: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
     },
@@ -173,7 +176,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -187,6 +190,9 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       subagentAlwaysParentModel: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
       subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       subagentNestedAllowedBuckets: undefined,
     },
@@ -202,6 +208,9 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       subagentAlwaysParentModel: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
       subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
       subagentNestedAllowedBuckets: undefined,
     },
@@ -233,6 +242,9 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       subagentAlwaysParentModel: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
     },
@@ -248,6 +260,9 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       subagentAlwaysParentModel: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
     },

@@ -10,6 +10,7 @@ import { deriveFileChangesFromTranscript } from '../../core/file-change-derivati
 import { deriveAvailableExtensions } from './session.js';
 import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
+import { backendExitEvents } from '../backend-exit-events.js';
 
 interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;
@@ -222,7 +223,7 @@ export function handleBusyChangedPayload(
     onSessionCompleted?: OnSessionCompleted;
   },
 ): void {
-  auditLog(deps.context, 'session-service', 'busy.changed', {
+  auditLog('session-service', 'busy.changed', {
     busy: payload.busy,
     seq: payload.seq ?? null,
     sessionPath,
@@ -297,16 +298,23 @@ export function attach(
   });
 
   const exitDisposable = backend.onExit(({ code, stderr }) => {
-    const notice =
-      `PI backend stopped${code !== null ? ` (code ${code})` : ''}` +
-      (stderr ? `: ${stderr.slice(0, 300)}` : '');
+    // Snapshot running sessions BEFORE we clear them. If the backend died
+    // while one or more sessions were streaming, those sessions' in-flight
+    // assistant messages will never receive a `message.aborted` event (the
+    // backend is gone), so without an explicit `SessionsInterrupted` dispatch
+    // they would stay `status: 'streaming'` forever and the user would never
+    // be alerted that the interruption was not their doing. The pure
+    // `backendExitEvents` helper decides the exact event sequence so the
+    // alert policy is unit-tested independently of vscode.
+    const runningSessionPaths = [...deps.getArchState().sessions.runningSessionPaths];
     bootLog('session-events', 'backend.exited', {
       code,
-      notice,
+      notice: `PI backend stopped${code !== null ? ` (code ${code})` : ''}`,
+      runningSessionPaths,
     });
-    deps.dispatchArch({ kind: 'NoticeShown', notice });
-    deps.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
-    deps.dispatchArch({ kind: 'RunningSessionsChanged', sessionPaths: [] });
+    for (const event of backendExitEvents(runningSessionPaths, code, stderr)) {
+      deps.dispatchArch(event);
+    }
     deps.scheduleRender();
   });
 

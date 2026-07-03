@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
+import { ProxyService } from '../backend/proxy-service';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
 import { normalizeStoredTabPaths } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
@@ -16,6 +17,7 @@ import { SessionServiceState } from './state';
 import { buildRestoredSessionSummaries } from '../core/restored-session-summaries';
 import { bootLog } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
+import { appendPieLog } from '../util/pie-log';
 import { publishBackendReady } from './backend-ready';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
@@ -107,18 +109,15 @@ function persistIfTabStateChanged(
     || restoredPinnedTabs.some((p, i) => p !== storedPinned[i]);
   if (tabsChanged) {
     void Promise.resolve(options.context.globalState.update('openTabPaths', rawTabs)).catch((error) => {
-      // Non-fatal: tab-path persistence failure must not block startup restore.
-      console.warn('[pie] globalState.update failed for openTabPaths:', toErrorMessage(error));
+      appendPieLog('warn', 'startup', 'globalState.update failed for openTabPaths', { error: toErrorMessage(error) });
     });
     void Promise.resolve(options.context.globalState.update('activeSessionPath', restoredStartupPath ?? undefined)).catch((error) => {
-      // Non-fatal: startup-path persistence failure must not block startup restore.
-      console.warn('[pie] globalState.update failed for activeSessionPath:', toErrorMessage(error));
+      appendPieLog('warn', 'startup', 'globalState.update failed for activeSessionPath', { error: toErrorMessage(error) });
     });
   }
   if (pinnedChanged) {
     void Promise.resolve(options.context.globalState.update('pinnedTabPaths', restoredPinnedTabs)).catch((error) => {
-      // Non-fatal: pinned-tab persistence failure must not block startup restore.
-      console.warn('[pie] globalState.update failed for pinnedTabPaths:', toErrorMessage(error));
+      appendPieLog('warn', 'startup', 'globalState.update failed for pinnedTabPaths', { error: toErrorMessage(error) });
     });
   }
 }
@@ -169,8 +168,7 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
     });
     if (shouldUseSdkCache) {
       void Promise.resolve(options.context.globalState.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
-        // Non-fatal: sdk-path cache failure must not block runtime resolution.
-        console.warn('[pie] globalState.update failed for resolvedSdkPath:', toErrorMessage(error));
+        appendPieLog('warn', 'startup', 'globalState.update failed for resolvedSdkPath', { error: toErrorMessage(error) });
       });
     }
     return { nodePath, sdkPath };
@@ -230,10 +228,10 @@ function setupAgentDirEnv(options: StartSessionBackendOptions): void {
     const tried = result.rejections
       .map((r) => `${r.source}="${r.candidate}" (${r.reason})`)
       .join('; ');
-    console.warn(
-      `[pie] No valid agent dir found (settings.json absent from every candidate). Tried: ${tried || 'none'}. ` +
-        'Custom providers like "umans" will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
-    );
+    appendPieLog('warn', 'startup', 'no valid agent dir found', {
+      tried: tried || 'none',
+      note: 'Custom providers like "umans" will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
+    });
     return;
   }
 
@@ -284,6 +282,89 @@ async function startBackendWithLogging(
   }
 }
 
+/**
+ * Start the local LiteLLM proxy (pie/proxy/) before the PI backend, so any
+ * provider whose `baseUrl` in models.json points at 127.0.0.1:proxyPort is
+ * already reachable when the backend issues its first request. This is the
+ * missing throughput governor for umans' "4 concurrent active sessions"
+ * limit — see docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
+ *
+ * FAILED-LOUD policy: if `pie.useProxy` is on and the proxy can't become
+ * ready, dispatch a `NoticeShown` and return false so the caller skips the
+ * backend start. There is NO silent fallback to direct umans — by design —
+ * because models.json would point at a dead port and every umans request
+ * would hang/429 opaquely. The user fixes the proxy (UI notice explains how)
+ * and reloads the window; Copilot/Ollama remain usable via a direct path
+ * only if the user turns `pie.useProxy` off.
+ *
+ * Skipped entirely (returns true) when `pie.useProxy` is false, so users who
+ * opt out of the proxy are unaffected.
+ */
+async function startProxyWithLogging(options: StartSessionBackendOptions): Promise<boolean> {
+  const config = vscode.workspace.getConfiguration('pie');
+  const useProxy = config.get<boolean>('useProxy', true);
+  if (!useProxy) {
+    bootLog('session-startup', 'proxy.skipped', { reason: 'pie.useProxy=false' });
+    return true;
+  }
+
+  // The proxy lives in `proxy/` under the resolved agentDir (the pie repo root
+  // that setupAgentDirEnv just wrote to process.env.PI_CODING_AGENT_DIR).
+  const agentDir = process.env.PI_CODING_AGENT_DIR;
+  if (!agentDir) {
+    options.dispatchArch({
+      kind: 'NoticeShown',
+      notice:
+        'pie.useProxy is on but no agent dir is resolved (PI_CODING_AGENT_DIR unset). ' +
+        'The LiteLLM proxy at pie/proxy/ cannot be located. Set pie.agentDir, or turn pie.useProxy off to bypass.',
+    });
+    return false;
+  }
+
+  const proxyDir = path.join(agentDir, 'proxy');
+  const configPath = path.join(proxyDir, 'litellm_config.yaml');
+  const port = config.get<number>('proxyPort', 4000);
+  const host = '127.0.0.1';
+
+  // LiteLLM is DB-less, so its `master_key` MUST equal the umans key the
+  // backend sends (pi's auth.json key == UMANS_API_KEY). If the env var is
+  // missing, the proxy can't authenticate the backend and 400s with
+  // "No connected db". Fail loud here rather than boot a broken proxy.
+  if (!process.env.UMANS_API_KEY) {
+    options.dispatchArch({
+      kind: 'NoticeShown',
+      notice:
+        'pie.useProxy is on but UMANS_API_KEY is not set in the environment. ' +
+        'The LiteLLM proxy needs it as its master_key and upstream credential. ' +
+        'Set it (setx UMANS_API_KEY sk-... on Windows, or export on Unix) and reload, ' +
+        'or turn pie.useProxy off to route umans direct (no concurrency limit).',
+    });
+    return false;
+  }
+
+  try {
+    bootLog('session-startup', 'proxy.starting', { proxyDir, port });
+    const proxy = new ProxyService();
+    // Owned by the extension context so the proxy child is killed on shutdown.
+    options.context.subscriptions.push(proxy);
+    await proxy.start({ proxyDir, configPath, port, host });
+    bootLog('session-startup', 'proxy.started', { port });
+    // No env-var injection needed: models.json uses `$UMANS_API_KEY`, which the
+    // backend resolves itself from auth.json or the inherited environment.
+    return true;
+  } catch (err) {
+    options.dispatchArch({
+      kind: 'NoticeShown',
+      notice:
+        `Failed to start the LiteLLM proxy: ${toErrorMessage(err)}. ` +
+        'umans will be unavailable until this is fixed. Run `npm run proxy` in a terminal to see the error, ' +
+        'or turn off pie.useProxy in settings to route providers direct (no concurrency limit).',
+    });
+    bootLog('session-startup', 'proxy.startFailed', { message: toErrorMessage(err) });
+    return false;
+  }
+}
+
 async function sendRuntimePrefsWithLogging(
   options: StartSessionBackendOptions,
   restoredStartupPath: string | null,
@@ -300,6 +381,9 @@ async function sendRuntimePrefsWithLogging(
       subagentAlwaysParentModel: archState.settings.prefs.subagentAlwaysParentModel,
       subagentMaxDepth: archState.settings.prefs.subagentMaxDepth,
       subagentMaxTreeSessions: archState.settings.prefs.subagentMaxTreeSessions,
+      subagentMaxInflight: archState.settings.prefs.subagentMaxInflight,
+      subagentMaxConcurrency: archState.settings.prefs.subagentMaxConcurrency,
+      subagentMaxParallelTasks: archState.settings.prefs.subagentMaxParallelTasks,
       subagentBuckets: archState.settings.prefs.subagentBuckets,
       subagentNestedAllowedBuckets: archState.settings.prefs.subagentNestedAllowedBuckets,
     });
@@ -309,6 +393,10 @@ async function sendRuntimePrefsWithLogging(
     });
   } catch {
     bootLog('session-startup', 'runtimePrefs.set.failed', {
+      backendReady: options.getArchState().settings.backendReady,
+      restoredStartupPath,
+    });
+    appendPieLog('warn', 'startup', 'runtimePrefs.set failed during startup', {
       backendReady: options.getArchState().settings.backendReady,
       restoredStartupPath,
     });
@@ -336,6 +424,7 @@ async function listAndOpenFirstSession(options: StartSessionBackendOptions): Pro
     }
   } catch (err) {
     bootLog('session-startup', 'listAndOpenFirstSession.failed', { error: toErrorMessage(err) });
+    appendPieLog('warn', 'startup', 'session.list failed during startup restore', { error: toErrorMessage(err) });
   }
 }
 
@@ -386,6 +475,14 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   const backendPath = path.join(options.context.extensionPath, 'out', 'backend.js');
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
+
+  // Start the LiteLLM proxy before the backend so proxied providers (umans)
+  // are reachable on the first request. Fails loud — see startProxyWithLogging.
+  const proxyReady = await startProxyWithLogging(options);
+  if (!proxyReady) {
+    options.scheduleRender();
+    return;
+  }
 
   options.events.attach(options.backend);
 
