@@ -464,6 +464,22 @@
             "cacheWrite": 3.75
           }
         },
+        "claude-fable-5": {
+          "name": "Copilot: Claude Fable 5",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "cost": {
+            "input": 10,
+            "output": 50,
+            "cacheRead": 1,
+            "cacheWrite": 12.5
+          }
+        },
         "gpt-4o": {
           "name": "Copilot: GPT-4o",
           "contextWindow": 128000,
@@ -683,6 +699,34 @@
             "output": 25,
             "cacheRead": 0.5,
             "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Copilot: Claude Sonnet 5",
+          "api": "anthropic-messages",
+          "compat": {
+            "forceAdaptiveThinking": true
+          },
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "max"
+          },
+          "cost": {
+            "input": 3,
+            "output": 15,
+            "cacheRead": 0.3,
+            "cacheWrite": 3.75
           }
         }
       ]

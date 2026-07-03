@@ -6,6 +6,12 @@ profiles:
   # thinking: supported thinking levels for this model (used by bucket-selector).
 
   # --- Claude (current gen) ---
+  - id: claude-fable-5
+    eligible: true
+    thinking: [low, medium, high, xhigh]
+    disabled_reason: null
+    cost: 30
+
   - id: claude-opus-4.8
     eligible: true
     thinking: [medium]
@@ -23,6 +29,12 @@ profiles:
     thinking: [low, medium, high, xhigh]
     disabled_reason: null
     cost: 18
+
+  - id: claude-sonnet-5
+    eligible: true
+    thinking: [low, medium, high, xhigh]
+    disabled_reason: null
+    cost: 10
 
   - id: claude-sonnet-4.6
     eligible: true
