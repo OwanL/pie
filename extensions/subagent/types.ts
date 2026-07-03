@@ -8,8 +8,8 @@ import type { Message } from "@mariozechner/pi-ai";
 import type { AgentScope } from "./agents.js";
 import type { ThinkingLevel } from "./bucket-selector.js";
 
-export const MAX_PARALLEL_TASKS = 8;
-export const MAX_CONCURRENCY = 4;
+export const MAX_PARALLEL_TASKS = 4;
+export const MAX_CONCURRENCY = 2;
 export const COLLAPSED_ITEM_COUNT = 10;
 export const MAX_MODEL_RETRIES = 5;
 /** Max characters shown when previewing a task description in chain/parallel renderCall. */

@@ -406,7 +406,7 @@ test("executeParallelMode: too many tasks returns isError without running", asyn
 		{ tasks }, makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
 	);
 	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Too many parallel tasks \(9\)\. Max is 8\./);
+	assert.match(r.content[0].text, /Too many parallel tasks \(9\)\. Max is 4\./);
 	assert.equal(called, false);
 });
 

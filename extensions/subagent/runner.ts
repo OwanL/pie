@@ -21,6 +21,7 @@ import {
 	ParentExtensionUIBridgeProxy,
 	type ParentBridge,
 } from "./src/parent-extension-ui-bridge-proxy.js";
+import { inflightSemaphore } from "./src/concurrency-limit.js";
 
 /**
  * Minimal contract for the session events emitted by the pi SDK's
@@ -204,13 +205,13 @@ export function getMaxDepth(): number {
 	const raw = process.env[MAX_DEPTH_ENV];
 	if (raw === undefined || raw === "") return DEFAULT_MAX_DEPTH;
 	const n = Number(raw);
-	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_DEPTH;
+	return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_MAX_DEPTH;
 }
 
 /** Environment key for the pie host to override the tree-wide session budget. */
 const MAX_TREE_SESSIONS_ENV = "PIE_SUBAGENT_MAX_TREE_SESSIONS";
 /** Default tree-wide session budget when no override is supplied. */
-export const DEFAULT_MAX_TREE_SESSIONS = 50;
+export const DEFAULT_MAX_TREE_SESSIONS = 10;
 
 /**
  * Resolve the tree-wide session budget — the max number of subagent sessions
@@ -523,7 +524,7 @@ function applyTimeoutFailure(result: SingleResult, timeoutMs: number, stage?: st
 }
 
 /** Apply a stop-reason-based exit code to a result. */
-function applyStopReason(result: SingleResult, parentAborted: boolean): void {
+function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: string): void {
 	const stop = result.stopReason;
 	if (stop === "error" || stop === "aborted") {
 		result.exitCode = 1;
@@ -534,6 +535,15 @@ function applyStopReason(result: SingleResult, parentAborted: boolean): void {
 	if (parentAborted && result.exitCode === 0) {
 		result.exitCode = 1;
 		if (!result.errorMessage) result.errorMessage = "Subagent was aborted";
+	}
+	// Enrich whatever message we have (the SDK's raw "Request was aborted" or
+	// similar) with the run stage and cause, mirroring applyTimeoutFailure /
+	// applyThrownError — otherwise an abort surfaces as a bare, contextless
+	// provider string with no indication of when/why it happened.
+	if (stop === "aborted" && stage) {
+		const cause = parentAborted ? "parent interrupted" : "provider/session aborted";
+		const base = result.errorMessage || "Request was aborted";
+		result.errorMessage = `${base} (${cause}, while ${stage})`;
 	}
 }
 
@@ -629,15 +639,22 @@ export async function runSingleAgent(
 	});
 	await resourceLoader.reload();
 
-	const { session } = await sdk.createSession({
-		cwd: sessionCwd,
-		modelRegistry,
-		model: resolvedModel,
-		thinkingLevel,
-		tools: agent.tools,
-		sessionManager: sdk.createSessionManager(sessionCwd),
-		resourceLoader,
-	});
+	const release = await inflightSemaphore.acquire();
+	let session: SessionLike;
+	try {
+		const created = await sdk.createSession({
+			cwd: sessionCwd,
+			modelRegistry,
+			model: resolvedModel,
+			thinkingLevel,
+			tools: agent.tools,
+			sessionManager: sdk.createSessionManager(sessionCwd),
+			resourceLoader,
+		});
+		session = created.session;
+	} finally {
+		release();
+	}
 
 	// Capture the model the session actually selected (in case our hint was overridden).
 	if (session.agent?.state?.model) {
@@ -721,7 +738,7 @@ export async function runSingleAgent(
 			return currentResult;
 		}
 
-		applyStopReason(currentResult, signal?.aborted === true);
+		applyStopReason(currentResult, signal?.aborted === true, stageRef.value);
 		return currentResult;
 	} catch (err) {
 		applyThrownError(currentResult, err, stageRef.value);

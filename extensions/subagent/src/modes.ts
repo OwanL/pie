@@ -15,14 +15,13 @@ import {
 } from "../runner.js";
 import { SubagentParams } from "../schema.js";
 import {
-	MAX_CONCURRENCY,
 	MAX_MODEL_RETRIES,
-	MAX_PARALLEL_TASKS,
 	type OnUpdateCallback,
 	type SingleResult,
 	type SubagentDetails,
 	type UsageStats,
 } from "../types.js";
+import { getMaxConcurrency, getMaxParallelTasks } from "./concurrency-limit.js";
 // Shared model-selection helpers live in ./selection.ts (NOT ./execute.ts) —
 // importing them from there breaks the execute↔modes circular import that
 // crashed parallel subagent dispatch with `Cannot read properties of
@@ -259,7 +258,7 @@ export async function executeParallelMode(
 	const allResults = createPendingResultsForTasks(params.tasks!);
 	const emitParallelUpdate = makeParallelUpdateEmitter(allResults, makeDetails, onUpdate);
 
-	const results = await mapWithConcurrencyLimit(params.tasks!, MAX_CONCURRENCY, (t, index) =>
+	const results = await mapWithConcurrencyLimit(params.tasks!, getMaxConcurrency(), (t, index) =>
 		runParallelTask(t, index, {
 			ctx,
 			agents,
@@ -382,12 +381,13 @@ async function runParallelTask(
 
 /** Build the standard "too many tasks" error response. */
 function buildParallelTaskLimitError(count: number, makeDetails: MakeDetails): ModeResult | undefined {
-	if (count <= MAX_PARALLEL_TASKS) return undefined;
+	const max = getMaxParallelTasks();
+	if (count <= max) return undefined;
 	return {
 		content: [
 			{
 				type: "text" as const,
-				text: `Too many parallel tasks (${count}). Max is ${MAX_PARALLEL_TASKS}.`,
+				text: `Too many parallel tasks (${count}). Max is ${max}.`,
 			},
 		],
 		details: makeDetails("parallel", []),

@@ -76,8 +76,13 @@ test("getMaxDepth: non-numeric → default", () => {
 	assert.equal(getMaxDepth(), DEFAULT_MAX_DEPTH);
 });
 
-test("getMaxDepth: below 1 → default (depth must be >= 1)", () => {
+test("getMaxDepth: 0 is honoured (subagents disabled)", () => {
 	process.env.PIE_SUBAGENT_MAX_DEPTH = "0";
+	assert.equal(getMaxDepth(), 0);
+});
+
+test("getMaxDepth: negative values fall back to default", () => {
+	process.env.PIE_SUBAGENT_MAX_DEPTH = "-1";
 	assert.equal(getMaxDepth(), DEFAULT_MAX_DEPTH);
 });
 
@@ -151,6 +156,23 @@ test("execute: caller canSpawn allowlist blocks a disallowed agent before dispat
 	assert.match(res.content[0].text, /blocked by the caller's canSpawn allowlist/);
 	assert.match(res.content[0].text, /"worker"/);
 	assert.equal(res.details.results.length, 0);
+});
+
+test("execute: maxDepth 0 short-circuits with disabled response", async () => {
+	process.env.PIE_SUBAGENT_MAX_DEPTH = "0";
+	const res: any = await subagentRuntime.run({ depth: 0, trail: [], budget: { sessions: 0 } }, () =>
+		execute(
+			"tc-disabled",
+			{ agent: "worker", task: "x" } as any,
+			noSignal(),
+			noOpUpdate,
+			{ cwd: process.cwd() } as any,
+			{} as any,
+			() => false,
+		),
+	);
+	assert.equal(res.isError, true);
+	assert.match(res.content[0].text, /Subagents are disabled/i);
 });
 
 test("execute: configurable depth overrides the default limit message", async () => {

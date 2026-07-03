@@ -181,6 +181,25 @@ function disabledErrorResponse(params: SubagentParams): ErrorResponse {
 	};
 }
 
+/** Returns the standard response when subagents are disabled via maxDepth = 0. */
+function subagentsDisabledResponse(params: SubagentParams, maxDepth: number): ErrorResponse {
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Subagents are disabled (nesting levels set to ${maxDepth}). Set "Nesting levels" above 0 to delegate to subagents.`,
+			},
+		],
+		details: {
+			mode: "single" as const,
+			agentScope: params.agentScope ?? "user",
+			projectAgentsDir: null,
+			results: [],
+		},
+		isError: true,
+	};
+}
+
 /** Returns the standard response when subagent depth limit is reached. */
 function depthLimitResponse(agentScope: AgentScope, maxDepth: number): ErrorResponse {
 	return {
@@ -346,6 +365,34 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 	return { modelConfig, disabledProviders, allowedModelIds, bucketAssignments, alwaysParentModel: readAlwaysParentModel(), nestedAllowedBuckets: readNestedAllowedBuckets() };
 }
 
+/** Memoized handle to the dynamically-imported modes module.
+ *
+ *  `dispatchToMode` used to call `await import("./modes.js")` fresh on every
+ *  invocation. Parallel-mode subagent dispatch calls `execute()` — and
+ *  therefore `dispatchToMode` — concurrently, multiple times, from the same
+ *  process. Under pi's on-the-fly TS→CJS extension loader, concurrent
+ *  `import()` calls for the *same* specifier are not guaranteed to be
+ *  deduped/serialized the way a spec-compliant ESM loader would: a second
+ *  call can observe a not-yet-fully-populated module object from the first
+ *  call's in-flight (re-)transpile, surfacing as
+ *  `Cannot read properties of undefined (reading 'checkTrailLoop')` — this
+ *  recurred even after the execute↔modes circular-import fix, confirming the
+ *  race is independent of the cycle. Caching the promise here means the
+ *  module is imported exactly once per process; every caller (sequential or
+ *  concurrent) awaits the same settled promise instead of re-triggering the
+ *  loader. On failure the cached promise is cleared so a subsequent call can
+ *  retry rather than being permanently stuck on a rejected import. */
+let modesModulePromise: Promise<typeof import("./modes.js")> | undefined;
+function loadModesModule(): Promise<typeof import("./modes.js")> {
+	if (!modesModulePromise) {
+		modesModulePromise = import("./modes.js").catch((err) => {
+			modesModulePromise = undefined;
+			throw err;
+		});
+	}
+	return modesModulePromise;
+}
+
 /** Routes the validated request to the mode-specific execution function. */
 async function dispatchToMode(
 	mode: Mode,
@@ -361,8 +408,9 @@ async function dispatchToMode(
 	_toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
 ) {
-	// Lazy import to avoid circular dependencies.
-	const { executeChainMode, executeParallelMode, executeSingleMode } = await import("./modes.js");
+	// Lazy import to avoid circular dependencies (see loadModesModule for why
+	// this is memoized rather than a bare `await import(...)` per call).
+	const { executeChainMode, executeParallelMode, executeSingleMode } = await loadModesModule();
 
 	const modeArgs = [
 		params,
@@ -397,6 +445,7 @@ export async function execute(
 	const agentScope: AgentScope = params.agentScope ?? "user";
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
+	if (maxDepth === 0) return subagentsDisabledResponse(params, maxDepth);
 	if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(agentScope, maxDepth);
 
 	// Seed the shared tree-wide session budget at the outermost call. Nested

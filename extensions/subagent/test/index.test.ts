@@ -22,6 +22,23 @@ import { subagentRuntime } from "../runner.js";
 import { MAX_DEPTH } from "../src/helpers.js";
 import type { AgentConfig } from "../agents.js";
 
+const ENV_KEYS = ["PIE_SUBAGENT_MAX_DEPTH", "PIE_SUBAGENT_MAX_TREE_SESSIONS"] as const;
+const envSnapshot: Record<string, string | undefined> = {};
+
+test.before(() => {
+	for (const key of ENV_KEYS) envSnapshot[key] = process.env[key];
+	// Clear env so these guard-rail tests exercise the compiled-in defaults, not
+	// any value inherited from the shell / previous test run.
+	for (const key of ENV_KEYS) delete process.env[key];
+});
+
+test.after(() => {
+	for (const key of ENV_KEYS) {
+		if (envSnapshot[key] === undefined) delete process.env[key];
+		else process.env[key] = envSnapshot[key];
+	}
+});
+
 // --- Mock agents (validation only inspects names; no SDK / filesystem) ---
 
 const MOCK_AGENTS: AgentConfig[] = [
