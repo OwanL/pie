@@ -114,17 +114,25 @@ test("buildPruningUserMessage omits context file when not provided", () => {
 	assert.ok(!msg.includes("Context file"));
 });
 
-test("buildPruningUserMessage lists protected (forced) skills/tools as never removed", () => {
+test("buildPruningUserMessage lists only the provided candidates and emits no protected-list framing", () => {
+	// Protected (always-keep / pinned) skills and tools are excluded from the
+	// candidate lists by the caller (register.ts) BEFORE reaching the builder —
+	// the model is never told about them. The builder therefore lists only what
+	// it is given and must not emit any "Protected …" framing; protection now
+	// happens by omission, not by instruction.
 	const msg = buildPruningUserMessage({
 		userPrompt: "refactor",
 		skills: [{ name: "alpha", description: "a" }],
 		tools: [{ name: "read", description: "Read files" }],
 		config: makeConfig(),
-		forcedSkills: ["alpha"],
-		forcedTools: ["read"],
 	});
-	assert.ok(msg.includes("Protected skills (never removed; do not list these): alpha"));
-	assert.ok(msg.includes("Protected tools (never removed; do not list these): read"));
+	assert.ok(msg.includes("Available skills (list any to REMOVE):"));
+	assert.ok(msg.includes("- alpha: a"));
+	assert.ok(msg.includes("Available tools (list any to REMOVE):"));
+	assert.ok(msg.includes("- read: Read files"));
+	assert.ok(!msg.includes("Protected skills"), "builder must not emit protected-skill framing");
+	assert.ok(!msg.includes("Protected tools"), "builder must not emit protected-tool framing");
+	assert.ok(!/never removed/.test(msg), "builder must not reference protection in the prompt");
 });
 
 // ---------------------------------------------------------------------------

@@ -93,14 +93,25 @@ export default function register(pi: ExtensionAPI) {
 			const { visibleSkills, effectivePinned } = resolveVisibleSkills(skills, activeConfig);
 			const contextFile = event.systemPromptOptions.contextFiles?.[0];
 
+			// Always-keep (pinned / alwaysKeep) skills and tools are never
+			// candidates for pruning. Exclude them from the prepass entirely so
+			// the model never sees them and never spends tokens reasoning about
+			// them — they are unconditionally re-added downstream by
+			// applySkillSelection / applyToolSelection. Telling the model about
+			// them only to re-protect them afterward is pure waste.
+			const forcedSkillNames = new Set(effectivePinned);
+			const forcedToolNames = new Set(activeConfig.tools?.alwaysKeep ?? []);
+
 			const llmInput = {
 				userPrompt: event.prompt,
 				contextFile: contextFile?.path,
-				skills: visibleSkills.map((s) => ({ name: s.name, description: s.description })),
-				tools: allTools.map((t) => ({ name: t.name, description: t.description ?? "" })),
+				skills: visibleSkills
+					.filter((s) => !forcedSkillNames.has(s.name))
+					.map((s) => ({ name: s.name, description: s.description })),
+				tools: allTools
+					.filter((t) => !forcedToolNames.has(t.name))
+					.map((t) => ({ name: t.name, description: t.description ?? "" })),
 				config: activeConfig,
-				forcedSkills: effectivePinned,
-				forcedTools: activeConfig.tools?.alwaysKeep ?? [],
 				recentConversation: getRecentConversation(ctx),
 			};
 

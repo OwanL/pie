@@ -699,6 +699,55 @@ test("recent conversation from the session is fed to the prepass so follow-ups g
 	}
 });
 
+test("always-keep / pinned skills and tools are never sent to the prepass", async () => {
+	// The user's never-prune list (skills.alwaysKeep + pinned, and
+	// tools.alwaysKeep) must not even reach the prepass LLM: surfacing them only
+	// to re-protect them afterward wastes tokens and asks the model to reason
+	// about items it cannot prune. Capture the user message the prepass
+	// actually receives and assert the protected names are absent (by both name
+	// and description) while the prunable candidates are present, and that there
+	// is no "Protected …" framing line at all.
+	let capturedUserMessage = "";
+	__setCompleteFn(async (_model: unknown, context: Array<{ role: string; content: string }>) => {
+		const userMsg = context.find((m) => m.role === "user");
+		capturedUserMessage = userMsg?.content ?? "";
+		return { text: '{"pruneSkills":[],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config(
+			{ alwaysKeep: ["frontend-design"], pinned: ["code-simplification"] },
+			"auto",
+			{ ceiling: 10, alwaysKeep: ["web_search"] },
+		));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => mockToolInfo.map((t) => t.name),
+			setActiveTools: () => {},
+		});
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string } | undefined;
+
+		// Prunable candidates are still presented to the model...
+		assert.ok(capturedUserMessage.includes("duckdb-query-optimization"), "prunable skill is a candidate");
+		assert.ok(capturedUserMessage.includes("Available tools (list any to REMOVE):"));
+		// ...but every protected (never-prune) item is absent, by name AND by
+		// description, and there is no "Protected …" framing line anywhere.
+		assert.ok(!capturedUserMessage.includes("frontend-design"), "alwaysKeep skill name not surfaced to prepass");
+		assert.ok(!capturedUserMessage.includes("Production-grade frontend interfaces"), "alwaysKeep skill description not surfaced to prepass");
+		assert.ok(!capturedUserMessage.includes("code-simplification"), "pinned skill name not surfaced to prepass");
+		assert.ok(!capturedUserMessage.includes("web_search"), "alwaysKeep tool name not surfaced to prepass");
+		assert.ok(!/Protected (skills|tools)/.test(capturedUserMessage), "no protected-list framing in prepass prompt");
+
+		// And the protected items still survive in the rewritten system prompt
+		// (re-added downstream by applySkillSelection / applyToolSelection).
+		assert.ok(result?.systemPrompt);
+		assert.match(result.systemPrompt, /<name>frontend-design<\/name>/);
+		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
 test("off mode baseline: known skill read → skill_read; non-skill read → no event", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-"));
 	const logPath = path.join(dir, "pruning.jsonl");

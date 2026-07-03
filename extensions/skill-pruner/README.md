@@ -6,7 +6,7 @@ Uses an LLM to score and prune skills/tools based on relevance to the current ta
 
 Before each agent turn, `skill-pruner` sends the user prompt + available skill/tool descriptions to an LLM (via `@earendil-works/pi-ai`). When prior turns exist, it also includes the most recent user/assistant exchanges (read from the session tree, stopping at any compaction boundary) so follow-up prompts like "fix this" or "do that again" are judged in context rather than as standalone two-word requests. The LLM returns a **prune list** — the skills and tools it judges safe to *remove* for this turn — and `skill-pruner` then:
 
-1. Keeps every skill the LLM did **not** prune. `pinned` / `alwaysKeep` skills are protected and can never be pruned.
+1. Keeps every skill the LLM did **not** prune. `pinned` / `alwaysKeep` skills are protected and can never be pruned — they're excluded from the prepass entirely so the model never sees them or spends tokens reasoning about them, then re-added unconditionally afterward.
 2. Keeps every tool the LLM did not prune, additionally protecting any dependency of a kept tool (so pruning a tool never strands a tool that needs it).
 3. Rewrites the system prompt to drop the pruned skills.
 4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
@@ -60,6 +60,7 @@ Add a `pruning` block to `settings.json`:
 | `strategy` | `"discretion"` | Pruning strategy (`discretion` = keep-biased, prune only clearly irrelevant items; `topK` = also steer toward the ceiling by pruning the least relevant) |
 | `ceiling` | `8` | Soft guidance communicated to the LLM on the effective context size; **not** a hard cap (hard-enforcing it would force over-pruning) |
 | `pinned` | `[]` | Skills protected from pruning regardless of the LLM's list |
+| `alwaysKeep` | `[]` | Skills protected from pruning regardless of the LLM's list (set via the UI's "Omitted skills (never pruned)") |
 
 ### Tools options
 
@@ -68,7 +69,7 @@ Add a `pruning` block to `settings.json`:
 | `strategy` | `"discretion"` | Pruning strategy (see skills) |
 | `ceiling` | `10` | Soft guidance (see skills) |
 | `dependencies` | `{ edit: [read], subagent: [bash] }` | Tool → dependency mapping; a dependency of a **kept** tool is protected from pruning |
-| `alwaysKeep` | `[]` | Tools protected from pruning regardless of the LLM's list |
+| `alwaysKeep` | `[]` | Tools protected from pruning regardless of the LLM's list (set via the UI's "Omitted tools (never pruned)") |
 
 ## Modes
 

@@ -25,10 +25,6 @@ export interface LlmPruningInput {
 	skills: SkillCandidate[];
 	tools: ToolCandidate[];
 	config: PruningConfig;
-	/** Names of skills that are protected (pinned / always-keep). The model never needs to prune these. */
-	forcedSkills?: string[];
-	/** Names of tools that are protected (always-keep). The model never needs to prune these. */
-	forcedTools?: string[];
 }
 
 export interface LlmPruningOutput {
@@ -121,17 +117,9 @@ export function buildPruningUserMessage(input: LlmPruningInput): string {
 		lines.push(`- ${s.name}: ${s.description}`);
 	}
 
-	if (input.forcedSkills && input.forcedSkills.length > 0) {
-		lines.push("", `Protected skills (never removed; do not list these): ${input.forcedSkills.join(", ")}`);
-	}
-
 	lines.push("", "Available tools (list any to REMOVE):");
 	for (const t of input.tools) {
 		lines.push(`- ${t.name}: ${t.description}`);
-	}
-
-	if (input.forcedTools && input.forcedTools.length > 0) {
-		lines.push("", `Protected tools (never removed; do not list these): ${input.forcedTools.join(", ")}`);
 	}
 
 	return lines.join("\n");
