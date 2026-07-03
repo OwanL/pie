@@ -511,6 +511,7 @@ test("isTransportErrorMessage: detects network/timeout keywords", () => {
 	assert.ok(isTransportErrorMessage("request ETIMEDOUT"));
 	assert.ok(isTransportErrorMessage("network error"));
 	assert.ok(isTransportErrorMessage("Gateway Timeout"));
+	assert.ok(isTransportErrorMessage("OpenAI Responses stream ended before a terminal response event"));
 });
 
 test("isTransportErrorMessage: rejects non-transport errors", () => {
@@ -529,6 +530,8 @@ test("isTransportError: classifies result by stopReason + errorMessage", () => {
 	assert.ok(!isTransportError({ stopReason: "stop", errorMessage: "500 Internal Server Error", rawResponse: "" } as any));
 	// Error stopReason but no status code → content error, not transport.
 	assert.ok(!isTransportError({ stopReason: "error", errorMessage: "Invalid JSON", rawResponse: "" } as any));
+	// Local AbortSignal.timeout still downgrades thinking instead of retrying at the same budget.
+	assert.ok(!isTransportError({ stopReason: "aborted", errorMessage: "OpenAI Responses stream ended before a terminal response event", rawResponse: "" } as any));
 	// No result at all.
 	assert.ok(!isTransportError(undefined));
 });

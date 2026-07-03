@@ -15,12 +15,25 @@ import {
 import type { PrepassRunResult } from "./pruning-types.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
 
+// Per-thinking-level timeout ceiling for ONE prepass model call. These are
+// ceilings, not waits: a call that completes early returns immediately.
+//
+// Calibrated for REASONING models (e.g. gpt-5-mini), which emit encrypted
+// reasoning tokens before the prune-list JSON. The previous values
+// (minimal/low = 20s) were sized for a non-reasoning model and aborted
+// gpt-5-mini mid-reasoning on complex tool sets — the abort surfaced as
+// `stopReason=aborted` + "OpenAI Responses stream ended before a terminal
+// response event" (the AbortSignal fires → SSE iterator ends with no
+// terminal event → pi-ai sets aborted). `aborted` never matches the
+// transport-retry regex, so it failed open ~40s into every turn (20s low
+// + 40s minimal-downgrade) instead of ever producing a prune list.
+// 45s for `low` comfortably covers gpt-5-mini reasoning on a ~15-tool set.
 export const LLM_TIMEOUT_MS_BY_THINKING_LEVEL: Record<string, number> = {
-	minimal: 20_000,
-	low: 20_000,
-	medium: 25_000,
-	high: 30_000,
-	xhigh: 35_000,
+	minimal: 30_000,
+	low: 45_000,
+	medium: 60_000,
+	high: 75_000,
+	xhigh: 90_000,
 };
 
 /**
@@ -35,6 +48,15 @@ export const LLM_TIMEOUT_MS_BY_THINKING_LEVEL: Record<string, number> = {
  */
 export const PREPASS_MAX_TRANSPORT_RETRIES = 2;
 const PREPASS_TRANSPORT_BACKOFF_BASE_MS = 1_000;
+
+/**
+ * Backoff for the OAuth-token race in `resolveAuth` (github-copilot). The
+ * pruning prepass runs in `before_agent_start`, BEFORE the main agent's first
+ * model call has triggered the lazy OAuth refresh+persist. Re-resolving auth
+ * after this delay gives that refresh time to land, bridging the window in
+ * which `getApiKeyAndHeaders` returns a stale/empty key.
+ */
+const OAUTH_RACE_BACKOFF_MS = 1_500;
 
 /** Resolve after `ms` milliseconds. Used for transport-retry backoff. */
 function sleep(ms: number): Promise<void> {
@@ -209,20 +231,53 @@ export function resolveModel(ctx: unknown, _config: PruningConfig): unknown {
 	return undefined;
 }
 
-export async function resolveAuth(ctx: unknown, model: unknown): Promise<{ apiKey?: string; headers?: Record<string, string> }> {
+export interface ResolvedAuth {
+	apiKey?: string;
+	headers?: Record<string, string>;
+	/** True only when `getApiKeyAndHeaders` was consulted and returned no usable
+	 *  key (e.g. an OAuth provider whose token expired and refresh hadn't landed).
+	 *  Lets the caller fail open instead of making a headerless request that 400s.
+	 *  False when no registry auth method was available (test/keyless paths). */
+	authFailed?: boolean;
+}
+
+export async function resolveAuth(ctx: unknown, model: unknown): Promise<ResolvedAuth> {
 	const modelObj = model as Record<string, unknown> | null;
 	const isCopilot = modelObj?.provider === "github-copilot";
 
 	const ctxObj = ctx as Record<string, unknown>;
 	const modelRegistry = ctxObj?.modelRegistry as { getApiKeyAndHeaders?: (model: unknown) => Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string> }> } | undefined;
 	if (modelRegistry?.getApiKeyAndHeaders) {
-		const result = await modelRegistry.getApiKeyAndHeaders(model);
-		if (result.ok) {
+		let result = await modelRegistry.getApiKeyAndHeaders(model);
+		// OAuth providers (e.g. github-copilot) refresh their access token lazily
+		// on the FIRST main-agent model call. This prepass runs in `before_agent_start`,
+		// before that call, so the in-memory credential can still hold a stale,
+		// expired token: `getApiKeyAndHeaders` then returns `{ ok: true, apiKey: undefined }`
+		// (or `ok: false`). Falling through to the copilot-headers-only branch below
+		// would produce a headerless request → "Authorization header is badly
+		// formatted" 400. Bridge the race by re-resolving once after a short delay,
+		// which is enough for the main agent's refresh-and-persist to land.
+		if (isCopilot && !hasUsableApiKey(result)) {
+			await sleep(OAUTH_RACE_BACKOFF_MS);
+			result = await modelRegistry.getApiKeyAndHeaders(model);
+		}
+		if (result.ok && hasUsableApiKey(result)) {
 			return { apiKey: result.apiKey, headers: withCopilotHeaders(result.headers, isCopilot) };
 		}
+		// Auth was attempted but produced no usable key. Returning headers-only
+		// for copilot would actively cause the 400, so return empty + signal the
+		// caller to fail open (skip the LLM call) rather than emit a headerless request.
+		return { authFailed: true };
 	}
 
+	// No registry auth method (test stubs / keyless providers): preserve the
+	// historical copilot-headers fallback so existing paths still proceed.
 	return isCopilot ? { headers: { ...COPILOT_IDE_HEADERS } } : {};
+}
+
+/** True when `result.apiKey` is a usable non-empty string. */
+function hasUsableApiKey(result: { ok?: boolean; apiKey?: string }): boolean {
+	return typeof result.apiKey === "string" && result.apiKey.trim().length > 0;
 }
 
 export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0): number {
@@ -265,21 +320,30 @@ export function formatEmptyPrepassError(result: Awaited<ReturnType<typeof runLlm
  * (e.g. `OpenAI API error (500): 500 Internal Server Error`) is the signature
  * pi-ai produces when the OpenAI client surfaces a non-2xx response. We also
  * treat a thrown error whose message carries an HTTP status as transport.
+ *
+ * Note: `stopReason === "aborted"` is intentionally NOT treated as transport.
+ * An aborted result means OUR `AbortSignal.timeout` fired mid-stream (pi-ai
+ * sets `aborted` only when the caller's signal is `.aborted`). Retrying at the
+ * SAME reasoning level with the SAME budget would just abort again — the right
+ * response to a self-inflicted timeout is the thinking-level DOWNGRADE path
+ * (less reasoning = faster completion), which is what the non-transport fall-
+ * through does. The budgets in LLM_TIMEOUT_MS_BY_THINKING_LEVEL are sized so a
+ * reasoning model (gpt-5-mini) completes before this fires in normal use.
  */
 export function isTransportError(result: Awaited<ReturnType<typeof runLlmPruning>> | undefined, thrown?: unknown): boolean {
 	if (thrown !== undefined) {
 		const msg = toErrorMessage(thrown);
-		return /\b(?:5\d\d|429)\b/.test(msg) || /Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|ECONNRESET|ETIMEDOUT|fetch failed|network/i.test(msg);
+		return isTransportErrorMessage(msg);
 	}
 	if (!result) return false;
 	if (result.stopReason !== "error") return false;
 	const msg = result.errorMessage ?? "";
-	return /\b(?:5\d\d|429)\b/.test(msg) || /Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|ECONNRESET|ETIMEDOUT|fetch failed|network/i.test(msg);
+	return isTransportErrorMessage(msg);
 }
 
 /** Classify a thrown/returned error as a transport error by message alone. */
 export function isTransportErrorMessage(message: string): boolean {
-	return /\b(?:5\d\d|429)\b/.test(message) || /Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|ECONNRESET|ETIMEDOUT|fetch failed|network/i.test(message);
+	return /\b(?:5\d\d|429)\b/.test(message) || /Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|ECONNRESET|ETIMEDOUT|fetch failed|network|stream ended before a terminal response event/i.test(message);
 }
 
 export async function runPruningPrepass(
@@ -305,7 +369,7 @@ export async function runPruningPrepass(
 	// and surface as a framework-level error; treat it like any other prepass
 	// failure so the orchestrator fails open with a visible error message.
 	let model: unknown;
-	let auth: { apiKey?: string; headers?: Record<string, string> };
+	let auth: ResolvedAuth;
 	try {
 		model = resolveModel(ctx, activeConfig);
 		if (!model) {
@@ -314,6 +378,21 @@ export async function runPruningPrepass(
 		auth = await resolveAuth(ctx, model);
 	} catch (error) {
 		return emptyResult(activeConfig.thinkingLevel, `LLM pruning failed: ${toErrorMessage(error)}`);
+	}
+
+	// Fail open when auth was explicitly attempted and produced no usable key
+	// (e.g. a github-copilot OAuth token expired and the lazy refresh hadn't
+	// landed by `before_agent_start`). Making the call without a Bearer would
+	// 400 with "Authorization header is badly formatted" and surface as a noisy
+	// pruning failure — but pruning is a best-effort optimization: skipping it
+	// (keeping all skills/tools) is safe and matches the orchestrator's existing
+	// "fail open" contract. Only triggers when `getApiKeyAndHeaders` was actually
+	// consulted (authFailed), not for keyless/test paths that lack the method.
+	if (auth.authFailed) {
+		return emptyResult(
+			activeConfig.thinkingLevel,
+			`Pruning skipped: ${activeConfig.provider} auth unavailable (token expired/refresh pending); run /login ${activeConfig.provider} if it persists`,
+		);
 	}
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
