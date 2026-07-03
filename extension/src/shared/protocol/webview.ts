@@ -81,6 +81,11 @@ export interface ViewState {
    *  their existing string-only rendering. Invariant: `noticeKind` is non-null
    *  only when `notice` is an H-category error message. */
   noticeKind?: NoticeKind | null;
+  /** Raw, unredacted full error string behind the short `notice` summary, or
+   *  null. The webview renders a "show more" affordance that reveals this
+   *  verbatim (including internal `req-NN` correlation ids) for debugging.
+   *  Cleared alongside `notice` on dismiss/replace. */
+  noticeRaw?: string | null;
   /** True once the backend process has started and emitted `backend.ready`. */
   backendReady: boolean;
   workspaceCwd: string | null;

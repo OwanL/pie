@@ -116,7 +116,7 @@ export interface SettingsState {
   contextUsageBySession: Record<string, ContextWindowUsage | null>;
   /** Whether the PI backend is connected and ready. */
   backendReady: boolean;
-  /** User-facing notice message, or null. */
+  /** User-facing notice message (short summary), or null. */
   notice: string | null;
   /** Failure category for the current notice (Brief H), or null when the
    *  notice is a plain info/warning string (or absent). Set alongside a
@@ -125,6 +125,13 @@ export interface SettingsState {
    *  render recovery action buttons. Invariant: non-null only when `notice`
    *  is an H-category error. */
   noticeKind: NoticeKind | null;
+  /** Raw, unredacted full error string behind the current `notice` summary,
+   *  or null. Surfaced via `ViewState.noticeRaw` so the webview can render a
+   *  "show more" affordance with the verbatim backend error (including any
+   *  internal `req-NN` correlation ids) for debugging. Cleared alongside
+   *  `notice`/`noticeKind` whenever a notice is dismissed or replaced by a
+   *  non-error notice (plain `NoticeShown` notices carry no raw detail). */
+  noticeRaw: string | null;
   /** Chat display preferences. */
   prefs: ChatPrefs;
   /** Extensions that provide tool integrations. */
@@ -415,6 +422,7 @@ export function createInitialArchState(): ArchState {
       backendReady: false,
       notice: null,
       noticeKind: null,
+      noticeRaw: null,
       prefs: { ...DEFAULT_CHAT_PREFS },
       availableExtensions: [],
       showOutcomeDialogBySession: {},

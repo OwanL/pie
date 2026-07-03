@@ -109,6 +109,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         <NoticeBanner
           notice={viewState.notice}
           kind={viewState.noticeKind}
+          rawDetail={viewState.noticeRaw}
           onAction={handleNoticeAction}
           onDismiss={() => postMessage({ type: 'dismissNotice' })}
         />

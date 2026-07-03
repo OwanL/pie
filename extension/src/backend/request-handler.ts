@@ -423,14 +423,32 @@ async function handleMessageInterrupt(
   if (context.activeRequest) {
     context.activeRequest.aborted = true;
   }
+  const abortRequestId = context.activeRequest?.id;
   context.uiBridge?.cancelAll();
-  void context.session.abort().catch((error: unknown) => {
-    deps.emit('error', {
-      code: 'MESSAGE_INTERRUPT_FAILED',
-      message: toErrorMessage(error),
-      requestId: context.activeRequest?.id,
-    } satisfies ErrorPayload);
-  });
+  void context.session.abort()
+    .catch((error: unknown) => {
+      deps.emit('error', {
+        code: 'MESSAGE_INTERRUPT_FAILED',
+        message: toErrorMessage(error),
+        requestId: context.activeRequest?.id,
+      } satisfies ErrorPayload);
+    })
+    .finally(() => {
+      // Defensive clear: the SDK normally fires `turn_end` after abort, which
+      // clears `activeRequest` via the session-event handler. But if the SDK
+      // never fires `turn_end` (e.g. a hung provider connection that abort
+      // couldn't tear down, or an abort that rejected without a turn-end
+      // event), `activeRequest` would stay set forever — leaving the session
+      // permanently blocked from sending or live-switching models. Clear it
+      // here once the abort promise settles AND the session has actually
+      // stopped streaming, so we never clobber a still-streaming turn that
+      // abort() failed to stop. The session-event handler's own `turn_end`
+      // clear is idempotent with this (it's an `undefined` re-assignment).
+      if (!context.session.isStreaming && context.activeRequest?.id === abortRequestId) {
+        context.activeRequest = undefined;
+        deps.emitBusyChanged(context, false);
+      }
+    });
   return { interrupted: true };
 }
 

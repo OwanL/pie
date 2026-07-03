@@ -2071,10 +2071,48 @@ test('reducer: handleError strips internal req-NN ids from the notice (Brief H c
   // A transcript-paging RPC timeout carries `req-NN`; the raw error must not
   // surface verbatim. handleError routes through stripReqIds (shared with
   // revertSetModel's `Failed to set model: …` notice).
-  const result = reducer(initialArchState, { kind: 'Error', error: 'Failed to load transcript page: Timed out waiting for response to req-99', sessionPath: '/s' } as any);
+  const error = 'Failed to load transcript page: Timed out waiting for response to req-99';
+  const result = reducer(initialArchState, { kind: 'Error', error, sessionPath: '/s' } as any);
   assert.ok(result.state.settings.notice, 'an error notice is set');
   assert.ok(!result.state.settings.notice!.includes('req-99'), 'no internal req-NN id reaches the user');
   assert.match(result.state.settings.notice!, /load transcript/, 'the plain-language problem is still named');
+  // The verbatim error (with req-NN) is retained as noticeRaw so the webview
+  // can reveal it via a 'show more' affordance, without leaking into the
+  // short summary.
+  assert.equal(result.state.settings.noticeRaw, error, 'noticeRaw carries the unredacted error');
+  assert.ok(result.state.settings.noticeRaw!.includes('req-99'), 'the raw detail keeps the req-NN id');
+});
+
+test('reducer: handleDismissNotice clears notice, noticeKind, and noticeRaw together', () => {
+  const errorState: ArchState = {
+    ...initialArchState,
+    settings: {
+      ...initialArchState.settings,
+      notice: 'The model took too long to start this turn.',
+      noticeKind: 'send-timeout' as any,
+      noticeRaw: 'Timed out waiting for response to req-42',
+    },
+  };
+  const result = reducer(errorState, { kind: 'Command', cmd: { kind: 'DismissNotice' } } as any);
+  assert.equal(result.state.settings.notice, null);
+  assert.equal(result.state.settings.noticeKind, null);
+  assert.equal(result.state.settings.noticeRaw, null, 'noticeRaw is cleared alongside the notice');
+});
+
+test('reducer: handleNoticeShown clears noticeRaw for plain info notices (no raw detail to reveal)', () => {
+  const errorState: ArchState = {
+    ...initialArchState,
+    settings: {
+      ...initialArchState.settings,
+      notice: 'The model took too long to start this turn.',
+      noticeKind: 'send-timeout' as any,
+      noticeRaw: 'Timed out waiting for response to req-42',
+    },
+  };
+  const result = reducer(errorState, { kind: 'NoticeShown', notice: 'A plain info banner.' } as any);
+  assert.equal(result.state.settings.notice, 'A plain info banner.');
+  assert.equal(result.state.settings.noticeKind, null);
+  assert.equal(result.state.settings.noticeRaw, null, 'a plain notice carries no raw detail');
 });
 
 // ─── Brief C: optimistic lifecycle for composer inputs (pasted-image stickiness) ─

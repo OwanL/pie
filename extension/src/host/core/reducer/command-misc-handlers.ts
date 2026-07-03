@@ -215,6 +215,7 @@ export function handleDismissNotice(state: ArchState, _cmd: Extract<Command, { k
     state: produce(state, (draft) => {
       draft.settings.notice = null;
       draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
     }),
     effects: [],
   };

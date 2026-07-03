@@ -71,8 +71,11 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
       settings: {
         ...state.settings,
         // Brief H: strip any internal req-NN before surfacing (transcript-paging
-        // RPC timeouts carry req-NN). The raw error is logged host-side.
+        // RPC timeouts carry req-NN). The raw, unredacted error is retained as
+        // `noticeRaw` so the webview can reveal it via 'show more', and is still
+        // logged host-side.
         notice: stripReqIds(event.error),
+        noticeRaw: event.error ?? null,
       },
     },
     effects: [],
@@ -87,6 +90,9 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
       // prior error kind so a stale kind doesn't outlive its notice
       // (Brief H invariant: noticeKind non-null only for H-category errors).
       draft.settings.noticeKind = null;
+      // Plain notices also carry no raw backend error — clear any prior raw
+      // detail so a stale 'show more' doesn't outlive its notice.
+      draft.settings.noticeRaw = null;
     }),
     effects: [],
   };

@@ -124,11 +124,13 @@ export function revertSetModel(state: ArchState, corrId: string, error: string |
   // user (Brief H criterion 1: no req-NN leaks). `settings.set` RPC timeouts
   // carry req-NN; the raw error is still logged host-side via the Log effect.
   const notice = `Failed to set model: ${stripReqIds(error ?? 'unknown error')}`;
+  const raw = error ?? null;
   if (!pending.snapshot) {
     return produce(state, (draft) => {
       delete draft.pending.setModelByCorrId[corrId];
       draft.settings.notice = notice;
       draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = raw;
     });
   }
   const snap = pending.snapshot;
@@ -161,6 +163,7 @@ export function revertSetModel(state: ArchState, corrId: string, error: string |
     delete draft.pending.setModelByCorrId[corrId];
     draft.settings.notice = notice;
     draft.settings.noticeKind = null;
+    draft.settings.noticeRaw = raw;
   });
 }
 

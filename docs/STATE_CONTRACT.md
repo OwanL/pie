@@ -105,3 +105,11 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 - **optimistic user message overlay** — pending user messages shown instantly before the host confirms them. The webview generates a `localId`, sends it with the `send` protocol message, and displays the message in the transcript immediately. When the host state arrives containing a message with that `localId`, the optimistic overlay entry is reconciled away. On `sendRejected`, the overlay entry is removed and the draft is restored.
 
 All other state (editing, outcome dialogs, draft content, session selection, model settings, prefs) lives in the host store and reaches the webview via ViewState snapshots.
+
+## Notice Surfacing
+
+- The host owns a single global notice triple in `settings`: `notice` (short, user-facing summary, `string | null`), `noticeKind` (Brief H failure category for recovery buttons, `NoticeKind | null`), and `noticeRaw` (the verbatim, unredacted backend error string, `string | null`).
+- The short `notice` summary **never** contains internal `req-NN` correlation ids (Brief H criterion 1). `noticeRaw` **does** retain them verbatim so the webview can reveal the full error via a "show raw" affordance for debugging.
+- Invariant: `noticeRaw` is non-null only when `notice` is an error notice (set at the send/edit/prepass error sites, `handleError`, and `revertSetModel`). Plain `NoticeShown` notices (info/warnings, including `notice: null` clears) always set `noticeRaw = null` so a stale "show raw" can't outlive its notice.
+- `dismissNotice` clears all three together. A non-error `NoticeShown` clears `noticeKind` and `noticeRaw` together (a plain info banner carries no recovery actions and no raw detail).
+- The projection surfaces all three as `ViewState.notice`, `ViewState.noticeKind`, and `ViewState.noticeRaw`. The webview's `NoticeBanner` renders the short summary, recovery action buttons (from `kind`), and — when `noticeRaw` differs from `notice` — a "Show raw" toggle that reveals the verbatim error in a scrollable monospaced block.

@@ -324,6 +324,84 @@ test('message.interrupt validates running state and reports abort failures', asy
   });
 });
 
+test('message.interrupt defensively clears a stuck activeRequest when abort settles and streaming has stopped', async () => {
+  // Reproduces the stuck-session bug: the SDK never fires `turn_end` (e.g. a
+  // hung provider connection), so `activeRequest` would stay set forever and
+  // block sends + live model switches. The interrupt's `.finally` clears it
+  // once the abort promise settles AND the session has actually stopped
+  // streaming, never clobbering a still-streaming turn.
+  let abortResolve: (() => void) | undefined;
+  const harness = createHarness({
+    context: {
+      activeRequest: { id: 'req-stuck', messageIndex: 0, aborted: false },
+    },
+    sessionOverrides: {
+      isStreaming: true,
+      abort: () => new Promise<void>((resolve) => { abortResolve = resolve; }),
+    },
+  });
+
+  const interrupted = await handleBackendRequest(harness.deps, {
+    id: '1',
+    method: 'message.interrupt',
+    params: { sessionPath: '/repo/session.jsonl' },
+  });
+  assert.deepEqual(interrupted, { interrupted: true });
+  assert.equal(harness.context.activeRequest?.aborted, true);
+
+  // Simulate the provider tearing down the stream after abort resolves.
+  (harness.context.session as unknown as { isStreaming: boolean }).isStreaming = false;
+  abortResolve!();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // The defensive clear fired: activeRequest is gone and busy=false emitted.
+  assert.equal(harness.context.activeRequest, undefined);
+  assert.equal(harness.busyEvents.at(-1), false);
+
+  // A subsequent settings.set carrying a different model is no longer blocked
+  // by the stale REQUEST_IN_PROGRESS — the live switch proceeds.
+  const updated = await handleBackendRequest(harness.deps, {
+    id: '2',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      defaultModel: 'model-b',
+      defaultThinkingLevel: 'high',
+    },
+  });
+  assert.deepEqual(updated, { defaultModel: 'model-b', defaultThinkingLevel: 'high' });
+  assert.equal((harness.context.session.model as { id: string }).id, 'model-b');
+});
+
+test('message.interrupt defensive clear does not clobber a still-streaming turn when abort resolves but streaming continues', async () => {
+  // abort() resolved but the session is still streaming (abort couldn't stop
+  // it). The defensive clear must NOT touch activeRequest — the session-event
+  // handler's own `turn_end` clear still owns that path.
+  let abortResolve: (() => void) | undefined;
+  const harness = createHarness({
+    context: {
+      activeRequest: { id: 'req-streaming', messageIndex: 0, aborted: false },
+    },
+    sessionOverrides: {
+      isStreaming: true,
+      abort: () => new Promise<void>((resolve) => { abortResolve = resolve; }),
+    },
+  });
+
+  await handleBackendRequest(harness.deps, {
+    id: '1',
+    method: 'message.interrupt',
+    params: { sessionPath: '/repo/session.jsonl' },
+  });
+
+  // Streaming continues after abort resolves.
+  abortResolve!();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // activeRequest is preserved (turn_end will clear it later).
+  assert.equal(harness.context.activeRequest?.id, 'req-streaming');
+});
+
 test('session.truncateAfter rewrites the file and recreates the session context', async () => {
   await withTempDir(async (dir) => {
     const sessionPath = path.join(dir, 'session.jsonl');

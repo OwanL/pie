@@ -109,6 +109,10 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     if (mapped) {
       draft.settings.notice = mapped.message;
       draft.settings.noticeKind = mapped.kind;
+      // Surface the verbatim error (including any req-NN ids) as the raw
+      // detail behind the short summary, so the webview can reveal it via
+      // a 'show more' affordance. null when there is no upstream error.
+      draft.settings.noticeRaw = event.error ?? null;
     }
     // Restore composer inputs from the send-time snapshot so a retry can
     // re-send them (no data loss). Inputs were cleared at send time (handleSend);
@@ -225,6 +229,7 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     const preflightMapped = mapPreflightError(event.error, snapshot.kind);
     draft.settings.notice = preflightMapped.message;
     draft.settings.noticeKind = preflightMapped.kind;
+    draft.settings.noticeRaw = event.error ?? null;
     // Restore session summary if the optimistic send had renamed it
     if (snapshot.previousSummary) {
       const idx = draft.sessions.sessions.findIndex((s) => s.path === snapshot.previousSummary!.path);
@@ -283,6 +288,7 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
     if (editMapped) {
       draft.settings.notice = editMapped.message;
       draft.settings.noticeKind = editMapped.kind;
+      draft.settings.noticeRaw = event.error ?? null;
     }
     // Brief F: edit rejected pre-ack — clear any prepass chip (idle).
     delete draft.pending.prepassBySession[pending.sessionPath];

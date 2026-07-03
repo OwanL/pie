@@ -390,6 +390,7 @@ function projectViewState(state: ArchState): ViewState {
     busy,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
+    noticeRaw: settings.noticeRaw,
     backendReady: settings.backendReady,
     workspaceCwd: sessions.workspaceCwd,
     systemPrompts: activeSystemPrompts,
