@@ -322,7 +322,46 @@ export class EffectRunner {
    * completion; this preserves the no-re-entrant-blocking invariant.
    */
   run(effect: Effect): void {
+    this.logEffectDispatch(effect);
     this.handlers[effect.kind](effect);
+  }
+
+  /**
+   * Emit a lightweight breadcrumb for every effect that enters the runner.
+   * This is intentionally centralized so runtime-audit mode can answer
+   * "what did the reducer ask the side-effect layer to do" without adding
+   * bespoke logs to every individual handler.
+   */
+  private logEffectDispatch(effect: Effect): void {
+    const payload: Record<string, unknown> = { kind: effect.kind };
+    if ('corrId' in effect) payload.corrId = effect.corrId;
+    if ('sessionPath' in effect) payload.sessionPath = effect.sessionPath;
+
+    switch (effect.kind) {
+      case 'DrainPendingSendQueue':
+        payload.entries = effect.entries.length;
+        payload.resolvedSessionPath = effect.resolvedSessionPath;
+        break;
+      case 'DrainBackendReadyQueue':
+        payload.entries = effect.entries.length;
+        break;
+      case 'StartBackendReadyWatchdog':
+        payload.timeoutMs = effect.timeoutMs;
+        break;
+      case 'PersistTabs':
+        payload.openTabs = effect.openTabPaths.length;
+        payload.pinnedTabs = effect.pinnedTabPaths.length;
+        payload.hasActiveSession = !!effect.activeSessionPath;
+        break;
+      case 'SetPrefsRpc':
+        payload.prefKeys = Object.keys(effect.prefs);
+        break;
+      case 'SetPruningSettings':
+        payload.settingKeys = Object.keys(effect.settings);
+        break;
+    }
+
+    this.deps.log.log('info', 'effect.dispatch', payload);
   }
 
   // ─── Template rows ────────────────────────────────────────────────────────
@@ -560,7 +599,7 @@ export class EffectRunner {
    *  result; catch: `log.log('error',…)` swallow. */
   private handleHydrateModel(effect: HydrateModelEffect): void {
     // Fire-and-forget, like PostImperative: the service's dispatched
-    // SetModel/AvailableModelsChanged events apply the results, so no
+    // ModelSettingsHydrated/AvailableModelsChanged events apply the results, so no
     // *Result event is produced here.
     void (async () => {
       try {

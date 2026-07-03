@@ -112,14 +112,34 @@ export class SessionMessageActions {
         this.backend.request<ModelSettings>('settings.get'),
         this.backend.request<ModelInfo[]>('models.list', { sessionPath }),
       ]);
-      this.dispatchArch({ kind: 'Command', cmd: { kind: 'SetModel', corrId: `hydrate:${Date.now()}`, sessionPath, modelSettings } });
-      const existing = this.getArchState().settings.availableModelsBySession[sessionPath] ?? [];
+
+      // Sync the global `modelSettings` (persisted default model + thinking
+      // level) read-only from the backend. This is a HYDRATE, not a user model
+      // switch: it must not touch the focused session's live model or persist
+      // anything, so we dispatch `ModelSettingsHydrated` (read-only ArchState
+      // update) instead of `SetModel`. The previous implementation dispatched
+      // `SetModel` whenever the session's per-session model differed from the
+      // global default — a legitimate state (a session can run a non-default
+      // model) — which then ran `settings.set` with `isChangingModel=true`,
+      // tripping the backend's busy-session guard with a spurious
+      // REQUEST_IN_PROGRESS error while a turn was streaming, and would have
+      // clobbered the session's per-session model on top of that.
+      const archState = this.getArchState();
+      const currentSettings = archState.settings.modelSettings;
+      const settingsInSync = currentSettings
+        && currentSettings.defaultModel === modelSettings.defaultModel
+        && currentSettings.defaultThinkingLevel === modelSettings.defaultThinkingLevel;
+      if (!settingsInSync) {
+        this.dispatchArch({ kind: 'ModelSettingsHydrated', modelSettings });
+      }
+
+      const existing = archState.settings.availableModelsBySession[sessionPath] ?? [];
       if (models.length > 0 || existing.length === 0) {
         this.dispatchArch({ kind: 'AvailableModelsChanged', sessionPath, models });
       }
       this.scheduleRender();
     } catch (err) {
-      auditLog(this.context, 'session-service', 'hydrateModelState.failed', { error: toErrorMessage(err) });
+      auditLog('session-service', 'hydrateModelState.failed', { error: toErrorMessage(err) });
     }
   }
 

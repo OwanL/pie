@@ -6,6 +6,7 @@ import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, 
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
+import { showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
 import { resolveSettingsPath } from '../session-service/pruning-settings';
 
@@ -220,7 +221,7 @@ export class MessageRouter {
     if (activeSessionPath) {
       // Phase 2: route through the CQRS reducer + effect runner instead of
       // calling the service directly. The HydrateModel effect is fire-and-forget;
-      // the service's dispatched SetModel/AvailableModelsChanged events apply
+      // the service's dispatched ModelSettingsHydrated/AvailableModelsChanged events apply
       // the results.
       this.dispatchEvent({
         kind: 'Command',
@@ -672,7 +673,7 @@ export class MessageRouter {
    *  is created lazily on first request and reused. Pure side effect: no
    *  reducer event, no notice change. */
   private onShowLogs(): void {
-    getPieLogChannel().show(true);
+    showPieLogs(true);
   }
 
   /** `openSettings` — open the pruning settings file (`settings.json` in
@@ -751,16 +752,4 @@ export class MessageRouter {
     if (!path) return null;
     return this.getArchState().sessions.sessions.find(s => s.path === path) ?? null;
   }
-}
-
-// ── Brief H: lazy singleton OutputChannel for the "Show logs" action ─────────
-// Created on first `showLogs` request; revealed (not recreated) after. Module-
-// scoped so it persists across webview messages for the extension lifetime.
-let pieLogChannel: vscode.OutputChannel | undefined;
-
-function getPieLogChannel(): vscode.OutputChannel {
-  if (!pieLogChannel) {
-    pieLogChannel = vscode.window.createOutputChannel('pie');
-  }
-  return pieLogChannel;
 }

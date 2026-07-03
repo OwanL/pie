@@ -7,9 +7,35 @@ import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { modelSupportsInputKind } from '../model-capability.js';
 import { applySetModelOptimistic } from './set-model-handlers.js';
 
+function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettings: { defaultModel?: string; defaultThinkingLevel?: string }): boolean {
+  const currentSettings = state.settings.modelSettings;
+  const currentSummary = state.sessions.sessions.find((session) => session.path === sessionPath);
+  if (!currentSettings) {
+    return false;
+  }
+
+  const settingsMatch =
+    currentSettings.defaultModel === modelSettings.defaultModel
+    && currentSettings.defaultThinkingLevel === modelSettings.defaultThinkingLevel;
+  if (!settingsMatch) {
+    return false;
+  }
+
+  // If the session summary has not been hydrated with its per-session model
+  // badge yet (or the badge is missing), there is nothing to correct — treat
+  // it as in-sync so a refresh-state event doesn't force a spurious
+  // settings.set.
+  if (!currentSummary || currentSummary.modelId === undefined) {
+    return true;
+  }
+
+  return currentSummary.modelId === modelSettings.defaultModel
+    && currentSummary.thinkingLevel === modelSettings.defaultThinkingLevel;
+}
+
 export function handleHydrateModel(state: ArchState, cmd: Extract<Command, { kind: 'HydrateModel' }>): ReducerResult {
   // No state change: emit a fire-and-forget effect. The runner calls the
-  // service; the service's dispatched SetModel/AvailableModelsChanged
+  // service; the service's dispatched ModelSettingsHydrated/AvailableModelsChanged
   // events apply the results, so no *Result event is produced here.
   return {
     state,
@@ -36,6 +62,13 @@ export function handleSetModel(state: ArchState, cmd: Extract<Command, { kind: '
   if (guardNotice) {
     return {
       state: { ...state, settings: { ...state.settings, notice: guardNotice } },
+      effects: [],
+    };
+  }
+
+  if (isNoOpModelSelection(state, sessionPath, modelSettings)) {
+    return {
+      state,
       effects: [],
     };
   }

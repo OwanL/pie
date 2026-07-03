@@ -53,6 +53,7 @@ import {
   handleAnalyticsFactorsChanged,
   handleTabOpened,
   handleOpenTabsChanged,
+  handleSessionsInterrupted,
 } from './reducer/session-handlers.js';
 import {
   handleCustomMessage,
@@ -84,7 +85,7 @@ import {
   handleAvailableExtensionsChanged,
   handleAssistantMessageErrorStamped,
 } from './reducer/host-handlers.js';
-import { handleAvailableModelsChanged } from './reducer/set-model-handlers.js';
+import { handleAvailableModelsChanged, handleModelSettingsHydrated } from './reducer/set-model-handlers.js';
 import { handleFileChangesUpdated } from './reducer/file-handlers.js';
 import {
   handleActiveRunSummaryChanged,
@@ -201,6 +202,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleAvailableModelsChanged(state, event);
     }
 
+    case 'ModelSettingsHydrated': {
+      return handleModelSettingsHydrated(state, event);
+    }
+
     case 'PendingExtensionUIRequestsCleared': {
       return handlePendingExtensionUIRequestsCleared(state, event);
     }
@@ -231,6 +236,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'RunningSessionsChanged': {
       return handleRunningSessionsChanged(state, event);
+    }
+
+    case 'SessionsInterrupted': {
+      return handleSessionsInterrupted(state, event);
     }
 
     case 'UnreadFinishedSessionsChanged': {

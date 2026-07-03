@@ -185,3 +185,28 @@ export function handleAvailableModelsChanged(
     effects: [],
   };
 }
+
+/** Read-only sync of the global `modelSettings` from the backend (hydrate).
+ *  Updates only `state.settings.modelSettings` — no per-session badge change,
+ *  no `SetModelRpc`, no persistence. See `ModelSettingsHydratedEvent`. */
+export function handleModelSettingsHydrated(
+  state: ArchState,
+  event: Extract<Event, { kind: 'ModelSettingsHydrated' }>,
+): ReducerResult {
+  const current = state.settings.modelSettings;
+  if (current
+    && current.defaultModel === event.modelSettings.defaultModel
+    && current.defaultThinkingLevel === event.modelSettings.defaultThinkingLevel) {
+    return { state, effects: [] };
+  }
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        modelSettings: event.modelSettings,
+      },
+    },
+    effects: [],
+  };
+}

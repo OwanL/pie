@@ -14,6 +14,7 @@
  */
 
 import type { Command } from './commands';
+import type { NoticeKind } from '../../shared/error-mapping';
 import type {
   ChatMessage,
   ToolCall,
@@ -29,6 +30,7 @@ import type {
   ModelInfo,
   ComposerInput,
   TranscriptWindow,
+  ModelSettings,
 } from '../../shared/protocol';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -295,6 +297,8 @@ export interface MessageAbortedEvent {
   kind: 'MessageAborted';
   sessionPath: string;
   messageId?: string;
+  userInitiated?: boolean;
+  reason?: string;
 }
 
 export interface ToolCallEvent {
@@ -354,6 +358,8 @@ export interface ExtensionUIRequestEvent {
 export interface NoticeShownEvent {
   kind: 'NoticeShown';
   notice: string | null;
+  noticeKind?: NoticeKind | null;
+  noticeRaw?: string | null;
 }
 
 /** Emitted when the backend reports an error. */
@@ -462,6 +468,20 @@ export interface SessionMetadataChangedEvent {
   sessionPath: string;
   modelId?: string;
   thinkingLevel?: ChatMessage['thinkingLevel'];
+}
+
+/** Emitted by `hydrateModelState` to sync the global `modelSettings` (the
+ *  persisted default model + thinking level) read-only from the backend into
+ *  ArchState. Unlike `SetModel`, this does NOT switch the focused session's
+ *  live model, touch the per-session model badge, or persist anything — it
+ *  only corrects ArchState's global default when `settings.get` reports a
+ *  value ArchState doesn't have yet (e.g. startup before `SessionOpened`, or
+ *  an external default change). The per-session badge stays as the session
+ *  summary's `modelId`, which is the source of truth for which model a given
+ *  session is actually running. */
+export interface ModelSettingsHydratedEvent {
+  kind: 'ModelSettingsHydrated';
+  modelSettings: ModelSettings;
 }
 
 /** Emitted when available models for a session change. */
@@ -581,6 +601,32 @@ export interface OpenTabsChangedEvent {
   pinnedTabPaths?: string[];
 }
 
+/**
+ * Emitted when one or more sessions were interrupted by something other than
+ * an explicit user action (Stop button / edit-while-streaming). Today the only
+ * producer is the backend `onExit` handler in `attach.ts`: when the PI backend
+ * process dies while sessions are running, no per-session `message.aborted`
+ * event ever fires (the backend is gone), so without this event those sessions'
+ * streaming assistant messages would stay `status: 'streaming'` forever and
+ * the user would see only a generic "PI backend stopped" notice with no
+ * per-session alert naming which sessions were interrupted.
+ *
+ * The reducer marks every still-streaming assistant message in each listed
+ * session `interrupted` and stamps `errorDetail` with the supplied reason, so
+ * the user is alerted inline in each affected tab AND via the global notice.
+ *
+ * `userInitiated` is false by construction — this event is never dispatched
+ * for user-initiated interrupts (those go through `MessageAborted` with
+ * `userInitiated: true`, which suppresses the alert path).
+ */
+export interface SessionsInterruptedEvent {
+  kind: 'SessionsInterrupted';
+  /** Session paths that were running when the interrupt occurred. */
+  sessionPaths: string[];
+  /** Plain-language reason shown to the user (e.g. backend exit detail). */
+  reason: string;
+}
+
 export type BackendEvent =
   | MessageStartedEvent
   | MessageAbortedEvent
@@ -619,6 +665,7 @@ export type HostEvent =
   | ActiveRunSummaryChangedEvent
   | SessionMetadataChangedEvent
   | AvailableModelsChangedEvent
+  | ModelSettingsHydratedEvent
   | PendingExtensionUIRequestsClearedEvent
   | AnalyticsFactorsChangedEvent
   | AvailableExtensionsChangedEvent
@@ -633,6 +680,7 @@ export type HostEvent =
   | SessionScopeClearedEvent
   | TabOpenedEvent
   | OpenTabsChangedEvent
-  | PreflightFailedEvent;
+  | PreflightFailedEvent
+  | SessionsInterruptedEvent;
 
 export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;
