@@ -1,7 +1,7 @@
 {
-  "defaultModel": "umans-glm-5.2",
+  "defaultModel": "glm-5.2:cloud",
   "defaultThinkingLevel": "high",
-  "defaultProvider": "umans",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -11,13 +11,14 @@
       "maxRetryDelayMs": 60000
     }
   },
+  "httpIdleTimeoutMs": 0,
   "packages": [
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
     "model": "gpt-5-mini",
     "provider": "github-copilot",
-    "thinkingLevel": "medium",
+    "thinkingLevel": "low",
     "tools": {
       "alwaysKeep": [
         "ask_user",
@@ -37,7 +38,7 @@
       ]
     }
   },
-  "lastChangelogVersion": "0.78.0",
+  "lastChangelogVersion": "0.80.2",
   "subagent": {
     "confirmProjectAgents": false
   },
