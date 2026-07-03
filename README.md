@@ -49,14 +49,15 @@ chmod +x install.sh
 Both installers are idempotent and safe to re-run. On each run they:
 
 1. **Set `PI_CODING_AGENT_DIR`** to the repo root (User env var on Windows; shell rc on macOS/Linux) so the `pi` CLI reads `settings.json` and `models.json` from here.
-2. **Install `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally if the `pi` command is not on PATH.
-3. **Relocate `auth.json`** out of the working tree into a secure OS user-data directory (`%LOCALAPPDATA%\pie\` on Windows; `~/.config/pie/` or `~/Library/Application Support/pie/` on macOS/Linux) and set `PI_CODING_AGENT_AUTH_DIR`.
-4. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
-5. **Write `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
-6. **Repair extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
-7. **Migrate session history** from legacy `~/.pi/agent/sessions/` into `data/outcomes/sessions/` (Windows only; planned for macOS/Linux).
-8. **Build and install the pie VS Code extension** from `extension/` via `vsce package` + `code --install-extension`.
-9. **Run a post-install verification** that checks auth content, `pie.agentDir`, and env vars, and warns about split-brain or missing credentials.
+2. **Pin `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` on Windows so standalone `pi` writes session JSONL to the repo-local store even when launched from an arbitrary working directory such as `C:\Windows\System32`.
+3. **Install `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally if the `pi` command is not on PATH.
+4. **Relocate `auth.json`** out of the working tree into a secure OS user-data directory (`%LOCALAPPDATA%\pie\` on Windows; `~/.config/pie/` or `~/Library/Application Support/pie/` on macOS/Linux) and set `PI_CODING_AGENT_AUTH_DIR`.
+5. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
+6. **Write `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
+7. **Repair extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
+8. **Migrate session history** from legacy `~/.pi/agent/sessions/` into `data/outcomes/sessions/` (Windows only; planned for macOS/Linux).
+9. **Build and install the pie VS Code extension** from `extension/` via `vsce package` + `code --install-extension`.
+10. **Run a post-install verification** that checks auth content, `pie.agentDir`, and env vars, and warns about split-brain or missing credentials.
 
 The macOS/Linux script (`install.sh`) is intentionally lighter: it covers steps 1–5 and 9. Full feature parity (session migration, sessionDir repair, VSIX packaging) is planned — see [docs/internal/code-review/TODO-archive.md](docs/internal/code-review/TODO-archive.md).
 
@@ -192,7 +193,7 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 
 ## Persistence and storage
 
-- PI session history is stored as canonical JSONL under this checkout's local `data/outcomes/sessions/` once `PI_CODING_AGENT_DIR` points here.
+- PI session history is stored as canonical JSONL under this checkout's local `data/outcomes/sessions/`. On Windows, `install.ps1` also pins `PI_CODING_AGENT_SESSION_DIR` to that absolute path so standalone `pi` does not fall back to the shell's current working directory.
 - `data/` is git-ignored. It is local runtime data, not part of the portable repo/config state.
 - `install.ps1` migrates legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`), repairs reachable absolute / `~`-based legacy `sessionDir` overrides, prefers newer transcripts on conflict, and preserves the loser as `.conflict.*.bak`.
 - Relative `sessionDir` overrides cannot be repaired safely by the installer and need manual cleanup.

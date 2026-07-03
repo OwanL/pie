@@ -384,6 +384,15 @@ if (-not $sessionDirOverride) {
 }
 if ($sessionDirOverride) {
   Write-Warning "PI_CODING_AGENT_SESSION_DIR is set to '$sessionDirOverride'. Clear it if you want PI to keep using the local sessions directory at '$newSessions'."
+} else {
+  [System.Environment]::SetEnvironmentVariable(
+    'PI_CODING_AGENT_SESSION_DIR',
+    $newSessions,
+    [System.EnvironmentVariableTarget]::User
+  )
+  $env:PI_CODING_AGENT_SESSION_DIR = $newSessions
+  $sessionDirOverride = $newSessions
+  Write-Host "==> Set PI_CODING_AGENT_SESSION_DIR to '$newSessions' so standalone 'pi' uses the local session store from any working directory"
 }
 
 $hasRepoSessions = Test-DirectoryHasJsonlFiles $newSessions
