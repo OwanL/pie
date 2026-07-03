@@ -470,28 +470,37 @@ async function handleSettingsSet(
   const { sessionPath, ...settingsUpdates } = params;
   const previousSettings = await deps.readModelSettings();
   const targetContext = sessionPath ? await deps.ensureSessionContext(sessionPath) : undefined;
+  const currentModelId = targetContext?.session.model?.id ?? previousSettings.defaultModel;
+  const isChangingModel = !!params.defaultModel && params.defaultModel !== currentModelId;
+
+  if (isChangingModel && targetContext && (targetContext.activeRequest || targetContext.session.isStreaming)) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model while a request is in progress for this session.');
+  }
+
   const result = await deps.writeModelSettings(settingsUpdates);
 
   try {
     if (params.defaultModel && targetContext) {
-      const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
-      const info = available.find((model) => model.id === params.defaultModel);
-      if (!info) {
-        throw new BackendError('MODEL_UNAVAILABLE', `Model not available in this session: ${params.defaultModel}`);
-      }
+      if (isChangingModel) {
+        const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
+        const info = available.find((model) => model.id === params.defaultModel);
+        if (!info) {
+          throw new BackendError('MODEL_UNAVAILABLE', `Model not available in this session: ${params.defaultModel}`);
+        }
 
-      const resolvedModel = targetContext.runtime.services.modelRegistry.find(info.provider, info.id);
-      if (!resolvedModel) {
-        throw new BackendError('MODEL_UNAVAILABLE', `Could not resolve model in registry: ${params.defaultModel}`);
-      }
+        const resolvedModel = targetContext.runtime.services.modelRegistry.find(info.provider, info.id);
+        if (!resolvedModel) {
+          throw new BackendError('MODEL_UNAVAILABLE', `Could not resolve model in registry: ${params.defaultModel}`);
+        }
 
-      if (typeof targetContext.session.setModel !== 'function') {
-        throw new BackendError('MODEL_SWITCH_UNSUPPORTED', 'This PI session does not support live model switching.');
-      }
+        if (typeof targetContext.session.setModel !== 'function') {
+          throw new BackendError('MODEL_SWITCH_UNSUPPORTED', 'This PI session does not support live model switching.');
+        }
 
-      await targetContext.session.setModel(resolvedModel);
-      if (targetContext.session.model?.id !== params.defaultModel) {
-        throw new BackendError('MODEL_SWITCH_FAILED', `Live model switch did not take effect: ${params.defaultModel}`);
+        await targetContext.session.setModel(resolvedModel);
+        if (targetContext.session.model?.id !== params.defaultModel) {
+          throw new BackendError('MODEL_SWITCH_FAILED', `Live model switch did not take effect: ${params.defaultModel}`);
+        }
       }
 
       if (params.defaultThinkingLevel) {

@@ -406,6 +406,122 @@ test('settings.set applies live model changes and rolls back persisted settings 
   ]);
 });
 
+test('settings.set rejects live model switch while a session is busy', async () => {
+  for (const busyState of ['activeRequest', 'streaming'] as const) {
+    let setModelCalls = 0;
+    const harness = createHarness({
+      context: busyState === 'activeRequest'
+        ? {
+          activeRequest: {
+            id: 'req-active',
+            messageIndex: 0,
+            aborted: false,
+          },
+        }
+        : undefined,
+      sessionOverrides: {
+        ...(busyState === 'streaming' ? { isStreaming: true } : {}),
+        setModel: async () => {
+          setModelCalls++;
+        },
+      },
+    });
+
+    await assert.rejects(
+      async () => await handleBackendRequest(harness.deps, {
+        id: `settings-set-${busyState}`,
+        method: 'settings.set',
+        params: {
+          sessionPath: '/repo/session.jsonl',
+          defaultModel: 'model-b',
+        },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === 'REQUEST_IN_PROGRESS',
+    );
+
+    assert.equal(setModelCalls, 0);
+    assert.equal((harness.context.session.model as { id: string }).id, 'model-a');
+    assert.deepEqual(harness.writtenSettings, []);
+    assert.deepEqual(harness.emitContextUsageChangedCalls, []);
+  }
+});
+
+test('settings.set does not reject when defaultModel is unchanged while a session is busy', async () => {
+  for (const busyState of ['activeRequest', 'streaming'] as const) {
+    const harness = createHarness({
+      context: busyState === 'activeRequest'
+        ? {
+          activeRequest: {
+            id: 'req-active',
+            messageIndex: 0,
+            aborted: false,
+          },
+        }
+        : undefined,
+      sessionOverrides: {
+        ...(busyState === 'streaming' ? { isStreaming: true } : {}),
+      },
+    });
+
+    const updated = await handleBackendRequest(harness.deps, {
+      id: `settings-set-same-${busyState}`,
+      method: 'settings.set',
+      params: {
+        sessionPath: '/repo/session.jsonl',
+        defaultModel: 'model-a',
+        defaultThinkingLevel: 'high',
+      },
+    });
+
+    assert.deepEqual(updated, { defaultModel: 'model-a', defaultThinkingLevel: 'high' });
+    assert.equal((harness.context.session.model as { id: string }).id, 'model-a');
+    assert.equal(harness.context.session.thinkingLevel, 'high');
+    assert.deepEqual(harness.writtenSettings, [{ defaultModel: 'model-a', defaultThinkingLevel: 'high' }]);
+    assert.equal(harness.emitContextUsageChangedCalls.length, 1);
+  }
+});
+
+test('settings.set does not reject when requested model matches the running session model while a session is busy', async () => {
+  for (const busyState of ['activeRequest', 'streaming'] as const) {
+    let setModelCalls = 0;
+    const harness = createHarness({
+      modelSettings: { defaultModel: 'model-b', defaultThinkingLevel: 'medium' },
+      context: busyState === 'activeRequest'
+        ? {
+          activeRequest: {
+            id: 'req-active',
+            messageIndex: 0,
+            aborted: false,
+          },
+        }
+        : undefined,
+      sessionOverrides: {
+        ...(busyState === 'streaming' ? { isStreaming: true } : {}),
+        setModel: async () => {
+          setModelCalls++;
+        },
+      },
+    });
+
+    const updated = await handleBackendRequest(harness.deps, {
+      id: `settings-set-runtime-match-${busyState}`,
+      method: 'settings.set',
+      params: {
+        sessionPath: '/repo/session.jsonl',
+        defaultModel: 'model-a',
+        defaultThinkingLevel: 'high',
+      },
+    });
+
+    assert.deepEqual(updated, { defaultModel: 'model-a', defaultThinkingLevel: 'high' });
+    assert.equal((harness.context.session.model as { id: string }).id, 'model-a');
+    assert.equal(harness.context.session.thinkingLevel, 'high');
+    assert.equal(setModelCalls, 0);
+    assert.deepEqual(harness.writtenSettings, [{ defaultModel: 'model-a', defaultThinkingLevel: 'high' }]);
+    assert.equal(harness.emitContextUsageChangedCalls.length, 1);
+  }
+});
+
 test('handleBackendRequest rejects unknown methods', async () => {
   const harness = createHarness();
   await assert.rejects(
