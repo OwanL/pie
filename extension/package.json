@@ -74,6 +74,10 @@
       {
         "command": "pie.revealLogFolder",
         "title": "pie: Reveal Log Folder"
+      },
+      {
+        "command": "pie.dumpDebugState",
+        "title": "pie: Dump Debug State"
       }
     ],
     "menus": {

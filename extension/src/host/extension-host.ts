@@ -286,7 +286,25 @@ export class PieExtension implements vscode.Disposable {
         this.sidebarProvider.reveal();
       }),
       vscode.commands.registerCommand('pie.dumpDebugState', async () => {
-        return await this.dumpDebugState();
+        const dumpPath = await this.dumpDebugState();
+        const open = 'Open File';
+        const reveal = 'Reveal in Folder';
+        const choice = await vscode.window.showInformationMessage(
+          `pie debug state written: ${dumpPath}`,
+          open,
+          reveal,
+        );
+        if (choice === open) {
+          try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(dumpPath));
+            await vscode.window.showTextDocument(doc, { preview: true });
+          } catch (err) {
+            void vscode.window.showErrorMessage(`Failed to open debug state: ${toErrorMessage(err)}`);
+          }
+        } else if (choice === reveal) {
+          await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dumpPath));
+        }
+        return dumpPath;
       }),
       vscode.commands.registerCommand('pie.toggleStreamDiag', () => {
         const next = setStreamDiagEnabled(!isStreamDiagEnabled());
