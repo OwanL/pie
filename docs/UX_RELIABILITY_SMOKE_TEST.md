@@ -1,11 +1,6 @@
 # UX & Reliability Remediation — Manual Smoke-Test Checklist
 
-> Companion to `docs/UX_RELIABILITY_PLAN.md` §12 (verification matrix) and
-> `docs/HANDOFF_UX_RELIABILITY_REMAINING.md` Bucket 3. The Briefs A–H are
-> implemented and unit-tested; this checklist covers the scenarios that need a
-> **real backend / human interaction** (they can't be app-smoke'd without a fake
-> backend). Run it after any change that touches the host↔backend RPC boundary,
-> the prepass lifecycle, the snapshot/reconciliation path, or error surfacing.
+> Companion to the now-completed UX & Reliability remediation (Briefs A–H, all implemented and unit-tested; the plan and handoff docs were removed once the code became authoritative — see git history). This checklist covers the scenarios that need a **real backend / human interaction** (they can't be app-smoke'd without a fake backend). Run it after any change that touches the host↔backend RPC boundary, the prepass lifecycle, the snapshot/reconciliation path, or error surfacing.
 
 **Goal:** confirm the `Failed to send message: Timed out waiting for response to
 req-NN` error is gone, errors are plain-language + actionable (no `req-NN`), and
@@ -60,7 +55,7 @@ The prepass is the `skill-pruner` `before_agent_start` LLM call. To slow it:
   legitimate prepass completes (e.g. `8`) for the "no false timeout" checks.
 
 > The host infers the prepass START at send dispatch (no SDK `preflightStarted`
-> event today — a cross-repo refinement, see `TODO.md`). So the live chip's
+> event today — a cross-repo refinement, not yet landed). So the live chip's
 > elapsed-time has a small (send-dispatch → preflight-callback) error bound.
 
 ### How to force a backend stderr / parse failure (scenario 7)
@@ -251,4 +246,5 @@ The prepass is the `skill-pruner` `before_agent_start` LLM call. To slow it:
   (scenario 7) — verify in settings after the retried turn commits.
 - `cd extension && npm run typecheck && npm run test && npm run build` green.
 
-Record any deviation as a follow-up in `TODO.md`.
+Record any deviation as a follow-up note (no active `TODO.md` exists in the
+repo; track in your issue tracker or a fresh note).

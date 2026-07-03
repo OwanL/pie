@@ -32,7 +32,7 @@ interface FileChangesPanelProps {
 
 // Hover-intent / dismiss delays for the peek overlay (STATE_CONTRACT
 // § Webview-Local State — peek/hover overlays). Tunable; see
-// CHANGED-FILES-UI-PLAN D9.
+// the changed-files-rail design (decision D9).
 const PEEK_OPEN_DELAY = 160;
 const PEEK_CLOSE_DELAY = 120;
 
@@ -55,7 +55,7 @@ export function FileChangesPanel({
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Hover capability — touch devices get tap-to-peek instead of hover-peek
-  // (CHANGED-FILES-UI-PLAN D8). SSR-safe (preact-render-to-string has no
+  // (changed-files-rail design, decision D8). SSR-safe (preact-render-to-string has no
   // window); the webview always has a window.
   const [canHover] = useState(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return true;

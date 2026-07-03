@@ -30,7 +30,7 @@ const SCHEDULE_DEBOUNCE_MS = 50;
 /**
  * Debounce window while sessions are actively streaming.
  *
- * ── Brief D seam (UX_RELIABILITY_PLAN §6) ──────────────────────────────────
+ * ── Brief D seam (UX-reliability remediation §6) ───────────────────────────
  * Brief D may lower this toward 50–80 now that Brief G memoizes
  * `selectViewState`: unchanged-delta posts (token-rate ticks, no-op events,
  * background-session streaming) are O(1) amortized, so posting more often no
@@ -38,7 +38,7 @@ const SCHEDULE_DEBOUNCE_MS = 50;
  * alongside that brief's webview revision/length-identity guard work which
  * owns this constant — Brief G deliberately leaves the number unchanged.
  *
- * Brief D update: lowered to 60 (see UX_RELIABILITY_PLAN §6). The webview
+ * Brief D update: lowered to 60 (see the UX-reliability remediation §6). The webview
  * revision guard (use-host-sync.ts) makes the higher post frequency safe
  * against out-of-order/duplicate envelopes.
  */

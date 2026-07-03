@@ -36,20 +36,13 @@ flowchart LR
   D -- yes --> E[Block L2]
 ```
 
-`maxDepth = 1` means "main → L1 is allowed." There is **no `0 = disabled` mode** — the UI clamps to `[1, 8]` (`extension/src/webview/panel/composer/settings-menu-subagent.tsx`) and `validateOptionalInt` in `rpc.ts` clamps to `[1, 8]` too. So "1" never means "no subagents," only "no nesting *below* the first level." That level can still spawn up to 20 sessions per reply.
+`maxDepth = 1` means "main → L1 is allowed." As of the item-3 fix, `0 = disabled` **is** supported: `validateOptionalInt` in `rpc.ts` clamps to `[0, 8]` and `execute()` short-circuits with `subagentsDisabledResponse` when `maxDepth === 0`. The UI slider still labels "1 level / 2 levels…"; relabelling to "Off / 1 level / …" is the remaining cosmetic piece.
 
 ### Recommendation — concrete code changes
 
-**a. Expose a real "disabled" mode and relabel the slider.**
-- Lower `validateOptionalInt` lower bound for `subagentMaxDepth` from `1` → `0` (`extension/src/backend/rpc.ts`).
-- Soften the slider `min` to `0` and relabel "Subagent nesting: Off / 1 level / 2 levels…" (`extension/src/webview/panel/composer/settings-menu-subagent.tsx`).
-- Short-circuit `execute()` when `maxDepth === 0`: return `disabledErrorResponse(params)` (`extensions/subagent/src/execute.ts`).
-- A depth of `0` gives the user the genuine "no nesting / no fan-out" kill switch they were reaching for.
+**a. Expose a real "disabled" mode and relabel the slider.** ✅ Shipped (lower bound `0`, short-circuit at `maxDepth === 0`). Remaining: relabel the slider "Off / 1 level / …" (`extension/src/webview/panel/composer/settings-menu-subagent.tsx`).
 
-**b. Make the throughput caps configurable and lower the defaults.**
-- Promote `MAX_PARALLEL_TASKS`, `MAX_CONCURRENCY`, `MAX_SESSIONS_PER_CALL` from magic constants to `ChatPrefs` (`subagentMaxParallelTasks`, `subagentMaxConcurrency`, `subagentMaxSessionsPerReply`) threaded through the same `runtimePrefs.set` → `PIE_SUBAGENT_*` env mirror that already exists (see `extension/src/backend/request-handler.ts` lines ~95–108).
-- Lower default `MAX_PARALLEL_TASKS` 8 → 4 and `MAX_CONCURRENCY` 4 → 2. On umans specifically these should be 2 / 1 (see §2 provider config).
-- Add a **global, cross-reply in-flight subagent cap** as a semaphore in the subagent extension. Today `MAX_CONCURRENCY` only throttles within one `tasks[]` array — multiple parallel `subagent` tool calls in one reply do not share a gate. A process-wide `Semaphore(maxInFlight)` wrapping `createAgentSession` is ~15 lines and is the single most effective fix for the "10+ at once" symptom. It is **not** bespoke queue logic — it's the standard concurrency primitive; see §3 for the fuller off-the-shelf option.
+**b. Make the throughput caps configurable and lower the defaults.** ✅ Shipped — `subagentMaxParallelTasks`, `subagentMaxConcurrency`, `subagentMaxSessionsPerReply` are threaded through `runtimePrefs.set` → `PIE_SUBAGENT_*` env (`extension/src/backend/rpc.ts`), defaults lowered to 4 / 2. A **global, cross-reply in-flight subagent cap** also shipped as `extensions/subagent/src/concurrency-limit.ts` (`PIE_SUBAGENT_MAX_INFLIGHT`, default 2) wrapping `createAgentSession` — the single most effective fix for the "10+ at once" symptom.
 
 ---
 
@@ -64,7 +57,7 @@ flowchart LR
 > - **Settings** — `pie.useProxy` (default true), `pie.proxyPort` (default 4000).
 > - **Verified** — proxy boots, `/health/liveness`→200, real chat completion routed to umans upstream successfully. Extension typecheck + build synced to `~/.vscode/extensions/pie.pie-0.3.0`. *(Remaining: user reloads window to confirm the extension-spawn path.)*
 >
-> See `proxy/README.md` for operations. Items 2–5 below are still pending.
+> See `proxy/README.md` for operations. Items 2, 3, 5 have since shipped too; only item 4's adaptive `providerBusy` portion remains — see §4.
 
 ### Current state
 
@@ -126,31 +119,29 @@ The phrase in the request — *"the app does not respect sub agent limits … 10
 1. **In-process semaphore** (smallest change). Add `extensions/subagent/src/concurrency-limit.ts` exporting a `Semaphore` acquired around every `createAgentSession` call in `runner.ts`. Default `PIE_SUBAGENT_MAX_INFLIGHT=2`. Configurable via the same `runtimePrefs.set` mirror. ~30 lines. This alone kills the 10-at-once symptom.
 2. **LiteLLM proxy's `rpm`/`tpm`** (§2). Pushes the guarantee outside pi so it covers the main agent + every subagent + any other pi consumer uniformly — it can't be bypassed even if a future code path forgets the semaphore. **This is the off-the-shelf answer the maintainer asked for.** The in-process semaphore is still worth keeping as defence-in-depth (it fails fast before the request even leaves the machine), but the proxy should be the source of truth for "respect the account limit."
 
-Tighten the obviously-too-high defaults together with whichever path you pick: `DEFAULT_MAX_TREE_SESSIONS` 50 → 10, `MAX_PARALLEL_TASKS` 8 → 4, `MAX_CONCURRENCY` 4 → 2.
+Tighten the obviously-too-high defaults together with whichever path you pick: `DEFAULT_MAX_TREE_SESSIONS` 50 → 10, `MAX_PARALLEL_TASKS` 8 → 4, `MAX_CONCURRENCY` 4 → 2. ✅ Shipped — see `extensions/subagent/types.ts` and `extensions/subagent/runner.ts`.
 
 ---
 
 ## 4. Prompt / harness hygiene
 
-### The system prompt actively rewards storms
+### The system prompt no longer rewards storms
 
-`APPEND_SYSTEM.md`:
+`APPEND_SYSTEM.md` (rewritten 2026-07-04, item 4 static portion ✅ shipped) now reads:
 ```text
 - Delegate to sub-agents when tasks can be broken down into discrete steps ...
-  Parallel sub agents are preferred over sequential.
-- Always verify your work before completion using a sub agent.
+  Prefer SEQUENTIAL sub-agents by default; only parallelize (multiple parallel
+  subagent tool calls in one reply, or tasks:[...] with several entries) when the
+  tasks are genuinely independent AND you have rate-limit headroom.
+- Reserve a sub-agent verification pass for non-trivial changes; for trivial
+  edits, inline verification (re-reading the diff, a quick check) is fine.
 ```
 
-Agent configs reinforce it — `agents/worker.md`: "Run independent sub-steps in parallel; sequence them only when one needs another's output." `agents/scout.md`: "fan out to nested scout subagents (parallel) to cover ground faster."
+Agent configs reinforce it — `agents/worker.md` and `agents/scout.md` now defer to the sequential-default guidance. The prompt and the limit config are **no longer in tension**; the limits (§1, §3) are now the right shape and the prompt no longer pushes the model into storms.
 
-For an unconstrained OpenAI/Claude backend this is the expected, efficient default. Against a rate-limited single-key umans account it is actively self-harming. **The prompt and the limit config are in tension**, and the prompt is winning because the limits were never the right shape (§1, §3).
+### Remaining work (item 4, adaptive portion)
 
-### Recommendation
-
-- **Replace the blanket "parallel preferred" directive with a conditional one** keyed on provider state. Concretely, add to `APPEND_SYSTEM.md`:
-  - Prefer **sequential** subagents unless the tasks are genuinely independent *and* the throughput governor estimates spare capacity.
-  - Gate "always verify with a subagent" — for trivial edits it doubles request count for no value; reserve it for non-trivial changes.
-- The cleanest implementation is to inject this guidance *dynamically* based on measured umans RPM headroom (the existing `extension/src/host/token-rate-service.ts` already tracks rate; extend it to publish a `providerBusy` signal the prompt builder reads). That keeps the harness adaptive instead of a static prompt that's right on some providers and wrong on others.
+- The static rewrite is done but the guidance is not yet **adaptive** to measured provider load. The cleanest next step is to inject the directive *dynamically* based on measured umans RPM headroom (the existing `extension/src/host/token-rate-service.ts` already tracks rate; extend it to publish a `providerBusy` signal the prompt builder reads). That keeps the harness adaptive instead of a static prompt that's right on some providers and wrong on others.
 - **Audit skills** (`skills/codebase-maintenance`, `skills/diagnose`, `skills/grill-with-docs`, `skills/tdd`) for implicit "run in parallel" directives that compound; they share the same budget.
 
 ---
@@ -166,10 +157,10 @@ The `runtimePrefs.set` RPC pattern (`extension/src/backend/request-handler.ts`) 
 | # | Change | Effort | Impact on the stated pain | Status |
 |---|---|---|---|---|
 | 1 | LiteLLM proxy in front of umans, with `rpm` set to the real limit | S–M | **Eliminates** key-rotation. Queue-backoff is the missing governor. | ✅ Done |
-| 2 | In-process subagent semaphore (`PIE_SUBAGENT_MAX_INFLIGHT=2`) + expose `MAX_CONCURRENCY` / `MAX_PARALLEL_TASKS` prefs | S | Kills "10+ at once" before a request leaves the machine | ⬜ Pending |
-| 3 | `subagentMaxDepth` lower bound 0, relabel slider, short-circuit at 0 | S | Gives the real "no subagents" kill switch | ⬜ Pending |
-| 4 | Rewrite the fan-out-biased guidance in `APPEND_SYSTEM.md` + agents adaptively | S | Stops the model from *wanting* the storm | ⬜ Pending |
-| 5 | Tighten defaults (`MAX_TREE_SESSIONS` 50→10, `MAX_PARALLEL_TASKS` 8→4, `MAX_CONCURRENCY` 4→2) | XS | Cheap insurance | ⬜ Pending |
+| 2 | In-process subagent semaphore (`PIE_SUBAGENT_MAX_INFLIGHT=2`) + expose `MAX_CONCURRENCY` / `MAX_PARALLEL_TASKS` prefs | S | Kills "10+ at once" before a request leaves the machine | ✅ Done |
+| 3 | `subagentMaxDepth` lower bound 0, short-circuit at 0 | S | Gives the real "no subagents" kill switch | ✅ Done (slider relabel cosmetic only) |
+| 4 | Rewrite the fan-out-biased guidance in `APPEND_SYSTEM.md` + agents adaptively | S | Stops the model from *wanting* the storm | ⬙ Static rewrite done; adaptive `providerBusy` signal pending |
+| 5 | Tighten defaults (`MAX_TREE_SESSIONS` 50→10, `MAX_PARALLEL_TASKS` 8→4, `MAX_CONCURRENCY` 4→2) | XS | Cheap insurance | ✅ Done |
 
 Items 1 + 2 together close the loop: the semaphore fails fast locally, LiteLLM holds the queue and retries honouring `Retry-After` centrally. Neither requires bespoke queue logic.
 
@@ -181,9 +172,10 @@ Items 1 + 2 together close the loop: the semaphore fails fast locally, LiteLLM h
 |---|---|
 | Depth gate | `extensions/subagent/src/execute.ts` (`execute()` → `depthLimitResponse`) |
 | Extended defaults + runner knobs | `extensions/subagent/runner.ts` (`getMaxDepth`, `getMaxTreeSessions`, `consumeTreeSlot`, `DEFAULT_MAX_*`) |
-| Throughput caps (hardcoded) | `extensions/subagent/src/types.ts` (`MAX_PARALLEL_TASKS`, `MAX_CONCURRENCY`), `extensions/subagent/src/helpers.ts` (`MAX_SESSIONS_PER_CALL`) |
+| Throughput caps (now configurable via `runtimePrefs.set`) | `extensions/subagent/types.ts` (`MAX_PARALLEL_TASKS=4`, `MAX_CONCURRENCY=2`), `extensions/subagent/src/helpers.ts` (`MAX_SESSIONS_PER_CALL=20`) |
+| Global in-flight gate | `extensions/subagent/src/concurrency-limit.ts` (`Semaphore`, `PIE_SUBAGENT_MAX_INFLIGHT`) |
 | Parallel fan-out wing | `extensions/subagent/src/modes.ts` (`executeParallelMode`, `mapWithConcurrencyLimit`) |
-| Pref mirror to env | `extension/src/backend/request-handler.ts` (`handleRuntimePrefsSet`), `extension/src/host/session-service/service.ts`, `extension/src/host/session-service/startup.ts` |
+| Pref mirror to env | `extension/src/backend/rpc.ts` (`runtimePrefs.set` handler), `extension/src/host/session-service/service.ts`, `extension/src/host/session-service/startup.ts` |
 | Prefs shape + defaults | `extension/src/shared/protocol/settings.ts` (`DEFAULT_CHAT_PREFS`), `extension/src/shared/protocol-validation.ts` |
 | UI slider + clamps | `extension/src/webview/panel/composer/settings-menu-subagent.tsx`, `extension/src/backend/rpc.ts` (`validateOptionalInt`) |
 | Provider wiring | `models.json` (umans block ~line 690), `settings.json` (top-level `retry`) |

@@ -10,17 +10,20 @@ This folder mixes design contracts, implementation plans (some completed, some o
 
 ## Active plans (in progress)
 
-- [EXPANDED-SECTION-UI-PLAN.md](EXPANDED-SECTION-UI-PLAN.md) — audit + grilling decisions for the bash/terminal tool pane and reasoning preview: bound reasoning with the resizable model, shared `expandedSectionMaxHeight` pref across all four expanded sections, reduced default max-height, and removed the "hold close while turn active" logic (per-command grace-then-slow-close) so open panes stop dominating the transcript. Secondary findings (ANSI, exitCode, long-line handling, stderr) deferred.
-- [CHANGED-FILES-UI-PLAN.md](CHANGED-FILES-UI-PLAN.md) — grilling decisions for the right-side changed-files rail: peek-vs-pin split (zero reserved space mid-turn, hover-overlay peek, click-to-pin), thin count + diff-bar sliver as the collapsed floor, ephemeral drag-resizable width (mirroring the height precedent), removed auto-open-on-arrival (pulse is the mid-turn signal), aggregate header + per-file diff bar for glanceability, and a tap=peek/pin-button=pin touch fallback. Auto-open machinery (`autoOpenFileChangesRail` + `autoExpandedBySession`) slated for removal.
+- [AGENT-HARNESS-IMPROVEMENTS.md](AGENT-HARNESS-IMPROVEMENTS.md) — agent/harness reliability plan (subagent fan-out, umans provider backpressure, prompt hygiene). **Mostly shipped**: LiteLLM proxy (item 1), in-process subagent semaphore + configurable throughput caps (item 2), `subagentMaxDepth = 0` disabled mode (item 3), tightened defaults (item 5), and the static `APPEND_SYSTEM.md` "prefer sequential" rewrite (item 4) are all done. **Only item 4's adaptive portion remains** — injecting the directive dynamically from a measured `providerBusy` signal (extend `token-rate-service.ts`) instead of a static prompt.
+
+## Operational references
+
+- [UX_RELIABILITY_SMOKE_TEST.md](UX_RELIABILITY_SMOKE_TEST.md) — manual smoke-test checklist for the scenarios that need a real backend / human interaction (slow prepass, wedged webview, forced stderr). Companion to the now-completed UX & Reliability remediation (Briefs A–H); run after any change touching the host↔backend RPC boundary, prepass lifecycle, snapshot/reconciliation path, or error surfacing.
 
 ## Archived plans (removed — see git history)
 
 Historical migration and planning documents were removed from the tree after completion. Check git history for the original content:
 
-- `ARCH-MIGRATION-PLAN.md` — multi-phase extension host + webview migration to CQRS/Elm/MVI
-- `HANDOFF_mvi-migration.md` — MVI migration tracker (Phases 0–5, 12 Phase 5 items). **Completed** — the MessageRouter is 100% Commands, `QueueManager` deleted, all per-session keyed maps cleaned on session close, optimistic-op TTL in place, all deferred items resolved. The code is now the authoritative record; see `ARCHITECTURE.md` and `STATE_CONTRACT.md` for the architecture.
-- `PLAN-extension-ui-questions.md` — extension UI question resolution
-- `PLAN-llm-pruner-rewrite.md` — LLM-based skill pruning implementation
+- `ARCH-MIGRATION-PLAN.md` — multi-phase extension host + webview migration to CQRS/Elm/MVI.
+- `HANDOFF_mvi-migration.md` — MVI migration tracker (Phases 0–5, 12 Phase 5 items). **Completed** — the MessageRouter is 100% Commands, `QueueManager` deleted, all per-session keyed maps cleaned on session close, optimistic-op TTL in place, all deferred items resolved. The code is now the authoritative record; see `ARCHITECTURE.md` and `STATE_CONTRACT.md`.
+- `PLAN-extension-ui-questions.md` — extension UI question resolution.
+- `PLAN-llm-pruner-rewrite.md` — LLM-based skill pruning implementation.
 - `PLAN-skill-tool-pruning.md` — skill/tool pruning design and implementation.
 - `model-token-pricing-implementation-plan.md` — token-pricing migration; **completed**. Pricing now lives in `extensions/subagent/pricing.ts` + `extension/src/backend/pricing.ts`; authoritative price evidence in `internal/model-token-pricing-sources.md`.
 - `ui-ux-review.md` — pie webview UI/UX engineering review (41 findings across hitboxes, a11y, streaming jank, virtualization, tabs, overlays). **Completed** across two rounds (commits `b1a0107` + `5a1804c`); the code is the authoritative record.
@@ -28,12 +31,18 @@ Historical migration and planning documents were removed from the tree after com
 - `model-scoring-methodology.md` — superseded fitness-based model-scoring methodology; replaced by the data-driven stratified leaderboard (`analysis/scripts/stratified-ranker.ts`).
 - `subagent-ask-user-design.md` — subagent `ask_user` support design (multi-entry pending requests, parent-bridge proxy, subagent-scoped webview rendering). **Implemented**.
 - `subagent-model-selection-v2.md` — subagent model-selection v2 (bucket system). **Implemented** in `extensions/subagent/bucket-selector.ts` + `bridge.ts`.
+- `EXPANDED-SECTION-UI-PLAN.md` — bash/terminal + reasoning-preview expanded-section decisions (bound reasoning, shared `expandedSectionMaxHeight`, reduced default max-height, removed "hold close while turn active"). **Implemented**; `expandedSectionMaxHeight` lives in `extension/src/shared/protocol/settings.ts`; the code is authoritative.
+- `CHANGED-FILES-UI-PLAN.md` — right-side changed-files rail decisions (peek-vs-pin, drag-resizable width, removed auto-open-on-arrival, per-file diff bar). **Implemented**; `autoOpenFileChangesRail` / `autoExpandedBySession` removed, `use-resizable-width.ts` present; the code is authoritative.
+- `UX_RELIABILITY_PLAN.md` — orchestrator playbook for Briefs A–H (timeout, optimistic lifecycle, stale-state, error mapping). **Completed** across 4 rounds (commits `5d8b964`, `3222af9`, `135cb52`, `a2575a9`); the code is authoritative. The manual smoke-test matrix lives on as `UX_RELIABILITY_SMOKE_TEST.md`.
+- `HANDOFF_UX_RELIABILITY_REMAINING.md` — handoff for UX-reliability follow-ups (Bucket 1–3). **Completed**: NoticeBanner action buttons wired, `disablePruning` restores prior mode, `PREPASS_TIMEOUT_PATTERN` handles decimal budgets, pie log channel exists, Brief F/D transition tests added. The code is authoritative.
 
 ## Reference / informational
 
+- [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) and `AGENTS.md` for authoritative usage. Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
-- [internal/copilot-model-pricing.md](internal/copilot-model-pricing.md) — GitHub Copilot premium request multipliers, token pricing, and cost mapping for `model-profiles.yaml`.
+- [internal/copilot-model-pricing.md](internal/copilot-model-pricing.md) — GitHub Copilot premium request multipliers, token pricing, and cost mapping for `model-profiles.yaml`. Self-marked superseded by the ledger below.
 - [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
+- [internal/code-review/](internal/code-review/) — completed codebase-review pass (findings `01_…`–`09_…`, `SUMMARY_structural_issues.md`, `ORCHESTRATOR_PROMPT.md`, `TODO-archive.md`). Historical; all items done (see `TODO-archive.md` status table). Referenced by `README.md` (macOS/Linux install parity) and `package.json`. Read as a record, not a live backlog.
 - [IDEAS.md](IDEAS.md) — unstructured brain-dump. Not a roadmap. Items here are candidates for evaluation, not commitments.
 
 ## Conventions

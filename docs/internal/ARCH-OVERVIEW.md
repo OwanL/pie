@@ -53,7 +53,7 @@ All application state lives in `ArchState` — no separate Redux store.
      Projection: ArchState → ViewState    EffectRunner executes:
                 │                           - RPCs to PI backend
                 ▼                           - File operations
-       Per-session snapshot channel          - Notifications
+       Per-session snapshot channel          - PostImperative
                 │                           - Analytics export
                 ▼                           Results → Event
        Webview mirror[sessionPath]

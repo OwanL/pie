@@ -1,6 +1,6 @@
 # Centralized Model Configuration
 
-> **Status:** Proposed plan, awaiting implementation.
+> **Status:** Implemented. `models.yaml` is the single source of truth; `npm run sync-models` regenerates `models.json`, `model-profiles.yaml`, `proxy/litellm_config.yaml`, and merges model fields into `settings.json`. Drift is pinned by `extension/test/model-config-sync.test.ts`. This doc remains as the design rationale; see `README.md` (Model Configuration) and `AGENTS.md` for the authoritative user-facing usage.
 > **Decisions (confirmed with owner):** Codegen approach · YAML source + JSON Schema · scope includes `settings.json` model fields.
 
 ## 1. Problem

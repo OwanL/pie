@@ -28,7 +28,8 @@
  *
  * Recovery ACTIONS are webview-side: the host surfaces the failure `kind`;
  * the webview maps `kind → action buttons` via {@link noticeActionsFor} and
- * `noticeActionLabel`. See `docs/UX_RELIABILITY_PLAN.md` §10.
+ * `noticeActionLabel`. See the UX-reliability remediation (Brief H, §10 of the
+ * since-removed plan; code is authoritative).
  */
 
 /** User-facing failure category. Drives the recovery action buttons the

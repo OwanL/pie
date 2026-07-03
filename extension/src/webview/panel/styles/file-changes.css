@@ -1,5 +1,5 @@
 /* ── Left-side file-changes rail ────────────────────────────────────────── */
-/* Peek-vs-pin policy (CHANGED-FILES-UI-PLAN D1):
+/* Peek-vs-pin policy (changed-files-rail design, decision D1):
  *  - Collapsed: a thin full-height sliver (count + aggregate churn + a
  *    scrollable per-file preview whose names are colored by kind, D2)
  *    — the only persistent footprint when not pinned.
