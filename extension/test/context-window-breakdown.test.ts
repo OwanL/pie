@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ChatMessage, SystemPromptEntry } from '../src/shared/protocol';
-import { buildContextWindowBreakdown } from '../src/webview/panel/context-window/breakdown';
+import {
+  buildContextWindowBreakdown,
+  clearToolCallTokenCache,
+  getToolCallTokenCacheSize,
+  TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES,
+} from '../src/webview/panel/context-window/breakdown';
 
 function makePrompt(overrides: Partial<SystemPromptEntry> = {}): SystemPromptEntry {
   return {
@@ -175,4 +180,80 @@ test('buildContextWindowBreakdown suppresses contributor rows when transcript is
   assert.equal(breakdown.summary.usedTokens, 64000);
   assert.equal(breakdown.summary.usedKind, 'exact');
   assert.match(breakdown.title, /partial transcript window is loaded/i);
+});
+
+// ─── per-tool-call token cache ──────────────────────────────────────────────
+
+function makeToolCall(overrides: Partial<{ id: string; name: string; input: unknown; result: unknown; status: 'running' | 'completed' | 'failed' }> = {}): {
+  id: string;
+  name: string;
+  input: unknown;
+  result?: unknown;
+  status: 'running' | 'completed' | 'failed';
+} {
+  return {
+    id: 'tool-1',
+    name: 'run',
+    input: 'abcd',
+    result: 'abcdefgh',
+    status: 'completed',
+    ...overrides,
+  };
+}
+
+function buildWithToolCalls(toolCalls: ReturnType<typeof makeToolCall>[]): ReturnType<typeof buildContextWindowBreakdown> {
+  return buildContextWindowBreakdown({
+    contextUsage: { tokens: 1000, contextWindow: 200000, percent: 1 },
+    effectiveContextWindow: 200000,
+    systemPrompts: [],
+    transcript: [
+      makeMessage({
+        id: 'msg-1',
+        role: 'assistant',
+        markdown: '',
+        toolCalls,
+      }),
+    ],
+    isPartial: false,
+  });
+}
+
+test('per-tool-call token cache: a completed tool call is cached and reused on recompute', () => {
+  // The breakdown recomputes on contextUsage / tool-call-signature changes
+  // during an active turn. Without the cache each recompute re-runs cl100k_base
+  // BPE over every accumulated tool result; the cache makes a recompute skip
+  // completed calls whose result already landed (immutable, id-unique).
+  clearToolCallTokenCache();
+  const tc = makeToolCall({ id: 'cache-hit-1', result: 'a'.repeat(2000) });
+  const first = buildWithToolCalls([tc]);
+  assert.equal(getToolCallTokenCacheSize(), 1, 'completed tool call should be cached');
+  const firstOther = first.entries.find((e) => e.key === 'other')?.value;
+  // Recompute with the content-identical call: cache hit, no new entry, same estimate.
+  const second = buildWithToolCalls([tc]);
+  assert.equal(getToolCallTokenCacheSize(), 1, 'repeat build should hit the cache, not add an entry');
+  assert.equal(
+    second.entries.find((e) => e.key === 'other')?.value,
+    firstOther,
+    'cached estimate is stable across recomputes',
+  );
+});
+
+test('per-tool-call token cache: running tool calls are not cached (no result yet)', () => {
+  clearToolCallTokenCache();
+  buildWithToolCalls([makeToolCall({ id: 'running-1', status: 'running', result: undefined })]);
+  assert.equal(getToolCallTokenCacheSize(), 0, 'running calls have no result and are not cached');
+});
+
+test('per-tool-call token cache: distinct completed calls are bounded by LRU eviction', () => {
+  clearToolCallTokenCache();
+  const toolCalls = [];
+  for (let i = 0; i < TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES + 50; i++) {
+    toolCalls.push(makeToolCall({ id: `evict-${i}`, result: `payload-${i}` }));
+  }
+  buildWithToolCalls(toolCalls);
+  assert.equal(
+    getToolCallTokenCacheSize(),
+    TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES,
+    'cache should cap and evict LRU entries past the max',
+  );
 });

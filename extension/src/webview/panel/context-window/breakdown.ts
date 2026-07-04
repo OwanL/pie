@@ -6,8 +6,41 @@ import type {
 } from '../../../shared/protocol';
 import { estimateTextTokens } from '../system-prompt-tokens';
 import { formatTokens } from '../utils/format-tokens';
+import { LruCache } from '../utils/lru-cache';
 
 const MAX_TOOLTIP_ENTRIES = 6;
+
+/**
+ * Bounded LRU cache of per-tool-call estimated token counts, keyed by
+ * tool-call id. `estimateToolCallTokens` runs real cl100k_base BPE
+ * (`gpt-tokenizer`) over each tool result, and `buildContextWindowBreakdown`
+ * recomputes whenever contextUsage or the tool-call signature changes (per tool
+ * completion / context-window snapshot during an active turn). Without this
+ * cache each recompute re-tokenises EVERY accumulated tool result — O(total
+ * agent output) per recompute, the dominant cost behind "slow for long sessions
+ * with lots of tool output". Completed/failed calls are immutable (results land
+ * atomically at status→completed and never change; ids are unique per
+ * invocation), so their token count is stable for the call's lifetime. Running
+ * calls (no result yet) are cheap and aren't cached. LRU-bounded so a
+ * long-lived session with many tool calls can't grow it unbounded.
+ */
+const TOOL_CALL_TOKEN_CACHE_MAX = 1024;
+const toolCallTokenCache = new LruCache<string, number>(TOOL_CALL_TOKEN_CACHE_MAX);
+
+/** Reset the per-tool-call token cache. Entries are id-keyed and stable for a
+ *  completed call's lifetime, so production never needs to clear this — it
+ *  exists for tests that need a deterministic cache state. */
+export function clearToolCallTokenCache(): void {
+  toolCallTokenCache.clear();
+}
+
+/** Cache capacity, exported so tests can drive the eviction boundary. */
+export const TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES = TOOL_CALL_TOKEN_CACHE_MAX;
+
+/** Number of entries currently in the cache. Test-support / diagnostics. */
+export function getToolCallTokenCacheSize(): number {
+  return toolCallTokenCache.size;
+}
 
 export type ContextWindowBreakdownKind = 'exact' | 'estimated' | 'derived' | 'unknown';
 
@@ -119,9 +152,23 @@ function estimateSerializedTokens(value: unknown): number {
 }
 
 function estimateToolCallTokens(toolCall: ToolCall): number {
-  return estimateTextTokens(toolCall.name)
+  // Completed/failed calls are immutable (see `toolCallTokenCache`), so their
+  // estimate is stable — serve from cache to skip the BPE re-tokenisation on
+  // breakdown recomputes. Running calls have no result yet (cheap) and aren't
+  // cached; they become cacheable once their result lands atomically.
+  if (toolCall.status === 'completed' || toolCall.status === 'failed') {
+    const cached = toolCallTokenCache.get(toolCall.id);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
+  const tokens = estimateTextTokens(toolCall.name)
     + estimateSerializedTokens(toolCall.input)
     + estimateSerializedTokens(toolCall.result);
+  if (toolCall.status === 'completed' || toolCall.status === 'failed') {
+    toolCallTokenCache.set(toolCall.id, tokens);
+  }
+  return tokens;
 }
 
 function extractToolCallFilePath(input: unknown): string | undefined {
