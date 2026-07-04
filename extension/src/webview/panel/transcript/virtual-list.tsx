@@ -7,6 +7,7 @@ import { memo } from 'preact/compat';
 
 import { type ChatMessage, type ChatPrefs, type PruningResult, type PruningSettings, type SystemPromptEntry, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../../shared/protocol';
 import { deriveTurnActivityState } from './activity';
+import { MessageRail } from './message-rail';
 import { ToolCallItem } from './tool-call-item';
 import { useTranscriptScroll } from './use-transcript-scroll';
 import { useTranscriptScrollAnchor } from './use-transcript-scroll-anchor';
@@ -366,6 +367,7 @@ export function TranscriptVirtualList({
 
   const {
     autoFollowRef,
+    setAutoFollow,
     isAtBottom,
     isInitialPositioning,
     isLoadingOlder,
@@ -422,54 +424,63 @@ export function TranscriptVirtualList({
   });
 
   return (
-    <div
-      class={`transcript transcript-virtual${isInitialPositioning ? ' transcript-positioning' : ''}`}
-      ref={scrollRef}
-      onClick={handleTranscriptClick}
-    >
-      <div class="transcript-virtual-inner" style={{ height: `${totalSize}px` }}>
-        {virtualRows.map((virtualRow) => (
-          <VirtualRow
-            key={virtualRow.key}
-            virtualRow={virtualRow}
-            rows={rows}
-            lastRow={lastRow}
-            busy={busy}
-            prefs={prefs}
-            systemPrompts={systemPrompts}
-            pruningResult={pruningResult}
-            workingDirectory={workingDirectory}
-            editingId={editingId}
-            isLoadingOlder={isLoadingOlder}
-            isLoadingNewer={isLoadingNewer}
-            onEditRequest={onEditRequest}
-            onEditConfirm={onEditConfirm}
-            onEditCancel={onEditCancel}
-            onOpenFile={onOpenFile}
-            onContextMenu={onContextMenu}
-            onRequestOlder={requestOlderPage}
-            onRequestNewer={requestNewerPage}
-            renderToolCall={renderToolCall}
-            transcript={transcript}
-            transcriptWindow={transcriptWindow}
-            measureRowElement={measureRowElement}
-            sessionKey={sessionKey}
-            onCancelPrepass={onCancelPrepass}
-          />
-        ))}
-      </div>
+    <div class="transcript-virtual-wrap">
+      <div
+        class={`transcript transcript-virtual${isInitialPositioning ? ' transcript-positioning' : ''}`}
+        ref={scrollRef}
+        onClick={handleTranscriptClick}
+      >
+        <div class="transcript-virtual-inner" style={{ height: `${totalSize}px` }}>
+          {virtualRows.map((virtualRow) => (
+            <VirtualRow
+              key={virtualRow.key}
+              virtualRow={virtualRow}
+              rows={rows}
+              lastRow={lastRow}
+              busy={busy}
+              prefs={prefs}
+              systemPrompts={systemPrompts}
+              pruningResult={pruningResult}
+              workingDirectory={workingDirectory}
+              editingId={editingId}
+              isLoadingOlder={isLoadingOlder}
+              isLoadingNewer={isLoadingNewer}
+              onEditRequest={onEditRequest}
+              onEditConfirm={onEditConfirm}
+              onEditCancel={onEditCancel}
+              onOpenFile={onOpenFile}
+              onContextMenu={onContextMenu}
+              onRequestOlder={requestOlderPage}
+              onRequestNewer={requestNewerPage}
+              renderToolCall={renderToolCall}
+              transcript={transcript}
+              transcriptWindow={transcriptWindow}
+              measureRowElement={measureRowElement}
+              sessionKey={sessionKey}
+              onCancelPrepass={onCancelPrepass}
+            />
+          ))}
+        </div>
 
-      {(!isAtBottom || transcriptWindow.hasNewer) && (
-        <button
-          type="button"
-          class="transcript-jump-latest"
-          aria-label="Jump to latest"
-          title="Jump to latest"
-          onClick={jumpToLatest}
-        >
-          <span aria-hidden="true">↓</span>
-        </button>
-      )}
+        {(!isAtBottom || transcriptWindow.hasNewer) && (
+          <button
+            type="button"
+            class="transcript-jump-latest"
+            aria-label="Jump to latest"
+            title="Jump to latest"
+            onClick={jumpToLatest}
+          >
+            <span aria-hidden="true">↓</span>
+          </button>
+        )}
+      </div>
+      <MessageRail
+        rows={rows}
+        virtualizer={virtualizer}
+        scrollRef={scrollRef}
+        setAutoFollow={setAutoFollow}
+        hidden={isInitialPositioning}
+      />
     </div>
   );
 }

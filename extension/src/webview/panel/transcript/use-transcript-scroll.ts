@@ -56,6 +56,10 @@ interface UseTranscriptScrollResult {
   /** Live ref to the auto-follow state (true while pinned to the bottom).
    *  Read by scroll-anchoring to know when NOT to pin the top visible row. */
   autoFollowRef: { current: boolean };
+  /** Reactive setter for auto-follow. Used by the user-message rail to
+   *  disengage stick-to-bottom before jumping to a prompt so the smooth-follow
+   *  rAF loop doesn't immediately re-pin to the bottom. */
+  setAutoFollow: (v: boolean) => void;
   isAtBottom: boolean;
   isInitialPositioning: boolean;
   isLoadingOlder: boolean;
@@ -186,6 +190,7 @@ export function useTranscriptScroll({
 
   return {
     autoFollowRef,
+    setAutoFollow,
     isAtBottom,
     isInitialPositioning,
     isLoadingOlder,

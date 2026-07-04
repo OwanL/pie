@@ -280,6 +280,79 @@
   outline-offset: 2px;
 }
 
+/* ── User-message rail (jump-to-prompt minimap) ──────────────────────────── */
+/* A thin vertical strip of clickable markers rendered in the gap just to the
+   left of the scrollbar. Each marker corresponds to a user message; clicking
+   instantly scrolls that message to the top of the viewport.
+
+   The rail is a non-scrolling overlay: a sibling of the `.transcript` scroll
+   container inside `.transcript-virtual-wrap`. Because it sits outside the
+   scroll container, it stays fixed over the viewport while content scrolls
+   beneath it. It lives in the right-edge padding gutter (just left of the 6px
+   webkit scrollbar) so it never overlaps message content. */
+
+.transcript-virtual-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.transcript-message-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Sit immediately to the left of the 6px webkit scrollbar (global width).
+     `right: 0` would overlap the scrollbar and block dragging it. */
+  right: 6px;
+  width: 10px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.transcript-message-rail-marker {
+  position: absolute;
+  right: 1px;
+  width: 8px;
+  /* `height` + `top` (center) are set inline per marker. */
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Center the hit area on the target position set via inline `top`. */
+  transform: translateY(-50%);
+}
+
+.transcript-message-rail-marker::before {
+  content: '';
+  display: block;
+  width: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--panel-accent) 45%, transparent);
+  transition:
+    background var(--panel-transition-fast),
+    width var(--panel-duration-fast) var(--panel-ease-out-expo);
+}
+
+.transcript-message-rail-marker:hover::before,
+.transcript-message-rail-marker:focus-visible::before {
+  background: var(--panel-accent);
+  width: 8px;
+}
+
+.transcript-message-rail-marker:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
 /* ── Activity indicators ─────────────────────────────────────────────────── */
 /* Standalone status row shown while the agent is working */
 
