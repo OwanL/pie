@@ -17,6 +17,7 @@ import {
   type ToolFinishedPayload,
   type ViewState,
   type WebviewToHostMessage,
+  EMPTY_AGGREGATE_STATS,
 } from '../src/shared/protocol';
 
 // ---------------------------------------------------------------------------
@@ -149,6 +150,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       activeRunSummary: null,
       runSummariesBySession: {},
       tokenRateBySession: {},
+      aggregateStats: EMPTY_AGGREGATE_STATS,
       draftText: '',
       busy: false,
       notice: null,

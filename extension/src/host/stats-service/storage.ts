@@ -129,6 +129,13 @@ export class RunAnalyticsStorage {
     return this.lastPersistError;
   }
 
+  /** The resolved storage directory (JSONL + checkpoint + auto-export live
+   *  here). Exposed so host-side aggregators can stat the files for an mtime
+   *  fast-path, skipping a full JSONL re-read when nothing has been persisted. */
+  getStorageDir(): string {
+    return this.storageDir;
+  }
+
   async flush(): Promise<void> {
     this.cancelPersistTimer();
     if (this.dirty || this.pendingSnapshots.size > 0 || this.pendingOutcomes.size > 0) {

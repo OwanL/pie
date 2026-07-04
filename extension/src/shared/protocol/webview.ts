@@ -2,6 +2,7 @@ import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from
 import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
 import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry } from './sessions.js';
 import type { ExtensionInfo, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
+import type { AggregateStats } from './aggregate-stats.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
 
@@ -69,6 +70,16 @@ export interface ViewState {
    * without an entry fall back to the idle state.
    */
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
+  /**
+   * Aggregate usage stats across ALL sessions (cost per provider, daily spend,
+   * token totals, generation throughput), computed host-side by
+   * `AggregateStatsService` and merged in `PieExtension.buildViewState` (the
+   * pure projection sets an empty placeholder — it must not read services or
+   * disk). The webview renders this as a thin strip above the tab row. The
+   * host keeps the cached object reference stable between recomputes so the
+   * webview's `memo()` barriers hold across snapshot posts.
+   */
+  aggregateStats: AggregateStats;
   /** Persisted composer draft text for the active session. */
   draftText: string;
   busy: boolean;

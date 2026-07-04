@@ -28,6 +28,7 @@ const CRITICAL_FIELDS: FieldSpec[] = [
   { path: 'systemPrompts', type: 'array' },
   { path: 'availableModels', type: 'array' },
   { path: 'availableExtensions', type: 'array' },
+  { path: 'aggregateStats', type: 'object' },
   { path: 'fileChanges', type: 'array' },
   { path: 'readFilePaths', type: 'array' },
   { path: 'pendingComposerInputs', type: 'array' },

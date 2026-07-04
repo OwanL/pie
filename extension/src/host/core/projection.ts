@@ -26,6 +26,7 @@ import type {
   ViewState,
 } from '../../shared/protocol';
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../shared/protocol';
+import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
 import type {
   ArchState,
@@ -386,6 +387,12 @@ function projectViewState(state: ArchState): ViewState {
     // `TokenRateService` and merged in by `PieExtension.buildViewState`
     // (this pure projection must not call the service).
     tokenRateBySession: {},
+    // Placeholder: aggregate stats are computed host-side by
+    // `AggregateStatsService` (reads run-analytics + pricing, ticks on a
+    // timer) and merged in by `PieExtension.buildViewState`. The pure
+    // projection must not read services or disk (STATE_CONTRACT § Reducer
+    // Purity).
+    aggregateStats: EMPTY_AGGREGATE_STATS,
     draftText: activeDraftText,
     busy,
     notice: settings.notice,

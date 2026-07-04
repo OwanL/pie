@@ -10,6 +10,7 @@ import { ContextMenu, type ContextMenuState } from './components/context-menu';
 import { RunOutcomeDialog } from './run-outcome-dialog';
 import { NoticeBanner } from './components/notice-banner';
 import { SessionTabs } from './ui';
+import { AggregateStatsStrip } from './ui';
 import { NoticeContext } from './hooks/notice-context';
 import { AskUserContext } from './hooks/ask-user-context';
 import { useHostSync } from './hooks/use-host-sync';
@@ -113,6 +114,10 @@ export function AppBody({ adapter }: AppBodyProps) {
           onAction={handleNoticeAction}
           onDismiss={() => postMessage({ type: 'dismissNotice' })}
         />
+      )}
+
+      {derived.showSessionChrome && (
+        <AggregateStatsStrip stats={viewState.aggregateStats} />
       )}
 
       {derived.showSessionChrome && (

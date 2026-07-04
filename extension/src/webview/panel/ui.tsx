@@ -39,6 +39,7 @@ import {
   useComposerHeightSync,
 } from './composer/hooks';
 export { SessionTabs } from './session-tabs';
+export { AggregateStatsStrip } from './aggregate-stats-strip';
 
 interface ComposerProps {
   busy: boolean;

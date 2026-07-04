@@ -22,6 +22,7 @@ import { type RunAnalyticsExportPayload } from './run-analytics/query';
 import { SidebarViewProvider } from './sidebar/provider';
 import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
+import { AggregateStatsService } from './aggregate-stats-service';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
@@ -94,6 +95,7 @@ export class PieExtension implements vscode.Disposable {
   private readonly statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   private readonly sidebarProvider: SidebarViewProvider;
   private readonly tokenRateService: TokenRateService;
+  private readonly aggregateStatsService: AggregateStatsService;
   private readonly statsService: StatsService;
   private readonly service: SessionService;
   private shutdownPromise: Promise<void> | null = null;
@@ -141,6 +143,14 @@ export class PieExtension implements vscode.Disposable {
     this.tokenRateService = new TokenRateService({
       getArchState: () => this.archState,
       onActiveRateChanged: () => this.sidebarProvider.scheduleState(),
+    });
+
+    this.aggregateStatsService = new AggregateStatsService({
+      getArchState: () => this.archState,
+      statsService: this.statsService,
+      tokenRateService: this.tokenRateService,
+      getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
+      onChanged: () => this.sidebarProvider.scheduleState(),
     });
 
     this.sidebarProvider = new SidebarViewProvider(
@@ -244,6 +254,7 @@ export class PieExtension implements vscode.Disposable {
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
     this.tokenRateService.start();
+    this.aggregateStatsService.start();
     await this.statsService.start();
     await this.service.start();
   }
@@ -523,6 +534,7 @@ export class PieExtension implements vscode.Disposable {
     return {
       ...projected,
       tokenRateBySession: this.tokenRateService.getRates(),
+      aggregateStats: this.aggregateStatsService.getAggregateStats(),
     };
   }
 
@@ -619,6 +631,7 @@ export class PieExtension implements vscode.Disposable {
       // store / sidebar provider after dispose.
       this.effectRunner.dispose();
       this.tokenRateService.dispose();
+      this.aggregateStatsService.dispose();
       await this.statsService.shutdown();
       this.service.dispose();
       this.sidebarProvider.dispose();

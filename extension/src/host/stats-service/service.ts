@@ -180,6 +180,11 @@ export class StatsService implements RunObserver {
     return await this.storage.queryRunAnalytics();
   }
 
+  /** The resolved run-analytics storage directory (see {@link RunAnalyticsStorage.getStorageDir}). */
+  getStorageDir(): string {
+    return this.storage.getStorageDir();
+  }
+
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
     await this.start();
     return await this.storage.exportRunAnalytics(targetPath);

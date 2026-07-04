@@ -19,6 +19,7 @@ import type {
   WebviewToHostMessage,
 } from '../../../shared/protocol';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
 import { webviewLog } from '../utils/log';
@@ -38,6 +39,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   activeRunSummary: null,
   runSummariesBySession: {},
   tokenRateBySession: {},
+  aggregateStats: EMPTY_AGGREGATE_STATS,
   busy: false,
   notice: null,
   noticeKind: null,

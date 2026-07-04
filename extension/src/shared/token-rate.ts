@@ -62,6 +62,14 @@ export interface TokenRateIndicatorState {
   state: 'idle' | 'generating' | 'paused';
   /** True while the generation clock is frozen (tool running / between turns / before the first token). */
   paused: boolean;
+  /**
+   * Numeric output tokens/sec (the generation-time-windowed rate), or
+   * `undefined` when not measurable (idle, or measuring before
+   * {@link MIN_RATE_SPAN_MS} of generation has elapsed). Consumed host-side by
+   * the aggregate-stats strip to sum live throughput across running sessions;
+   * the webview display ignores it (it renders {@link label}).
+   */
+  rate?: number;
 }
 
 export const IDLE_STATE: TokenRateIndicatorState = {
@@ -369,6 +377,7 @@ function buildState(
       ]),
       state: 'generating',
       paused: false,
+      rate,
     };
   }
 
@@ -398,6 +407,7 @@ function buildState(
     ]),
     state: 'paused',
     paused: true,
+    rate,
   };
 }
 
