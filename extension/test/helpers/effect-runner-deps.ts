@@ -158,6 +158,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async jumpToLatestTranscript() {},
     async closeSession() {},
     async setPruningSettings() {},
+    async setProxySettings() {},
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },

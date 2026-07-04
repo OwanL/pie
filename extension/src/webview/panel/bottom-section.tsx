@@ -32,6 +32,7 @@ export interface BottomSectionProps {
   pruningSettings: ViewState['pruningSettings'];
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
+  proxySettings: ViewState['proxySettings'];
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
@@ -43,7 +44,7 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetPruningSettings' | 'handleMarkComplete'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetPruningSettings' | 'handleSetProxySettings' | 'handleMarkComplete'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -64,6 +65,7 @@ export const BottomSection = memo(function BottomSection({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  proxySettings,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -98,6 +100,7 @@ export const BottomSection = memo(function BottomSection({
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
+        proxySettings={proxySettings}
         systemPrompts={systemPrompts}
         transcript={transcript}
         transcriptWindow={transcriptWindow}
@@ -116,6 +119,7 @@ export const BottomSection = memo(function BottomSection({
         onModelChange={handlers.handleModelChange}
         onSetPrefs={handlers.handleSetPrefs}
         onSetPruningSettings={handlers.handleSetPruningSettings}
+        onSetProxySettings={handlers.handleSetProxySettings}
         onMarkComplete={handlers.handleMarkComplete}
       />
     </>

@@ -3,6 +3,7 @@ import type {
   ChatPrefs,
   ComposerInputDraft,
   PruningSettings,
+  ProxySettingsUpdate,
   RunOutcome,
   ThinkingLevel,
   WebviewToHostMessage,
@@ -33,6 +34,7 @@ export interface AppHandlers {
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
+  handleSetProxySettings: (partial: ProxySettingsUpdate) => void;
   handleEditRequest: (messageId: string) => void;
   handleAddComposerInput: (input: ComposerInputDraft) => void;
   handleRemoveComposerInput: (inputId: string) => void;
@@ -126,6 +128,7 @@ export function useAppHandlers(
   }, [postMessage, activeSessionPathRef]);
   const handleSetPrefs = useCallback((partial: Partial<ChatPrefs>) => postMessage({ type: 'setPrefs', prefs: partial }), [postMessage]);
   const handleSetPruningSettings = useCallback((partial: Partial<PruningSettings>) => postMessage({ type: 'setPruningSettings', settings: partial }), [postMessage]);
+  const handleSetProxySettings = useCallback((partial: ProxySettingsUpdate) => postMessage({ type: 'setProxySettings', settings: partial }), [postMessage]);
   const handleEditRequest = useCallback((messageId: string) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -263,6 +266,7 @@ export function useAppHandlers(
       handleCancelEdit,
       handleSetPrefs,
       handleSetPruningSettings,
+      handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,
@@ -294,6 +298,7 @@ export function useAppHandlers(
       handleCancelEdit,
       handleSetPrefs,
       handleSetPruningSettings,
+      handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,

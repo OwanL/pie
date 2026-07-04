@@ -3,7 +3,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker } from './model-list';
 
 import {
@@ -15,6 +15,7 @@ import {
   ChatPrefSections,
   ExtensionsSection,
   ProvidersSection,
+  ProxySection,
   SoundSection,
   SubagentFlyout,
   UiFlyout,
@@ -37,13 +38,15 @@ export interface ComposerSettingsMenuProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  proxySettings: ProxySettings;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
 }
 
-export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, availableExtensions, availableModels, onSetPrefs, onSetPruningSettings }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, proxySettings, availableExtensions, availableModels, onSetPrefs, onSetPruningSettings, onSetProxySettings }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -206,6 +209,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
             {providers.length > 0 && (
               <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} />
             )}
+            <ProxySection proxySettings={proxySettings} onSetProxySettings={onSetProxySettings} />
           </div>
           {uiOpen && <UiFlyout prefs={prefs} onSetPrefs={onSetPrefs} />}
           {subagentOpen && (

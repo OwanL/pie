@@ -383,7 +383,10 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
     const proxy = new ProxyService();
     // Owned by the extension context so the proxy child is killed on shutdown.
     options.context.subscriptions.push(proxy);
-    await proxy.start({ proxyDir, configPath, port, host });
+    const startOptions = { proxyDir, configPath, port, host };
+    await proxy.start(startOptions);
+    // Record the running proxy + its start options so later edits can restart it.
+    options.service.setProxyRuntime(proxy, startOptions);
     bootLog('session-startup', 'proxy.started', { port });
     // No env-var injection needed: models.json uses `$UMANS_API_KEY`, which the
     // backend resolves itself from auth.json or the inherited environment.
@@ -474,6 +477,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   applyStoredPrefs(options);
   await loadPruningSettingsFromService(options);
+  await options.service.loadProxySettings();
 
   const {
     storedRawTabs,

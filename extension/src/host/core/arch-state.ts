@@ -34,11 +34,14 @@ import type {
   ComposerInput,
   ActiveRunSummary,
   UserContentPart,
+  ProxySettings,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
+  DEFAULT_PROXY_SETTINGS,
+  mergeProxySettings,
 } from '../../shared/protocol';
 
 // ---------------------------------------------------------------------------
@@ -110,6 +113,8 @@ export interface SettingsState {
   modelSettings: ModelSettings | null;
   /** Pruning configuration. */
   pruningSettings: PruningSettings;
+  /** LiteLLM proxy configuration (settings.json `proxy` block — the SSoT). */
+  proxySettings: ProxySettings;
   /** Available models per session. */
   availableModelsBySession: Record<string, ModelInfo[]>;
   /** Context window usage per session. */
@@ -417,6 +422,7 @@ export function createInitialArchState(): ArchState {
     settings: {
       modelSettings: null,
       pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
+      proxySettings: mergeProxySettings(DEFAULT_PROXY_SETTINGS, {}),
       availableModelsBySession: {},
       contextUsageBySession: {},
       backendReady: false,

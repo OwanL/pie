@@ -13,12 +13,14 @@
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
 #   overrideOnly:true     -> models.json providers.<p>.modelOverrides (vs models[])
-#   providers.<p>.upstream-> proxy/litellm_config.yaml model_list[]
 #   defaults/retry/pruning-> settings.json model fields
-#   proxy.*               -> proxy/litellm_config.yaml top-level settings
+#
+# Proxy settings (the LiteLLM gateway + per-provider upstream routing) live in
+# settings.json `proxy` — that is the user-editable source of truth, surfaced in
+# the pie UI. sync-models reads it from settings.json and injects it into
+# proxy/litellm_config.yaml. models.yaml only owns the model CATALOG.
 #
 # profileOrder lists the order of entries in generated model-profiles.yaml.
-# upstream.modelListOrder lists the order of entries in generated litellm_config.yaml.
 
 defaults:
   model: glm-5.2:cloud
@@ -35,15 +37,6 @@ pruning:
   model: gpt-5-mini
   provider: github-copilot
   thinkingLevel: low
-proxy:
-  routerSettings:
-    numRetries: 2
-    retryAfter: true
-    timeout: 600
-  litellmSettings:
-    dropParams: true
-  generalSettings:
-    masterKeyEnv: UMANS_API_KEY
 profileOrder:
   - claude-fable-5
   - claude-opus-4.8
@@ -1085,23 +1078,6 @@ providers:
     apiKey: $UMANS_API_KEY
     compat:
       supportsReasoningEffort: true
-    upstream:
-      apiBase: https://api.code.umans.ai/v1
-      apiKeyEnv: UMANS_API_KEY
-      litellmProvider: openai
-      maxConcurrentRequests: 4
-      litellmModelInfoId: umans-shared
-      modelListOrder:
-        - umans
-        - umans-coder
-        - umans-flash
-        - umans-kimi-k2.7
-        - umans-kimi-k2.6
-        - umans-glm-5.2
-        - umans-glm-5.1
-        - umans-qwen3.6-35b-a3b
-      alias:
-        umans: umans-coder
     models:
       - id: umans-coder
         name: "Umans: Coder"

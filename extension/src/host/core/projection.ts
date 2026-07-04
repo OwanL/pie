@@ -404,6 +404,7 @@ function projectViewState(state: ArchState): ViewState {
     availableExtensions: settings.availableExtensions,
     pruningResult,
     pruningSettings: settings.pruningSettings,
+    proxySettings: settings.proxySettings,
     pruningCatalog,
     prepassPhase: prepass.phase,
     prepassStartedAt: prepass.startedAt,

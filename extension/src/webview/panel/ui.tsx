@@ -17,6 +17,8 @@ import type {
   PruningCatalog,
   PruningResult,
   PruningSettings,
+  ProxySettings,
+  ProxySettingsUpdate,
   SystemPromptEntry,
   ThinkingLevel,
   TranscriptWindow,
@@ -56,6 +58,7 @@ interface ComposerProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  proxySettings: ProxySettings;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
@@ -76,6 +79,7 @@ interface ComposerProps {
   onModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
   onMarkComplete?: () => void;
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
@@ -101,6 +105,7 @@ function ComposerView({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  proxySettings,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -118,6 +123,7 @@ function ComposerView({
   onModelChange,
   onSetPrefs,
   onSetPruningSettings,
+  onSetProxySettings,
   onMarkComplete,
   sendRetryDraftRef,
 }: ComposerProps) {
@@ -242,8 +248,10 @@ function ComposerView({
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
+        proxySettings={proxySettings}
         onSetPrefs={onSetPrefs}
         onSetPruningSettings={onSetPruningSettings}
+        onSetProxySettings={onSetProxySettings}
         availableExtensions={availableExtensions}
         availableModels={availableModels}
         selectedModel={selectedModel}

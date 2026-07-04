@@ -1,7 +1,7 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeProxySettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage } from './helpers.js';
@@ -345,6 +345,31 @@ export function handleSetPruningSettings(state: ArchState, cmd: Extract<Command,
     effects: [
       {
         kind: 'SetPruningSettings',
+        corrId: cmd.corrId,
+        settings: cmd.settings,
+      },
+    ],
+  };
+}
+
+export function handleSetProxySettings(state: ArchState, cmd: Extract<Command, { kind: 'SetProxySettings' }>): ReducerResult {
+  // Optimistic apply for instant UI, mirroring handleSetPruningSettings. The
+  // service persists + regenerates litellm_config.yaml + restarts the proxy;
+  // on a config/restart failure it dispatches a NoticeShown rather than
+  // reverting (the new settings are already on disk). mergeProxySettings
+  // matches the disk-write merge in writeProxySettings so optimistic state ==
+  // persisted state.
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        proxySettings: mergeProxySettings(state.settings.proxySettings, cmd.settings),
+      },
+    },
+    effects: [
+      {
+        kind: 'SetProxySettings',
         corrId: cmd.corrId,
         settings: cmd.settings,
       },

@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, PruningMode } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, PruningMode, ProxySettingsUpdate } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
@@ -29,6 +29,7 @@ export interface SessionServiceLike {
   jumpToLatestTranscript(sessionPath?: string): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
+  setProxySettings(updates: ProxySettingsUpdate): Promise<void>;
 }
 
 /**
@@ -164,6 +165,9 @@ export class MessageRouter {
 
       case 'setPruningSettings':
         return await this.onSetPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>);
+
+      case 'setProxySettings':
+        return await this.onSetProxySettings(msg as Extract<WebviewToHostMessage, { type: 'setProxySettings' }>);
 
       case 'startEdit':
         return this.onStartEdit(msg as Extract<WebviewToHostMessage, { type: 'startEdit' }>);
@@ -594,6 +598,15 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetPruningSettings', corrId, settings: msg.settings },
+    });
+    this.scheduleRender();
+  }
+
+  private async onSetProxySettings(msg: Extract<WebviewToHostMessage, { type: 'setProxySettings' }>): Promise<void> {
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'SetProxySettings', corrId, settings: msg.settings },
     });
     this.scheduleRender();
   }

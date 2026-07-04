@@ -357,6 +357,117 @@ export function mergePruningSettings(
   };
 }
 
+export interface ProxyGatewaySettings {
+  routerSettings: { numRetries: number; retryAfter: boolean; timeout: number };
+  litellmSettings: { dropParams: boolean };
+  generalSettings: { masterKeyEnv: string };
+}
+
+export interface ProxyProviderUpstream {
+  apiBase: string;
+  apiKeyEnv: string;
+  litellmProvider: string;
+  maxConcurrentRequests: number;
+  litellmModelInfoId: string;
+  modelListOrder: string[];
+  alias: Record<string, string>;
+}
+
+export interface ProxySettings {
+  gateway: ProxyGatewaySettings;
+  providers: Record<string, ProxyProviderUpstream>;
+}
+
+/** Partial-update shape for proxy settings. Gateway sub-objects are replaced
+ *  wholesale when present (each is a small flat object); provider entries are
+ *  merged per-provider, so a single provider field can be patched without
+ *  resending the whole entry. Used by {@link mergeProxySettings}, the
+ *  SetProxySettings command/effect, the webview message, and the host service. */
+export type ProxySettingsUpdate = {
+  gateway?: {
+    routerSettings?: ProxyGatewaySettings['routerSettings'];
+    litellmSettings?: ProxyGatewaySettings['litellmSettings'];
+    generalSettings?: ProxyGatewaySettings['generalSettings'];
+  };
+  providers?: Record<string, Partial<ProxyProviderUpstream>>;
+};
+
+export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
+  gateway: {
+    routerSettings: { numRetries: 2, retryAfter: true, timeout: 600 },
+    litellmSettings: { dropParams: true },
+    generalSettings: { masterKeyEnv: 'UMANS_API_KEY' },
+  },
+  providers: {
+    umans: {
+      apiBase: 'https://api.code.umans.ai/v1',
+      apiKeyEnv: 'UMANS_API_KEY',
+      litellmProvider: 'openai',
+      maxConcurrentRequests: 4,
+      litellmModelInfoId: 'umans-shared',
+      modelListOrder: ['umans','umans-coder','umans-flash','umans-kimi-k2.7','umans-kimi-k2.6','umans-glm-5.2','umans-glm-5.1','umans-qwen3.6-35b-a3b'],
+      alias: { umans: 'umans-coder' },
+    },
+  },
+};
+
+/** Deep-merge a partial proxy-settings update into the current settings.
+ *
+ *  Gateway sub-fields (`routerSettings` / `litellmSettings` /
+ *  `generalSettings`) are replaced wholesale when present in `updates` (each
+ *  is a small flat object edited field-by-field from the UI, so a partial
+ *  gateway update is itself a complete sub-object). Per-provider entries are
+ *  merged individually: a partial provider update deep-merges into the
+ *  existing provider entry; `modelListOrder` (replaced + copied) and `alias`
+ *  (replaced + shallow-copied) are replaced when present. This must produce
+ *  the same shape as the disk-write merge in `writeProxySettings` so the
+ *  reducer's optimistic state matches the persisted state. */
+export function mergeProxySettings(
+  current: ProxySettings,
+  updates: ProxySettingsUpdate,
+): ProxySettings {
+  const gateway: ProxyGatewaySettings = updates.gateway
+    ? {
+        routerSettings: updates.gateway.routerSettings ?? current.gateway.routerSettings,
+        litellmSettings: updates.gateway.litellmSettings ?? current.gateway.litellmSettings,
+        generalSettings: updates.gateway.generalSettings ?? current.gateway.generalSettings,
+      }
+    : current.gateway;
+
+  const providers: Record<string, ProxyProviderUpstream> = { ...current.providers };
+  if (updates.providers) {
+    for (const [name, partial] of Object.entries(updates.providers)) {
+      if (!partial) continue;
+      const base = providers[name];
+      if (!base) {
+        // New provider entry: keep only valid fields, fall back to defaults
+        // for any missing required field so ArchState stays well-typed.
+        providers[name] = {
+          apiBase: partial.apiBase ?? '',
+          apiKeyEnv: partial.apiKeyEnv ?? '',
+          litellmProvider: partial.litellmProvider ?? '',
+          maxConcurrentRequests: partial.maxConcurrentRequests ?? 1,
+          litellmModelInfoId: partial.litellmModelInfoId ?? '',
+          modelListOrder: partial.modelListOrder ? [...partial.modelListOrder] : [],
+          alias: partial.alias ? { ...partial.alias } : {},
+        };
+        continue;
+      }
+      providers[name] = {
+        apiBase: partial.apiBase !== undefined ? partial.apiBase : base.apiBase,
+        apiKeyEnv: partial.apiKeyEnv !== undefined ? partial.apiKeyEnv : base.apiKeyEnv,
+        litellmProvider: partial.litellmProvider !== undefined ? partial.litellmProvider : base.litellmProvider,
+        maxConcurrentRequests: partial.maxConcurrentRequests !== undefined ? partial.maxConcurrentRequests : base.maxConcurrentRequests,
+        litellmModelInfoId: partial.litellmModelInfoId !== undefined ? partial.litellmModelInfoId : base.litellmModelInfoId,
+        modelListOrder: partial.modelListOrder !== undefined ? [...partial.modelListOrder] : base.modelListOrder,
+        alias: partial.alias !== undefined ? { ...partial.alias } : base.alias,
+      };
+    }
+  }
+
+  return { gateway, providers };
+}
+
 export const EMPTY_TRANSCRIPT_WINDOW: TranscriptWindow = {
   totalCount: 0,
   loadedStart: 0,

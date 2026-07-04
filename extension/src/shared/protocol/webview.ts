@@ -1,7 +1,7 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
 import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry } from './sessions.js';
-import type { ExtensionInfo, PruningResult, PruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
+import type { ExtensionInfo, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
 
@@ -113,6 +113,8 @@ export interface ViewState {
   pruningResult: PruningResult | null;
   /** Current pruning configuration from settings.json. */
   pruningSettings: PruningSettings;
+  /** Current LiteLLM proxy configuration from settings.json (`proxy` block). */
+  proxySettings: ProxySettings;
   /** Active pruning choices surfaced to the composer/settings UI. */
   pruningCatalog: PruningCatalog;
   /** Pruning prepass phase for the active session (Brief F). Driven host-side
@@ -236,6 +238,7 @@ export type WebviewToHostMessage =
     }
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
+  | { type: 'setProxySettings'; settings: ProxySettingsUpdate }
   | { type: 'startEdit'; sessionPath: string; messageId: string }
   | { type: 'cancelEdit'; sessionPath: string }
   | { type: 'dismissNotice' }

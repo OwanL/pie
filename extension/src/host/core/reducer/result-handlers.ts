@@ -395,6 +395,7 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
+    case 'SetProxySettingsResult':
     case 'ExtensionUiResponseResult': {
       if (!event.ok) {
         return {

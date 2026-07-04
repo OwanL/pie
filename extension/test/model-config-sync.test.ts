@@ -103,6 +103,9 @@ test('settings.json merge overwrites only the 7 model keys and preserves pruning
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);
   // Synthesize a settings base with extra fields that must survive the merge.
+  // The `proxy` block is now the user-editable proxy SSoT (read from settings.json
+  // by generate()); it must be preserved untouched by the model-key merge.
+  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
   const base = {
     defaultModel: 'OLD',
     defaultProvider: 'OLD',
@@ -116,6 +119,7 @@ test('settings.json merge overwrites only the 7 model keys and preserves pruning
       thinkingLevel: 'OLD',
       tools: { alwaysKeep: ['read', 'bash'] },
     },
+    proxy: committedSettings.proxy,
     lastChangelogVersion: '9.9.9',
     subagent: { confirmProjectAgents: true },
     sessionDir: 'data/outcomes/sessions',
@@ -137,4 +141,6 @@ test('settings.json merge overwrites only the 7 model keys and preserves pruning
   assert.deepEqual(merged.subagent, { confirmProjectAgents: true });
   assert.equal(merged.sessionDir, 'data/outcomes/sessions');
   assert.deepEqual(pruning.tools, { alwaysKeep: ['read', 'bash'] });
+  // The user-editable proxy block must be preserved verbatim by the merge.
+  assert.deepEqual(merged.proxy, committedSettings.proxy);
 });

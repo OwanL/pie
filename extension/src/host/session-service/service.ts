@@ -1,13 +1,21 @@
+import * as cp from 'node:child_process';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
+import { ProxyService, type ProxyStartOptions } from '../backend/proxy-service';
 import { resolveChatPrefs } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ThinkingLevel, TranscriptMode } from '../../shared/protocol';
+import type { ChatPrefs, PruningSettings, ProxySettings, ProxySettingsUpdate, ThinkingLevel, TranscriptMode } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
   type PruningSettingsStorage,
 } from './pruning-settings-persistence';
+import {
+  loadPersistedProxySettings,
+  saveProxySettings,
+  type ProxySettingsStorage,
+} from './proxy-settings-persistence';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
@@ -23,6 +31,7 @@ import type { ArchState } from '../core/arch-state';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
+const PROXY_STORAGE_KEY = 'proxySettings';
 
 /**
  * Owns the PI backend process lifecycle and wires backend events to the
@@ -36,6 +45,10 @@ export class SessionService implements vscode.Disposable {
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
+  /** The running LiteLLM proxy + the options it was started with, set by
+   *  startup once `proxy.start()` succeeds so later edits can restart it. */
+  private proxyService?: ProxyService;
+  private proxyStartOptions?: ProxyStartOptions;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -270,6 +283,82 @@ export class SessionService implements vscode.Disposable {
     return {
       get: () => this.context.globalState.get<PruningSettings>(PRUNING_STORAGE_KEY),
       update: (value) => this.context.globalState.update(PRUNING_STORAGE_KEY, value),
+    };
+  }
+
+  /** Record the running proxy + its start options so later edits can restart it. */
+  setProxyRuntime(proxy: ProxyService, options: ProxyStartOptions): void {
+    this.proxyService = proxy;
+    this.proxyStartOptions = options;
+  }
+
+  /** Persist a partial proxy-settings update to settings.json, regenerate the
+   *  litellm_config.yaml via sync-models, and restart the proxy so the new
+   *  config takes effect. Mirrors `setPruningSettings` (optimistic — the
+   *  reducer already applied the update; do NOT re-dispatch
+   *  ProxySettingsChanged on the SET path). */
+  async setProxySettings(updates: ProxySettingsUpdate): Promise<void> {
+    const storage = this.createProxySettingsStorage();
+    await saveProxySettings(
+      storage,
+      // SET path: the reducer already applied the update optimistically, so
+      // do not re-dispatch ProxySettingsChanged (avoids a lost-update flicker
+      // under rapid sequential changes). Persistence still writes-or-mirrors
+      // and notifies on disk failure.
+      undefined,
+      () => this.getArchState().settings.proxySettings,
+      updates,
+      (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
+    );
+
+    const agentDir = process.env.PI_CODING_AGENT_DIR;
+    if (!agentDir) {
+      // No agent dir = no proxy config to regenerate; nothing to restart.
+      return;
+    }
+
+    // Regenerate litellm_config.yaml from the updated settings.json proxy block.
+    const nodePath = vscode.workspace.getConfiguration('pie').get<string>('nodePath', '') || 'node';
+    const syncScript = path.join(agentDir, 'scripts', 'sync-models.mjs');
+    const result = cp.spawnSync(nodePath, [syncScript], { encoding: 'utf8', windowsHide: true });
+    if (result.status !== 0) {
+      const stderr = (result.stderr || result.stdout || '').trim().slice(-800);
+      this.dispatchArch({
+        kind: 'NoticeShown',
+        notice: `Failed to regenerate the proxy config (sync-models): ${stderr || 'exited non-zero'}. The proxy was not restarted.`,
+      });
+      return;
+    }
+
+    // Restart the proxy so the new config is loaded. LiteLLM has no /reload
+    // endpoint, so a full stop+start is required. A failure here surfaces a
+    // notice but leaves the persisted config intact (the user can fix it and
+    // retry, or reload the window).
+    if (this.proxyService && this.proxyStartOptions) {
+      try {
+        await this.proxyService.restart(this.proxyStartOptions);
+      } catch (err) {
+        this.dispatchArch({
+          kind: 'NoticeShown',
+          notice: `Proxy config regenerated, but the LiteLLM proxy failed to restart: ${toErrorMessage(err)}. Reload the window to retry.`,
+        });
+        appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update', { error: toErrorMessage(err) });
+      }
+    }
+  }
+
+  async loadProxySettings(): Promise<void> {
+    const storage = this.createProxySettingsStorage();
+    await loadPersistedProxySettings(
+      storage,
+      (settings) => this.dispatchArch({ kind: 'ProxySettingsChanged', proxySettings: settings }),
+    );
+  }
+
+  private createProxySettingsStorage(): ProxySettingsStorage {
+    return {
+      get: () => this.context.globalState.get<ProxySettings>(PROXY_STORAGE_KEY),
+      update: (value) => this.context.globalState.update(PROXY_STORAGE_KEY, value),
     };
   }
 }

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   assertProtocolVersion,
   DEFAULT_CHAT_PREFS,
+  DEFAULT_PROXY_SETTINGS,
   PROTOCOL_VERSION,
   resolveChatPrefs,
   type ChatMessage,
@@ -175,6 +176,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
         provider: 'github-copilot',
         thinkingLevel: 'minimal' as const,
       },
+      proxySettings: DEFAULT_PROXY_SETTINGS,
       pruningCatalog: {
         skills: [],
         tools: [],

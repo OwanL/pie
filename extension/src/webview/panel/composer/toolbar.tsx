@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ThinkingLevel } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, ThinkingLevel } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS } from '../../../shared/thinking-level.js';
 
 import { useMemo } from 'preact/hooks';
@@ -23,8 +23,10 @@ interface ComposerToolbarProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  proxySettings: ProxySettings;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   selectedModel: string;
@@ -44,8 +46,10 @@ export function ComposerToolbar({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  proxySettings,
   onSetPrefs,
   onSetPruningSettings,
+  onSetProxySettings,
   availableExtensions,
   availableModels,
   selectedModel,
@@ -72,7 +76,7 @@ export function ComposerToolbar({
   return (
     <div class="flex w-full flex-nowrap items-center gap-1.5 [container-name:toolbar] [container-type:inline-size]">
       <div class="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5">
-        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} availableExtensions={availableExtensions} availableModels={availableModels} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} />
+        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} proxySettings={proxySettings} availableExtensions={availableExtensions} availableModels={availableModels} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetProxySettings={onSetProxySettings} />
 
         {filteredModels.length > 0 ? (
           <ModelPicker

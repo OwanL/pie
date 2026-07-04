@@ -23,6 +23,7 @@ import type {
   ExtensionUIRequestPayload,
   SessionOpenedPayload,
   PruningSettings,
+  ProxySettings,
   FileChangeEntry,
   ActiveRunSummary,
   SessionAnalyticsFactors,
@@ -222,6 +223,13 @@ export interface SetPruningSettingsResultEvent {
   error?: string;
 }
 
+export interface SetProxySettingsResultEvent {
+  kind: 'SetProxySettingsResult';
+  corrId: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface CloseSessionResultEvent {
   kind: 'CloseSessionResult';
   corrId: string;
@@ -263,6 +271,7 @@ export type EffectResultEvent =
   | OpenFileInEditorResultEvent
   | OpenFileResultEvent
   | SetPruningSettingsResultEvent
+  | SetProxySettingsResultEvent
   | CloseSessionResultEvent
   | DuplicateSessionResultEvent;
 
@@ -432,6 +441,12 @@ export interface BackendReadyWatchdogFiredEvent {
 export interface PruningSettingsChangedEvent {
   kind: 'PruningSettingsChanged';
   pruningSettings: PruningSettings;
+}
+
+/** Emitted when proxy settings change. */
+export interface ProxySettingsChangedEvent {
+  kind: 'ProxySettingsChanged';
+  proxySettings: ProxySettings;
 }
 
 /** Emitted when the workspace cwd changes. */
@@ -659,6 +674,7 @@ export type HostEvent =
   | BackendReadyChangedEvent
   | BackendReadyWatchdogFiredEvent
   | PruningSettingsChangedEvent
+  | ProxySettingsChangedEvent
   | WorkspaceCwdChangedEvent
   | TranscriptPageLoadedEvent
   | FileChangesUpdatedEvent

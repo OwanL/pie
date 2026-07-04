@@ -20,6 +20,7 @@ import {
   handleContinueTask,
   handleRecordOutcome,
   handleSetPruningSettings,
+  handleSetProxySettings,
 } from './command-misc-handlers.js';
 import {
   handleOpenSession,
@@ -195,6 +196,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetPruningSettings': {
       return handleSetPruningSettings(state, cmd);
+    }
+
+    case 'SetProxySettings': {
+      return handleSetProxySettings(state, cmd);
     }
 
     case 'DuplicateSession': {

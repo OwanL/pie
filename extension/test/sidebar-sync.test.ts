@@ -8,7 +8,7 @@ import {
   flushDirtySnapshot,
   reconcilePostedMessageDelivery,
 } from '../src/host/sidebar/sync';
-import { DEFAULT_CHAT_PREFS, type ViewState, type HostToWebviewMessage } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PROXY_SETTINGS, type ViewState, type HostToWebviewMessage } from '../src/shared/protocol';
 
 const baseViewState: ViewState = {
   sessions: [],
@@ -59,6 +59,7 @@ const baseViewState: ViewState = {
     provider: 'github-copilot',
     thinkingLevel: 'minimal' as const,
   },
+  proxySettings: DEFAULT_PROXY_SETTINGS,
   pruningCatalog: {
     skills: [],
     tools: [],

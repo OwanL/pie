@@ -221,6 +221,11 @@ export interface SetPruningSettingsCommand extends CommandBase {
   settings: Partial<import('../../shared/protocol').PruningSettings>;
 }
 
+export interface SetProxySettingsCommand extends CommandBase {
+  kind: 'SetProxySettings';
+  settings: import('../../shared/protocol').ProxySettingsUpdate;
+}
+
 export interface SetFileChangesExpandedCommand extends CommandBase {
   kind: 'SetFileChangesExpanded';
   sessionPath: string;
@@ -274,6 +279,7 @@ export type Command =
   | OpenFileInEditorCommand
   | OpenFileCommand
   | SetPruningSettingsCommand
+  | SetProxySettingsCommand
   | DuplicateSessionCommand
   | MoveSessionTabCommand
   | TogglePinTabCommand

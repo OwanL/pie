@@ -4,7 +4,7 @@
   "title": "pie models.yaml source",
   "type": "object",
   "additionalProperties": false,
-  "required": ["defaults", "retry", "pruning", "proxy", "profileOrder", "providers"],
+  "required": ["defaults", "retry", "pruning", "profileOrder", "providers"],
   "properties": {
     "defaults": {
       "type": "object",
@@ -45,39 +45,6 @@
         "thinkingLevel": { "$ref": "#/definitions/thinkingLevel" }
       }
     },
-    "proxy": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["routerSettings", "litellmSettings", "generalSettings"],
-      "properties": {
-        "routerSettings": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["numRetries", "retryAfter", "timeout"],
-          "properties": {
-            "numRetries": { "type": "integer", "minimum": 0 },
-            "retryAfter": { "type": "boolean" },
-            "timeout": { "type": "integer", "minimum": 0 }
-          }
-        },
-        "litellmSettings": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["dropParams"],
-          "properties": {
-            "dropParams": { "type": "boolean" }
-          }
-        },
-        "generalSettings": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["masterKeyEnv"],
-          "properties": {
-            "masterKeyEnv": { "type": "string", "minLength": 1 }
-          }
-        }
-      }
-    },
     "profileOrder": {
       "type": "array",
       "items": { "type": "string" },
@@ -114,27 +81,6 @@
         "apiKey": { "type": "string" },
         "compat": { "type": "object" },
         "headers": { "type": "object" },
-        "upstream": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["apiBase", "apiKeyEnv", "litellmProvider", "maxConcurrentRequests", "litellmModelInfoId", "modelListOrder", "alias"],
-          "properties": {
-            "apiBase": { "type": "string" },
-            "apiKeyEnv": { "type": "string", "minLength": 1 },
-            "litellmProvider": { "type": "string" },
-            "maxConcurrentRequests": { "type": "integer", "minimum": 1 },
-            "litellmModelInfoId": { "type": "string" },
-            "modelListOrder": {
-              "type": "array",
-              "items": { "type": "string" },
-              "uniqueItems": true
-            },
-            "alias": {
-              "type": "object",
-              "additionalProperties": { "type": "string" }
-            }
-          }
-        },
         "models": {
           "type": "array",
           "items": { "$ref": "#/definitions/model" }

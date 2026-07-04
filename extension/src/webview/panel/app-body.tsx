@@ -186,6 +186,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningSettings={viewState.pruningSettings}
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}
+        proxySettings={viewState.proxySettings}
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
         transcriptWindow={viewState.transcriptWindow}

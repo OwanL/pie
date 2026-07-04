@@ -291,6 +291,23 @@ export class ProxyService implements vscode.Disposable {
     }
   }
 
+  /** Force a fresh proxy spawn so a newly-regenerated `litellm_config.yaml` is
+   *  loaded. LiteLLM has no `/reload` endpoint, so a config change requires a
+   *  full stop+start. Also reclaims any orphaned litellm still bound to the
+   *  port from a prior run — otherwise `start()`'s fast-path would reuse the
+   *  stale-config proxy and never pick up the new config. */
+  async restart(options: ProxyStartOptions): Promise<ProxyReadyPayload> {
+    const { port, host } = options;
+    await this.stop();
+    // Kill any port holder we didn't spawn (a reused proxy from a prior run),
+    // otherwise start() would reuse the stale-config proxy and never load the
+    // new config.
+    if (this.isPortListening(port)) {
+      await this.reclaimOrphanedPort(port, host);
+    }
+    return this.start(options);
+  }
+
   /** Stop the proxy child process. Safe to call repeatedly.
    *
    *  `uv run litellm` spawns litellm as a CHILD of uv — so killing only the

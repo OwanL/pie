@@ -11,4 +11,5 @@ export { SoundSection } from './settings-menu-sound';
 export { SubagentFlyout } from './settings-menu-subagent';
 export { ExtensionsSection } from './settings-menu-extensions';
 export { ProvidersSection } from './settings-menu-providers';
+export { ProxySection } from './settings-menu-proxy';
 export { UiSubmenuTrigger, UiFlyout } from './ui-appearance-settings';

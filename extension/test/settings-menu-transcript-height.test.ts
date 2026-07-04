@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../src/webview/panel/composer/settings-menu';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS } from '../src/shared/protocol';
 
 let container: HTMLElement;
 
@@ -41,10 +41,12 @@ test('UI flyout caps its height to the transcript vertical space, not the viewpo
         pruningSettings: DEFAULT_PRUNING_SETTINGS,
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
+        proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: [],
         availableModels: [],
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
+        onSetProxySettings: () => undefined,
       }),
       container,
     );
@@ -87,10 +89,12 @@ test('settings menu caps its height to the transcript vertical space', () => {
         pruningSettings: DEFAULT_PRUNING_SETTINGS,
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
+        proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: [],
         availableModels: [],
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
+        onSetProxySettings: () => undefined,
       }),
       container,
     );

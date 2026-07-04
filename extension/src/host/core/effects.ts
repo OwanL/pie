@@ -211,6 +211,11 @@ export interface SetPruningSettingsEffect extends EffectBase {
   settings: Partial<import('../../shared/protocol').PruningSettings>;
 }
 
+export interface SetProxySettingsEffect extends EffectBase {
+  kind: 'SetProxySettings';
+  settings: import('../../shared/protocol').ProxySettingsUpdate;
+}
+
 export interface CloseSessionEffect extends EffectBase {
   kind: 'CloseSession';
   sessionPath: string;
@@ -265,6 +270,7 @@ export type Effect =
   | OpenFileInEditorEffect
   | OpenFileEffect
   | SetPruningSettingsEffect
+  | SetProxySettingsEffect
   | CloseSessionEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect

@@ -79,6 +79,7 @@ import {
   handleBackendReadyChanged,
   handleBackendReadyWatchdogFired,
   handlePruningSettingsChanged,
+  handleProxySettingsChanged,
   handleWorkspaceCwdChanged,
   handleTranscriptPageLoaded,
   handleTranscriptTrimmed,
@@ -119,6 +120,7 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
+    case 'SetProxySettingsResult':
     case 'ExtensionUiResponseResult': {
       return handleEffectResult(state, event);
     }
@@ -176,6 +178,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'PruningSettingsChanged': {
       return handlePruningSettingsChanged(state, event);
+    }
+
+    case 'ProxySettingsChanged': {
+      return handleProxySettingsChanged(state, event);
     }
 
     case 'WorkspaceCwdChanged': {
