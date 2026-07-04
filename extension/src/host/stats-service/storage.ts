@@ -19,6 +19,7 @@ import {
 } from '../run-analytics/query';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
+  type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
   type RunCheckpoint,
@@ -60,6 +61,7 @@ export class RunAnalyticsStorage {
    */
   private pendingSnapshots: Map<string, RunSnapshot> = new Map();
   private pendingOutcomes: Map<string, OutcomeHistoryLogEntry> = new Map();
+  private pendingAgentReviews: Map<string, AgentReviewEntry> = new Map();
 
   constructor(options: RunAnalyticsStorageOptions) {
     const workspaceIds = [...new Set([options.workspaceId, ...(options.legacyWorkspaceIds ?? [])])];
@@ -124,6 +126,23 @@ export class RunAnalyticsStorage {
     }
   }
 
+  schedulePersistAgentReview(entry: AgentReviewEntry): void {
+    // Stage the latest agent-review entry per runId so a failed append is
+    // retried by the next persist, and re-recording for the same run keeps
+    // only the newest review (mirrors pendingOutcomes / pendingSnapshots).
+    const existing = this.pendingAgentReviews.get(entry.runId);
+    if (!existing || this.agentReviewRecencyMs(entry) >= this.agentReviewRecencyMs(existing)) {
+      this.pendingAgentReviews.set(entry.runId, entry);
+    }
+    this.dirty = true;
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null;
+        this.schedulePersistJob();
+      }, this.persistIntervalMs);
+    }
+  }
+
   /** The most recent persistence failure, or null if the last persist succeeded. */
   getPersistError(): { message: string; at: string } | null {
     return this.lastPersistError;
@@ -138,7 +157,7 @@ export class RunAnalyticsStorage {
 
   async flush(): Promise<void> {
     this.cancelPersistTimer();
-    if (this.dirty || this.pendingSnapshots.size > 0 || this.pendingOutcomes.size > 0) {
+    if (this.dirty || this.pendingSnapshots.size > 0 || this.pendingOutcomes.size > 0 || this.pendingAgentReviews.size > 0) {
       this.schedulePersistJob();
     }
 
@@ -207,6 +226,14 @@ export class RunAnalyticsStorage {
       );
       this.pendingOutcomes.delete(outcome.runId);
     }
+    for (const review of [...this.pendingAgentReviews.values()]) {
+      await fs.appendFile(
+        path.join(this.storageDir, 'agent-reviews.jsonl'),
+        serializeJsonLine(review),
+        'utf8',
+      );
+      this.pendingAgentReviews.delete(review.runId);
+    }
     if (needsCheckpoint) {
       const checkpoint = this.buildCheckpoint(++this.seq);
       await this.writeCheckpoint(checkpoint);
@@ -270,6 +297,10 @@ export class RunAnalyticsStorage {
     return Date.parse(outcome.recordedAt);
   }
 
+  private agentReviewRecencyMs(entry: AgentReviewEntry): number {
+    return Date.parse(entry.recordedAt);
+  }
+
   private buildCheckpoint(seq: number): RunCheckpoint {
     return {
       schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
@@ -313,6 +344,7 @@ export class RunAnalyticsStorage {
 
     await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'run-snapshots.jsonl');
     await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'outcome-history.jsonl');
+    await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'agent-reviews.jsonl');
     await this.mergeCheckpointStates(existingLegacyStorageDirs);
   }
 
@@ -491,6 +523,15 @@ export class RunAnalyticsStorage {
         && typeof parsed.runId === 'string') {
         return {
           key: `run_outcome:${parsed.runId}`,
+          recency: typeof parsed.recordedAt === 'string' ? parsed.recordedAt : '',
+        };
+      }
+
+      if (fileName === 'agent-reviews.jsonl'
+        && parsed.kind === 'agent_review'
+        && typeof parsed.runId === 'string') {
+        return {
+          key: `agent_review:${parsed.runId}`,
           recency: typeof parsed.recordedAt === 'string' ? parsed.recordedAt : '',
         };
       }

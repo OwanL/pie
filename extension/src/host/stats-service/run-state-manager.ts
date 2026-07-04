@@ -18,6 +18,7 @@ import {
   createEmptyToolUsageRollup,
   createEmptyVerificationRollup,
   normalizeExperimentAssignment,
+  type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
   type RunFinalizationReason,
@@ -55,6 +56,7 @@ interface SessionRunStateManagerOptions {
   getArchState: GetArchState;
   dispatchArchEvent: DispatchArchEvent;
   schedulePersist: (snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry) => void;
+  schedulePersistAgentReview: (entry: AgentReviewEntry) => void;
   now: () => Date;
   createId: () => string;
   getExperimentAssignment: () => string | null;
@@ -65,6 +67,7 @@ export class SessionRunStateManager {
   private readonly getArchState: GetArchState;
   private readonly dispatchArchEvent: DispatchArchEvent;
   private readonly schedulePersistCallback: SessionRunStateManagerOptions['schedulePersist'];
+  private readonly schedulePersistAgentReviewCallback: SessionRunStateManagerOptions['schedulePersistAgentReview'];
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly getExperimentAssignment: () => string | null;
@@ -73,6 +76,7 @@ export class SessionRunStateManager {
     this.getArchState = options.getArchState;
     this.dispatchArchEvent = options.dispatchArchEvent;
     this.schedulePersistCallback = options.schedulePersist;
+    this.schedulePersistAgentReviewCallback = options.schedulePersistAgentReview;
     this.now = options.now;
     this.createId = options.createId;
     this.getExperimentAssignment = options.getExperimentAssignment;
@@ -341,6 +345,10 @@ export class SessionRunStateManager {
 
   persist(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
     this.schedulePersistCallback(snapshotToAppend, outcomeToAppend);
+  }
+
+  persistAgentReview(entry: AgentReviewEntry): void {
+    this.schedulePersistAgentReviewCallback(entry);
   }
 
   isoNow(): string {

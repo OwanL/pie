@@ -6,6 +6,7 @@ import {
   DATA_MODE_LOCAL_DEFAULT,
   SITE_DATA_FILE_NAMES,
   SITE_DATA_SCHEMA_VERSION,
+  type AgentReviewComparisonData,
   type BackendErrorData,
   type FileExtensionData,
   type ModelQualityAggregateRow,
@@ -14,6 +15,7 @@ import {
   type PruningImpactData,
   type ResolutionCounts,
   type PreparedAnalyticsData,
+  type PreparedAgentReviewRow,
   type PreparedRunRow,
   type PreparedTurnThroughputRow,
   type SiteDataBundle,
@@ -577,6 +579,100 @@ function createToolResultPruningImpact(prepared: PreparedAnalyticsData): ToolRes
   };
 }
 
+/** Build the agent-vs-user outcome comparison site-data payload. Agent ratings (1–5) come
+ *  from the session_review tool; user satisfaction (1–5) comes from the user's run_outcome.
+ *  Agreement is computed only over runs scored by BOTH (an agent review joined to a run that
+ *  has a user outcome). Multi-reviewer coverage groups reviews by their reviewer-bucket
+ *  signature so multi-reviewer vs single-reviewer populations can be contrasted. */
+function buildAgentReviewComparison(prepared: PreparedAnalyticsData): AgentReviewComparisonData {
+  const rows = prepared.agentReviews;
+
+  // Agent side: group review rows by model family.
+  const agentByModel = new Map<string, PreparedAgentReviewRow[]>();
+  for (const row of rows) {
+    const mid = row.modelFamily?.trim() || '(unknown)';
+    const existing = agentByModel.get(mid) ?? [];
+    existing.push(row);
+    agentByModel.set(mid, existing);
+  }
+
+  // User side: group user-scored runs (satisfaction != null) by model family.
+  const userByModel = new Map<string, number[]>();
+  for (const run of prepared.runs) {
+    if (run.status === 'open' || run.satisfaction === null) {
+      continue;
+    }
+    const mid = run.modelFamily?.trim() || '(unknown)';
+    const existing = userByModel.get(mid) ?? [];
+    existing.push(run.satisfaction);
+    userByModel.set(mid, existing);
+  }
+
+  const modelKeys = new Set<string>([...agentByModel.keys(), ...userByModel.keys()]);
+
+  const perModel = [...modelKeys].map((modelId) => {
+    const agentRows = agentByModel.get(modelId) ?? [];
+    const userSatisfactions = userByModel.get(modelId) ?? [];
+    const agentRatings = agentRows.map((r) => r.agentRating);
+    const bothScored = agentRows.filter((r) => r.userSatisfaction !== null);
+    const deltas = bothScored.map((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)));
+    const completion = { fully: 0, partial: 0, setback: 0 };
+    for (const r of agentRows) {
+      completion[r.agentCompletion] += 1;
+    }
+    return {
+      modelId,
+      agentReviewCount: agentRows.length,
+      userOutcomeCount: userSatisfactions.length,
+      bothScoredCount: bothScored.length,
+      agentAverageRating: average(agentRatings, 2),
+      userAverageSatisfaction: average(userSatisfactions, 2),
+      agentCompletion: completion,
+      agreement: {
+        meanAbsDelta: deltas.length > 0 ? round(deltas.reduce((a, b) => a + b, 0) / deltas.length, 3) : null,
+        exactCount: bothScored.filter((r) => r.agentRating === r.userSatisfaction).length,
+        offByOneCount: bothScored.filter((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)) === 1).length,
+        offByTwoPlusCount: bothScored.filter((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)) >= 2).length,
+      },
+    };
+  }).sort((a, b) => b.agentReviewCount - a.agentReviewCount || a.modelId.localeCompare(b.modelId));
+
+  // Multi-reviewer coverage: group by sorted reviewer-bucket signature.
+  const byBucket = new Map<string, { buckets: string[]; rows: PreparedAgentReviewRow[] }>();
+  for (const row of rows) {
+    const sig = JSON.stringify(row.reviewerBuckets);
+    const existing = byBucket.get(sig) ?? { buckets: row.reviewerBuckets, rows: [] };
+    existing.rows.push(row);
+    byBucket.set(sig, existing);
+  }
+  const reviewerBucketCoverage = [...byBucket.values()]
+    .map((entry) => ({
+      reviewerBuckets: entry.buckets,
+      reviewCount: entry.rows.length,
+      averageAgentRating: average(entry.rows.map((r) => r.agentRating), 2),
+    }))
+    .sort((a, b) => b.reviewCount - a.reviewCount || JSON.stringify(a.reviewerBuckets).localeCompare(JSON.stringify(b.reviewerBuckets)));
+
+  const totalAgentReviews = rows.length;
+  const totalRunsScoredByUser = prepared.runs.filter((r) => r.status !== 'open' && r.satisfaction !== null).length;
+  const totalScoredByBoth = rows.filter((r) => r.userSatisfaction !== null).length;
+
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    perModel,
+    reviewerBucketCoverage,
+    overall: {
+      totalAgentReviews,
+      totalRunsScoredByUser,
+      totalScoredByBoth,
+    },
+    notes: [
+      "Agent ratings (1–5) are the session_review tool's judgement; user satisfaction (1–5) is the user's run_outcome. Agreement is computed only over runs scored by BOTH.",
+      "reviewerBuckets is the sorted sub-agent bucket signature that fed the rating (e.g. ['medium','small']); an empty array means a single reviewer with no bucket provenance.",
+    ],
+  };
+}
+
 function createBackendErrors(prepared: PreparedAnalyticsData): BackendErrorData {
   const rows = prepared.backendErrors;
   const byCode = new Map<string, { count: number; runs: Set<string> }>();
@@ -663,6 +759,7 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     modelLeaderboard: createModelLeaderboard(prepared),
     pruningImpact: createPruningImpact(prepared),
     toolResultPruningImpact: createToolResultPruningImpact(prepared),
+    agentReviewComparison: buildAgentReviewComparison(prepared),
     backendErrors: createBackendErrors(prepared),
     fileExtensions: createFileExtensions(prepared),
     tokenThroughput: createTokenThroughput(prepared),
@@ -682,6 +779,7 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'model-leaderboard.json': bundle.modelLeaderboard,
     'pruning-impact.json': bundle.pruningImpact,
     'tool-result-pruning-impact.json': bundle.toolResultPruningImpact,
+    'agent-review-comparison.json': bundle.agentReviewComparison,
     'backend-errors.json': bundle.backendErrors,
     'file-types.json': bundle.fileExtensions,
     'token-throughput.json': bundle.tokenThroughput,
@@ -894,6 +992,18 @@ function validateToolResultPruningImpact(data: unknown): asserts data is ToolRes
   assert(Array.isArray(data.summary.byTool), 'tool-result-pruning-impact.json summary is missing byTool.');
 }
 
+function validateAgentReviewComparison(data: unknown): asserts data is AgentReviewComparisonData {
+  assert(isRecord(data), 'agent-review-comparison.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'agent-review-comparison.json has an unexpected schemaVersion.');
+  assert(Array.isArray(data.perModel), 'agent-review-comparison.json is missing perModel.');
+  assert(Array.isArray(data.reviewerBucketCoverage), 'agent-review-comparison.json is missing reviewerBucketCoverage.');
+  assert(isRecord(data.overall), 'agent-review-comparison.json is missing overall.');
+  assert(typeof data.overall.totalAgentReviews === 'number', 'agent-review-comparison.json overall is missing totalAgentReviews.');
+  assert(typeof data.overall.totalRunsScoredByUser === 'number', 'agent-review-comparison.json overall is missing totalRunsScoredByUser.');
+  assert(typeof data.overall.totalScoredByBoth === 'number', 'agent-review-comparison.json overall is missing totalScoredByBoth.');
+  assert(Array.isArray(data.notes), 'agent-review-comparison.json is missing notes.');
+}
+
 function validateBackendErrors(data: unknown): asserts data is BackendErrorData {
   assert(isRecord(data), 'backend-errors.json must contain an object.');
   assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'backend-errors.json has an unexpected schemaVersion.');
@@ -937,6 +1047,7 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateModelLeaderboard(bundle.modelLeaderboard);
   validatePruningImpact(bundle.pruningImpact);
   validateToolResultPruningImpact(bundle.toolResultPruningImpact);
+  validateAgentReviewComparison(bundle.agentReviewComparison);
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
   validateTokenThroughput(bundle.tokenThroughput);
@@ -961,6 +1072,7 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     modelLeaderboard: files['model-leaderboard.json'] as SiteDataBundle['modelLeaderboard'],
     pruningImpact: files['pruning-impact.json'] as SiteDataBundle['pruningImpact'],
     toolResultPruningImpact: files['tool-result-pruning-impact.json'] as SiteDataBundle['toolResultPruningImpact'],
+    agentReviewComparison: files['agent-review-comparison.json'] as SiteDataBundle['agentReviewComparison'],
     backendErrors: files['backend-errors.json'] as SiteDataBundle['backendErrors'],
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],
     tokenThroughput: files['token-throughput.json'] as SiteDataBundle['tokenThroughput'],

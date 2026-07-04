@@ -18,6 +18,7 @@ import { listStorageDirCandidates } from './source-auto.ts';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
+  type AgentReviewSourceEvent,
   type FileExtensionRollup,
   type FileMutationRollup,
   type FunctionalSettingsSnapshot,
@@ -909,6 +910,7 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     pruningDecisions: Array.isArray(value.pruningDecisions) ? value.pruningDecisions : [],
     pruningEvents: coercePruningEvents(value.pruningEvents),
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
+    agentReviews: coerceAgentReviews(value.agentReviews),
   };
 }
 
@@ -977,6 +979,63 @@ function coerceToolResultPruningEvents(value: unknown): ToolResultPruningSourceE
   return events;
 }
 
+/** Coerce a single parsed JSONL line into an {@link AgentReviewSourceEvent}, or null if invalid. */
+function coerceAgentReviewEntry(value: unknown): AgentReviewSourceEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const completion = value.completion;
+  if (
+    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION ||
+    value.kind !== 'agent_review' ||
+    typeof value.recordedAt !== 'string' ||
+    typeof value.sessionPath !== 'string' ||
+    typeof value.runId !== 'string' ||
+    typeof value.taskGroupId !== 'string' ||
+    typeof value.done !== 'boolean' ||
+    typeof value.rating !== 'number' ||
+    !Number.isFinite(value.rating) ||
+    (completion !== 'fully' && completion !== 'partial' && completion !== 'setback') ||
+    typeof value.evaluatedAt !== 'string' ||
+    !Array.isArray(value.reviewerBuckets) ||
+    !value.reviewerBuckets.every((b: unknown) => typeof b === 'string') ||
+    typeof value.reviewerCount !== 'number' ||
+    !Number.isFinite(value.reviewerCount)
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+    kind: 'agent_review',
+    recordedAt: value.recordedAt,
+    sessionPath: value.sessionPath,
+    runId: value.runId,
+    taskGroupId: value.taskGroupId,
+    done: value.done,
+    rating: value.rating,
+    completion,
+    reason: typeof value.reason === 'string' ? value.reason : '',
+    evaluatedAt: value.evaluatedAt,
+    reviewerBuckets: value.reviewerBuckets as string[],
+    reviewerCount: Math.trunc(value.reviewerCount),
+  };
+}
+
+/** Coerce a raw array into {@link AgentReviewSourceEvent}[], dropping malformed entries. */
+export function coerceAgentReviews(value: unknown): AgentReviewSourceEvent[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const events: AgentReviewSourceEvent[] = [];
+  for (const entry of value) {
+    const coerced = coerceAgentReviewEntry(entry);
+    if (coerced) {
+      events.push(coerced);
+    }
+  }
+  return events;
+}
+
 function readToolResultPruningLog(configRoot: string): ToolResultPruningSourceEvent[] {
   const logPath = path.join(configRoot, 'data', 'tool-result-pruning.jsonl');
   let raw: string;
@@ -1011,6 +1070,32 @@ function readToolResultPruningLog(configRoot: string): ToolResultPruningSourceEv
           tokensSaved: parsed.tokensSaved,
           timestamp: parsed.timestamp,
         });
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return events;
+}
+
+/** Read `<storageDir>/agent-reviews.jsonl` (the agent-side counterpart to outcome-history.jsonl).
+ *  Missing file or malformed lines are skipped; returns [] when the file is absent. */
+export function readAgentReviewsLog(storageDir: string): AgentReviewSourceEvent[] {
+  const logPath = path.join(storageDir, 'agent-reviews.jsonl');
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, 'utf8');
+  } catch {
+    return [];
+  }
+  const lines = raw.trim().split('\n').filter((line) => line.trim().length > 0);
+  const events: AgentReviewSourceEvent[] = [];
+  for (const line of lines) {
+    try {
+      const parsed = parseJsonOrThrow<unknown>(line, logPath);
+      const coerced = coerceAgentReviewEntry(parsed);
+      if (coerced) {
+        events.push(coerced);
       }
     } catch {
       // Skip malformed lines
@@ -1115,6 +1200,7 @@ async function querySourceAnalyticsPayloadFromStorageDir(storageDir: string): Pr
     completedRuns: result.completedRuns,
     openRuns: result.openRuns,
     outcomes: result.outcomes,
+    agentReviews: readAgentReviewsLog(storageDir),
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],
@@ -1137,12 +1223,14 @@ async function queryAllRunAnalyticsStores(
   const completedRuns: RunSnapshot[] = [];
   const openRuns: RunSnapshot[] = [];
   const outcomes: OutcomeHistoryLogEntry[] = [];
+  const agentReviews: AgentReviewSourceEvent[] = [];
 
   for (const { storageDir } of candidates) {
     const result = await querySourceAnalyticsPayloadFromStorageDir(storageDir);
     completedRuns.push(...result.completedRuns);
     openRuns.push(...result.openRuns);
     outcomes.push(...result.outcomes);
+    agentReviews.push(...result.agentReviews);
   }
 
   const source: SourceAnalyticsPayload = {
@@ -1152,6 +1240,7 @@ async function queryAllRunAnalyticsStores(
     completedRuns,
     openRuns,
     outcomes,
+    agentReviews,
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],

@@ -29,6 +29,7 @@ export const SITE_DATA_FILE_NAMES = [
   'model-leaderboard.json',
   'pruning-impact.json',
   'tool-result-pruning-impact.json',
+  'agent-review-comparison.json',
   'backend-errors.json',
   'file-types.json',
   'token-throughput.json',
@@ -274,6 +275,32 @@ export interface OutcomeHistoryLogEntry {
   outcome: RunOutcome;
 }
 
+/** Agent-review completion judgement, mirrored from the `session_review` tool. */
+export type AgentReviewCompletion = 'fully' | 'partial' | 'setback';
+
+/** Raw agent-authored session review read from `agent-reviews.jsonl` (one per line).
+ *  The agent-side counterpart to the user's `run_outcome` ({@link OutcomeHistoryLogEntry}):
+ *  carries the richer agent-review fields (done / 1–5 rating / completion / reason) plus
+ *  multi-reviewer provenance (reviewerBuckets / reviewerCount) so agent judgement can be
+ *  compared against the user's own outcome in the dashboard. */
+export interface AgentReviewSourceEvent {
+  schemaVersion: number;
+  kind: 'agent_review';
+  recordedAt: string;
+  sessionPath: string;
+  runId: string;
+  taskGroupId: string;
+  done: boolean;
+  rating: number;
+  completion: AgentReviewCompletion;
+  reason: string;
+  evaluatedAt: string;
+  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small']). */
+  reviewerBuckets: string[];
+  /** Number of sub-agent reviewers that fed the rating. */
+  reviewerCount: number;
+}
+
 export interface SourceAnalyticsPayload {
   schemaVersion: number;
   exportedAt: string;
@@ -281,6 +308,8 @@ export interface SourceAnalyticsPayload {
   completedRuns: RunSnapshot[];
   openRuns: RunSnapshot[];
   outcomes: OutcomeHistoryLogEntry[];
+  /** Raw agent-authored session reviews read from <store>/agent-reviews.jsonl. */
+  agentReviews: AgentReviewSourceEvent[];
   /** Raw pruning decisions read from data/pruning.jsonl. */
   pruningDecisions: PruningSourceDecision[];
   /** Raw pruning quality-signal events read from data/pruning.jsonl. */
@@ -609,6 +638,27 @@ export interface PreparedToolResultPruningRow {
   tokensSaved: number;
 }
 
+/** Prepared agent-review row for DuckDB + site-data (joined to a run by sessionPathHash + runId).
+ *  Carries the matched run's model family + user satisfaction so the comparison builder is
+ *  self-contained (no re-join to runs needed). */
+export interface PreparedAgentReviewRow {
+  runId: string;
+  sessionPathHash: string;
+  taskGroupId: string;
+  recordedAt: string;
+  evaluatedAt: string;
+  startedDay: string;
+  /** Canonical model family of the matched run (null when unjoined). */
+  modelFamily: string | null;
+  agentRating: number;
+  agentCompletion: AgentReviewCompletion;
+  agentDone: boolean;
+  reviewerBuckets: string[];
+  reviewerCount: number;
+  /** User satisfaction for the matched run (null when the run has no user outcome). */
+  userSatisfaction: number | null;
+}
+
 /** Prepared pruning event row for DuckDB. */
 export interface PreparedPruningEventRow {
   runId: string;
@@ -650,6 +700,7 @@ export interface PreparedAnalyticsData {
   pruningEvents: PreparedPruningEventRow[];
   pruningSignals: PreparedPruningSignalRow[];
   toolResultPruning: PreparedToolResultPruningRow[];
+  agentReviews: PreparedAgentReviewRow[];
 }
 
 export interface SiteManifest {
@@ -939,6 +990,55 @@ export interface ToolResultPruningImpactData {
   summary: ToolResultPruningSummary;
 }
 
+/** Agreement signal between agent rating and user satisfaction, computed only over runs
+ *  scored by BOTH (an agent review AND a user outcome). */
+export interface AgentReviewAgreementSummary {
+  /** Mean of |agent_rating - user_satisfaction| over runs scored by both. Null when none scored by both. */
+  meanAbsDelta: number | null;
+  /** Runs where agent_rating === user_satisfaction. */
+  exactCount: number;
+  /** Runs where |agent_rating - user_satisfaction| === 1. */
+  offByOneCount: number;
+  /** Runs where |agent_rating - user_satisfaction| >= 2. */
+  offByTwoPlusCount: number;
+}
+
+/** Per-model aggregate comparing agent judgement vs user outcome. */
+export interface AgentReviewPerModelRow {
+  /** Canonical model family the row is grouped by (mirrors model-quality modelId). */
+  modelId: string;
+  agentReviewCount: number;
+  /** Runs in this model group scored by the user (satisfaction != null). */
+  userOutcomeCount: number;
+  /** Runs in this model group scored by BOTH agent and user. */
+  bothScoredCount: number;
+  agentAverageRating: number | null;
+  userAverageSatisfaction: number | null;
+  agentCompletion: { fully: number; partial: number; setback: number };
+  agreement: AgentReviewAgreementSummary;
+}
+
+/** Multi-reviewer coverage: review counts grouped by reviewer-bucket signature. */
+export interface AgentReviewReviewerBucketRow {
+  /** Sorted reviewer-bucket signature (e.g. ['medium','small']); empty array when no bucket provenance. */
+  reviewerBuckets: string[];
+  reviewCount: number;
+  averageAgentRating: number | null;
+}
+
+/** Site-data payload comparing agent-authored reviews against user outcomes. */
+export interface AgentReviewComparisonData {
+  schemaVersion: number;
+  perModel: AgentReviewPerModelRow[];
+  reviewerBucketCoverage: AgentReviewReviewerBucketRow[];
+  overall: {
+    totalAgentReviews: number;
+    totalRunsScoredByUser: number;
+    totalScoredByBoth: number;
+  };
+  notes: string[];
+}
+
 export interface BackendErrorByCodeRow {
   errorCode: string;
   count: number;
@@ -990,6 +1090,7 @@ export interface SiteDataBundle {
   modelLeaderboard: ModelLeaderboardData;
   pruningImpact: PruningImpactData;
   toolResultPruningImpact: ToolResultPruningImpactData;
+  agentReviewComparison: AgentReviewComparisonData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;

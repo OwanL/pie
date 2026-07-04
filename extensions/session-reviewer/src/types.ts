@@ -33,6 +33,11 @@ export interface ReviewRecord {
   completion: Completion;
   reason: string;
   evaluatedAt: string;
+  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small']).
+   *  Optional for backward compat; older records have no field. */
+  reviewerBuckets?: string[];
+  /** Number of sub-agent reviewers that fed the rating. Optional for backward compat. */
+  reviewerCount?: number;
 }
 
 export interface SessionReviewParams {
@@ -48,6 +53,12 @@ export interface SessionReviewParams {
   completion?: Completion;
   /** `setReview`: free-text reason for the rating/completion. */
   reason?: string;
+  /** `setReview`: sub-agent buckets whose judgments fed the rating (e.g.
+   *  ['medium','small']) — records the multi-reviewer provenance so the host
+   *  analytics can distinguish multi-reviewer agent reviews from single-shot ones. */
+  reviewerBuckets?: string[];
+  /** `setReview`: number of sub-agent reviewers that fed the rating. */
+  reviewerCount?: number;
   /** `getTranscript`: cap on the number of most-recent turns returned (default 40). */
   maxTurns?: number;
 }
@@ -75,6 +86,12 @@ export const sessionReviewSchema = {
       description: 'setReview: fully = task completed; partial = work done but unresolved; setback = left things worse (regression/failed approach).',
     },
     reason: { type: 'string', description: 'setReview: free-text reason for the rating/completion.' },
+    reviewerBuckets: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'setReview: sub-agent buckets whose judgments fed the rating (e.g. ["medium","small"]) — records the multi-reviewer provenance for analytics.',
+    },
+    reviewerCount: { type: 'integer', minimum: 0, description: 'setReview: number of sub-agent reviewers that fed the rating.' },
     maxTurns: { type: 'integer', minimum: 1, maximum: 200, description: 'getTranscript: cap on most-recent turns returned (default 40).' },
   },
   required: ['action'],

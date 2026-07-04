@@ -17,7 +17,10 @@ import type {
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
 import {
+  RUN_ANALYTICS_SCHEMA_VERSION,
   normalizeExperimentAssignment,
+  type AgentReviewCompletion,
+  type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
   type RunSnapshot,
   type TreatmentChangeKind,
@@ -43,6 +46,7 @@ interface SessionRunTrackerOptions {
   dispatchArchEvent: DispatchArchEvent;
   scheduleRender: () => void;
   schedulePersist: (snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry) => void;
+  schedulePersistAgentReview: (entry: AgentReviewEntry) => void;
   now: () => Date;
   createId: () => string;
   getExperimentAssignment: () => string | null;
@@ -67,6 +71,7 @@ export class SessionRunTracker {
       getArchState: options.getArchState,
       dispatchArchEvent: options.dispatchArchEvent,
       schedulePersist: options.schedulePersist,
+      schedulePersistAgentReview: options.schedulePersistAgentReview,
       now: options.now,
       createId: options.createId,
       getExperimentAssignment: options.getExperimentAssignment,
@@ -591,6 +596,42 @@ export class SessionRunTracker {
       this.runState.buildOutcomeHistoryEntry(updatedRun, outcome),
     );
     this.scheduleRender();
+  }
+
+  recordAgentReview(
+    sessionPath: string,
+    review: {
+      done: boolean;
+      rating: number;
+      completion: AgentReviewCompletion;
+      reason: string;
+      evaluatedAt: string;
+      reviewerBuckets: string[];
+      reviewerCount: number;
+    },
+  ): void {
+    const state = this.runState.getOrCreateSessionState(sessionPath);
+    const run = state.currentRun ?? state.lastRun;
+    if (!run) {
+      return;
+    }
+    const recordedAt = this.runState.isoNow();
+    const entry: AgentReviewEntry = {
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'agent_review',
+      recordedAt,
+      sessionPath,
+      runId: run.runId,
+      taskGroupId: run.taskGroupId,
+      done: review.done,
+      rating: review.rating,
+      completion: review.completion,
+      reason: review.reason,
+      evaluatedAt: review.evaluatedAt ?? recordedAt,
+      reviewerBuckets: review.reviewerBuckets ?? [],
+      reviewerCount: review.reviewerCount ?? 0,
+    };
+    this.runState.persistAgentReview(entry);
   }
 
   startNewTask(sessionPath: string): void {

@@ -12,9 +12,10 @@ export type SessionCompletion = 'fully' | 'partial' | 'setback';
  *  (`<data>/session-reviews/reviews.jsonl`). Append-only JSONL keyed by
  *  `sessionPath`; the latest record per path wins. Owned by the
  *  `session_review` tool (the sole writer); the backend reads + watches it to
- *  merge `done`/`rating`/`completion`/`reviewReason`/`evaluatedAt` back into
- *  `SessionSummary` (the SDK owns the session JSONL and exposes no append path
- *  to pie, so the review lives in a sidecar). */
+ *  merge `done`/`rating`/`completion`/`reviewReason`/`evaluatedAt`/
+ *  `reviewerBuckets`/`reviewerCount` back into `SessionSummary` (the SDK owns
+ *  the session JSONL and exposes no append path to pie, so the review lives in
+ *  a sidecar). */
 export interface SessionReview {
   sessionPath: string;
   done: boolean;
@@ -22,6 +23,14 @@ export interface SessionReview {
   completion: SessionCompletion;
   reason: string;
   evaluatedAt: string;
+  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small'])
+   *  — captures the multi-reviewer process so agent reviews can be
+   *  distinguished from single-shot/user outcomes in analytics. Optional for
+   *  backward compat; older records have no field. */
+  reviewerBuckets?: string[];
+  /** Number of sub-agent reviewers that fed the rating. Optional for backward
+   *  compat; older records have no field. */
+  reviewerCount?: number;
 }
 
 export interface SessionSummary {
@@ -50,6 +59,12 @@ export interface SessionSummary {
   reviewReason?: string;
   /** ISO timestamp of the most recent review. */
   evaluatedAt?: string;
+  /** Agent review: sub-agent buckets whose judgments fed the rating (e.g.
+   *  ['medium','small']) — captures the multi-reviewer process so agent
+   *  reviews can be distinguished from single-shot/user outcomes in analytics. */
+  reviewerBuckets?: string[];
+  /** Agent review: number of sub-agent reviewers that fed the rating. */
+  reviewerCount?: number;
 }
 
 export type TranscriptPageDirection = 'older' | 'newer' | 'latest';

@@ -11,6 +11,7 @@ import type {
   ExtensionInfo,
   ExtensionUIRequestPayload,
   SessionListChangedPayload,
+  SessionSummary,
 } from '../../../shared/protocol';
 import { requestWindowAttention } from '../../sidebar/completion-notification';
 import { auditLog } from '../../util/audit.js';
@@ -42,6 +43,37 @@ export function onSessionListChanged(payload: SessionListChangedPayload, deps: H
     archState.sessions.openTabPaths,
     archState.sessions.runningSessionPaths,
   );
+
+  // Record agent-review analytics for fresh done transitions BEFORE closing the
+  // tab. `closures` already encodes the fresh-done-transition + open-tab +
+  // non-running filters (computeReviewAutoCloseClosures), so this is the
+  // minimal place to join a review to its run. Recording before the
+  // CloseSession dispatch avoids depending on microtask ordering: the runId
+  // resolves from currentRun ?? lastRun, which is definitely present now.
+  const summaryByPath = new Map<string, SessionSummary>(
+    payload.sessions.map((summary) => [summary.path, summary]),
+  );
+  for (const sessionPath of closures) {
+    const summary = summaryByPath.get(sessionPath);
+    if (!summary || summary.done !== true) {
+      continue;
+    }
+    deps.runObserver.recordAgentReview(sessionPath, {
+      done: true,
+      rating: summary.rating ?? 0,
+      completion: summary.completion ?? 'partial',
+      reason: summary.reviewReason ?? '',
+      evaluatedAt: summary.evaluatedAt ?? new Date().toISOString(),
+      reviewerBuckets: summary.reviewerBuckets ?? [],
+      reviewerCount: summary.reviewerCount ?? 0,
+    });
+  }
+
+  // Auto-close tabs for sessions the agent just reviewed as `done: true` —
+  // the same `CloseSession` command a user-initiated tab close dispatches
+  // (handles pinned tabs too: `evictSession` drops them from
+  // `pinnedTabPaths`). Only fresh done transitions close; the first list
+  // seeds the known-done set so pre-existing done tabs aren't mass-closed.
   for (const sessionPath of closures) {
     deps.dispatchArch({
       kind: 'Command',

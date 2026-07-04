@@ -7,7 +7,7 @@ import type {
 } from '../../shared/protocol';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
-import type { TaskBoundaryIntent, RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
+import type { AgentReviewCompletion, TaskBoundaryIntent, RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
 
 export type DispatchArchEvent = (event: Event) => void;
 export type GetArchState = () => ArchState;
@@ -51,6 +51,18 @@ export interface RunObserver {
   onUnsupportedInputAttempt(sessionPath: string): void;
   onSessionClosed(sessionPath: string): void;
   replaceSessionPath(oldPath: string, newPath: string): void;
+  recordAgentReview(
+    sessionPath: string,
+    review: {
+      done: boolean;
+      rating: number;
+      completion: AgentReviewCompletion;
+      reason: string;
+      evaluatedAt: string;
+      reviewerBuckets: string[];
+      reviewerCount: number;
+    },
+  ): void;
 }
 
 export const NOOP_RUN_OBSERVER: RunObserver = {
@@ -70,6 +82,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onUnsupportedInputAttempt: () => undefined,
   onSessionClosed: () => undefined,
   replaceSessionPath: () => undefined,
+  recordAgentReview: () => undefined,
 };
 
 export interface StatsServiceOptions {

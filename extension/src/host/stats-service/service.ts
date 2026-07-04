@@ -54,6 +54,7 @@ export class StatsService implements RunObserver {
       schedulePersist: (snapshotToAppend, outcomeToAppend) => (
         this.storage.schedulePersist(snapshotToAppend, outcomeToAppend)
       ),
+      schedulePersistAgentReview: (entry) => this.storage.schedulePersistAgentReview(entry),
       now,
       createId,
       getExperimentAssignment,
@@ -161,6 +162,21 @@ export class StatsService implements RunObserver {
 
   recordOutcome(sessionPath: string, outcome: RunOutcome): void {
     this.tracker.recordOutcome(sessionPath, outcome);
+  }
+
+  recordAgentReview(
+    sessionPath: string,
+    review: {
+      done: boolean;
+      rating: number;
+      completion: 'fully' | 'partial' | 'setback';
+      reason: string;
+      evaluatedAt: string;
+      reviewerBuckets: string[];
+      reviewerCount: number;
+    },
+  ): void {
+    this.tracker.recordAgentReview(sessionPath, review);
   }
 
   startNewTask(sessionPath: string): void {

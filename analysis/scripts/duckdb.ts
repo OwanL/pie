@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import type {
   PreparedAnalyticsData,
+  PreparedAgentReviewRow,
   PreparedBackendErrorRow,
   PreparedFileExtensionRow,
   PreparedPruningEventRow,
@@ -260,6 +261,22 @@ interface DuckDbToolResultPruningRow {
   before_tokens: number;
   after_tokens: number;
   tokens_saved: number;
+}
+
+interface DuckDbAgentReviewRow {
+  run_id: string;
+  session_path_hash: string;
+  task_group_id: string;
+  recorded_at: string;
+  evaluated_at: string;
+  started_day: string;
+  model_family: string | null;
+  agent_rating: number;
+  agent_completion: string;
+  agent_done: boolean;
+  reviewer_buckets: string[];
+  reviewer_count: number;
+  user_satisfaction: number | null;
 }
 
 interface DuckDbTurnThroughputRow {
@@ -527,6 +544,24 @@ function toDuckDbToolResultPruningRow(row: PreparedToolResultPruningRow): DuckDb
   };
 }
 
+function toDuckDbAgentReviewRow(row: PreparedAgentReviewRow): DuckDbAgentReviewRow {
+  return {
+    run_id: row.runId,
+    session_path_hash: row.sessionPathHash,
+    task_group_id: row.taskGroupId,
+    recorded_at: row.recordedAt,
+    evaluated_at: row.evaluatedAt,
+    started_day: row.startedDay,
+    model_family: row.modelFamily,
+    agent_rating: row.agentRating,
+    agent_completion: row.agentCompletion,
+    agent_done: row.agentDone,
+    reviewer_buckets: row.reviewerBuckets,
+    reviewer_count: row.reviewerCount,
+    user_satisfaction: row.userSatisfaction,
+  };
+}
+
 function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnThroughputRow {
   return {
     run_id: row.runId,
@@ -556,6 +591,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   pruningEventsPath: string;
   pruningSignalsPath: string;
   toolResultPruningPath: string;
+  agentReviewsPath: string;
   turnThroughputPath: string;
 }> {
   await ensureDir(exportsDir);
@@ -568,6 +604,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const pruningEventsPath = path.join(exportsDir, 'pruning-events.json');
   const pruningSignalsPath = path.join(exportsDir, 'pruning-signals.json');
   const toolResultPruningPath = path.join(exportsDir, 'tool-result-pruning.json');
+  const agentReviewsPath = path.join(exportsDir, 'agent-reviews.json');
   const turnThroughputPath = path.join(exportsDir, 'turn-throughput.json');
 
   await Promise.all([
@@ -580,10 +617,11 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(pruningEventsPath, prepared.pruningEvents.map(toDuckDbPruningEventRow)),
     writeJsonFile(pruningSignalsPath, prepared.pruningSignals.map(toDuckDbPruningSignalRow)),
     writeJsonFile(toolResultPruningPath, prepared.toolResultPruning.map(toDuckDbToolResultPruningRow)),
+    writeJsonFile(agentReviewsPath, prepared.agentReviews.map(toDuckDbAgentReviewRow)),
     writeJsonFile(turnThroughputPath, prepared.turnThroughput.map(toDuckDbTurnThroughputRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, turnThroughputPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, agentReviewsPath, turnThroughputPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -872,6 +910,26 @@ CREATE TABLE tool_result_pruning (
 `.trim();
 }
 
+function agentReviewTableSchema(): string {
+  return `
+CREATE TABLE agent_reviews (
+  run_id VARCHAR,
+  session_path_hash VARCHAR,
+  task_group_id VARCHAR,
+  recorded_at TIMESTAMP,
+  evaluated_at TIMESTAMP,
+  started_day DATE,
+  model_family VARCHAR,
+  agent_rating DOUBLE,
+  agent_completion VARCHAR,
+  agent_done BOOLEAN,
+  reviewer_buckets VARCHAR[],
+  reviewer_count INTEGER,
+  user_satisfaction DOUBLE
+);
+`.trim();
+}
+
 function turnThroughputTableSchema(): string {
   return `
 CREATE TABLE turn_throughput (
@@ -986,6 +1044,7 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'pruning_events', pruningEventsTableSchema(), stagingPaths.pruningEventsPath);
     await populateTableFromJson(connection, 'pruning_signals', pruningSignalsTableSchema(), stagingPaths.pruningSignalsPath);
     await populateTableFromJson(connection, 'tool_result_pruning', toolResultPruningTableSchema(), stagingPaths.toolResultPruningPath);
+    await populateTableFromJson(connection, 'agent_reviews', agentReviewTableSchema(), stagingPaths.agentReviewsPath);
     await populateTableFromJson(connection, 'turn_throughput', turnThroughputTableSchema(), stagingPaths.turnThroughputPath);
     await createDerivedViews(connection);
   } finally {

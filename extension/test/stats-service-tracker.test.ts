@@ -49,6 +49,7 @@ function createHarness() {
     schedulePersist: (snapshot, outcome) => {
       persistCalls.push({ snapshot, outcome });
     },
+    schedulePersistAgentReview: () => undefined,
     now: () => new Date(nowMs),
     createId: () => `id-${++idCounter}`,
     getExperimentAssignment: () => experimentAssignment,

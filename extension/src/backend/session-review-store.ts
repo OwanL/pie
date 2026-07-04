@@ -88,6 +88,16 @@ function normalizeReview(value: unknown): SessionReview | undefined {
   if (typeof v.rating !== 'number' || !Number.isFinite(v.rating)) return undefined;
   const completion = v.completion;
   if (completion !== 'fully' && completion !== 'partial' && completion !== 'setback') return undefined;
+  // Multi-reviewer provenance (optional): validate shape and drop malformed
+  // values so a corrupt sidecar line never breaks session listing/review.
+  const rawBuckets = v.reviewerBuckets;
+  const reviewerBuckets = Array.isArray(rawBuckets) && rawBuckets.every((b) => typeof b === 'string')
+    ? (rawBuckets as string[])
+    : undefined;
+  const rawCount = v.reviewerCount;
+  const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
+    ? rawCount
+    : undefined;
   return {
     sessionPath: v.sessionPath,
     done: v.done,
@@ -95,6 +105,8 @@ function normalizeReview(value: unknown): SessionReview | undefined {
     completion,
     reason: typeof v.reason === 'string' ? v.reason : '',
     evaluatedAt: typeof v.evaluatedAt === 'string' ? v.evaluatedAt : new Date(0).toISOString(),
+    ...(reviewerBuckets !== undefined ? { reviewerBuckets } : {}),
+    ...(reviewerCount !== undefined ? { reviewerCount } : {}),
   };
 }
 
@@ -112,6 +124,8 @@ export function mergeReviewIntoSummary(summary: SessionSummary, reviews: Map<str
     completion: review.completion,
     reviewReason: review.reason,
     evaluatedAt: review.evaluatedAt,
+    ...(review.reviewerBuckets !== undefined ? { reviewerBuckets: review.reviewerBuckets } : {}),
+    ...(review.reviewerCount !== undefined ? { reviewerCount: review.reviewerCount } : {}),
   };
 }
 

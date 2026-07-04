@@ -51,9 +51,9 @@ export default function (pi: ExtensionAPI) {
     name: 'session_review',
     label: 'Session review',
     description:
-      'Evaluate and review the currently-open sessions in the app: list open sessions with their review status, read a session\'s inputs/outputs transcript, and record a done/rating/completion/reason review. Use the evaluate-sessions skill for the full rubric and flow.',
+      'Evaluate and review the currently-open sessions in the app: list open sessions with their review status, read a session\'s inputs/outputs transcript, and record a done/rating/completion/reason review. Multi-reviewer provenance (reviewerBuckets/reviewerCount) is captured when provided. Use the evaluate-sessions skill for the full rubric and flow.',
     promptSnippet:
-      'List/read/review the app\'s currently-open sessions. listOpen shows open sessions + review status; getTranscript reads a session JSONL; setReview records done + 1–5 rating + completion (fully/partial/setback) + reason.',
+      'List/read/review the app\'s currently-open sessions. listOpen shows open sessions + review status; getTranscript reads a session JSONL; setReview records done + 1–5 rating + completion (fully/partial/setback) + reason, and captures multi-reviewer provenance (reviewerBuckets/reviewerCount) when provided.',
     promptGuidelines: [
       'Call listOpen first to see which sessions are currently open and which are already done.',
       'For each non-done open session, call getTranscript to read its inputs/outputs, judge completeness against the user\'s last intent, then call setReview with done + a 1–5 rating + completion (fully/partial/setback) + reason.',
@@ -61,6 +61,7 @@ export default function (pi: ExtensionAPI) {
       'completion: fully = task completed; partial = work done but unresolved; setback = left things worse (regression/failed approach worth revisiting).',
       "Only mark a session done when its task is genuinely complete or conclusively stopped — never mark an in-progress/uncertain session done. Recording done=true closes the session's tab (the same close path a user takes, pinned tabs included) to clean up the tab once the host refreshes; a partial/setback review keeps the tab open.",
       'Report a final summary table (session → done/rating/completion) after reviewing all sessions.',
+      'When using multi-reviewer evaluation, pass `reviewerBuckets` (e.g. ["medium","small"]) and `reviewerCount` on setReview so analytics can distinguish multi-reviewer agent reviews from single-shot ones.',
     ],
     parameters: sessionReviewSchema,
 
@@ -102,6 +103,22 @@ export default function (pi: ExtensionAPI) {
           return err('setReview requires completion (fully | partial | setback).');
         }
         const reason = typeof p.reason === 'string' ? p.reason : '';
+        // Multi-reviewer provenance (optional): validate shape and reject
+        // malformed input so the sidecar never stores junk provenance.
+        const rawBuckets = p.reviewerBuckets;
+        const reviewerBuckets = Array.isArray(rawBuckets) && rawBuckets.every((b) => typeof b === 'string')
+          ? (rawBuckets as string[])
+          : undefined;
+        if (rawBuckets !== undefined && reviewerBuckets === undefined) {
+          return err('setReview reviewerBuckets must be an array of strings.');
+        }
+        const rawCount = p.reviewerCount;
+        const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
+          ? rawCount
+          : undefined;
+        if (rawCount !== undefined && reviewerCount === undefined) {
+          return err('setReview reviewerCount must be a non-negative integer.');
+        }
         const record = {
           sessionPath: p.sessionPath,
           done: p.done,
@@ -109,14 +126,21 @@ export default function (pi: ExtensionAPI) {
           completion: p.completion,
           reason,
           evaluatedAt: new Date().toISOString(),
+          ...(reviewerBuckets !== undefined ? { reviewerBuckets } : {}),
+          ...(reviewerCount !== undefined ? { reviewerCount } : {}),
         };
         try {
           const file = appendReview(record);
           const closeNote = p.done
             ? "\nThe session's tab will be closed (same as a user closing it, pinned tabs included) — this cleans up the tab once the host refreshes."
             : '';
+          const provenance = [
+            reviewerBuckets ? `reviewerBuckets=[${reviewerBuckets.join(',')}]` : '',
+            reviewerCount !== undefined ? `reviewerCount=${reviewerCount}` : '',
+          ].filter(Boolean).join('  ');
+          const provenanceLine = provenance ? `\n  ${provenance}` : '';
           return ok(
-            `Recorded review for ${p.sessionPath}:\n  done=${p.done} rating=${p.rating}/5 completion=${p.completion}\n  reason: ${reason || '(none)'}\nStored in ${file}.${closeNote}`,
+            `Recorded review for ${p.sessionPath}:\n  done=${p.done} rating=${p.rating}/5 completion=${p.completion}\n  reason: ${reason || '(none)'}${provenanceLine}\nStored in ${file}.${closeNote}`,
             record,
           );
         } catch (e) {

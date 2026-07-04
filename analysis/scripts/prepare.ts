@@ -1,7 +1,9 @@
 import {
   type RunOutcome,
   type RunSnapshot,
+  type AgentReviewSourceEvent,
   type PreparedAnalyticsData,
+  type PreparedAgentReviewRow,
   type PreparedBackendErrorRow,
   type PreparedFileExtensionRow,
   type PreparedPruningEventRow,
@@ -613,6 +615,40 @@ function prepareToolResultPruning(
   });
 }
 
+/** Join agent-review events to runs by sessionPathHash + runId (the event carries both).
+ *  Mirrors how outcomes are joined to runs, but disambiguates same-session runs via runId:
+ *  the composite key `${sessionPathHash}::${runId}` picks the exact run whose session path
+ *  hashes to the same prefix and whose runId matches. Unjoined reviews keep the event's runId
+ *  with null model/satisfaction (they still surface in totals but not in agreement). */
+function prepareAgentReviews(
+  events: AgentReviewSourceEvent[],
+  runs: PreparedRunRow[],
+): PreparedAgentReviewRow[] {
+  const runByKey = new Map<string, PreparedRunRow>();
+  for (const run of runs) {
+    runByKey.set(`${run.sessionPathHash}::${run.runId}`, run);
+  }
+  return events.map((e) => {
+    const sessionPathHash = hashToPrefix(e.sessionPath, 16);
+    const matchedRun = runByKey.get(`${sessionPathHash}::${e.runId}`);
+    return {
+      runId: e.runId,
+      sessionPathHash,
+      taskGroupId: e.taskGroupId,
+      recordedAt: e.recordedAt,
+      evaluatedAt: e.evaluatedAt,
+      startedDay: e.recordedAt.slice(0, 10),
+      modelFamily: matchedRun?.modelFamily ?? null,
+      agentRating: e.rating,
+      agentCompletion: e.completion,
+      agentDone: e.done,
+      reviewerBuckets: [...e.reviewerBuckets].sort(),
+      reviewerCount: e.reviewerCount,
+      userSatisfaction: matchedRun?.satisfaction ?? null,
+    };
+  });
+}
+
 function roundThroughput(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -688,6 +724,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const pruningEvents = preparePruningEvents(source.pruningDecisions ?? [], runs);
   const pruningSignals = preparePruningSignals(source.pruningEvents ?? [], runs);
   const toolResultPruning = prepareToolResultPruning(source.toolResultPruningEvents ?? [], runs);
+  const agentReviews = prepareAgentReviews(source.agentReviews ?? [], runs);
 
   return {
     sourceSchemaVersion: source.schemaVersion,
@@ -703,5 +740,6 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     pruningEvents,
     pruningSignals,
     toolResultPruning,
+    agentReviews,
   };
 }
