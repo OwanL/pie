@@ -44,7 +44,12 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     openIndexByPath: new Map([[tabPath, 0]]),
     runningPathSet: new Set(),
     unreadFinishedPathSet: new Set(),
-    activeSession: null,
+    // `activePath` (a stable string) replaces the previous `activeSession`
+    // object prop — SessionTab now derives `isActive` from this path, and the
+    // tab bar passes an optimistic override here while a click awaits the host
+    // round-trip. These tests drive the component directly, so they pass the
+    // plain host path.
+    activePath: null,
     hasPendingExtensionUIRequest: false,
     activeRunSummary: null,
     isPinned: false,
@@ -71,7 +76,7 @@ test('non-active tab with a pending extension UI request renders the attention c
   const other = makeSession('/sessions/other', 'Other');
   const tab = renderTab({
     tabPath: '/sessions/alpha',
-    activeSession: other,
+    activePath: other.path,
     hasPendingExtensionUIRequest: true,
   });
 
@@ -87,7 +92,7 @@ test('non-active tab without a pending request does not get the attention class'
   const other = makeSession('/sessions/other', 'Other');
   const tab = renderTab({
     tabPath: '/sessions/alpha',
-    activeSession: other,
+    activePath: other.path,
     hasPendingExtensionUIRequest: false,
   });
 
@@ -102,7 +107,7 @@ test('active tab with a pending request keeps both the active and attention clas
   const alpha = makeSession('/sessions/alpha', 'Alpha');
   const tab = renderTab({
     tabPath: '/sessions/alpha',
-    activeSession: alpha,
+    activePath: alpha.path,
     hasPendingExtensionUIRequest: true,
   });
 
@@ -119,7 +124,7 @@ test('pinned tab renders an avatar instead of a label, hides the close button, a
   const alpha = makeSession('/sessions/alpha', 'Alpha');
   const tab = renderTab({
     tabPath: '/sessions/alpha',
-    activeSession: alpha,
+    activePath: alpha.path,
     isPinned: true,
   });
 
@@ -145,7 +150,7 @@ test('pending request wins title precedence over unread-finished', () => {
   const alpha = makeSession('/sessions/alpha', 'Alpha');
   const tab = renderTab({
     tabPath: '/sessions/alpha',
-    activeSession: alpha,
+    activePath: alpha.path,
     hasPendingExtensionUIRequest: true,
     // The path is also in the unread-finished set, so without precedence the
     // title would read "(finished, unread)". Pending must win.

@@ -14,7 +14,12 @@ export interface SessionTabProps {
   openIndexByPath: Map<string, number>;
   runningPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
-  activeSession: SessionSummary | null;
+  /** Effective active path (host `activeSession.path`, or an optimistic
+   *  override while a tab click is awaiting the host round-trip). Replaces the
+   *  `activeSession` object so this prop is a stable string (the host
+   *  re-serialises `activeSession` every snapshot, which previously defeated
+   *  this component's `memo()` and re-rendered every tab each snapshot). */
+  activePath: string | null;
   hasPendingExtensionUIRequest: boolean;
   activeRunSummary: ActiveRunSummary | null;
   isPinned: boolean;
@@ -36,7 +41,7 @@ export const SessionTab = memo(function SessionTab({
   openIndexByPath,
   runningPathSet,
   unreadFinishedPathSet,
-  activeSession,
+  activePath,
   hasPendingExtensionUIRequest,
   activeRunSummary,
   isPinned,
@@ -48,7 +53,7 @@ export const SessionTab = memo(function SessionTab({
 }: SessionTabProps) {
   const session = sessionByPath.get(tabPath);
   const label = session?.name ?? 'New Session';
-  const isActive = activeSession?.path === tabPath;
+  const isActive = activePath === tabPath;
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);

@@ -64,6 +64,29 @@ export function SessionTabs({
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
 
+  // Optimistic active-tab highlight. `onSelect` (click / keyboard) only posts
+  // `openSession` and waits for the host round-trip to confirm via the next
+  // `state`'s `activeSession`. Without this override the clicked tab doesn't
+  // highlight until that round-trip completes — the "nothing happens on click"
+  // lag. We reflect the click immediately: `effectiveActivePath` (below)
+  // falls back to the host's `activeSession.path` once the override clears.
+  // The override clears when the host confirms (activeSession.path ===
+  // optimistic) or after a 2s safety timeout (rejection / closed-before-
+  // confirm). Only the tab-bar highlight is optimistic — the transcript /
+  // composer still wait for the host, since they need the new session's data.
+  const [optimisticActivePath, setOptimisticActivePath] = useState<string | null>(null);
+  const optimisticTimerRef = useRef<number | null>(null);
+
+  const selectTab = useCallback((path: string) => {
+    setOptimisticActivePath(path);
+    if (optimisticTimerRef.current !== null) clearTimeout(optimisticTimerRef.current);
+    optimisticTimerRef.current = window.setTimeout(() => {
+      optimisticTimerRef.current = null;
+      setOptimisticActivePath(null);
+    }, 2000);
+    onSelect(path);
+  }, [onSelect]);
+
   const {
     dragState,
     tabContextMenu,
@@ -76,13 +99,31 @@ export function SessionTabs({
     openTabPaths,
     pinnedTabPaths,
     onMove,
-    onSelect,
+    onSelect: selectTab,
     onClose,
     onDuplicate,
     onTogglePin,
     onRunAction,
     stripRef,
   });
+
+  const effectiveActivePath = optimisticActivePath ?? activeSession?.path ?? null;
+
+  // Clear the override once the host confirms the active session matches.
+  useEffect(() => {
+    if (optimisticActivePath !== null && activeSession?.path === optimisticActivePath) {
+      if (optimisticTimerRef.current !== null) {
+        clearTimeout(optimisticTimerRef.current);
+        optimisticTimerRef.current = null;
+      }
+      setOptimisticActivePath(null);
+    }
+  }, [activeSession?.path, optimisticActivePath]);
+
+  // Clean up the safety timeout on unmount.
+  useEffect(() => () => {
+    if (optimisticTimerRef.current !== null) clearTimeout(optimisticTimerRef.current);
+  }, []);
 
   // Stabilize derived collections so memoized children (SessionTab, DropGap)
   // skip re-render while their props are unchanged — essential during a drag,
@@ -112,15 +153,14 @@ export function SessionTabs({
   // Tabs-1: scroll the active tab into view when the active session changes
   // (host selection, closing an adjacent tab, DnD commit near an edge).
   // `inline: 'nearest'` scrolls only the minimum needed; no-op if visible.
-  const activePath = activeSession?.path ?? null;
   useEffect(() => {
-    if (!activePath) return;
+    if (!effectiveActivePath) return;
     const strip = stripRef.current;
     if (!strip) return;
     const tab = Array.from(strip.querySelectorAll<HTMLElement>('.session-tab[data-tab-path]'))
-      .find((el) => el.getAttribute('data-tab-path') === activePath);
+      .find((el) => el.getAttribute('data-tab-path') === effectiveActivePath);
     tab?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-  }, [activePath]);
+  }, [effectiveActivePath]);
 
   // Tabs-4: surface horizontal overflow with edge fades. Re-measures on strip
   // resize (ResizeObserver), scroll position, and tab/content changes (deps).
@@ -221,10 +261,10 @@ export function SessionTabs({
     const targetTab = tabs[targetIndex];
     const targetPath = targetTab?.getAttribute('data-tab-path');
     if (targetPath && targetPath !== tabPath) {
-      onSelect(targetPath);
+      selectTab(targetPath);
     }
     targetTab?.querySelector<HTMLElement>('[role="tab"]')?.focus();
-  }, [dragState, onClose, onSelect]);
+  }, [dragState, onClose, selectTab]);
 
   const stripClass = `session-tabs-strip${fadeLeft ? ' fade-left' : ''}${fadeRight ? ' fade-right' : ''}`;
 
@@ -247,9 +287,9 @@ export function SessionTabs({
             openIndexByPath={openIndexByPath}
             runningPathSet={runningPathSet}
             unreadFinishedPathSet={unreadFinishedPathSet}
-            activeSession={activeSession}
+            activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
-            activeRunSummary={activeRunSummary}
+            activeRunSummary={tabPath === effectiveActivePath ? activeRunSummary : null}
             isPinned={pinnedPathSet.has(tabPath)}
             onContextMenu={onContextMenu}
             onPointerDown={onPointerDown}
