@@ -407,6 +407,8 @@ async function dispatchToMode(
 	selectionCtx: SelectionContext,
 	_toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
+	parentSessionId: string | undefined,
+	allToolNames: string[] | undefined,
 ) {
 	// Lazy import to avoid circular dependencies (see loadModesModule for why
 	// this is memoized rather than a bare `await import(...)` per call).
@@ -424,6 +426,8 @@ async function dispatchToMode(
 		selectionCtx,
 		_toolCallId,
 		parentUiBridge,
+		parentSessionId,
+		allToolNames,
 	] as const;
 	if (mode === "chain") return executeChainMode(...modeArgs);
 	if (mode === "parallel") return executeParallelMode(...modeArgs);
@@ -481,6 +485,19 @@ export async function execute(
 	const makeDetailsBound = (m: Mode, res: SingleResult[]) =>
 		makeDetails(m, res, agentScope, discovery.projectAgentsDir);
 
+	// Resolve the parent (main) session id and the full tool-name set once per
+	// subagent tool call, so subagents can (a) inherit the main turn's pruned
+	// skills by looking up the skill-pruner's kept set, and (b) have the
+	// user-configured drop-tools list subtracted from unrestricted agents.
+	// Both are defensive: undefined when unresolvable → today's behavior.
+	const parentSessionId = (ctx as { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.();
+	let allToolNames: string[] | undefined;
+	try {
+		allToolNames = _pi.getAllTools().map((t) => t.name);
+	} catch {
+		allToolNames = undefined;
+	}
+
 	return dispatchToMode(
 		mode,
 		params,
@@ -494,5 +511,7 @@ export async function execute(
 		selectionCtx,
 		_toolCallId,
 		ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
+		parentSessionId,
+		allToolNames,
 	);
 }

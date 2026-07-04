@@ -202,6 +202,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
       if (v !== undefined && !isNestedAllowedBucketsPatch(v)) return false;
       continue;
     }
+    if (key === 'subagentDropTools') {
+      if (v !== undefined && !(Array.isArray(v) && v.every((entry) => typeof entry === 'string'))) return false;
+      continue;
+    }
     if ((booleanKeys as string[]).includes(key)) {
       if (v !== undefined && typeof v !== 'boolean') return false;
     } else if ((toggleKeys as string[]).includes(key)) {

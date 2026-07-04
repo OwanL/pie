@@ -185,6 +185,12 @@ export interface ChatPrefs {
    *  highest allowed tier at or below it. Mirrored to the in-process subagent
    *  extension via PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON. Default: all true. */
   subagentNestedAllowedBuckets: NestedAllowedBuckets;
+  /** User-configured list of tool names to always drop from subagent sessions
+   *  (e.g. ["ask_user"]). Subtracted from every subagent's effective tool set,
+   *  regardless of the agent's `tools:` frontmatter. Empty (default) → no tools
+   *  dropped. Mirrored to the in-process subagent extension via
+   *  PIE_SUBAGENT_DROP_TOOLS_JSON. */
+  subagentDropTools: string[];
   completionSoundVolume: number;
   /** Base font size (px) for body text and message prose — the primary
    *  readable content (assistant/user messages and the inline editor). Drives
@@ -303,6 +309,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   bashShellPath: '',
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
+  subagentDropTools: [],
   completionSoundVolume: 50,
   uiBaseFontSize: 13,
   uiComposerFontSize: 13,
@@ -541,11 +548,20 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     },
     subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
     subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
+    subagentDropTools: normalizeStringArray(prefs?.subagentDropTools),
     autoExpandSubagentCalls:
       prefs?.autoExpandSubagentCalls
       ?? prefs?.autoExpandToolCalls
       ?? DEFAULT_CHAT_PREFS.autoExpandSubagentCalls,
   };
+}
+
+/** Normalize a user-configured string-array pref: accept undefined/arrays of
+ *  strings, drop non-string entries, return a fresh array. Used for
+ *  subagentDropTools. */
+export function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
 }
 
 // ─── Extension UI types ──────────────────────────────────────────────────────

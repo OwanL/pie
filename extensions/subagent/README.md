@@ -163,6 +163,47 @@ canSpawn: [scout]
 
 The root caller (the main agent) is never restricted.
 
+## Skill & tool scoping for subagents
+
+Two mechanisms keep subagent system prompts lean and focused:
+
+### Skills: inherit the parent turn's pruned set
+
+The skill-pruner computes a kept-skill set for the **main** turn and rewrites
+the main agent's system prompt. Subagents inherit that same kept set — the
+pruner records it (keyed by session id) and the subagent runner filters the
+subagent's loaded skills by name via the resource loader's `skillsOverride`.
+No extra LLM call runs inside the subagent (the prepass is skipped for
+subagent sessions, as before). Behaviour:
+
+- A non-empty kept set → the subagent's system prompt includes only those skills.
+- `"keep-all"` / no record / unresolvable parent session → no filter (today's
+  behaviour — all skills loaded).
+- An empty kept set is treated as keep-all (never strips the lot), matching the
+  pruner's own keep-all safeguard.
+- **Depth-1 only.** Nested subagents (depth ≥ 2) resolve their parent session
+  id from the depth-1 subagent's in-memory session, which never had a kept set
+  recorded (the pruner skips subagent sessions), so they fall back to all
+  skills. Threading the inherited set through the runtime context for deeper
+  nesting is a tracked follow-up, not v1.
+
+### Tools: user-configured drop list
+
+A user-defined list of tool names (e.g. `ask_user`) is always dropped from
+every subagent's tool set, regardless of the agent's `tools:` frontmatter.
+Configured in the Subagent settings flyout ("Drop tools for subagents") and
+mirrored to the in-process extension via `PIE_SUBAGENT_DROP_TOOLS_JSON` (same
+mirroring pattern as the model buckets). Behaviour:
+
+- For agents with an explicit `tools:` list, the drop names are subtracted from it.
+- For unrestricted agents (no `tools:` frontmatter), the names are subtracted
+  from the parent session's full tool set.
+- An empty list (the default) → no tools dropped (today's behaviour).
+
+Tool *pruning* inheritance (the pruner's `setActiveTools` decisions) is **not**
+inherited — subagents remain frontmatter-driven for tools; the drop list is the
+only host-side tool override.
+
 ## Timeouts
 
 Subagents **do not time out by default** — a subagent runs until it finishes or

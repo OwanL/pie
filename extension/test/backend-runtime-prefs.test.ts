@@ -48,7 +48,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -73,7 +73,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 
@@ -296,4 +296,39 @@ test('runtimePrefs.set leaves the warm-bash env vars untouched when omitted', as
   assert.equal(process.env['PIE_BASH_WARM_POOL'], 'pre-existing');
   assert.equal(process.env['PIE_BASH_FAST_PATH'], 'pre-existing');
   assert.equal(process.env['PIE_SHELL'], 'pre-existing');
+});
+
+test('runtimePrefs.set mirrors subagentDropTools into the backend environment', async (t) => {
+  const DROP_ENV = 'PIE_SUBAGENT_DROP_TOOLS_JSON';
+  const previous = process.env[DROP_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[DROP_ENV];
+    else process.env[DROP_ENV] = previous;
+  });
+
+  const dropTools = ['ask_user', 'web_search'];
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-drop-tools',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, subagentDropTools: dropTools },
+  }) as { subagentDropTools?: string[] };
+
+  assert.deepEqual(result.subagentDropTools, dropTools);
+  assert.equal(process.env[DROP_ENV], JSON.stringify(dropTools));
+});
+
+test('runtimePrefs.set leaves the drop-tools env var untouched when omitted', async (t) => {
+  const DROP_ENV = 'PIE_SUBAGENT_DROP_TOOLS_JSON';
+  const previous = process.env[DROP_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[DROP_ENV];
+    else process.env[DROP_ENV] = previous;
+  });
+  process.env[DROP_ENV] = 'pre-existing';
+  await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-drop-tools-omitted',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {} },
+  });
+  assert.equal(process.env[DROP_ENV], 'pre-existing');
 });

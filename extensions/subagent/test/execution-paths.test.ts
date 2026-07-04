@@ -53,6 +53,8 @@ function createFakeSdk(options?: {
 		disposeCalls: 0,
 		unsubscribeCalls: 0,
 		promptCalls: 0,
+		createSessionArgs: [] as Array<Record<string, unknown>>,
+		createResourceLoaderArgs: [] as Array<Record<string, unknown>>,
 	};
 
 	const listeners: Array<(event: any) => void> = [];
@@ -93,8 +95,14 @@ function createFakeSdk(options?: {
 	};
 
 	const sdk = {
-		createSession: async () => ({ session }),
-		createResourceLoader: () => ({ reload: async () => undefined }),
+		createSession: async (args: Record<string, unknown>) => {
+			state.createSessionArgs.push(args);
+			return { session };
+		},
+		createResourceLoader: (args: Record<string, unknown>) => {
+			state.createResourceLoaderArgs.push(args);
+			return { reload: async () => undefined };
+		},
 		createSessionManager: () => ({}),
 		getAgentDir: () => ".",
 	};
@@ -141,6 +149,8 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 		undefined,
 		undefined,
 		undefined,
+		undefined,
+		undefined,
 		{ sdk: sdk as any, timeoutMs: 50 },
 	);
 
@@ -178,6 +188,8 @@ test("runSingleAgent handles already-aborted parent signal and settles pending U
 		undefined,
 		"tool-1",
 		bridge,
+		undefined,
+		undefined,
 		{ sdk: sdk as any, timeoutMs: 50 },
 	);
 
@@ -210,6 +222,8 @@ test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
 		undefined,
 		"tool-timeout",
 		bridge,
+		undefined,
+		undefined,
 		{ sdk: sdk as any, timeoutMs: 10 },
 	);
 
@@ -260,6 +274,8 @@ test("runSingleAgent with timeout disabled and no parent signal completes normal
 			undefined,
 			undefined,
 			undefined,
+			undefined,
+			undefined,
 			{ sdk: sdk as any }, // no timeoutMs seam → default (disabled)
 		);
 
@@ -301,6 +317,8 @@ test("runSingleAgent with timeout disabled: parent abort interrupts without time
 			undefined,
 			"tool-no-timeout",
 			bridge,
+			undefined,
+			undefined,
 			{ sdk: sdk as any }, // no timeoutMs seam → default (disabled)
 		);
 
@@ -346,6 +364,8 @@ test("runSingleAgent honours PI_SUBAGENT_TIMEOUT_MS env var (no seam): hanging p
 			undefined,
 			"tool-env-timeout",
 			bridge,
+			undefined,
+			undefined,
 			{ sdk: sdk as any }, // no timeoutMs seam — env var is the source of truth
 		);
 
@@ -479,6 +499,8 @@ test("runSingleAgent runs the prompt inside the shared subagent context (A)", as
 			undefined,
 			undefined,
 			undefined,
+			undefined,
+			undefined,
 			{ sdk: sdk as any, timeoutMs: 0 },
 		);
 	});
@@ -509,6 +531,8 @@ test("runSingleAgent: error thrown during prefill is annotated with the run stag
 		undefined,
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
 		makeModelRegistry(),
+		undefined,
+		undefined,
 		undefined,
 		undefined,
 		undefined,
@@ -582,6 +606,8 @@ test("runSingleAgent propagates nested tool_execution_update partials onto resul
 		undefined,
 		undefined,
 		undefined,
+		undefined,
+		undefined,
 		{ sdk: sdk as any, timeoutMs: 0 },
 	);
 
@@ -632,6 +658,8 @@ test("runSingleAgent tool_execution_update is a graceful no-op before the assist
 		makeModelRegistry(),
 		undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined,
+		undefined,
 		undefined,
 		undefined,
 		undefined,

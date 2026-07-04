@@ -135,6 +135,9 @@ async function handleRuntimePrefsSet(
   if (params.subagentNestedAllowedBuckets !== undefined) {
     process.env[NESTED_ALLOWED_BUCKETS_ENV] = JSON.stringify(params.subagentNestedAllowedBuckets);
   }
+  if (params.subagentDropTools !== undefined) {
+    process.env['PIE_SUBAGENT_DROP_TOOLS_JSON'] = JSON.stringify(params.subagentDropTools);
+  }
   return params;
 }
 

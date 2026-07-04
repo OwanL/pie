@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, Skill, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { clearPruningTrackingForTesting, flushLog, setLogPathForTesting } from "../logger.js";
+import { readKeptSkills, clearKeptSkills } from "../../../shared/pruned-skills.js";
 import type { PruningConfig } from "../types.js";
 
 installSdkResolverForTests();
@@ -1131,6 +1132,47 @@ test("github-copilot model without headers: copilot headers injected via model r
 		assert.ok(authHeaders, "auth headers should be defined");
 		assert.ok(authHeaders["Editor-Version"], "Editor-Version should be present in auth headers");
 	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("disabled-by-toggle records keep-all for subagent inheritance without throwing", async () => {
+	const prevToggles = process.env.PIE_EXTENSION_TOGGLES_JSON;
+	process.env.PIE_EXTENSION_TOGGLES_JSON = JSON.stringify({ "skill-pruner": false });
+	try {
+		const { handlers } = register(config());
+		// Must not throw (regression: sessionId was referenced before declaration).
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
+		assert.equal(result, undefined);
+		// The disabled path records keep-all keyed by the session id, so subagents
+		// spawned this turn inherit "no filter" rather than a stale prior set.
+		assert.equal(readKeptSkills("session-1"), "keep-all");
+	} finally {
+		clearKeptSkills("session-1");
+		if (prevToggles === undefined) delete process.env.PIE_EXTENSION_TOGGLES_JSON;
+		else process.env.PIE_EXTENSION_TOGGLES_JSON = prevToggles;
+	}
+});
+
+test("too-short prompt records keep-all for subagent inheritance", async () => {
+	try {
+		const { handlers } = register(config());
+		await runBeforeAgentStart(handlers, "hi", realisticSkills);
+		assert.equal(readKeptSkills("session-1"), "keep-all");
+	} finally {
+		clearKeptSkills("session-1");
+	}
+});
+
+test("LLM pruning records the kept subset for subagent inheritance", async () => {
+	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
+	try {
+		const { handlers } = register(config());
+		await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills);
+		// code-simplification is the only kept skill (the other two are pruned).
+		assert.deepEqual(readKeptSkills("session-1"), ["code-simplification"]);
+	} finally {
+		clearKeptSkills("session-1");
 		__setCompleteFn(null);
 	}
 });

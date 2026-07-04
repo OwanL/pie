@@ -148,3 +148,9 @@ export function setNestedAllowedBucket(
     },
   };
 }
+
+/** Replace the user-configured list of tool names always dropped from
+ *  subagent sessions (e.g. ['ask_user']). */
+export function setSubagentDropTools(prefs: ChatPrefs, tools: string[]): Partial<ChatPrefs> {
+  return { subagentDropTools: [...tools] };
+}

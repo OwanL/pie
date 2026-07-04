@@ -445,6 +445,7 @@ async function sendRuntimePrefsWithLogging(
       bashShellPath: archState.settings.prefs.bashShellPath,
       subagentBuckets: archState.settings.prefs.subagentBuckets,
       subagentNestedAllowedBuckets: archState.settings.prefs.subagentNestedAllowedBuckets,
+      subagentDropTools: archState.settings.prefs.subagentDropTools,
     });
     bootLog('session-startup', 'runtimePrefs.set.completed', {
       backendReady: options.getArchState().settings.backendReady,

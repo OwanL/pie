@@ -157,6 +157,8 @@ export async function executeSingleMode(
 	selectionCtx: SelectionContext,
 	_toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
+	parentSessionId: string | undefined,
+	allToolNames: string[] | undefined,
 ) {
 	if (checkTrailLoop(params.agent!, runtimeCtx.trail)) {
 		return {
@@ -219,6 +221,8 @@ export async function executeSingleMode(
 				selectionCtx.disabledProviders,
 				_toolCallId,
 				parentUiBridge,
+				parentSessionId,
+				allToolNames,
 			);
 		},
 	});
@@ -251,6 +255,8 @@ export async function executeParallelMode(
 	selectionCtx: SelectionContext,
 	_toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
+	parentSessionId: string | undefined,
+	allToolNames: string[] | undefined,
 ) {
 	const tooMany = buildParallelTaskLimitError(params.tasks!.length, makeDetails);
 	if (tooMany) return tooMany;
@@ -275,6 +281,8 @@ export async function executeParallelMode(
 			// match — otherwise the inline ask_user prompt never finds its request.
 			_toolCallId: params.tasks!.length > 1 ? `${_toolCallId}:${index}` : _toolCallId,
 			parentUiBridge,
+			parentSessionId,
+			allToolNames,
 		}),
 	);
 
@@ -293,6 +301,8 @@ interface ParallelTaskArgs {
 	checkSessionLimit: () => string | undefined;
 	_toolCallId: string;
 	parentUiBridge: ParentBridge | undefined;
+	parentSessionId: string | undefined;
+	allToolNames: string[] | undefined;
 }
 
 async function runParallelTask(
@@ -300,7 +310,7 @@ async function runParallelTask(
 	index: number,
 	args: ParallelTaskArgs,
 ): Promise<SingleResult> {
-	const { ctx, agents, signal, selectionCtx, runtimeCtx, makeDetails, allResults, emitUpdate, checkSessionLimit, _toolCallId, parentUiBridge } =
+	const { ctx, agents, signal, selectionCtx, runtimeCtx, makeDetails, allResults, emitUpdate, checkSessionLimit, _toolCallId, parentUiBridge, parentSessionId, allToolNames } =
 		args;
 
 	const sessionLimitError = checkSessionLimit();
@@ -370,6 +380,8 @@ async function runParallelTask(
 				selectionCtx.disabledProviders,
 				_toolCallId,
 				parentUiBridge,
+				parentSessionId,
+				allToolNames,
 			);
 		},
 	});
@@ -459,6 +471,8 @@ export async function executeChainMode(
 	selectionCtx: SelectionContext,
 	_toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
+	parentSessionId: string | undefined,
+	allToolNames: string[] | undefined,
 ) {
 	const results: SingleResult[] = [];
 	let previousOutput = "";
@@ -522,6 +536,8 @@ export async function executeChainMode(
 					// inline match, not surfaced to the bottom bar) and hang.
 					i > 0 ? `${_toolCallId}:${i}` : _toolCallId,
 					parentUiBridge,
+					parentSessionId,
+					allToolNames,
 				);
 			},
 		});

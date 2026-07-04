@@ -9,6 +9,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Message, Model } from "@mariozechner/pi-ai";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
+
+/** Minimal local shapes for the skills filter, avoiding a static import of
+ *  Skill/ResourceDiagnostic from the SDK (tsx retains that import at module-load
+ *  time in ESM contexts without a resolve hook, breaking execution-path tests
+ *  that mock the SDK lazily). Runtime behaviour is unchanged: the override fn
+ *  only reads `skill.name` and passes diagnostics through. */
+type SubagentSkill = { name: string };
+type SubagentSkillsOverride = (base: { skills: SubagentSkill[]; diagnostics: unknown[] }) => { skills: SubagentSkill[]; diagnostics: unknown[] };
 import type { AgentConfig } from "./agents.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
@@ -17,6 +25,7 @@ import type { OnUpdateCallback, SingleResult, SubagentDetails } from "./types.js
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
+import { readKeptSkills } from "../../shared/pruned-skills.js";
 import {
 	ParentExtensionUIBridgeProxy,
 	type ParentBridge,
@@ -108,6 +117,9 @@ interface SubagentSdk {
 		agentDir: string;
 		appendSystemPrompt: string[] | undefined;
 		noExtensions: boolean;
+		/** Optional filter applied to the loaded skills before they enter the
+		 *  subagent's system prompt. Used to inherit the parent's pruned set. */
+		skillsOverride?: SubagentSkillsOverride;
 	}) => ResourceLoaderLike;
 	createSessionManager: (cwd: string) => unknown;
 	getAgentDir: () => string;
@@ -571,6 +583,26 @@ function teardownSession(unsubscribe: () => void, session: { dispose: () => void
 	}
 }
 
+/** Environment key for the user-configured list of tool names to always drop
+ *  from subagent sessions (e.g. ["ask_user"]). Mirrored by the pie host from
+ *  the Subagent settings UI via the runtimePrefs.set RPC, same pattern as
+ *  PIE_SUBAGENT_BUCKETS_JSON. Empty/unset → no tools dropped (today's behavior). */
+const SUBAGENT_DROP_TOOLS_ENV = "PIE_SUBAGENT_DROP_TOOLS_JSON";
+
+/** Reads the user-configured drop-tools list from the environment. Returns a
+ *  Set for O(1) membership checks; empty when unset/invalid. */
+function readDropTools(): Set<string> {
+	const raw = process.env[SUBAGENT_DROP_TOOLS_ENV];
+	if (!raw) return new Set();
+	try {
+		const parsed = JSON.parse(raw);
+		if (!Array.isArray(parsed)) return new Set();
+		return new Set(parsed.filter((t): t is string => typeof t === "string" && t.length > 0));
+	} catch {
+		return new Set();
+	}
+}
+
 export async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -589,6 +621,15 @@ export async function runSingleAgent(
 	_toolCallId?: string,
 	/** The parent session's UI bridge, for proxying ask_user calls. */
 	parentUiBridge?: ParentBridge,
+	/** The PARENT (main) session id, used to look up the skill-pruner's kept-skill
+	 *  set so this subagent inherits the main turn's pruned skills (direction C).
+	 *  Undefined when unresolvable → no skill filtering (today's behavior). */
+	parentSessionId?: string,
+	/** The full set of tool names available in the parent session, used so the
+	 *  user-configured drop-tools list can be subtracted from unrestricted agents
+	 *  (those without a `tools:` frontmatter). Undefined → only explicit
+	 *  `agent.tools` can be filtered. */
+	allToolNames?: string[],
 	/** Internal test seam to avoid loading the real SDK and long timeout delays. */
 	_internal?: {
 		sdk?: SubagentSdk;
@@ -631,11 +672,49 @@ export async function runSingleAgent(
 	//   load into nested sessions, enabling further delegation. Nesting is bounded
 	//   by the depth/trail/tree-budget guards in execute()/modes.ts, not by hiding
 	//   the tool.
+	// Skills: inherit the parent's pruned set (direction C). The skill-pruner
+	// writes the kept-skill names for the main turn to a per-session store;
+	// here we read them and filter the subagent's loaded skills by name. Both
+	// sessions load skills from the same locations, so name-based filtering is
+	// exact. Undefined / "keep-all" / not-found → no filter (today's behavior).
+	let skillsOverride: SubagentSkillsOverride | undefined;
+	if (parentSessionId) {
+		const kept = readKeptSkills(parentSessionId);
+		// A non-empty kept set filters the subagent's skills to exactly those the
+		// main turn kept. An empty array is treated as keep-all (no filter) — matching
+		// the pruner's own keep-all safeguard ("never strip the lot"), so a subagent
+		// can never end up with zero skills via inheritance. "keep-all" / undefined
+		// also fall through to no filter (today's behavior).
+		if (Array.isArray(kept) && kept.length > 0) {
+			const keptSet = new Set(kept);
+			skillsOverride = (base) => ({
+				skills: base.skills.filter((s) => keptSet.has(s.name)),
+				diagnostics: base.diagnostics,
+			});
+		}
+	}
+
+	// Tools: subtract the user-configured drop list (e.g. ["ask_user"]) from
+	// the agent's effective tool set. For agents with an explicit `tools:`
+	// frontmatter we filter that list; for unrestricted agents (no `tools:`)
+	// we filter the full parent tool set passed in as `allToolNames`. When the
+	// drop set is empty, `agent.tools` passes through unchanged (undefined →
+	// SDK loads all tools), preserving today's behavior exactly.
+	const dropSet = readDropTools();
+	let effectiveTools: string[] | undefined = agent.tools;
+	if (dropSet.size > 0) {
+		const base = agent.tools ?? allToolNames;
+		if (base && base.length > 0) {
+			effectiveTools = base.filter((t) => !dropSet.has(t));
+		}
+	}
+
 	const resourceLoader = sdk.createResourceLoader({
 		cwd: sessionCwd,
 		agentDir: sdk.getAgentDir(),
 		appendSystemPrompt: agent.systemPrompt.trim() ? [agent.systemPrompt] : undefined,
 		noExtensions: false,
+		skillsOverride,
 	});
 	await resourceLoader.reload();
 
@@ -647,7 +726,7 @@ export async function runSingleAgent(
 			modelRegistry,
 			model: resolvedModel,
 			thinkingLevel,
-			tools: agent.tools,
+			tools: effectiveTools,
 			sessionManager: sdk.createSessionManager(sessionCwd),
 			resourceLoader,
 		});

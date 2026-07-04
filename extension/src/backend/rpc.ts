@@ -347,6 +347,7 @@ export interface RuntimePrefsSetParams {
   bashShellPath?: string;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
+  subagentDropTools?: string[];
 }
 
 export interface SettingsSetParams extends Partial<ModelSettings> {
@@ -467,6 +468,8 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const subagentMaxTreeSessions = validateOptionalInt('runtimePrefs.set', 'subagentMaxTreeSessions', (params as Record<string, unknown>)['subagentMaxTreeSessions'], 5, 200);
   const subagentBuckets = validateOptionalSubagentBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentBuckets']);
   const subagentNestedAllowedBuckets = validateOptionalNestedAllowedBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentNestedAllowedBuckets']);
+  const rawSubagentDropTools = (params as Record<string, unknown>)['subagentDropTools'];
+  const subagentDropTools = rawSubagentDropTools === undefined ? undefined : Array.isArray(rawSubagentDropTools) && rawSubagentDropTools.every((entry) => typeof entry === 'string') ? [...(rawSubagentDropTools as string[])] : fail('runtimePrefs.set', 'subagentDropTools must be an array of strings when provided');
   const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
   const subagentMaxConcurrency = validateOptionalInt('runtimePrefs.set', 'subagentMaxConcurrency', (params as Record<string, unknown>)['subagentMaxConcurrency'], 1, 16);
   const subagentMaxParallelTasks = validateOptionalInt('runtimePrefs.set', 'subagentMaxParallelTasks', (params as Record<string, unknown>)['subagentMaxParallelTasks'], 1, 16);
@@ -475,7 +478,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashFastPath = rawBashFastPath === undefined ? undefined : typeof rawBashFastPath === 'boolean' ? rawBashFastPath : fail('runtimePrefs.set', 'bashFastPath must be a boolean when provided');
   const rawBashShellPath = (params as Record<string, unknown>)['bashShellPath'];
   const bashShellPath = rawBashShellPath === undefined ? undefined : typeof rawBashShellPath === 'string' ? rawBashShellPath : fail('runtimePrefs.set', 'bashShellPath must be a string when provided');
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, subagentBuckets, subagentNestedAllowedBuckets };
+  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools };
 }
 
 export function validateSettingsSet(params: unknown): SettingsSetParams {

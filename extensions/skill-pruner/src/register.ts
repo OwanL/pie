@@ -7,6 +7,7 @@ import {
 	state,
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
+import { recordKeptSkills } from "../../../shared/pruned-skills.js";
 import { requestToolDefinition } from "./tools.js";
 import { pruningResultRenderer } from "./render.js";
 import {
@@ -51,19 +52,31 @@ export default function register(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
 		const activeConfig = getConfig();
 		const skipInfo = shouldSkipPruning(event, activeConfig);
+		// Resolved before the early-return block so the disabled-by-toggle path can
+		// record keep-all for subagent inheritance (keyed by this session id).
+		const sessionId = getSessionId(ctx);
 		if (skipInfo.skip && (skipInfo.reason === "disabled-by-toggle" || skipInfo.reason === "subagent")) {
 			// disabled-by-toggle: user turned the extension off via PIE_EXTENSION_TOGGLES_JSON.
 			// subagent: running inside a scoped subagent session — the prepass is
 			// main-agent-oriented and would add 20–35s (+ a failure mode) per turn.
+			//
+			// Record keep-all for the disabled path so subagents spawned this turn
+			// inherit "no filtering" rather than a stale set from a previous turn.
+			// The subagent path records nothing (subagent sessions are not main).
+			if (skipInfo.reason === "disabled-by-toggle") {
+				recordKeptSkills(sessionId, "keep-all");
+			}
 			return undefined;
 		}
 
-		const sessionId = getSessionId(ctx);
 		const skills = event.systemPromptOptions.skills ?? [];
 		const allSkillPaths = skills.map((s: Skill) => s.filePath);
 
 		if (skipInfo.skip) {
 			recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
+			// off / too-short: the main session keeps every visible skill, so
+			// subagents should inherit keep-all (no filter) for this turn.
+			recordKeptSkills(sessionId, "keep-all");
 			return undefined;
 		}
 
@@ -236,6 +249,14 @@ export default function register(pi: ExtensionAPI) {
 			error: pruningError,
 			safeguardReason,
 		});
+
+		// Record the kept-skill set for subagent inheritance (direction C). This is
+		// the single recording point for every non-early-return path: success,
+		// shadow, parse-failure safeguard, block-not-found, no-completeFn, and
+		// error all reach here. `skillResult.included` holds the kept subset when
+		// the prepass ran and the skills block was found; otherwise null → keep-all
+		// (no filtering) so subagents never read a stale set from a previous turn.
+		recordKeptSkills(sessionId, skillResult?.included ?? "keep-all");
 
 		if (activeConfig.mode === "shadow") {
 			return { systemPrompt: event.systemPrompt, message: feedbackMessage ?? undefined };

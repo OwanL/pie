@@ -174,12 +174,13 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       bashShellPath: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
+      subagentDropTools: undefined,
     },
   );
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -201,6 +202,7 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       bashShellPath: undefined,
       subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       subagentNestedAllowedBuckets: undefined,
+      subagentDropTools: undefined,
     },
   );
 });
@@ -222,6 +224,7 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       bashShellPath: undefined,
       subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
       subagentNestedAllowedBuckets: undefined,
+      subagentDropTools: undefined,
     },
   );
 });
@@ -259,6 +262,7 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       bashShellPath: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
+      subagentDropTools: undefined,
     },
   );
 });
@@ -280,6 +284,7 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       bashShellPath: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
+      subagentDropTools: undefined,
     },
   );
 });
@@ -295,6 +300,42 @@ test('validateRuntimePrefsSet rejects non-object subagentNestedAllowedBuckets', 
   assert.throws(
     () => validateRuntimePrefsSet({ subagentNestedAllowedBuckets: 'nope' }),
     /subagentNestedAllowedBuckets must be an object/,
+  );
+});
+
+test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
+  assert.deepEqual(
+    validateRuntimePrefsSet({ subagentDropTools: ['ask_user', 'web_search'] }),
+    {
+      providerToggles: {},
+      extensionToggles: {},
+      subagentAlwaysParentModel: undefined,
+      subagentMaxDepth: undefined,
+      subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: undefined,
+      subagentMaxConcurrency: undefined,
+      subagentMaxParallelTasks: undefined,
+      bashWarmPoolSize: undefined,
+      bashFastPath: undefined,
+      bashShellPath: undefined,
+      subagentBuckets: undefined,
+      subagentNestedAllowedBuckets: undefined,
+      subagentDropTools: ['ask_user', 'web_search'],
+    },
+  );
+});
+
+test('validateRuntimePrefsSet rejects non-string entries in subagentDropTools', () => {
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentDropTools: ['ok', 5] }),
+    /subagentDropTools must be an array of strings/,
+  );
+});
+
+test('validateRuntimePrefsSet rejects non-array subagentDropTools', () => {
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentDropTools: 'nope' }),
+    /subagentDropTools must be an array of strings/,
   );
 });
 

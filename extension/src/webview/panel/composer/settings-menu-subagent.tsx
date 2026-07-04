@@ -3,7 +3,7 @@
 
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
-import { setBucketModels, setNestedAllowedBucket, toggleChatPref } from '../chat-prefs';
+import { setBucketModels, setNestedAllowedBucket, setSubagentDropTools, toggleChatPref } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
 import { FlyoutPanel, UiGroupLabel } from './ui-appearance-settings';
 import type { OnSetPrefs } from './settings-menu-types';
@@ -140,6 +140,70 @@ function BucketModelsEditor({ bucket, label, hint, selected, availableModels, mo
   );
 }
 
+interface DropToolsEditorProps {
+  selected: string[];
+  onChange: (tools: string[]) => void;
+}
+
+/** Free-text chip editor for the list of tool names always dropped from
+ *  subagent sessions. Tool names aren't enumerated in the webview, so the
+ *  user types them (e.g. `ask_user`) and presses Enter to add; chips are
+ *  removable. Reuses the keep-picker chip styling for visual consistency. */
+function DropToolsEditor({ selected, onChange }: DropToolsEditorProps) {
+  const [draft, setDraft] = useState('');
+  const addTool = () => {
+    const name = draft.trim();
+    setDraft('');
+    if (!name || selected.includes(name)) return;
+    onChange([...selected, name]);
+  };
+  const removeTool = (name: string) => onChange(selected.filter((t) => t !== name));
+  return (
+    <div class="toolbar-settings-keep-picker">
+      <div class="toolbar-settings-keep-picker-label">Drop tools for subagents</div>
+      <div class="toolbar-settings-item-hint">
+        Tool names listed here are removed from every subagent's tool set — e.g. <code>ask_user</code> to stop subagents prompting the user mid-delegation. Applies to both agents with an explicit <code>tools:</code> list and unrestricted agents.
+      </div>
+      {selected.length > 0 && (
+        <div class="toolbar-settings-keep-chips">
+          {selected.map((name) => (
+            <span key={name} class="toolbar-settings-keep-chip">
+              <span>{name}</span>
+              <button
+                type="button"
+                class="toolbar-settings-keep-chip-remove"
+                aria-label={`Stop dropping ${name}`}
+                onClick={() => removeTool(name)}
+              >
+                <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="3" y1="3" x2="10" y2="10" />
+                  <line x1="10" y1="3" x2="3" y2="10" />
+                </svg>
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div class="toolbar-settings-keep-picker-wrap">
+        <input
+          type="text"
+          class="toolbar-settings-keep-select"
+          value={draft}
+          placeholder="Add tool name…"
+          onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addTool();
+            }
+          }}
+          aria-label="Add a tool name to drop for subagents"
+        />
+      </div>
+    </div>
+  );
+}
+
 interface SubagentSettingsProps {
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
@@ -170,6 +234,12 @@ export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntrie
         </span>
         <span class="toolbar-settings-item-label">Always use parent model</span>
       </button>
+
+      <UiGroupLabel label="Dropped tools" />
+      <DropToolsEditor
+        selected={prefs.subagentDropTools ?? []}
+        onChange={(tools) => onSetPrefs(setSubagentDropTools(prefs, tools))}
+      />
 
       <UiGroupLabel label="Model buckets" />
       <div class="toolbar-settings-item-hint">
