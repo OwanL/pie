@@ -51,6 +51,7 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
     satisfaction: 4,
     modelId: 'model-a',
     modelFamily: 'model-a',
+    provider: null,
     thinkingLevel: 'medium',
     mixedModelConfig: false,
     mixedTreatmentConfig: false,

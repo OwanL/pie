@@ -88,6 +88,70 @@ function costTrendRows(runs: PreparedRunRow[]): CostTrendRow[] {
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 
+interface CostTrendByProviderRow {
+  day: string;
+  provider: string;
+  totalCostUsd: number;
+  runCount: number;
+}
+
+/** Max providers drawn as their own series; the long tail folds into 'Other' to keep the legend readable. */
+const COST_TREND_BY_PROVIDER_TOP_N = 8;
+
+/**
+ * Daily estimated cost broken down by provider — one row per (day, provider)
+ * with priced, non-open runs. Providers are ranked by total spend across the
+ * filtered window; the long tail beyond the top {@link COST_TREND_BY_PROVIDER_TOP_N}
+ * is folded into an 'Other' bucket per day so every day's spend stays
+ * representable without drowning the legend in one-off providers. A provider
+ * absent on a given day simply has no point that day (the line skips it).
+ * Mirrors {@link costTrendRows}'s open-run / unpriced-run exclusion.
+ */
+export function costTrendByProviderRows(runs: PreparedRunRow[]): CostTrendByProviderRow[] {
+  const totalsByProvider = new Map<string, number>();
+  const byDayProvider = new Map<string, Map<string, { total: number; count: number }>>();
+
+  for (const run of runs) {
+    if (run.status === 'open' || run.estimatedCostUsd === null) {
+      continue;
+    }
+    const provider = run.provider?.trim() || '(unknown)';
+    totalsByProvider.set(provider, (totalsByProvider.get(provider) ?? 0) + run.estimatedCostUsd);
+
+    const dayMap = byDayProvider.get(run.startedDay) ?? new Map<string, { total: number; count: number }>();
+    const entry = dayMap.get(provider) ?? { total: 0, count: 0 };
+    entry.total += run.estimatedCostUsd;
+    entry.count += 1;
+    dayMap.set(provider, entry);
+    byDayProvider.set(run.startedDay, dayMap);
+  }
+
+  const keep = new Set(
+    [...totalsByProvider.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, COST_TREND_BY_PROVIDER_TOP_N)
+      .map(([name]) => name),
+  );
+
+  const rows: CostTrendByProviderRow[] = [];
+  for (const [day, dayMap] of byDayProvider) {
+    let otherTotal = 0;
+    let otherCount = 0;
+    for (const [provider, e] of dayMap) {
+      if (keep.has(provider)) {
+        rows.push({ day, provider, totalCostUsd: Math.round(e.total * 10000) / 10000, runCount: e.count });
+      } else {
+        otherTotal += e.total;
+        otherCount += e.count;
+      }
+    }
+    if (otherCount > 0) {
+      rows.push({ day, provider: 'Other', totalCostUsd: Math.round(otherTotal * 10000) / 10000, runCount: otherCount });
+    }
+  }
+  return rows.sort((a, b) => a.day.localeCompare(b.day) || a.provider.localeCompare(b.provider));
+}
+
 export const costCharts: ChartEntry[] = [
   {
     id: 'chart-cost-by-model',
@@ -197,6 +261,47 @@ export const costCharts: ChartEntry[] = [
         ],
       };
       await ctx.renderSpec('chart-cost-trend', spec, 'No runs with cost data match the current filters.', ctx.renderToken);
+    },
+  },
+  {
+    id: 'chart-cost-trend-by-provider',
+    render: async (ctx: ChartContext) => {
+      const rows = costTrendByProviderRows(ctx.runs);
+      const providerCount = new Set(rows.map((r) => r.provider)).size;
+      ctx.setNote(
+        'cost-trend-by-provider-note',
+        `Daily estimated spend split by provider; ${providerCount} provider${providerCount === 1 ? '' : 's'} shown (top ${COST_TREND_BY_PROVIDER_TOP_N} by spend, remainder folded into 'Other'). Estimated via token usage × model pricing.`,
+        ctx.renderToken,
+      );
+      const spec = rows.length === 0 ? null : {
+        width: 'container',
+        height: 240,
+        data: { values: rows },
+        layer: [
+          {
+            // One line per provider; point markers carry the tooltip. A provider
+            // absent on a given day has no point there, so its line skips that
+            // day rather than interpolating a fake zero.
+            mark: { type: 'line' as const, strokeWidth: 2, point: { filled: true, size: 35, opacity: 0.55 }, opacity: 0.9 },
+            encoding: {
+              x: { field: 'day', type: 'temporal' as const, title: 'Day', timeUnit: 'yearmonthdate' },
+              y: { field: 'totalCostUsd', type: 'quantitative' as const, title: 'Estimated cost (USD)', axis: { format: '$.2f' } },
+              color: {
+                field: 'provider', type: 'nominal' as const, title: 'Provider',
+                scale: { range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.success, CHART_COLORS.gold, CHART_COLORS.accent2, CHART_COLORS.text, CHART_COLORS.muted] },
+                legend: { orient: 'bottom', labelLimit: 180 },
+              },
+              tooltip: [
+                { field: 'provider', type: 'nominal' as const, title: 'Provider' },
+                { field: 'day', type: 'temporal' as const, title: 'Day', timeUnit: 'yearmonthdate' },
+                { field: 'totalCostUsd', type: 'quantitative' as const, title: 'Cost', format: '$.2f' },
+                { field: 'runCount', type: 'quantitative' as const, title: 'Runs' },
+              ],
+            },
+          },
+        ],
+      };
+      await ctx.renderSpec('chart-cost-trend-by-provider', spec, 'No runs with cost data match the current filters.', ctx.renderToken);
     },
   },
   {

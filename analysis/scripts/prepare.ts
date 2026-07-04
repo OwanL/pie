@@ -19,7 +19,7 @@ import {
 } from './contracts.ts';
 import { existingHashPrefix, hashToPrefix } from './hash.ts';
 import { loadModelPricingMap, estimateRunCostUsd } from './pricing.ts';
-import { loadModelFamilyMap, resolveModelFamily } from './model-family.ts';
+import { loadModelFamilyMap, resolveModelFamily, resolveModelProvider } from './model-family.ts';
 
 function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
@@ -132,6 +132,7 @@ function prepareRun(
   const startedDay = toStartedDay(run.startedAt);
   const normalizedModelId = normalizeNullableText(run.modelId);
   const modelFamily = resolveModelFamily(normalizedModelId, familyMap);
+  const provider = resolveModelProvider(normalizedModelId, familyMap);
 
   const dims = ['precision', 'creativity', 'reasoning', 'thoroughness'] as const;
   function meanForDim(dim: typeof dims[number]): number | null {
@@ -163,6 +164,7 @@ function prepareRun(
     satisfaction: outcome?.satisfaction ?? null,
     modelId: normalizedModelId,
     modelFamily,
+    provider,
     thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
     mixedModelConfig: run.mixedModelConfig,
     mixedTreatmentConfig: run.mixedTreatmentConfig,

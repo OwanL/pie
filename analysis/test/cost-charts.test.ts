@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { PreparedRunRow } from '../scripts/contracts.ts';
-import { groupCostByModel } from '../site/charts/cost.ts';
+import { costTrendByProviderRows, groupCostByModel } from '../site/charts/cost.ts';
 
 /**
  * Minimal run factory: `groupCostByModel` only reads `status`, `modelId`,
@@ -11,6 +11,11 @@ import { groupCostByModel } from '../site/charts/cost.ts';
  */
 function mkRun(model: string, session: string, cost: number | null, status = 'completed'): PreparedRunRow {
   return { status, modelId: model, sessionPathHash: session, estimatedCostUsd: cost } as unknown as PreparedRunRow;
+}
+
+/** Like {@link mkRun} but also sets the fields `costTrendByProviderRows` reads (`startedDay`, `provider`). */
+function mkProviderRun(day: string, provider: string | null, cost: number | null, status = 'completed'): PreparedRunRow {
+  return { status, startedDay: day, provider, estimatedCostUsd: cost, sessionPathHash: 's', modelId: 'm' } as unknown as PreparedRunRow;
 }
 
 function approx(actual: number, expected: number, epsilon = 1e-9): void {
@@ -87,4 +92,62 @@ test('groupCostByModel sorts by total spend descending and caps at 12 models', (
   const rows = groupCostByModel(runs);
   assert.equal(rows.length, 12, 'should cap at 12 models');
   assert.equal(rows[0]!.model, 'model-12', 'highest-spend model first');
+});
+
+test('costTrendByProviderRows groups daily cost by provider and sums across runs', () => {
+  const rows = costTrendByProviderRows([
+    mkProviderRun('2026-01-01', 'anthropic', 0.10),
+    mkProviderRun('2026-01-01', 'anthropic', 0.20),
+    mkProviderRun('2026-01-01', 'openai', 0.05),
+    mkProviderRun('2026-01-02', 'anthropic', 0.40),
+  ]);
+  // 3 (day, provider) cells, sorted by day then provider.
+  assert.equal(rows.length, 3);
+  const [d1Anthropic, d1Openai, d2Anthropic] = rows;
+  assert.equal(d1Anthropic!.day, '2026-01-01');
+  assert.equal(d1Anthropic!.provider, 'anthropic');
+  approx(d1Anthropic!.totalCostUsd, 0.30); // 0.10 + 0.20
+  assert.equal(d1Anthropic!.runCount, 2);
+  assert.equal(d1Openai!.provider, 'openai');
+  approx(d1Openai!.totalCostUsd, 0.05);
+  assert.equal(d2Anthropic!.day, '2026-01-02');
+  approx(d2Anthropic!.totalCostUsd, 0.40);
+});
+
+test('costTrendByProviderRows excludes open runs, unpriced runs, and attributes null provider to (unknown)', () => {
+  const rows = costTrendByProviderRows([
+    mkProviderRun('2026-01-01', 'anthropic', 0.10, 'completed'),
+    mkProviderRun('2026-01-01', 'anthropic', 0.99, 'open'), // open → ignored
+    mkProviderRun('2026-01-01', null, 0.15), // null provider → (unknown)
+    mkProviderRun('2026-01-01', 'openai', null), // unpriced → ignored
+  ]);
+  assert.equal(rows.length, 2);
+  const anthropic = rows.find((r) => r.provider === 'anthropic')!;
+  approx(anthropic.totalCostUsd, 0.10);
+  const unknown = rows.find((r) => r.provider === '(unknown)')!;
+  approx(unknown.totalCostUsd, 0.15);
+});
+
+test('costTrendByProviderRows folds the long tail beyond the top N into a single Other series', () => {
+  // 9 distinct providers with strictly increasing spend; the 9th is the tail.
+  const runs: PreparedRunRow[] = [];
+  for (let i = 0; i < 9; i += 1) {
+    runs.push(mkProviderRun('2026-01-01', `p-${i}`, i + 1));
+  }
+  const rows = costTrendByProviderRows(runs);
+  const providers = new Set(rows.map((r) => r.provider));
+  assert.equal(providers.size, 9, 'top 8 + Other');
+  assert.ok(providers.has('Other'), 'tail folded into Other');
+  // The cheapest provider (p-0, spend 1) is the tail, NOT p-8 (spend 9).
+  assert.ok(!providers.has('p-0'), 'lowest-spend provider rolled into Other');
+  assert.ok(providers.has('p-8'), 'highest-spend provider kept');
+  const other = rows.find((r) => r.provider === 'Other')!;
+  approx(other.totalCostUsd, 1); // p-0's spend
+});
+
+test('costTrendByProviderRows returns an empty array when no runs have cost data', () => {
+  assert.deepEqual(
+    costTrendByProviderRows([mkProviderRun('2026-01-01', 'anthropic', null)]),
+    [],
+  );
 });

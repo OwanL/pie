@@ -320,6 +320,8 @@ export interface PreparedRunRow {
   modelId: string | null;
   /** Canonical, provider-agnostic model family (e.g. 'glm-5.2') resolved from `models.json`'s optional `family` field; falls back to `modelId` when unset, null when `modelId` is null. The leaderboard groups by this, not `modelId`. */
   modelFamily: string | null;
+  /** Provider name from `models.json` (e.g. 'anthropic', 'openai', 'umans', 'ollama'); null when the model could not be attributed to a provider (not in the registry). Surfaced so analytics can roll cost up by provider over time, complementing the provider-agnostic `modelFamily`. */
+  provider: string | null;
   thinkingLevel: ThinkingLevel | null;
   mixedModelConfig: boolean;
   mixedTreatmentConfig: boolean;

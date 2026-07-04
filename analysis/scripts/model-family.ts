@@ -100,3 +100,20 @@ export function resolveModelFamily(
   if (!trimmed) return null;
   return familyMap.get(trimmed)?.family ?? trimmed;
 }
+
+/**
+ * Resolve the provider for a model id from the family map (e.g. 'anthropic',
+ * 'openai', 'umans', 'ollama'). Returns `null` when `modelId` is null/blank or
+ * when the model is not in the registry (provider unattributable). Mirrors
+ * {@link resolveModelFamily} so the two lookups stay in lockstep: `modelFamily`
+ * collapses provider-specific ids into one canonical family, while `provider`
+ * retains the per-provider dimension for cost-rollup analytics.
+ */
+export function resolveModelProvider(
+  modelId: string | null | undefined,
+  familyMap: Map<string, ModelFamilyEntry>,
+): string | null {
+  const trimmed = modelId?.trim();
+  if (!trimmed) return null;
+  return familyMap.get(trimmed)?.provider ?? null;
+}
