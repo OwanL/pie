@@ -102,9 +102,10 @@ const COST_TREND_BY_PROVIDER_TOP_N = 8;
  * Daily estimated cost broken down by provider — one row per (day, provider)
  * with priced, non-open runs. Providers are ranked by total spend across the
  * filtered window; the long tail beyond the top {@link COST_TREND_BY_PROVIDER_TOP_N}
- * is folded into an 'Other' bucket per day so every day's spend stays
- * representable without drowning the legend in one-off providers. A provider
- * absent on a given day simply has no point that day (the line skips it).
+ * is folded into an 'Other' bucket so every day's spend stays representable
+ * without drowning the legend in one-off providers. Missing (day, provider)
+ * combinations are imputed to `$0` so each series is a continuous line, and the
+ * rendered line uses monotone interpolation to round the corners between days.
  * Mirrors {@link costTrendRows}'s open-run / unpriced-run exclusion.
  */
 export function costTrendByProviderRows(runs: PreparedRunRow[]): CostTrendByProviderRow[] {
@@ -133,20 +134,36 @@ export function costTrendByProviderRows(runs: PreparedRunRow[]): CostTrendByProv
       .map(([name]) => name),
   );
 
+  const hasOther = totalsByProvider.size > keep.size;
+  const outputProviders = [...keep];
+  if (hasOther) {
+    outputProviders.push('Other');
+  }
+
+  const days = [...byDayProvider.keys()].sort();
   const rows: CostTrendByProviderRow[] = [];
-  for (const [day, dayMap] of byDayProvider) {
+  for (const day of days) {
+    const dayMap = byDayProvider.get(day)!;
     let otherTotal = 0;
     let otherCount = 0;
     for (const [provider, e] of dayMap) {
-      if (keep.has(provider)) {
-        rows.push({ day, provider, totalCostUsd: Math.round(e.total * 10000) / 10000, runCount: e.count });
-      } else {
+      if (!keep.has(provider)) {
         otherTotal += e.total;
         otherCount += e.count;
       }
     }
-    if (otherCount > 0) {
-      rows.push({ day, provider: 'Other', totalCostUsd: Math.round(otherTotal * 10000) / 10000, runCount: otherCount });
+    for (const provider of outputProviders) {
+      if (provider === 'Other') {
+        rows.push({ day, provider, totalCostUsd: Math.round(otherTotal * 10000) / 10000, runCount: otherCount });
+      } else {
+        const e = dayMap.get(provider);
+        rows.push({
+          day,
+          provider,
+          totalCostUsd: Math.round((e?.total ?? 0) * 10000) / 10000,
+          runCount: e?.count ?? 0,
+        });
+      }
     }
   }
   return rows.sort((a, b) => a.day.localeCompare(b.day) || a.provider.localeCompare(b.provider));
@@ -279,10 +296,10 @@ export const costCharts: ChartEntry[] = [
         data: { values: rows },
         layer: [
           {
-            // One line per provider; point markers carry the tooltip. A provider
-            // absent on a given day has no point there, so its line skips that
-            // day rather than interpolating a fake zero.
-            mark: { type: 'line' as const, strokeWidth: 2, point: { filled: true, size: 35, opacity: 0.55 }, opacity: 0.9 },
+            // One line per provider with $0 imputation for missing days and
+            // monotone interpolation to round the corners between days (fewer
+            // sharp spikes). Point markers still reveal the actual data points.
+            mark: { type: 'line' as const, strokeWidth: 2, interpolate: 'monotone', point: { filled: true, size: 35, opacity: 0.55 }, opacity: 0.9 },
             encoding: {
               x: { field: 'day', type: 'temporal' as const, title: 'Day', timeUnit: 'yearmonthdate' },
               y: { field: 'totalCostUsd', type: 'quantitative' as const, title: 'Estimated cost (USD)', axis: { format: '$.2f' } },

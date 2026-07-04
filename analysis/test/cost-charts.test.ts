@@ -101,17 +101,21 @@ test('costTrendByProviderRows groups daily cost by provider and sums across runs
     mkProviderRun('2026-01-01', 'openai', 0.05),
     mkProviderRun('2026-01-02', 'anthropic', 0.40),
   ]);
-  // 3 (day, provider) cells, sorted by day then provider.
-  assert.equal(rows.length, 3);
-  const [d1Anthropic, d1Openai, d2Anthropic] = rows;
-  assert.equal(d1Anthropic!.day, '2026-01-01');
-  assert.equal(d1Anthropic!.provider, 'anthropic');
-  approx(d1Anthropic!.totalCostUsd, 0.30); // 0.10 + 0.20
-  assert.equal(d1Anthropic!.runCount, 2);
-  assert.equal(d1Openai!.provider, 'openai');
-  approx(d1Openai!.totalCostUsd, 0.05);
-  assert.equal(d2Anthropic!.day, '2026-01-02');
-  approx(d2Anthropic!.totalCostUsd, 0.40);
+  // 4 rows: 2 providers × 2 days; openai is imputed as $0 on day 2.
+  assert.equal(rows.length, 4);
+  const d1Anthropic = rows.find((r) => r.day === '2026-01-01' && r.provider === 'anthropic')!;
+  const d1Openai = rows.find((r) => r.day === '2026-01-01' && r.provider === 'openai')!;
+  const d2Anthropic = rows.find((r) => r.day === '2026-01-02' && r.provider === 'anthropic')!;
+  const d2Openai = rows.find((r) => r.day === '2026-01-02' && r.provider === 'openai')!;
+  assert.equal(d1Anthropic.day, '2026-01-01');
+  assert.equal(d1Anthropic.provider, 'anthropic');
+  approx(d1Anthropic.totalCostUsd, 0.30); // 0.10 + 0.20
+  assert.equal(d1Anthropic.runCount, 2);
+  approx(d1Openai.totalCostUsd, 0.05);
+  assert.equal(d2Anthropic.day, '2026-01-02');
+  approx(d2Anthropic.totalCostUsd, 0.40);
+  approx(d2Openai.totalCostUsd, 0);
+  assert.equal(d2Openai.runCount, 0);
 });
 
 test('costTrendByProviderRows excludes open runs, unpriced runs, and attributes null provider to (unknown)', () => {
@@ -143,6 +147,22 @@ test('costTrendByProviderRows folds the long tail beyond the top N into a single
   assert.ok(providers.has('p-8'), 'highest-spend provider kept');
   const other = rows.find((r) => r.provider === 'Other')!;
   approx(other.totalCostUsd, 1); // p-0's spend
+});
+
+test('costTrendByProviderRows imputes $0 for missing (day, provider) combinations', () => {
+  const rows = costTrendByProviderRows([
+    mkProviderRun('2026-01-01', 'anthropic', 0.10),
+    mkProviderRun('2026-01-01', 'openai', 0.05),
+    mkProviderRun('2026-01-02', 'anthropic', 0.40),
+  ]);
+  // 2 days × 2 providers = 4 rows; openai has no runs on day 2 but still gets a $0 point.
+  assert.equal(rows.length, 4);
+  const openaiDay2 = rows.find((r) => r.day === '2026-01-02' && r.provider === 'openai')!;
+  assert.ok(openaiDay2, 'openai gets a day-2 row even though it had no runs that day');
+  approx(openaiDay2.totalCostUsd, 0);
+  assert.equal(openaiDay2.runCount, 0);
+  const anthropicDay1 = rows.find((r) => r.day === '2026-01-01' && r.provider === 'anthropic')!;
+  approx(anthropicDay1.totalCostUsd, 0.10);
 });
 
 test('costTrendByProviderRows returns an empty array when no runs have cost data', () => {
