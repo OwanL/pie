@@ -591,22 +591,66 @@ export class PieExtension implements vscode.Disposable {
     });
   }
 
+  /** Count tool calls with status 'running' across every loaded transcript.
+   *  Gives a rough system-load signal for the status bar: each running tool
+   *  call (including an in-flight subagent invocation, which is itself a
+   *  running tool call on the parent session) is one unit of concurrent work.
+   *  Only loaded sessions are scanned, so the count is a lower bound when
+   *  background sessions aren't pinned/open — acceptable for a load glance. */
+  private countActiveToolCalls(): number {
+    const { bySession } = this.archState.transcript;
+    let count = 0;
+    for (const messages of Object.values(bySession)) {
+      if (!messages) continue;
+      for (const message of messages) {
+        // `toolCalls` is the canonical flat array kept in sync with the
+        // structured `parts` by `upsertAssistantToolCall`; prefer it and only
+        // fall back to `parts` for messages that never got the array populated.
+        if (message.toolCalls && message.toolCalls.length > 0) {
+          for (const tc of message.toolCalls) {
+            if (tc.status === 'running') count++;
+          }
+        } else if (message.parts) {
+          for (const part of message.parts) {
+            if (part.kind === 'toolCall' && part.toolCall.status === 'running') count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
   private updateStatusBar(state: 'Starting' | 'Idle' | 'Thinking' | 'Error'): void {
     const runningCount = this.archState.sessions.runningSessionPaths.length;
+    const activeToolCount = this.countActiveToolCalls();
     const notice = this.archState.settings.notice;
-    const text =
-      state === 'Thinking'
-        ? runningCount > 1
-          ? `pie: ${runningCount} Running`
-          : 'pie: Running'
-        : state === 'Error'
-          ? 'pie: Error'
-          : state === 'Starting'
-            ? 'pie: Starting'
-            : 'pie: Idle';
+
+    let text: string;
+    if (state === 'Thinking') {
+      const sessionPart = runningCount > 1 ? `${runningCount} Running` : 'Running';
+      text = activeToolCount > 0
+        ? `pie: ${sessionPart} \u00b7 ${activeToolCount} tool${activeToolCount === 1 ? '' : 's'}`
+        : `pie: ${sessionPart}`;
+    } else if (state === 'Error') {
+      text = 'pie: Error';
+    } else if (state === 'Starting') {
+      text = 'pie: Starting';
+    } else {
+      text = 'pie: Idle';
+    }
 
     this.statusBar.text = text;
-    this.statusBar.tooltip = notice ?? 'Open pie chat';
+
+    // Build a tooltip that surfaces the load breakdown when running, then
+    // falls through to the backend notice (if any) or the default prompt.
+    const tooltipLines: string[] = [];
+    if (state === 'Thinking') {
+      tooltipLines.push(
+        `${runningCount} running session${runningCount === 1 ? '' : 's'} \u00b7 ${activeToolCount} active tool call${activeToolCount === 1 ? '' : 's'}`,
+      );
+    }
+    tooltipLines.push(notice ?? 'Open pie chat');
+    this.statusBar.tooltip = tooltipLines.join('\n');
   }
 
   private handleSessionCompleted(_event: SessionCompletionEvent): void {
