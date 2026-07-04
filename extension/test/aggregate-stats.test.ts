@@ -91,7 +91,7 @@ test('computeAggregateStats: per-provider cost + token totals', () => {
       inputTokens: 200_000, outputTokens: 100_000,
     }),
   ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {});
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 2);
 
   // openai: 1M*2/1M + 500k*6/1M = 2 + 3 = 5
   // anthropic: 200k*3/1M + 100k*15/1M = 0.6 + 1.5 = 2.1
@@ -104,6 +104,7 @@ test('computeAggregateStats: per-provider cost + token totals', () => {
   assert.equal(stats.totalOutputTokens, 600_000);
   assert.equal(stats.sessionCount, 2);
   assert.equal(stats.runCount, 2);
+  assert.equal(stats.openTabCount, 2);
   assert.equal(stats.ready, true);
 });
 
@@ -115,12 +116,17 @@ test('computeAggregateStats: today bucketing excludes other-day runs', () => {
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 1_000_000, outputTokens: 0, startedAt: today, updatedAt: today, finalizedAt: today }),
     makeRun({ runId: 'r2', modelId: 'm', inputTokens: 2_000_000, outputTokens: 0, startedAt: yesterday, updatedAt: yesterday, finalizedAt: yesterday }),
   ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {});
-  // today: 1M*1/1M = 1 ; total = 1 + 2 = 3
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // today: 1M*1/1M = 1 ; total = 1 + 2 = 3 ; week = today + yesterday = 3
   assert.equal(stats.todayCost, 1);
   assert.equal(stats.totalCost, 3);
   assert.equal(stats.todayCostByProvider.length, 1);
   assert.equal(stats.todayCostByProvider[0]!.provider, 'openai');
+  assert.equal(stats.weekCost, 3);
+  assert.equal(stats.weekCostByProvider.length, 1);
+  assert.equal(stats.weekCostByProvider[0]!.provider, 'openai');
+  assert.equal(stats.todayRunCount, 1);
+  assert.equal(stats.weekRunCount, 2);
   // daily series includes both days (within 14-day window)
   assert.equal(stats.dailyCost.length, 2);
   assert.equal(stats.dailyCost[0]!.date, '2026-07-03');
@@ -140,18 +146,22 @@ test('computeAggregateStats: throughput is generation-time-weighted', () => {
       ],
     }),
   ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {});
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
   // weighted: (1000 + 3000) / (20_000/1000) = 4000 / 20 = 200 tok/s
   assert.equal(stats.tokensPerSecond, 200);
   assert.equal(stats.tokensPerSecondByProvider.length, 1);
   assert.equal(stats.tokensPerSecondByProvider[0]!.tokensPerSecond, 200);
   assert.equal(stats.tokensPerSecondByProvider[0]!.sampleCount, 2);
+  // today's throughput (samples ended today) = same 200 tok/s
+  assert.equal(stats.todayTokensPerSecond, 200);
+  assert.equal(stats.todayTokensPerSecondByProvider.length, 1);
+  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 2);
 });
 
 test('computeAggregateStats: unknown/unpriced model attributes to unknown with zero cost', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>();
   const runs = [makeRun({ runId: 'r1', modelId: 'mystery', inputTokens: 500_000, outputTokens: 100_000 })];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {});
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
   assert.equal(stats.totalCost, 0);
   assert.equal(stats.costByProvider.length, 1);
   assert.equal(stats.costByProvider[0]!.provider, 'unknown');
@@ -167,9 +177,51 @@ test('computeAggregateStats: live tok/s sums running sessions rates', () => {
     '/s/2': { label: '5.5 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 5.5 },
     '/s/3': { label: '—', ariaLabel: '', tooltip: '', state: 'paused', paused: true }, // no rate → 0
   };
-  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2', '/s/3'], rates);
+  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2', '/s/3'], rates, 3);
   assert.equal(stats.liveTokensPerSecond, 45.5);
   assert.equal(stats.runningSessionCount, 3);
+  assert.equal(stats.openTabCount, 3);
+});
+
+test('computeAggregateStats: week window excludes runs older than 7 days', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const today = '2026-07-04T10:00:00.000Z';
+  const tenDaysAgo = '2026-06-24T10:00:00.000Z'; // outside the 7-day window
+  const runs = [
+    makeRun({ runId: 'r1', modelId: 'm', inputTokens: 1_000_000, outputTokens: 0, startedAt: today, updatedAt: today, finalizedAt: today }),
+    makeRun({ runId: 'r2', modelId: 'm', inputTokens: 5_000_000, outputTokens: 0, startedAt: tenDaysAgo, updatedAt: tenDaysAgo, finalizedAt: tenDaysAgo }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // today run = $1 ; 10-days-ago run = $5 but outside week window
+  assert.equal(stats.todayCost, 1);
+  assert.equal(stats.weekCost, 1);
+  assert.equal(stats.totalCost, 6);
+  assert.equal(stats.todayRunCount, 1);
+  assert.equal(stats.weekRunCount, 1);
+  assert.equal(stats.runCount, 2);
+});
+
+test('computeAggregateStats: today throughput buckets by sample end-date', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const yesterdaySample = '2026-07-03T23:30:00.000Z';
+  const todaySample = '2026-07-04T10:00:00.000Z';
+  const runs = [
+    makeRun({
+      runId: 'r1', modelId: 'm',
+      // Run landed today, but one of its samples ended yesterday (pre-midnight).
+      startedAt: '2026-07-03T23:00:00.000Z', updatedAt: todaySample, finalizedAt: todaySample,
+      turnThroughputSamples: [
+        { endedAt: yesterdaySample, outputTokens: 2000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: todaySample, outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      ],
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // All-time: (2000 + 1000) / 20s = 150 tok/s
+  assert.equal(stats.tokensPerSecond, 150);
+  // Today: only the sample that ended today → 1000 / 10s = 100 tok/s
+  assert.equal(stats.todayTokensPerSecond, 100);
+  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 1);
 });
 
 test('providerForModel / pricingForModel: first priced provider wins', () => {

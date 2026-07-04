@@ -1,10 +1,10 @@
 /* ── Aggregate stats strip ────────────────────────────────────────────────── */
 /* Thin status strip anchored at the bottom of the panel (below the composer).
-   Shows aggregate usage across ALL sessions (cost per provider, today,
-   throughput, live tok/s, token totals, counts). The full breakdown lives in
-   the `title` tooltip so the strip itself stays a single thin line. Host-owned:
-   a pure projection of ViewState.aggregateStats (STATE_CONTRACT § Webview-Local
-   State). */
+   Focused on recent (today / this-week) + current (live / open) activity.
+   Per-provider breakdowns and all-time context live in each segment's scoped
+   `title` tooltip rather than dedicated inline chips, so the strip itself stays
+   a single thin line. Host-owned: a pure projection of ViewState.aggregateStats
+   (STATE_CONTRACT § Webview-Local State). */
 
 .aggregate-strip {
   display: flex;
@@ -23,7 +23,6 @@
   white-space: nowrap;
   overflow: hidden;
   user-select: none;
-  cursor: help;
 }
 
 .aggregate-strip--placeholder {
@@ -35,15 +34,16 @@
   align-items: center;
   gap: 3px;
   flex-shrink: 0;
+  cursor: help;
 }
 
 .aggregate-strip-seg--primary {
-  color: color-mix(in srgb, var(--panel-foreground) 86%, var(--panel-muted));
+  color: color-mix(in srgb, var(--panel-foreground) 88%, var(--panel-muted));
   font-weight: 600;
 }
 
 .aggregate-strip-cost {
-  color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted));
+  color: color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-muted));
   font-variant-numeric: tabular-nums;
 }
 
@@ -53,60 +53,48 @@
   font-weight: 600;
 }
 
-.aggregate-strip-unit,
-.aggregate-strip-live {
+.aggregate-strip-unit {
   color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
 }
 
-.aggregate-strip-providers {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.aggregate-strip-provider-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 5px;
+.aggregate-strip-live-tag {
+  color: var(--panel-success);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  padding: 1px 3px;
   border-radius: var(--panel-radius-sm);
-  background: color-mix(in srgb, var(--panel-control-surface) 70%, transparent);
-  border: 1px solid var(--panel-border-subtle);
-}
-
-.aggregate-strip-provider-name {
-  color: var(--panel-muted);
-  max-width: 84px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.aggregate-strip-provider-more {
-  color: var(--panel-muted);
-  background: transparent;
-  border-color: transparent;
-}
-
-.aggregate-strip-tokens {
-  color: color-mix(in srgb, var(--panel-foreground) 60%, var(--panel-muted));
-  font-variant-numeric: tabular-nums;
-}
-
-.aggregate-strip-tok-down {
-  color: color-mix(in srgb, var(--panel-foreground) 55%, var(--panel-muted));
-}
-
-.aggregate-strip-tok-up {
-  color: color-mix(in srgb, var(--panel-foreground) 55%, var(--panel-muted));
+  background: color-mix(in srgb, var(--panel-success) 14%, transparent);
 }
 
 .aggregate-strip-counts {
   color: var(--panel-muted);
   margin-left: auto;
   padding-left: 6px;
-  flex-shrink: 0;
+}
+
+.aggregate-strip-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--panel-accent);
+  font-weight: 600;
+}
+
+.aggregate-strip-active-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--panel-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 18%, transparent);
+  animation: aggregate-strip-pulse 1.4s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes aggregate-strip-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 .aggregate-strip-sep {

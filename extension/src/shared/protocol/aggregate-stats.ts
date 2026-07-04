@@ -9,6 +9,13 @@
  * is stable between recomputes — mirroring `tokenRateBySession`'s reference-
  * stability contract (the host spreads the cached ref into each ViewState).
  *
+ * ## Focus: recent + current
+ *
+ * The strip surfaces **recent** (today / this-week) and **current** (live /
+ * open) activity over long-term all-time totals. All-time figures are retained
+ * for tooltip context but are not the headline. Per-provider breakdowns live in
+ * each segment's scoped tooltip rather than dedicated inline chips.
+ *
  * ## Provider attribution
  *
  * `RunSnapshot` carries only `modelId` (never the serving provider). A model id
@@ -62,38 +69,60 @@ export interface AggregateDailyCost {
 
 /**
  * Aggregate stats across all runs (completed + open) for the current
- * workspace. All cost figures are in USD.
+ * workspace, with a recent/current focus. All cost figures are in USD.
  */
 export interface AggregateStats {
-  /** Total cost across all runs (sum of {@link costByProvider}). */
-  totalCost: number;
-  /** Cost per provider, sorted descending by cost. */
-  costByProvider: AggregateProviderCost[];
+  // ── Recent: today ──
   /** Total spend for the current UTC day. */
   todayCost: number;
   /** Today's spend per provider, sorted descending by cost. */
   todayCostByProvider: AggregateProviderCost[];
-  /** Per-day cost for the last `N` days (ascending date). */
+  /** Mean output tok/s across completed turns whose sample ended today (UTC). */
+  todayTokensPerSecond: number;
+  /** Per-provider throughput for today, sorted descending by output tokens. */
+  todayTokensPerSecondByProvider: AggregateProviderThroughput[];
+  /** Number of runs that landed (finalized/updated/started) today. */
+  todayRunCount: number;
+
+  // ── Recent: this week (last 7 days, inclusive of today) ──
+  /** Total spend over the last 7 UTC days (inclusive of today). */
+  weekCost: number;
+  /** Last-7-days spend per provider, sorted descending by cost. */
+  weekCostByProvider: AggregateProviderCost[];
+  /** Number of runs in the last 7 days. */
+  weekRunCount: number;
+  /** Per-day cost for the last 14 days (ascending date) — tooltip context. */
   dailyCost: AggregateDailyCost[];
-  /** Generation-time-weighted mean output tokens/sec across all completed turns. */
-  tokensPerSecond: number;
-  /** Per-provider throughput breakdown, sorted descending by output tokens. */
-  tokensPerSecondByProvider: AggregateProviderThroughput[];
+
+  // ── Current: live / open ──
   /**
    * Sum of live tok/s across currently-running sessions (from
    * `TokenRateService.getRates()`). 0 when no session is generating.
    */
   liveTokensPerSecond: number;
+  /** Number of currently-running sessions. */
+  runningSessionCount: number;
+  /** Number of currently-open session tabs (current UI state, not analytics). */
+  openTabCount: number;
+
+  // ── All-time (tooltip context only) ──
+  /** Total cost across all runs (sum of {@link costByProvider}). */
+  totalCost: number;
+  /** Cost per provider (all runs), sorted descending by cost. */
+  costByProvider: AggregateProviderCost[];
+  /** Generation-time-weighted mean output tok/s across ALL completed turns. */
+  tokensPerSecond: number;
+  /** Per-provider throughput (all runs), sorted descending by output tokens. */
+  tokensPerSecondByProvider: AggregateProviderThroughput[];
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
   totalCacheWriteTokens: number;
   /** Number of runs included in the aggregate (completed + open). */
   runCount: number;
-  /** Number of distinct sessions. */
+  /** Number of distinct sessions that ever had a run (all-time). */
   sessionCount: number;
-  /** Number of currently-running sessions. */
-  runningSessionCount: number;
+
   /** False until the host has completed its first computation. */
   ready: boolean;
 }
@@ -102,20 +131,27 @@ export interface AggregateStats {
  *  host computation lands. Stable reference so the webview's `EMPTY_VIEW_STATE`
  *  and the projection placeholder never allocate. */
 export const EMPTY_AGGREGATE_STATS: AggregateStats = {
-  totalCost: 0,
-  costByProvider: [],
   todayCost: 0,
   todayCostByProvider: [],
+  todayTokensPerSecond: 0,
+  todayTokensPerSecondByProvider: [],
+  todayRunCount: 0,
+  weekCost: 0,
+  weekCostByProvider: [],
+  weekRunCount: 0,
   dailyCost: [],
+  liveTokensPerSecond: 0,
+  runningSessionCount: 0,
+  openTabCount: 0,
+  totalCost: 0,
+  costByProvider: [],
   tokensPerSecond: 0,
   tokensPerSecondByProvider: [],
-  liveTokensPerSecond: 0,
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCacheReadTokens: 0,
   totalCacheWriteTokens: 0,
   runCount: 0,
   sessionCount: 0,
-  runningSessionCount: 0,
   ready: false,
 };

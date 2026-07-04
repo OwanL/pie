@@ -123,6 +123,7 @@ export class AggregateStatsService {
   private async recompute(): Promise<void> {
     const archState = this.deps.getArchState();
     const runningSessionPaths = archState.sessions.runningSessionPaths;
+    const openTabCount = archState.sessions.openTabPaths.length;
     const ratesBySession = this.deps.tokenRateService.getRates();
     const nowMs = Date.now();
 
@@ -139,11 +140,12 @@ export class AggregateStatsService {
 
     let next: AggregateStats;
     if (dataUnchanged) {
-      // Only refresh the live fields cheaply from the in-memory rate map.
+      // Only refresh the live/current fields cheaply from in-memory state.
       next = {
         ...this.cached,
         liveTokensPerSecond: sumLiveRate(runningSessionPaths, ratesBySession),
         runningSessionCount: runningSessionPaths.length,
+        openTabCount,
       };
     } else {
       const pricingMap = this.loadPricingCached();
@@ -154,7 +156,7 @@ export class AggregateStatsService {
       for (const run of openRuns) {
         if (run) runs.push(run);
       }
-      next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession);
+      next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession, openTabCount);
       this.lastDataSignature = signature;
     }
 
@@ -249,32 +251,47 @@ function sumLiveRate(
 
 /**
  * Shallow equality for the "changed?" gate. Compares the fields a user would
- * perceive as different (cost, tokens, counts, live rate, per-provider arrays
- * by content). Per-provider arrays are compared by length + first-entry
- * provider/cost (cheap); a genuinely different breakdown triggers a post.
+ * perceive as different (recent + current + all-time cost/tokens/counts,
+ * live rate, per-provider arrays by content). Per-provider arrays are compared
+ * by length + first-entry provider/cost (cheap); a genuinely different
+ * breakdown triggers a post.
  */
 function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
   if (a === b) return true;
   if (
-    a.totalCost !== b.totalCost
-    || a.todayCost !== b.todayCost
+    // Recent + current (the headline fields — most likely to change):
+    a.todayCost !== b.todayCost
+    || a.weekCost !== b.weekCost
+    || a.todayTokensPerSecond !== b.todayTokensPerSecond
     || a.tokensPerSecond !== b.tokensPerSecond
     || a.liveTokensPerSecond !== b.liveTokensPerSecond
+    || a.todayRunCount !== b.todayRunCount
+    || a.weekRunCount !== b.weekRunCount
+    || a.runningSessionCount !== b.runningSessionCount
+    || a.openTabCount !== b.openTabCount
+    // All-time context:
+    || a.totalCost !== b.totalCost
     || a.totalInputTokens !== b.totalInputTokens
     || a.totalOutputTokens !== b.totalOutputTokens
     || a.totalCacheReadTokens !== b.totalCacheReadTokens
     || a.totalCacheWriteTokens !== b.totalCacheWriteTokens
     || a.runCount !== b.runCount
     || a.sessionCount !== b.sessionCount
-    || a.runningSessionCount !== b.runningSessionCount
     || a.ready !== b.ready
   ) {
     return false;
   }
+  // Per-provider cost lists (today + all-time) by length + first entries.
   if (a.costByProvider.length !== b.costByProvider.length) return false;
   for (let i = 0; i < a.costByProvider.length; i += 1) {
     const x = a.costByProvider[i]!;
     const y = b.costByProvider[i]!;
+    if (x.provider !== y.provider || x.cost !== y.cost) return false;
+  }
+  if (a.todayCostByProvider.length !== b.todayCostByProvider.length) return false;
+  for (let i = 0; i < a.todayCostByProvider.length; i += 1) {
+    const x = a.todayCostByProvider[i]!;
+    const y = b.todayCostByProvider[i]!;
     if (x.provider !== y.provider || x.cost !== y.cost) return false;
   }
   return true;
