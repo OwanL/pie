@@ -479,6 +479,7 @@ export function TranscriptVirtualList({
         virtualizer={virtualizer}
         scrollRef={scrollRef}
         setAutoFollow={setAutoFollow}
+        markerSize={prefs.uiMessageRailSize}
         hidden={isInitialPositioning}
       />
     </div>

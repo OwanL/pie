@@ -256,6 +256,12 @@ export interface ChatPrefs {
    *  bottom of a turn). Tools/subagents add one header row on top. Default 2
    *  reproduces the bundled 2-row (reasoning) / 3-row (tool) preview. */
   activityTailLines: number;
+  /** Hit-area height (px) of the clickable user-message markers in the thin
+   *  rail to the left of the transcript scrollbar. Each marker is a jump-to
+   *  button; this controls the click-target size (the visible dot scales with
+   *  it). Default 18 is a comfortable click target; smaller values are more
+   *  compact, larger values are easier to click. Range 8–28. */
+  uiMessageRailSize: number;
 }
 
 /** Environment key used to expose pie provider toggles to in-process pi extensions. */
@@ -329,6 +335,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   extensionToggles: {},
   providerToggles: {},
   activityTailLines: 2,
+  uiMessageRailSize: 18,
 };
 
 export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {

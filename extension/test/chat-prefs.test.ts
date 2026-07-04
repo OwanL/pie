@@ -52,6 +52,7 @@ const prefs: ChatPrefs = {
   extensionToggles: {},
   providerToggles: {},
   activityTailLines: 2,
+  uiMessageRailSize: 18,
 };
 
 test('chat pref menu sections expose transcript, notifications, and diagnostics toggles', () => {
@@ -133,6 +134,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     extensionToggles: {},
     providerToggles: {},
     activityTailLines: 2,
+    uiMessageRailSize: 18,
   });
 });
 

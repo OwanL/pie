@@ -175,6 +175,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
+    uiMessageRailSize: [8, 28],
   };
   const stringKeys: Array<keyof ChatPrefs> = [
     'uiFontSans',

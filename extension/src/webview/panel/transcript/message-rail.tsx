@@ -8,17 +8,15 @@ import type { ChatMessage, UserContentPart } from '../../../shared/protocol';
 import { getRenderableUserParts } from './parts';
 import type { TranscriptRow } from './virtual-list-rows';
 
-/** Hit-area height per marker (px). Larger than the visible bar so a small
- *  visual dot stays easy to click. Sized for a comfortable click target — the
- *  visible dot is only a few px, but the full hit box is this tall. */
-const MARKER_HIT_HEIGHT_PX = 18;
+/** Default hit-area height per marker (px) when no pref is supplied. The
+ *  user-configurable `uiMessageRailSize` pref overrides this; the visible dot
+ *  scales with it via the `--message-rail-marker-size` CSS var. */
+const DEFAULT_MARKER_HIT_HEIGHT_PX = 18;
 /** Minimum vertical gap between consecutive marker centers (px). Set equal to
  *  the hit height so adjacent hit areas touch without overlapping — every
  *  visible marker is individually clickable. In very long sessions dense
  *  clusters collapse the later messages into the nearest kept marker (jumping
  *  there lands near the collapsed ones anyway). */
-const MIN_MARKER_GAP_PX = MARKER_HIT_HEIGHT_PX;
-/** Max characters of the hover-tooltip preview of the user message. */
 const PREVIEW_MAX_CHARS = 160;
 
 interface RailMarker {
@@ -57,12 +55,16 @@ interface BuildMarkersArgs {
   measurements: readonly VirtualItem[];
   railHeight: number;
   totalSize: number;
+  markerHitHeight: number;
 }
 
-function buildMarkers({ rows, measurements, railHeight, totalSize }: BuildMarkersArgs): RailMarker[] {
+function buildMarkers({ rows, measurements, railHeight, totalSize, markerHitHeight }: BuildMarkersArgs): RailMarker[] {
   if (railHeight <= 0 || totalSize <= 0) return [];
-  const half = MARKER_HIT_HEIGHT_PX / 2;
+  const half = markerHitHeight / 2;
   const maxCenter = Math.max(half, railHeight - half);
+  // Adjacent hit areas touch without overlapping; in dense clusters the later
+  // messages collapse into the nearest kept marker.
+  const minGap = markerHitHeight;
   const markers: RailMarker[] = [];
   let lastCenter = -Infinity;
   for (let i = 0; i < rows.length; i++) {
@@ -72,7 +74,7 @@ function buildMarkers({ rows, measurements, railHeight, totalSize }: BuildMarker
     if (!measured) continue;
     const ratio = totalSize > 0 ? measured.start / totalSize : 0;
     const center = Math.min(maxCenter, Math.max(half, ratio * railHeight));
-    if (center - lastCenter < MIN_MARKER_GAP_PX) continue;
+    if (center - lastCenter < minGap) continue;
     markers.push({
       rowIndex: i,
       messageId: row.message.id,
@@ -89,6 +91,10 @@ interface MessageRailProps {
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
   scrollRef: { current: HTMLDivElement | null };
   setAutoFollow: (v: boolean) => void;
+  /** Hit-area height (px) per marker — the user-configurable
+   *  `uiMessageRailSize` pref. The visible dot scales with it via the
+   *  `--message-rail-marker-size` CSS var. */
+  markerSize: number;
   /** Suppress rendering during the virtualizer's initial positioning phase
    *  (when `.transcript` is opacity:0) so markers don't flash in first. */
   hidden?: boolean;
@@ -107,14 +113,15 @@ interface MessageRailProps {
  * those already measured. The parent re-renders on every virtualizer change
  * (content growth, scroll, viewport resize) which keeps the rail live.
  */
-export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, hidden }: MessageRailProps) {
+export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, markerSize, hidden }: MessageRailProps) {
   const railHeight = scrollRef.current?.clientHeight ?? 0;
   const totalSize = virtualizer.getTotalSize();
   const measurements = virtualizer.measurementsCache;
+  const markerHitHeight = markerSize > 0 ? markerSize : DEFAULT_MARKER_HIT_HEIGHT_PX;
 
   const markers = useMemo(
-    () => buildMarkers({ rows, measurements, railHeight, totalSize }),
-    [rows, measurements, railHeight, totalSize],
+    () => buildMarkers({ rows, measurements, railHeight, totalSize, markerHitHeight }),
+    [rows, measurements, railHeight, totalSize, markerHitHeight],
   );
 
   const handleJump = useCallback((rowIndex: number) => {
@@ -150,7 +157,7 @@ export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, hidde
           class="transcript-message-rail-marker"
           title={marker.preview}
           aria-label={`Jump to message: ${marker.preview}`}
-          style={{ top: `${marker.top}px`, height: `${MARKER_HIT_HEIGHT_PX}px` }}
+          style={{ top: `${marker.top}px`, height: `${markerHitHeight}px` }}
           onClick={() => handleJump(marker.rowIndex)}
         />
       ))}

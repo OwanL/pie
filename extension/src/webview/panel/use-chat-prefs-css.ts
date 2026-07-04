@@ -33,6 +33,7 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     uiBorder,
     uiCornerRadius,
     uiDensity,
+    uiMessageRailSize,
   } = prefs;
 
   // Apply UI prefs as CSS custom properties on :root so every component picks
@@ -151,6 +152,12 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     root.setProperty('--panel-gap-md', `${gaps.md}px`);
     root.setProperty('--panel-gap-lg', `${gaps.lg}px`);
     root.setProperty('--panel-gap-xl', `${gaps.xl}px`);
+
+    // Message-rail marker size. The hit-area height is applied inline per marker
+    // (see MessageRail); this var drives the visible dot so it scales with the
+    // click target. The dot is clamped so it never exceeds the 10px rail width
+    // on hover.
+    root.setProperty('--message-rail-marker-size', `${uiMessageRailSize}px`);
   }, [
     uiBaseFontSize,
     uiComposerFontSize,
@@ -168,5 +175,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     uiBorder,
     uiCornerRadius,
     uiDensity,
+    uiMessageRailSize,
   ]);
 }

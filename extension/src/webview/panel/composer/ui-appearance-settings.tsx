@@ -418,6 +418,23 @@ export function UiFlyout({ prefs, onSetPrefs }: UiFlyoutProps) {
         />
         <div class="toolbar-settings-item-hint">Rows shown in the live activity preview at the bottom of a turn.</div>
       </div>
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Rail markers</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.uiMessageRailSize}px</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="8"
+          max="28"
+          step="1"
+          value={prefs.uiMessageRailSize}
+          onInput={(e) => onSetPrefs({ uiMessageRailSize: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Message rail marker size"
+        />
+        <div class="toolbar-settings-item-hint">Click target of the user-message jump buttons beside the scrollbar. Larger is easier to click.</div>
+      </div>
 
       <UiGroupLabel label="Typography" />
       <div class="toolbar-settings-ui-control">
