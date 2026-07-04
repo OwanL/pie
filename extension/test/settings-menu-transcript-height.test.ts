@@ -68,3 +68,54 @@ test('settings menu caps its height to the transcript vertical space', () => {
     'menu max-height should be the transcript space (menu bottom - pad), not 100vh',
   );
 });
+
+// Regression: the menu used to grow/shrink as the user clicked between
+// categories (each tab has a different content height), making its top edge
+// jump around. It must now keep a fixed height across tab switches; only the
+// inner body scrolls.
+test('settings menu keeps a fixed height when switching tabs', () => {
+  act(() => {
+    render(
+      h(ComposerSettingsMenu, {
+        prefs: DEFAULT_CHAT_PREFS,
+        pruningSettings: DEFAULT_PRUNING_SETTINGS,
+        pruningCatalog: { skills: [], tools: [] },
+        pruningResult: null,
+        proxySettings: DEFAULT_PROXY_SETTINGS,
+        availableExtensions: [],
+        availableModels: [],
+        onSetPrefs: () => undefined,
+        onSetPruningSettings: () => undefined,
+        onSetProxySettings: () => undefined,
+      }),
+      container,
+    );
+  });
+
+  act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
+
+  const menu = container.querySelector('.toolbar-settings-menu') as HTMLElement;
+  assert.ok(menu, 'settings menu should be open');
+
+  // Generous available space so the fixed height isn't clamped by the viewport.
+  menu.getBoundingClientRect = () => ({
+    bottom: 700, right: 600, top: 100, left: 0, width: 600, height: 600,
+    x: 0, y: 100, toJSON() {},
+  }) as DOMRect;
+
+  act(() => { window.dispatchEvent(new Event('resize')); });
+
+  const fixedHeight = menu.style.height;
+  assert.ok(fixedHeight, 'menu should have an explicit height set after sizing');
+  assert.equal(menu.style.maxHeight, '692px', 'max-height still tracks the viewport cap');
+
+  // Switching tabs must not change the height (the original resize complaint).
+  for (const tab of ['appearance', 'bash', 'proxy', 'chat']) {
+    act(() => { click(menu.querySelector(`.toolbar-settings-tab[data-tab="${tab}"]`)); });
+    assert.equal(
+      menu.style.height,
+      fixedHeight,
+      `height should not change when switching to the ${tab} tab`,
+    );
+  }
+});

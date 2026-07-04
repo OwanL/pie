@@ -76,6 +76,13 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   proxy: 'Proxy',
 };
 
+/** Fixed height for the settings menu, capped to the available vertical space
+ *  at runtime. A fixed height keeps the menu from growing/shrinking as the
+ *  user clicks between categories (which differ in content height) — the inner
+ *  .toolbar-settings-menu-body scrolls any overflow. Sized to be comfortably
+ *  larger than the old content-driven default. */
+const SETTINGS_MENU_HEIGHT = 600;
+
 /** Small line icons for the vertical category sidebar. 14px viewBox, stroked to
  *  match the rest of the composer UI. */
 function TabIcon({ id }: { id: SettingsTab }) {
@@ -434,12 +441,15 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     setQuery('');
   };
 
-  // Cap the menu's height to the transcript's vertical space (viewport top → the
-  // menu's bottom, which sits just above the toolbar) so a tall menu fills the
-  // available room and its inner body scrolls instead of running off the top of
-  // the screen. The menu is bottom-anchored, so its bottom edge is stable
-  // regardless of content height (no feedback loop). Re-runs when the tab or
-  // search mode changes, since content height changes with it.
+  // Pin the menu to a fixed height so it stops growing/shrinking as the user
+  // clicks between categories — each tab has a different amount of content, so
+  // a content-driven height made the menu's top edge jump around (the
+  // "resizes too much" problem). The height is generously sized by default and
+  // only shrinks when the viewport can't fit it; the inner
+  // .toolbar-settings-menu-body scrolls any overflow. The menu is
+  // bottom-anchored, so its bottom edge is stable regardless of height, and
+  // since the height no longer depends on content there's no need to
+  // re-measure on tab/search changes.
   useLayoutEffect(() => {
     const el = settingsMenuRef.current;
     if (!open || !el) return;
@@ -447,8 +457,9 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     const fit = () => {
       const rect = el.getBoundingClientRect();
       const avail = Math.max(180, rect.bottom - pad);
+      const h = Math.min(SETTINGS_MENU_HEIGHT, avail);
+      el.style.height = `${h}px`;
       el.style.maxHeight = `${avail}px`;
-      el.style.minHeight = `${Math.min(380, avail)}px`;
     };
     fit();
     const t = window.setTimeout(fit, 320);
@@ -457,7 +468,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       window.clearTimeout(t);
       window.removeEventListener('resize', fit);
     };
-  }, [open, effectiveTab, searching]);
+  }, [open]);
 
   useEffect(() => {
     if (!open) {

@@ -198,8 +198,15 @@
   z-index: 200;
   display: flex;
   flex-direction: column;
-  min-width: 560px;
+  /* Fixed width keeps the menu from drifting horizontally as the user clicks
+     between categories (whose content widths differ). 600px is comfortably
+     larger than the old 560px floor and fits the flexible interior layouts. */
+  width: 600px;
+  min-width: 600px;
   max-width: 660px;
+  /* Height is pinned at runtime by the settings-menu useLayoutEffect (a fixed
+     value capped to the available vertical space) so the menu doesn't grow or
+     shrink when switching tabs. This CSS max-height is just a safety cap. */
   min-height: 0;
   max-height: calc(100vh - 32px);
   padding: var(--panel-gap-md);
