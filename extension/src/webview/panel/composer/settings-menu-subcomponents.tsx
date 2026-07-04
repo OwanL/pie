@@ -8,6 +8,7 @@
 export type { OnSetPrefs } from './settings-menu-types';
 export { ChatPrefSections } from './settings-menu-chat-prefs';
 export { SoundSection } from './settings-menu-sound';
+export { BashSection } from './settings-menu-bash';
 export { SubagentFlyout } from './settings-menu-subagent';
 export { ExtensionsSection } from './settings-menu-extensions';
 export { ProvidersSection } from './settings-menu-providers';

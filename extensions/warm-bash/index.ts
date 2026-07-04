@@ -50,13 +50,20 @@ export default function (pi: ExtensionAPI) {
   const pools = new Map<string, WarmBashPool>();
   const tools = new Map<string, ReturnType<typeof createBashTool>>();
   const sessionCwd = new Map<string, { cwd: string }>();
+  /** Snapshot of the env-derived config used to build each session's tool, so a
+   *  live settings change (writes new env via runtimePrefs.set) is detected and
+   *  the pool/tool rebuilt on the next bash call — no restart needed. */
+  const toolConfig = new Map<string, { size: number; fastPath: boolean; shell: string }>();
 
-  function getPool(sessionId: string): WarmBashPool | null {
-    const size = poolSize();
+  function currentConfig() {
+    return { size: poolSize(), fastPath: fastPathEnabled(), shell: shellPath() };
+  }
+
+  function getPool(sessionId: string, size: number, shell: string): WarmBashPool | null {
     if (size <= 0) return null;
     let p = pools.get(sessionId);
     if (!p) {
-      p = new WarmBashPool({ size, env: process.env, shellPath: shellPath() });
+      p = new WarmBashPool({ size, env: process.env, shellPath: shell });
       pools.set(sessionId, p);
     }
     return p;
@@ -70,17 +77,28 @@ export default function (pi: ExtensionAPI) {
     }
     entry.cwd = cwd; // keep current in case a session ever changes cwd
 
+    const cfg = currentConfig();
+    const prev = toolConfig.get(sessionId);
+    // If a setting changed since we built this session's tool, tear it down and
+    // rebuild so the new pool size / fast-path / shell takes effect immediately.
+    if (prev && (prev.size !== cfg.size || prev.fastPath !== cfg.fastPath || prev.shell !== cfg.shell)) {
+      pools.get(sessionId)?.dispose();
+      pools.delete(sessionId);
+      tools.delete(sessionId);
+      toolConfig.delete(sessionId);
+    }
+
     let tool = tools.get(sessionId);
     if (!tool) {
-      const pool = getPool(sessionId);
+      const pool = getPool(sessionId, cfg.size, cfg.shell);
       // Fallback = today's exact path. Pass the same explicit shell so the
       // fallback and warm pool use one bash binary.
       const fallbackOps = createLocalBashOperations({
-        shellPath: process.env.PIE_SHELL?.trim() || undefined,
+        shellPath: cfg.shell || undefined,
       }) as BashOperations;
       const operations = createWarmBashOperations({
         pool,
-        fastPathEnabled: fastPathEnabled(),
+        fastPathEnabled: cfg.fastPath,
         fallbackOps,
       });
       // spawnHook overrides the baked cwd with the live per-session cwd on every call.
@@ -89,6 +107,7 @@ export default function (pi: ExtensionAPI) {
         spawnHook: ({ command, cwd: _cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({ command, cwd: entry!.cwd, env }),
       });
       tools.set(sessionId, tool);
+      toolConfig.set(sessionId, cfg);
     }
     return tool;
   }
@@ -109,6 +128,7 @@ export default function (pi: ExtensionAPI) {
     pools.delete(id);
     tools.delete(id);
     sessionCwd.delete(id);
+    toolConfig.delete(id);
   });
 
   // Best-effort cleanup if the process exits without per-session shutdown.

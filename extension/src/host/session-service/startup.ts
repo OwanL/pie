@@ -440,6 +440,9 @@ async function sendRuntimePrefsWithLogging(
       subagentMaxInflight: archState.settings.prefs.subagentMaxInflight,
       subagentMaxConcurrency: archState.settings.prefs.subagentMaxConcurrency,
       subagentMaxParallelTasks: archState.settings.prefs.subagentMaxParallelTasks,
+      bashWarmPoolSize: archState.settings.prefs.bashWarmPoolSize,
+      bashFastPath: archState.settings.prefs.bashFastPath,
+      bashShellPath: archState.settings.prefs.bashShellPath,
       subagentBuckets: archState.settings.prefs.subagentBuckets,
       subagentNestedAllowedBuckets: archState.settings.prefs.subagentNestedAllowedBuckets,
     });

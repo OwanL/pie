@@ -120,6 +120,15 @@ async function handleRuntimePrefsSet(
   if (params.subagentMaxParallelTasks !== undefined) {
     process.env['PIE_SUBAGENT_MAX_PARALLEL_TASKS'] = String(params.subagentMaxParallelTasks);
   }
+  if (params.bashWarmPoolSize !== undefined) {
+    process.env['PIE_BASH_WARM_POOL'] = String(params.bashWarmPoolSize);
+  }
+  if (params.bashFastPath !== undefined) {
+    process.env['PIE_BASH_FAST_PATH'] = params.bashFastPath ? '1' : '0';
+  }
+  if (params.bashShellPath !== undefined) {
+    process.env['PIE_SHELL'] = params.bashShellPath;
+  }
   if (params.subagentBuckets !== undefined) {
     process.env[SUBAGENT_BUCKETS_ENV] = JSON.stringify(params.subagentBuckets);
   }

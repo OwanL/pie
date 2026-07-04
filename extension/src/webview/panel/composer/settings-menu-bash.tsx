@@ -1,0 +1,80 @@
+/** @jsxRuntime automatic */
+/** @jsxImportSource preact */
+
+import type { ChatPrefs } from '../../../shared/protocol';
+import type { OnSetPrefs } from './settings-menu-types';
+
+/** Settings section for the warm-bash bash-tool accelerator.
+ *
+ *  Mirrors `bashWarmPoolSize` / `bashFastPath` / `bashShellPath` prefs →
+ *  PIE_BASH_WARM_POOL / PIE_BASH_FAST_PATH / PIE_SHELL env (see
+ *  handleRuntimePrefsSet). Changes take effect on the next bash call — the
+ *  warm-bash extension rebuilds its per-session pool live when the config
+ *  snapshot changes, so no restart is needed. */
+export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
+  const fastPathChecked = prefs.bashFastPath;
+  return (
+    <div key="bash" class="toolbar-settings-section">
+      <div class="toolbar-settings-section-label">Bash</div>
+      <div class="toolbar-settings-list">
+        {/* Warm pool size */}
+        <div class="toolbar-settings-ui-control">
+          <div class="toolbar-settings-ui-control-head">
+            <span class="toolbar-settings-ui-control-label">Warm pool size</span>
+            <span class="toolbar-settings-ui-control-value">
+              {prefs.bashWarmPoolSize === 0 ? 'Off' : prefs.bashWarmPoolSize}
+            </span>
+          </div>
+          <input
+            type="range"
+            class="toolbar-settings-slider toolbar-settings-ui-slider"
+            min="0"
+            max="8"
+            step="1"
+            value={prefs.bashWarmPoolSize}
+            onInput={(e) => onSetPrefs({ bashWarmPoolSize: Number((e.target as HTMLInputElement).value) })}
+            aria-label="Warm bash pool size"
+          />
+          <div class="toolbar-settings-item-hint">
+            Pre-warmed bash processes that hide shell-spawn latency. 0 = today's fresh-spawn behaviour.
+          </div>
+        </div>
+
+        {/* Fast path toggle */}
+        <button
+          class={`toolbar-settings-item${fastPathChecked ? ' checked' : ''}`}
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked={fastPathChecked}
+          onClick={() => onSetPrefs({ bashFastPath: !prefs.bashFastPath })}
+        >
+          <span class="toolbar-settings-item-check" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={fastPathChecked ? '' : 'opacity:0'}>
+              <polyline points="2.5,6.5 5,9 10.5,3.5" />
+            </svg>
+          </span>
+          <span class="toolbar-settings-item-label">Fast path (no shell for simple commands)</span>
+        </button>
+
+        {/* Shell path */}
+        <div class="toolbar-settings-ui-control">
+          <div class="toolbar-settings-ui-control-head">
+            <span class="toolbar-settings-ui-control-label">Shell path</span>
+          </div>
+          <input
+            type="text"
+            class="toolbar-settings-select"
+            placeholder="auto-detect (Git Bash / bash)"
+            value={prefs.bashShellPath}
+            onInput={(e) => onSetPrefs({ bashShellPath: (e.target as HTMLInputElement).value })}
+            aria-label="Explicit bash shell path"
+            spellcheck={false}
+          />
+          <div class="toolbar-settings-item-hint">
+            Leave blank to auto-detect. Used by both the warm pool and the fallback.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

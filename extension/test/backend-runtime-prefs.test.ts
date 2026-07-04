@@ -48,7 +48,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -73,7 +73,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 
@@ -256,4 +256,44 @@ test('runtimePrefs.set leaves the nested-allowlist env var untouched when omitte
   });
 
   assert.equal(process.env[NESTED_ALLOWED_BUCKETS_ENV], 'pre-existing');
+});
+
+test('runtimePrefs.set writes the warm-bash env vars when provided', async (t) => {
+  const prevPool = process.env['PIE_BASH_WARM_POOL'];
+  const prevFast = process.env['PIE_BASH_FAST_PATH'];
+  const prevShell = process.env['PIE_SHELL'];
+  t.after(() => {
+    for (const [k, v] of [['PIE_BASH_WARM_POOL', prevPool], ['PIE_BASH_FAST_PATH', prevFast], ['PIE_SHELL', prevShell]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-bash',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, bashWarmPoolSize: 4, bashFastPath: false, bashShellPath: '/bin/bash' },
+  }) as { bashWarmPoolSize?: number; bashFastPath?: boolean; bashShellPath?: string };
+
+  assert.equal(result.bashWarmPoolSize, 4);
+  assert.equal(result.bashFastPath, false);
+  assert.equal(result.bashShellPath, '/bin/bash');
+  assert.equal(process.env['PIE_BASH_WARM_POOL'], '4');
+  assert.equal(process.env['PIE_BASH_FAST_PATH'], '0');
+  assert.equal(process.env['PIE_SHELL'], '/bin/bash');
+});
+
+test('runtimePrefs.set leaves the warm-bash env vars untouched when omitted', async () => {
+  process.env['PIE_BASH_WARM_POOL'] = 'pre-existing';
+  process.env['PIE_BASH_FAST_PATH'] = 'pre-existing';
+  process.env['PIE_SHELL'] = 'pre-existing';
+  await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-bash-omitted',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {} },
+  });
+
+  assert.equal(process.env['PIE_BASH_WARM_POOL'], 'pre-existing');
+  assert.equal(process.env['PIE_BASH_FAST_PATH'], 'pre-existing');
+  assert.equal(process.env['PIE_SHELL'], 'pre-existing');
 });

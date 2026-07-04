@@ -154,6 +154,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'showPruningMessages',
     'subagentAlwaysParentModel',
     'runtimeAuditLog',
+    'bashFastPath',
   ];
   const toggleKeys: Array<keyof ChatPrefs> = [
     'extensionToggles',
@@ -166,6 +167,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     subagentMaxInflight: [1, 16],
     subagentMaxConcurrency: [1, 16],
     subagentMaxParallelTasks: [1, 16],
+    bashWarmPoolSize: [0, 8],
     uiBaseFontSize: [10, 24],
     uiComposerFontSize: [11, 28],
     expandedSectionFontSize: [8, 32],
@@ -183,6 +185,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'uiBackground',
     'uiForeground',
     'uiBorder',
+    'bashShellPath',
   ];
   const validDensities = new Set(['compact', 'comfortable', 'spacious']);
   for (const key of Object.keys(value)) {

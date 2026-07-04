@@ -249,6 +249,9 @@ export class SessionService implements vscode.Disposable {
       subagentMaxInflight: merged.subagentMaxInflight,
       subagentMaxConcurrency: merged.subagentMaxConcurrency,
       subagentMaxParallelTasks: merged.subagentMaxParallelTasks,
+      bashWarmPoolSize: merged.bashWarmPoolSize,
+      bashFastPath: merged.bashFastPath,
+      bashShellPath: merged.bashShellPath,
       subagentBuckets: merged.subagentBuckets,
       subagentNestedAllowedBuckets: merged.subagentNestedAllowedBuckets,
     }).catch((error) => {

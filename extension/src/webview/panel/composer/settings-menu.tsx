@@ -20,6 +20,7 @@ import {
   SubagentFlyout,
   UiFlyout,
   UiSubmenuTrigger,
+  BashSection,
 } from './settings-menu-subcomponents';
 
 export {
@@ -189,6 +190,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
             <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} />
             <UiSubmenuTrigger open={uiOpen} onToggle={toggleUi} />
             <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
+            <BashSection prefs={prefs} onSetPrefs={onSetPrefs} />
             {availableExtensions.length > 0 && (
               <ExtensionsSection
                 availableExtensions={availableExtensions}

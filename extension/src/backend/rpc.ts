@@ -342,6 +342,9 @@ export interface RuntimePrefsSetParams {
   subagentMaxInflight?: number;
   subagentMaxConcurrency?: number;
   subagentMaxParallelTasks?: number;
+  bashWarmPoolSize?: number;
+  bashFastPath?: boolean;
+  bashShellPath?: string;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
 }
@@ -467,7 +470,12 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
   const subagentMaxConcurrency = validateOptionalInt('runtimePrefs.set', 'subagentMaxConcurrency', (params as Record<string, unknown>)['subagentMaxConcurrency'], 1, 16);
   const subagentMaxParallelTasks = validateOptionalInt('runtimePrefs.set', 'subagentMaxParallelTasks', (params as Record<string, unknown>)['subagentMaxParallelTasks'], 1, 16);
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, subagentBuckets, subagentNestedAllowedBuckets };
+  const bashWarmPoolSize = validateOptionalInt('runtimePrefs.set', 'bashWarmPoolSize', (params as Record<string, unknown>)['bashWarmPoolSize'], 0, 8);
+  const rawBashFastPath = (params as Record<string, unknown>)['bashFastPath'];
+  const bashFastPath = rawBashFastPath === undefined ? undefined : typeof rawBashFastPath === 'boolean' ? rawBashFastPath : fail('runtimePrefs.set', 'bashFastPath must be a boolean when provided');
+  const rawBashShellPath = (params as Record<string, unknown>)['bashShellPath'];
+  const bashShellPath = rawBashShellPath === undefined ? undefined : typeof rawBashShellPath === 'string' ? rawBashShellPath : fail('runtimePrefs.set', 'bashShellPath must be a string when provided');
+  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, subagentBuckets, subagentNestedAllowedBuckets };
 }
 
 export function validateSettingsSet(params: unknown): SettingsSetParams {

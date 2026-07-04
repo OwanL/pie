@@ -164,6 +164,17 @@ export interface ChatPrefs {
   /** Max parallel tasks allowed in a single `subagent` call. Default 4.
    *  Mirrored via PIE_SUBAGENT_MAX_PARALLEL_TASKS. */
   subagentMaxParallelTasks: number;
+  /** Size of the per-session warm bash pool (pre-warmed bash processes that
+   *  hide shell-spawn latency). 0 disables warm bash (today's fresh-spawn
+   *  behaviour). Default 2. Mirrored via PIE_BASH_WARM_POOL. Applies on the
+   *  next bash call (the pool is rebuilt live when this changes). */
+  bashWarmPoolSize: number;
+  /** When true, simple commands (no shell metacharacters) are exec'd directly
+   *  without spawning bash at all. Default true. Mirrored via PIE_BASH_FAST_PATH. */
+  bashFastPath: boolean;
+  /** Explicit bash binary path for the warm pool + fallback (default: auto-detect
+   *  Git Bash / bash). Mirrored via PIE_SHELL. */
+  bashShellPath: string;
   /** User-configured model ids per bucket for subagent model selection. The
    *  subagent tool picks uniformly at random from the requested bucket; an empty
    *  bucket falls back to the parent's active model. Mirrored to the in-process
@@ -287,6 +298,9 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   subagentMaxInflight: 2,
   subagentMaxConcurrency: 2,
   subagentMaxParallelTasks: 4,
+  bashWarmPoolSize: 2,
+  bashFastPath: true,
+  bashShellPath: '',
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
   completionSoundVolume: 50,
