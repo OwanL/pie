@@ -61,16 +61,12 @@
         "ask_user",
         "bash",
         "edit",
-        "fetch_content",
         "find",
         "grep",
-        "get_search_content",
         "ls",
         "read",
         "request_tool",
-        "session_review",
         "subagent",
-        "web_search",
         "write",
         "code_search"
       ]
