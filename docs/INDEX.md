@@ -11,6 +11,7 @@ This folder mixes design contracts, implementation plans (some completed, some o
 ## Active plans (in progress)
 
 - [AGENT-HARNESS-IMPROVEMENTS.md](AGENT-HARNESS-IMPROVEMENTS.md) — agent/harness reliability plan (subagent fan-out, umans provider backpressure, prompt hygiene). **Mostly shipped**: LiteLLM proxy (item 1), in-process subagent semaphore + configurable throughput caps (item 2), `subagentMaxDepth = 0` disabled mode (item 3), tightened defaults (item 5), and the static `APPEND_SYSTEM.md` "prefer sequential" rewrite (item 4) are all done. **Only item 4's adaptive portion remains** — injecting the directive dynamically from a measured `providerBusy` signal (extend `token-rate-service.ts`) instead of a static prompt.
+- [OUTPUT-COMPACTION.md](OUTPUT-COMPACTION.md) — design for a token-saving `tool_result` middleware that semantically compacts tool output (strip ANSI, minify JSON, prune `ls -l` permission columns, collapse blank lines) before it enters context. **Not yet started.** Consolidates a prior-art survey (Claude Code / Codex / third-party ecosystem), the pi architecture decision (use the `tool_result` event — middleware-chained, post-exec/pre-model, cache-safe by construction), a verified durability trace (rewrites persist into history), and the recall contract that licenses lossy transforms. Next: ship the lossless tier as an MVP, then add recall + the lossy tier.
 
 ## Operational references
 
