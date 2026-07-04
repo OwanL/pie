@@ -76,6 +76,73 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   proxy: 'Proxy',
 };
 
+/** Small line icons for the vertical category sidebar. 14px viewBox, stroked to
+ *  match the rest of the composer UI. */
+function TabIcon({ id }: { id: SettingsTab }) {
+  const common = {
+    width: 14,
+    height: 14,
+    viewBox: '0 0 16 16',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': 1.5,
+    'stroke-linecap': 'round' as const,
+    'stroke-linejoin': 'round' as const,
+    'aria-hidden': true,
+  };
+  switch (id) {
+    case 'chat':
+      return (
+        <svg {...common}>
+          <path d="M2.5 4.5h11a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H6l-3.5 3V5.5a1 1 0 0 1 1-1z" />
+        </svg>
+      );
+    case 'appearance':
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="8" r="6" />
+          <circle cx="5.5" cy="6" r="1" fill="currentColor" stroke="none" />
+          <circle cx="10" cy="6" r="1" fill="currentColor" stroke="none" />
+          <circle cx="11" cy="9.5" r="1" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'bash':
+      return (
+        <svg {...common}>
+          <rect x="1.5" y="3" width="13" height="10" rx="2" />
+          <path d="M4 7l2 1.5L4 10" />
+          <path d="M8 10h4" />
+        </svg>
+      );
+    case 'extensions':
+      return (
+        <svg {...common}>
+          <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+          <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+          <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+          <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+        </svg>
+      );
+    case 'providers':
+      return (
+        <svg {...common}>
+          <rect x="2" y="3" width="12" height="4" rx="1" />
+          <rect x="2" y="9" width="12" height="4" rx="1" />
+          <circle cx="5" cy="5" r="0.6" fill="currentColor" stroke="none" />
+          <circle cx="5" cy="11" r="0.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'proxy':
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="8" r="6" />
+          <path d="M2 8h12" />
+          <path d="M8 2c2.2 2.2 2.2 9.8 0 12M8 2c-2.2 2.2-2.2 9.8 0 12" />
+        </svg>
+      );
+  }
+}
+
 /** Nested-bucket allowlist labels, mirrored from the subagent section so the
  *  search index can surface those toggles by their tier name. Highest tier
  *  first to match the in-tab order. */
@@ -379,7 +446,9 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     const pad = 8;
     const fit = () => {
       const rect = el.getBoundingClientRect();
-      el.style.maxHeight = `${Math.max(180, rect.bottom - pad)}px`;
+      const avail = Math.max(180, rect.bottom - pad);
+      el.style.maxHeight = `${avail}px`;
+      el.style.minHeight = `${Math.min(380, avail)}px`;
     };
     fit();
     const t = window.setTimeout(fit, 320);
@@ -445,8 +514,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     if (ids.length === 0) return;
     const idx = ids.indexOf(effectiveTab);
     let next: SettingsTab | null = null;
-    if (event.key === 'ArrowRight') next = ids[(idx + 1) % ids.length];
-    else if (event.key === 'ArrowLeft') next = ids[(idx - 1 + ids.length) % ids.length];
+    if (event.key === 'ArrowDown') next = ids[(idx + 1) % ids.length];
+    else if (event.key === 'ArrowUp') next = ids[(idx - 1 + ids.length) % ids.length];
     else if (event.key === 'Home') next = ids[0];
     else if (event.key === 'End') next = ids[ids.length - 1];
     if (!next) return;
@@ -479,6 +548,20 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
 
       {open && (
         <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Chat settings">
+          <div class="toolbar-settings-header">
+            <span class="toolbar-settings-title">Settings</span>
+            <button
+              type="button"
+              class="toolbar-settings-close"
+              aria-label="Close settings"
+              onClick={() => { setOpen(false); triggerRef.current?.focus(); }}
+            >
+              <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="3" y1="3" x2="10" y2="10" />
+                <line x1="10" y1="3" x2="3" y2="10" />
+              </svg>
+            </button>
+          </div>
           <div class="toolbar-settings-search">
             <svg class="toolbar-settings-search-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="7" cy="7" r="4.5" />
@@ -508,36 +591,40 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
             )}
           </div>
 
-          {!searching && (
-            <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-label="Settings categories" onKeyDown={onTablistKeyDown}>
-              {visibleTabs.map((tab) => {
-                const active = tab.id === effectiveTab;
-                return (
-                  <button
-                    key={tab.id}
-                    id={`toolbar-settings-tab-${tab.id}`}
-                    class={`toolbar-settings-tab${active ? ' active' : ''}`}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    aria-controls={tabpanelId}
-                    tabindex={active ? 0 : -1}
-                    data-tab={tab.id}
-                    onClick={() => setActiveTab(tab.id)}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <div class="toolbar-settings-layout">
+            {!searching && (
+              <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-orientation="vertical" aria-label="Settings categories" onKeyDown={onTablistKeyDown}>
+                {visibleTabs.map((tab) => {
+                  const active = tab.id === effectiveTab;
+                  return (
+                    <button
+                      key={tab.id}
+                      id={`toolbar-settings-tab-${tab.id}`}
+                      class={`toolbar-settings-tab${active ? ' active' : ''}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      aria-controls={tabpanelId}
+                      tabindex={active ? 0 : -1}
+                      data-tab={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                    >
+                      <span class="toolbar-settings-tab-icon" aria-hidden="true">
+                        <TabIcon id={tab.id} />
+                      </span>
+                      <span class="toolbar-settings-tab-label">{tab.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
-          <div
-            id={tabpanelId}
-            class="toolbar-settings-menu-body"
-            role="tabpanel"
-            aria-labelledby={`toolbar-settings-tab-${effectiveTab}`}
-          >
+            <div
+              id={tabpanelId}
+              class="toolbar-settings-menu-body"
+              role="tabpanel"
+              aria-labelledby={`toolbar-settings-tab-${effectiveTab}`}
+            >
             {searching ? (
               <div class="toolbar-settings-search-results">
                 {searchResults.jumps.length === 0 && searchResults.toggles.length === 0 && (
@@ -609,6 +696,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                 )}
               </>
             )}
+          </div>
           </div>
         </div>
       )}
