@@ -1,13 +1,14 @@
-# Tool-Result Output Compaction
+# Tool-Result Pruning
 
-> Design doc for a token-saving middleware that transforms tool *output* before it
+> Design doc for a token-saving middleware that prunes tool *output* before it
 > enters the model's context. Consolidates the brainstorm, prior-art survey, pi
 > architecture decision, and durability verification.
 >
-> **Not to be confused with** pi's existing *history compaction* (LLM-based
-> summarization of old messages on context threshold — see
-> `pi-coding-agent/docs/compaction.md`). That operates on the past; this operates
-> on the present, per tool result, deterministically.
+> One of three **context-lean layers** in this stack (see `AGENTS.md` § Context-lean
+> layers): **history compaction** (pi — LLM-summarize old messages; past),
+> **skill pruning** (pie `skill-pruner` — drop skills/tools from the catalog;
+> prepass), **tool-result pruning** (this — prune a tool result's bytes;
+> deterministic; per-result).
 
 ## 1. Problem
 
@@ -28,10 +29,10 @@ output that is often the most informative part, and it does nothing for the
 vast majority of outputs that are under the byte cap but still bloated
 (permissions columns, ANSI codes, pretty-printed JSON, blank-line runs).
 
-**Goal:** a deterministic middleware that *semantically* compacts tool output
+**Goal:** a deterministic middleware that *semantically* prunes tool output
 *before* it is stored to history — giving the agent what it actually wants,
-trimming what it never reads — and that falls through to byte-truncation only
-when output is genuinely huge.
+trimming what it never reads. It complements pi's existing byte-truncation,
+which is *upstream* of this layer (see §7.1).
 
 ## 2. Thesis
 
@@ -47,8 +48,8 @@ dissolves if transforms are split into three tiers:
 Almost everything good lives in tiers 1 and 2. Tier 3 is where you get burned.
 A corollary, validated by prior art: **the agent-friendliest format is often
 also the token-cheapest** (a tight list, a minified JSON array, a columnar
-encoding). Compaction is not just trimming — it is re-presenting tool output in
-the agent's native shape.
+encoding). It is not just trimming — it is re-presenting tool output in the
+agent's native shape.
 
 ## 3. Three principles
 
@@ -65,7 +66,7 @@ the agent's native shape.
    `git log --author=foo`, author matters. Shape-first, args-as-prior.
 
 3. **Leave a fidelity marker.** Every pruned result gets a one-line note
-   (`[ls -la: 23 entries, names only — raw id #42]`) so the agent knows what it
+   (`[ls -la: 23 entries, names only — raw: /tmp/…]`) so the agent knows what it
    is *not* seeing and can ask. Silent pruning causes "why don't I see the
    permissions?" round-trips. Codex issue #6544 (silent middle-chopping of MCP
    responses) is the cautionary tale.
@@ -135,9 +136,9 @@ cautionary tale — silent middle-chopping of MCP responses caused real breakage
 
 ### 4.6 Gaps → our opening
 
-1. **First-class recall (`expand <id>`).** Nobody has it as a clean tool. Codex's
-   temp-file-re-read is a side-effect hack. A consistent "what was removed +
-   how to get the raw back" contract is unstandardized.
+1. **First-class recall.** Nobody has it cleanly. Codex's temp-file-re-read is a
+   side-effect hack. We resolve it by stashing the pre-pruning text and having
+   the agent recover it via the existing `read` tool (no new tool) — see §7.3.
 2. **Args-as-signal + shape-based + recall, combined.** Most tools pick one or two.
 3. **A consistent fidelity-marker contract** across all transforms (Codex has
    it ad hoc for truncation only).
@@ -149,7 +150,7 @@ Pi exposes **all three archetypes**. The mapping:
 | Archetype | pi hook | Verdict |
 |-----------|---------|---------|
 | **(a) tool-result hook** | `tool_result` event | ✅ **Use this** |
-| **(b) API/model-payload proxy** | `before_provider_request` | ⚠️ Reserve for orthogonal wins (trim tool schemas, drop unused tools). *Not* output compaction. |
+| **(b) API/model-payload proxy** | `before_provider_request` | ⚠️ Reserve for orthogonal wins (trim tool schemas, drop unused tools). *Not* tool-result pruning. |
 | **(c) shell wrapper** | bash `spawnHook` (+ `user_bash`) | ⏭️ Subsumed by (a). Keep spawnHook for its real job: inject `--color=never` *preventively*. |
 
 ### Why `tool_result` is the right home
@@ -162,7 +163,7 @@ interface ToolResultEventBase {
   toolCallId: string;
   input: Record<string, unknown>;                 // ← tool-call ARGS (args-as-signal, free)
   content: (TextContent | ImageContent)[];        // ← what the model sees — MUTABLE
-  isError: boolean;                               // ← gate: never compact errors
+  isError: boolean;                               // ← gate: never prune errors
 }
 // per-tool subclasses: BashToolResultEvent { toolName: "bash"; details: BashToolDetails | undefined }
 //   ReadToolResultEvent, LsToolResultEvent, GrepToolResultEvent, ...
@@ -178,12 +179,15 @@ Each principle lands natively:
    `toolName` + `input` as prior) is the natural mode and is stronger than
    either alone.
 
-2. **`event.details` is typed per-tool and already carries recall substrate.**
+2. **`event.details` is typed per-tool and carries truncation metadata.**
    `BashToolDetails` includes `truncated` + `fullOutputPath` — pi *already*
-   saves the full raw output to a temp file when it byte-truncates. So recall
-   has a ready-made backing store. For outputs we semantically compact *before*
-   byte-truncation, the handler stashes the original to a temp file and records
-   an id in `details`. We don't invent the stash; we formalize it.
+   saves the full raw output to a temp file when it byte-truncates, and surfaces
+   that path to the agent in its own `[Full output: <path>]` marker. **Truncation
+   recovery is pi's concern, already handled** — the pruner does not re-own it.
+   Pruning's recall owns *only* what pruning itself removed: before a lossy rule
+   rewrites `content`, the handler stashes the (post-truncation, pre-pruning)
+   text it received to a temp file and records an id in `details`. See §7.1
+   (pruning is downstream of truncation) and §7.3 (separation of concerns).
 
 3. **`isError` → "errors pass unfiltered" is a one-line guard.**
 
@@ -193,7 +197,7 @@ Each principle lands natively:
    handlers or one handler with an internal pipeline
    (`dist/core/extensions/runner.js:592`, `emitToolResult`).
 
-5. **Cache-safety (structural).** Compaction at this layer rewrites only *new*
+5. **Cache-safety (structural).** Pruning at this layer rewrites only *new*
    tool results. It never touches history or the provider payload → the
    prompt-cache prefix stays stable. The `llmtrim` risk does not apply.
 
@@ -203,7 +207,7 @@ Rewriting `content` in a `tool_result` handler durably changes the stored
 `toolResult` message — it is not a display-time transform. Evidence chain:
 
 ```
-tool_result handler returns { content, details, isError }   ← our compaction
+tool_result handler returns { content, details, isError }   ← our pruning
       │  dist/core/extensions/runner.js:610-640  (emitToolResult: chains, applies patches)
       ▼
 AgentSession.afterToolCall returns the patched result        ← dist/core/agent-session.js:208-229
@@ -231,15 +235,17 @@ on `ToolResultEventResult`, so we cannot accidentally break tool-flow terminatio
    appended *after* the cached prefix. KV cache stays valid. ✓
 
 2. **Lossy ⇒ recall is *necessary*, not nice-to-have.** Rewriting is one-way and
-   persistent; once we compact an output the raw is gone from history — the
-   *only* recovery path is our stashed copy. Hard rule: **a lossy transform may
-   not ship without a recall stash.** Lossless transforms need none. This is the
-   dividing line for the rule pipeline.
+   persistent; once we prune an output the pre-pruning text is gone from
+   history — the *only* recovery path for pruning's own loss is our stashed
+   copy (single-raw: the post-truncation, pre-pruning text pruning received).
+   Truncation's loss is separately recoverable via pi's existing `fullOutputPath`
+   marker. Hard rule: **a lossy transform may not ship without a recall stash.**
+   Lossless transforms need none. This is the dividing line for the rule pipeline.
 
 3. **Rules must be defensively try/caught.** If `afterToolCall` throws,
    `finalizeExecutedToolCall` replaces the *entire* result with an error tool
-   result (`agent-loop.js:464-467`; CHANGELOG #3084). A buggy compaction rule
-   would thus turn a perfectly good `ls` into an error the agent sees. Every rule
+   result (`agent-loop.js:464-467`; CHANGELOG #3084). A buggy pruning rule would
+   thus turn a perfectly good `ls` into an error the agent sees. Every rule
    catches its own failures and returns the original content unchanged — never
    propagate. The `cli-denoiser` "zero false positives" discipline, enforced by
    structure.
@@ -249,31 +255,32 @@ on `ToolResultEventResult`, so we cannot accidentally break tool-flow terminatio
 ### 7.1 Layering
 
 ```
-tool executes
-   │
+tool execute()
+   │  byte-truncation happens HERE (inside execute, via OutputAccumulator):
+   │  bash.js:188/236/255  →  returns truncated content + details.fullOutputPath
    ▼
-┌─────────────────────────────────────────────┐
-│ tool_result handler: compaction pipeline    │
-│   lossless rules (always on, no recall)      │
-│   lossy rules   (only if recall stashed)     │
-│   → rewritten content + details.compaction   │
-└─────────────────────────────────────────────┘
-   │
-   ▼
-pi's existing byte-truncation (fallback for huge output; full file already on disk)
-   │
+tool_result handler: pruning pipeline   (sees POST-truncation content)
+   │  top guard: skip entirely if toolName === "read" (agent-directed — §7.4)
+   │  lossless rules (always on, no recall)
+   │  lossy rules   (only if recall stashed)
+   │  → rewritten content + details.pruning
    ▼
 stored toolResult message → history → re-sent every turn
 ```
 
-Semantic compaction runs *first*; byte-truncation is the fallback of last resort.
-The two cooperate: good per-output compaction ⇒ history compaction triggers
+**Byte-truncation is upstream of pruning, not a fallback for it.** The two are
+sequential and both always apply (for tools that self-truncate): truncation runs
+inside the tool's `execute()` before `tool_result` fires, so pruning only ever
+sees post-truncation content. There is no extension seam that lets pruning run
+*before* tool-internal truncation without replacing the tool outright
+(archetype c — rejected). Good per-result pruning ⇒ history compaction triggers
 later ⇒ less noise summarized.
 
 ### 7.2 Rule pipeline
 
 A rule is `(event) => { content, details?, marker? } | null`, self-caught, with
-a declared tier:
+a declared tier. The pipeline short-circuits on `read` results
+(`event.toolName === "read"` → no rules run; see §7.4):
 
 - **Lossless rules** run unconditionally, in fixed order:
   1. ANSI escape stripping.
@@ -294,15 +301,25 @@ minify before column-prune so column detection sees normalized text).
 
 ### 7.3 Recall contract (the differentiator)
 
-- **Stash:** before a lossy rule rewrites `content`, the handler writes the
-  original text to a temp file (reuse pi's temp-file convention) and records an
-  id + path in `event.details.compaction = { id, rawPath, rules: [...] }`.
-- **Discovery:** every lossy result prepends a fidelity marker text block —
-  `[compacted: <rules>; raw id #42, call expand("42")]` — so the agent sees
-  both *what* was removed and *how* to recover it.
-- **Recall tool:** register an `expand(id)` tool that reads the stashed file and
-  returns the raw. (For bash outputs already byte-truncated by pi,
-  `details.fullOutputPath` is the existing equivalent — unify on one id scheme.)
+**Separation of concerns (decided — grill Q1):** pruning's recall owns *only*
+what pruning removed. Truncation's loss is owned by pi's existing `fullOutputPath`
+marker (the agent reads that path with the `read` tool) — pruning does not
+restate or re-own it.
+
+- **Stash (single-raw):** before a lossy rule rewrites `content`, the handler
+  writes the **post-truncation, pre-pruning** text it received to a temp file
+  (reuse pi's temp-file convention) and records an id + path in
+  `event.details.pruning = { id, rawPath, rules: [...] }`. The stash includes
+  pi's own `[Full output: …]` marker verbatim — it is the true pre-pruning state.
+- **Discovery:** every lossy result prepends a fidelity marker scoped to
+  pruning's own changes — `[pruned: <rules>; raw: <rawPath>]` — so the agent
+  sees *what pruning removed* and *where* to recover it. It does **not** restate
+  `fullOutputPath` (pi already shows that).
+- **Invocation (decided — grill Q2):** reuse the existing `read` tool on
+  `<rawPath>` (same idiom as pi's own truncation marker). No new tool. Recall is
+  faithful because **the whole pipeline skips `read`** (§7.4) — the stash
+  read-back returns the pre-pruning text unchanged, semantically identical to
+  what the agent would have seen without pruning.
 - **Lifecycle:** stashes are session-scoped temp files; cleaned on session end.
   Bounded LRU if memory is a concern.
 - **Hard gate:** a lossy rule that cannot stash (e.g. disk write fails) must
@@ -314,6 +331,16 @@ minify before column-prune so column detection sees normalized text).
 - Every rule is wrapped in try/catch; on failure, return original content.
 - Validate-then-transform for any structural parse (JSON, tables); fall back to
   raw on parse failure. "Uncertain → keep."
+- **The whole pipeline skips `read` results** (`event.toolName === "read"` →
+  return null before any rule runs). `read` is agent-directed — the model asked
+  for exactly that file's content, and it may `edit` it by exact `oldText` match;
+  any byte-altering transform (minify, whitespace-trim — even lossless ones)
+  would desync the model's view from the file's actual bytes and break edits
+  unrecoverably (reads aren't stashed). The high-value read transform (minify
+  JSON configs) is exactly the broken one; safe transforms (ANSI/whitespace) save
+  little on already-lean code/configs. Reads are already byte-truncated by the
+  read tool. Cost: forgo pruning savings on reads — acceptable for high-signal,
+  agent-chosen content.
 - Lossy ⇒ recall stashed, or the rule is skipped.
 
 ## 8. Transform catalog
@@ -331,19 +358,24 @@ minify before column-prune so column detection sees normalized text).
 
 ## 9. Open decisions / next steps
 
-1. **Recall contract details** — id scheme, `expand` tool surface, lifecycle/LRU,
-   unifying with pi's existing `details.fullOutputPath`.
+1. **Recall invocation — RESOLVED (grill Q2):** reuse the existing `read` tool
+   on the stashed `<rawPath>` (no new tool); the whole pipeline skips `read`
+   results (grill Q4) so recall is faithful. Separation (grill Q1): pruning's
+   recall owns only pruning's loss; pi's `fullOutputPath` marker owns
+   truncation's loss.
 2. **MVP scope** — ship the lossless tier first (safe, no recall, immediate
    savings, proves the plumbing end-to-end), then add recall + the lossy tier.
 3. **Measurement** — instrument before/after token counts per rule, or we fly
    blind on what's worth shipping.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
-5. **Config** — tier-1 always on; tier-2 off but profile-selectable (a
-   security-focused profile keeps permissions).
+5. **Config** — `toolResultPruning: { enabled, profile }` block, sibling to
+   `skill-pruner`'s `disablePruning` (do not overload that flag). Tier-1 always
+   on; tier-2 off but profile-selectable (a security-focused profile keeps
+   permissions).
 6. **Orthogonal win (separate effort):** `before_provider_request` to trim tool
-   descriptions / drop unused tools (the llmtrim/yoke `PassDropUnusedTools`
-   idea). Do not conflate with output compaction.
+   descriptions / drop unused tools (the llmtrim/yoke `PassDropUnusedSkills`
+   idea — i.e. extend `skill-pruner`). Do not conflate with tool-result pruning.
 
 ## 10. References
 

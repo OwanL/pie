@@ -17,3 +17,19 @@ npm run test       # unit tests
 npm run typecheck  # type-check only
 npm run package    # produce .vsix
 ```
+
+## Context-lean layers
+
+Three distinct mechanisms keep the model's context lean. Don't conflate them — they operate on different objects at different times.
+
+**History compaction**:
+pi's LLM summarization of old messages when context exceeds a threshold (`/compact`; `compaction{enabled,reserveTokens,keepRecentTokens}`). Operates on the past, across turns.
+_Avoid_: compaction (unqualified), summarization
+
+**Skill pruning**:
+The `skill-pruner` extension's LLM prepass that drops skills/tools from the agent's available catalog before a turn (`pruning-result` customType; `disablePruning` flag). Operates on the tool catalog.
+_Avoid_: pruning (unqualified)
+
+**Tool-result pruning**:
+A deterministic `tool_result` middleware that rewrites a single tool's output bytes before they enter context (strip ANSI, minify JSON, drop permission columns). Operates on the present, per result. See `docs/TOOL-RESULT-PRUNING.md`.
+_Avoid_: output compaction, result compaction
