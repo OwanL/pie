@@ -151,6 +151,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck:skill-pruner": "tsc --noEmit -p ../extensions/skill-pruner/tsconfig.json",
     "typecheck:web-access-compat": "tsc --noEmit -p ../extensions/web-access-compat/tsconfig.json",
+    "typecheck:warm-bash": "tsc --noEmit -p ../extensions/warm-bash/tsconfig.json",
     "test": "tsx --test ./test/**/*.test.ts",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
     "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"

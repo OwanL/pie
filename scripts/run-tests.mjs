@@ -69,6 +69,17 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 100, branches: 100 },
   },
   {
+    id: 'warm-bash',
+    cwd: repoRoot,
+    testGlobs: ['extensions/warm-bash/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/warm-bash/**/*.ts'],
+    // warm-pool tests spawn real bash and are environment-dependent; the
+    // classifier (pure logic) carries the coverage backbone. Remaining branch
+    // gaps are defensive empty catch blocks + the untestable cross-platform
+    // (win32 vs unix) paths in kill.ts / warm-pool.ts.
+    thresholds: { lines: 90, branches: 77 },
+  },
+  {
     id: 'web-access-compat',
     cwd: repoRoot,
     testGlobs: ['extensions/web-access-compat/test/**/*.test.ts'],
