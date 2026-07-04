@@ -127,10 +127,50 @@ test('computeAggregateStats: today bucketing excludes other-day runs', () => {
   assert.equal(stats.weekCostByProvider[0]!.provider, 'openai');
   assert.equal(stats.todayRunCount, 1);
   assert.equal(stats.weekRunCount, 2);
+  assert.equal(stats.todayInputTokens, 1_000_000);
+  assert.equal(stats.todayOutputTokens, 0);
+  assert.equal(stats.todayToolCallCount, 0);
+  assert.equal(stats.todayTouchedFileCount, 0);
   // daily series includes both days (within 14-day window)
   assert.equal(stats.dailyCost.length, 2);
   assert.equal(stats.dailyCost[0]!.date, '2026-07-03');
   assert.equal(stats.dailyCost[1]!.date, '2026-07-04');
+});
+
+test('computeAggregateStats: today activity (tokens/tool-calls/files) sums today runs', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
+  const today = '2026-07-04T10:00:00.000Z';
+  const runs = [
+    makeRun({ runId: 'r1', modelId: 'm', inputTokens: 100, outputTokens: 200, startedAt: today, updatedAt: today, finalizedAt: today,
+      toolUsage: { totalCount: 5, failureCount: 0, executionFailureCount: 0, verificationProjectFailureCount: 0, probeFailureCount: 0, resultIssueCount: 0, countsByName: {}, failureCountsByName: {}, failureCountsByKind: {}, failureCountsByNameAndKind: {}, failureSamples: [], resultIssueCountsByName: {}, resultIssueCountsByKind: {}, resultIssueCountsByNameAndKind: {}, resultIssueSamples: [], totalDurationMs: 0, timedCallCount: 0, durationMsByName: {}, subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [], subagentScoredTaskCount: 0, subagentTaskScores: { scored: 0, total: 0, byAgent: {}, averageScore: null, scoreHistogram: {} } } as any,
+      fileMutation: { writeCount: 0, editCount: 0, deleteCount: 0, renameCount: 0, touchedFileCount: 3, lineAdditions: 0, lineDeletions: 0, lineModifications: 0, editCountsByFile: {}, readCountsByFile: {} } as any,
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  assert.equal(stats.todayToolCallCount, 5);
+  assert.equal(stats.todayTouchedFileCount, 3);
+  assert.equal(stats.todayInputTokens, 100);
+  assert.equal(stats.todayOutputTokens, 200);
+});
+
+test('computeAggregateStats: last run is the most-recently ended run', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 2, 6)]]]);
+  const earlier = '2026-07-03T10:00:00.000Z';
+  const later = '2026-07-04T10:00:00.000Z';
+  const runs = [
+    makeRun({ runId: 'r1', modelId: 'm', inputTokens: 500_000, outputTokens: 100_000, startedAt: earlier, updatedAt: earlier, finalizedAt: earlier, busyDurationMs: 30_000, outcome: { resolution: 'resolved', satisfaction: 4 } as any }),
+    makeRun({ runId: 'r2', modelId: 'm', inputTokens: 1_000_000, outputTokens: 500_000, startedAt: later, updatedAt: later, finalizedAt: later, busyDurationMs: 90_000 }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  assert.ok(stats.lastRun);
+  assert.equal(stats.lastRun!.endedAt, later); // r2 ended later
+  assert.equal(stats.lastRun!.durationMs, 90_000);
+  assert.equal(stats.lastRun!.provider, 'openai');
+  // r2 cost: 1M*2/1M + 500k*6/1M = 2 + 3 = 5
+  assert.equal(stats.lastRun!.cost, 5);
+  assert.equal(stats.lastRun!.inputTokens, 1_000_000);
+  assert.equal(stats.lastRun!.outputTokens, 500_000);
+  assert.equal(stats.lastRun!.outcome, null); // r2 unscored
 });
 
 test('computeAggregateStats: throughput is generation-time-weighted', () => {

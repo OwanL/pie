@@ -277,6 +277,11 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
     || a.totalCacheWriteTokens !== b.totalCacheWriteTokens
     || a.runCount !== b.runCount
     || a.sessionCount !== b.sessionCount
+    || a.todayRunCount !== b.todayRunCount
+    || a.todayInputTokens !== b.todayInputTokens
+    || a.todayOutputTokens !== b.todayOutputTokens
+    || a.todayToolCallCount !== b.todayToolCallCount
+    || a.todayTouchedFileCount !== b.todayTouchedFileCount
     || a.ready !== b.ready
   ) {
     return false;
@@ -293,6 +298,20 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
     const x = a.todayCostByProvider[i]!;
     const y = b.todayCostByProvider[i]!;
     if (x.provider !== y.provider || x.cost !== y.cost) return false;
+  }
+  // Last run: compare by identity + cost + endedAt (a different most-recent run
+  // is a perceptible change worth a post).
+  const la = a.lastRun;
+  const lb = b.lastRun;
+  if ((la === null) !== (lb === null)) return false;
+  if (la && lb) {
+    if (la.cost !== lb.cost
+      || la.durationMs !== lb.durationMs
+      || la.modelId !== lb.modelId
+      || la.endedAt !== lb.endedAt
+      || la.outcome?.satisfaction !== lb.outcome?.satisfaction) {
+      return false;
+    }
   }
   return true;
 }

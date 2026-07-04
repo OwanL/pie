@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 
-import type { AggregateStats } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 
@@ -30,11 +30,14 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
     ready,
     todayCost,
     weekCost,
+    todayInputTokens,
+    todayOutputTokens,
     todayTokensPerSecond,
     tokensPerSecond,
     liveTokensPerSecond,
     runningSessionCount,
     openTabCount,
+    lastRun,
   } = stats;
 
   // Throughput headline: live when running, else today's mean, else all-time
@@ -64,6 +67,11 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
         wk <span class="aggregate-strip-cost">{formatCostAdaptive(weekCost)}</span>
       </span>
       <Sep />
+      <span class="aggregate-strip-seg aggregate-strip-tokens" title={todayTooltip(stats)}>
+        <span class="aggregate-strip-tok-down">↓{formatCompactTokens(todayInputTokens)}</span>
+        {' '}<span class="aggregate-strip-tok-up">↑{formatCompactTokens(todayOutputTokens)}</span>
+      </span>
+      <Sep />
       <span class="aggregate-strip-seg" title={throughputTooltip(stats, rateSource)}>
         {rateSource === 'live' && <span class="aggregate-strip-live-tag">live</span>}
         {rateSource === 'none'
@@ -71,6 +79,15 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
           : <span class="aggregate-strip-rate">{formatRate(headlineRate)}</span>}
         <span class="aggregate-strip-unit"> tok/s</span>
       </span>
+      {lastRun && (
+        <>
+          <Sep />
+          <span class="aggregate-strip-seg" title={lastRunTooltip(lastRun)}>
+            last <span class="aggregate-strip-cost">{formatCostAdaptive(lastRun.cost)}</span>
+            <span class="aggregate-strip-dur">{formatDuration(lastRun.durationMs)}</span>
+          </span>
+        </>
+      )}
       <Sep />
       <span class="aggregate-strip-seg aggregate-strip-counts" title={sessionsTooltip(stats)}>
         {openTabCount} tab{openTabCount === 1 ? '' : 's'}
@@ -109,8 +126,9 @@ function statsSignature(s: AggregateStats): string {
   return [
     s.ready,
     s.todayCost, s.weekCost,
+    s.todayInputTokens, s.todayOutputTokens,
     s.todayTokensPerSecond, s.tokensPerSecond, s.liveTokensPerSecond,
-    s.todayRunCount, s.weekRunCount,
+    s.todayRunCount, s.todayToolCallCount, s.todayTouchedFileCount, s.weekRunCount,
     s.runningSessionCount, s.openTabCount,
     s.totalCost, s.totalInputTokens, s.totalOutputTokens,
     s.totalCacheReadTokens, s.totalCacheWriteTokens,
@@ -121,6 +139,7 @@ function statsSignature(s: AggregateStats): string {
     s.dailyCost.map((d) => `${d.date}:${d.totalCost}`).join(','),
     s.tokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.todayTokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
+    s.lastRun ? `${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.endedAt}:${s.lastRun.modelId}` : '',
   ].join('|');
 }
 
@@ -142,6 +161,21 @@ function formatRate(n: number): string {
   return n.toFixed(1);
 }
 
+/** Compact duration: `45s` / `1.2m` / `2.3h` (0 → `0s`). */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0s';
+  const sec = ms / 1000;
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const min = sec / 60;
+  if (min < 60) return `${trimDec(min)}m`;
+  const hr = min / 60;
+  return `${trimDec(hr)}h`;
+}
+
+function trimDec(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
 function pad(s: string, width: number): string {
   return s.length >= width ? s + ' ' : s + ' '.repeat(width - s.length);
 }
@@ -157,8 +191,14 @@ function ariaLabel(s: AggregateStats): string {
 function todayTooltip(s: AggregateStats): string {
   if (!s.ready) return 'Computing usage stats…';
   const lines: string[] = [`Today: ${formatCostAdaptive(s.todayCost)}  ·  ${s.todayRunCount} run${s.todayRunCount === 1 ? '' : 's'}`];
+  if (s.todayInputTokens > 0 || s.todayOutputTokens > 0) {
+    lines.push(`Tokens: ↓${formatCompactTokens(s.todayInputTokens)} in  ↑${formatCompactTokens(s.todayOutputTokens)} out`);
+  }
+  if (s.todayToolCallCount > 0 || s.todayTouchedFileCount > 0) {
+    lines.push(`Activity: ${s.todayToolCallCount} tool call${s.todayToolCallCount === 1 ? '' : 's'} · ${s.todayTouchedFileCount} file${s.todayTouchedFileCount === 1 ? '' : 's'} touched`);
+  }
   if (s.todayCostByProvider.length > 0) {
-    lines.push('By provider:');
+    lines.push('Cost by provider:');
     for (const e of s.todayCostByProvider) {
       lines.push(`  ${pad(e.provider, 14)}${formatCostAdaptive(e.cost)}  (↑${formatCompactTokens(e.outputTokens)} ↓${formatCompactTokens(e.inputTokens)})`);
     }
@@ -212,6 +252,23 @@ function throughputTooltip(s: AggregateStats, source: 'live' | 'today' | 'all-ti
   if (lines.length === 0) {
     lines.push(source === 'none' ? 'No throughput recorded yet.' : 'Measuring…');
   }
+  return lines.join('\n');
+}
+
+function lastRunTooltip(r: AggregateLastRun): string {
+  const lines: string[] = [`Last run: ${formatCostAdaptive(r.cost)}  ·  ${formatDuration(r.durationMs)}`];
+  if (r.modelId) {
+    lines.push(`Model: ${r.modelId}  (${r.provider})`);
+  } else {
+    lines.push(`Provider: ${r.provider}`);
+  }
+  lines.push(`Tokens: ↓${formatCompactTokens(r.inputTokens)} in  ↑${formatCompactTokens(r.outputTokens)} out`);
+  if (r.outcome) {
+    lines.push(`Outcome: ${r.outcome.resolution.replace('_', ' ')}  ·  satisfaction ${r.outcome.satisfaction}`);
+  } else {
+    lines.push('Outcome: unscored');
+  }
+  lines.push(`${r.startedAt} → ${r.endedAt}`);
   return lines.join('\n');
 }
 

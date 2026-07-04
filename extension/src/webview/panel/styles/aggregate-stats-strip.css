@@ -57,6 +57,24 @@
   color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
 }
 
+.aggregate-strip-tokens {
+  color: color-mix(in srgb, var(--panel-foreground) 60%, var(--panel-muted));
+  font-variant-numeric: tabular-nums;
+}
+
+.aggregate-strip-tok-down {
+  color: color-mix(in srgb, var(--panel-foreground) 55%, var(--panel-muted));
+}
+
+.aggregate-strip-tok-up {
+  color: color-mix(in srgb, var(--panel-foreground) 55%, var(--panel-muted));
+}
+
+.aggregate-strip-dur {
+  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
 .aggregate-strip-live-tag {
   color: var(--panel-success);
   font-weight: 700;

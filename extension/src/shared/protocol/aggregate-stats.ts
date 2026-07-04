@@ -27,6 +27,8 @@
  * `modelId` is unknown or unpriced attribute to provider `'unknown'` (cost 0).
  */
 
+import type { RunOutcome } from './settings.js';
+
 /**
  * Per-provider cost + token rollup. `provider` is the provider name from
  * `models.json` (or `'unknown'` when the model is unpriced/unknown).
@@ -67,6 +69,28 @@ export interface AggregateDailyCost {
   byProvider: AggregateProviderCost[];
 }
 
+/** Summary of the most recently finalized run across all sessions. */
+export interface AggregateLastRun {
+  /** Cost (USD) of the run, derived from its tokens × pricing. */
+  cost: number;
+  /** Wall-clock busy duration in ms (the run's `busyDurationMs`). */
+  durationMs: number;
+  /** Model id used for the run (null when unrecorded). */
+  modelId: string | null;
+  /** Resolved provider name (or `'unknown'`). */
+  provider: string;
+  /** Scored outcome, or null when the run closed unscored. */
+  outcome: RunOutcome | null;
+  /** ISO timestamp the run started. */
+  startedAt: string;
+  /** ISO timestamp the run ended (finalizedAt, falling back to updatedAt). */
+  endedAt: string;
+  /** Input tokens reported across the run's assistant turns. */
+  inputTokens: number;
+  /** Output tokens reported across the run's assistant turns. */
+  outputTokens: number;
+}
+
 /**
  * Aggregate stats across all runs (completed + open) for the current
  * workspace, with a recent/current focus. All cost figures are in USD.
@@ -83,6 +107,15 @@ export interface AggregateStats {
   todayTokensPerSecondByProvider: AggregateProviderThroughput[];
   /** Number of runs that landed (finalized/updated/started) today. */
   todayRunCount: number;
+  /** Cumulative input tokens across today's runs. */
+  todayInputTokens: number;
+  /** Cumulative output tokens across today's runs. */
+  todayOutputTokens: number;
+  /** Total tool calls across today's runs (recent activity signal). */
+  todayToolCallCount: number;
+  /** Approximate distinct files touched across today's runs (sum of per-run
+   *  touched-file counts; may double-count a file edited across runs). */
+  todayTouchedFileCount: number;
 
   // ── Recent: this week (last 7 days, inclusive of today) ──
   /** Total spend over the last 7 UTC days (inclusive of today). */
@@ -122,6 +155,8 @@ export interface AggregateStats {
   runCount: number;
   /** Number of distinct sessions that ever had a run (all-time). */
   sessionCount: number;
+  /** Most recently finalized run across all sessions, or null when none. */
+  lastRun: AggregateLastRun | null;
 
   /** False until the host has completed its first computation. */
   ready: boolean;
@@ -136,6 +171,10 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   todayTokensPerSecond: 0,
   todayTokensPerSecondByProvider: [],
   todayRunCount: 0,
+  todayInputTokens: 0,
+  todayOutputTokens: 0,
+  todayToolCallCount: 0,
+  todayTouchedFileCount: 0,
   weekCost: 0,
   weekCostByProvider: [],
   weekRunCount: 0,
@@ -153,5 +192,6 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   totalCacheWriteTokens: 0,
   runCount: 0,
   sessionCount: 0,
+  lastRun: null,
   ready: false,
 };

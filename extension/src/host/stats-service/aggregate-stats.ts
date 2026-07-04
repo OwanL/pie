@@ -15,6 +15,7 @@
 import type { ModelPricingRecord, ModelTokenPricing } from '../../backend/pricing';
 import type {
   AggregateDailyCost,
+  AggregateLastRun,
   AggregateProviderCost,
   AggregateProviderThroughput,
   AggregateStats,
@@ -236,6 +237,14 @@ export function computeAggregateStats(
 
   let todayRunCount = 0;
   let weekRunCount = 0;
+  let todayInputTokens = 0;
+  let todayOutputTokens = 0;
+  let todayToolCallCount = 0;
+  let todayTouchedFileCount = 0;
+
+  // Most-recent finalized run (max endedAt across all runs).
+  let lastRun: AggregateLastRun | null = null;
+  let lastRunEndedMs = -1;
 
   const providerAcc = (provider: string): ProviderAccumulator => {
     let acc = byProvider.get(provider);
@@ -332,8 +341,33 @@ export function computeAggregateStats(
       dayAcc.cacheWriteTokens += run.cacheWriteTokens;
 
       // Run-count buckets (by run day).
-      if (date === todayDate) todayRunCount += 1;
+      if (date === todayDate) {
+        todayRunCount += 1;
+        todayInputTokens += run.inputTokens;
+        todayOutputTokens += run.outputTokens;
+        todayToolCallCount += run.toolUsage?.totalCount ?? 0;
+        todayTouchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
+      }
       if (weekDates.has(date)) weekRunCount += 1;
+    }
+
+    // Track the most-recent run by its end timestamp (finalizedAt else updatedAt
+    // else startedAt). Open (in-flight) runs are included so the bar reflects a
+    // run that just started, but a finalized run with a later endedAt wins.
+    const endedMs = runDayMs(run);
+    if (!Number.isNaN(endedMs) && endedMs > lastRunEndedMs) {
+      lastRunEndedMs = endedMs;
+      lastRun = {
+        cost,
+        durationMs: run.busyDurationMs ?? 0,
+        modelId: run.modelId ?? null,
+        provider,
+        outcome: run.outcome ?? null,
+        startedAt: run.startedAt,
+        endedAt: run.finalizedAt ?? run.updatedAt,
+        inputTokens: run.inputTokens,
+        outputTokens: run.outputTokens,
+      };
     }
   }
 
@@ -419,6 +453,10 @@ export function computeAggregateStats(
     todayTokensPerSecond,
     todayTokensPerSecondByProvider,
     todayRunCount,
+    todayInputTokens,
+    todayOutputTokens,
+    todayToolCallCount,
+    todayTouchedFileCount,
     weekCost,
     weekCostByProvider,
     weekRunCount,
@@ -436,6 +474,7 @@ export function computeAggregateStats(
     totalCacheWriteTokens,
     runCount: runs.length,
     sessionCount: sessionPaths.size,
+    lastRun,
     ready: true,
   };
 }
