@@ -364,14 +364,20 @@ export function generateLitellmConfigYaml(source, proxy) {
   return LITELLM_BANNER + LITELLM_NOTES + body;
 }
 
-/** Read-modify-write merge of settings.json: overwrite ONLY the 7 model keys.
- *  The user-editable `proxy` block is preserved untouched (settings.json is the
- *  proxy SSoT). */
+/** Read-modify-write merge of settings.json.
+ *
+ *  `defaultModel` / `defaultProvider` / `defaultThinkingLevel` are USER-OWNED:
+ *  the running backend persists the user's selected model to settings.json, so
+ *  sync only SEEDS them from models.yaml `defaults` when absent — it never
+ *  clobbers a user's choice (which would reset the selected model on every
+ *  `npm run sync-models`). `retry` and `pruning.{model,provider,thinkingLevel}`
+ *  remain derived from models.yaml. The user-editable `proxy` block is preserved
+ *  untouched (settings.json is the proxy SSoT). */
 export function generateSettings(source, existingSettings) {
   const s = JSON.parse(JSON.stringify(existingSettings));
-  s.defaultModel = source.defaults.model;
-  s.defaultProvider = source.defaults.provider;
-  s.defaultThinkingLevel = source.defaults.thinkingLevel;
+  if (typeof s.defaultModel !== 'string' || s.defaultModel.length === 0) s.defaultModel = source.defaults.model;
+  if (typeof s.defaultProvider !== 'string' || s.defaultProvider.length === 0) s.defaultProvider = source.defaults.provider;
+  if (typeof s.defaultThinkingLevel !== 'string' || s.defaultThinkingLevel.length === 0) s.defaultThinkingLevel = source.defaults.thinkingLevel;
   s.retry = JSON.parse(JSON.stringify(source.retry));
   s.pruning = {
     ...(s.pruning && typeof s.pruning === 'object' ? s.pruning : {}),

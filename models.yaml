@@ -13,7 +13,11 @@
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
 #   overrideOnly:true     -> models.json providers.<p>.modelOverrides (vs models[])
-#   defaults/retry/pruning-> settings.json model fields
+#   defaults/retry/pruning-> settings.json (defaults only SEEDS the user-owned
+#                           defaultModel/Provider/ThinkingLevel when absent;
+#                           retry + pruning.{model,provider,thinkingLevel} are
+#                           re-derived on every sync)
+#   proxy.* (settings.json)-> proxy/litellm_config.yaml (proxy SSoT = settings.json)
 #
 # Proxy settings (the LiteLLM gateway + per-provider upstream routing) live in
 # settings.json `proxy` — that is the user-editable source of truth, surfaced in

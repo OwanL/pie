@@ -99,11 +99,11 @@ test('generate() is a pure function: same source + settings => same output', asy
   assert.deepStrictEqual(a, b, 'generate() is not deterministic');
 });
 
-test('settings.json merge overwrites only the 7 model keys and preserves pruning.tools', async () => {
+test('settings.json merge preserves the user model choice and overwrites only retry/pruning', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);
   // Synthesize a settings base with extra fields that must survive the merge.
-  // The `proxy` block is now the user-editable proxy SSoT (read from settings.json
+  // The `proxy` block is the user-editable proxy SSoT (read from settings.json
   // by generate()); it must be preserved untouched by the model-key merge.
   const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
   const base = {
@@ -126,10 +126,12 @@ test('settings.json merge overwrites only the 7 model keys and preserves pruning
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
   const pruning = merged.pruning as Record<string, unknown>;
-  // Model keys overwritten from source.
-  assert.equal(merged.defaultModel, (source as { defaults: { model: string } }).defaults.model);
-  assert.equal(merged.defaultProvider, (source as { defaults: { provider: string } }).defaults.provider);
-  assert.equal(merged.defaultThinkingLevel, (source as { defaults: { thinkingLevel: string } }).defaults.thinkingLevel);
+  // User-owned model keys are PRESERVED (the backend owns them; sync only seeds
+  // from models.yaml when absent). They must NOT be overwritten by the merge.
+  assert.equal(merged.defaultModel, 'OLD');
+  assert.equal(merged.defaultProvider, 'OLD');
+  assert.equal(merged.defaultThinkingLevel, 'OLD');
+  // retry + pruning.{model,provider,thinkingLevel} are re-derived from models.yaml.
   assert.deepEqual(merged.retry, (source as { retry: unknown }).retry);
   assert.equal(pruning.model, (source as { pruning: { model: string } }).pruning.model);
   assert.equal(pruning.provider, (source as { pruning: { provider: string } }).pruning.provider);
@@ -143,4 +145,20 @@ test('settings.json merge overwrites only the 7 model keys and preserves pruning
   assert.deepEqual(pruning.tools, { alwaysKeep: ['read', 'bash'] });
   // The user-editable proxy block must be preserved verbatim by the merge.
   assert.deepEqual(merged.proxy, committedSettings.proxy);
+});
+
+test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.yaml only when absent', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot);
+  // A fresh settings base lacking the user-owned model keys gets them seeded
+  // from models.yaml `defaults`; present values are kept as-is.
+  const base = {
+    retry: { enabled: false, maxRetries: 0, baseDelayMs: 0, provider: { maxRetries: 0, maxRetryDelayMs: 0 } },
+    pruning: { model: 'x', provider: 'x', thinkingLevel: 'low' },
+    proxy: (parseCommitted('settings.json') as Record<string, unknown>).proxy,
+  };
+  const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
+  assert.equal(merged.defaultModel, (source as { defaults: { model: string } }).defaults.model);
+  assert.equal(merged.defaultProvider, (source as { defaults: { provider: string } }).defaults.provider);
+  assert.equal(merged.defaultThinkingLevel, (source as { defaults: { thinkingLevel: string } }).defaults.thinkingLevel);
 });
