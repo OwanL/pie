@@ -125,6 +125,22 @@ export function SessionTabs({
     if (optimisticTimerRef.current !== null) clearTimeout(optimisticTimerRef.current);
   }, []);
 
+  // If the optimistically-selected tab is closed before the host confirms the
+  // switch (click then immediate close), clear the override so the highlight
+  // falls back to the host's actual active session instead of lingering on a
+  // now-unrendered tab until the 2s safety timeout. The body short-circuits on
+  // `optimisticActivePath === null` (the common case), so the per-snapshot
+  // `openTabPaths` dep churn during streaming costs only a null check.
+  useEffect(() => {
+    if (optimisticActivePath !== null && !openTabPaths.includes(optimisticActivePath)) {
+      if (optimisticTimerRef.current !== null) {
+        clearTimeout(optimisticTimerRef.current);
+        optimisticTimerRef.current = null;
+      }
+      setOptimisticActivePath(null);
+    }
+  }, [openTabPaths, optimisticActivePath]);
+
   // Stabilize derived collections so memoized children (SessionTab, DropGap)
   // skip re-render while their props are unchanged — essential during a drag,
   // where the parent re-renders on every pointermove.
