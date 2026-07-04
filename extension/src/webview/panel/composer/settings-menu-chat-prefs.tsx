@@ -13,7 +13,7 @@ function ChatPrefItem({ item, prefs, onSetPrefs }: { item: ChatPrefItemDef; pref
     <button
       class={`toolbar-settings-item${checked ? ' checked' : ''}`}
       type="button"
-      role="menuitemcheckbox"
+      role="checkbox"
       aria-checked={checked}
       onClick={() => onSetPrefs(toggleChatPref(prefs, item.key))}
     >

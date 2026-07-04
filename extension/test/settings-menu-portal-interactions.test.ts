@@ -67,6 +67,8 @@ function mount() {
 // prepass ModelPicker. Returns the portaled dropdown element.
 function openPrepassPicker(): HTMLElement {
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
+  // Skill-pruner lives on the Extensions tab of the tabbed settings menu.
+  act(() => { click(container.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
   act(() => { click(container.querySelector('.toolbar-settings-ext-chevron')); });
   act(() => { click(container.querySelector('.model-picker-trigger')); });
   const dropdown = document.querySelector('.model-picker-dropdown') as HTMLElement | null;

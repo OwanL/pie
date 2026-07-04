@@ -4,7 +4,7 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
-import { SubagentFlyout } from '../src/webview/panel/composer/settings-menu-subcomponents';
+import { SubagentSection } from '../src/webview/panel/composer/settings-menu-subcomponents';
 import { filterEnabledProviders, orderModelsForPicker } from '../src/webview/panel/composer/model-list';
 import { DEFAULT_CHAT_PREFS } from '../src/shared/protocol';
 import type { ChatPrefs, ModelInfo } from '../src/shared/protocol';
@@ -20,9 +20,9 @@ const AVAILABLE_MODELS: ModelInfo[] = [
   { id: 'gpt-5', name: 'GPT-5', provider: 'openai', reasoning: true, inputKinds: ['text'] },
 ];
 
-test('SubagentFlyout renders the flyout chrome, toggle, buckets, and nesting controls', () => {
+test('SubagentSection renders the inline container, toggle, buckets, and nesting controls', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({}),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -30,8 +30,8 @@ test('SubagentFlyout renders the flyout chrome, toggle, buckets, and nesting con
     }),
   );
 
-  // Flyout chrome (shared FlyoutPanel) + the always-parent-model toggle.
-  assert.match(html, /toolbar-settings-ui-flyout-title"[^>]*>Subagent</);
+  // Inline container + the always-parent-model toggle.
+  assert.match(html, /toolbar-settings-ext-settings/);
   assert.match(html, /Always use parent model</);
 
   // Model buckets group + all three bucket labels + hints.
@@ -48,9 +48,9 @@ test('SubagentFlyout renders the flyout chrome, toggle, buckets, and nesting con
   assert.match(html, /Max parallel tasks</);
 });
 
-test('SubagentFlyout renders the nested-bucket allowlist toggles reflecting prefs', () => {
+test('SubagentSection renders the nested-bucket allowlist toggles reflecting prefs', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({ subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false } }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -67,9 +67,9 @@ test('SubagentFlyout renders the nested-bucket allowlist toggles reflecting pref
   assert.match(html, /Allow Small \(Haiku\)/);
 });
 
-test('SubagentFlyout renders selected bucket models as chips labelled with model names', () => {
+test('SubagentSection renders selected bucket models as chips labelled with model names', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({
         subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       }),
@@ -87,9 +87,9 @@ test('SubagentFlyout renders selected bucket models as chips labelled with model
   assert.doesNotMatch(html, /falls back to the parent model/);
 });
 
-test('SubagentFlyout add-model selects list only models not already in their bucket', () => {
+test('SubagentSection add-model selects list only models not already in their bucket', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({
         subagentBuckets: { small: ['haiku'], medium: [], frontier: [] },
       }),
@@ -110,9 +110,9 @@ test('SubagentFlyout add-model selects list only models not already in their buc
   assert.equal(warnCount, 2);
 });
 
-test('SubagentFlyout renders an empty-bucket warning per empty bucket', () => {
+test('SubagentSection renders an empty-bucket warning per empty bucket', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({ subagentBuckets: { small: [], medium: [], frontier: [] } }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -130,9 +130,9 @@ test('SubagentFlyout renders an empty-bucket warning per empty bucket', () => {
   assert.match(html, /No models — falls back to the parent model/);
 });
 
-test('SubagentFlyout does not warn for a bucket that has models', () => {
+test('SubagentSection does not warn for a bucket that has models', () => {
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs: prefsWith({ subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: [] } }),
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -145,14 +145,14 @@ test('SubagentFlyout does not warn for a bucket that has models', () => {
   assert.equal(warnCount, 1);
 });
 
-test('SubagentFlyout add-model options exclude disabled-provider models (ComposerSettingsMenu composition)', () => {
+test('SubagentSection add-model options exclude disabled-provider models (ComposerSettingsMenu composition)', () => {
   // Mirror what ComposerSettingsMenu does: filter availableModels by enabled
   // providers, then order for the picker. The full availableModels list is still
   // passed for chip label resolution.
   const prefs = prefsWith({ providerToggles: { anthropic: false } });
   const enabledEntries = orderModelsForPicker(filterEnabledProviders(AVAILABLE_MODELS, prefs.providerToggles));
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs,
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,
@@ -168,7 +168,7 @@ test('SubagentFlyout add-model options exclude disabled-provider models (Compose
   assert.match(html, /<option[^>]*value="gpt-5"/);
 });
 
-test('SubagentFlyout still labels a selected bucket chip whose provider is disabled (via full availableModels)', () => {
+test('SubagentSection still labels a selected bucket chip whose provider is disabled (via full availableModels)', () => {
   // haiku's provider (anthropic) is disabled, but it's already in the bucket.
   // The chip should still render its display name (resolved from the full
   // availableModels list), so the user can see and remove it.
@@ -178,7 +178,7 @@ test('SubagentFlyout still labels a selected bucket chip whose provider is disab
   });
   const enabledEntries = orderModelsForPicker(filterEnabledProviders(AVAILABLE_MODELS, prefs.providerToggles));
   const html = renderToString(
-    h(SubagentFlyout, {
+    h(SubagentSection, {
       prefs,
       onSetPrefs: () => undefined,
       availableModels: AVAILABLE_MODELS,

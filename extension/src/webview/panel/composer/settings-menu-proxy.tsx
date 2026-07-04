@@ -91,7 +91,7 @@ function BoolRow({
     <button
       class={`toolbar-settings-item${checked ? ' checked' : ''}`}
       type="button"
-      role="menuitemcheckbox"
+      role="checkbox"
       aria-checked={checked}
       aria-label={ariaLabel}
       onClick={onToggle}

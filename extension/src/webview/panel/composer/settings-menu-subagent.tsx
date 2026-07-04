@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
 import { setBucketModels, setNestedAllowedBucket, setSubagentDropTools, toggleChatPref } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
-import { FlyoutPanel, UiGroupLabel } from './ui-appearance-settings';
+import { UiGroupLabel } from './ui-appearance-settings';
 import type { OnSetPrefs } from './settings-menu-types';
 
 type BucketKey = 'small' | 'medium' | 'frontier';
@@ -212,18 +212,19 @@ interface SubagentSettingsProps {
 }
 
 /**
- * Side-panel flyout for subagent settings (mirrors the UI flyout). Holds the
- * always-parent-model toggle, the user-configurable model buckets, and the
- * nesting limits — surfaced as a flyout rather than an inline expansion so the
- * bucket editors don't crowd the main settings menu.
+ * Inline subagent settings, rendered inside the Extensions tab when the
+ * subagent extension row is expanded. Holds the always-parent-model toggle, the
+ * user-configurable model buckets, the nested-bucket allowlist, and the
+ * nesting/throughput limits. Reuses the same inline-settings container styling
+ * as the skill-pruner expansion.
  */
-export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentSettingsProps) {
+export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentSettingsProps) {
   return (
-    <FlyoutPanel title="Subagent" ariaLabel="Subagent settings">
+    <div class="toolbar-settings-ext-settings">
       <button
         class={`toolbar-settings-item${prefs.subagentAlwaysParentModel ? ' checked' : ''}`}
         type="button"
-        role="menuitemcheckbox"
+        role="checkbox"
         aria-checked={prefs.subagentAlwaysParentModel}
         onClick={() => onSetPrefs(toggleChatPref(prefs, 'subagentAlwaysParentModel'))}
       >
@@ -269,7 +270,7 @@ export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntrie
             key={def.key}
             class={`toolbar-settings-item${enabled ? ' checked' : ''}`}
             type="button"
-            role="menuitemcheckbox"
+            role="checkbox"
             aria-checked={enabled}
             onClick={() => onSetPrefs(setNestedAllowedBucket(prefs, def.key, !enabled))}
           >
@@ -374,6 +375,6 @@ export function SubagentFlyout({ prefs, onSetPrefs, availableModels, modelEntrie
         />
         <div class="toolbar-settings-item-hint">Maximum number of tasks allowed in a single parallel subagent call.</div>
       </div>
-    </FlyoutPanel>
+    </div>
   );
 }

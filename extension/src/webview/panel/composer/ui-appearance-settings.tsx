@@ -1,13 +1,9 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useLayoutEffect, useRef } from 'preact/hooks';
-import type { ComponentChildren } from 'preact';
-
 import type { ChatPrefs, UiDensity } from '../../../shared/protocol';
-import { CollapsibleChevron } from '../components/chevron';
 import { DENSITY_OPTIONS, UI_THEME_PRESETS, matchUiThemePreset, uiThemePresetToPrefs } from './settings-menu-helpers';
-import type { OnSetPrefs } from './settings-menu-subcomponents';
+import type { OnSetPrefs } from './settings-menu-types';
 
 interface FontOption {
   label: string;
@@ -100,98 +96,14 @@ function FontSelect({ value, options, ariaLabel, onChange }: FontSelectProps) {
   );
 }
 
-interface UiSubmenuTriggerProps {
-  open: boolean;
-  onToggle: () => void;
-}
-
-/** The "UI ▸" row inside the settings menu that opens the UI flyout to the side. */
-export function UiSubmenuTrigger({ open, onToggle }: UiSubmenuTriggerProps) {
-  return (
-    <button
-      class={`toolbar-settings-ui-trigger${open ? ' open' : ''}`}
-      type="button"
-      aria-haspopup="dialog"
-      aria-expanded={open}
-      aria-label="UI settings"
-      onClick={onToggle}
-    >
-      <span>UI</span>
-      <CollapsibleChevron open={open} class="toolbar-settings-ui-trigger-chevron" />
-    </button>
-  );
-}
-
 interface UiGroupLabelProps {
   label: string;
 }
 
-/** Small uppercase divider heading used to group related controls in the flyout
- *  now that it holds many settings. Styled like the flyout title. */
+/** Small uppercase divider heading used to group related controls — Theme,
+ *  Colors, Shape, Layout, Typography — inside the Appearance tab. */
 export function UiGroupLabel({ label }: UiGroupLabelProps) {
   return <div class="toolbar-settings-ui-group-label">{label}</div>;
-}
-
-interface FlyoutPanelProps {
-  title: string;
-  ariaLabel: string;
-  children: ComponentChildren;
-}
-
-/**
- * Side-panel flyout chrome shared by the UI and Subagent settings menus.
- *
- * Renders as a flyout to the right of the settings menu (a child of
- * `.toolbar-settings-menu`, positioned past its right edge via the
- * `toolbar-settings-ui-flyout` class) so opening it never grows the menu. The
- * flyout is bottom-aligned with the menu (whose bottom sits just above the
- * toolbar) and a mount-time effect caps its height to the transcript's vertical
- * space (viewport top → menu bottom) and shrinks its width to fit beside the
- * menu, so it fills the available room, scrolls internally, and never extends
- * past the toolbar or off the bottom of the screen.
- */
-export function FlyoutPanel({ title, ariaLabel, children }: FlyoutPanelProps) {
-  const flyoutRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    const el = flyoutRef.current;
-    const menu = el?.parentElement; // .toolbar-settings-menu
-    if (!el || !menu) return;
-    const pad = 8;
-    const gap = 8; // matches var(--panel-gap-md) in the CSS left offset
-    const naturalWidth = 260; // matches .toolbar-settings-ui-flyout width
-    const minWidth = 200;
-    const fit = () => {
-      const menuRect = menu.getBoundingClientRect();
-      // Vertical: cap height to the transcript's vertical space — from the
-      // viewport top (plus padding) down to the menu's bottom — so it fills the
-      // available room and scrolls instead of running past the toolbar / off
-      // the bottom of the screen.
-      const availableHeight = menuRect.bottom - pad;
-      el.style.maxHeight = `${Math.max(180, availableHeight)}px`;
-      // Horizontal: the menu sits at the panel's left edge, so the flyout
-      // always opens to the right. Shrink it to fit the space beside the menu
-      // rather than overflowing the right edge (there's no room to flip left).
-      const available = window.innerWidth - menuRect.right - gap - pad;
-      el.style.width =
-        available < naturalWidth ? `${Math.max(minWidth, available)}px` : '';
-    };
-    fit();
-    // Re-measure once the entrance animation settles (transform skews the rect).
-    const t = window.setTimeout(fit, 320);
-    window.addEventListener('resize', fit);
-    return () => {
-      window.clearTimeout(t);
-      window.removeEventListener('resize', fit);
-    };
-  }, []);
-
-  return (
-    <div ref={flyoutRef} class="toolbar-settings-ui-flyout" role="dialog" aria-label={ariaLabel}>
-      <div class="toolbar-settings-ui-flyout-title">{title}</div>
-      {children}
-    </div>
-  );
 }
 
 interface ColorRowProps {
@@ -264,23 +176,20 @@ function ThemeSelect({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSe
   );
 }
 
-interface UiFlyoutProps {
+interface AppearanceSectionProps {
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
 }
 
 /**
- * Side panel of UI appearance controls. Renders as a flyout to the right of the
- * settings menu (a child of `.toolbar-settings-menu`, positioned past its right
- * edge) so opening it never grows the menu. The flyout is bottom-aligned with
- * the menu (whose bottom sits just above the toolbar) and a mount-time effect
- * caps its height to the transcript's vertical space (viewport top → menu
- * bottom), so it fills the available room, scrolls internally, and never
- * extends past the toolbar or off the bottom of the screen.
+ * Inline appearance controls rendered inside the Appearance tab of the settings
+ * menu. Previously these lived in a side flyout that escaped the menu's scroll
+ * container; the tabbed menu shows one category at a time, so the controls now
+ * render inline and the menu body scrolls when needed.
  */
-export function UiFlyout({ prefs, onSetPrefs }: UiFlyoutProps) {
+export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps) {
   return (
-    <FlyoutPanel title="UI" ariaLabel="UI settings">
+    <div class="toolbar-settings-appearance">
       <ThemeSelect prefs={prefs} onSetPrefs={onSetPrefs} />
 
       <UiGroupLabel label="Colors" />
@@ -508,6 +417,6 @@ export function UiFlyout({ prefs, onSetPrefs }: UiFlyoutProps) {
         />
         <div class="toolbar-settings-item-hint">Code and tool output. "Default" uses the bundled stack.</div>
       </div>
-    </FlyoutPanel>
+    </div>
   );
 }

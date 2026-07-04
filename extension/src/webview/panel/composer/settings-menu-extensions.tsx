@@ -2,11 +2,12 @@
 /** @jsxImportSource preact */
 
 import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningSettings } from '../../../shared/protocol';
-import { setExtensionEnabled, toggleChatPref } from '../chat-prefs';
+import { setExtensionEnabled } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
 import { CollapsibleChevron } from '../components/chevron';
 import { EXTENSIONS_WITH_SETTINGS } from './settings-menu-helpers';
 import { SkillPrunerSettings } from './settings-menu-skill-pruner';
+import { SubagentSection } from './settings-menu-subagent';
 import type { OnSetPrefs, OnSetPruningSettings } from './settings-menu-types';
 
 interface ExtensionItemProps {
@@ -15,10 +16,6 @@ interface ExtensionItemProps {
   onSetPrefs: OnSetPrefs;
   isExpanded: boolean;
   setExpandedExt: (next: string | null) => void;
-  /** Subagent settings open as a side flyout (not inline); this reflects and
-   *  toggles that flyout's open state for the subagent extension row. */
-  subagentOpen: boolean;
-  onToggleSubagent: () => void;
   pruningSettings: PruningSettings;
   modelEntries: ReturnType<typeof orderModelsForPicker>;
   availableModels: ModelInfo[];
@@ -27,19 +24,20 @@ interface ExtensionItemProps {
   onSetPruningSettings: OnSetPruningSettings;
 }
 
-function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, subagentOpen, onToggleSubagent, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionItemProps) {
+function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionItemProps) {
   const checked = prefs.extensionToggles[ext.id] !== false;
   const hasSettings = EXTENSIONS_WITH_SETTINGS.has(ext.id);
-  // The subagent settings live in a side flyout; other extensions expand inline.
-  const expanded = ext.id === 'subagent' ? subagentOpen : isExpanded;
-  const onChevronClick = ext.id === 'subagent' ? onToggleSubagent : () => setExpandedExt(isExpanded ? null : ext.id);
+  // Extensions with nested settings expand inline under their row (skill-pruner
+  // and subagent both use the same inline expansion mechanism).
+  const expanded = isExpanded;
+  const onChevronClick = () => setExpandedExt(isExpanded ? null : ext.id);
   return (
     <div class="toolbar-settings-ext-group">
       <div class="toolbar-settings-ext-row">
         <button
           class={`toolbar-settings-item${checked ? ' checked' : ''}`}
           type="button"
-          role="menuitemcheckbox"
+          role="checkbox"
           aria-checked={checked}
           title={ext.description}
           onClick={() => onSetPrefs(setExtensionEnabled(prefs, ext.id, !checked))}
@@ -75,6 +73,14 @@ function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, sub
           onSetPruningSettings={onSetPruningSettings}
         />
       )}
+      {hasSettings && expanded && ext.id === 'subagent' && (
+        <SubagentSection
+          prefs={prefs}
+          onSetPrefs={onSetPrefs}
+          availableModels={availableModels}
+          modelEntries={modelEntries}
+        />
+      )}
     </div>
   );
 }
@@ -85,8 +91,6 @@ interface ExtensionsSectionProps {
   onSetPrefs: OnSetPrefs;
   expandedExt: string | null;
   setExpandedExt: (next: string | null) => void;
-  subagentOpen: boolean;
-  onToggleSubagent: () => void;
   pruningSettings: PruningSettings;
   modelEntries: ReturnType<typeof orderModelsForPicker>;
   availableModels: ModelInfo[];
@@ -95,7 +99,7 @@ interface ExtensionsSectionProps {
   onSetPruningSettings: OnSetPruningSettings;
 }
 
-export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expandedExt, setExpandedExt, subagentOpen, onToggleSubagent, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionsSectionProps) {
+export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expandedExt, setExpandedExt, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionsSectionProps) {
   return (
     <div key="extensions" class="toolbar-settings-section">
       <div class="toolbar-settings-section-label">Extensions</div>
@@ -108,8 +112,6 @@ export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expa
             onSetPrefs={onSetPrefs}
             isExpanded={expandedExt === ext.id}
             setExpandedExt={setExpandedExt}
-            subagentOpen={subagentOpen}
-            onToggleSubagent={onToggleSubagent}
             pruningSettings={pruningSettings}
             modelEntries={modelEntries}
             availableModels={availableModels}

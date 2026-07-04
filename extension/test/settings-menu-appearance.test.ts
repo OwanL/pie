@@ -4,7 +4,7 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
-import { UiFlyout } from '../src/webview/panel/composer/settings-menu-subcomponents';
+import { AppearanceSection } from '../src/webview/panel/composer/settings-menu-subcomponents';
 import { DEFAULT_CHAT_PREFS } from '../src/shared/protocol';
 import type { ChatPrefs } from '../src/shared/protocol';
 
@@ -12,8 +12,8 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
   return { ...DEFAULT_CHAT_PREFS, ...overrides };
 }
 
-test('UiFlyout selects the Night theme by default and lists all themes', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection selects the Night theme by default and lists all themes', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({}),
     onSetPrefs: () => undefined,
   }));
@@ -27,8 +27,8 @@ test('UiFlyout selects the Night theme by default and lists all themes', () => {
   assert.match(html, />Carbon</);
 });
 
-test('UiFlyout shows Custom when colors do not match a preset', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection shows Custom when colors do not match a preset', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiAccentColor: '#abcdef' }),
     onSetPrefs: () => undefined,
   }));
@@ -38,8 +38,8 @@ test('UiFlyout shows Custom when colors do not match a preset', () => {
   assert.match(html, /<option selected value>Custom</);
 });
 
-test('UiFlyout renders all color rows with default swatches and reset buttons', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders all color rows with default swatches and reset buttons', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({}),
     onSetPrefs: () => undefined,
   }));
@@ -62,13 +62,14 @@ test('UiFlyout renders all color rows with default swatches and reset buttons', 
   assert.match(html, /<input[^>]*type="color"[^>]*value="#d7a942"[^>]*aria-label="Link color"/);
 
   // Reset buttons are disabled because none of the colors are overridden.
-  const resetButtons = html.match(/<button[^>]*class="toolbar-settings-color-reset"/g) ?? [];
-  assert.equal(resetButtons.length, 6, 'expected one reset button per color row');
-  assert.doesNotMatch(html, /class="toolbar-settings-color-reset"[^>]*disabled=""/);
+  const resetTags = html.match(/<button\b[^>]*\bclass="toolbar-settings-color-reset"[^>]*>/g) ?? [];
+  assert.equal(resetTags.length, 6, 'expected one reset button per color row');
+  const disabledResets = resetTags.filter((tag) => /\bdisabled\b/.test(tag)).length;
+  assert.equal(disabledResets, 6, 'all reset buttons should be disabled when no color is overridden');
 });
 
-test('UiFlyout color rows enable Reset only when their pref is overridden', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection color rows enable Reset only when their pref is overridden', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiBackground: '#0d1117', uiAccentColor: '#abcdef' }),
     onSetPrefs: () => undefined,
   }));
@@ -83,8 +84,8 @@ test('UiFlyout color rows enable Reset only when their pref is overridden', () =
   assert.equal(totalResets - disabledResets, 2, 'expected exactly the two overridden rows to be resettable');
 });
 
-test('UiFlyout renders the corner-radius slider with the current value and range', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the corner-radius slider with the current value and range', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiCornerRadius: 12 }),
     onSetPrefs: () => undefined,
   }));
@@ -94,8 +95,8 @@ test('UiFlyout renders the corner-radius slider with the current value and range
   assert.match(html, /<input[^>]*type="range"[^>]*min="0"[^>]*max="24"[^>]*step="1"[^>]*value="12"[^>]*aria-label="Corner radius"/);
 });
 
-test('UiFlyout renders the density select with comfortable selected by default', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the density select with comfortable selected by default', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({}),
     onSetPrefs: () => undefined,
   }));
@@ -106,8 +107,8 @@ test('UiFlyout renders the density select with comfortable selected by default',
   assert.match(html, />Spacious</);
 });
 
-test('UiFlyout renders the message-width slider with the current value', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the message-width slider with the current value', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiMessageWidth: 70 }),
     onSetPrefs: () => undefined,
   }));
@@ -117,8 +118,8 @@ test('UiFlyout renders the message-width slider with the current value', () => {
   assert.match(html, /<input[^>]*type="range"[^>]*min="40"[^>]*max="100"[^>]*step="2"[^>]*value="70"[^>]*aria-label="Message width"/);
 });
 
-test('UiFlyout renders the base-text and composer-text sliders with widened ranges', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the base-text and composer-text sliders with widened ranges', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiBaseFontSize: 15, uiComposerFontSize: 17 }),
     onSetPrefs: () => undefined,
   }));
@@ -132,8 +133,8 @@ test('UiFlyout renders the base-text and composer-text sliders with widened rang
   assert.match(html, /<input[^>]*type="range"[^>]*min="11"[^>]*max="28"[^>]*step="1"[^>]*value="17"[^>]*aria-label="Composer font size"/);
 });
 
-test('UiFlyout renders the expanded-text slider with its widened range', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the expanded-text slider with its widened range', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ expandedSectionFontSize: 20 }),
     onSetPrefs: () => undefined,
   }));
@@ -143,8 +144,8 @@ test('UiFlyout renders the expanded-text slider with its widened range', () => {
   assert.match(html, /<input[^>]*type="range"[^>]*min="8"[^>]*max="32"[^>]*step="1"[^>]*value="20"[^>]*aria-label="Expanded section font size"/);
 });
 
-test('UiFlyout renders the expanded-height and activity-rows sliders with widened ranges', () => {
-  const html = renderToString(h(UiFlyout, {
+test('AppearanceSection renders the expanded-height and activity-rows sliders with widened ranges', () => {
+  const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ expandedSectionMaxHeight: 1000, activityTailLines: 9 }),
     onSetPrefs: () => undefined,
   }));

@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import { useEffect, useState } from 'preact/hooks';
 import type { ChatPrefs } from '../../../shared/protocol';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -13,6 +14,13 @@ import type { OnSetPrefs } from './settings-menu-types';
  *  snapshot changes, so no restart is needed. */
 export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
   const fastPathChecked = prefs.bashFastPath;
+  // Keep a local draft of the shell-path text field and commit on blur / Enter so
+  // typing doesn't fire a host round-trip (and a persisted write) per keystroke.
+  const [shellDraft, setShellDraft] = useState(prefs.bashShellPath);
+  useEffect(() => { setShellDraft(prefs.bashShellPath); }, [prefs.bashShellPath]);
+  const commitShell = () => {
+    if (shellDraft !== prefs.bashShellPath) onSetPrefs({ bashShellPath: shellDraft });
+  };
   return (
     <div key="bash" class="toolbar-settings-section">
       <div class="toolbar-settings-section-label">Bash</div>
@@ -44,7 +52,7 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
         <button
           class={`toolbar-settings-item${fastPathChecked ? ' checked' : ''}`}
           type="button"
-          role="menuitemcheckbox"
+          role="checkbox"
           aria-checked={fastPathChecked}
           onClick={() => onSetPrefs({ bashFastPath: !prefs.bashFastPath })}
         >
@@ -65,8 +73,10 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
             type="text"
             class="toolbar-settings-select"
             placeholder="auto-detect (Git Bash / bash)"
-            value={prefs.bashShellPath}
-            onInput={(e) => onSetPrefs({ bashShellPath: (e.target as HTMLInputElement).value })}
+            value={shellDraft}
+            onInput={(e) => setShellDraft((e.target as HTMLInputElement).value)}
+            onBlur={commitShell}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); } }}
             aria-label="Explicit bash shell path"
             spellcheck={false}
           />

@@ -17,7 +17,7 @@ function ProviderItem({ provider, prefs, onSetPrefs }: ProviderItemProps) {
     <button
       class={`toolbar-settings-item${checked ? ' checked' : ''}`}
       type="button"
-      role="menuitemcheckbox"
+      role="checkbox"
       aria-checked={checked}
       onClick={() => onSetPrefs(setProviderEnabled(prefs, provider, !checked))}
     >

@@ -31,7 +31,7 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
       <button
         class={`toolbar-settings-item${prefs.showPruningMessages ? ' checked' : ''}`}
         type="button"
-        role="menuitemcheckbox"
+        role="checkbox"
         aria-checked={prefs.showPruningMessages}
         onClick={() => onSetPrefs(toggleChatPref(prefs, 'showPruningMessages'))}
       >
