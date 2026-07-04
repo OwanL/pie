@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI) {
       'For each non-done open session, call getTranscript to read its inputs/outputs, judge completeness against the user\'s last intent, then call setReview with done + a 1–5 rating + completion (fully/partial/setback) + reason.',
       'Before finalizing a session\'s review, use the ask_user tool to check with the user — present your evaluation (completion + proposed rating + reason) and confirm their take. Adjust based on their reply.',
       'completion: fully = task completed; partial = work done but unresolved; setback = left things worse (regression/failed approach worth revisiting).',
-      'Only mark a session done when its task is genuinely complete or conclusively stopped — never mark an in-progress/uncertain session done.',
+      "Only mark a session done when its task is genuinely complete or conclusively stopped — never mark an in-progress/uncertain session done. Recording done=true closes the session's tab (the same close path a user takes, pinned tabs included) to clean up the tab once the host refreshes; a partial/setback review keeps the tab open.",
       'Report a final summary table (session → done/rating/completion) after reviewing all sessions.',
     ],
     parameters: sessionReviewSchema,
@@ -112,8 +112,11 @@ export default function (pi: ExtensionAPI) {
         };
         try {
           const file = appendReview(record);
+          const closeNote = p.done
+            ? "\nThe session's tab will be closed (same as a user closing it, pinned tabs included) — this cleans up the tab once the host refreshes."
+            : '';
           return ok(
-            `Recorded review for ${p.sessionPath}:\n  done=${p.done} rating=${p.rating}/5 completion=${p.completion}\n  reason: ${reason || '(none)'}\nStored in ${file}. The session list refreshes shortly.`,
+            `Recorded review for ${p.sessionPath}:\n  done=${p.done} rating=${p.rating}/5 completion=${p.completion}\n  reason: ${reason || '(none)'}\nStored in ${file}.${closeNote}`,
             record,
           );
         } catch (e) {

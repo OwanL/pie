@@ -26,8 +26,33 @@ interface HandlerDeps {
   requireEventSessionPath: (eventName: string, sessionPath: string | undefined) => string | null;
 }
 
+let reviewAutoCloseCorrIdCounter = 0;
+
 export function onSessionListChanged(payload: SessionListChangedPayload, deps: HandlerDeps): void {
   deps.dispatchArch({ kind: 'SessionListChanged', sessionSummaries: payload.sessions });
+
+  // Auto-close tabs for sessions the agent just reviewed as `done: true` —
+  // the same `CloseSession` command a user-initiated tab close dispatches
+  // (handles pinned tabs too: `evictSession` drops them from
+  // `pinnedTabPaths`). Only fresh done transitions close; the first list
+  // seeds the known-done set so pre-existing done tabs aren't mass-closed.
+  const archState = deps.getArchState();
+  const closures = deps.state.consumeReviewAutoCloseClosures(
+    payload.sessions,
+    archState.sessions.openTabPaths,
+    archState.sessions.runningSessionPaths,
+  );
+  for (const sessionPath of closures) {
+    deps.dispatchArch({
+      kind: 'Command',
+      cmd: {
+        kind: 'CloseSession',
+        corrId: `review-auto-close:${++reviewAutoCloseCorrIdCounter}`,
+        sessionPath,
+      },
+    });
+  }
+
   deps.scheduleRender();
 }
 

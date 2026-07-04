@@ -28,8 +28,10 @@ It has three actions:
   to a token-budgeted rendering. Use this to see what actually happened in a
   session. `sessionPath` is the absolute path from `listOpen`.
 - **`setReview`** — `{ sessionPath, done, rating, completion, reason }` records
-  the review. Persists to the session-review sidecar; the app's session list
-  refreshes shortly to show the done marker + rating.
+  the review. Persists to the session-review sidecar. When `done: true`, the
+  app closes that session's tab — the same close path a user takes (pinned
+  tabs included) — so the tab is cleaned up rather than just badged. A
+  `partial` / `setback` review keeps the tab open with a status badge.
 
 `sessionPath` values come from `listOpen` (the paths it prints at the bottom).
 Never invent a path.
@@ -42,8 +44,10 @@ For each reviewed session, set:
   or has been conclusively stopped. Never mark an in-progress, ambiguous, or
   still-streaming session done.
 - **`rating`** (integer 1–5): the quality of the work done in the session.
-  - **5** — excellent: task fully and correctly done, clean, well-verified.
-  - **4** — good: done well with only minor issues.
+  - **5** — excellent: surprisingly good, beyond expectations; reserve for
+    standout work, not the baseline for "done well".
+  - **4** — good: solid, complete, verified work. This is the baseline for
+    work done well; default to 4 unless the work genuinely stands out.
   - **3** — adequate: done but with notable rough edges or incomplete verification.
   - **2** — weak: partial / sloppy work, significant gaps.
   - **1** — poor: mostly wrong, broken, or wasted effort.
@@ -77,7 +81,9 @@ For each reviewed session, set:
    e. Decide `done`: only `true` when completion is `fully` *and* the work is
       verified, OR when the user explicitly concluded the session. Otherwise
       `false` (you can still record a `partial`/`setback` review without marking
-      done — that captures "this is where things stand" without closing it).
+      done — that captures "this is where things stand" and keeps the tab open).
+      Note: `done: true` closes the session's tab, so only set it when the task
+      is genuinely finished and you've confirmed with the user.
 
 3. **Check in with the user before finalizing each review.** Before calling
    `setReview`, use the `ask_user` tool to present your evaluation and confirm

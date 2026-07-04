@@ -8,6 +8,11 @@ import {
   isPendingTabPath,
 } from '../../shared/tab-behavior';
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../shared/transcript-window';
+import {
+  INITIAL_REVIEW_AUTO_CLOSE_STATE,
+  computeReviewAutoCloseClosures,
+  type ReviewAutoCloseState,
+} from '../../shared/review-auto-close';
 import type { SessionOpenedPayload } from '../../shared/protocol';
 import type { ScheduleRender, SelectionRequest } from './types';
 import type { Event } from '../core/events';
@@ -32,6 +37,10 @@ export class SessionServiceState {
   private pendingSessionCounter = 0;
   private selectionRequestCounter = 0;
   private currentSelectionToken: string | null = null;
+  /** Tracks agent-reviewed `done` sessions so the host auto-closes tabs on a
+   *  fresh done transition (and seeds on first list so startup does not
+   *  mass-close pre-existing done tabs). See `review-auto-close.ts`. */
+  private reviewAutoClose: ReviewAutoCloseState = INITIAL_REVIEW_AUTO_CLOSE_STATE;
   private onPreloadedSessionOpened?: (payload: SessionOpenedPayload) => void;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
@@ -67,6 +76,25 @@ export class SessionServiceState {
     this.requestSessionPathById.clear();
     this.transcriptTouchedAtBySession.clear();
     this.currentSelectionToken = null;
+    this.reviewAutoClose = INITIAL_REVIEW_AUTO_CLOSE_STATE;
+  }
+
+  /** Return the open-tab session paths that newly transitioned to `done` in
+   *  this session-list refresh and should be auto-closed for tab cleanup.
+   *  Pure-decision: delegates to `computeReviewAutoCloseClosures` and stores
+   *  the resulting state for the next call. */
+  consumeReviewAutoCloseClosures(
+    incoming: ReadonlyArray<{ path: string; done?: boolean }>,
+    openTabPaths: readonly string[],
+    runningPaths: readonly string[],
+  ): string[] {
+    const result = computeReviewAutoCloseClosures(this.reviewAutoClose, {
+      incoming,
+      openTabPaths,
+      runningPaths,
+    });
+    this.reviewAutoClose = result.next;
+    return result.closures;
   }
 
   createPendingSessionPath(): string {
