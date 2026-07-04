@@ -1,9 +1,10 @@
 /* ── Aggregate stats strip ────────────────────────────────────────────────── */
-/* Thin header strip above the session tab row. Shows aggregate usage across
-   ALL sessions (cost per provider, today, throughput, live tok/s, token
-   totals, counts). The full breakdown lives in the `title` tooltip so the strip
-   itself stays a single thin line. Host-owned: a pure projection of
-   ViewState.aggregateStats (STATE_CONTRACT § Webview-Local State). */
+/* Thin status strip anchored at the bottom of the panel (below the composer).
+   Shows aggregate usage across ALL sessions (cost per provider, today,
+   throughput, live tok/s, token totals, counts). The full breakdown lives in
+   the `title` tooltip so the strip itself stays a single thin line. Host-owned:
+   a pure projection of ViewState.aggregateStats (STATE_CONTRACT § Webview-Local
+   State). */
 
 .aggregate-strip {
   display: flex;
@@ -12,7 +13,7 @@
   gap: 6px;
   height: 22px;
   padding: 0 10px;
-  border-bottom: 1px solid var(--panel-border-subtle);
+  border-top: 1px solid var(--panel-border-subtle);
   background: var(--panel-surface);
   font-family: var(--panel-font-mono);
   font-size: 10px;

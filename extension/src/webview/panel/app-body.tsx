@@ -117,10 +117,6 @@ export function AppBody({ adapter }: AppBodyProps) {
       )}
 
       {derived.showSessionChrome && (
-        <AggregateStatsStrip stats={viewState.aggregateStats} />
-      )}
-
-      {derived.showSessionChrome && (
         <SessionTabs
           sessions={viewState.sessions}
           openTabPaths={viewState.openTabPaths}
@@ -203,6 +199,10 @@ export function AppBody({ adapter }: AppBodyProps) {
         tokenRateBySession={viewState.tokenRateBySession}
         handlers={handlers}
       />
+
+      {derived.showSessionChrome && (
+        <AggregateStatsStrip stats={viewState.aggregateStats} />
+      )}
     </div>
     </AskUserContext.Provider>
     </NoticeContext.Provider>

@@ -8,12 +8,13 @@ import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 
 /**
- * Thin header strip rendered above the session tab row. Shows aggregate usage
- * across ALL sessions — total cost with a per-provider breakdown, today's
- * spend, generation throughput (mean tok/s) with a per-provider breakdown, live
- * aggregate tok/s, token totals, and run/session counts. The full breakdown
- * (daily per-provider series, per-provider tokens, per-provider throughput) is
- * in the `title` tooltip so the strip itself stays a single thin line.
+ * Thin status strip anchored at the bottom of the panel (below the composer).
+ * Shows aggregate usage across ALL sessions — total cost with a per-provider
+ * breakdown, today's spend, generation throughput (mean tok/s) with a
+ * per-provider breakdown, live aggregate tok/s, token totals, and run/session
+ * counts. The full breakdown (daily per-provider series, per-provider tokens,
+ * per-provider throughput) is in the `title` tooltip so the strip itself stays
+ * a single thin line.
  *
  * Host-owned (STATE_CONTRACT § Webview-Local State): the strip is a pure
  * projection of `ViewState.aggregateStats`; it computes nothing itself.
