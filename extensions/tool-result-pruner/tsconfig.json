@@ -1,0 +1,17 @@
+{
+  "//": "Typecheck gate for the tool-result-pruner extension. Mirrors skill-pruner / warm-bash: `module: preserve` + `moduleResolution: bundler` allow `import.meta` and `.js`-extension imports without a package.json \"type\": \"module\". The `@earendil-works/pi-*` peer packages are provided by the pi runtime (globally installed) and are NOT in this repo's node_modules, so tsc cannot resolve them; they are declared as ambient modules in `types-global.d.ts` (imports resolve to the precise event/content shapes, ExtensionAPI stays `any`).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

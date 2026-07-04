@@ -129,6 +129,7 @@ function createMinimalPayload(runs: RunSnapshot[], outcomes: RunSnapshot[] = [])
     openRuns: [],
     pruningDecisions: [],
     pruningEvents: [],
+    toolResultPruningEvents: [],
     outcomes: outcomes.map((run) => ({
       schemaVersion: 1,
       kind: 'run_outcome',
@@ -919,6 +920,7 @@ test('edge: payload with only open runs produces valid overview with zeros/nulls
     openRuns: [openRun],
     pruningDecisions: [],
     pruningEvents: [],
+    toolResultPruningEvents: [],
     outcomes: [],
   };
 

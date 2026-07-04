@@ -75,6 +75,10 @@
       ]
     }
   },
+  "toolResultPruning": {
+    "enabled": true,
+    "profile": "default"
+  },
   "lastChangelogVersion": "0.80.2",
   "subagent": {
     "confirmProjectAgents": false

@@ -6,6 +6,7 @@ import {
   type PreparedFileExtensionRow,
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
+  type PreparedToolResultPruningRow,
   type PreparedRunRow,
   type PreparedToolFailureRow,
   type PreparedToolUsageRow,
@@ -13,6 +14,7 @@ import {
   type PreparedVerificationUsageRow,
   type PruningSourceDecision,
   type PruningSourceEvent,
+  type ToolResultPruningSourceEvent,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
   type VerificationCommandKind,
@@ -585,6 +587,32 @@ function preparePruningSignals(
   });
 }
 
+function prepareToolResultPruning(
+  events: ToolResultPruningSourceEvent[],
+  runs: PreparedRunRow[],
+): PreparedToolResultPruningRow[] {
+  const runBySessionHash = new Map<string, PreparedRunRow>();
+  for (const run of runs) {
+    runBySessionHash.set(run.sessionPathHash, run);
+  }
+  return events.map((e) => {
+    const sessionPathHash = hashToPrefix(e.sessionId, 16);
+    const matchedRun = runBySessionHash.get(sessionPathHash);
+    const runId = matchedRun?.runId ?? `pruning-${sessionPathHash}`;
+    return {
+      runId,
+      sessionPathHash,
+      timestamp: e.timestamp,
+      startedDay: e.timestamp.slice(0, 10),
+      toolName: e.toolName,
+      rules: e.rules,
+      beforeTokens: e.beforeTokens,
+      afterTokens: e.afterTokens,
+      tokensSaved: e.tokensSaved,
+    };
+  });
+}
+
 function roundThroughput(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -659,6 +687,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
 
   const pruningEvents = preparePruningEvents(source.pruningDecisions ?? [], runs);
   const pruningSignals = preparePruningSignals(source.pruningEvents ?? [], runs);
+  const toolResultPruning = prepareToolResultPruning(source.toolResultPruningEvents ?? [], runs);
 
   return {
     sourceSchemaVersion: source.schemaVersion,
@@ -673,5 +702,6 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     turnThroughput,
     pruningEvents,
     pruningSignals,
+    toolResultPruning,
   };
 }

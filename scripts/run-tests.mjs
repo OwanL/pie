@@ -88,6 +88,16 @@ const PACKAGE_CONFIGS = [
     // portably; the rewrite/patch/repair logic it delegates to is fully covered.
     thresholds: { lines: 82, branches: 78 },
   },
+  {
+    id: 'tool-result-pruner',
+    cwd: repoRoot,
+    testGlobs: ['extensions/tool-result-pruner/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/tool-result-pruner/**/*.ts'],
+    // MVP: the lossless rules + pipeline guards are pure functions; the
+    // index.ts factory is env-glue (registers a pi.on handler) and is not
+    // unit-testable without the pi runtime. Types-global.d.ts is ambient only.
+    thresholds: { lines: 92, branches: 80 },
+  },
 ];
 
 const PACKAGE_LOOKUP = new Map();

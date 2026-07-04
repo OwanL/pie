@@ -27,6 +27,7 @@ import {
   type PruningMode,
   type PruningSourceDecision,
   type PruningSourceEvent,
+  type ToolResultPruningSourceEvent,
   type RunFinalizationReason,
   type RunOutcome,
   type RunSnapshot,
@@ -907,6 +908,7 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     outcomes: coerceOutcomeArray(value.outcomes),
     pruningDecisions: Array.isArray(value.pruningDecisions) ? value.pruningDecisions : [],
     pruningEvents: coercePruningEvents(value.pruningEvents),
+    toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
   };
 }
 
@@ -940,6 +942,82 @@ function coercePruningEvents(value: unknown): PruningSourceEvent[] {
   return events;
 }
 
+function coerceToolResultPruningEvents(value: unknown): ToolResultPruningSourceEvent[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const events: ToolResultPruningSourceEvent[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    if (
+      entry.event === 'tool_result_pruned' &&
+      typeof entry.sessionId === 'string' &&
+      typeof entry.toolName === 'string' &&
+      Array.isArray(entry.rules) &&
+      entry.rules.every((r: unknown) => typeof r === 'string') &&
+      typeof entry.beforeTokens === 'number' &&
+      typeof entry.afterTokens === 'number' &&
+      typeof entry.tokensSaved === 'number' &&
+      typeof entry.timestamp === 'string'
+    ) {
+      events.push({
+        event: 'tool_result_pruned',
+        sessionId: entry.sessionId,
+        toolName: entry.toolName,
+        rules: entry.rules as string[],
+        beforeTokens: entry.beforeTokens,
+        afterTokens: entry.afterTokens,
+        tokensSaved: entry.tokensSaved,
+        timestamp: entry.timestamp,
+      });
+    }
+  }
+  return events;
+}
+
+function readToolResultPruningLog(configRoot: string): ToolResultPruningSourceEvent[] {
+  const logPath = path.join(configRoot, 'data', 'tool-result-pruning.jsonl');
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, 'utf8');
+  } catch {
+    return [];
+  }
+  const lines = raw.trim().split('\n').filter((line) => line.trim().length > 0);
+  const events: ToolResultPruningSourceEvent[] = [];
+  for (const line of lines) {
+    try {
+      const parsed = parseJsonOrThrow<any>(line, logPath);
+      if (
+        parsed.event === 'tool_result_pruned' &&
+        typeof parsed.sessionId === 'string' &&
+        typeof parsed.toolName === 'string' &&
+        Array.isArray(parsed.rules) &&
+        parsed.rules.every((r: unknown) => typeof r === 'string') &&
+        typeof parsed.beforeTokens === 'number' &&
+        typeof parsed.afterTokens === 'number' &&
+        typeof parsed.tokensSaved === 'number' &&
+        typeof parsed.timestamp === 'string'
+      ) {
+        events.push({
+          event: 'tool_result_pruned',
+          sessionId: parsed.sessionId,
+          toolName: parsed.toolName,
+          rules: parsed.rules,
+          beforeTokens: parsed.beforeTokens,
+          afterTokens: parsed.afterTokens,
+          tokensSaved: parsed.tokensSaved,
+          timestamp: parsed.timestamp,
+        });
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return events;
+}
 function readPruningLog(configRoot: string): { decisions: PruningSourceDecision[]; events: PruningSourceEvent[] } {
   const pruningPath = path.join(configRoot, 'data', 'pruning.jsonl');
   let raw: string;
@@ -1039,6 +1117,7 @@ async function querySourceAnalyticsPayloadFromStorageDir(storageDir: string): Pr
     outcomes: result.outcomes,
     pruningDecisions: [],
     pruningEvents: [],
+    toolResultPruningEvents: [],
   };
 }
 
@@ -1075,6 +1154,7 @@ async function queryAllRunAnalyticsStores(
     outcomes,
     pruningDecisions: [],
     pruningEvents: [],
+    toolResultPruningEvents: [],
   };
 
   return { source, storeCount: candidates.length };
@@ -1087,6 +1167,7 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
     const { decisions, events } = readPruningLog(configRoot);
     source.pruningDecisions = decisions;
     source.pruningEvents = events;
+    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
     return {
       source,
       sourceKind: 'export',
@@ -1099,6 +1180,7 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
     const { decisions, events } = readPruningLog(configRoot);
     source.pruningDecisions = decisions;
     source.pruningEvents = events;
+    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
     return {
       source,
       sourceKind: 'storage-dir',
@@ -1116,6 +1198,7 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   if (storeCount > 0) {
     source.pruningDecisions = decisions;
     source.pruningEvents = events;
+    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
     return {
       source,
       sourceKind: 'all-stores',
@@ -1126,6 +1209,7 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   const fixtureSource = await readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
   fixtureSource.pruningDecisions = decisions;
   fixtureSource.pruningEvents = events;
+  fixtureSource.toolResultPruningEvents = readToolResultPruningLog(configRoot);
   return {
     source: fixtureSource,
     sourceKind: 'fixture',

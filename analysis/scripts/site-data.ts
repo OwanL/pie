@@ -22,6 +22,7 @@ import {
   type TimelineData,
   type TimelineRow,
   type TokenThroughputData,
+  type ToolResultPruningImpactData,
   type ToolUsageAggregateRow,
   type ToolUsageData,
   type TreatmentComparisonData,
@@ -542,6 +543,40 @@ function createPruningImpact(prepared: PreparedAnalyticsData): PruningImpactData
   };
 }
 
+function createToolResultPruningImpact(prepared: PreparedAnalyticsData): ToolResultPruningImpactData {
+  const rows = prepared.toolResultPruning;
+  const totalTokensSaved = rows.reduce((sum, r) => sum + r.tokensSaved, 0);
+  const totalBeforeTokens = rows.reduce((sum, r) => sum + r.beforeTokens, 0);
+  const totalAfterTokens = rows.reduce((sum, r) => sum + r.afterTokens, 0);
+  const byRule = new Map<string, { count: number; tokensSaved: number }>();
+  const byTool = new Map<string, { count: number; tokensSaved: number; beforeTokens: number; afterTokens: number }>();
+  for (const row of rows) {
+    for (const rule of row.rules) {
+      const acc = byRule.get(rule) ?? { count: 0, tokensSaved: 0 };
+      acc.count += 1;
+      acc.tokensSaved += row.tokensSaved;
+      byRule.set(rule, acc);
+    }
+    const t = byTool.get(row.toolName) ?? { count: 0, tokensSaved: 0, beforeTokens: 0, afterTokens: 0 };
+    t.count += 1; t.tokensSaved += row.tokensSaved; t.beforeTokens += row.beforeTokens; t.afterTokens += row.afterTokens;
+    byTool.set(row.toolName, t);
+  }
+  const byRuleRows = [...byRule.entries()].map(([rule, v]) => ({ rule, count: v.count, tokensSaved: v.tokensSaved })).sort((a, b) => b.tokensSaved - a.tokensSaved || a.rule.localeCompare(b.rule));
+  const byToolRows = [...byTool.entries()].map(([toolName, v]) => ({ toolName, count: v.count, tokensSaved: v.tokensSaved, beforeTokens: v.beforeTokens, afterTokens: v.afterTokens })).sort((a, b) => b.tokensSaved - a.tokensSaved || a.toolName.localeCompare(b.toolName));
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    rows,
+    summary: {
+      totalEvents: rows.length,
+      totalTokensSaved,
+      totalBeforeTokens,
+      totalAfterTokens,
+      byRule: byRuleRows,
+      byTool: byToolRows,
+    },
+  };
+}
+
 function createBackendErrors(prepared: PreparedAnalyticsData): BackendErrorData {
   const rows = prepared.backendErrors;
   const byCode = new Map<string, { count: number; runs: Set<string> }>();
@@ -627,6 +662,7 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     timeline: createTimeline(prepared),
     modelLeaderboard: createModelLeaderboard(prepared),
     pruningImpact: createPruningImpact(prepared),
+    toolResultPruningImpact: createToolResultPruningImpact(prepared),
     backendErrors: createBackendErrors(prepared),
     fileExtensions: createFileExtensions(prepared),
     tokenThroughput: createTokenThroughput(prepared),
@@ -645,6 +681,7 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'timeline.json': bundle.timeline,
     'model-leaderboard.json': bundle.modelLeaderboard,
     'pruning-impact.json': bundle.pruningImpact,
+    'tool-result-pruning-impact.json': bundle.toolResultPruningImpact,
     'backend-errors.json': bundle.backendErrors,
     'file-types.json': bundle.fileExtensions,
     'token-throughput.json': bundle.tokenThroughput,
@@ -844,6 +881,19 @@ function validatePruningImpact(data: unknown): asserts data is PruningImpactData
   assert(data.summary.skillMissRate === null || typeof data.summary.skillMissRate === 'number', 'pruning-impact.json summary has an invalid skillMissRate.');
 }
 
+function validateToolResultPruningImpact(data: unknown): asserts data is ToolResultPruningImpactData {
+  assert(isRecord(data), 'tool-result-pruning-impact.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'tool-result-pruning-impact.json has an unexpected schemaVersion.');
+  assert(Array.isArray(data.rows), 'tool-result-pruning-impact.json is missing rows.');
+  assert(isRecord(data.summary), 'tool-result-pruning-impact.json is missing summary.');
+  assert(typeof data.summary.totalEvents === 'number', 'tool-result-pruning-impact.json summary is missing totalEvents.');
+  assert(typeof data.summary.totalTokensSaved === 'number', 'tool-result-pruning-impact.json summary is missing totalTokensSaved.');
+  assert(typeof data.summary.totalBeforeTokens === 'number', 'tool-result-pruning-impact.json summary is missing totalBeforeTokens.');
+  assert(typeof data.summary.totalAfterTokens === 'number', 'tool-result-pruning-impact.json summary is missing totalAfterTokens.');
+  assert(Array.isArray(data.summary.byRule), 'tool-result-pruning-impact.json summary is missing byRule.');
+  assert(Array.isArray(data.summary.byTool), 'tool-result-pruning-impact.json summary is missing byTool.');
+}
+
 function validateBackendErrors(data: unknown): asserts data is BackendErrorData {
   assert(isRecord(data), 'backend-errors.json must contain an object.');
   assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'backend-errors.json has an unexpected schemaVersion.');
@@ -886,6 +936,7 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateTimeline(bundle.timeline);
   validateModelLeaderboard(bundle.modelLeaderboard);
   validatePruningImpact(bundle.pruningImpact);
+  validateToolResultPruningImpact(bundle.toolResultPruningImpact);
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
   validateTokenThroughput(bundle.tokenThroughput);
@@ -909,6 +960,7 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     timeline: files['timeline.json'] as SiteDataBundle['timeline'],
     modelLeaderboard: files['model-leaderboard.json'] as SiteDataBundle['modelLeaderboard'],
     pruningImpact: files['pruning-impact.json'] as SiteDataBundle['pruningImpact'],
+    toolResultPruningImpact: files['tool-result-pruning-impact.json'] as SiteDataBundle['toolResultPruningImpact'],
     backendErrors: files['backend-errors.json'] as SiteDataBundle['backendErrors'],
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],
     tokenThroughput: files['token-throughput.json'] as SiteDataBundle['tokenThroughput'],

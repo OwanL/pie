@@ -28,6 +28,7 @@ export const SITE_DATA_FILE_NAMES = [
   'timeline.json',
   'model-leaderboard.json',
   'pruning-impact.json',
+  'tool-result-pruning-impact.json',
   'backend-errors.json',
   'file-types.json',
   'token-throughput.json',
@@ -284,6 +285,8 @@ export interface SourceAnalyticsPayload {
   pruningDecisions: PruningSourceDecision[];
   /** Raw pruning quality-signal events read from data/pruning.jsonl. */
   pruningEvents: PruningSourceEvent[];
+  /** Raw tool-result-pruning events read from data/tool-result-pruning.jsonl. */
+  toolResultPruningEvents: ToolResultPruningSourceEvent[];
 }
 
 export interface LoadedSourceAnalytics {
@@ -566,6 +569,21 @@ export interface PruningSourceEvent {
   timestamp: string;
 }
 
+/** Raw tool-result-pruning event read from data/tool-result-pruning.jsonl.
+ *  Emitted by extensions/tool-result-pruner for every tool result whose output
+ *  the lossless pipeline rewrote. Carries which rules fired + before/after token
+ *  counts (the §9.3 measurement signal: per-rule savings, per-tool noise). */
+export interface ToolResultPruningSourceEvent {
+  event: 'tool_result_pruned';
+  sessionId: string;
+  toolName: string;
+  rules: string[];
+  beforeTokens: number;
+  afterTokens: number;
+  tokensSaved: number;
+  timestamp: string;
+}
+
 /** Prepared pruning quality-signal row for DuckDB (joined to a run by sessionPathHash). */
 export interface PreparedPruningSignalRow {
   runId: string;
@@ -575,6 +593,20 @@ export interface PreparedPruningSignalRow {
   event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'tool_recovered';
   skillName: string | null;
   toolName: string | null;
+}
+
+/** Prepared tool-result-pruning row for DuckDB (joined to a run by sessionPathHash).
+ *  One row per pruned tool result. */
+export interface PreparedToolResultPruningRow {
+  runId: string;
+  sessionPathHash: string;
+  timestamp: string;
+  startedDay: string;
+  toolName: string;
+  rules: string[];
+  beforeTokens: number;
+  afterTokens: number;
+  tokensSaved: number;
 }
 
 /** Prepared pruning event row for DuckDB. */
@@ -617,6 +649,7 @@ export interface PreparedAnalyticsData {
   turnThroughput: PreparedTurnThroughputRow[];
   pruningEvents: PreparedPruningEventRow[];
   pruningSignals: PreparedPruningSignalRow[];
+  toolResultPruning: PreparedToolResultPruningRow[];
 }
 
 export interface SiteManifest {
@@ -872,6 +905,40 @@ export interface PruningImpactData {
   summary: PruningSummary;
 }
 
+/** Per-rule aggregate for tool-result pruning: how often each rule fired and
+ *  how many tokens it saved. Rules are counted once per pruned result they
+ *  fired on (a result can fire several rules). */
+export interface ToolResultPruningByRuleRow {
+  rule: string;
+  count: number;
+  tokensSaved: number;
+}
+
+/** Per-tool aggregate for tool-result pruning: which tools produce the most
+ *  prunable output noise. */
+export interface ToolResultPruningByToolRow {
+  toolName: string;
+  count: number;
+  tokensSaved: number;
+  beforeTokens: number;
+  afterTokens: number;
+}
+
+export interface ToolResultPruningSummary {
+  totalEvents: number;
+  totalTokensSaved: number;
+  totalBeforeTokens: number;
+  totalAfterTokens: number;
+  byRule: ToolResultPruningByRuleRow[];
+  byTool: ToolResultPruningByToolRow[];
+}
+
+export interface ToolResultPruningImpactData {
+  schemaVersion: number;
+  rows: PreparedToolResultPruningRow[];
+  summary: ToolResultPruningSummary;
+}
+
 export interface BackendErrorByCodeRow {
   errorCode: string;
   count: number;
@@ -922,6 +989,7 @@ export interface SiteDataBundle {
   timeline: TimelineData;
   modelLeaderboard: ModelLeaderboardData;
   pruningImpact: PruningImpactData;
+  toolResultPruningImpact: ToolResultPruningImpactData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;

@@ -363,19 +363,47 @@ restate or re-own it.
    results (grill Q4) so recall is faithful. Separation (grill Q1): pruning's
    recall owns only pruning's loss; pi's `fullOutputPath` marker owns
    truncation's loss.
-2. **MVP scope** — ship the lossless tier first (safe, no recall, immediate
-   savings, proves the plumbing end-to-end), then add recall + the lossy tier.
-3. **Measurement** — instrument before/after token counts per rule, or we fly
-   blind on what's worth shipping.
+2. **MVP scope -- RESOLVED & SHIPPED:** the lossless tier is implemented in
+   `extensions/tool-result-pruner/` (ANSI strip, trailing-whitespace trim,
+   blank-run collapse, JSON minify). The `Rule`/`RuleContext`/`Profile` types
+   are in place; `RuleResult` (marker field) and the pipeline (stash +
+   `details.pruning` wiring) gain their lossy-tier additions in the follow-up
+   pass. Config key `toolResultPruning` (sibling to `pruning`, which skill-pruner
+   owns); extension id `tool-result-pruner`. The lossy tier + recall stash is
+   that follow-up.
+3. **Measurement — RESOLVED & SHIPPED:** per-pruned-result before/after token
+   counts + which rules fired are written to `data/tool-result-pruning.jsonl`
+   by `extensions/tool-result-pruner/logger.ts`, and ingested end-to-end by the
+   analysis pipeline (`ToolResultPruningSourceEvent` -> `PreparedToolResultPruningRow`
+   -> DuckDB `tool_result_pruning` table -> `tool-result-pruning-impact.json`
+   site-data artifact with by-rule and by-tool aggregates). Per-rule savings are
+   visible on the dashboard; the lossy tier will lean on this to decide which
+   rules are worth shipping and whether any starved the agent.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
-5. **Config** — `toolResultPruning: { enabled, profile }` block, sibling to
-   `skill-pruner`'s `disablePruning` (do not overload that flag). Tier-1 always
-   on; tier-2 off but profile-selectable (a security-focused profile keeps
-   permissions).
+5. **Config — RESOLVED:** `toolResultPruning: { enabled, profile }` block in
+   `settings.json`, sibling to `pruning` (do not overload that flag). Tier-1
+   always on; tier-2 profile-selectable (`default` runs lossy; `security`
+   keeps permissions/columns). Toggleable via `PIE_EXTENSION_TOGGLES_JSON`.
 6. **Orthogonal win (separate effort):** `before_provider_request` to trim tool
    descriptions / drop unused tools (the llmtrim/yoke `PassDropUnusedSkills`
    idea — i.e. extend `skill-pruner`). Do not conflate with tool-result pruning.
+
+### Implementation status
+
+- `extensions/tool-result-pruner/` — MVP lossless tier. Files: `index.ts`
+  (registers `pi.on("tool_result")`), `config.ts` (cached loader + toggle),
+  `types.ts`, `rules.ts` (4 lossless rules, §7.2 order), `pipeline.ts` (guards
+  + orchestration), `types-global.d.ts`, `test/` (rules, pipeline, config).
+- Wired into `extension/package.json` (`typecheck:tool-result-pruner`),
+  root `package.json` (`extensions:typecheck` / `extensions:test`), and
+  `scripts/run-tests.mjs` (package `tool-result-pruner`, 98% lines gate).
+- `settings.json` carries the default `toolResultPruning` block.
+- Analytics wired: `logger.ts` records `tool_result_pruned` events;
+  `analysis/scripts/{contracts,source,prepare,duckdb,site-data}.ts` ingest
+  them into a `tool_result_pruning` DuckDB table and a
+  `tool-result-pruning-impact.json` site-data artifact (by-rule + by-tool
+  token-saved aggregates). Covered by `analysis/test/tool-result-pruning.test.ts`.
 
 ## 10. References
 

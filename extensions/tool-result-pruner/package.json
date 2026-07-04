@@ -1,0 +1,10 @@
+{
+  "name": "tool-result-pruner",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
