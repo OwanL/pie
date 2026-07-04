@@ -14,6 +14,8 @@ import { resolveAgentDir } from '../../shared/agent-dir-resolution';
 import type { ChatPrefs, SessionSummary } from '../../shared/protocol';
 import { SessionService } from './service';
 import { SessionServiceEvents } from './events';
+import { readProxySettings } from './proxy-settings';
+import { ensureProxyMasterKey, PROXY_MASTER_KEY_ENV } from './proxy-master-key';
 import { SessionServiceState } from './state';
 import { buildRestoredSessionSummaries } from '../core/restored-session-summaries';
 import { bootLog } from '../util/audit';
@@ -235,11 +237,11 @@ function setupInTreeAuthEnv(): void {
  * Candidates (pie.agentDir setting, PI_CODING_AGENT_DIR env var, and the
  * dir above the extension package) are VALIDATED: a dir is only trusted if
  * it actually contains settings.json. This is what makes the recurring
- * "umans provider missing" failure self-healing: a STALE pie.agentDir
+ * "custom provider missing" failure self-healing: a STALE pie.agentDir
  * pointing at a path from another machine (or after a repo relocation) used
  * to silently overwrite a correct PI_CODING_AGENT_DIR env var, leaving the
  * backend to read models.json from a non-existent dir — so custom providers
- * (umans is defined ONLY in models.json, never built-in) vanished with no
+ * (defined ONLY in models.json, never built-in) vanished with no
  * error. Now stale candidates are rejected (logged) and resolution falls
  * through to a valid dir instead of clobbering a good env var.
  *
@@ -266,7 +268,7 @@ function setupAgentDirEnv(options: StartSessionBackendOptions): void {
       .join('; ');
     appendPieLog('warn', 'startup', 'no valid agent dir found', {
       tried: tried || 'none',
-      note: 'Custom providers like "umans" will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
+      note: 'Custom providers will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
     });
     return;
   }
@@ -321,16 +323,16 @@ async function startBackendWithLogging(
 /**
  * Start the local LiteLLM proxy (pie/proxy/) before the PI backend, so any
  * provider whose `baseUrl` in models.json points at 127.0.0.1:proxyPort is
- * already reachable when the backend issues its first request. This is the
- * missing throughput governor for umans' "4 concurrent active sessions"
- * limit — see docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
+ * already reachable when the backend issues its first request. This enforces
+ * per-provider concurrency limits centrally — see
+ * docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
  *
  * FAILED-LOUD policy: if `pie.useProxy` is on and the proxy can't become
  * ready, dispatch a `NoticeShown` and return false so the caller skips the
- * backend start. There is NO silent fallback to direct umans — by design —
- * because models.json would point at a dead port and every umans request
+ * backend start. There is NO silent fallback to direct routing — by design —
+ * because models.json would point at a dead port and every proxied request
  * would hang/429 opaquely. The user fixes the proxy (UI notice explains how)
- * and reloads the window; Copilot/Ollama remain usable via a direct path
+ * and reloads the window; direct providers (Copilot/Ollama) remain usable
  * only if the user turns `pie.useProxy` off.
  *
  * Skipped entirely (returns true) when `pie.useProxy` is false, so users who
@@ -362,18 +364,31 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
   const port = config.get<number>('proxyPort', 4000);
   const host = '127.0.0.1';
 
-  // LiteLLM is DB-less, so its `master_key` MUST equal the umans key the
-  // backend sends (pi's auth.json key == UMANS_API_KEY). If the env var is
-  // missing, the proxy can't authenticate the backend and 400s with
-  // "No connected db". Fail loud here rather than boot a broken proxy.
-  if (!process.env.UMANS_API_KEY) {
+  // LiteLLM is DB-less, so the backend's Authorization MUST match the proxy
+  // `master_key`. The master key is a pie-owned LOCAL gate (the proxy binds
+  // 127.0.0.1) — auto-generated + persisted on first run, and DECOUPLED from
+  // any provider's upstream key, so multiple proxied providers each with their
+  // own upstream key all auth to the proxy with this one value. Set it in
+  // process.env before spawning the proxy + backend (both inherit it).
+  const masterKey = await ensureProxyMasterKey(options.context.secrets);
+  process.env[PROXY_MASTER_KEY_ENV] = masterKey;
+
+  // Each configured proxied provider needs its upstream key env var set (litellm
+  // sends `os.environ/<apiKeyEnv>` to the upstream). Fail loud listing any that
+  // are missing rather than boot a proxy that will 401 every request to them.
+  const proxySettings = await readProxySettings();
+  const missingProviderEnvs = Object.entries(proxySettings.providers)
+    .map(([name, p]) => ({ name, env: p.apiKeyEnv, set: !!process.env[p.apiKeyEnv] }))
+    .filter((p) => !p.set);
+  if (missingProviderEnvs.length > 0) {
+    const listing = missingProviderEnvs.map((p) => `${p.env} (provider "${p.name}")`).join(', ');
     options.dispatchArch({
       kind: 'NoticeShown',
       notice:
-        'pie.useProxy is on but UMANS_API_KEY is not set in the environment. ' +
-        'The LiteLLM proxy needs it as its master_key and upstream credential. ' +
-        'Set it (setx UMANS_API_KEY sk-... on Windows, or export on Unix) and reload, ' +
-        'or turn pie.useProxy off to route umans direct (no concurrency limit).',
+        `pie.useProxy is on but these provider API key env vars are not set: ${listing}. ` +
+        'The LiteLLM proxy needs each proxied provider\'s upstream key to route to it. ' +
+        'Set them and reload, remove the providers from the proxy config, ' +
+        'or turn pie.useProxy off to route providers direct (no concurrency limit).',
     });
     return false;
   }
@@ -388,15 +403,17 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
     // Record the running proxy + its start options so later edits can restart it.
     options.service.setProxyRuntime(proxy, startOptions);
     bootLog('session-startup', 'proxy.started', { port });
-    // No env-var injection needed: models.json uses `$UMANS_API_KEY`, which the
-    // backend resolves itself from auth.json or the inherited environment.
+    // The proxied-provider apiKey in models.json is `$PIE_PROXY_MASTER_KEY`
+    // (the local gate pie just set), which the backend resolves from the
+    // inherited environment. Each provider's UPSTREAM key is sent by litellm
+    // (api_key: os.environ/<apiKeyEnv> in litellm_config.yaml), not by pi.
     return true;
   } catch (err) {
     options.dispatchArch({
       kind: 'NoticeShown',
       notice:
         `Failed to start the LiteLLM proxy: ${toErrorMessage(err)}. ` +
-        'umans will be unavailable until this is fixed. Run `npm run proxy` in a terminal to see the error, ' +
+        'Proxied providers will be unavailable until this is fixed. Run `npm run proxy` in a terminal to see the error, ' +
         'or turn off pie.useProxy in settings to route providers direct (no concurrency limit).',
     });
     bootLog('session-startup', 'proxy.startFailed', { message: toErrorMessage(err) });
@@ -516,7 +533,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
 
-  // Start the LiteLLM proxy before the backend so proxied providers (umans)
+  // Start the LiteLLM proxy before the backend so proxied providers
   // are reachable on the first request. Fails loud — see startProxyWithLogging.
   const proxyReady = await startProxyWithLogging(options);
   if (!proxyReady) {

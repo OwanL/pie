@@ -45,14 +45,13 @@ function asStringRecord(value: unknown): Record<string, string> | undefined {
 /** Coerce an unknown stored provider entry into a valid `ProxyProviderUpstream`, */
 function coerceProvider(name: string, raw: unknown): ProxyProviderUpstream | null {
   if (!isPlainObject(raw)) return null;
-  const fallback = DEFAULT_PROXY_SETTINGS.providers.umans;
   const apiBase = typeof raw.apiBase === 'string' ? raw.apiBase : '';
   const apiKeyEnv = typeof raw.apiKeyEnv === 'string' ? raw.apiKeyEnv : '';
   const litellmProvider = typeof raw.litellmProvider === 'string' ? raw.litellmProvider : '';
   const maxConcurrentRequests =
     typeof raw.maxConcurrentRequests === 'number' && raw.maxConcurrentRequests >= 1
       ? raw.maxConcurrentRequests
-      : fallback.maxConcurrentRequests;
+      : 1;
   const litellmModelInfoId = typeof raw.litellmModelInfoId === 'string' ? raw.litellmModelInfoId : '';
   const modelListOrder = asStringArray(raw.modelListOrder) ?? [];
   const alias = asStringRecord(raw.alias) ?? {};
@@ -111,9 +110,9 @@ export async function readProxySettings(): Promise<ProxySettings> {
         if (coerced) providers[name] = coerced;
       }
     }
-    if (Object.keys(providers).length === 0) {
-      providers.umans = { ...DEFAULT_PROXY_SETTINGS.providers.umans, modelListOrder: [...DEFAULT_PROXY_SETTINGS.providers.umans.modelListOrder], alias: { ...DEFAULT_PROXY_SETTINGS.providers.umans.alias } };
-    }
+    // No hardcoded provider fallback — providers are entirely user-configured
+    // in settings.json. An empty `providers` is valid (the proxy boots with no
+    // routes); the gateway + master_key still apply.
 
     return { gateway, providers };
   } catch {

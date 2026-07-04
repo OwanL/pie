@@ -22,7 +22,7 @@
         "dropParams": true
       },
       "generalSettings": {
-        "masterKeyEnv": "UMANS_API_KEY"
+        "masterKeyEnv": "PIE_PROXY_MASTER_KEY"
       }
     },
     "providers": {

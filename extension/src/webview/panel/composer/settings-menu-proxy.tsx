@@ -214,17 +214,11 @@ export function ProxySection({ proxySettings, onSetProxySettings }: ProxySection
           ariaLabel="proxy litellm drop params"
           onToggle={() => setGateway({ litellmSettings: { dropParams: !gateway.litellmSettings.dropParams } })}
         />
-        <TextRow
-          label="Master key env"
-          value={gateway.generalSettings.masterKeyEnv}
-          ariaLabel="proxy master key env var"
-          onCommit={(masterKeyEnv) => setGateway({ generalSettings: { masterKeyEnv } })}
-        />
         {Object.entries(proxySettings.providers).map(([name, provider]) => (
           <ProviderGroup key={name} name={name} provider={provider} onSetProxySettings={onSetProxySettings} />
         ))}
         <div class="toolbar-settings-item-hint">
-          Changes regenerate the proxy config and restart the LiteLLM proxy. In-flight umans requests may be interrupted.
+          Changes regenerate the proxy config and restart the LiteLLM proxy. In-flight proxied requests may be interrupted. The master key is pie-managed (auto-generated). Add providers in settings.json `proxy.providers` + models.yaml.
         </div>
       </div>
     </div>

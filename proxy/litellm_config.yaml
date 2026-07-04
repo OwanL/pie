@@ -97,4 +97,4 @@ router_settings:
 litellm_settings:
   drop_params: true
 general_settings:
-  master_key: os.environ/UMANS_API_KEY
+  master_key: os.environ/PIE_PROXY_MASTER_KEY

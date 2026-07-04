@@ -2,23 +2,24 @@
  * ProxyService — spawns and supervises the local LiteLLM proxy.
  *
  * The proxy (pie/proxy/, an isolated `uv run litellm` Python process) fronts
- * the API-key providers (umans + future) so per-provider concurrency limits
- * can be enforced centrally — the missing throughput governor for umans'
- * "4 concurrent active sessions" account limit. See
+ * the API-key providers configured in settings.json `proxy.providers` so
+ * per-provider concurrency limits can be enforced centrally. See
  * docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
  *
  * Lifecycle mirrors `BackendClient`: spawn → wait for a readiness signal →
  * resolve / reject. The readiness signal is an HTTP 200 from
  * `/health/liveness` instead of a JSON-RPC `backend.ready` event. On failure
  * the caller (startup.ts) dispatches a `NoticeShown` and DOES NOT start the
- * backend — "fail loud" by design (no silent fallback to direct umans).
+ * backend — "fail loud" by design (no silent fallback to direct routing).
  *
- * GitHub Copilot and Ollama stay direct (not routed through here); only the
- * providers whose `baseUrl` in models.json points at 127.0.0.1:proxyPort use
- * this. The proxy's `master_key` in litellm_config.yaml (set to
- * `os.environ/UMANS_API_KEY`) is the localhost gate the backend sends as the
- * provider `apiKey` (`$UMANS_API_KEY` in models.json) — it is not a cloud
- * secret. DB-less LiteLLM requires the Authorization to match `master_key`.
+ * Providers without a `proxy.providers` entry (e.g. GitHub Copilot, Ollama)
+ * stay direct; only the providers whose `baseUrl` in models.json points at
+ * 127.0.0.1:proxyPort use this. The proxy's `master_key` in litellm_config.yaml
+ * (set to `os.environ/PIE_PROXY_MASTER_KEY`) is a pie-managed localhost gate the
+ * backend sends as the proxied-provider `apiKey` (`$PIE_PROXY_MASTER_KEY` in
+ * models.json) — it is not a cloud secret and is decoupled from each provider's
+ * upstream key (which litellm sends via `api_key: os.environ/<apiKeyEnv>`).
+ * DB-less LiteLLM requires the Authorization to match `master_key`.
  */
 
 import * as cp from 'node:child_process';
@@ -89,10 +90,11 @@ export class ProxyService implements vscode.Disposable {
     // leaves it running — correct, since we didn't spawn it and it may belong
     // to another window.
     //
-    // Limitation: if UMANS_API_KEY changed since the holder was started, its
-    // master_key is stale and umans will 401. This is a rare edge case (key
-    // rotation between VS Code launches) traded for ~4.5s saved per boot; the
-    // user can recover by killing the port holder or changing pie.proxyPort.
+    // Limitation: if the pie-managed master key (PIE_PROXY_MASTER_KEY) changed
+    // since the holder was started, its master_key is stale and proxied
+    // requests will 401. The key is persisted (stable across reloads), so this
+    // is rare; the user can recover by killing the port holder or changing
+    // pie.proxyPort.
     if (await this.healthCheck(baseUrl, 1500)) {
       bootLog('proxy-service', 'start.reused', { port });
       return { port, baseUrl, pid: 0 };

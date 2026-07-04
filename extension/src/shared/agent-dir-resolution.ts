@@ -5,16 +5,16 @@ import * as path from 'node:path';
  *
  * The backend (pi SDK) resolves its config dir via `getAgentDir()`, which reads
  * `PI_CODING_AGENT_DIR`. That dir must contain `settings.json` and `models.json`
- * — the latter is the ONLY place custom providers (e.g. `umans`) are defined. A
- * built-in provider list without `umans` is the symptom of a wrong/empty agent
- * dir, NOT a missing auth key.
+ * — the latter is the ONLY place custom providers are defined. A
+ * built-in provider list missing configured custom providers is the symptom of a
+ * wrong/empty agent dir, NOT a missing auth key.
  *
  * This is a recurring failure: the VS Code User setting `pie.agentDir` is a
  * persisted absolute path that goes STALE whenever the repo is relocated or the
  * config is copied across machines (the installer writes the current path, but
  * a stale value already on disk — from a previous install on another machine —
  * is blindly trusted and silently overrides the correct OS env var). The result
- * is "umans provider missing" with no visible error.
+ * is "custom provider missing" with no visible error.
  *
  * The robust contract here: a candidate dir is only trusted if it actually
  * contains `settings.json` (the file that defines an agent dir). Candidates are
@@ -45,7 +45,7 @@ export interface ResolvedAgentDir {
   /**
    * Diagnostics for the caller to log/surface. Populated when a candidate was
    * considered but rejected (e.g. a stale `pie.agentDir` pointing at a path
-   * that no longer exists) so the user can see WHY umans disappeared instead
+   * that no longer exists) so the user can see WHY custom providers disappeared instead
    * of debugging a silent empty-provider list.
    */
   rejections: AgentDirRejection[];

@@ -396,19 +396,15 @@ export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
   gateway: {
     routerSettings: { numRetries: 2, retryAfter: true, timeout: 600 },
     litellmSettings: { dropParams: true },
-    generalSettings: { masterKeyEnv: 'UMANS_API_KEY' },
+    // Pie-managed local proxy gate (auto-generated + persisted, see
+    // proxy-master-key.ts). NOT a provider key — decoupled so any number of
+    // proxied providers each with their own upstream key auth to the proxy.
+    generalSettings: { masterKeyEnv: 'PIE_PROXY_MASTER_KEY' },
   },
-  providers: {
-    umans: {
-      apiBase: 'https://api.code.umans.ai/v1',
-      apiKeyEnv: 'UMANS_API_KEY',
-      litellmProvider: 'openai',
-      maxConcurrentRequests: 4,
-      litellmModelInfoId: 'umans-shared',
-      modelListOrder: ['umans','umans-coder','umans-flash','umans-kimi-k2.7','umans-kimi-k2.6','umans-glm-5.2','umans-glm-5.1','umans-qwen3.6-35b-a3b'],
-      alias: { umans: 'umans-coder' },
-    },
-  },
+  // No providers are hardcoded — providers are user-configured in settings.json
+  // `proxy.providers` (one entry per proxied provider). Adding a provider is a
+  // config-only operation (settings.json + models.yaml), no code change.
+  providers: {},
 };
 
 /** Deep-merge a partial proxy-settings update into the current settings.
