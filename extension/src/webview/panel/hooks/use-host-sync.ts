@@ -355,6 +355,15 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
 
   if (hostChanged || sessionChanged) {
     ctx.clearTransientUi();
+    // The collapsible cache is keyed by globally-unique message/tool ids, so
+    // it never goes stale across session switches. Clear it ONLY on a backend
+    // restart (hostChanged), where the session data is genuinely new. Skipping
+    // the clear on a plain session switch preserves the user's expand/collapse
+    // state when switching back to a previously-viewed session and avoids a
+    // re-resolve re-render of every visible collapsible per switch.
+    if (hostChanged) {
+      clearCollapsibleCache();
+    }
   } else {
     // Brief D length/identity guard: the optimistic overlay is reconciled
     // ONLY by localId identity — a confirmed host message (id === localId)
@@ -471,7 +480,13 @@ export function useHostSync(
     setInputsRestore(null);
     setOptimisticMessages([]);
     pendingDraftRestoreRef.current.clear();
-    clearCollapsibleCache();
+    // The collapsible cache is NOT cleared here. It is keyed by globally-unique
+    // message/tool ids (`reasoning:<messageId>:<index>`, `tool:<toolCallId>`),
+    // so it never goes stale across session switches — clearing it here would
+    // only discard the user's expand/collapse state when switching back to a
+    // previously-viewed session and force a re-resolve re-render of every
+    // visible collapsible on each switch. It is cleared separately, only on a
+    // backend restart (hostChanged), in `handleStateMessage`.
   }, []);
 
   const resetPerSessionState = useCallback(() => {

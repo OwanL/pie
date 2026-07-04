@@ -5,7 +5,10 @@ import { syncCollapsibleOpenState } from '../collapsible-state';
 const collapsibleOpenByKey = new Map<string, boolean>();
 const collapsibleDefaultByKey = new Map<string, boolean>();
 
-/** Clear the module-level collapsible cache. Called on host-instance/session change to prevent stale open/closed state from a previous session. */
+/** Clear the module-level collapsible cache. Called on host-instance change
+ *  (backend restart) to prevent stale open/closed state from a previous backend
+ *  instance. NOT called on session switch — keys are globally-unique
+ *  message/tool ids, so open/closed state is preserved across tab switches. */
 export function clearCollapsibleCache(): void {
   collapsibleOpenByKey.clear();
   collapsibleDefaultByKey.clear();

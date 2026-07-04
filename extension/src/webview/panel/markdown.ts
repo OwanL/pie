@@ -62,12 +62,20 @@ marked.use({
  * lag despite "just rendering text".
  *
  * Entry-count bound (rather than byte bound) keeps bookkeeping cheap; typical
- * markdown fragments are a few KB so 256 entries is ample for the visible
- * window plus recently-scrolled history. LRU refresh on hit keeps the
- * frequently-rendered visible fragments resident even as streaming
+ * markdown fragments are a few KB. The bound is sized for multi-session tab
+ * switching: each host session switch swaps the visible transcript, and
+ * without a resident cache every visible message of the newly-active session
+ * re-parses (marked + per-code-block hljs.highlight + DOMPurify)
+ * synchronously on the first frame — a blocking burst that holds the
+ * `transcript-positioning` opacity mask up. 256 entries thrash across a
+ * handful of active sessions (~5–8 × ~40 messages), re-parsing on every
+ * back-and-forth; 512 keeps recent sessions resident so switching back to a
+ * previously-viewed session renders from cache with no parse burst (memory
+ * stays bounded at ~few MB for typical fragments). LRU refresh on hit keeps
+ * the frequently-rendered visible fragments resident even as streaming
  * intermediate snapshots churn through the cache.
  */
-const MARKDOWN_CACHE_MAX = 256;
+const MARKDOWN_CACHE_MAX = 512;
 const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX);
 
 /**
