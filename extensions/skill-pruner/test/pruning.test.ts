@@ -32,6 +32,7 @@ const {
 	resolvePrepassBudgets,
 	prepassTimeoutMs,
 	clonePruningConfig,
+	resolveAuth,
 	isTransportError,
 	isTransportErrorMessage,
 	PREPASS_MAX_TRANSPORT_RETRIES,
@@ -728,4 +729,41 @@ test("clonePruningConfig: deep-clones the prepass block (overrides are not share
 test("clonePruningConfig: leaves prepass undefined when absent", () => {
 	const clone = clonePruningConfig(config());
 	assert.equal(clone.prepass, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// resolveAuth: the configured oauthRaceBackoffMs gates the OAuth-token-race
+// re-resolve. `0` skips it (one getApiKeyAndHeaders call); a positive value
+// re-resolves once (two calls). Asserted via call count — no timing assertion,
+// so the test is deterministic.
+// ---------------------------------------------------------------------------
+
+function authRegistryStub(stale: boolean) {
+	let calls = 0;
+	const registry = {
+		getApiKeyAndHeaders: async () => {
+			calls++;
+			// `stale` simulates the OAuth race: ok=true but no usable apiKey, the
+			// exact shape that triggers the copilot re-resolve branch.
+			return { ok: true, apiKey: stale ? undefined : "bearer-token" };
+		},
+	};
+	return { registry, calls: () => calls };
+}
+
+const copilotModel = { id: "gpt-5-mini", provider: "github-copilot" };
+
+test("resolveAuth: oauthRaceBackoffMs=0 skips the re-resolve (single call, fails open)", async () => {
+	const { registry, calls } = authRegistryStub(true);
+	const auth = await resolveAuth({ modelRegistry: registry }, copilotModel, 0);
+	assert.equal(calls(), 1, "must not re-resolve when backoff is 0");
+	assert.equal(auth.authFailed, true, "stale key with no re-resolve fails open");
+});
+
+test("resolveAuth: positive oauthRaceBackoffMs re-resolves once (two calls)", async () => {
+	const { registry, calls } = authRegistryStub(true);
+	// 1ms backoff keeps the test fast while still exercising the sleep path.
+	const auth = await resolveAuth({ modelRegistry: registry }, copilotModel, 1);
+	assert.equal(calls(), 2, "must re-resolve exactly once on a stale copilot key");
+	assert.equal(auth.authFailed, true, "still-stale key after re-resolve fails open");
 });
