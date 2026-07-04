@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type { PruningConfig, PruningMode, PruningStrategy, ToolPruningConfig } from "./types.js";
+import type { PrepassConfig, PruningConfig, PruningMode, PruningStrategy, ToolPruningConfig } from "./types.js";
 import { toErrorMessage, parseJsonOrThrow } from "../../shared/error-message.js";
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
@@ -28,6 +28,10 @@ export const DEFAULT_CONFIG: PruningConfig = {
 		alwaysKeep: [],
 	},
 	tools: cloneDefaultToolConfig(),
+	// `prepass` intentionally absent: no overrides → the built-in timeout /
+	// retry budgets in src/prepass.ts apply. Populated only when the user
+	// supplies a `pruning.prepass` block.
+	prepass: undefined,
 };
 
 const VALID_MODES = new Set<PruningMode>(["auto", "off", "shadow"]);
@@ -46,6 +50,7 @@ function cloneDefault(): PruningConfig {
 			alwaysKeep: [...DEFAULT_CONFIG.skills.alwaysKeep],
 		},
 		tools: cloneDefaultToolConfig(),
+		prepass: undefined,
 	};
 }
 
@@ -74,6 +79,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isPositiveInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -120,6 +129,21 @@ function assignPositiveInteger(
 		return;
 	}
 	if (isPositiveInteger(value)) {
+		assign(value);
+		return;
+	}
+	warn(invalidMessage);
+}
+
+function assignNonNegativeInteger(
+	value: unknown,
+	assign: (next: number) => void,
+	invalidMessage: string,
+): void {
+	if (value === undefined) {
+		return;
+	}
+	if (isNonNegativeInteger(value)) {
 		assign(value);
 		return;
 	}
@@ -280,6 +304,59 @@ export function loadConfig(
 			},
 			"invalid pruning.tools.alwaysKeep; using default []",
 		);
+	}
+
+	// Parse prepass config (timeouts + retry budgets). Absent → undefined,
+	// meaning the built-in budgets in src/prepass.ts apply unchanged.
+	if (isRecord(raw.prepass)) {
+		const rawPrepass = raw.prepass;
+		const prepass: PrepassConfig = {};
+
+		if (isRecord(rawPrepass.timeoutMs)) {
+			const timeoutMs: Record<string, number> = {};
+			for (const [level, ms] of Object.entries(rawPrepass.timeoutMs)) {
+				if (isPositiveInteger(ms)) {
+					timeoutMs[level] = ms;
+				} else {
+					warn(`Invalid timeoutMs for thinking level '${level}'; must be a positive integer; skipping`);
+				}
+			}
+			if (Object.keys(timeoutMs).length > 0) {
+				prepass.timeoutMs = timeoutMs;
+			}
+		} else if (rawPrepass.timeoutMs !== undefined) {
+			warn("invalid pruning.prepass.timeoutMs; must be an object of thinking-level → ms; ignoring");
+		}
+
+		assignNonNegativeInteger(
+			rawPrepass.maxTransportRetries,
+			(value) => {
+				prepass.maxTransportRetries = value;
+			},
+			"invalid pruning.prepass.maxTransportRetries; must be a non-negative integer; using default",
+		);
+
+		assignNonNegativeInteger(
+			rawPrepass.transportBackoffBaseMs,
+			(value) => {
+				prepass.transportBackoffBaseMs = value;
+			},
+			"invalid pruning.prepass.transportBackoffBaseMs; must be a non-negative integer; using default",
+		);
+
+		assignNonNegativeInteger(
+			rawPrepass.oauthRaceBackoffMs,
+			(value) => {
+				prepass.oauthRaceBackoffMs = value;
+			},
+			"invalid pruning.prepass.oauthRaceBackoffMs; must be a non-negative integer; using default",
+		);
+
+		// Only attach when at least one override was set, so the default path
+		// (empty block or all-invalid) stays `undefined` → pure built-in defaults.
+		if (Object.keys(prepass).length > 0) {
+			config.prepass = prepass;
+		}
 	}
 
 	return config;

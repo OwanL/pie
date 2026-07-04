@@ -29,9 +29,13 @@ const {
 	applySkillSelection,
 	applyToolSelection,
 	runPruningPrepass,
+	resolvePrepassBudgets,
+	prepassTimeoutMs,
+	clonePruningConfig,
 	isTransportError,
 	isTransportErrorMessage,
 	PREPASS_MAX_TRANSPORT_RETRIES,
+	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 	getRecentConversation,
 	subagentContext,
 	SKILLS_BLOCK_RE,
@@ -624,4 +628,104 @@ test("runPruningPrepass: thrown transport error retried before failing open", as
 	assert.equal(calls, 2, "thrown transport error should be retried");
 	assert.deepEqual(result.prunedSkills, ["beta"]);
 	assert.equal(result.error, null);
+});
+
+// ---------------------------------------------------------------------------
+// prepass budgets: `pruning.prepass` overrides flow through to the LLM call.
+// resolvePrepassBudgets merges config over built-in defaults; prepassTimeoutMs
+// honors per-level overrides; runPruningPrepass forwards the configured
+// maxTransportRetries as options.maxRetries.
+// ---------------------------------------------------------------------------
+
+test("resolvePrepassBudgets: returns built-in defaults when prepass absent", () => {
+	const b = resolvePrepassBudgets(config());
+	assert.equal(b.maxTransportRetries, PREPASS_MAX_TRANSPORT_RETRIES);
+	assert.equal(b.timeoutOverrides, undefined);
+});
+
+test("resolvePrepassBudgets: merges config overrides over defaults", () => {
+	const cfg = config({ prepass: { timeoutMs: { minimal: 12000 }, maxTransportRetries: 5, transportBackoffBaseMs: 250 } });
+	const b = resolvePrepassBudgets(cfg);
+	assert.deepEqual(b.timeoutOverrides, { minimal: 12000 });
+	assert.equal(b.maxTransportRetries, 5);
+	assert.equal(b.transportBackoffBaseMs, 250);
+});
+
+test("prepassTimeoutMs: uses override when present, built-in otherwise", () => {
+	assert.equal(prepassTimeoutMs("minimal", 0, { minimal: 12000 }), 12000);
+	// 'low' not overridden → falls back to built-in LLM_TIMEOUT_MS_BY_THINKING_LEVEL.low
+	assert.equal(prepassTimeoutMs("low", 0, { minimal: 12000 }), LLM_TIMEOUT_MS_BY_THINKING_LEVEL.low);
+	// no overrides → built-in
+	assert.equal(prepassTimeoutMs("high", 0), LLM_TIMEOUT_MS_BY_THINKING_LEVEL.high);
+	// unknown level → falls back to minimal built-in
+	assert.equal(prepassTimeoutMs("bogus", 0, { minimal: 12000 }), 12000);
+});
+
+test("prepassTimeoutMs: scales by attempt index", () => {
+	assert.equal(prepassTimeoutMs("minimal", 0, { minimal: 10000 }), 10000);
+	assert.equal(prepassTimeoutMs("minimal", 1, { minimal: 10000 }), 20000);
+	assert.equal(prepassTimeoutMs("minimal", 2, { minimal: 10000 }), 30000);
+});
+
+test("runPruningPrepass: forwards configured maxTransportRetries as options.maxRetries", async () => {
+	const cfg = config({ prepass: { maxTransportRetries: 7 } });
+	const seenMaxRetries: number[] = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number }) => {
+		seenMaxRetries.push(options.maxRetries as number);
+		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+	};
+	await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub() },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.ok(seenMaxRetries.length >= 1, "prepass must have run at least once");
+	for (const mr of seenMaxRetries) {
+		assert.equal(mr, 7, `every call should forward the configured maxRetries; saw ${mr}`);
+	}
+});
+
+test("runPruningPrepass: forwards default maxRetries when prepass absent", async () => {
+	const cfg = config();
+	const seenMaxRetries: number[] = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number }) => {
+		seenMaxRetries.push(options.maxRetries as number);
+		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+	};
+	await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub() },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.ok(seenMaxRetries.length >= 1);
+	for (const mr of seenMaxRetries) {
+		assert.equal(mr, PREPASS_MAX_TRANSPORT_RETRIES);
+	}
+});
+
+test("clonePruningConfig: deep-clones the prepass block (overrides are not shared by reference)", () => {
+	const cfg = config({
+		prepass: {
+			timeoutMs: { minimal: 12000, low: 20000 },
+			maxTransportRetries: 3,
+			transportBackoffBaseMs: 750,
+			oauthRaceBackoffMs: 0,
+		},
+	});
+	const clone = clonePruningConfig(cfg);
+	assert.deepEqual(clone.prepass, cfg.prepass);
+	assert.notEqual(clone.prepass, cfg.prepass, "prepass object must be a new instance");
+	assert.notEqual(clone.prepass!.timeoutMs, cfg.prepass!.timeoutMs, "timeoutMs map must be a new instance");
+	// Mutating the clone must not leak back into the original.
+	clone.prepass!.timeoutMs!.minimal = 99999;
+	clone.prepass!.maxTransportRetries = 99;
+	assert.equal(cfg.prepass!.timeoutMs!.minimal, 12000, "original timeoutMs untouched");
+	assert.equal(cfg.prepass!.maxTransportRetries, 3, "original maxTransportRetries untouched");
+});
+
+test("clonePruningConfig: leaves prepass undefined when absent", () => {
+	const clone = clonePruningConfig(config());
+	assert.equal(clone.prepass, undefined);
 });

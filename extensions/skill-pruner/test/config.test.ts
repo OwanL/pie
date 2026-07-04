@@ -235,3 +235,89 @@ test("loadConfig warns on invalid tools ceiling", () => {
 	assert.equal(result.tools.ceiling, DEFAULT_TOOL_CONFIG.ceiling);
 	assert.ok(warnings.some((w) => w.includes("ceiling")));
 });
+
+// ---------------------------------------------------------------------------
+// prepass: timeout / retry budgets. Absent → undefined (built-in defaults in
+// src/prepass.ts apply); present → only valid fields are attached.
+// ---------------------------------------------------------------------------
+
+test("loadConfig leaves prepass undefined when absent", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({ pruning: { mode: "auto" } })));
+	assert.equal(result.prepass, undefined);
+});
+
+test("loadConfig leaves prepass undefined for an empty prepass block", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({ pruning: { prepass: {} } })));
+	assert.equal(result.prepass, undefined);
+});
+
+test("loadConfig parses a full prepass block", () => {
+	const settingsPath = tempSettings(JSON.stringify({
+		pruning: {
+			prepass: {
+				timeoutMs: { minimal: 20000, low: 30000 },
+				maxTransportRetries: 4,
+				transportBackoffBaseMs: 500,
+				oauthRaceBackoffMs: 0,
+			},
+		},
+	}));
+	const result = loadConfig(settingsPath);
+	assert.deepEqual(result.prepass, {
+		timeoutMs: { minimal: 20000, low: 30000 },
+		maxTransportRetries: 4,
+		transportBackoffBaseMs: 500,
+		oauthRaceBackoffMs: 0,
+	});
+});
+
+test("loadConfig parses a partial timeoutMs map", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { timeoutMs: { minimal: 12000 } } },
+	})));
+	assert.deepEqual(result.prepass?.timeoutMs, { minimal: 12000 });
+	assert.equal(result.prepass?.maxTransportRetries, undefined);
+});
+
+test("loadConfig drops invalid timeoutMs entries and warns", () => {
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { timeoutMs: { minimal: 20000, bad: -1, also: "x" } } },
+	}))));
+	assert.deepEqual(result.prepass?.timeoutMs, { minimal: 20000 });
+	assert.ok(warnings.some((w) => w.includes("timeoutMs for thinking level 'bad'")));
+	assert.ok(warnings.some((w) => w.includes("timeoutMs for thinking level 'also'")));
+});
+
+test("loadConfig drops an all-invalid timeoutMs map (prepass stays undefined)", () => {
+	const { result } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { timeoutMs: { bad: -1 } } },
+	}))));
+	assert.equal(result.prepass, undefined);
+});
+
+test("loadConfig warns on non-object timeoutMs", () => {
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { timeoutMs: 20000 } },
+	}))));
+	assert.equal(result.prepass, undefined);
+	assert.ok(warnings.some((w) => w.includes("pruning.prepass.timeoutMs")));
+});
+
+test("loadConfig rejects non-integer prepass budgets and warns", () => {
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { maxTransportRetries: -1, transportBackoffBaseMs: 1.5, oauthRaceBackoffMs: "x" } },
+	}))));
+	assert.equal(result.prepass, undefined);
+	assert.ok(warnings.some((w) => w.includes("maxTransportRetries")));
+	assert.ok(warnings.some((w) => w.includes("transportBackoffBaseMs")));
+	assert.ok(warnings.some((w) => w.includes("oauthRaceBackoffMs")));
+});
+
+test("loadConfig allows zero for retry/backoff budgets", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({
+		pruning: { prepass: { maxTransportRetries: 0, transportBackoffBaseMs: 0, oauthRaceBackoffMs: 0 } },
+	})));
+	assert.equal(result.prepass?.maxTransportRetries, 0);
+	assert.equal(result.prepass?.transportBackoffBaseMs, 0);
+	assert.equal(result.prepass?.oauthRaceBackoffMs, 0);
+});

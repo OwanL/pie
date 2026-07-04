@@ -34,6 +34,7 @@ export {
 	isTransportError,
 	isTransportErrorMessage,
 	PREPASS_MAX_TRANSPORT_RETRIES,
+	resolvePrepassBudgets,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 } from "./prepass.js";
@@ -244,6 +245,12 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 			ceiling: input.tools.ceiling,
 			dependencies: Object.fromEntries(Object.entries(input.tools.dependencies).map(([k, v]) => [k, [...v]])),
 			alwaysKeep: [...(input.tools.alwaysKeep ?? [])],
+		} : undefined,
+		prepass: input.prepass ? {
+			timeoutMs: input.prepass.timeoutMs ? { ...input.prepass.timeoutMs } : undefined,
+			maxTransportRetries: input.prepass.maxTransportRetries,
+			transportBackoffBaseMs: input.prepass.transportBackoffBaseMs,
+			oauthRaceBackoffMs: input.prepass.oauthRaceBackoffMs,
 		} : undefined,
 	};
 }

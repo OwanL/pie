@@ -27,6 +27,12 @@ Add a `pruning` block to `settings.json`:
     "model": "gpt-5.4-mini",
     "provider": "github-copilot",
     "thinkingLevel": "minimal",
+    "prepass": {
+      "timeoutMs": { "minimal": 30000, "low": 45000 },
+      "maxTransportRetries": 2,
+      "transportBackoffBaseMs": 1000,
+      "oauthRaceBackoffMs": 1500
+    },
     "skills": {
       "strategy": "discretion",
       "ceiling": 8,
@@ -52,6 +58,7 @@ Add a `pruning` block to `settings.json`:
 | `model` | `"gpt-5.4-mini"` | LLM model for relevance scoring |
 | `provider` | `"github-copilot"` | Provider for the scoring model |
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
+| `prepass` | _(built-in defaults)_ | Timeout / retry budgets for the LLM prepass call; see [Prepass options](#prepass-options) |
 
 ### Skills options
 
@@ -70,6 +77,27 @@ Add a `pruning` block to `settings.json`:
 | `ceiling` | `10` | Soft guidance (see skills) |
 | `dependencies` | `{ edit: [read], subagent: [bash] }` | Tool → dependency mapping; a dependency of a **kept** tool is protected from pruning |
 | `alwaysKeep` | `[]` | Tools protected from pruning regardless of the LLM's list (set via the UI's "Omitted tools (never pruned)") |
+
+### Prepass options
+
+Tunable knobs for the LLM prepass call itself (timeouts + retry budgets). Every field is optional — an absent field (or an absent `prepass` block entirely) keeps the built-in default, so you only override the budgets you want to change.
+
+| Option | Default | Description |
+|---|---|---|
+| `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
+| `maxTransportRetries` | `2` | Max transport-level retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables prepass-level transport retrying (pi-ai's own `maxRetries` is still forwarded) |
+| `transportBackoffBaseMs` | `1000` | Base (ms) for the exponential backoff between transport retries (`base * 2**(attempt-1)`). `0` retries immediately |
+| `oauthRaceBackoffMs` | `1500` | Backoff (ms) for the github-copilot OAuth-token race in `resolveAuth` (the prepass runs before the main agent's first call triggers the lazy OAuth refresh). `0` skips the re-resolve |
+
+Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`, which emit encrypted reasoning tokens before the prune-list JSON):
+
+| Thinking level | Default timeout |
+|---|---|
+| `minimal` | `30000` |
+| `low` | `45000` |
+| `medium` | `60000` |
+| `high` | `75000` |
+| `xhigh` | `90000` |
 
 ## Modes
 

@@ -241,7 +241,7 @@ export interface ResolvedAuth {
 	authFailed?: boolean;
 }
 
-export async function resolveAuth(ctx: unknown, model: unknown): Promise<ResolvedAuth> {
+export async function resolveAuth(ctx: unknown, model: unknown, oauthRaceBackoffMs: number = OAUTH_RACE_BACKOFF_MS): Promise<ResolvedAuth> {
 	const modelObj = model as Record<string, unknown> | null;
 	const isCopilot = modelObj?.provider === "github-copilot";
 
@@ -257,8 +257,10 @@ export async function resolveAuth(ctx: unknown, model: unknown): Promise<Resolve
 		// would produce a headerless request → "Authorization header is badly
 		// formatted" 400. Bridge the race by re-resolving once after a short delay,
 		// which is enough for the main agent's refresh-and-persist to land.
-		if (isCopilot && !hasUsableApiKey(result)) {
-			await sleep(OAUTH_RACE_BACKOFF_MS);
+		// A configured `0` skips the re-resolve (e.g. for a provider known not to
+		// race) and fails straight through to the headerless-request guard.
+		if (isCopilot && !hasUsableApiKey(result) && oauthRaceBackoffMs > 0) {
+			await sleep(oauthRaceBackoffMs);
 			result = await modelRegistry.getApiKeyAndHeaders(model);
 		}
 		if (result.ok && hasUsableApiKey(result)) {
@@ -280,8 +282,12 @@ function hasUsableApiKey(result: { ok?: boolean; apiKey?: string }): boolean {
 	return typeof result.apiKey === "string" && result.apiKey.trim().length > 0;
 }
 
-export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0): number {
-	const base = LLM_TIMEOUT_MS_BY_THINKING_LEVEL[thinkingLevel] ?? LLM_TIMEOUT_MS_BY_THINKING_LEVEL.minimal;
+export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0, timeoutOverrides?: Record<string, number>): number {
+	// Overrides replace specific levels of the built-in map; an unknown level
+	// falls back to the EFFECTIVE minimal (so a user who lowers `minimal` also
+	// lowers the safety-net budget for any level they didn't enumerate).
+	const effective = timeoutOverrides ? { ...LLM_TIMEOUT_MS_BY_THINKING_LEVEL, ...timeoutOverrides } : LLM_TIMEOUT_MS_BY_THINKING_LEVEL;
+	const base = effective[thinkingLevel] ?? effective.minimal;
 	return base * (attemptIndex + 1);
 }
 
@@ -346,6 +352,29 @@ export function isTransportErrorMessage(message: string): boolean {
 	return /\b(?:5\d\d|429)\b/.test(message) || /Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|ECONNRESET|ETIMEDOUT|fetch failed|network|stream ended before a terminal response event/i.test(message);
 }
 
+/** Effective timeout/retry budgets for a prepass run. */
+export interface PrepassBudgets {
+	timeoutOverrides?: Record<string, number>;
+	maxTransportRetries: number;
+	transportBackoffBaseMs: number;
+}
+
+/**
+ * Merge `pruning.prepass` config overrides over the built-in default budgets.
+ * Absent fields keep the calibrated defaults in this module (see
+ * `LLM_TIMEOUT_MS_BY_THINKING_LEVEL`, `PREPASS_MAX_TRANSPORT_RETRIES`,
+ * `PREPASS_TRANSPORT_BACKOFF_BASE_MS`). Exposed so tests / observability can
+ * resolve the same effective budgets the run will use.
+ */
+export function resolvePrepassBudgets(config: PruningConfig): PrepassBudgets {
+	const prepass = config.prepass;
+	return {
+		timeoutOverrides: prepass?.timeoutMs,
+		maxTransportRetries: prepass?.maxTransportRetries ?? PREPASS_MAX_TRANSPORT_RETRIES,
+		transportBackoffBaseMs: prepass?.transportBackoffBaseMs ?? PREPASS_TRANSPORT_BACKOFF_BASE_MS,
+	};
+}
+
 export async function runPruningPrepass(
 	ctx: unknown,
 	llmInput: LlmPruningInput,
@@ -375,7 +404,7 @@ export async function runPruningPrepass(
 		if (!model) {
 			return emptyResult(activeConfig.thinkingLevel, `Model '${activeConfig.model}' (provider: ${activeConfig.provider}) not found in registry`);
 		}
-		auth = await resolveAuth(ctx, model);
+		auth = await resolveAuth(ctx, model, activeConfig.prepass?.oauthRaceBackoffMs);
 	} catch (error) {
 		return emptyResult(activeConfig.thinkingLevel, `LLM pruning failed: ${toErrorMessage(error)}`);
 	}
@@ -395,6 +424,11 @@ export async function runPruningPrepass(
 		);
 	}
 
+	// Resolve effective timeout/retry budgets: `pruning.prepass` overrides
+	// merged over the built-in defaults. Absent fields keep the calibrated
+	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
+	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs } = resolvePrepassBudgets(activeConfig);
+
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
 
@@ -407,8 +441,8 @@ export async function runPruningPrepass(
 				// `openai-responses.js` (`maxRetries: options?.maxRetries ?? 0`)
 				// retries 5xx/429/timeout at the SDK layer instead of surfacing
 				// the first blip as a terminal "no text response".
-				maxRetries: PREPASS_MAX_TRANSPORT_RETRIES,
-				signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index)),
+				maxRetries: maxTransportRetries,
+				signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 				...auth,
 			}, completeFn);
 
@@ -436,15 +470,15 @@ export async function runPruningPrepass(
 			//_downgrades_ the reasoning — that never fixes a transport fault.
 			if (isTransportError(result)) {
 				let recovered = false;
-				for (let r = 1; r <= PREPASS_MAX_TRANSPORT_RETRIES; r++) {
-					const backoff = PREPASS_TRANSPORT_BACKOFF_BASE_MS * 2 ** (r - 1);
-					console.warn(`[skill-pruner] transport error (attempt ${r}/${PREPASS_MAX_TRANSPORT_RETRIES}); retrying in ${backoff}ms: ${result.errorMessage}`);
+				for (let r = 1; r <= maxTransportRetries; r++) {
+					const backoff = transportBackoffBaseMs * 2 ** (r - 1);
+					console.warn(`[skill-pruner] transport error (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms: ${result.errorMessage}`);
 					await sleep(backoff);
 					try {
 						const retryResult = await runLlmPruning(llmInput, model, {
 							reasoning: thinkingLevel,
-							maxRetries: PREPASS_MAX_TRANSPORT_RETRIES,
-							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index)),
+							maxRetries: maxTransportRetries,
+							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 							...auth,
 						}, completeFn);
 						if (hasUsablePrepassResponse(retryResult)) {
@@ -500,15 +534,15 @@ export async function runPruningPrepass(
 				// there is no level to downgrade to, surfacing a transient blip
 				// as a terminal failure.
 				let recovered = false;
-				for (let r = 1; r <= PREPASS_MAX_TRANSPORT_RETRIES; r++) {
-					const backoff = PREPASS_TRANSPORT_BACKOFF_BASE_MS * 2 ** (r - 1);
-					console.warn(`[skill-pruner] ${errorMessage} (attempt ${r}/${PREPASS_MAX_TRANSPORT_RETRIES}); retrying in ${backoff}ms`);
+				for (let r = 1; r <= maxTransportRetries; r++) {
+					const backoff = transportBackoffBaseMs * 2 ** (r - 1);
+					console.warn(`[skill-pruner] ${errorMessage} (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms`);
 					await sleep(backoff);
 					try {
 						const retryResult = await runLlmPruning(llmInput, model, {
 							reasoning: thinkingLevel,
-							maxRetries: PREPASS_MAX_TRANSPORT_RETRIES,
-							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index)),
+							maxRetries: maxTransportRetries,
+							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 							...auth,
 						}, completeFn);
 						if (hasUsablePrepassResponse(retryResult)) {
