@@ -313,8 +313,8 @@
 
 .transcript-message-rail-marker {
   position: absolute;
-  right: 1px;
-  width: 8px;
+  right: 0;
+  width: 10px;
   /* `height` + `top` (center) are set inline per marker. */
   padding: 0;
   margin: 0;
@@ -332,8 +332,8 @@
 .transcript-message-rail-marker::before {
   content: '';
   display: block;
-  width: 4px;
-  height: 3px;
+  width: 5px;
+  height: 5px;
   border-radius: 2px;
   background: color-mix(in srgb, var(--panel-accent) 45%, transparent);
   transition:
@@ -344,7 +344,7 @@
 .transcript-message-rail-marker:hover::before,
 .transcript-message-rail-marker:focus-visible::before {
   background: var(--panel-accent);
-  width: 8px;
+  width: 10px;
 }
 
 .transcript-message-rail-marker:focus-visible {

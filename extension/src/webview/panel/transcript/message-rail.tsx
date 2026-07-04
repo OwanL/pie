@@ -9,8 +9,9 @@ import { getRenderableUserParts } from './parts';
 import type { TranscriptRow } from './virtual-list-rows';
 
 /** Hit-area height per marker (px). Larger than the visible bar so a small
- *  visual dot stays easy to click. */
-const MARKER_HIT_HEIGHT_PX = 12;
+ *  visual dot stays easy to click. Sized for a comfortable click target — the
+ *  visible dot is only a few px, but the full hit box is this tall. */
+const MARKER_HIT_HEIGHT_PX = 18;
 /** Minimum vertical gap between consecutive marker centers (px). Set equal to
  *  the hit height so adjacent hit areas touch without overlapping — every
  *  visible marker is individually clickable. In very long sessions dense
