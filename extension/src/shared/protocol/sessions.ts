@@ -1,6 +1,29 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
 
+/** Agent-assigned task-completion classification for a session review.
+ *  - `fully`: the session's task was completed.
+ *  - `partial`: work was done but the task is not fully resolved.
+ *  - `setback`: the session left things worse than it found them (regression /
+ *    failed approach that should be revisited). */
+export type SessionCompletion = 'fully' | 'partial' | 'setback';
+
+/** An agent review record persisted in the session-review sidecar
+ *  (`<data>/session-reviews/reviews.jsonl`). Append-only JSONL keyed by
+ *  `sessionPath`; the latest record per path wins. Owned by the
+ *  `session_review` tool (the sole writer); the backend reads + watches it to
+ *  merge `done`/`rating`/`completion`/`reviewReason`/`evaluatedAt` back into
+ *  `SessionSummary` (the SDK owns the session JSONL and exposes no append path
+ *  to pie, so the review lives in a sidecar). */
+export interface SessionReview {
+  sessionPath: string;
+  done: boolean;
+  rating: number;
+  completion: SessionCompletion;
+  reason: string;
+  evaluatedAt: string;
+}
+
 export interface SessionSummary {
   path: string;
   name: string;
@@ -15,6 +38,18 @@ export interface SessionSummary {
    * refreshes without resorting to string-content heuristics.
    */
   isPlaceholder?: boolean;
+  /** Agent review: whether the session's task is marked done. Merged from the
+   *  session-review sidecar by the backend; preserved across backend list
+   *  refreshes by `mergeSessionSummaryPreservingLocalName`. */
+  done?: boolean;
+  /** Agent review: 1–5 quality rating. */
+  rating?: number;
+  /** Agent review: task-completion classification. */
+  completion?: SessionCompletion;
+  /** Agent review: free-text reason for the rating/completion. */
+  reviewReason?: string;
+  /** ISO timestamp of the most recent review. */
+  evaluatedAt?: string;
 }
 
 export type TranscriptPageDirection = 'older' | 'newer' | 'latest';

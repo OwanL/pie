@@ -26,7 +26,7 @@ import { AggregateStatsService } from './aggregate-stats-service';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
-import type { WebviewToHostMessage, ViewState } from '../shared/protocol';
+import type { WebviewToHostMessage, ViewState, SessionSummary } from '../shared/protocol';
 import { EffectRunner } from './core/effect-runner';
 import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
@@ -219,6 +219,12 @@ export class PieExtension implements vscode.Disposable {
           void context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects);
           void context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath);
           void context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths);
+
+          // Push the currently-open tab summaries to the backend so the
+          // `session_review` tool can list "currently open" sessions (true
+          // host tab state) without a host→tool bridge. Mirrors the
+          // `warm-bash` env-push pattern.
+          this.pushOpenTabsRegistry();
         },
       },
       log: {
@@ -257,11 +263,30 @@ export class PieExtension implements vscode.Disposable {
     this.aggregateStatsService.start();
     await this.statsService.start();
     await this.service.start();
+    // Push the restored open-tab summaries to the backend so the
+    // `session_review` tool's listOpen works immediately after startup
+    // (persistTabs only fires on tab changes, not on cold-start restore).
+    this.pushOpenTabsRegistry();
   }
 
   async restart(): Promise<void> {
     this.updateStatusBar('Starting');
     await this.service.restart();
+    this.pushOpenTabsRegistry();
+  }
+
+  /** Push the currently-open tab summaries to the backend (`openTabs.set`) so
+   *  the `session_review` tool can list "currently open" sessions (true host
+   *  tab state) without a host→tool bridge. Called from `persistTabs` (on tab
+   *  changes) and once after backend start/restart (startup gap). The
+   *  summaries already carry `done`/`rating` merged from the review sidecar. */
+  private pushOpenTabsRegistry(): void {
+    const sessions = this.archState.sessions.sessions;
+    const tabs = this.archState.sessions.openTabPaths
+      .filter((p) => !isPendingTabPath(p))
+      .map((p) => sessions.find((s) => s.path === p))
+      .filter((s): s is SessionSummary => !!s);
+    void this.backend.request('openTabs.set', { tabs }).catch(() => {});
   }
 
 

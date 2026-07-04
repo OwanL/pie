@@ -68,6 +68,7 @@
         "ls",
         "read",
         "request_tool",
+        "session_review",
         "subagent",
         "web_search",
         "write",

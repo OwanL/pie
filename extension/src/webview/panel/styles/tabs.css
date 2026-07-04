@@ -513,6 +513,39 @@ body.session-tab-dragging {
   flex-shrink: 0;
 }
 
+/* ── Session review badge (agent done/rating/completion) ───────────────── */
+/* Small inline marker shown when an agent review exists for a session.
+   Shows ✓/○ + the 1–5 rating; tone follows the completion classification. */
+.session-tab-review-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  margin-left: 4px;
+  border-radius: var(--panel-radius-sm);
+  border: 1px solid var(--panel-border-subtle);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  flex-shrink: 0;
+  background: var(--panel-control-surface);
+  color: var(--panel-muted);
+}
+.session-tab-review-badge.done {
+  background: color-mix(in srgb, var(--panel-success-surface) 72%, var(--panel-control-surface));
+  border-color: color-mix(in srgb, var(--panel-success) 28%, var(--panel-border));
+  color: var(--panel-success);
+}
+.session-tab-review-badge.partial {
+  background: color-mix(in srgb, var(--panel-accent-surface) 60%, var(--panel-control-surface));
+  border-color: color-mix(in srgb, var(--panel-accent) 24%, var(--panel-border));
+  color: var(--panel-accent);
+}
+.session-tab-review-badge.setback {
+  background: color-mix(in srgb, var(--panel-error-surface) 60%, var(--panel-control-surface));
+  border-color: color-mix(in srgb, var(--panel-error) 28%, var(--panel-border));
+  color: var(--panel-error);
+}
+
 .session-tab-running {
   background: var(--panel-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 14%, transparent);

@@ -23,6 +23,15 @@ function mergeSessionSummaryPreservingLocalName(
     isPlaceholder: keepExistingName ? false : incoming.isPlaceholder,
     modelId: incoming.modelId ?? existing.modelId,
     thinkingLevel: incoming.thinkingLevel ?? existing.thinkingLevel,
+    // Review fields come from the session-review sidecar, which the backend
+    // merges in. A backend list refresh that omits them (e.g. sidecar read
+    // failed) must not wipe a previously-known review, so preserve the
+    // existing value when the incoming summary doesn't carry one.
+    done: incoming.done ?? existing.done,
+    rating: incoming.rating ?? existing.rating,
+    completion: incoming.completion ?? existing.completion,
+    reviewReason: incoming.reviewReason ?? existing.reviewReason,
+    evaluatedAt: incoming.evaluatedAt ?? existing.evaluatedAt,
   };
 }
 
@@ -111,6 +120,24 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     ? addToArray(state.sessions.runningSessionPaths, sessionPath)
     : state.sessions.runningSessionPaths;
 
+  // Preserve review fields across `session.opened`'s full-replace upsert.
+  // `payload.session` comes from `buildCurrentSummary`, which merges the
+  // review sidecar; a transient sidecar read failure would omit `done`/`
+  // `rating`/etc. and the upsert (a full replace, NOT `mergeSessionSummary*`)
+  // would wipe previously-known review state. Fill from the existing summary
+  // when the incoming summary lacks a field.
+  const existingForOpened = state.sessions.sessions.find((s) => s.path === payload.session.path);
+  const openedSummary: SessionSummary = existingForOpened
+    ? {
+        ...payload.session,
+        done: payload.session.done ?? existingForOpened.done,
+        rating: payload.session.rating ?? existingForOpened.rating,
+        completion: payload.session.completion ?? existingForOpened.completion,
+        reviewReason: payload.session.reviewReason ?? existingForOpened.reviewReason,
+        evaluatedAt: payload.session.evaluatedAt ?? existingForOpened.evaluatedAt,
+      }
+    : payload.session;
+
   // Any aliases discovered while merging must be stored so that later
   // backend events carrying the SDK-assigned message id resolve to the
   // streaming row the host kept.
@@ -124,7 +151,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     sessions: {
       ...next.sessions,
       runningSessionPaths: nextRunningSessionPaths,
-      sessions: upsertSessionSummary(next.sessions.sessions, payload.session),
+      sessions: upsertSessionSummary(next.sessions.sessions, openedSummary),
       ...(payload.analyticsFactors && {
         analyticsFactorsBySession: {
           ...next.sessions.analyticsFactorsBySession,
@@ -368,6 +395,11 @@ export function handleSessionSummaryUpserted(state: ArchState, event: Extract<Ev
       isPlaceholder: keepExistingName ? false : event.summary.isPlaceholder,
       modelId: event.summary.modelId ?? existing.modelId,
       thinkingLevel: event.summary.thinkingLevel ?? existing.thinkingLevel,
+      done: event.summary.done ?? existing.done,
+      rating: event.summary.rating ?? existing.rating,
+      completion: event.summary.completion ?? existing.completion,
+      reviewReason: event.summary.reviewReason ?? existing.reviewReason,
+      evaluatedAt: event.summary.evaluatedAt ?? existing.evaluatedAt,
     };
   }
   return {

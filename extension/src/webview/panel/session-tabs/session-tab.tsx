@@ -58,6 +58,23 @@ export const SessionTab = memo(function SessionTab({
   const isRunning = runningPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
+  const review = session
+    ? { done: session.done, rating: session.rating, completion: session.completion, reason: session.reviewReason }
+    : undefined;
+  const hasReview = !!(review && (review.done !== undefined || review.rating !== undefined));
+  const reviewText = review
+    ? `${review.done ? '✓' : '○'}${typeof review.rating === 'number' ? review.rating : ''}`
+    : '';
+  const reviewTone = review?.completion === 'fully'
+    ? 'done'
+    : review?.completion === 'setback'
+      ? 'setback'
+      : review?.done
+        ? 'done'
+        : 'partial';
+  const reviewTitle = review
+    ? `Reviewed: done=${review.done ?? false}, rating=${review.rating ?? '—'}/5, completion=${review.completion ?? '—'}${review.reason ? ` — ${review.reason}` : ''}`
+    : '';
   const title = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
     : isUnreadFinished
@@ -106,6 +123,13 @@ export const SessionTab = memo(function SessionTab({
                 ? <span class="session-tab-finished" aria-hidden="true" />
                 : null}
             <span class="session-tab-label">{label}</span>
+            {hasReview ? (
+              <span
+                class={`session-tab-review-badge ${reviewTone}`}
+                title={reviewTitle}
+                aria-label={reviewTitle}
+              >{reviewText}</span>
+            ) : null}
           </>
         )}
       </button>

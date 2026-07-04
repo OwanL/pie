@@ -93,6 +93,12 @@ export class BackendClient implements vscode.Disposable {
     const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
     const sessionDirEnv = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
       || (agentDir ? path.join(agentDir, 'data', 'outcomes', 'sessions') : undefined);
+    // Session reviews live in a sibling of the sessions dir so the backend
+    // (reader) and the session_review tool (writer) — same process — agree on
+    // the sidecar location via `PIE_REVIEWS_DIR`.
+    const reviewsDirEnv = sessionDirEnv
+      ? path.join(path.dirname(sessionDirEnv), 'session-reviews')
+      : undefined;
     const proc = cp.spawn(
       options.nodePath,
       [options.backendPath, '--sdkPath', options.sdkPath, '--cwd', options.cwd],
@@ -102,6 +108,7 @@ export class BackendClient implements vscode.Disposable {
           ...process.env,
           PIE_EDITOR_VERSION: vscode.version,
           ...(sessionDirEnv ? { PI_CODING_AGENT_SESSION_DIR: sessionDirEnv } : {}),
+          ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
           ...trustedRootEnv,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -114,6 +121,7 @@ export class BackendClient implements vscode.Disposable {
       cwd: options.cwd,
       sdkPath: options.sdkPath,
       sessionDir: sessionDirEnv ?? null,
+      reviewsDir: reviewsDirEnv ?? null,
     });
 
     this.proc = proc;

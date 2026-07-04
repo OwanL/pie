@@ -481,6 +481,31 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools };
 }
 
+export interface OpenTabsSetParams {
+  /** Open-tab summaries the host pushes so the `session_review` tool can list
+   *  currently-open sessions without host state access. Stored verbatim into
+   *  `process.env.PIE_OPEN_TABS` (JSON) for the tool to read. */
+  tabs: unknown[];
+}
+
+/** Validate `openTabs.set` (host → backend). The tabs are open-tab summaries;
+ *  we only require each be an object with a non-empty string `path` (the rest
+ *  is passed through opaquely and stringified to env for the tool to parse). */
+export function validateOpenTabsSet(params: unknown): OpenTabsSetParams {
+  if (!isObj(params)) fail('openTabs.set', 'expected an object');
+  const rawTabs = (params as Record<string, unknown>)['tabs'];
+  if (!Array.isArray(rawTabs)) fail('openTabs.set', 'tabs must be an array');
+  const tabs: unknown[] = [];
+  for (let i = 0; i < rawTabs.length; i += 1) {
+    const entry = rawTabs[i];
+    if (!isObj(entry)) fail('openTabs.set', `tabs[${i}] must be an object`);
+    const p = (entry as Record<string, unknown>)['path'];
+    if (typeof p !== 'string' || !p) fail('openTabs.set', `tabs[${i}].path must be a non-empty string`);
+    tabs.push(entry);
+  }
+  return { tabs };
+}
+
 export function validateSettingsSet(params: unknown): SettingsSetParams {
   if (!isObj(params)) fail('settings.set', 'expected an object');
   const out: SettingsSetParams = {};

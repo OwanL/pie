@@ -12,6 +12,7 @@ import type { SdkModule } from './sdk';
 import type { SessionContext } from './server-types';
 import { loadSubagentProfiles } from './subagent-profiles';
 import { mapTranscript, summarizeSession, type SessionEntryLike } from './transcript';
+import { mergeReviewIntoSummary, readReviews } from './session-review-store';
 
 function textFromSessionMessageContent(content: unknown): string {
   if (typeof content === 'string') {
@@ -58,6 +59,7 @@ export async function deriveNameFromFile(filePath: string): Promise<string> {
 }
 
 export async function listSessions(sdk: SdkModule): Promise<SessionSummary[]> {
+  const reviews = readReviews();
   const sessions = await sdk.SessionManager.listAll();
   const summaries = await Promise.all(
     sessions.map(async (session) => {
@@ -71,7 +73,7 @@ export async function listSessions(sdk: SdkModule): Promise<SessionSummary[]> {
           summary.isPlaceholder = true;
         }
       }
-      return summary;
+      return mergeReviewIntoSummary(summary, reviews);
     }),
   );
   return summaries.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
@@ -104,7 +106,7 @@ export function buildCurrentSummary(
 ): SessionSummary {
   const messageCount = context.session.messages.length ?? 0;
   const { name, isPlaceholder } = deriveSessionName(context);
-  return {
+  const summary: SessionSummary = {
     path: context.sessionPath,
     cwd: context.session.sessionManager.getCwd() ?? startupCwd,
     name,
@@ -114,6 +116,7 @@ export function buildCurrentSummary(
     modelId: context.session.model?.id,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
   };
+  return mergeReviewIntoSummary(summary, readReviews());
 }
 
 export function buildTranscript(context: SessionContext): ChatMessage[] {

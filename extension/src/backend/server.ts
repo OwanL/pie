@@ -27,6 +27,7 @@ import {
   listSessions as listSessionSummaries,
   resolveActiveModel,
 } from './session-metadata';
+import { ensureReviewsDir, startReviewWatcher } from './session-review-store';
 import {
   loadSdk,
   loadSdkInternalModule,
@@ -104,6 +105,8 @@ export class BackendServer {
   private viewedSessionPath?: string;
   private readonly sessionContexts = new Map<string, SessionContext>();
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
+  /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
+  private stopReviewWatcher?: () => void;
 
   constructor(options: { sdkPath: string; cwd: string }) {
     this.sdkPath = options.sdkPath;
@@ -166,6 +169,15 @@ export class BackendServer {
       sdkVersion: this.sdk.VERSION,
       protocolVersion: PROTOCOL_VERSION,
       authPath,
+    });
+
+    // Ensure the session-review sidecar dir exists and watch it so a review
+    // written by the `session_review` tool is reflected in the session list
+    // (and thus the host UI) promptly. Best-effort: if watching fails, changes
+    // are still picked up on the next any-cause `session.list.changed`.
+    ensureReviewsDir();
+    this.stopReviewWatcher = startReviewWatcher(() => {
+      void this.emitSessionListChanged();
     });
   }
 
@@ -564,6 +576,9 @@ export class BackendServer {
   async dispose(): Promise<void> {
     const contexts = [...this.sessionContexts.values()];
     this.sessionContexts.clear();
+
+    this.stopReviewWatcher?.();
+    this.stopReviewWatcher = undefined;
 
     for (const context of contexts) {
       context.unsubscribe();

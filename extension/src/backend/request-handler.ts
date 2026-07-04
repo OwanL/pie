@@ -15,6 +15,7 @@ import {
   validateSettingsSet,
   validateTruncateAfter,
   validateExtensionUiResponse,
+  validateOpenTabsSet,
 } from './rpc';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
@@ -508,6 +509,19 @@ async function handleMessageInterrupt(
   return { interrupted: true };
 }
 
+/** Host → backend push of the currently-open tab summaries. Stored into
+ *  `process.env.PIE_OPEN_TABS` (JSON) so the `session_review` tool (running in
+ *  this backend process) can list currently-open sessions without host state
+ *  access. Fire-and-forget from the host's tab-persistence site. */
+async function handleOpenTabsSet(
+  _deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateOpenTabsSet(request.params);
+  process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
+  return { ok: true, count: params.tabs.length };
+}
+
 async function handleExtensionUiResponse(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -625,6 +639,7 @@ const handlers: Record<string, RequestHandler> = {
   'message.send': handleMessageSend,
   'message.interrupt': handleMessageInterrupt,
   'extension_ui.response': handleExtensionUiResponse,
+  'openTabs.set': handleOpenTabsSet,
   'models.list': handleModelsList,
   'settings.get': handleSettingsGet,
   'settings.set': handleSettingsSet,
