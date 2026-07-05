@@ -17,6 +17,8 @@ import {
 	isDeleteArtifact,
 	patchCompatFiles,
 	patchCompatInSource,
+	patchWorkflowClampFiles,
+	patchWorkflowClampInSource,
 	readabilityIntact,
 	repairDeleteArtifacts,
 	runSelfHeal,
@@ -77,6 +79,131 @@ test("patchCompatInSource handles multiple occurrences in one file", () => {
 		'import { a } from "@earendil-works/pi-ai/compat";\nimport("@earendil-works/pi-ai/compat");',
 	);
 	assert.equal(out, 'import { a } from "@earendil-works/pi-ai";\nimport("@earendil-works/pi-ai");');
+});
+
+// --- pure: patchWorkflowClampInSource ---
+
+const RESOLVE_WORKFLOW_SRC = [
+	"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {",
+	'\tconst normalized = typeof input === "string" ? input.trim().toLowerCase() : "";',
+	'\tif (normalized === "auto-summary") return "auto-summary";',
+	'\tif (!hasUI) return "none";',
+	'\tif (normalized === "none") return "none";',
+	'\treturn "summary-review";',
+	"}",
+].join("\n");
+
+const WORKFLOW_ENUM_SRC = [
+	'\t\t\tworkflow: Type.Optional(',
+	'\t\t\t\tStringEnum(["none", "summary-review", "auto-summary"], {',
+	'\t\t\t\t\tdescription: "Search workflow mode: none = no curator, summary-review = open curator with auto summary draft (default), auto-summary = generate summary without opening curator",',
+	'\t\t\t\t}),',
+	'\t\t\t),',
+].join("\n");
+
+test("patchWorkflowClampInSource rewrites resolveWorkflow to always return none", () => {
+	const out = patchWorkflowClampInSource(RESOLVE_WORKFLOW_SRC);
+	assert.equal(
+		out,
+		[
+			"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {",
+			'\treturn "none";',
+			"}",
+		].join("\n"),
+	);
+});
+
+test("patchWorkflowClampInSource reduces the workflow enum to [none]", () => {
+	const out = patchWorkflowClampInSource(WORKFLOW_ENUM_SRC);
+	assert.ok(out.includes('StringEnum(["none"],'), `expected clamped enum, got:\n${out}`);
+	assert.ok(!out.includes('"summary-review"'), `summary-review must be gone from enum, got:\n${out}`);
+	assert.ok(!out.includes('"auto-summary"'), `auto-summary must be gone from enum, got:\n${out}`);
+});
+
+test("patchWorkflowClampInSource handles both sites in one pass", () => {
+	const src = `${RESOLVE_WORKFLOW_SRC}\n\n${WORKFLOW_ENUM_SRC}`;
+	const out = patchWorkflowClampInSource(src);
+	assert.ok(out.includes('return "none";'), 'resolveWorkflow should be clamped');
+	assert.ok(out.includes('StringEnum(["none"],'), 'enum should be clamped');
+	assert.ok(!out.includes('return "summary-review";'), 'no summary-review return');
+	assert.ok(!out.includes('return "auto-summary";'), 'no auto-summary return');
+});
+
+test("patchWorkflowClampInSource is idempotent (already-clamped source is unchanged)", () => {
+	const clamped = patchWorkflowClampInSource(RESOLVE_WORKFLOW_SRC);
+	assert.equal(patchWorkflowClampInSource(clamped), clamped);
+});
+
+test("patchWorkflowClampInSource leaves source without the sites untouched", () => {
+	const src = 'export const x = 1;\nimport { complete } from "@earendil-works/pi-ai/compat";\n';
+	assert.equal(patchWorkflowClampInSource(src), src);
+});
+
+test("patchWorkflowClampInSource is tolerant of a changed resolveWorkflow signature", () => {
+	const src = [
+		"function resolveWorkflow(input: string | undefined, ctx: { hasUI: boolean }): WebSearchWorkflow {",
+		'\treturn "summary-review";',
+		"}",
+].join("\n");
+	const out = patchWorkflowClampInSource(src);
+	assert.ok(out.includes('return "none";'), `signature-tolerant match should still clamp, got:\n${out}`);
+});
+
+// --- fs: patchWorkflowClampFiles ---
+
+test("patchWorkflowClampFiles clamps index.ts and reports one write", async () => {
+	const root = makePkg();
+	try {
+		writeFileSync(path.join(root, "index.ts"), RESOLVE_WORKFLOW_SRC + "\n", "utf8");
+		writeFileSync(path.join(root, "plain.ts"), 'export const x = 1;\n', "utf8");
+		const patched = await patchWorkflowClampFiles(root);
+		assert.equal(patched, 1);
+		assert.equal(
+			readFileSync(path.join(root, "index.ts"), "utf8"),
+			[
+				"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {",
+				'\treturn "none";',
+			"}",
+			"",
+			].join("\n"),
+		);
+		assert.equal(readFileSync(path.join(root, "plain.ts"), "utf8"), 'export const x = 1;\n');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("patchWorkflowClampFiles is idempotent (second run writes nothing)", async () => {
+	const root = makePkg();
+	try {
+		const f = path.join(root, "index.ts");
+		writeFileSync(f, RESOLVE_WORKFLOW_SRC + "\n", "utf8");
+		assert.equal(await patchWorkflowClampFiles(root), 1);
+		assert.equal(await patchWorkflowClampFiles(root), 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// --- fs: applyCompatFixes (workflow clamp) ---
+
+test("applyCompatFixes applies both the compat import fix and the workflow clamp", async () => {
+	const root = makePkg();
+	try {
+		writeFileSync(
+			path.join(root, "index.ts"),
+			`${RESOLVE_WORKFLOW_SRC}\n\nimport { complete } from "@earendil-works/pi-ai/compat";\n`,
+			"utf8",
+		);
+		await applyCompatFixes(root);
+		const out = readFileSync(path.join(root, "index.ts"), "utf8");
+		assert.ok(out.includes('return "none";'), 'workflow should be clamped');
+		assert.ok(!out.includes('return "summary-review";'), 'summary-review return should be gone');
+		assert.ok(out.includes('from "@earendil-works/pi-ai";'), 'compat import should be rewritten');
+		assert.ok(!out.includes('pi-ai/compat'), 'compat subpath should be gone');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 // --- pure: delete-artifact helpers ---

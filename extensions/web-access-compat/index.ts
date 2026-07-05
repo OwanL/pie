@@ -58,6 +58,35 @@ const LOG_PREFIX = "web-access-compat";
 /** Matches `@earendil-works/pi-ai/compat` only when it ends a string/import. */
 const COMPAT_REGEX = /@earendil-works\/pi-ai\/compat(?=["')])/g;
 const COMPAT_TO = "@earendil-works/pi-ai";
+
+/**
+ * Matches `function resolveWorkflow(...): WebSearchWorkflow { ... }` — the
+ * single chokepoint that decides whether `web_search` opens the curator
+ * (`summary-review`) or runs an LLM summary round-trip (`auto-summary`). The
+ * body has no nested braces, so the first `\n}` reliably marks the function
+ * end. Tolerant of signature changes: `[^)]*` accepts any param list.
+ */
+const RESOLVE_WORKFLOW_RE = /function resolveWorkflow\([^)]*\): WebSearchWorkflow \{[\s\S]*?\n\}/;
+
+/**
+ * Matches the `workflow` parameter's `StringEnum(["none", "summary-review",
+ * "auto-summary"], { ... })` schema in the tool registration — the only site
+ * where those three values appear together as an array literal. The /curator
+ * command compares strings (`arg === "summary-review"`), not arrays, so it
+ * is never touched.
+ */
+const WORKFLOW_ENUM_RE = /StringEnum\(\["none", "summary-review", "auto-summary"\],[\s\S]*?\}\)/;
+
+/**
+ * The clamped `resolveWorkflow`: always returns `"none"`. The only way to
+ * guarantee `generateSummaryDraft` can never be reached, regardless of config,
+ * `/curator on`, or a per-call `workflow: "summary-review"` / `"auto-summary"
+ * override from the model.
+ */
+const RESOLVE_WORKFLOW_CLAMPED =
+	"function resolveWorkflow(input: unknown, hasUI: boolean): WebSearchWorkflow {\n" +
+	'\treturn "none";\n' +
+	"}";
 /** `@mozilla/readability`'s `index.js` `require()`s this; missing it = corrupted. */
 const READABILITY_ENTRY = "@mozilla/readability/Readability.js";
 
@@ -125,6 +154,37 @@ export function patchCompatInSource(content: string): string {
 	return content.replace(COMPAT_REGEX, COMPAT_TO);
 }
 
+/**
+ * Hard-clamp `web_search`'s workflow to `"none"` so the curator + LLM summary
+ * path can *never* execute — not via config default, not via `/curator`, not
+ * via a per-call `workflow: "summary-review"` / `"auto-summary"` override from
+ * the model. This is the physical-impossibility layer: even if the agent
+ * requests a summary, the runtime cannot honour it.
+ *
+ * Two transforms:
+ *   1. `resolveWorkflow(...)` → always returns `"none"`. This is the single
+ *      chokepoint: `shouldCurate = workflow === "summary-review"` and the
+ *      `if (workflow === "auto-summary")` summary branch are both gated on
+ *      its return, so clamping it dead-roots `generateSummaryDraft`.
+ *   2. The tool-schema `workflow` enum is reduced to `["none"]` so the model
+ *      is never even offered `summary-review` / `auto-summary` as valid
+ *      values — defence in depth before the runtime clamp.
+ *
+ * Idempotent: an already-clamped `resolveWorkflow` matches the same regex and
+ * rewrites to identical text, and the clamped enum no longer matches the
+ * three-value regex, so the write is skipped. Forward-compatible: if upstream
+ * rewrites either site, the regex misses and the pass is a no-op — same
+ * philosophy as `patchCompatInSource`.
+ */
+export function patchWorkflowClampInSource(content: string): string {
+	return content
+		.replace(RESOLVE_WORKFLOW_RE, RESOLVE_WORKFLOW_CLAMPED)
+		.replace(
+			WORKFLOW_ENUM_RE,
+			'StringEnum(["none"], { description: "Search workflow mode: none = raw results only (curator and LLM summary disabled)" })',
+		);
+}
+
 /** True for npm's "could not replace" rename artifacts, e.g. `Readability.js.DELETE.e9020…`. */
 export function isDeleteArtifact(name: string): boolean {
 	return /\.DELETE\..+$/.test(name);
@@ -144,6 +204,32 @@ export function stripDeleteSuffix(name: string): string {
  * abort the rest, and writes are atomic so a failure never corrupts the file.
  */
 export async function patchCompatFiles(root: string): Promise<number> {
+	return patchFilesWith(root, patchCompatInSource, "compat");
+}
+
+/**
+ * Hard-clamp the `web_search` workflow to `"none"` across `pi-web-access`'s
+ * `.ts`/`.js` sources. Returns the number of files written. Idempotent and
+ * never-throwing, identical in contract to `patchCompatFiles`. See
+ * `patchWorkflowClampInSource` for what the clamp guarantees and why.
+ */
+export async function patchWorkflowClampFiles(root: string): Promise<number> {
+	return patchFilesWith(root, patchWorkflowClampInSource, "workflow-clamp");
+}
+
+/**
+ * Generic single-pass source patcher: walks `root`'s top-level `.ts`/`.js`
+ * files, applies `transform` to each, and atomically writes the ones that
+ * changed. Returns the count written. Idempotent — a file the transform
+ * leaves unchanged is a no-op. Never throws: read, write, and verify failures
+ * are logged (tagged with `label`) and skipped so one bad file cannot abort
+ * the rest, and writes are atomic so a failure never corrupts the file.
+ */
+async function patchFilesWith(
+	root: string,
+	transform: (content: string) => string,
+	label: string,
+): Promise<number> {
 	let entries: string[];
 	try {
 		entries = await readdir(root);
@@ -168,15 +254,15 @@ export async function patchCompatFiles(root: string): Promise<number> {
 			log(`could not read ${full}: ${describeErr(err)} — skipping`);
 			continue;
 		}
-		const next = patchCompatInSource(content);
-		if (next === content) continue; // already patched / no compat import — idempotent no-op
+		const next = transform(content);
+		if (next === content) continue; // already patched / nothing to do — idempotent no-op
 		try {
 			await atomicWriteFile(full, next);
 			await verifyPatch(full, next);
 			patched++;
 		} catch (err) {
 			// atomic write failed before rename → original file is untouched
-			log(`failed to patch ${full}: ${describeErr(err)} — file left unchanged; web tools may not load; reinstall pi-web-access if needed`);
+			log(`failed to apply ${label} patch to ${full}: ${describeErr(err)} — file left unchanged; web tools may not load; reinstall pi-web-access if needed`);
 		}
 	}
 	return patched;
@@ -238,9 +324,10 @@ export async function readabilityIntact(root: string): Promise<boolean> {
 	}
 }
 
-/** Apply both fixes to the package at `root`. */
+/** Apply all fixes to the package at `root`. */
 export async function applyCompatFixes(root: string): Promise<void> {
 	await patchCompatFiles(root);
+	await patchWorkflowClampFiles(root);
 	if (!(await readabilityIntact(root))) {
 		await repairDeleteArtifacts(root);
 	}
