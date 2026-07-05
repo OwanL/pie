@@ -146,3 +146,142 @@ test('recordStateApplied does not clear the pending watchdog when ack revision <
     timers.restore();
   }
 });
+// ─── Bounded resnapshot escalation while streaming ────────────────────────
+// The watchdog must not suppress a force-reload *indefinitely* while a session
+// is running. After RESNAPSHOT_MAX_RETRIES unacked resnapshots it escalates to a
+// throttled force-reload even with runningCount > 0, so a hung renderer recovers
+// within ~((1 + RESNAPSHOT_MAX_RETRIES) * STATE_APPLIED_TIMEOUT_MS) instead of
+// waiting out the whole turn. A slow-but-functional webview that eventually acks
+// resets the retry counter and never escalates.
+
+test('resnapshot retries while streaming, then escalates to a force-reload after the budget is exhausted', () => {
+  const timers = useFakeTimers();
+  try {
+    const resnapshots: number[] = [];
+    const reloads: number[] = [];
+    let nextRevision = 1;
+    let watchdog!: StateAppliedWatchdog;
+    const deps = fakeDeps({
+      getRunningSessionCount: () => 1, // streaming
+      onResnapshot: () => {
+        // Mirror the real flow: the resnapshot re-posts a fresh revision and
+        // re-arms the watchdog for it.
+        nextRevision += 1;
+        resnapshots.push(nextRevision);
+        watchdog.armStateAppliedWatchdog(nextRevision);
+      },
+      onForceReload: async (revision: number) => {
+        reloads.push(revision);
+      },
+    });
+    watchdog = new StateAppliedWatchdog(deps);
+
+    watchdog.armStateAppliedWatchdog(nextRevision); // rev 1
+    timers.advance(2_500); // first timeout -> resnapshot #1, re-arm rev 2
+    assert.equal(resnapshots.length, 1, 'first timeout resnapshots, does not reload');
+    assert.equal(reloads.length, 0);
+    assert.equal(watchdog.getPendingStateAppliedRevision(), 2);
+
+    timers.advance(2_500); // resnapshot #2, re-arm rev 3
+    assert.equal(resnapshots.length, 2);
+    timers.advance(2_500); // resnapshot #3, re-arm rev 4
+    assert.equal(resnapshots.length, 3);
+    timers.advance(2_500); // resnapshot #4, re-arm rev 5
+    assert.equal(resnapshots.length, 4);
+    assert.equal(reloads.length, 0, 'resnapshot retries do not reload');
+
+    timers.advance(2_500); // budget exhausted -> escalate to force-reload
+    assert.equal(resnapshots.length, 4, 'escalation does not resnapshot again');
+    assert.equal(reloads.length, 1, 'escalation triggers exactly one force-reload');
+    assert.equal(reloads[0], 5, 'the pending revision at escalation is reloaded');
+  } finally {
+    timers.restore();
+  }
+});
+
+test('a mid-stream ack resets the resnapshot retry budget so a slow-but-functional webview never escalates', () => {
+  const timers = useFakeTimers();
+  try {
+    const resnapshots: number[] = [];
+    const reloads: number[] = [];
+    let nextRevision = 10;
+    let watchdog!: StateAppliedWatchdog;
+    const deps = fakeDeps({
+      getRunningSessionCount: () => 1,
+      onResnapshot: () => {
+        nextRevision += 1;
+        resnapshots.push(nextRevision);
+        watchdog.armStateAppliedWatchdog(nextRevision);
+      },
+      onForceReload: async (revision: number) => {
+        reloads.push(revision);
+      },
+    });
+    watchdog = new StateAppliedWatchdog(deps);
+
+    watchdog.armStateAppliedWatchdog(nextRevision); // rev 10
+    timers.advance(2_500); // resnapshot #1 -> re-arm rev 11
+    timers.advance(2_500); // resnapshot #2 -> re-arm rev 12
+    assert.equal(resnapshots.length, 2);
+
+    // The webview finally acknowledges rev 12 (slow but functional).
+    watchdog.recordStateApplied(12);
+    assert.equal(reloads.length, 0, 'ack prevents escalation');
+
+    // The budget is fully reset; a fresh unacked episode must run the full
+    // retry budget before escalating again.
+    watchdog.armStateAppliedWatchdog(20);
+    timers.advance(2_500); // resnapshot #1 -> re-arm rev 21
+    timers.advance(2_500); // resnapshot #2
+    timers.advance(2_500); // resnapshot #3
+    assert.equal(resnapshots.length, 5, 'fresh episode restarts the retry budget from 0');
+    assert.equal(reloads.length, 0);
+  } finally {
+    timers.restore();
+  }
+});
+
+test('escalated force-reloads while streaming are throttled to STATE_APPLIED_RELOAD_LIMIT per window', () => {
+  const timers = useFakeTimers();
+  try {
+    const reloads: number[] = [];
+    let nextRevision = 100;
+    let watchdog!: StateAppliedWatchdog;
+    const deps = fakeDeps({
+      getRunningSessionCount: () => 1,
+      onResnapshot: () => {
+        nextRevision += 1;
+        watchdog.armStateAppliedWatchdog(nextRevision);
+      },
+      onForceReload: async (revision: number) => {
+        reloads.push(revision);
+        // Reload resets the bridge; simulate the post-reload re-arm with a
+        // fresh revision and a reset resnapshot budget.
+        watchdog.resetResnapshotFlag();
+        nextRevision += 1;
+        watchdog.armStateAppliedWatchdog(nextRevision);
+      },
+    });
+    watchdog = new StateAppliedWatchdog(deps);
+
+    watchdog.armStateAppliedWatchdog(nextRevision); // rev 100
+    // Burn through the resnapshot budget -> first reload.
+    for (let i = 0; i < 5; i++) timers.advance(2_500);
+    assert.equal(reloads.length, 1, 'first escalation reloads (within the throttle window)');
+
+    // After the reload the webview is still hung: another full budget -> reload.
+    // (The throttle window is wall-clock via Date.now(); the test runs in well
+    // under 30s of real time, so the second reload is still within the window.)
+    for (let i = 0; i < 5; i++) timers.advance(2_500);
+    assert.equal(reloads.length, 2, 'second escalation reloads (limit reached)');
+
+    // Third escalation within the same wall-clock window is throttled (the
+    // `shouldThrottleStateAppliedReload` limit is STATE_APPLIED_RELOAD_LIMIT=2).
+    // The window-reset path itself is covered by the dedicated throttle tests
+    // above, which exercise `shouldThrottleStateAppliedReload(now)` directly.
+    for (let i = 0; i < 5; i++) timers.advance(2_500);
+    assert.equal(reloads.length, 2, 'third escalation within the window is throttled');
+  } finally {
+    timers.restore();
+  }
+});

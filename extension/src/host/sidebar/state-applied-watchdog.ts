@@ -7,6 +7,22 @@ const STATE_APPLIED_TIMEOUT_MS = 2_500;
 export const STATE_APPLIED_RELOAD_LIMIT = 2;
 /** Rolling window for missing-ack reload throttling. */
 export const STATE_APPLIED_RELOAD_WINDOW_MS = 30_000;
+/**
+ * Bounded resnapshot retries before escalating to a force-reload while a
+ * session is streaming. Each retry re-posts the dirty snapshot and re-arms
+ * the watchdog for the new revision (~{@link STATE_APPLIED_TIMEOUT_MS}
+ * cadence), giving a slow-but-functional webview several chances to
+ * acknowledge without a disruptive reload. Once exhausted the watchdog
+ * escalates to a throttled force-reload even while `runningCount > 0`, so a
+ * genuinely hung renderer recovers in roughly
+ * `(1 + RESNAPSHOT_MAX_RETRIES) * STATE_APPLIED_TIMEOUT_MS` instead of staying
+ * frozen for the entire turn (the previous behaviour: the force-reload was
+ * suppressed indefinitely while any session was running, so the only
+ * recovery was a manual panel reload). The standard reload throttle
+ * ({@link STATE_APPLIED_RELOAD_LIMIT} / {@link STATE_APPLIED_RELOAD_WINDOW_MS})
+ * still bounds reload storms during the escalation.
+ */
+const RESNAPSHOT_MAX_RETRIES = 4;
 
 /**
  * Dependencies injected by {@link SidebarViewProvider} so the watchdog has no
@@ -38,7 +54,7 @@ export class StateAppliedWatchdog {
   private lastStateAppliedAt = 0;
   private stateAppliedReloadWindowStartedAt = 0;
   private stateAppliedReloadAttempts = 0;
-  private resnapshotAttempted = false;
+  private resnapshotAttempts = 0;
 
   constructor(private readonly deps: StateAppliedWatchdogDeps) {}
 
@@ -53,7 +69,7 @@ export class StateAppliedWatchdog {
       this.clear();
       this.stateAppliedReloadAttempts = 0;
       this.stateAppliedReloadWindowStartedAt = 0;
-      this.resnapshotAttempted = false;
+      this.resnapshotAttempts = 0;
     }
   }
 
@@ -98,9 +114,11 @@ export class StateAppliedWatchdog {
     return false;
   }
 
-  /** Reset the first-timeout resnapshot flag (called when the bridge becomes ready). */
+  /** Reset the resnapshot retry counter (called when the bridge becomes
+   *  ready and on a successful ack — a fresh start should not inherit the
+   *  retry budget of a previously-unacked episode). */
   resetResnapshotFlag(): void {
-    this.resnapshotAttempted = false;
+    this.resnapshotAttempts = 0;
   }
 
   getLastStateAppliedRevision(): number {
@@ -127,16 +145,19 @@ export class StateAppliedWatchdog {
       return;
     }
 
-    // Re-snapshot-first: before force-reloading the webview HTML, try
-    // re-posting the state snapshot. Only reload if the re-snapshot also
-    // goes unacked (a consecutive timeout with resnapshotAttempted=true).
-    // This avoids reload storms on slow transcripts where the webview is
-    // slow to ack but still functional.
-    if (!this.resnapshotAttempted) {
-      this.resnapshotAttempted = true;
+    // Re-snapshot-first: before force-reloading the webview HTML, re-post the
+    // dirty snapshot up to {@link RESNAPSHOT_MAX_RETRIES} times. Each retry
+    // re-arms the watchdog for the freshly-posted revision, so a slow-but-
+    // functional webview gets several chances to acknowledge without a
+    // disruptive reload. This avoids reload storms on slow transcripts where
+    // the webview is slow to ack but still functional.
+    if (this.resnapshotAttempts < RESNAPSHOT_MAX_RETRIES) {
+      this.resnapshotAttempts += 1;
       recordWatchdog('resnapshot');
       bootLog('sidebar-provider', 'stateApplied.timeout.resnapshot', {
+        attempt: this.resnapshotAttempts,
         hostInstanceId: this.deps.getHostInstanceId(),
+        maxRetries: RESNAPSHOT_MAX_RETRIES,
         pendingRevision: revision,
         visible: this.deps.getViewVisible(),
         webviewReady: this.deps.getWebviewReady(),
@@ -145,23 +166,20 @@ export class StateAppliedWatchdog {
       return;
     }
 
-    // Never force-reload the webview while any session is actively running.
-    // Mid-stream reloads discard transient streaming state and frequently
-    // leave the UI frozen or split, especially during slow tool calls like
-    // ask_user. The first-timeout resnapshot above gives the webview another
-    // chance once the current burst of events subsides.
+    // Escalation: the resnapshot retries above are exhausted, meaning the
+    // webview has not acknowledged a state revision for roughly
+    // `(1 + RESNAPSHOT_MAX_RETRIES) * STATE_APPLIED_TIMEOUT_MS` — it is
+    // effectively hung. Previously the force-reload was suppressed
+    // *indefinitely* whenever `runningCount > 0`, which trapped a hung renderer
+    // for the entire turn (the "transcript frozen until I reload the panel"
+    // symptom: the host keeps posting, the webview never renders, and nothing
+    // short of a manual panel reload recovered it). A mid-stream reload does
+    // discard transient streaming state and can flash the "old + new at once"
+    // frame, but a bounded, throttled reload is strictly better than a freeze
+    // that lasts the whole turn. The standard reload throttle below still
+    // bounds reload storms; a slow-but-functional webview never reaches here
+    // because its acks reset `resnapshotAttempts` along the way.
     const runningCount = this.deps.getRunningSessionCount();
-    if (runningCount > 0) {
-      bootLog('sidebar-provider', 'stateApplied.timeout.streaming.suppressed', {
-        hostInstanceId: this.deps.getHostInstanceId(),
-        pendingRevision: revision,
-        runningCount,
-        visible: this.deps.getViewVisible(),
-        webviewReady: this.deps.getWebviewReady(),
-      });
-      return;
-    }
-
     const now = Date.now();
     if (this.shouldThrottleStateAppliedReload(now)) {
       recordWatchdog('throttled');
@@ -169,6 +187,8 @@ export class StateAppliedWatchdog {
         hostInstanceId: this.deps.getHostInstanceId(),
         lastStateAppliedRevision: this.lastStateAppliedRevision,
         pendingRevision: revision,
+        resnapshotAttempts: this.resnapshotAttempts,
+        runningCount,
         visible: this.deps.getViewVisible(),
         webviewReady: this.deps.getWebviewReady(),
       });
@@ -176,11 +196,13 @@ export class StateAppliedWatchdog {
     }
 
     recordWatchdog('reload');
-    bootLog('sidebar-provider', 'stateApplied.timeout', {
+    bootLog('sidebar-provider', runningCount > 0 ? 'stateApplied.timeout.streaming.escalated' : 'stateApplied.timeout', {
       hostInstanceId: this.deps.getHostInstanceId(),
       lastStateAppliedAt: this.lastStateAppliedAt || null,
       lastStateAppliedRevision: this.lastStateAppliedRevision,
       pendingRevision: revision,
+      resnapshotAttempts: this.resnapshotAttempts,
+      runningCount,
       visible: this.deps.getViewVisible(),
       webviewReady: this.deps.getWebviewReady(),
     });
