@@ -24,9 +24,9 @@ async function loadPool(): Promise<new (opts: { size: number; shellPath: string;
   return m.WarmBashPool as unknown as new (opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv }) => AnyPool;
 }
 
-async function loadOps(): Promise<(o: { pool: AnyPool | null; fastPathEnabled: boolean; fallbackOps: AnyOps }) => AnyOps> {
+async function loadOps(): Promise<(o: { pool: AnyPool | null; fastPathEnabled: boolean; fallbackOps: AnyOps; metrics?: { totalFastPath: number; totalWarm: number; totalFallback: number } }) => AnyOps> {
   const m = await import(opsUrl);
-  return m.createWarmBashOperations as unknown as (o: { pool: AnyPool | null; fastPathEnabled: boolean; fallbackOps: AnyOps }) => AnyOps;
+  return m.createWarmBashOperations as unknown as (o: { pool: AnyPool | null; fastPathEnabled: boolean; fallbackOps: AnyOps; metrics?: { totalFastPath: number; totalWarm: number; totalFallback: number } }) => AnyOps;
 }
 
 async function loadClassify() {
@@ -252,6 +252,86 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
         assert.equal(res.exitCode, 0);
         assert.equal(text().trim(), `iter${i}`);
       }
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('getStats reports pool size, ready workers, and warmup failures', async () => {
+    const pool = new Pool({ size: 2, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      // ready() waits for at least one warm worker; size 2 → at least 1 ready.
+      const before = pool.getStats();
+      assert.equal(before.poolSize, 2);
+      assert.ok(before.ready >= 1, `ready>=1, got ${before.ready}`);
+      assert.equal(before.totalWarmupFailures, 0);
+      assert.equal(before.disposed, false);
+
+      const { onData } = sink();
+      await pool.exec({ command: 'echo counted', cwd: tmp, env: process.env, onData });
+      const after = pool.getStats();
+      // warm-exec count is owned by the operations layer (metrics), not the pool;
+      // the pool only reports pool size / ready / warming / warmup failures.
+      assert.ok(after.ready >= 1, `ready>=1 after exec, got ${after.ready}`);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('getStats reports disposed state and zeros after dispose', async () => {
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env });
+    await pool.ready();
+    pool.dispose();
+    const s = pool.getStats();
+    assert.equal(s.disposed, true);
+    assert.equal(s.ready, 0);
+    assert.equal(s.warming, 0);
+  });
+
+  test('custom warmup + acquire timeouts are accepted (0 falls back to default)', async () => {
+    // 0 → default; just verify the pool constructs and runs with the overrides.
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env, warmupTimeoutMs: 0, acquireTimeoutMs: 0 });
+    try {
+      await pool.ready();
+      const { onData, text } = sink();
+      const res = await pool.exec({ command: 'echo timeout-cfg', cwd: tmp, env: process.env, onData });
+      assert.equal(res.exitCode, 0);
+      assert.equal(text().trim(), 'timeout-cfg');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('operations: metrics count fast-path, warm, and fallback executions distinctly', async () => {
+    // Fast path: simple command, no shell, no pool.
+    const fast = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    const opsFast = createOps({ pool: null, fastPathEnabled: true, fallbackOps: freshBashOps(), metrics: fast });
+    await opsFast.exec('echo fast', tmp, { onData: () => {} });
+    assert.equal(fast.totalFastPath, 1);
+    assert.equal(fast.totalWarm, 0);
+    assert.equal(fast.totalFallback, 0);
+
+    // Fallback: pool null + fast path off + shell command (pipe) → fresh spawn.
+    const fb = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    const opsFb = createOps({ pool: null, fastPathEnabled: false, fallbackOps: freshBashOps(), metrics: fb });
+    await opsFb.exec('echo via-fallback | tr a-z A-Z', tmp, { onData: () => {} });
+    assert.equal(fb.totalFastPath, 0);
+    assert.equal(fb.totalWarm, 0);
+    assert.equal(fb.totalFallback, 1);
+
+    // Warm path: pool present + shell command (pipe) → warm pool.
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      const warm = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+      const opsWarm = createOps({ pool, fastPathEnabled: true, fallbackOps: freshBashOps(), metrics: warm });
+      await opsWarm.exec('echo warm | cat', tmp, { onData: () => {} });
+      assert.equal(warm.totalFastPath, 0);
+      assert.equal(warm.totalWarm, 1);
+      assert.equal(warm.totalFallback, 0);
+      // The three counters sum to exactly one distinct command per scenario.
+      assert.equal(warm.totalFastPath + warm.totalWarm + warm.totalFallback, 1);
     } finally {
       pool.dispose();
     }

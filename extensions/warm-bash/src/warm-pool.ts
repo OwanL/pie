@@ -3,8 +3,22 @@ import { randomBytes } from "node:crypto";
 import { killShellOnly, killTree } from "./kill.js";
 
 const READY_TOKEN = "__PI_READY__";
-const WARMUP_TIMEOUT_MS = 10_000;
-const ACQUIRE_TIMEOUT_MS = 15_000; // backstop: a stuck warmup must not hang a bash call
+/** Default warmup wait (ms) for a bash process to print the ready marker.
+ *  Overridable via {@link WarmBashPool} opts (env: PIE_BASH_WARMUP_TIMEOUT_MS). */
+const DEFAULT_WARMUP_TIMEOUT_MS = 10_000;
+/** Default acquire wait (ms) for a ready worker when the pool is empty.
+ *  Overridable via {@link WarmBashPool} opts (env: PIE_BASH_ACQUIRE_TIMEOUT_MS). */
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 15_000;
+
+/** Live pool metrics surfaced to the host status strip via the stats registry. */
+export interface WarmBashPoolStats {
+  poolSize: number;
+  ready: number;
+  warming: number;
+  /** Warmup attempts that failed (timed out / shell unavailable). */
+  totalWarmupFailures: number;
+  disposed: boolean;
+}
 
 /** Marker error for warm-pool protocol failures so operations.ts can fall back. */
 export class WarmExecError extends Error {}
@@ -48,11 +62,28 @@ export class WarmBashPool {
   private readonly size: number;
   private readonly shell: string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly warmupTimeoutMs: number;
+  private readonly acquireTimeoutMs: number;
+  private totalWarmupFailures = 0;
 
-  constructor(opts: { size: number; shellPath: string; env?: NodeJS.ProcessEnv }) {
+  constructor(opts: {
+    size: number;
+    shellPath: string;
+    env?: NodeJS.ProcessEnv;
+    /** Warmup wait (ms); 0 or omitted → {@link DEFAULT_WARMUP_TIMEOUT_MS}. */
+    warmupTimeoutMs?: number;
+    /** Acquire wait (ms); 0 or omitted → {@link DEFAULT_ACQUIRE_TIMEOUT_MS}. */
+    acquireTimeoutMs?: number;
+  }) {
     this.size = opts.size;
     this.env = opts.env ?? process.env;
     this.shell = opts.shellPath;
+    this.warmupTimeoutMs = opts.warmupTimeoutMs && opts.warmupTimeoutMs > 0
+      ? opts.warmupTimeoutMs
+      : DEFAULT_WARMUP_TIMEOUT_MS;
+    this.acquireTimeoutMs = opts.acquireTimeoutMs && opts.acquireTimeoutMs > 0
+      ? opts.acquireTimeoutMs
+      : DEFAULT_ACQUIRE_TIMEOUT_MS;
     for (let i = 0; i < this.size; i++) this.refill();
   }
 
@@ -68,6 +99,18 @@ export class WarmBashPool {
     }
   }
 
+  /** Live pool metrics for the host status strip. `ready` is the count of idle
+   *  warm workers; `warming` is the count of workers still warming up. */
+  getStats(): WarmBashPoolStats {
+    return {
+      poolSize: this.size,
+      ready: this.disabled ? 0 : this.items.length,
+      warming: this.disabled ? 0 : this.inflight,
+      totalWarmupFailures: this.totalWarmupFailures,
+      disposed: this.disabled,
+    };
+  }
+
   /** Fast path: take a ready worker. Otherwise register as a waiter — the next
    *  warmup to land resolves us directly (no double-buffering). Bounded by an
    *  acquire timeout so a stuck warmup (e.g. bash unavailable) can never hang
@@ -81,7 +124,7 @@ export class WarmBashPool {
         const idx = this.waiters.indexOf(resolver!);
         if (idx >= 0) this.waiters.splice(idx, 1);
         reject(new WarmExecError("acquire-timeout"));
-      }, ACQUIRE_TIMEOUT_MS);
+      }, this.acquireTimeoutMs);
       resolver = (w) => {
         clearTimeout(timer);
         if (w) resolve(w);
@@ -117,13 +160,14 @@ export class WarmBashPool {
     // we're below the floor — avoids warming workers nobody will take.
     if (this.items.length + this.inflight >= this.size) return;
     this.inflight++;
-    createWarmWorker(this.shell, this.env, this.warmingChildren)
+    createWarmWorker(this.shell, this.env, this.warmingChildren, this.warmupTimeoutMs)
       .then((w) => {
         this.inflight--;
         this.deliver(w);
       })
       .catch(() => {
         this.inflight--;
+        this.totalWarmupFailures++;
         this.deliver(null);
       });
   }
@@ -154,6 +198,7 @@ async function createWarmWorker(
   shell: string,
   env: NodeJS.ProcessEnv,
   warmingChildren: Set<ChildProcess>,
+  warmupTimeoutMs: number,
 ): Promise<WarmWorker> {
   const child = spawn(shell, ["--norc", "--noprofile"], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -165,7 +210,7 @@ async function createWarmWorker(
   warmingChildren.add(child);
 
   try {
-    await waitReady(child);
+    await waitReady(child, warmupTimeoutMs);
   } finally {
     warmingChildren.delete(child);
   }
@@ -182,12 +227,12 @@ async function createWarmWorker(
   return worker;
 }
 
-function waitReady(child: ChildProcess): Promise<void> {
+function waitReady(child: ChildProcess, warmupTimeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       killTree(child);
       reject(new WarmExecError("warmup-timeout"));
-    }, WARMUP_TIMEOUT_MS);
+    }, warmupTimeoutMs);
 
     let buf = "";
     const onStdout = (data: Buffer) => {

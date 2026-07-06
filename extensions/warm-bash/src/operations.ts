@@ -4,6 +4,24 @@ import { execFastPath, FastPathError } from "./fast-path.js";
 import { WarmBashPool, WarmExecError } from "./warm-pool.js";
 import type { BashOperations } from "./types.js";
 
+/** Mutable counters shared with the per-session stats provider (index.ts).
+ *  Each counter increments when a command is ROUTED to that path AND does not
+ *  degrade further: fast path counts successful execFile returns (an ENOENT
+ *  fall-through is NOT counted — it degraded to the shell paths); warm counts
+ *  warm-pool execs that returned or threw a terminal/unexpected error (a
+ *  WarmExecError that fell back is NOT counted); fallback always counts (it is
+ *  the terminal layer). So the three counters sum to the number of distinct
+ *  commands executed. */
+export interface WarmBashMetrics {
+  totalFastPath: number;
+  totalWarm: number;
+  totalFallback: number;
+}
+
+export function createWarmBashMetrics(): WarmBashMetrics {
+  return { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+}
+
 export interface WarmBashOpsOpts {
   /** Per-session warm pool, or null when warm mode is disabled. */
   pool: WarmBashPool | null;
@@ -11,6 +29,8 @@ export interface WarmBashOpsOpts {
   /** Today's exact execution path, injected by index.ts (createLocalBashOperations).
    *  Used as the final fallback so this layer can never be worse than the status quo. */
   fallbackOps: BashOperations;
+  /** Counters incremented per execution path (for the host status strip). */
+  metrics?: WarmBashMetrics;
 }
 
 /** A command failure that is terminal for this call (must propagate, not fall back). */
@@ -38,7 +58,7 @@ export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations 
       // 1. Fast path (simple commands only).
       if (c.kind === "simple" && opts.fastPathEnabled && c.program && c.args) {
         try {
-          return await execFastPath({
+          const r = await execFastPath({
             program: c.program,
             args: c.args,
             cwd: c.cwd,
@@ -48,10 +68,16 @@ export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations 
             signal,
             timeout,
           });
+          if (opts.metrics) opts.metrics.totalFastPath++;
+          return r;
         } catch (e) {
           const msg = (e as Error).message;
-          if (isTerminal(msg)) throw e;
-          // ENOENT / non-terminal → fall through to shell.
+          if (isTerminal(msg)) {
+            // Aborted/timed-out — the command WAS a fast-path execution, count it.
+            if (opts.metrics) opts.metrics.totalFastPath++;
+            throw e;
+          }
+          // ENOENT / non-terminal → fall through to the shell paths (not counted).
         }
       }
 
@@ -59,7 +85,7 @@ export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations 
       //    so the wrapper re-applies cd exactly once.
       if (opts.pool) {
         try {
-          return await opts.pool.exec({
+          const r = await opts.pool.exec({
             command: c.rest,
             cwd: effCwd,
             env,
@@ -68,15 +94,25 @@ export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations 
             timeout,
             hasHeredoc: c.hasHeredoc,
           });
+          if (opts.metrics) opts.metrics.totalWarm++;
+          return r;
         } catch (e) {
           const msg = (e as Error).message;
-          if (isTerminal(msg)) throw e;
-          if (!(e instanceof WarmExecError)) throw e;
-          // Warm protocol failure → fall back to a fresh spawn.
+          if (isTerminal(msg)) {
+            if (opts.metrics) opts.metrics.totalWarm++;
+            throw e;
+          }
+          if (!(e instanceof WarmExecError)) {
+            // Unexpected non-warm error — the command was a warm execution, count it.
+            if (opts.metrics) opts.metrics.totalWarm++;
+            throw e;
+          }
+          // WarmExecError (non-terminal) → fall back to a fresh spawn (not counted).
         }
       }
 
       // 3. Fallback: today's exact path (original command, session cwd).
+      if (opts.metrics) opts.metrics.totalFallback++;
       return fallback.exec(command, cwd, { onData, signal, timeout, env });
     },
   };
