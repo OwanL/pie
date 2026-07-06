@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { attachJsonlLineReader, serializeJsonLine } from '../../shared/jsonl';
 import { getDeferredTriggersDir } from '../../shared/deferred-triggers-paths';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
+import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
@@ -30,6 +31,14 @@ const STDERR_BUFFER_LIMIT = 64 * 1024;
 
 /** Default timeout for backend RPC calls if no per-method override is set. */
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+
+/**
+ * Time the host waits for the backend to emit `backend.ready` after spawn.
+ * See `shared/backend-ready-timeout.ts` for rationale (cold SDK load on
+ * Windows takes ~30s; a 30s budget races it). Shared with the reducer
+ * watchdog so the two never drift.
+ */
+const READY_TIMEOUT_MS = BACKEND_READY_TIMEOUT_MS;
 
 /**
  * Per-method timeouts. Methods doing disk I/O or batch work get a longer
@@ -58,8 +67,6 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'message.clearQueue': 10_000,
   'extension_ui.response': 10_000,
 };
-
-const READY_TIMEOUT_MS = 30_000;
 
 export class BackendClient implements vscode.Disposable {
   private readonly events = new vscode.EventEmitter<EventEnvelope>();

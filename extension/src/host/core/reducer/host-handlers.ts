@@ -13,6 +13,7 @@ import type {
   AvailableExtensionsChangedEvent,
   AssistantMessageErrorStampedEvent,
 } from '../events.js';
+import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 import type { ReducerResult } from './helpers.js';
 import type { Effect } from '../effects.js';
 import { removeMessage } from './helpers.js';
@@ -69,7 +70,7 @@ export function handleBackendReadyWatchdogFired(
     return { state, effects: [] };
   }
 
-  const timeoutSec = 30;
+  const timeoutSec = BACKEND_READY_TIMEOUT_MS / 1000;
   const nextState = produce(state, (draft) => {
     for (const entry of allEntries) {
       removeMessage(draft, entry.sessionPath, entry.localId);

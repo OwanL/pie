@@ -1,7 +1,7 @@
 {
-  "defaultModel": "umans-glm-5.2",
-  "defaultThinkingLevel": "low",
-  "defaultProvider": "umans",
+  "defaultModel": "glm-5.2:cloud",
+  "defaultThinkingLevel": "high",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -54,8 +54,8 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "gpt-5-mini",
-    "provider": "github-copilot",
+    "model": "umans-flash",
+    "provider": "umans",
     "thinkingLevel": "low",
     "tools": {
       "alwaysKeep": [

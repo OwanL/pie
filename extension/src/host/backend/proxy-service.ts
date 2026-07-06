@@ -33,6 +33,25 @@ import { toErrorMessage } from '../util/error-message';
 const PROXY_READY_TIMEOUT_MS = 60_000; // generous — first `uv run` resolves deps
 const HEALTH_POLL_INTERVAL_MS = 500;
 
+/** Bug: reused-proxy health monitor. A proxy reused via the fast path
+ *  (this.proc stays undefined) is NOT tracked by ProxyService, so a mid-session
+ *  hang (uvicorn event loop wedged by a stalled upstream before headers) is
+ *  invisible — the backend keeps pointing at a dead port and every proxied
+ *  turn fails with an opaque "Connection error.". The monitor probes
+ *  /health/liveness on an interval; after N consecutive failures it reclaims
+ *  the port and (when start options are known) respawns a fresh tracked child.
+ *  Env-tunable so a tight test can shrink the window. */
+const PROXY_HEALTH_MONITOR_ENV = 'PIE_PROXY_HEALTH_MONITOR_MS';
+const DEFAULT_PROXY_HEALTH_MONITOR_MS = 30_000; // every 30s
+const PROXY_HEALTH_FAIL_THRESHOLD = 3; // 3 consecutive misses ≈ 90s dead
+
+function resolveHealthMonitorIntervalMs(): number {
+  const raw = process.env[PROXY_HEALTH_MONITOR_ENV];
+  if (raw === undefined || raw === '') return DEFAULT_PROXY_HEALTH_MONITOR_MS;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_PROXY_HEALTH_MONITOR_MS;
+}
+
 export interface ProxyStartOptions {
   proxyDir: string;
   configPath: string;
@@ -82,6 +101,19 @@ export class ProxyService implements vscode.Disposable {
   private proc?: cp.ChildProcess;
   private stderrBuffer = '';
   private readonly stderrLimit = 32 * 1024;
+  /** Bug: reused-proxy health monitor. Set when start() reuses a healthy proxy
+   *  via the fast path (this.proc stays undefined). Probes /health/liveness on
+   *  an interval; after N consecutive misses, reclaims the port + respawns a
+   *  fresh tracked child so the backend isn't left pointing at a dead port.
+   *  Cleared by stop()/dispose()/restart(). */
+  private healthMonitor?: ReturnType<typeof setInterval>;
+  private healthFailures = 0;
+  /** Cached start options so the monitor can respawn a fresh tracked child after
+   *  reclaiming a hung reused proxy. */
+  private lastStartOptions?: ProxyStartOptions;
+  /** Optional callback invoked when the monitor detects a hung reused proxy
+   *  and reclaims + respawns it — so session-service can surface a NoticeShown. */
+  onProxyHungReclaimed?: (payload: { port: number; reason: string }) => void;
 
   /** Bug 5 observability hook: invoked synchronously from {@link stop} BEFORE
    *  the kill, when a tracked child is about to be torn down. The caller
@@ -119,6 +151,14 @@ export class ProxyService implements vscode.Disposable {
     // pie.proxyPort.
     if (await this.healthCheck(baseUrl, 1500)) {
       bootLog('proxy-service', 'start.reused', { port });
+      // Bug: arm a health monitor for the reused proxy. We did NOT spawn it
+      // (this.proc stays undefined), so without a monitor a mid-session hang
+      // (uvicorn wedged by a stalled upstream) is invisible — the backend
+      // keeps pointing at a dead port. The monitor probes /health/liveness;
+      // after N consecutive misses it reclaims the port + respawns a fresh
+      // tracked child so the backend recovers without a window reload.
+      this.lastStartOptions = options;
+      this.armHealthMonitor(baseUrl);
       return { port, baseUrl, pid: 0 };
     }
 
@@ -131,6 +171,7 @@ export class ProxyService implements vscode.Disposable {
     // scripts/proxy.mjs startBackground().
     await this.reclaimOrphanedPort(port, host);
 
+    this.lastStartOptions = options;
     bootLog('proxy-service', 'start.spawn', { uv: resolveUv(), proxyDir, port });
 
     const proc = cp.spawn(
@@ -338,7 +379,56 @@ export class ProxyService implements vscode.Disposable {
    *  `proc` (uv) orphans the Python litellm server still bound to proxyPort.
    *  We kill the whole tree: `taskkill /T /F` on Windows, process-group signal
    *  on Unix (the spawn below uses detached:true so PID is a group leader). */
+  /** Bug: arm a background health monitor for a reused (untracked) proxy. Probes
+   *  /health/liveness on an interval; after N consecutive misses, reclaims the
+   *  port + respawns a fresh tracked child. No-op if a monitor is already armed. */
+  private armHealthMonitor(baseUrl: string): void {
+    if (this.healthMonitor) return;
+    this.healthFailures = 0;
+    const interval = resolveHealthMonitorIntervalMs();
+    this.healthMonitor = setInterval(async () => {
+      const up = await this.healthCheck(baseUrl, Math.min(interval, 5000));
+      if (up) {
+        this.healthFailures = 0;
+        return;
+      }
+      this.healthFailures += 1;
+      if (this.healthFailures < PROXY_HEALTH_FAIL_THRESHOLD) return;
+      // The reused proxy has hung (N consecutive misses). Reclaim the port +
+      // respawn a fresh tracked child so the backend recovers.
+      bootLog('proxy-service', 'health-monitor.hung', { port: this.lastStartOptions?.port, failures: this.healthFailures });
+      this.disarmHealthMonitor();
+      const opts = this.lastStartOptions;
+      if (opts) {
+        try { await this.reclaimOrphanedPort(opts.port, opts.host); } catch { /* best-effort */ }
+        try {
+          this.onProxyHungReclaimed?.({ port: opts.port, reason: 'reused proxy hung — health monitor reclaimed + respawned' });
+        } catch { /* listener must not block recovery */ }
+        try {
+          // Respawn a fresh tracked child. This sets this.proc + re-establishes
+          // readiness so subsequent proxied turns hit a live proxy.
+          await this.start(opts);
+        } catch (err) {
+          bootLog('proxy-service', 'health-monitor.respawn.failed', { port: opts.port, error: toErrorMessage(err) });
+        }
+      }
+    }, interval);
+    // Don't keep the event loop alive for the monitor.
+    this.healthMonitor.unref?.();
+  }
+
+  private disarmHealthMonitor(): void {
+    if (this.healthMonitor) {
+      clearInterval(this.healthMonitor);
+      this.healthMonitor = undefined;
+    }
+    this.healthFailures = 0;
+  }
+
   async stop(): Promise<void> {
+    // Bug: clear the reused-proxy health monitor so a stop/restart doesn't
+    // race the monitor's reclaim+respawn.
+    this.disarmHealthMonitor();
     const proc = this.proc;
     if (!proc) return;
     this.proc = undefined;

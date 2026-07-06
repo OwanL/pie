@@ -223,6 +223,34 @@ def resolve_stream_idle_timeout_s() -> float:
     return value
 
 
+# Environment key for the header-phase timeout (seconds). 0 disables.
+HEADER_TIMEOUT_ENV = "PIE_PROXY_HEADER_TIMEOUT_S"
+# Default header-phase timeout (seconds): the max wait for the upstream to
+# START responding (headers). Generous for slow prefill, but bounded so a
+# stalled upstream before headers can't wedge the uvicorn event loop (which
+# would also block /health/liveness and make the proxy look dead).
+DEFAULT_HEADER_TIMEOUT_S = 120
+
+
+def resolve_header_timeout_s() -> float:
+    """Resolve the header-phase timeout window in seconds.
+
+    Reads ``PIE_PROXY_HEADER_TIMEOUT_S``: unset/empty → default; ``0`` →
+    disabled (no header-phase bound); positive → the window. Invalid (NaN /
+    negative) → default.
+    """
+    raw = os.environ.get(HEADER_TIMEOUT_ENV, "")
+    if raw == "":
+        return float(DEFAULT_HEADER_TIMEOUT_S)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_HEADER_TIMEOUT_S)
+    if value < 0:
+        return float(DEFAULT_HEADER_TIMEOUT_S)
+    return value
+
+
 def _terminal_sse_error(idle_seconds: float) -> bytes:
     """Build the terminal SSE error event + ``[DONE]`` sentinel to emit when a
     stream stalls. Emits an OpenAI-style ``error`` payload so clients/SDKs that
@@ -312,7 +340,28 @@ def install_stream_liveness_middleware(app: Any) -> None:
 
     class StreamLivenessMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
-            response = await call_next(request)
+            # Bug: bound the header phase. A stalled upstream BEFORE headers
+            # (no response start) would otherwise block `await call_next` for
+            # the full 600s router timeout, saturating the uvicorn event loop so
+            # even /health/liveness stops responding (the reused-proxy hang).
+            # asyncio.wait_for surfaces a stalled header phase promptly; the
+            # stream-body phase is bounded separately by wrap_stream_with_liveness.
+            header_timeout = resolve_header_timeout_s()
+            try:
+                if header_timeout > 0:
+                    response = await asyncio.wait_for(call_next(request), timeout=header_timeout)
+                else:
+                    response = await call_next(request)
+            except asyncio.TimeoutError:
+                _proxy_log(
+                    f"header phase stalled: no response start within {header_timeout:.0f}s "
+                    f"(path={request.url.path}); surfacing 504"
+                )
+                return JSONResponse(
+                    {"error": {"message": f"upstream header phase stalled: no response start within {header_timeout:.0f}s",
+                                "type": "upstream_header_stalled"}},
+                    status_code=504,
+                )
             # Only SSE chat-completion streams need wrapping. The body_iterator
             # is the async generator backing a Starlette StreamingResponse; we
             # replace it with the liveness-wrapped version so each chunk fetch is

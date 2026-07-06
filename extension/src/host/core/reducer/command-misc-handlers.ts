@@ -6,6 +6,7 @@ import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage } from './helpers.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
+import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
   return {
@@ -91,7 +92,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   // If the backend is not yet ready, queue the send into ArchState instead
   // of emitting `SendRpc`. The optimistic user message is inserted
   // immediately, the draft is cleared, and a `StartBackendReadyWatchdog`
-  // effect is emitted (the runner starts a 30s timer; if the backend
+  // effect is emitted (the runner starts a timer; if the backend
   // doesn't become ready in time, the watchdog fires and the reducer drops
   // the queued messages). When `BackendReadyChanged{ready:true}` fires, the
   // reducer emits a `DrainBackendReadyQueue` effect; the runner re-dispatches
@@ -121,7 +122,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     });
     return {
       state: nextState,
-      effects: [{ kind: 'StartBackendReadyWatchdog', corrId: 'watchdog', timeoutMs: 30_000 }],
+      effects: [{ kind: 'StartBackendReadyWatchdog', corrId: 'watchdog', timeoutMs: BACKEND_READY_TIMEOUT_MS }],
     };
   }
 
