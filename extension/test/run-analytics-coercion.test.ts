@@ -305,11 +305,30 @@ test('coerceFunctionalSettings accepts valid snapshots and drops malformed ones'
     subagentAlwaysParentModel: 'truthy',
     pruningMode: 'shadow',
     extensionToggles: { subagent: true, safeguard: 'no', cwd: false },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'security',
   });
   assert.deepEqual(coerced, {
     subagentAlwaysParentModel: false,
     pruningMode: 'shadow',
     extensionToggles: { subagent: true, cwd: false },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'security',
+  });
+});
+
+test('coerceFunctionalSettings defaults tool-result-pruning fields to null when absent or invalid', () => {
+  const coerced = coerceFunctionalSettings({
+    pruningMode: 'auto',
+    toolResultPruningEnabled: 'truthy',
+    toolResultPruningProfile: 'bogus',
+  });
+  assert.deepEqual(coerced, {
+    subagentAlwaysParentModel: false,
+    pruningMode: 'auto',
+    extensionToggles: {},
+    toolResultPruningEnabled: null,
+    toolResultPruningProfile: null,
   });
 });
 

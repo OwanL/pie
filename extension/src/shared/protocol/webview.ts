@@ -1,8 +1,9 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
-import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry } from './sessions.js';
-import type { ExtensionInfo, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
+import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
+import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
+import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
 
@@ -41,6 +42,22 @@ export interface StateAppliedPayload {
   systemPromptCount: number;
   domTranscriptLoaderPresent: boolean;
   domTabsConnectingPresent: boolean;
+}
+
+export interface ProxySessionStatus {
+  provider: string;
+  state: 'active' | 'queued';
+  activeSessions: number;
+  queuedSessions: number;
+  maxConcurrentRequests: number;
+}
+
+export interface ProxyProviderMetrics {
+  provider: string;
+  modelInfoId: string;
+  activeRequests: number;
+  queuedRequests: number;
+  maxConcurrentRequests: number;
 }
 
 /** The full view state sent from the extension host to the webview. */
@@ -83,6 +100,12 @@ export interface ViewState {
   /** Persisted composer draft text for the active session. */
   draftText: string;
   busy: boolean;
+  /** Live auto-retry status for the active session, or null when no retry is
+   *  in flight. Surfaced as a "Retrying N of M…" chip with a Cancel button in
+   *  the composer. Independent of `busy` (the SDK emits mid-retry `agent_end`
+ *  with `willRetry`, which the backend now gates on, so `busy` stays true
+ *  throughout a retry; this field is the authoritative retry signal). */
+  retryStatus: RetryStatus | null;
   notice: string | null;
   /** Failure category for the current notice, or null when the notice is a
    *  plain info/warning string (or there is no notice). Set ONLY at the Brief H
@@ -124,8 +147,19 @@ export interface ViewState {
   pruningResult: PruningResult | null;
   /** Current pruning configuration from settings.json. */
   pruningSettings: PruningSettings;
+  /** Current tool-result pruning configuration from settings.json. */
+  toolResultPruningSettings: ToolResultPruningSettings;
   /** Current LiteLLM proxy configuration from settings.json (`proxy` block). */
   proxySettings: ProxySettings;
+  /** Exact live proxy-side concurrency metrics, polled from the local proxy's
+   *  metrics endpoint. One entry per provider currently using or waiting on
+   *  slots. */
+  proxyMetrics?: ProxyProviderMetrics[];
+  /** Host-derived per-session proxy activity/queueing status for running
+   *  sessions on proxied providers. A session is `queued` when it appears to
+   *  be parked waiting for a provider concurrency slot rather than actively
+   *  occupying one. */
+  proxyStatusBySession?: Record<string, ProxySessionStatus>;
   /** Active pruning choices surfaced to the composer/settings UI. */
   pruningCatalog: PruningCatalog;
   /** Pruning prepass phase for the active session (Brief F). Driven host-side
@@ -151,6 +185,12 @@ export interface ViewState {
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
   /** First pending extension UI request for the active session, or null (for bottom-bar prompt). */
   pendingExtensionUIRequest: ExtensionUIRequestPayload | null;
+  /** Currently-active (registered, not yet fired/cancelled) deferred triggers
+   *  across ALL sessions, projected host-side from the `DeferredTriggerRegistry`.
+   *  The webview renders a waiting-trigger segment in the bottom status strip
+   *  (with a cancel affordance) and greys out the mark-done / close-tab actions
+   *  for sessions that own a pending trigger. Empty array when none are active. */
+  deferredTriggers: DeferredTriggerView[];
 }
 
 // ─── Host ↔ webview envelopes ────────────────────────────────────────────────
@@ -229,6 +269,7 @@ export type WebviewToHostMessage =
     }
   | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; localId?: string }
   | { type: 'interrupt'; sessionPath: string }
+  | { type: 'clearQueue'; sessionPath: string }
   | { type: 'newSession' }
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string }
@@ -249,7 +290,9 @@ export type WebviewToHostMessage =
     }
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
+  | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }
   | { type: 'setProxySettings'; settings: ProxySettingsUpdate }
+  | { type: 'addProxyProvider'; input: import('./settings').ProxyProviderAddInput }
   | { type: 'startEdit'; sessionPath: string; messageId: string }
   | { type: 'cancelEdit'; sessionPath: string }
   | { type: 'dismissNotice' }
@@ -259,6 +302,16 @@ export type WebviewToHostMessage =
   | { type: 'openFileInEditor'; sessionPath: string; filePath: string }
   | { type: 'revertFile'; sessionPath: string; filePath: string }
   | { type: 'setFileRead'; sessionPath: string; filePath: string; read: boolean }
+  | {
+      /** Set the complete disabled-entry set for a session's system prompts.
+       *  An entry id in `disabledEntries` is toggled OFF (removed from the
+       *  prompt sent to the model and hidden from the transcript). An empty
+       *  array re-enables everything. The backend is the source of truth and
+       *  re-emits `session.opened` with updated `disabled` flags. */
+      type: 'setSystemPromptToggles';
+      sessionPath: string;
+      disabledEntries: string[];
+    }
   | { type: 'stateApplied'; payload: StateAppliedPayload }
   | { type: 'extensionUiResponse'; sessionPath: string; response: ExtensionUIResponsePayload }
   | { type: 'setFileChangesExpanded'; sessionPath: string; expanded: boolean }
@@ -283,5 +336,15 @@ export type WebviewToHostMessage =
       text: string;
       localId: string;
       disablePruning?: boolean;
+    }
+  | {
+      /** Cancel a deferred trigger registered for `sessionPath`. When
+       *  `triggerId` is omitted, cancels ALL active triggers for that session
+       *  (mirrors the `defer_trigger` tool's `cancel` action with no
+       *  `triggerId`). The host appends a `cancel` op to the sidecar and
+       *  updates its in-memory set; the next snapshot reflects the removal. */
+      type: 'cancelDeferredTrigger';
+      sessionPath: string;
+      triggerId?: string;
     };
 

@@ -6,7 +6,7 @@ import type * as vscode from 'vscode';
 import { toErrorMessage } from './error-message';
 
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
-export type PieLogLevel = Extract<LogLevel, 'info' | 'warn' | 'error'>;
+export type PieLogLevel = Extract<LogLevel, 'debug' | 'info' | 'warn' | 'error'>;
 
 const LEVEL_RANK: Record<LogLevel, number> = {
   trace: 10,

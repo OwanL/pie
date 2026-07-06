@@ -3,7 +3,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker } from './model-list';
 
 import {
@@ -13,7 +13,6 @@ import {
 
 import {
   AppearanceSection,
-  BashSection,
   ChatPrefSections,
   ExtensionsSection,
   ProvidersSection,
@@ -46,22 +45,24 @@ export interface ComposerSettingsMenuProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  toolResultPruningSettings: ToolResultPruningSettings;
   proxySettings: ProxySettings;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   onSetProxySettings: (settings: ProxySettingsUpdate) => void;
+  onAddProxyProvider: (input: import('../../../shared/protocol').ProxyProviderAddInput) => void;
 }
 
 /** The six settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'appearance' | 'bash' | 'extensions' | 'providers' | 'proxy';
+type SettingsTab = 'chat' | 'appearance' | 'extensions' | 'providers' | 'proxy';
 
 const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'chat', label: 'Chat' },
   { id: 'appearance', label: 'Appearance' },
-  { id: 'bash', label: 'Bash' },
   { id: 'extensions', label: 'Extensions' },
   { id: 'providers', label: 'Providers' },
   { id: 'proxy', label: 'Proxy' },
@@ -70,7 +71,6 @@ const TAB_DEFS: { id: SettingsTab; label: string }[] = [
 const TAB_LABEL: Record<SettingsTab, string> = {
   chat: 'Chat',
   appearance: 'Appearance',
-  bash: 'Bash',
   extensions: 'Extensions',
   providers: 'Providers',
   proxy: 'Proxy',
@@ -111,14 +111,6 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <circle cx="5.5" cy="6" r="1" fill="currentColor" stroke="none" />
           <circle cx="10" cy="6" r="1" fill="currentColor" stroke="none" />
           <circle cx="11" cy="9.5" r="1" fill="currentColor" stroke="none" />
-        </svg>
-      );
-    case 'bash':
-      return (
-        <svg {...common}>
-          <rect x="1.5" y="3" width="13" height="10" rx="2" />
-          <path d="M4 7l2 1.5L4 10" />
-          <path d="M8 10h4" />
         </svg>
       );
     case 'extensions':
@@ -170,7 +162,7 @@ const APPEARANCE_SETTING_LABELS = [
   'Base text size', 'Composer text size', 'Expanded section text size',
   'Sans-serif font', 'Monospace font',
 ];
-const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path'];
+const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Acquire timeout', 'Fast path'];
 const SKILL_PRUNER_SETTING_LABELS = [
   'Pruning mode', 'Pruning prepass model', 'Pruning thinking level',
   'Pruning skill limit', 'Pruning tool limit', 'Omitted skills (never pruned)',
@@ -180,6 +172,11 @@ const SUBAGENT_SETTING_LABELS = [
   'Subagent dropped tools', 'Subagent model buckets', 'Subagent nesting levels',
   'Subagent tree session budget', 'Subagent max in-flight',
   'Subagent max concurrency', 'Subagent max parallel tasks',
+];
+const TOOL_RESULT_PRUNER_SETTING_LABELS = [
+  'Tool-result pruning enabled', 'Tool-result pruning profile',
+  'Tool-result pruning tools', 'Prune ANSI escapes',
+  'Prune trailing whitespace', 'Prune blank-line runs', 'Prune JSON',
 ];
 
 interface SearchJumpEntry {
@@ -203,7 +200,7 @@ interface SearchToggleEntry {
 
 type SearchEntry = SearchJumpEntry | SearchToggleEntry;
 
-export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, proxySettings, availableExtensions, availableModels, onSetPrefs, onSetPruningSettings, onSetProxySettings }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, proxySettings, availableExtensions, availableModels, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings, onSetProxySettings, onAddProxyProvider }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -275,6 +272,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     const extIds = new Set(availableExtensions.map((e) => e.id));
     const hasSkillPruner = extIds.has('skill-pruner');
     const hasSubagent = extIds.has('subagent');
+    const hasToolResultPruner = extIds.has('tool-result-pruner');
+    const hasWarmBash = extIds.has('warm-bash');
 
     // Category jump entries (one per visible tab).
     for (const tab of visibleTabs) {
@@ -301,9 +300,10 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       }
     };
     if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
-    if (visibleTabs.some((t) => t.id === 'bash')) pushSettings(BASH_SETTING_LABELS, 'bash');
+    if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
     if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
     if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
+    if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'extensions', 'tool-result-pruner');
     if (visibleTabs.some((t) => t.id === 'proxy')) {
       pushSettings(['Proxy retries', 'Proxy timeout'], 'proxy');
       for (const name of Object.keys(proxySettings.providers)) {
@@ -332,15 +332,17 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       }
     }
 
-    // Bash fast-path toggle.
-    entries.push({
-      type: 'toggle',
-      id: 'bash:fastpath',
-      label: 'Fast path (no shell for simple commands)',
-      haystack: 'bash fast path no shell simple commands'.toLowerCase(),
-      checked: !!prefs.bashFastPath,
-      apply: () => onSetPrefs({ bashFastPath: !prefs.bashFastPath }),
-    });
+    // Bash fast-path toggle (warm-bash extension).
+    if (hasWarmBash) {
+      entries.push({
+        type: 'toggle',
+        id: 'bash:fastpath',
+        label: 'Fast path (no shell for simple commands)',
+        haystack: 'bash fast path no shell simple commands'.toLowerCase(),
+        checked: !!prefs.bashFastPath,
+        apply: () => onSetPrefs({ bashFastPath: !prefs.bashFastPath }),
+      });
+    }
 
     // Extension enable toggles.
     for (const ext of availableExtensions) {
@@ -681,9 +683,6 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                 {effectiveTab === 'appearance' && (
                   <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
                 )}
-                {effectiveTab === 'bash' && (
-                  <BashSection prefs={prefs} onSetPrefs={onSetPrefs} />
-                )}
                 {effectiveTab === 'extensions' && (
                   <ExtensionsSection
                     availableExtensions={availableExtensions}
@@ -692,18 +691,20 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                     expandedExt={expandedExt}
                     setExpandedExt={setExpandedExt}
                     pruningSettings={pruningSettings}
+                    toolResultPruningSettings={toolResultPruningSettings}
                     modelEntries={modelEntries}
                     availableModels={availableModels}
                     skillCatalog={skillCatalog}
                     toolCatalog={toolCatalog}
                     onSetPruningSettings={onSetPruningSettings}
+                    onSetToolResultPruningSettings={onSetToolResultPruningSettings}
                   />
                 )}
                 {effectiveTab === 'providers' && (
                   <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} />
                 )}
                 {effectiveTab === 'proxy' && (
-                  <ProxySection proxySettings={proxySettings} onSetProxySettings={onSetProxySettings} />
+                  <ProxySection proxySettings={proxySettings} onSetProxySettings={onSetProxySettings} onAddProxyProvider={onAddProxyProvider} />
                 )}
               </>
             )}

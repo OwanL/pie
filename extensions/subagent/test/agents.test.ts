@@ -519,6 +519,84 @@ test("findNearestProjectAgentsDir: finds agents/ in parent dir", async (t) => {
 // loadAgentsFromDir: frontmatter with bucket and thinkingLevel
 // ============================================================
 
+// ============================================================
+// discoverAgents — multi-cwd union (subdirectory project roots)
+// ============================================================
+// When the session cwd is a workspace root that sits ABOVE the real project,
+// walking up from it never reaches the nested project's `agents/` dir.
+// Passing an array that includes a per-task cwd pointing at the nested project
+// must surface its agents. This is the multi-repo workspace scenario.
+
+test("discoverAgents: array cwd lets a nested project's agents be found from a parent workspace root", async (t) => {
+	const { discoverAgents } = await import("../agents.js");
+	const workspaceDir = path.join(os.tmpdir(), `pi-agent-test-ws-${Date.now()}`);
+	fs.mkdirSync(workspaceDir, { recursive: true });
+	const projectDir = path.join(workspaceDir, "pie");
+	const agentsDir = path.join(projectDir, "agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.writeFileSync(path.join(agentsDir, "scout.md"), "---\nname: scout\ndescription: nested project scout\n---\nbody\n");
+	t.after(() => { fs.rmSync(workspaceDir, { recursive: true, force: true }); });
+
+	const alone = discoverAgents(workspaceDir, "project");
+	assert.equal(alone.agents.length, 0, "workspace root alone has no agents/ ancestor");
+	assert.equal(alone.projectAgentsDir, null);
+
+	const withNested = discoverAgents([workspaceDir, projectDir], "project");
+	assert.equal(withNested.agents.length, 1);
+	assert.equal(withNested.agents[0].name, "scout");
+	assert.equal(withNested.agents[0].source, "project");
+	assert.equal(withNested.projectAgentsDir, fs.realpathSync(agentsDir));
+});
+
+test("discoverAgents: array cwd dedupes the same agents/ dir reached via two cwds", async (t) => {
+	const { discoverAgents } = await import("../agents.js");
+	const projectDir = path.join(os.tmpdir(), `pi-agent-test-dedup-${Date.now()}`);
+	const agentsDir = path.join(projectDir, "agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.writeFileSync(path.join(agentsDir, "worker.md"), "---\nname: worker\ndescription: dedup\n---\nbody\n");
+	const childDir = path.join(projectDir, "src", "deep");
+	fs.mkdirSync(childDir, { recursive: true });
+	t.after(() => { fs.rmSync(projectDir, { recursive: true, force: true }); });
+
+	const result = discoverAgents([projectDir, childDir], "project");
+	assert.equal(result.agents.length, 1, "same dir reached twice must not double-load");
+	assert.equal(result.agents[0].name, "worker");
+});
+
+test("discoverAgents: with multiple distinct project dirs, first cwd's nearest dir wins", async (t) => {
+	const { discoverAgents } = await import("../agents.js");
+	const root = path.join(os.tmpdir(), `pi-agent-test-multidir-${Date.now()}`);
+	const projA = path.join(root, "a");
+	const projB = path.join(root, "b");
+	fs.mkdirSync(path.join(projA, "agents"), { recursive: true });
+	fs.mkdirSync(path.join(projB, "agents"), { recursive: true });
+	fs.writeFileSync(path.join(projA, "agents", "shared.md"), "---\nname: shared\ndescription: from-a\n---\nbody\n");
+	fs.writeFileSync(path.join(projB, "agents", "shared.md"), "---\nname: shared\ndescription: from-b\n---\nbody\n");
+	fs.writeFileSync(path.join(projB, "agents", "only-b.md"), "---\nname: only-b\ndescription: b-only\n---\nbody\n");
+	t.after(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+	const result = discoverAgents([projA, projB], "project");
+	assert.equal(result.projectAgentsDir, fs.realpathSync(path.join(projA, "agents")));
+	const shared = result.agents.find((a) => a.name === "shared");
+	assert.ok(shared);
+	assert.equal(shared!.description, "from-a", "first project dir wins name collisions");
+	assert.ok(result.agents.some((a) => a.name === "only-b"), "second dir still contributes non-colliding agents");
+});
+
+test("discoverAgents: string cwd still works (backward compatible)", async (t) => {
+	const { discoverAgents } = await import("../agents.js");
+	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-strcwd-${Date.now()}`);
+	const agentsDir = path.join(tmpDir, "agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+	fs.writeFileSync(path.join(agentsDir, "x.md"), "---\nname: x\ndescription: str cwd compat\n---\nbody\n");
+	t.after(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+	const result = discoverAgents(tmpDir, "project");
+	assert.equal(result.agents.length, 1);
+	assert.equal(result.agents[0].name, "x");
+	assert.equal(result.projectAgentsDir, fs.realpathSync(agentsDir));
+});
+
 test("loadAgentsFromDir: parses bucket and thinkingLevel from frontmatter", async (t) => {
 	const { discoverAgents } = await import("../agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-bucket-${Date.now()}`);

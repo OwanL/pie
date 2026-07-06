@@ -430,6 +430,71 @@ test('agent_end emits busy false, refreshes session state, and aborts requests w
   assert.equal(context.activeRequest, undefined);
 });
 
+test('agent_end with willRetry=true is a no-op (mid-retry: preserve activeRequest, busy, no abort)', () => {
+  const { deps, emitted, busy, sessionOpened, getListChangedCount, getContextUsageChangedCount } = createDeps();
+  const activeRequest = { id: 'req-retry', messageIndex: 1, aborted: false, lastAssistantMessageId: 'req-retry:1' };
+  const context = createContext({ activeRequest });
+
+  handleSdkSessionEvent(deps, context, { type: 'agent_end', willRetry: true });
+
+  // Mid-retry agent_end must NOT finalize: activeRequest is preserved so the
+  // retry turn can stream (message_start/message_end are gated on it), busy
+  // stays true (no flicker, no premature session_finished trigger), and no
+  // session.opened / message.aborted is emitted.
+  assert.equal(context.activeRequest, activeRequest);
+  assert.deepEqual(busy, []);
+  assert.deepEqual(sessionOpened, []);
+  assert.equal(getListChangedCount(), 0);
+  assert.equal(getContextUsageChangedCount(), 0);
+  assert.deepEqual(emitted, []);
+});
+
+test('auto_retry_start emits retry.started with attempt/delay/error', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'auto_retry_start',
+    attempt: 2,
+    maxAttempts: 3,
+    delayMs: 4000,
+    errorMessage: '429 Too Many Requests',
+  });
+
+  assert.deepEqual(emitted, [{
+    event: 'retry.started',
+    payload: {
+      sessionPath: '/workspace/session.jsonl',
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 4000,
+      errorMessage: '429 Too Many Requests',
+    },
+  }]);
+});
+
+test('auto_retry_end emits retry.ended with success/finalError', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'auto_retry_end',
+    success: false,
+    attempt: 3,
+    finalError: 'Retry cancelled',
+  });
+
+  assert.deepEqual(emitted, [{
+    event: 'retry.ended',
+    payload: {
+      sessionPath: '/workspace/session.jsonl',
+      success: false,
+      attempt: 3,
+      finalError: 'Retry cancelled',
+    },
+  }]);
+});
+
 test('agent_end reports unexpected interruptions when the run ends without any assistant message', () => {
   const { deps, emitted } = createDeps();
   const context = createContext({
@@ -520,7 +585,8 @@ test('assistant message events ignore non-assistant roles and incomplete streami
   handleSdkSessionEvent(deps, context, { type: 'message_end', message: { role: 'user' } as any });
   handleSdkSessionEvent(deps, context, { type: 'tool_execution_update', toolCallId: 'tool-1', partialResult: 'ignored' });
 
-  assert.deepEqual(emitted, []);
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].event, 'message.queuedDelivered');
   assert.equal(getContextUsageChangedCount(), 0);
   assert.equal(context.activeRequest?.currentMessageId, undefined);
 });

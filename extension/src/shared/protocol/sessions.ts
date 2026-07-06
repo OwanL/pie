@@ -65,6 +65,10 @@ export interface SessionSummary {
   reviewerBuckets?: string[];
   /** Agent review: number of sub-agent reviewers that fed the rating. */
   reviewerCount?: number;
+  /** True when this tab is pinned (browser-style pinned tab). Populated by
+   *  the host when pushing open-tab summaries so the `session_review` tool's
+   *  listOpen can show which tabs are pinned and skip them during review. */
+  pinned?: boolean;
 }
 
 export type TranscriptPageDirection = 'older' | 'newer' | 'latest';
@@ -109,6 +113,21 @@ export interface SystemPromptEntry {
   availability: SystemPromptAvailability;
   /** Full path or extra detail shown on hover when the title is shortened. */
   tooltip?: string;
+  /** Stable identifier used to toggle this entry on/off per session. Entries
+   *  built by `buildSessionSystemPrompts` always carry an `id`; legacy/test
+   *  fixtures may omit it (the webview falls back to `title`). */
+  id?: string;
+  /** True when the user has toggled this entry off for the session. A disabled
+   *  entry is stripped from the system prompt sent to the model AND hidden from
+   *  the transcript display. Absent/`false` = enabled. */
+  disabled?: boolean;
+  /** False for display-only entries that pi cannot strip from the sent prompt
+   *  and the user therefore cannot toggle. The provider card is the canonical
+   *  case: the provider's own system prompt is injected server-side and is
+   *  outside pi's control, so "turning it off" is impossible. Such entries are
+   *  always shown in the transcript (never hidden) and never render a checkbox
+   *  in the toggle menu. Absent/`true` = toggleable. */
+  toggleable?: boolean;
 }
 
 export interface SessionContextFileFactor {
@@ -297,6 +316,57 @@ export interface PreflightFailedPayload {
   requestId: string;
   sessionPath: string;
   error: string;
+}
+
+/** Steering (FollowUp) delivery signal. Emitted by the backend when the agent
+ *  loop injects a queued follow-up user message into a turn (the SDK emits
+ *  `message_start` with `role: 'user'` for each injected queued message). The
+ *  host uses this to promote its optimistic 'queued' transcript message to
+ *  'completed'. Carries the user-visible text for observability; the host
+ *  promotes the EARLIEST 'queued' message (FIFO order — the SDK drains the
+ *  follow-up queue one message at a time in enqueue order), so text is not
+ *  used for matching (the SDK may have expanded skill/template commands). */
+export interface QueuedDeliveredPayload {
+  sessionPath: string;
+  text: string;
+}
+
+/** Live auto-retry status for a session's in-flight turn. The SDK retries
+ *  transient provider errors (overloaded / rate-limit / 5xx / transport) with
+ *  exponential backoff; this records the attempt currently sleeping/retrying
+ *  so the webview can surface "Retrying 2 of 3…" with a Cancel affordance.
+ *  Driven by the SDK's `auto_retry_start` / `auto_retry_end` events. */
+export interface RetryStatus {
+  /** 1-based retry attempt number (1 = first retry after the initial failure). */
+  attempt: number;
+  /** Max retry attempts configured (`retry.maxRetries`). */
+  maxAttempts: number;
+  /** Backoff delay (ms) the SDK is sleeping before this attempt. */
+  delayMs: number;
+  /** Verbatim provider error that triggered the retry (e.g. "429 Too Many Requests"). */
+  errorMessage: string;
+}
+
+/** Emitted by the backend when the SDK begins an auto-retry attempt (after a
+ *  transient error), just before the exponential-backoff sleep. The webview
+ *  surfaces this as a "Retrying N of M…" status chip with a Cancel button. */
+export interface RetryStartedPayload {
+  sessionPath: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+}
+
+/** Emitted by the backend when an auto-retry attempt concludes — on success
+ *  (the retried turn produced a non-error assistant message), on final failure
+ *  (retries exhausted), or on cancellation (`session.abort()` aborted the
+ *  retry sleep). Clears the retry status chip. */
+export interface RetryEndedPayload {
+  sessionPath: string;
+  success: boolean;
+  attempt: number;
+  finalError?: string;
 }
 
 export type FileChangeKind = 'created' | 'modified' | 'deleted';

@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../src/webview/panel/composer/settings-menu';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS } from '../src/shared/protocol';
 import type { ExtensionInfo, ModelInfo } from '../src/shared/protocol';
 
 let container: HTMLElement;
@@ -35,12 +35,15 @@ function mount(extensions: ExtensionInfo[] = [], models: ModelInfo[] = []) {
         pruningSettings: DEFAULT_PRUNING_SETTINGS,
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
+        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
         proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: extensions,
         availableModels: models,
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
+        onSetToolResultPruningSettings: () => undefined,
         onSetProxySettings: () => undefined,
+        onAddProxyProvider: () => undefined,
       }),
       container,
     );
@@ -66,7 +69,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   // Tab strip present with the always-on categories (Extensions/Providers are
   // hidden because no extensions/models were passed).
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance', 'bash', 'proxy']);
+  assert.deepEqual(tabIds, ['chat', 'appearance', 'proxy']);
 
   // Chat is active by default and renders its Transcript section.
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="chat"].active'), 'Chat tab should be active by default');
@@ -78,10 +81,6 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /Corner radius/);
   assert.doesNotMatch(body.textContent!, /Transcript/);
-
-  // Switch to Bash — warm-pool content renders.
-  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="bash"]')); });
-  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Warm pool size/);
 });
 
 test('Extensions and Providers tabs appear only when their content exists', () => {
@@ -93,7 +92,72 @@ test('Extensions and Providers tabs appear only when their content exists', () =
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance', 'bash', 'extensions', 'providers', 'proxy']);
+  assert.deepEqual(tabIds, ['chat', 'appearance', 'extensions', 'providers', 'proxy']);
+});
+
+// Bash settings now live under the Warm Bash extension in the Extensions tab
+// (moved out of a dedicated Bash tab). Expanding the warm-bash row reveals the
+// warm-pool / fast-path / shell-path controls inline.
+test('warm-bash settings render inline under the Warm Bash extension row', () => {
+  const extensions: ExtensionInfo[] = [{ id: 'warm-bash', label: 'Warm Bash', description: 'Speeds up bash' }];
+  mount(extensions, []);
+  const menu = openMenu();
+
+  // Switch to the Extensions tab.
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+  assert.match(body.textContent!, /Warm Bash/);
+  assert.doesNotMatch(body.textContent!, /Warm pool size/, 'warm-pool controls should be hidden until expanded');
+
+  // Expand the warm-bash row — the inline settings render.
+  act(() => { click(body.querySelector('.toolbar-settings-ext-chevron')); });
+  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Warm pool size/);
+});
+
+// The ask-user extension exposes a nested "Include for subagents" toggle that
+// drives the shared subagentDropTools list. Expanding the row reveals it; the
+// toggle stays in sync with the Subagent section's Dropped-tools editor.
+test('ask-user settings render inline with an "Include for subagents" toggle', () => {
+  const extensions: ExtensionInfo[] = [{ id: 'ask-user', label: 'Ask User', description: 'Ask the user' }];
+  const setPrefsCalls: Partial<import('../src/shared/protocol').ChatPrefs>[] = [];
+  act(() => {
+    render(
+      h(ComposerSettingsMenu, {
+        prefs: DEFAULT_CHAT_PREFS,
+        pruningSettings: DEFAULT_PRUNING_SETTINGS,
+        pruningCatalog: { skills: [], tools: [] },
+        pruningResult: null,
+        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+        proxySettings: DEFAULT_PROXY_SETTINGS,
+        availableExtensions: extensions,
+        availableModels: [],
+        onSetPrefs: (p) => setPrefsCalls.push(p),
+        onSetPruningSettings: () => undefined,
+        onSetToolResultPruningSettings: () => undefined,
+        onSetProxySettings: () => undefined,
+        onAddProxyProvider: () => undefined,
+      }),
+      container,
+    );
+  });
+  const menu = openMenu();
+
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+  assert.match(body.textContent!, /Ask User/);
+  assert.doesNotMatch(body.textContent!, /Include for subagents/, 'ask-user toggle should be hidden until expanded');
+
+  // Expand the ask-user row — the inline toggle renders and is checked by
+  // default (DEFAULT_CHAT_PREFS.subagentDropTools is empty → ask_user included).
+  act(() => { click(body.querySelector('.toolbar-settings-ext-chevron')); });
+  const toggle = menu.querySelector('.toolbar-settings-ext-settings .toolbar-settings-item[role="checkbox"]') as HTMLElement;
+  assert.ok(toggle, 'include-for-subagents toggle should render');
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Include for subagents/);
+
+  // Clicking the toggle disables inclusion → adds ask_user to the drop list.
+  act(() => { click(toggle); });
+  assert.deepEqual(setPrefsCalls, [{ subagentDropTools: ['ask_user'] }]);
 });
 
 // Search replaces the tab strip + body with a flat filtered result list that

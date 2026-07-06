@@ -164,34 +164,50 @@ export function onContextUsageChanged(payload: ContextUsageChangedPayload, deps:
 
 /**
  * Known pi extensions and the tool IDs they register.
- * Hook-only extensions (safeguard) are listed by name since they
- * don't register tools but still participate in every session.
+ * Hook-only extensions (or tool overrides like warm-bash that shadow a core
+ * tool id) are listed by name since they don't expose a detectable tool id but
+ * still participate in every session; see HOOK_ONLY_EXTENSION_IDS below.
  */
 const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'subagent', label: 'Subagent', description: 'Delegate tasks to specialized sub-agents' },
   { id: 'safeguard', label: 'Safeguard', description: 'Block dangerous shell commands and file writes' },
   { id: 'cwd-skills', label: 'CWD Skills', description: 'Auto-discover skills from the working directory' },
   { id: 'skill-pruner', label: 'Skill Pruner', description: 'Score and prune skill descriptions by relevance' },
+  { id: 'tool-result-pruner', label: 'Tool-result Pruner', description: 'Prune tool output bytes before they enter the model context' },
+  { id: 'ask-user', label: 'Ask User', description: 'Ask the user a clarifying question with preset answers' },
+  { id: 'deferred-triggers', label: 'Deferred Triggers', description: 'Defer a task and auto-resume the session when a trigger fires' },
+  { id: 'session-reviewer', label: 'Session Reviewer', description: 'List, read, and review the currently-open session transcripts' },
+  { id: 'warm-bash', label: 'Warm Bash', description: 'Speed up the bash tool with a pre-warmed shell pool' },
 ];
 
 const TOOL_TO_EXTENSION: Record<string, string> = {
   subagent: 'subagent',
+  ask_user: 'ask-user',
+  defer_trigger: 'deferred-triggers',
+  session_review: 'session-reviewer',
 };
+
+// Hook-only extensions (or tool overrides like warm-bash that shadow a core
+// tool id) can't be detected from the selected-tool list, so they're treated as
+// active whenever the extension is loaded. The backend doesn't expose hook
+// registration, so we include them by convention.
+const HOOK_ONLY_EXTENSION_IDS = new Set([
+  'safeguard',
+  'cwd-skills',
+  'skill-pruner',
+  'tool-result-pruner',
+  'warm-bash',
+]);
 
 /** Derive available extensions from selected tool IDs + known hook-only extensions. */
 export function deriveAvailableExtensions(selectedToolIds: string[]): ExtensionInfo[] {
-  const activeExtensionIds = new Set<string>();
+  const activeExtensionIds = new Set<string>(HOOK_ONLY_EXTENSION_IDS);
   for (const toolId of selectedToolIds) {
     const extId = TOOL_TO_EXTENSION[toolId];
     if (extId) {
       activeExtensionIds.add(extId);
     }
   }
-  // Always include known hook-only extensions (they're active if the extension is loaded).
-  // The backend doesn't expose hook registration, so we include them by convention.
-  activeExtensionIds.add('safeguard');
-  activeExtensionIds.add('cwd-skills');
-  activeExtensionIds.add('skill-pruner');
 
   return KNOWN_EXTENSIONS.filter((ext) => activeExtensionIds.has(ext.id));
 }

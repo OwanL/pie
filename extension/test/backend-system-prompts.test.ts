@@ -2,7 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { SdkBuildSystemPromptOptions, SdkSkill, SdkToolInfo } from '../src/backend/sdk';
-import { buildProviderSystemPrompt, buildSessionSystemPrompts } from '../src/backend/system-prompts';
+import {
+  APPEND_ENTRY_ID,
+  HARNESS_ENTRY_ID,
+  PROJECT_CONTEXT_ENTRY_ID,
+  RUNTIME_ENTRY_ID,
+  SKILLS_ENTRY_ID,
+  TOOLS_ENTRY_ID,
+  applySystemPromptTogglesToOptions,
+  buildProviderSystemPrompt,
+  buildSessionSystemPrompts,
+  contextFileEntryId,
+  filterDisplayEntries,
+  markDisabledEntries,
+  stripDisabledSectionsFromPrompt,
+} from '../src/backend/system-prompts';
 
 function makeSkill(name: string): SdkSkill {
   return {
@@ -208,6 +222,28 @@ test('buildProviderSystemPrompt falls back to a neutral unresolved state when no
   assert.match(entry.text, /No active model has been selected/);
 });
 
+test('buildProviderSystemPrompt marks the card as non-toggleable (display-only)', () => {
+  // The provider's own system prompt is injected server-side and cannot be
+  // removed by pi, so the card must never offer a toggle in either state.
+  assert.equal(buildProviderSystemPrompt({ provider: 'umans', modelId: 'umans-glm-5.2', modelName: 'GLM 5.2' }).toggleable, false);
+  assert.equal(buildProviderSystemPrompt(undefined).toggleable, false);
+});
+
+test('markDisabledEntries never disables a non-toggleable entry, even when its id is in the set', () => {
+  // Self-heal for sidecars persisted before the provider card became
+  // non-toggleable: a stale `'provider'` in the disabled set must not hide the
+  // informational card from the transcript.
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions: { cwd: '/repo', skills: [] },
+    disabledEntries: ['provider', HARNESS_ENTRY_ID],
+  });
+  const provider = prompts.find((p) => p.id === 'provider')!;
+  const harness = prompts.find((p) => p.id === HARNESS_ENTRY_ID)!;
+  assert.equal(provider.disabled, undefined, 'provider card stays visible');
+  assert.equal(harness.disabled, true, 'toggleable entries still disable normally');
+});
+
 test('buildSessionSystemPrompts threads the active provider into the provider entry', () => {
   const prompts = buildSessionSystemPrompts({
     harnessPrompt: 'Harness\nCurrent date: 2026-05-13\nCurrent working directory: /repo',
@@ -221,4 +257,120 @@ test('buildSessionSystemPrompts threads the active provider into the provider en
   assert.equal(provider.summary, 'anthropic');
   assert.match(provider.text, /anthropic/);
   assert.match(provider.text, /claude-3-5-sonnet/);
+});
+
+test('buildSessionSystemPrompts stamps a stable id on every entry', () => {
+  const promptOptions: SdkBuildSystemPromptOptions = {
+    cwd: '/repo',
+    appendSystemPrompt: '# Appended\nextra',
+    contextFiles: [{ path: '/repo/AGENTS.md', content: 'rules' }],
+    skills: [makeSkill('frontend-design')],
+  };
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions,
+    formatSkillsForPrompt: (skills) => skills.map((s) => s.name).join('\n'),
+  });
+  assert.deepEqual(
+    prompts.map((p) => p.id),
+    ['provider', HARNESS_ENTRY_ID, APPEND_ENTRY_ID, PROJECT_CONTEXT_ENTRY_ID, contextFileEntryId('/repo/AGENTS.md'), SKILLS_ENTRY_ID, RUNTIME_ENTRY_ID],
+  );
+  // No entry is disabled by default.
+  assert.ok(prompts.every((p) => !p.disabled));
+});
+
+test('buildSessionSystemPrompts marks disabled entries when disabledEntries is provided', () => {
+  const promptOptions: SdkBuildSystemPromptOptions = {
+    cwd: '/repo',
+    contextFiles: [{ path: '/repo/AGENTS.md', content: 'rules' }],
+  };
+  const disabled = [HARNESS_ENTRY_ID, contextFileEntryId('/repo/AGENTS.md')];
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions,
+    disabledEntries: disabled,
+  });
+  const harness = prompts.find((p) => p.id === HARNESS_ENTRY_ID)!;
+  const file = prompts.find((p) => p.id === contextFileEntryId('/repo/AGENTS.md'))!;
+  const runtime = prompts.find((p) => p.id === RUNTIME_ENTRY_ID)!;
+  assert.equal(harness.disabled, true);
+  assert.equal(file.disabled, true);
+  assert.equal(runtime.disabled, undefined);
+});
+
+test('filterDisplayEntries drops disabled entries and keeps the rest', () => {
+  const promptOptions: SdkBuildSystemPromptOptions = {
+    cwd: '/repo',
+    contextFiles: [{ path: '/repo/AGENTS.md', content: 'rules' }],
+  };
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions,
+    disabledEntries: [contextFileEntryId('/repo/AGENTS.md')],
+  });
+  const visible = filterDisplayEntries(prompts, new Set([contextFileEntryId('/repo/AGENTS.md')]));
+  assert.ok(!visible.some((p) => p.id === contextFileEntryId('/repo/AGENTS.md')));
+  assert.ok(visible.some((p) => p.id === HARNESS_ENTRY_ID));
+});
+
+test('applySystemPromptTogglesToOptions drops option-driven disabled sections', () => {
+  const options: SdkBuildSystemPromptOptions = {
+    cwd: '/repo',
+    appendSystemPrompt: '# Appended\nextra',
+    contextFiles: [{ path: '/repo/AGENTS.md', content: 'rules' }, { path: '/repo/other.md', content: 'more' }],
+    skills: [makeSkill('frontend-design')],
+  };
+  const disabled = new Set([APPEND_ENTRY_ID, SKILLS_ENTRY_ID, contextFileEntryId('/repo/AGENTS.md')]);
+  const filtered = applySystemPromptTogglesToOptions(options, disabled);
+  assert.equal(filtered.appendSystemPrompt, undefined);
+  assert.deepEqual(filtered.skills, []);
+  assert.deepEqual(
+    filtered.contextFiles!.map((c) => c.path),
+    ['/repo/other.md'],
+  );
+  // customPrompt is intentionally NOT cleared (cleared would re-add the harness).
+  assert.equal(filtered.customPrompt, options.customPrompt);
+});
+
+test('stripDisabledSectionsFromPrompt removes the harness prefix, tools block, and runtime trailer', () => {
+  const harnessPrefix =
+    'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\n' +
+    'Available tools:\n- read: read files\n- bash: run commands\n\n' +
+    'In addition to the tools above, you may have access to other custom tools depending on the project.\n\n' +
+    'Guidelines:\n- Be concise in your responses\n';
+  const full =
+    harnessPrefix +
+    '\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n<project_instructions path="/repo/AGENTS.md">\nrules\n</project_instructions>\n\n</project_context>\n' +
+    '\nCurrent date: 2026-01-01\nCurrent working directory: /repo';
+
+  // Disable everything option-driven can't express: harness, tools, runtime.
+  const disabled = new Set([HARNESS_ENTRY_ID, TOOLS_ENTRY_ID, RUNTIME_ENTRY_ID]);
+  const stripped = stripDisabledSectionsFromPrompt(full, disabled, undefined, harnessPrefix);
+  assert.ok(!stripped.startsWith('You are an expert'));
+  assert.ok(!stripped.includes('Available tools'));
+  assert.ok(!stripped.includes('Current date:'));
+  // Project context (not disabled) survives.
+  assert.ok(stripped.includes('<project_instructions'));
+});
+
+test('stripDisabledSectionsFromPrompt strips the custom prompt prefix when customPrompt is set', () => {
+  const custom = 'You are a custom assistant.';
+  const full = custom + '\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n</project_context>\n\nCurrent date: 2026-01-01\nCurrent working directory: /repo';
+  const disabled = new Set(['custom']);
+  const stripped = stripDisabledSectionsFromPrompt(full, disabled, custom, undefined);
+  assert.ok(!stripped.startsWith('You are a custom'));
+  // Runtime (not disabled) survives.
+  assert.ok(stripped.includes('Current date:'));
+});
+
+test('markDisabledEntries sets disabled only on matching ids', () => {
+  const entries = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions: { cwd: '/repo', appendSystemPrompt: '# Appended' },
+  });
+  const marked = markDisabledEntries(entries, new Set([APPEND_ENTRY_ID]));
+  assert.equal(marked.find((p) => p.id === APPEND_ENTRY_ID)?.disabled, true);
+  assert.equal(marked.find((p) => p.id === HARNESS_ENTRY_ID)?.disabled, undefined);
+  // The non-toggleable provider card is never marked disabled.
+  assert.equal(marked.find((p) => p.id === 'provider')?.disabled, undefined);
 });

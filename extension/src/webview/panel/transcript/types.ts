@@ -9,6 +9,7 @@ import type {
   ThinkingLevel,
   ToolCall,
   TranscriptWindow,
+  ProxySessionStatus,
 } from '../../../shared/protocol';
 import type { TranscriptContextMenuType } from '../chat-prefs';
 
@@ -40,6 +41,7 @@ export interface TranscriptCommonProps {
   pruningResult: PruningResult | null;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ThinkingLevel;
+  proxySessionStatus?: ProxySessionStatus | null;
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;

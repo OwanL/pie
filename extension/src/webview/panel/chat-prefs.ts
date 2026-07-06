@@ -7,7 +7,13 @@ export type BooleanPrefKey =
   | 'suppressCompletionNotifications'
   | 'showPruningMessages'
   | 'subagentAlwaysParentModel'
-  | 'runtimeAuditLog';
+  | 'runtimeAuditLog'
+  | 'hideStatusStrip'
+  | 'hideTokenRate'
+  | 'hideSessionTokens'
+  | 'hideSessionCost'
+  | 'hideContextIndicator'
+  | 'hideRunStatus';
 
 export type ChatPrefKey = keyof ChatPrefs;
 export type ChatPrefContextType = 'reasoning' | 'toolCalls' | 'subagentCalls';
@@ -52,6 +58,36 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
       CHAT_PREF_CONTEXT_ITEMS.reasoning,
       CHAT_PREF_CONTEXT_ITEMS.toolCalls,
       CHAT_PREF_CONTEXT_ITEMS.subagentCalls,
+    ],
+  },
+  {
+    id: 'display',
+    label: 'Display',
+    items: [
+      {
+        key: 'hideStatusStrip',
+        label: 'Hide bottom usage strip',
+      },
+      {
+        key: 'hideTokenRate',
+        label: 'Hide tokens/sec',
+      },
+      {
+        key: 'hideSessionTokens',
+        label: 'Hide session tokens',
+      },
+      {
+        key: 'hideSessionCost',
+        label: 'Hide session cost',
+      },
+      {
+        key: 'hideContextIndicator',
+        label: 'Hide context usage',
+      },
+      {
+        key: 'hideRunStatus',
+        label: 'Hide run status',
+      },
     ],
   },
   {
@@ -153,4 +189,26 @@ export function setNestedAllowedBucket(
  *  subagent sessions (e.g. ['ask_user']). */
 export function setSubagentDropTools(prefs: ChatPrefs, tools: string[]): Partial<ChatPrefs> {
   return { subagentDropTools: [...tools] };
+}
+
+/** The tool name the ask-user extension contributes. */
+export const ASK_USER_TOOL = 'ask_user';
+
+/** Toggle whether the ask-user tool is available to subagents. When disabled,
+ *  `ask_user` is added to the subagent drop-tools list; when enabled it is
+ *  removed. This reuses the existing `subagentDropTools` mechanism rather than
+ *  introducing a separate pref, so the ask-user toggle stays in sync with the
+ *  "Dropped tools" editor in the Subagent section. */
+export function setAskUserForSubagents(prefs: ChatPrefs, enabled: boolean): Partial<ChatPrefs> {
+  const current = prefs.subagentDropTools ?? [];
+  const next = enabled
+    ? current.filter((t) => t !== ASK_USER_TOOL)
+    : current.includes(ASK_USER_TOOL) ? current : [...current, ASK_USER_TOOL];
+  return { subagentDropTools: next };
+}
+
+/** Whether the ask-user tool is currently available to subagents (i.e. not in
+ *  the drop list). */
+export function isAskUserForSubagentsEnabled(prefs: ChatPrefs): boolean {
+  return !(prefs.subagentDropTools ?? []).includes(ASK_USER_TOOL);
 }

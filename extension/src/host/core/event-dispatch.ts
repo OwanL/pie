@@ -11,6 +11,9 @@ import type {
   MessageStartedPayload,
   MessageThinkingPayload,
   PreflightFailedPayload,
+  QueuedDeliveredPayload,
+  RetryEndedPayload,
+  RetryStartedPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -29,6 +32,9 @@ import {
   isMessageStartedPayload,
   isMessageThinkingPayload,
   isPreflightFailedPayload,
+  isQueuedDeliveredPayload,
+  isRetryEndedPayload,
+  isRetryStartedPayload,
   isSessionListChangedPayload,
   isSessionOpenedPayload,
   isToolFinishedPayload,
@@ -50,6 +56,9 @@ export interface SessionBackendEventHandlers {
   onCustomMessage(payload: CustomMessagePayload): void;
   onMessageAborted(payload: MessageAbortedPayload): void;
   onPreflightFailed(payload: PreflightFailedPayload): void;
+  onQueuedDelivered(payload: QueuedDeliveredPayload): void;
+  onRetryStarted(payload: RetryStartedPayload): void;
+  onRetryEnded(payload: RetryEndedPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
   onExtensionUIRequest(payload: ExtensionUIRequestPayload): void;
@@ -119,6 +128,15 @@ export function dispatchSessionBackendEvent(
       return;
     case 'preflight.failed':
       dispatch(event, isPreflightFailedPayload, handlers.onPreflightFailed);
+      return;
+    case 'message.queuedDelivered':
+      dispatch(event, isQueuedDeliveredPayload, handlers.onQueuedDelivered);
+      return;
+    case 'retry.started':
+      dispatch(event, isRetryStartedPayload, handlers.onRetryStarted);
+      return;
+    case 'retry.ended':
+      dispatch(event, isRetryEndedPayload, handlers.onRetryEnded);
       return;
     case 'busy.changed':
       dispatch(event, isBusyChangedPayload, handlers.onBusyChanged);

@@ -1,13 +1,14 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, ThinkingLevel } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxyProviderAddInput, ProxySettings, ProxySettingsUpdate, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS } from '../../../shared/thinking-level.js';
 
 import { useMemo } from 'preact/hooks';
 
 import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarSelectChip } from '../components/panel-chip';
 import { ModelPicker } from '../components/model-picker';
+import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
 import { orderModelsForPicker } from './model-list';
 import type { TokenRateIndicatorState } from './use-token-rate';
 import { ComposerSettingsMenu } from './settings-menu';
@@ -23,12 +24,17 @@ interface ComposerToolbarProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  toolResultPruningSettings: ToolResultPruningSettings;
   proxySettings: ProxySettings;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   onSetProxySettings: (settings: ProxySettingsUpdate) => void;
+  onAddProxyProvider: (input: ProxyProviderAddInput) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
+  systemPrompts: SystemPromptEntry[];
   selectedModel: string;
   selectedLevel: ThinkingLevel;
   supportsReasoning: boolean;
@@ -46,12 +52,17 @@ export function ComposerToolbar({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  toolResultPruningSettings,
   proxySettings,
   onSetPrefs,
+  onSetSystemPromptToggles,
   onSetPruningSettings,
+  onSetToolResultPruningSettings,
   onSetProxySettings,
+  onAddProxyProvider,
   availableExtensions,
   availableModels,
+  systemPrompts,
   selectedModel,
   selectedLevel,
   supportsReasoning,
@@ -76,7 +87,7 @@ export function ComposerToolbar({
   return (
     <div class="flex w-full flex-nowrap items-center gap-1.5 [container-name:toolbar] [container-type:inline-size]">
       <div class="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5">
-        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} proxySettings={proxySettings} availableExtensions={availableExtensions} availableModels={availableModels} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetProxySettings={onSetProxySettings} />
+        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} proxySettings={proxySettings} availableExtensions={availableExtensions} availableModels={availableModels} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} onSetProxySettings={onSetProxySettings} onAddProxyProvider={onAddProxyProvider} />
 
         {filteredModels.length > 0 ? (
           <ModelPicker
@@ -108,10 +119,12 @@ export function ComposerToolbar({
             ))}
           </ToolbarSelectChip>
         )}
+
+        <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
       </div>
 
       <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">
-        {tokenRateIndicator.label && (
+        {tokenRateIndicator.label && !prefs.hideTokenRate && (
           <ToolbarIndicatorChip
             kind="speed"
             state={tokenRateIndicator.paused ? 'paused' : null}
@@ -122,15 +135,17 @@ export function ComposerToolbar({
           />
         )}
 
-        <ToolbarIndicatorChip
-          kind="tokens"
-          ariaLabel={sessionTokenIndicator.ariaLabel}
-          tooltip={sessionTokenIndicator.tooltip}
-          label={sessionTokenIndicator.label}
-          freezeWhileVisible
-        />
+        {!prefs.hideSessionTokens && (
+          <ToolbarIndicatorChip
+            kind="tokens"
+            ariaLabel={sessionTokenIndicator.ariaLabel}
+            tooltip={sessionTokenIndicator.tooltip}
+            label={sessionTokenIndicator.label}
+            freezeWhileVisible
+          />
+        )}
 
-        {sessionCostIndicator && (
+        {sessionCostIndicator && !prefs.hideSessionCost && (
           <ToolbarIndicatorChip
             kind="cost"
             ariaLabel={sessionCostIndicator.ariaLabel}
@@ -140,7 +155,7 @@ export function ComposerToolbar({
           />
         )}
 
-        {contextIndicator?.label && contextBreakdownTitle && (
+        {contextIndicator?.label && contextBreakdownTitle && !prefs.hideContextIndicator && (
           <ToolbarIndicatorChip
             kind="context"
             severity={contextIndicator.severity}
@@ -151,7 +166,7 @@ export function ComposerToolbar({
           />
         )}
 
-        {runStatus && (
+        {runStatus && !prefs.hideRunStatus && (
           <div class="ml-auto mr-0 inline-flex shrink-0 items-center gap-1.5">
             <ToolbarRunStatusChip
               tone={runStatus.tone}

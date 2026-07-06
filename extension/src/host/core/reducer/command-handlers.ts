@@ -12,6 +12,7 @@ import {
   handleSend,
   handleEdit,
   handleTruncateAfter,
+  handleClearQueue,
   handleSetOutcomeDialog,
   handleDismissNotice,
   handleRespondExtensionUI,
@@ -20,7 +21,9 @@ import {
   handleContinueTask,
   handleRecordOutcome,
   handleSetPruningSettings,
+  handleSetToolResultPruningSettings,
   handleSetProxySettings,
+  handleAddProxyProvider,
 } from './command-misc-handlers.js';
 import {
   handleOpenSession,
@@ -58,12 +61,17 @@ import {
   handleAddFilesystemPaths,
   handleSetFileChangesExpanded,
   handleSetFileRead,
+  handleSetSystemPromptToggles,
 } from './command-file-handlers.js';
 
 export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
   switch (cmd.kind) {
     case 'Interrupt': {
       return handleInterrupt(state, cmd);
+    }
+
+    case 'ClearQueue': {
+      return handleClearQueue(state, cmd);
     }
 
     case 'Send': {
@@ -120,6 +128,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetFileRead': {
       return handleSetFileRead(state, cmd);
+    }
+
+    case 'SetSystemPromptToggles': {
+      return handleSetSystemPromptToggles(state, cmd);
     }
 
     case 'CloseSession': {
@@ -198,8 +210,16 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleSetPruningSettings(state, cmd);
     }
 
+    case 'SetToolResultPruningSettings': {
+      return handleSetToolResultPruningSettings(state, cmd);
+    }
+
     case 'SetProxySettings': {
       return handleSetProxySettings(state, cmd);
+    }
+
+    case 'AddProxyProvider': {
+      return handleAddProxyProvider(state, cmd);
     }
 
     case 'DuplicateSession': {

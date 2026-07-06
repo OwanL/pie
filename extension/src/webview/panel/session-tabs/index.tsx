@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionSummary } from '../../../shared/protocol';
+import type { ActiveRunSummary, ExtensionUIRequestPayload, ProxySessionStatus, SessionSummary } from '../../../shared/protocol';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
 import { SessionTab } from './session-tab';
@@ -23,6 +23,7 @@ interface SessionTabsProps {
   hideConnectingWheel?: boolean;
   pendingExtensionUIRequestsBySession: Record<string, Record<string, import('../../../shared/protocol').ExtensionUIRequestPayload>>;
   runSummariesBySession: Record<string, ActiveRunSummary | null>;
+  proxyStatusBySession?: Record<string, ProxySessionStatus>;
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
   onMove: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
@@ -31,6 +32,10 @@ interface SessionTabsProps {
   onDuplicate: (path: string) => void;
   onTogglePin: (path: string) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
+  /** Session paths that own a pending deferred trigger. Tabs in this set have
+   *  their close × and mark-done badge greyed out with an explanatory tooltip
+   *  (the trigger must be cancelled first, from the status strip). */
+  deferredSessionPaths: string[];
 }
 
 function hasPendingRequest(
@@ -53,6 +58,7 @@ export function SessionTabs({
   hideConnectingWheel,
   pendingExtensionUIRequestsBySession,
   runSummariesBySession,
+  proxyStatusBySession,
   onSelect,
   onClose,
   onMove,
@@ -61,6 +67,7 @@ export function SessionTabs({
   onDuplicate,
   onTogglePin,
   onRunAction,
+  deferredSessionPaths,
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
 
@@ -149,6 +156,7 @@ export function SessionTabs({
   const runningPathSet = useMemo(() => new Set(runningSessionPaths), [runningSessionPaths]);
   const unreadFinishedPathSet = useMemo(() => new Set(unreadFinishedSessionPaths), [unreadFinishedSessionPaths]);
   const pinnedPathSet = useMemo(() => new Set(pinnedTabPaths), [pinnedTabPaths]);
+  const deferredPathSet = useMemo(() => new Set(deferredSessionPaths), [deferredSessionPaths]);
 
   // Re-resolve the dragged index from the source path each render so a tab
   // closing or being inserted elsewhere mid-drag doesn't float the wrong tab.
@@ -247,6 +255,10 @@ export function SessionTabs({
 
     if (event.key === 'Delete') {
       event.preventDefault();
+      // A tab with a pending deferred trigger cannot be closed (greyed-out ×).
+      // Mirror that guard on the keyboard shortcut so Delete can't bypass it
+      // and orphan the trigger.
+      if (deferredPathSet.has(tabPath)) return;
       const fallbackIndex = currentIndex < tabs.length - 1 ? currentIndex + 1 : currentIndex - 1;
       const fallbackPath = fallbackIndex >= 0 ? tabs[fallbackIndex]?.getAttribute('data-tab-path') : null;
       onClose(tabPath);
@@ -280,7 +292,7 @@ export function SessionTabs({
       selectTab(targetPath);
     }
     targetTab?.querySelector<HTMLElement>('[role="tab"]')?.focus();
-  }, [dragState, onClose, selectTab]);
+  }, [dragState, onClose, selectTab, deferredPathSet]);
 
   const stripClass = `session-tabs-strip${fadeLeft ? ' fade-left' : ''}${fadeRight ? ' fade-right' : ''}`;
 
@@ -305,8 +317,10 @@ export function SessionTabs({
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
+            proxySessionStatus={proxyStatusBySession?.[tabPath] ?? null}
             activeRunSummary={tabPath === effectiveActivePath ? activeRunSummary : null}
             isPinned={pinnedPathSet.has(tabPath)}
+            hasDeferredTriggers={deferredPathSet.has(tabPath)}
             onContextMenu={onContextMenu}
             onPointerDown={onPointerDown}
             onClick={onClick}
@@ -349,6 +363,7 @@ export function SessionTabs({
           sessionByPath={sessionByPath}
           runSummary={runSummariesBySession[tabContextMenu.tabPath] ?? null}
           isPinned={pinnedPathSet.has(tabContextMenu.tabPath)}
+          hasDeferredTriggers={deferredPathSet.has(tabContextMenu.tabPath)}
           onContextAction={onContextAction}
         />
       )}

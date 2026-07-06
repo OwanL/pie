@@ -21,6 +21,12 @@ import { MessageItemHeader, MessageHeaderActions } from './header';
 interface MessageItemShellProps {
   messageId: string;
   role: ChatMessage['role'];
+  /** Message status — used to dim queued (follow-up) user messages. */
+  status: ChatMessage['status'];
+  /** Host-side synthetic-send tag. `'deferred-trigger'` marks the auto-resume
+   *  wake-up message so the shell can render it differently from a typed user
+   *  message (dashed outline, muted fill, header badge). */
+  customType?: string;
   isCurrentlyStreaming: boolean;
   isClickableUserMsg: boolean;
   isEditing: boolean;
@@ -34,6 +40,8 @@ interface MessageItemShellProps {
 export function MessageItemShell({
   messageId,
   role,
+  status,
+  customType,
   isCurrentlyStreaming,
   isClickableUserMsg,
   isEditing,
@@ -41,6 +49,7 @@ export function MessageItemShell({
   handleMessageClick,
   children,
 }: MessageItemShellProps) {
+  const isDeferredTrigger = role === 'user' && customType === 'deferred-trigger';
   return (
     <div
       class={cx(
@@ -59,12 +68,22 @@ export function MessageItemShell({
         'forced-colors:border forced-colors:border-[ButtonText]',
         role === 'assistant' &&
           'self-start w-[min(var(--message-assistant-width),100%)] max-w-[min(var(--message-assistant-width),100%)] max-[340px]:w-[min(var(--message-assistant-width-narrow),100%)] max-[340px]:max-w-[min(var(--message-assistant-width-narrow),100%)] rounded-xl bg-card shadow-sm',
-        role === 'user' && 'w-fit max-w-[var(--message-assistant-width)] self-end rounded-xl bg-accent/15 shadow-none',
+        role === 'user' && 'w-fit max-w-[var(--message-assistant-width)] self-end rounded-xl shadow-none',
+        role === 'user' && !isDeferredTrigger && 'bg-accent/15',
+        // Deferred-trigger wake-up: keep the user-bubble shape (it honestly
+        // enters the transcript as a user turn) but swap the solid accent fill
+        // for a muted surface + dashed accent outline so it reads as
+        // host-injected rather than typed. The `.deferred-trigger-bubble`
+        // class carries the dashed border + fill in transcript.css.
+        role === 'user' && isDeferredTrigger && 'deferred-trigger-bubble',
         role === 'system' && 'w-auto max-w-none self-stretch bg-surface shadow-none',
+        role === 'user' && status === 'queued' && 'opacity-60 ring-1 ring-border-subtle',
         isClickableUserMsg && 'cursor-pointer hover:ring-1 hover:ring-border-subtle hover:bg-accent/20',
       )}
       data-message-id={messageId}
       data-role={role}
+      data-queued={role === 'user' && status === 'queued' ? 'true' : undefined}
+      data-deferred-trigger={isDeferredTrigger ? 'true' : undefined}
       data-entered={entered ? 'true' : undefined}
       data-editing={isEditing ? 'true' : undefined}
       data-streaming={isCurrentlyStreaming ? 'true' : undefined}
@@ -158,6 +177,7 @@ export function MessageItemInner({
         replyMeta={replyMeta}
         assistantMetaTooltip={assistantMetaTooltip}
         actions={headerActions}
+        customType={message.customType}
       />
 
       {pruningHeaderState?.kind === 'result' && pruningExpanded && (

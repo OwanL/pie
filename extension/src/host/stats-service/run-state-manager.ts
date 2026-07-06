@@ -323,10 +323,13 @@ export class SessionRunStateManager {
   */
   private getCurrentFunctionalSettings(): FunctionalSettingsSnapshot {
     const settings = this.getArchState().settings;
+    const trp = settings.toolResultPruningSettings;
     return {
       subagentAlwaysParentModel: settings.prefs.subagentAlwaysParentModel === true,
       pruningMode: settings.pruningSettings.mode,
       extensionToggles: { ...(settings.prefs.extensionToggles ?? {}) },
+      toolResultPruningEnabled: trp.enabled,
+      toolResultPruningProfile: trp.profile,
     };
   }
 

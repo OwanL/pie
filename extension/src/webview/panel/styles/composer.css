@@ -1186,3 +1186,205 @@
     border-color: ButtonText;
   }
 }
+
+/* ── System-prompt toggle menu (toolbar) ─────────────────────────────────── */
+/* A compact chip placed to the right of the model / reasoning pickers that    */
+/* opens an upward dropdown of checkbox rows, one per system-prompt entry.    */
+/* Reuses `.toolbar-settings-item` (check + label) for the rows so the        */
+/* checkbox visuals match the settings menu.                                   */
+
+.system-prompt-toggle-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.system-prompt-toggle-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--status-chip-radius);
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
+  cursor: pointer;
+  transition:
+    background var(--status-chip-transition-duration) var(--panel-ease-out),
+    border-color var(--status-chip-transition-duration) var(--panel-ease-out),
+    color var(--status-chip-transition-duration) var(--panel-ease-out);
+}
+
+.system-prompt-toggle-trigger:hover,
+.system-prompt-toggle-trigger:focus-visible,
+.system-prompt-toggle-trigger.open {
+  background: var(--panel-control-hover);
+}
+
+.system-prompt-toggle-trigger:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
+/* Accent the trigger when any entries are disabled, so the user can see at a
+   glance that the active session's system prompt is being filtered. */
+.system-prompt-toggle-trigger.has-disabled {
+  border-color: color-mix(in srgb, var(--panel-accent) 40%, transparent);
+  color: var(--panel-accent);
+}
+
+.system-prompt-toggle-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--panel-accent);
+  color: var(--panel-accent-contrast);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.system-prompt-toggle-caret {
+  color: var(--panel-muted);
+}
+
+.system-prompt-toggle-dropdown {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--panel-gap-sm));
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  min-width: 260px;
+  max-width: 360px;
+  max-height: calc(100vh - 32px);
+  padding: var(--panel-gap-md);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius-lg);
+  background: var(--panel-overlay-surface);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--panel-shadow-overlay);
+  animation: panel-scale-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
+  transform-origin: bottom left;
+}
+
+.system-prompt-toggle-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px var(--panel-gap-sm);
+}
+
+.system-prompt-toggle-reset {
+  border: none;
+  background: transparent;
+  color: var(--panel-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--panel-radius-sm);
+}
+
+.system-prompt-toggle-reset:hover {
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.system-prompt-toggle-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  min-height: 0;
+  max-height: 320px;
+  padding-right: 2px;
+}
+
+/* Two-line label: title on top, muted summary underneath. Reuses the
+   `.toolbar-settings-item` grid (check + label) — this just styles the inner
+   text spans. */
+.system-prompt-toggle-entry-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-prompt-toggle-entry-summary {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--panel-muted);
+}
+
+/* Stack the title + summary vertically inside the label cell. */
+.toolbar-settings-item .system-prompt-toggle-entry-summary {
+  margin-top: 1px;
+}
+
+@media (forced-colors: active) {
+  .system-prompt-toggle-trigger,
+  .system-prompt-toggle-dropdown {
+    border-color: ButtonText;
+  }
+}
+
+/* ── Auto-retry status chip (composer) ─────────────────────────────────── */
+/* Shown while the SDK auto-retries a transient provider error. Independent
+   of `busy` (a retry sleeps between turns; the `willRetry` gate on
+   `agent_end` keeps `busy` true). The Cancel button reuses the interrupt
+   path (`session.abort()` → `abortRetry()` → `auto_retry_end`
+   "Retry cancelled"). */
+.composer-retry-row {
+  padding: 1px 1px 0;
+  font-size: 12px;
+  color: var(--panel-foreground);
+}
+
+.composer-retry-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.composer-retry-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid var(--panel-muted);
+  border-top-color: var(--panel-accent);
+  animation: panel-loading-wheel-spin 0.7s linear infinite;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.composer-retry-error {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--panel-muted);
+  max-width: min(40ch, 100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-retry-spinner {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .composer-retry-row {
+    color: ButtonText;
+  }
+  .composer-retry-spinner {
+    border-color: ButtonText;
+    border-top-color: Highlight;
+  }
+}

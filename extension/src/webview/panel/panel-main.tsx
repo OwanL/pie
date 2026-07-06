@@ -35,6 +35,7 @@ export interface PanelMainProps {
   pruningSettings: ViewState['pruningSettings'];
   systemPrompts: ViewState['systemPrompts'];
   pruningResult: ViewState['pruningResult'];
+  proxySessionStatus?: NonNullable<ViewState['proxyStatusBySession']>[string] | null;
   pendingAssistantModelId: string;
   pendingAssistantThinkingLevel: ThinkingLevel;
   editingMessageId: ViewState['editingMessageId'];
@@ -65,6 +66,7 @@ export const PanelMain = memo(function PanelMain({
   pruningSettings,
   systemPrompts,
   pruningResult,
+  proxySessionStatus,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
   editingMessageId,
@@ -117,6 +119,7 @@ export const PanelMain = memo(function PanelMain({
           pruningSettings={pruningSettings}
           systemPrompts={systemPrompts}
           pruningResult={pruningResult}
+          proxySessionStatus={proxySessionStatus}
           pendingAssistantModelId={pendingAssistantModelId}
           pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
           workingDirectory={activeSession?.cwd ?? workspaceCwd}

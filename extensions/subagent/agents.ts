@@ -171,24 +171,70 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
-export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
+/**
+ * Discover agents for a given scope.
+ *
+ * `searchCwds` may be a single cwd or an array. Project-local agents are
+ * found by walking up from each cwd looking for an `agents/` directory
+ * (`findNearestProjectAgentsDir`). Accepting multiple cwds lets a caller point
+ * at a subdirectory project root — e.g. when the session's cwd is a
+ * multi-repo workspace root but the task targets one repo nested inside it
+ * whose `agents/` dir would never be reached by walking up from the root.
+ *
+ * Distinct project dirs (deduped by realpath) are all loaded. The nearest dir
+ * to the FIRST cwd is reported as `projectAgentsDir`; among multiple project
+ * dirs the first one to define a given agent name wins (later dirs only add
+ * agents not yet seen). Project agents always override same-named user agents
+ * (preserving the existing `"both"` scope semantics).
+ */
+export function discoverAgents(searchCwds: string | string[], scope: AgentScope): AgentDiscoveryResult {
+	const cwds = Array.isArray(searchCwds)
+		? Array.from(new Set(searchCwds.filter((c): c is string => typeof c === "string" && c.length > 0)))
+		: [searchCwds];
 	const userDir = path.join(getAgentDir(), "agents");
-	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
-	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 
-	const agentMap = new Map<string, AgentConfig>();
-
-	if (scope === "both") {
-		for (const agent of userAgents) agentMap.set(agent.name, agent);
-		for (const agent of projectAgents) agentMap.set(agent.name, agent);
-	} else if (scope === "user") {
-		for (const agent of userAgents) agentMap.set(agent.name, agent);
-	} else {
-		for (const agent of projectAgents) agentMap.set(agent.name, agent);
+	// Walk up from each cwd to find project-local `agents/` dirs. Dedup by
+	// realpath so the same dir reached via different cwds isn't loaded twice.
+	const projectDirs: string[] = [];
+	const seenDirs = new Set<string>();
+	for (const cwd of cwds) {
+		const dir = findNearestProjectAgentsDir(cwd);
+		if (!dir) continue;
+		let key = dir;
+		try {
+			key = fs.realpathSync(dir);
+		} catch {
+			/* fall back to the literal path as the dedup key */
+		}
+		if (seenDirs.has(key)) continue;
+		seenDirs.add(key);
+		projectDirs.push(dir);
 	}
 
+	// First-wins among project dirs: nearer project roots aren't clobbered by
+	// farther ones reached via later cwds.
+	const projectMap = new Map<string, AgentConfig>();
+	if (scope !== "user") {
+		for (const dir of projectDirs) {
+			const agents = loadAgentsFromDir(dir, "project");
+			for (const agent of agents) {
+				if (!projectMap.has(agent.name)) projectMap.set(agent.name, agent);
+			}
+		}
+	}
+
+	const agentMap = new Map<string, AgentConfig>();
+	if (scope === "both" || scope === "user") {
+		for (const agent of userAgents) agentMap.set(agent.name, agent);
+	}
+	// Project agents override same-named user agents ("both" scope semantics).
+	if (scope !== "user") {
+		for (const agent of projectMap.values()) agentMap.set(agent.name, agent);
+	}
+
+	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0] : null;
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 

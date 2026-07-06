@@ -30,6 +30,7 @@ export function useAppBodyDerivedState(
     transcript,
     systemPrompts,
     transcriptLoaded,
+    deferredTriggers,
   } = viewState;
 
   const panelSurface = resolvePanelSurface({ backendReady, notice, openTabPaths });
@@ -94,6 +95,28 @@ export function useAppBodyDerivedState(
       : {},
   }), [activeSessionPath, postMessage, pendingExtensionUIRequestsBySession]);
 
+  // Stable signature of the active deferred-trigger set so the derived
+  // `deferredSessionPaths` array + `activeSessionHasDeferredTriggers` boolean
+  // keep stable references across snapshots whose `deferredTriggers` content is
+  // unchanged (the host re-serialises the array on every post, which would
+  // otherwise defeat the SessionTabs / SessionTab memo barriers). Keyed on a
+  // compact id+session string so a note/registeredAt change (e.g. a re-arm)
+  // doesn't churn the set unless membership changes.
+  const deferredSig = useMemo(
+    () => deferredTriggers.map((t) => `${t.sessionPath}:${t.id}`).sort().join('|'),
+    [deferredTriggers],
+  );
+  const deferredSessionPaths = useMemo(
+    () => Array.from(new Set(deferredTriggers.map((t) => t.sessionPath))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deferredSig],
+  );
+  const activeSessionHasDeferredTriggers = useMemo(
+    () => deferredTriggers.some((t) => t.sessionPath === activeSessionPath),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deferredSig, activeSessionPath],
+  );
+
   // Stable notice context value: `dismiss` is fixed for the AppBody lifetime
   // so consumers only re-render when `notice` actually changes, mirroring the
   // memoized `askUserContextValue` above.
@@ -114,5 +137,8 @@ export function useAppBodyDerivedState(
     noticeValue,
     transcriptHydrating,
     loadingStatus,
+    deferredTriggers,
+    deferredSessionPaths,
+    activeSessionHasDeferredTriggers,
   };
 }

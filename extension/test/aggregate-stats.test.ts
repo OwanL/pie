@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { computeAggregateStats, providerForModel, pricingForModel } from '../src/host/stats-service/aggregate-stats';
+import { sumLiveRate } from '../src/host/aggregate-stats-service';
+import { formatProxyStripSummary, summarizeProxyStrip } from '../src/webview/panel/aggregate-stats-strip';
 import type { RunSnapshot } from '../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../shared/pricing-core';
 import type { TokenRateIndicatorState } from '../src/shared/token-rate';
@@ -221,6 +223,107 @@ test('computeAggregateStats: live tok/s sums running sessions rates', () => {
   assert.equal(stats.liveTokensPerSecond, 45.5);
   assert.equal(stats.runningSessionCount, 3);
   assert.equal(stats.openTabCount, 3);
+});
+
+test('computeAggregateStats: a paused session (held rate) is excluded from live tok/s', () => {
+  // A session paused on a tool call holds its last rate for the chip display
+  // (token-rate.ts returns state:'paused' with a held `rate`) but must NOT
+  // contribute to the status-bar aggregate for the whole tool-call duration.
+  const pricingMap = new Map<string, ModelPricingRecord[]>();
+  const rates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
+  };
+  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], rates, 1);
+  assert.equal(stats.liveTokensPerSecond, 0);
+  // Still counted as a running session so ready/warming counts stay accurate.
+  assert.equal(stats.runningSessionCount, 1);
+});
+
+test('computeAggregateStats: a long-running bash (paused peer) does not inflate the live total', () => {
+  // Two running sessions: one generating at 150 tok/s, one paused on a tool
+  // call holding 200 tok/s. The aggregate must be 150 (the generating session
+  // only), not 350 — the user's exact symptom.
+  const pricingMap = new Map<string, ModelPricingRecord[]>();
+  const rates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '150 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 150 },
+    '/s/2': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
+  };
+  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2'], rates, 2);
+  assert.equal(stats.liveTokensPerSecond, 150);
+  assert.equal(stats.runningSessionCount, 2);
+});
+
+test('computeAggregateStats: all-paused aggregate is 0 but running counts are unaffected', () => {
+  // Two paused sessions (both mid tool call) → 0 live tok/s, but both still
+  // counted in runningSessionCount so the ready/warming counts stay accurate.
+  const pricingMap = new Map<string, ModelPricingRecord[]>();
+  const rates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '⏸ 180 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 180 },
+    '/s/2': { label: '⏸ 220 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 220 },
+  };
+  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2'], rates, 2);
+  assert.equal(stats.liveTokensPerSecond, 0);
+  assert.equal(stats.runningSessionCount, 2);
+  assert.equal(stats.openTabCount, 2);
+});
+
+test('computeAggregateStats: resuming after a tool call restores the session\'s contribution', () => {
+  // Same session transitions paused → generating across two computes. While
+  // paused (tool running) it contributes 0; once generating again its rate is
+  // summed back in.
+  const pricingMap = new Map<string, ModelPricingRecord[]>();
+  const pausedRates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
+  };
+  const pausedStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], pausedRates, 1);
+  assert.equal(pausedStats.liveTokensPerSecond, 0);
+
+  const generatingRates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '200 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 200 },
+  };
+  const generatingStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], generatingRates, 1);
+  assert.equal(generatingStats.liveTokensPerSecond, 200);
+});
+
+test('summarizeProxyStrip formats exact proxy provider metrics', () => {
+  const summary = summarizeProxyStrip([
+    { provider: 'umans', modelInfoId: 'umans-shared', activeRequests: 3, queuedRequests: 2, maxConcurrentRequests: 3 },
+    { provider: 'openrouter', modelInfoId: 'openrouter-shared', activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 2 },
+  ]);
+  assert.deepEqual(summary, [
+    { provider: 'umans', activeRequests: 3, queuedRequests: 2, maxConcurrentRequests: 3, maxedOut: true },
+    { provider: 'openrouter', activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 2, maxedOut: false },
+  ]);
+  assert.equal(formatProxyStripSummary(summary), 'umans 3/3 +2q, openrouter 1/2');
+});
+
+test('summarizeProxyStrip keeps idle providers so the strip stays present between turns', () => {
+  // Idle providers (0 active, 0 queued) must be retained — not dropped — so
+  // the proxy status strip does not flicker appear/disappear as models
+  // complete turns. The headline renders an idle `0/N` per provider.
+  const summary = summarizeProxyStrip([
+    { provider: 'openrouter', modelInfoId: 'openrouter-shared', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 4 },
+  ]);
+  assert.deepEqual(summary, [
+    { provider: 'openrouter', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 4, maxedOut: false },
+  ]);
+  assert.equal(formatProxyStripSummary(summary), 'openrouter 0/4');
+});
+
+test('formatProxyStripSummary returns null only when there are no providers at all', () => {
+  assert.equal(formatProxyStripSummary([]), null);
+});
+
+test('sumLiveRate: a paused entry (held rate) contributes 0 (widened predicate)', () => {
+  // sumLiveRate is the fast-path used when disk data is unchanged. Its param
+  // is widened to TokenRateIndicatorState so the same generating-only predicate
+  // applies — a paused entry with a held rate must not be summed.
+  const rates: Record<string, TokenRateIndicatorState> = {
+    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
+    '/s/2': { label: '40 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 40 },
+  };
+  assert.equal(sumLiveRate(['/s/1', '/s/2'], rates), 40);
+  assert.equal(sumLiveRate(['/s/1'], rates), 0);
 });
 
 test('computeAggregateStats: week window excludes runs older than 7 days', () => {

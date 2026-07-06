@@ -34,6 +34,7 @@ function createHarness(overrides: {
   const createCalls: Array<{ cwd: string; reason: string }> = [];
   const openCalls: string[] = [];
   const writtenSettings: Partial<ModelSettings>[] = [];
+  const appliedToggles: Array<{ sessionPath: string; disabledEntries: string[] }> = [];
   const emitContextUsageChangedCalls: SessionContext[] = [];
   let viewedSessionPath: string | undefined;
   const modelSettings = overrides.modelSettings ?? { defaultModel: 'model-a', defaultThinkingLevel: 'medium' };
@@ -46,6 +47,8 @@ function createHarness(overrides: {
       options?.preflightResult?.(true);
     },
     abort: async () => undefined,
+    followUp: async (_text: string, _images?: unknown) => undefined,
+    clearQueue: () => ({ steering: [] as string[], followUp: [] as string[] }),
     setModel: async (model: { id: string }) => {
       (session.model as { id: string }).id = model.id;
     },
@@ -106,6 +109,9 @@ function createHarness(overrides: {
     },
     async buildSessionOpenedPayload(sessionPath, selectionToken) {
       return { sessionPath, selectionToken } as any;
+    },
+    async applySystemPromptToggles(sessionPath, disabledEntries) {
+      appliedToggles.push({ sessionPath, disabledEntries: [...disabledEntries] });
     },
     async loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd) {
       return { sessionPath, direction, loadedStart, loadedEnd } as any;
@@ -240,14 +246,17 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(acceptedHarness.busyEvents.at(-1), true);
   assert.ok(acceptedHarness.context.activeRequest?.id);
 
-  await assert.rejects(
-    async () => await handleBackendRequest(acceptedHarness.deps, {
-      id: '2',
-      method: 'message.send',
-      params: { sessionPath: '/repo/session.jsonl', text: 'Hello again', inputs: [] },
-    }),
-    /already in progress/,
-  );
+  // Steering (FollowUp): a second send while a turn is already in-flight is
+  // now QUEUED as a follow-up (SDK `followUp()`) instead of rejected. The
+  // backend acks `{ queued: true }` with no new `activeRequest` (no turn is
+  // started by the enqueue) and no `requestId`.
+  const queued = await handleBackendRequest(acceptedHarness.deps, {
+    id: '2',
+    method: 'message.send',
+    params: { sessionPath: '/repo/session.jsonl', text: 'Hello again', inputs: [] },
+  });
+  assert.equal((queued as { queued?: boolean }).queued, true);
+  assert.ok(!(queued as { requestId?: string }).requestId, 'queued send must not start a turn / mint a requestId');
 
   const rejectedHarness = createHarness({
     sessionOverrides: {
@@ -713,19 +722,176 @@ test('handleBackendRequest unknown method throws BackendError with UNKNOWN_METHO
   }
 });
 
-test('message.send while busy throws BackendError with REQUEST_IN_PROGRESS code', async () => {
+test('message.send while busy queues as a follow-up (steering) and acks { queued: true }', async () => {
+  const followUpCalls: string[] = [];
   const harness = createHarness({
-    sessionOverrides: { isStreaming: true },
+    sessionOverrides: {
+      isStreaming: true,
+      followUp: async (text: string) => { followUpCalls.push(text); },
+    },
   });
-  try {
-    await handleBackendRequest(harness.deps, {
+  const result = await handleBackendRequest(harness.deps, {
+    id: '1',
+    method: 'message.send',
+    params: { sessionPath: '/repo/session.jsonl', text: 'Hi', inputs: [] },
+  });
+  assert.equal((result as { queued?: boolean }).queued, true);
+  assert.ok(!(result as { requestId?: string }).requestId, 'queued send must not start a turn / mint a requestId');
+  assert.equal(followUpCalls.length, 1);
+  assert.equal(followUpCalls[0], 'Hi');
+  // No activeRequest is created for a queued send (the turn is not started).
+  assert.equal(harness.context.activeRequest, undefined);
+});
+
+test('session.truncateAfter re-applies the user\'s model when the truncate dropped its model_change entry', async () => {
+  await withTempDir(async (dir) => {
+    const sessionPath = path.join(dir, 'session.jsonl');
+    await fs.writeFile(sessionPath, [
+      JSON.stringify({ id: 'keep-1', message: 'keep' }),
+      JSON.stringify({ id: 'stop-here', message: 'stop' }),
+      // A model_change appended AFTER the edited message (the user set the
+      // model after this message existed). truncateAfter drops everything
+      // from 'stop-here' onward, so this entry is lost and the reopened
+      // session would revert to the previous model.
+      JSON.stringify({ id: 'mc-1', type: 'model_change', provider: 'mock', modelId: 'model-b' }),
+    ].join('\n') + '\n', 'utf8');
+
+    // Existing context: the user's chosen model (model-b) + thinking level.
+    const existingSession = {
+      isStreaming: false,
+      model: { id: 'model-b' },
+      thinkingLevel: 'high',
+      setModel: async () => undefined,
+      setThinkingLevel: (_level: string) => undefined,
+    } as unknown as SessionContext['session'];
+    const existingContext: SessionContext = {
+      runtime: { session: existingSession, dispose: async () => undefined, services: { modelRegistry: { getAvailable: () => [], find: () => undefined } } } as SessionContext['runtime'],
+      session: existingSession,
+      sessionPath,
+      unsubscribe: () => undefined,
+      busySeq: 0,
+    };
+
+    // Reopened context: the SDK resolved the model from the surviving entries
+    // only (model-a, the pre-switch model) — the bug. setModel/setThinkingLevel
+    // spies record the re-application.
+    const reopenedSetModelCalls: { id: string }[] = [];
+    const reopenedSetThinkingLevelCalls: string[] = [];
+    const reopenedSession = {
+      isStreaming: false,
+      model: { id: 'model-a' },
+      thinkingLevel: 'medium',
+      setModel: async (model: { id: string }) => {
+        reopenedSetModelCalls.push({ id: model.id });
+        (reopenedSession.model as { id: string }).id = model.id;
+      },
+      setThinkingLevel: (level: string) => {
+        reopenedSetThinkingLevelCalls.push(level);
+        (reopenedSession as { thinkingLevel: string }).thinkingLevel = level;
+      },
+    } as unknown as SessionContext['session'];
+    const reopenedContext: SessionContext = {
+      runtime: { session: reopenedSession, dispose: async () => undefined, services: { modelRegistry: { getAvailable: () => [
+        { id: 'model-b', name: 'Model B', provider: 'mock', reasoning: false, input: ['text', 'image'] },
+      ], find: (_p: string, id: string) => ({ id }) } } } as SessionContext['runtime'],
+      session: reopenedSession,
+      sessionPath,
+      unsubscribe: () => undefined,
+      busySeq: 0,
+    };
+
+    const emitted: Array<{ event: string; payload?: unknown }> = [];
+    const deps: BackendRequestHandlerDeps = {
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/startup',
+      sdk: { VERSION: '1.0.0', SessionManager: { open: (p: string) => ({ cwd: '/repo', sessionPath: p } as any), listAll: async () => [], continueRecent: (cwd: string) => ({ cwd } as any), create: (cwd: string) => ({ cwd } as any) } } as any,
+      getSessionContext: () => existingContext,
+      async createSessionContext(_manager, _reason) { return reopenedContext; },
+      async ensureSessionContext(p) { assert.equal(p, sessionPath); return reopenedContext; },
+      setViewedSessionPath: () => undefined,
+      async buildSessionOpenedPayload(p) { return { sessionPath: p, session: { path: p, modelId: reopenedSession.model?.id, thinkingLevel: reopenedSession.thinkingLevel } } as any; },
+      async applySystemPromptToggles() { /* no-op */ },
+      async loadTranscriptPage() { return {} as any; },
+      emit: (event, payload) => emitted.push({ event, payload }),
+      emitBusyChanged: () => undefined,
+      emitContextUsageChanged: () => undefined,
+      async emitSessionListChanged() { emitted.push({ event: 'session.list.changed' }); },
+      async listSessions() { return []; },
+      listAvailableModels: () => [],
+      async readModelSettings() { return { defaultModel: 'model-b', defaultThinkingLevel: 'high' }; },
+      async writeModelSettings(u) { return { defaultModel: '', defaultThinkingLevel: 'medium', ...u }; },
+    };
+
+    const result = await handleBackendRequest(deps, {
       id: '1',
-      method: 'message.send',
-      params: { sessionPath: '/repo/session.jsonl', text: 'Hi', inputs: [] },
+      method: 'session.truncateAfter',
+      params: { sessionPath, entryId: 'stop-here' },
     });
-    assert.fail('expected busy send to throw');
-  } catch (error) {
-    assert.ok(error instanceof BackendError, 'busy send should throw a BackendError');
-    assert.equal((error as BackendError).code, 'REQUEST_IN_PROGRESS');
-  }
+
+    // The fresh context's model + thinking level are restored to the user's
+    // pre-truncate choice, so the edit turn runs on model-b/high, not the
+    // reverted model-a/medium.
+    assert.deepEqual(reopenedSetModelCalls, [{ id: 'model-b' }],
+      'setModel must be re-applied with the user\'s pre-truncate model');
+    assert.deepEqual(reopenedSetThinkingLevelCalls, ['high'],
+      'setThinkingLevel must be restored after setModel re-clamps');
+    assert.equal(reopenedSession.model?.id, 'model-b');
+    assert.equal(reopenedSession.thinkingLevel, 'high');
+    // The session.opened payload reflects the restored model.
+    assert.equal((result as { session?: { modelId?: string } }).session?.modelId, 'model-b');
+    // The file was still rewritten (the model_change entry is dropped from
+    // disk; the in-memory re-apply is what restores the choice).
+    const rewritten = await fs.readFile(sessionPath, 'utf8');
+    assert.equal(rewritten, `${JSON.stringify({ id: 'keep-1', message: 'keep' })}\n`);
+  });
+});
+
+test('session.truncateAfter leaves the model untouched when the new context already matches', async () => {
+  await withTempDir(async (dir) => {
+    const sessionPath = path.join(dir, 'session.jsonl');
+    await fs.writeFile(sessionPath, [
+      JSON.stringify({ id: 'keep-1', message: 'keep' }),
+      JSON.stringify({ id: 'stop-here', message: 'stop' }),
+    ].join('\n') + '\n', 'utf8');
+
+    const setModelCalls: { id: string }[] = [];
+    const setThinkingLevelCalls: string[] = [];
+    const session = {
+      isStreaming: false,
+      model: { id: 'model-a' },
+      thinkingLevel: 'medium',
+      setModel: async (m: { id: string }) => { setModelCalls.push(m); },
+      setThinkingLevel: (l: string) => { setThinkingLevelCalls.push(l); },
+    } as unknown as SessionContext['session'];
+    const context: SessionContext = {
+      runtime: { session, dispose: async () => undefined, services: { modelRegistry: { getAvailable: () => [], find: () => undefined } } } as SessionContext['runtime'],
+      session, sessionPath, unsubscribe: () => undefined, busySeq: 0,
+    };
+    const deps: BackendRequestHandlerDeps = {
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/startup',
+      sdk: { VERSION: '1.0.0', SessionManager: { open: (p: string) => ({ cwd: '/repo', sessionPath: p } as any), listAll: async () => [], continueRecent: (cwd: string) => ({ cwd } as any), create: (cwd: string) => ({ cwd } as any) } } as any,
+      getSessionContext: () => context,
+      async createSessionContext(_m, _r) { return context; },
+      async ensureSessionContext(p) { assert.equal(p, sessionPath); return context; },
+      setViewedSessionPath: () => undefined,
+      async buildSessionOpenedPayload(p) { return { sessionPath: p } as any; },
+      async applySystemPromptToggles() { /* no-op */ },
+      async loadTranscriptPage() { return {} as any; },
+      emit: () => undefined,
+      emitBusyChanged: () => undefined,
+      emitContextUsageChanged: () => undefined,
+      async emitSessionListChanged() { /* no-op */ },
+      async listSessions() { return []; },
+      listAvailableModels: () => [],
+      async readModelSettings() { return { defaultModel: 'model-a', defaultThinkingLevel: 'medium' }; },
+      async writeModelSettings(u) { return { defaultModel: '', defaultThinkingLevel: 'medium', ...u }; },
+    };
+
+    await handleBackendRequest(deps, {
+      id: '1', method: 'session.truncateAfter',
+      params: { sessionPath, entryId: 'stop-here' },
+    });
+
+    assert.deepEqual(setModelCalls, [], 'setModel must not be called when the model already matches');
+    assert.deepEqual(setThinkingLevelCalls, [], 'setThinkingLevel must not be called when the level already matches');
+  });
 });

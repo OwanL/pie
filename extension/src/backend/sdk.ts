@@ -44,6 +44,24 @@ export interface SdkSessionEvent {
   isError?: boolean;
   /** Partial result from onUpdate callback, present on tool_execution_update events. */
   partialResult?: unknown;
+  /** `agent_end` is re-emitted by AgentSession with `willRetry: true` when the
+   *  SDK will auto-retry the turn (a transient error occurred and the backoff
+   *  sleep + retry are pending). The backend gates `agent_end` finalization on
+   *  `!willRetry` so a mid-retry `agent_end` does not clear `activeRequest`
+   *  (which would break the retry turn's streaming) or flicker `busy` false. */
+  willRetry?: boolean;
+  /** `auto_retry_start`: 1-based retry attempt about to sleep/retry. */
+  attempt?: number;
+  /** `auto_retry_start`: configured max retry attempts. */
+  maxAttempts?: number;
+  /** `auto_retry_start`: backoff delay (ms) before this attempt. */
+  delayMs?: number;
+  /** `auto_retry_start`: verbatim provider error that triggered the retry. */
+  errorMessage?: string;
+  /** `auto_retry_end`: whether the retry attempt succeeded. */
+  success?: boolean;
+  /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
+  finalError?: string;
 }
 
 export interface SdkSessionManager {
@@ -86,6 +104,13 @@ export interface SdkSession {
   subscribe: (listener: (event: SdkSessionEvent) => void) => () => void;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
   abort: () => Promise<void>;
+  /** Queue a follow-up message to run as a fresh turn after the current turn
+   *  completes. Used by `message.send` when a turn is already running (steering).
+   *  Throws synchronously if the text is an extension command. */
+  followUp: (text: string, images?: SdkImageContent[]) => Promise<void>;
+  /** Clear all queued steering + follow-up messages and return what was cleared.
+   *  Synchronous. Used by `message.clearQueue` and on interrupt. */
+  clearQueue: () => { steering: string[]; followUp: string[] };
   setModel?: (model: unknown) => Promise<void>;
   setThinkingLevel?: (level: string) => void;
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;

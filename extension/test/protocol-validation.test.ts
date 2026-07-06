@@ -73,6 +73,16 @@ test('validateWebviewToHostMessage validates session-scoped messages with requir
   }
 });
 
+test('validateWebviewToHostMessage validates cancelDeferredTrigger (required sessionPath, optional triggerId)', () => {
+  // sessionPath required; triggerId optional.
+  assert.equal(validateWebviewToHostMessage({ type: 'cancelDeferredTrigger', sessionPath: '/a' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'cancelDeferredTrigger', sessionPath: '/a', triggerId: 't1' }).ok, true);
+  // missing sessionPath
+  assert.equal(validateWebviewToHostMessage({ type: 'cancelDeferredTrigger' }).ok, false);
+  // non-string triggerId
+  assert.equal(validateWebviewToHostMessage({ type: 'cancelDeferredTrigger', sessionPath: '/a', triggerId: 123 }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates editMessage payloads', () => {
   assert.equal(
     validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited' }).ok,

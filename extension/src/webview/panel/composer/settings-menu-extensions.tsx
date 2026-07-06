@@ -1,14 +1,17 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningSettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningSettings, ToolResultPruningSettings } from '../../../shared/protocol';
 import { setExtensionEnabled } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
 import { CollapsibleChevron } from '../components/chevron';
+import { BashSection } from './settings-menu-bash';
+import { AskUserSettings } from './settings-menu-ask-user';
 import { EXTENSIONS_WITH_SETTINGS } from './settings-menu-helpers';
 import { SkillPrunerSettings } from './settings-menu-skill-pruner';
 import { SubagentSection } from './settings-menu-subagent';
-import type { OnSetPrefs, OnSetPruningSettings } from './settings-menu-types';
+import { ToolResultPrunerSettings } from './settings-menu-tool-result-pruner';
+import type { OnSetPrefs, OnSetPruningSettings, OnSetToolResultPruningSettings } from './settings-menu-types';
 
 interface ExtensionItemProps {
   ext: ExtensionInfo;
@@ -17,14 +20,16 @@ interface ExtensionItemProps {
   isExpanded: boolean;
   setExpandedExt: (next: string | null) => void;
   pruningSettings: PruningSettings;
+  toolResultPruningSettings: ToolResultPruningSettings;
   modelEntries: ReturnType<typeof orderModelsForPicker>;
   availableModels: ModelInfo[];
   skillCatalog: string[];
   toolCatalog: string[];
   onSetPruningSettings: OnSetPruningSettings;
+  onSetToolResultPruningSettings: OnSetToolResultPruningSettings;
 }
 
-function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionItemProps) {
+function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, pruningSettings, toolResultPruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings, onSetToolResultPruningSettings }: ExtensionItemProps) {
   const checked = prefs.extensionToggles[ext.id] !== false;
   const hasSettings = EXTENSIONS_WITH_SETTINGS.has(ext.id);
   // Extensions with nested settings expand inline under their row (skill-pruner
@@ -81,6 +86,18 @@ function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, pru
           modelEntries={modelEntries}
         />
       )}
+      {hasSettings && expanded && ext.id === 'tool-result-pruner' && (
+        <ToolResultPrunerSettings
+          settings={toolResultPruningSettings}
+          onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+        />
+      )}
+      {hasSettings && expanded && ext.id === 'warm-bash' && (
+        <BashSection prefs={prefs} onSetPrefs={onSetPrefs} />
+      )}
+      {hasSettings && expanded && ext.id === 'ask-user' && (
+        <AskUserSettings prefs={prefs} onSetPrefs={onSetPrefs} />
+      )}
     </div>
   );
 }
@@ -92,14 +109,16 @@ interface ExtensionsSectionProps {
   expandedExt: string | null;
   setExpandedExt: (next: string | null) => void;
   pruningSettings: PruningSettings;
+  toolResultPruningSettings: ToolResultPruningSettings;
   modelEntries: ReturnType<typeof orderModelsForPicker>;
   availableModels: ModelInfo[];
   skillCatalog: string[];
   toolCatalog: string[];
   onSetPruningSettings: OnSetPruningSettings;
+  onSetToolResultPruningSettings: OnSetToolResultPruningSettings;
 }
 
-export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expandedExt, setExpandedExt, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings }: ExtensionsSectionProps) {
+export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expandedExt, setExpandedExt, pruningSettings, toolResultPruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPruningSettings, onSetToolResultPruningSettings }: ExtensionsSectionProps) {
   return (
     <div key="extensions" class="toolbar-settings-section">
       <div class="toolbar-settings-section-label">Extensions</div>
@@ -113,11 +132,13 @@ export function ExtensionsSection({ availableExtensions, prefs, onSetPrefs, expa
             isExpanded={expandedExt === ext.id}
             setExpandedExt={setExpandedExt}
             pruningSettings={pruningSettings}
+            toolResultPruningSettings={toolResultPruningSettings}
             modelEntries={modelEntries}
             availableModels={availableModels}
             skillCatalog={skillCatalog}
             toolCatalog={toolCatalog}
             onSetPruningSettings={onSetPruningSettings}
+            onSetToolResultPruningSettings={onSetToolResultPruningSettings}
           />
         ))}
       </div>

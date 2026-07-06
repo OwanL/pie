@@ -88,6 +88,24 @@ test('Tooltip does not set a native title on the trigger', () => {
   assert.equal(trigger?.getAttribute('title'), null);
 });
 
+test('triggerClassName is appended to the wrapper class when provided', () => {
+  act(() => {
+    render(h(Tooltip, { content: 'Hello', triggerClassName: 'strip-counts-trigger' }, h('span', null, 'x')), container);
+  });
+
+  const trigger = container.querySelector('.pie-tooltip-trigger');
+  assert.equal(trigger?.className, 'pie-tooltip-trigger strip-counts-trigger');
+});
+
+test('triggerClassName omitted yields the bare wrapper class', () => {
+  act(() => {
+    render(h(Tooltip, { content: 'Hello' }, h('span', null, 'x')), container);
+  });
+
+  const trigger = container.querySelector('.pie-tooltip-trigger');
+  assert.equal(trigger?.className, 'pie-tooltip-trigger');
+});
+
 test('Tooltip creates a distinct host for each instance', () => {
   const hostsBefore = document.querySelectorAll('.pie-tooltip-host').length;
 

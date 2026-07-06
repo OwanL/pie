@@ -193,6 +193,11 @@ export interface FunctionalSettingsSnapshot {
   pruningMode: PruningMode;
   /** Per-extension enabled/disabled toggles at run start (extension id -> enabled). */
   extensionToggles: Record<string, boolean>;
+  /** Tool-result-pruning enabled flag at run start (null = untracked, predates field). Backs the
+   *  outcome comparison: are runs better with tool-result pruning on or off? */
+  toolResultPruningEnabled: boolean | null;
+  /** Tool-result-pruning profile at run start (null = untracked). */
+  toolResultPruningProfile: 'default' | 'security' | null;
 }
 
 export interface RunSnapshot {

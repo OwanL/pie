@@ -117,7 +117,7 @@ export interface ChatMessage {
   modelId?: string;
   /** Reasoning/thinking level used for this assistant response, when available. */
   thinkingLevel?: ThinkingLevel;
-  status: 'streaming' | 'completed' | 'interrupted' | 'error';
+  status: 'streaming' | 'completed' | 'interrupted' | 'error' | 'queued';
   /** Human-readable error detail when status is 'error'. */
   errorDetail?: string;
   toolCalls?: ToolCall[];
@@ -151,9 +151,16 @@ export interface ChatMessage {
   customDetails?: CustomMessageDetails;
 }
 
+/** Details for a `deferred-trigger` custom user message (the wake-up text the
+ *  host injects to resume a deferred session). Carries the human-readable fire
+ *  reason so the webview can badge the bubble without re-parsing the text. */
+export interface DeferredTriggerDetails {
+  reason: string;
+}
+
 /**
  * Discriminated detail payloads keyed by `customType`.
  * Fallback `unknown` covers future extension types that haven't been typed yet.
  */
-export type CustomMessageDetails = PruningDetails | unknown;
+export type CustomMessageDetails = PruningDetails | DeferredTriggerDetails | unknown;
 

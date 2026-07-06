@@ -3,9 +3,11 @@ import type {
   ChatPrefs,
   ComposerInputDraft,
   PruningSettings,
+  ProxyProviderAddInput,
   ProxySettingsUpdate,
   RunOutcome,
   ThinkingLevel,
+  ToolResultPruningSettings,
   WebviewToHostMessage,
 } from '../../shared/protocol';
 import { createLocalMessageId } from '../../shared/local-message-id';
@@ -30,11 +32,15 @@ export interface AppHandlers {
   handleDuplicateTab: (path: string) => void;
   handleTogglePinTab: (path: string) => void;
   handleMarkComplete: () => void;
+  handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
   handleCancelOutcome: () => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
+  handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
+  handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
   handleSetProxySettings: (partial: ProxySettingsUpdate) => void;
+  handleAddProxyProvider: (input: ProxyProviderAddInput) => void;
   handleEditRequest: (messageId: string) => void;
   handleAddComposerInput: (input: ComposerInputDraft) => void;
   handleRemoveComposerInput: (inputId: string) => void;
@@ -116,6 +122,13 @@ export function useAppHandlers(
     if (!sessionPath) return;
     postMessage({ type: 'openOutcomeDialog', sessionPath });
   }, [postMessage, activeSessionPathRef]);
+  // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
+  // (carried on the trigger itself), not necessarily the active session, so it
+  // is passed explicitly rather than read from the ref. Omit `triggerId` to
+  // cancel every active trigger for that session.
+  const handleCancelDeferredTrigger = useCallback((sessionPath: string, triggerId?: string) => {
+    postMessage({ type: 'cancelDeferredTrigger', sessionPath, triggerId });
+  }, [postMessage]);
   const handleCancelOutcome = useCallback(() => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -127,8 +140,15 @@ export function useAppHandlers(
     postMessage({ type: 'cancelEdit', sessionPath });
   }, [postMessage, activeSessionPathRef]);
   const handleSetPrefs = useCallback((partial: Partial<ChatPrefs>) => postMessage({ type: 'setPrefs', prefs: partial }), [postMessage]);
+  const handleSetSystemPromptToggles = useCallback((disabledEntries: string[]) => {
+    const sessionPath = activeSessionPathRef.current;
+    if (!sessionPath) return;
+    postMessage({ type: 'setSystemPromptToggles', sessionPath, disabledEntries });
+  }, [postMessage, activeSessionPathRef]);
   const handleSetPruningSettings = useCallback((partial: Partial<PruningSettings>) => postMessage({ type: 'setPruningSettings', settings: partial }), [postMessage]);
+  const handleSetToolResultPruningSettings = useCallback((partial: Partial<ToolResultPruningSettings>) => postMessage({ type: 'setToolResultPruningSettings', settings: partial }), [postMessage]);
   const handleSetProxySettings = useCallback((partial: ProxySettingsUpdate) => postMessage({ type: 'setProxySettings', settings: partial }), [postMessage]);
+  const handleAddProxyProvider = useCallback((input: ProxyProviderAddInput) => postMessage({ type: 'addProxyProvider', input }), [postMessage]);
   const handleEditRequest = useCallback((messageId: string) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -262,10 +282,13 @@ export function useAppHandlers(
       handleDuplicateTab,
       handleTogglePinTab,
       handleMarkComplete,
+      handleCancelDeferredTrigger,
       handleCancelOutcome,
       handleCancelEdit,
       handleSetPrefs,
+      handleSetSystemPromptToggles,
       handleSetPruningSettings,
+      handleSetToolResultPruningSettings,
       handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
@@ -282,6 +305,7 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
+      handleAddProxyProvider,
     }),
     [
       handleSend,
@@ -294,10 +318,13 @@ export function useAppHandlers(
       handleDuplicateTab,
       handleTogglePinTab,
       handleMarkComplete,
+      handleCancelDeferredTrigger,
       handleCancelOutcome,
       handleCancelEdit,
       handleSetPrefs,
+      handleSetSystemPromptToggles,
       handleSetPruningSettings,
+      handleSetToolResultPruningSettings,
       handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
@@ -314,6 +341,7 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
+      handleAddProxyProvider,
     ],
   );
 }

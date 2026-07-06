@@ -29,6 +29,12 @@ export interface TooltipProps {
   /** Preferred placement relative to the trigger. */
   placement?: 'top' | 'bottom';
   /**
+   * Extra class(es) for the trigger wrapper. Useful when the wrapper is a flex
+   * item and needs layout-only styling (e.g. `margin-left: auto` to pin a
+   * status-strip segment to the right edge) that can't live on the inner child.
+   */
+  triggerClassName?: string;
+  /**
    * When true, snapshot the tooltip text the moment it becomes visible and keep
    * showing that snapshot for the rest of the hover, ignoring updates to
    * `content` while visible. Live indicators (e.g. tokens/sec) rebuild their
@@ -56,6 +62,7 @@ export function Tooltip({
   delayHide = 50,
   placement = 'bottom',
   freezeWhileVisible = false,
+  triggerClassName,
 }: TooltipProps): JSX.Element {
   const [isVisible, setIsVisible] = useState(false);
   const triggerRef = useRef<HTMLSpanElement>(null);
@@ -234,7 +241,7 @@ export function Tooltip({
   return (
     <span
       ref={triggerRef}
-      class="pie-tooltip-trigger"
+      class={triggerClassName ? `pie-tooltip-trigger ${triggerClassName}` : 'pie-tooltip-trigger'}
       aria-describedby={singleVNode ? undefined : (isVisible ? hostIdRef.current : undefined)}
       onMouseEnter={showTooltip}
       onMouseLeave={hideTooltip}

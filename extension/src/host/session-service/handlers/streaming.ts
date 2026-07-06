@@ -10,6 +10,9 @@ import type {
   MessageStartedPayload,
   MessageThinkingPayload,
   PreflightFailedPayload,
+  QueuedDeliveredPayload,
+  RetryEndedPayload,
+  RetryStartedPayload,
 } from '../../../shared/protocol';
 import type { TurnThroughputStatus } from '../../run-analytics';
 import { stripReqIds } from '../../../shared/error-mapping.js';
@@ -230,5 +233,46 @@ export function onPreflightFailed(payload: PreflightFailedPayload, deps: Handler
     sessionPath,
     requestId: payload.requestId,
     error: payload.error,
+  });
+}
+
+export function onQueuedDelivered(payload: QueuedDeliveredPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('message.queuedDelivered', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.dispatchArch({
+    kind: 'QueuedDelivered',
+    sessionPath,
+    text: payload.text,
+  });
+}
+
+export function onRetryStarted(payload: RetryStartedPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('retry.started', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.dispatchArch({
+    kind: 'RetryStarted',
+    sessionPath,
+    attempt: payload.attempt,
+    maxAttempts: payload.maxAttempts,
+    delayMs: payload.delayMs,
+    errorMessage: payload.errorMessage,
+  });
+}
+
+export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('retry.ended', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.dispatchArch({
+    kind: 'RetryEnded',
+    sessionPath,
+    success: payload.success,
+    attempt: payload.attempt,
+    finalError: payload.finalError,
   });
 }

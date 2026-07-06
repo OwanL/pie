@@ -41,6 +41,15 @@ export interface SendCommand extends CommandBase {
    *  EffectRunner when the in-flight send resolves (commit / fire / pre-ack
    *  failure) so pruning returns to the user's prior mode for the next turn. */
   priorPruningMode?: PruningMode;
+  /** Host-side tag for synthetic (non-user-typed) sends. Currently set only
+   *  by the deferred-trigger registry's wake-up dispatch to `'deferred-trigger'`
+   *  so the webview can visually differentiate the auto-resume message from a
+   *  typed user message. NOT forwarded to the backend `message.send` RPC (the
+   *  SDK persists user messages without this metadata); on transcript reload
+   *  `mapUserMessage` re-derives the tag from the stable text prefix. */
+  customType?: string;
+  /** Structured details for a synthetic send, keyed by `customType`. */
+  customDetails?: unknown;
   /** Explicit timestamp for deterministic optimistic message ordering. */
   timestamp: number;
 }
@@ -60,6 +69,15 @@ export interface EditCommand extends CommandBase {
 /** Interrupt the in-flight assistant turn for a session. */
 export interface InterruptCommand extends CommandBase {
   kind: 'Interrupt';
+  sessionPath: string;
+}
+
+/** Clear all queued follow-up (steering) messages for a session. Removes the
+ *  optimistic 'queued' transcript messages and asks the backend to drop them
+ *  from the SDK follow-up queue so they will not run later. Does NOT interrupt
+ *  the current turn. */
+export interface ClearQueueCommand extends CommandBase {
+  kind: 'ClearQueue';
   sessionPath: string;
 }
 
@@ -221,9 +239,25 @@ export interface SetPruningSettingsCommand extends CommandBase {
   settings: Partial<import('../../shared/protocol').PruningSettings>;
 }
 
+export interface SetToolResultPruningSettingsCommand extends CommandBase {
+  kind: 'SetToolResultPruningSettings';
+  settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
+}
+
 export interface SetProxySettingsCommand extends CommandBase {
   kind: 'SetProxySettings';
   settings: import('../../shared/protocol').ProxySettingsUpdate;
+}
+
+/** Add a new proxied provider from the proxy settings "Add Provider" form. The
+ *  reducer validates + applies optimistically (merging a fresh
+ *  `proxy.providers.<name>` entry into proxySettings); the service persists the
+ *  key to `proxy/.env`, writes the `proxy.providers.<name>` entry to
+ *  settings.json, runs sync-models, and restarts the proxy. The model catalog
+ *  (`models.yaml`) is added separately via the add-provider skill. */
+export interface AddProxyProviderCommand extends CommandBase {
+  kind: 'AddProxyProvider';
+  input: import('../../shared/protocol').ProxyProviderAddInput;
 }
 
 export interface SetFileChangesExpandedCommand extends CommandBase {
@@ -246,10 +280,22 @@ export interface SetFileReadCommand extends CommandBase {
   read: boolean;
 }
 
+/** Set the complete disabled-entry set for a session's system prompts. The
+ *  backend is the source of truth: it persists the set, rewrites the SDK base
+ *  prompt, and re-emits `session.opened` (which flows back through the reducer
+ *  to update `systemPromptsBySession` with fresh `disabled` flags). The
+ *  reducer emits only the RPC effect — no optimistic host state. */
+export interface SetSystemPromptTogglesCommand extends CommandBase {
+  kind: 'SetSystemPromptToggles';
+  sessionPath: string;
+  disabledEntries: string[];
+}
+
 export type Command =
   | SendCommand
   | EditCommand
   | InterruptCommand
+  | ClearQueueCommand
   | TruncateAfterCommand
   | OpenSessionCommand
   | CreateSessionCommand
@@ -279,12 +325,15 @@ export type Command =
   | OpenFileInEditorCommand
   | OpenFileCommand
   | SetPruningSettingsCommand
+  | SetToolResultPruningSettingsCommand
   | SetProxySettingsCommand
+  | AddProxyProviderCommand
   | DuplicateSessionCommand
   | MoveSessionTabCommand
   | TogglePinTabCommand
   | SetFileChangesExpandedCommand
-  | SetFileReadCommand;
+  | SetFileReadCommand
+  | SetSystemPromptTogglesCommand;
 export interface SetModelCommand extends CommandBase {
   kind: 'SetModel';
   sessionPath: string;

@@ -20,6 +20,7 @@ export interface BottomSectionProps {
   isAskUserHandledInline: boolean;
   postMessage: (msg: WebviewToHostMessage) => void;
   busy: ViewState['busy'];
+  retryStatus: ViewState['retryStatus'];
   /** Brief E: optimistic in-flight interrupt flag (webview-local). Drives the
    *  "Stopping…" affordance so the click reflects within one frame. */
   interrupting: boolean;
@@ -32,6 +33,7 @@ export interface BottomSectionProps {
   pruningSettings: ViewState['pruningSettings'];
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
+  toolResultPruningSettings: ViewState['toolResultPruningSettings'];
   proxySettings: ViewState['proxySettings'];
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
@@ -44,7 +46,10 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetPruningSettings' | 'handleSetProxySettings' | 'handleMarkComplete'>;
+  /** True when the active session owns a pending deferred trigger — greys out
+   *  the composer's mark-done button with an explanatory tooltip. */
+  activeSessionHasDeferredTriggers: boolean;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetProxySettings' | 'handleAddProxyProvider' | 'handleMarkComplete'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -55,6 +60,7 @@ export const BottomSection = memo(function BottomSection({
   isAskUserHandledInline,
   postMessage,
   busy,
+  retryStatus,
   interrupting,
   activeSession,
   modelSettings,
@@ -65,6 +71,7 @@ export const BottomSection = memo(function BottomSection({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  toolResultPruningSettings,
   proxySettings,
   systemPrompts,
   transcript,
@@ -75,6 +82,7 @@ export const BottomSection = memo(function BottomSection({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
+  activeSessionHasDeferredTriggers,
   handlers,
 }: BottomSectionProps) {
   if (!hasActiveTabs || needsSessionRecovery) return null;
@@ -89,6 +97,7 @@ export const BottomSection = memo(function BottomSection({
         draftText={draftText}
         postMessage={postMessage}
         busy={busy}
+        retryStatus={retryStatus}
         interrupting={interrupting}
         activeModelId={activeSession?.modelId}
         activeThinkingLevel={activeSession?.thinkingLevel}
@@ -100,6 +109,7 @@ export const BottomSection = memo(function BottomSection({
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
+        toolResultPruningSettings={toolResultPruningSettings}
         proxySettings={proxySettings}
         systemPrompts={systemPrompts}
         transcript={transcript}
@@ -109,6 +119,7 @@ export const BottomSection = memo(function BottomSection({
         pendingComposerInputs={pendingComposerInputs}
         activeRunSummary={activeRunSummary}
         tokenRateBySession={tokenRateBySession}
+        activeSessionHasDeferredTriggers={activeSessionHasDeferredTriggers}
         focusTrigger={activeSession?.path}
         onSend={handlers.handleSend}
         onRetrySend={handlers.handleRetrySend}
@@ -118,8 +129,11 @@ export const BottomSection = memo(function BottomSection({
         onRemoveInput={handlers.handleRemoveComposerInput}
         onModelChange={handlers.handleModelChange}
         onSetPrefs={handlers.handleSetPrefs}
+        onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
+        onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
         onSetProxySettings={handlers.handleSetProxySettings}
+        onAddProxyProvider={handlers.handleAddProxyProvider}
         onMarkComplete={handlers.handleMarkComplete}
       />
     </>

@@ -55,6 +55,21 @@ export interface SessionContext {
   displayTranscriptCache?: DisplayTranscriptCache;
   /** UI bridge for extension UI requests within this session. */
   uiBridge?: ExtensionUIBridge;
+  /** Entry ids the user has toggled off for this session (persists across
+   *  reopens via the sidecar store). Applied to both the display entries and
+   *  the `_baseSystemPrompt` sent to the model. */
+  systemPromptDisabledEntries?: string[];
+  /** Bug 6 watchdog: armed on `agent_end willRetry:true`, re-armed on
+   *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
+   *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +
+   *  `retry.stuck` so a retry that never completes (provider dies mid-backoff,
+   *  extension hook blocks the retry) is observable and recoverable instead of
+   *  the session sitting in willRetry forever. */
+  willRetryWatchdogTimer?: ReturnType<typeof setTimeout>;
+  /** The clear function returned by {@link armWillRetryWatchdog}. Stored on
+   *  the context so `auto_retry_end` / `agent_end willRetry:false` can clear it
+   *  without re-implementing the timer lookup. */
+  willRetryWatchdogClear?: () => void;
 }
 
 export interface SessionPromptState {

@@ -4,22 +4,30 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { ProxyService, type ProxyStartOptions } from '../backend/proxy-service';
-import { resolveChatPrefs } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ProxySettings, ProxySettingsUpdate, ThinkingLevel, TranscriptMode } from '../../shared/protocol';
+import { resolveChatPrefs, buildProxyProviderEntry, deriveApiKeyEnv } from '../../shared/protocol';
+import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, ProxyProviderAddInput, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
   type PruningSettingsStorage,
 } from './pruning-settings-persistence';
 import {
+  loadPersistedToolResultPruningSettings,
+  saveToolResultPruningSettings,
+  type ToolResultPruningSettingsStorage,
+} from './tool-result-pruning-settings-persistence';
+import {
   loadPersistedProxySettings,
   saveProxySettings,
   type ProxySettingsStorage,
 } from './proxy-settings-persistence';
+import { readProxySettings, writeProxySettings } from './proxy-settings';
+import { writeProxyEnvKey, loadProxyEnvIntoProcess } from './proxy-env';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
 import { SessionServiceState } from './state';
+import { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { startSessionBackend } from './startup';
 import { toErrorMessage } from '../util/error-message';
 import { setRuntimeAuditLogEnabled } from '../util/audit';
@@ -31,6 +39,7 @@ import type { ArchState } from '../core/arch-state';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
+const TOOL_RESULT_PRUNING_STORAGE_KEY = 'toolResultPruningSettings';
 const PROXY_STORAGE_KEY = 'proxySettings';
 
 /**
@@ -41,6 +50,10 @@ const PROXY_STORAGE_KEY = 'proxySettings';
 export class SessionService implements vscode.Disposable {
   private readonly state: SessionServiceState;
   private readonly events: SessionServiceEvents;
+  /** Deferred-trigger registry: resumes a session when a registered condition
+   *  (session finished / timer / user input) fires. Backend-independent —
+   *  survives `restart()` so pending triggers persist across backend restarts. */
+  private readonly triggers: DeferredTriggerRegistry;
   private readonly tabs: SessionTabActions;
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
@@ -64,6 +77,7 @@ export class SessionService implements vscode.Disposable {
     this.dispatchArch = dispatchArch;
 
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
+    this.triggers = new DeferredTriggerRegistry({ getArchState, dispatchArch, scheduleRender });
     this.events = new SessionServiceEvents({
       context,
       scheduleRender,
@@ -72,6 +86,7 @@ export class SessionService implements vscode.Disposable {
       state: this.state,
       dispatchArch,
       getArchState,
+      triggers: this.triggers,
     });
     this.tabs = new SessionTabActions({
       context,
@@ -96,6 +111,11 @@ export class SessionService implements vscode.Disposable {
   }
 
   async start(): Promise<void> {
+    // Start the deferred-trigger registry (sidecar watcher). Idempotent — safe
+    // across `restart()`. Done here (not the constructor) so constructing a
+    // SessionService in unit tests without `start()` doesn't arm an fs.watch
+    // that would keep the test process alive.
+    this.triggers.start();
     await startSessionBackend({
       context: this.context,
       backend: this.backend,
@@ -107,6 +127,25 @@ export class SessionService implements vscode.Disposable {
       getArchState: this.getArchState,
       dispatchArch: this.dispatchArch,
     });
+  }
+
+  /** Notify deferred triggers that the user sent a message in `sessionPath`
+   *  (webview Send path). Fires any `user_input` trigger registered for it. */
+  notifyUserInput(sessionPath: string): void {
+    this.triggers.onUserInput(sessionPath);
+  }
+
+  /** Snapshot of all currently-active deferred triggers (across every
+   *  session), projected into `ViewState.deferredTriggers` by
+   *  `PieExtension.buildViewState`. */
+  getDeferredTriggers(): DeferredTriggerView[] {
+    return this.triggers.getActiveTriggers();
+  }
+
+  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
+   *  omitted). Invoked by the webview's status-strip cancel affordance. */
+  cancelDeferredTrigger(sessionPath: string, triggerId?: string): void {
+    this.triggers.cancel(sessionPath, triggerId);
   }
 
   /** Expose queue routing for the Phase 3 EffectRunner. */
@@ -145,6 +184,7 @@ export class SessionService implements vscode.Disposable {
 
   dispose(): void {
     this.events.detach();
+    this.triggers.dispose();
   }
 
   createNewSession(): string {
@@ -252,10 +292,25 @@ export class SessionService implements vscode.Disposable {
       bashWarmPoolSize: merged.bashWarmPoolSize,
       bashFastPath: merged.bashFastPath,
       bashShellPath: merged.bashShellPath,
+      bashWarmupTimeoutMs: merged.bashWarmupTimeoutMs,
+      bashAcquireTimeoutMs: merged.bashAcquireTimeoutMs,
+      bashDefaultTimeout: merged.bashDefaultTimeout,
       subagentBuckets: merged.subagentBuckets,
       subagentNestedAllowedBuckets: merged.subagentNestedAllowedBuckets,
     }).catch((error) => {
       appendPieLog('warn', 'prefs', 'runtimePrefs.set failed', { error: toErrorMessage(error) });
+    });
+  }
+
+  /** Push the complete disabled-entry set for a session's system prompts to the
+   *  backend (`systemPromptToggles.set`). The backend persists the set to a
+   *  sidecar, rewrites the SDK base prompt, and re-emits `session.opened` —
+   *  that re-emit (not this call's result) updates the host's
+   *  `systemPromptsBySession` with fresh `disabled` flags. */
+  async setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void> {
+    await this.backend.request('systemPromptToggles.set', {
+      sessionPath,
+      disabledEntries: [...disabledEntries],
     });
   }
 
@@ -289,10 +344,54 @@ export class SessionService implements vscode.Disposable {
     };
   }
 
+  async setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void> {
+    const storage = this.createToolResultPruningSettingsStorage();
+    await saveToolResultPruningSettings(
+      storage,
+      // SET path: the reducer already applied the update optimistically, so do
+      // not re-dispatch ToolResultPruningSettingsChanged (avoids a lost-update
+      // flicker under rapid sequential changes). Persistence still writes-or-
+      // mirrors and notifies on disk failure. The LOAD path keeps its own dispatch.
+      undefined,
+      () => this.getArchState().settings.toolResultPruningSettings,
+      updates,
+      (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
+    );
+  }
+
+  async loadToolResultPruningSettings(): Promise<void> {
+    const storage = this.createToolResultPruningSettingsStorage();
+    await loadPersistedToolResultPruningSettings(
+      storage,
+      (settings) => this.dispatchArch({ kind: 'ToolResultPruningSettingsChanged', toolResultPruningSettings: settings }),
+    );
+  }
+
+  private createToolResultPruningSettingsStorage(): ToolResultPruningSettingsStorage {
+    return {
+      get: () => this.context.globalState.get<ToolResultPruningSettings>(TOOL_RESULT_PRUNING_STORAGE_KEY),
+      update: (value) => this.context.globalState.update(TOOL_RESULT_PRUNING_STORAGE_KEY, value),
+    };
+  }
+
   /** Record the running proxy + its start options so later edits can restart it. */
   setProxyRuntime(proxy: ProxyService, options: ProxyStartOptions): void {
     this.proxyService = proxy;
     this.proxyStartOptions = options;
+    // Bug 5 observability: when a config restart kills an in-flight proxied
+    // stream, surface a structured NoticeShown so the user can tell "proxy
+    // restarted under me" vs "provider cut" vs "proxy throttled". The hook
+    // fires synchronously from ProxyService.stop() BEFORE the kill.
+    proxy.onInFlightInterrupted = (payload) => {
+      this.dispatchArch({
+        kind: 'NoticeShown',
+        notice: `${payload.message} (pid ${payload.pid}). The next turn will use the restarted proxy.`,
+      });
+      appendPieLog('warn', 'proxy-restart', 'in-flight proxied stream interrupted by proxy restart', {
+        code: payload.code,
+        pid: payload.pid,
+      });
+    };
   }
 
   /** Persist a partial proxy-settings update to settings.json, regenerate the
@@ -313,7 +412,87 @@ export class SessionService implements vscode.Disposable {
       updates,
       (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
     );
+    await this.regenerateProxyConfigAndRestart();
+  }
 
+  /** Add a new proxied provider from the proxy settings "Add Provider" form.
+   *  The reducer already applied the provider entry optimistically; this method
+   *  does the deterministic wiring the host owns:
+   *    1. derive `apiKeyEnv` + store the key safely in `proxy/.env` + `process.env`
+   *    2. write `proxy.providers.<name>` to settings.json (empty modelListOrder,
+   *       `<name>-shared` model-info id — "pending" until the add-provider skill
+   *       adds the models.yaml catalog)
+   *    3. run sync-models (tolerant of pending providers) + restart the proxy
+   *  On any failure, reload proxy settings from disk + dispatch
+   *  ProxySettingsChanged to revert the optimistic entry (no phantom provider).
+   *  The model CATALOG (models.yaml) is added separately via the add-provider skill. */
+  async addProxyProvider(input: ProxyProviderAddInput): Promise<void> {
+    const name = input.name.trim().toLowerCase();
+    const entry = buildProxyProviderEntry(input);
+    if (!entry) {
+      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: could not build a config entry for "${name}".` });
+      await this.revertProxySettingsFromDisk();
+      return;
+    }
+    const apiKeyEnv = deriveApiKeyEnv(name);
+    if (!apiKeyEnv) {
+      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: could not derive an API key env var for "${name}".` });
+      await this.revertProxySettingsFromDisk();
+      return;
+    }
+
+    // 1. Store the key safely (proxy/.env is gitignored; never written to
+    //    settings.json/models.yaml) + set process.env so the proxy child
+    //    inherits it on the restart below.
+    try {
+      await writeProxyEnvKey(apiKeyEnv, input.apiKey);
+    } catch (err) {
+      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: failed to store the API key for "${name}" in proxy/.env: ${toErrorMessage(err)}` });
+      await this.revertProxySettingsFromDisk();
+      return;
+    }
+
+    // 2. Write the proxy.providers.<name> entry to settings.json.
+    try {
+      await writeProxySettings({ providers: { [name]: entry } });
+    } catch (err) {
+      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: failed to write the proxy config for "${name}": ${toErrorMessage(err)}` });
+      await this.revertProxySettingsFromDisk();
+      return;
+    }
+
+    // 3. Regenerate litellm_config.yaml (sync-models tolerates the pending
+    //    provider — it has no models.yaml catalog entry yet, so it contributes
+    //    no routes) + restart the proxy so the new env + config take effect.
+    await this.regenerateProxyConfigAndRestart();
+
+    this.dispatchArch({
+      kind: 'NoticeShown',
+      notice:
+        `Provider "${name}" added to the proxy config. Models aren't wired yet — ` +
+        `run the add-provider skill (or /skill:add-provider) to add the models.yaml ` +
+        `catalog + populate its model list so the provider routes traffic.`,
+    });
+  }
+
+  /** Reload proxy settings from disk and dispatch ProxySettingsChanged to
+   *  revert the reducer's optimistic state to disk truth. Used by
+   *  addProxyProvider on failure so a failed add leaves no phantom provider. */
+  private async revertProxySettingsFromDisk(): Promise<void> {
+    try {
+      const disk = await readProxySettings();
+      this.dispatchArch({ kind: 'ProxySettingsChanged', proxySettings: disk });
+    } catch (err) {
+      appendPieLog('warn', 'proxy-settings', 'failed to revert proxy settings from disk after add failure', { error: toErrorMessage(err) });
+    }
+  }
+
+  /** Regenerate proxy/litellm_config.yaml from settings.json via sync-models
+   *  and restart the LiteLLM proxy so the new config takes effect. Shared by
+   *  setProxySettings (field edits) + addProxyProvider (new provider). On a
+   *  sync/restart failure, dispatch a NoticeShown (the persisted config is
+   *  left intact — the user can fix it and retry, or reload the window). */
+  private async regenerateProxyConfigAndRestart(): Promise<void> {
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     if (!agentDir) {
       // No agent dir = no proxy config to regenerate; nothing to restart.

@@ -143,6 +143,8 @@ test('prepareForSend captures functional settings from ArchState.settings at run
     subagentAlwaysParentModel: true,
     pruningMode: 'shadow',
     extensionToggles: { subagent: true, safeguard: false },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'default',
   });
 
   // The snapshot must not alias reducer state: later changes to prefs must not leak into the captured copy.
@@ -156,6 +158,8 @@ test('prepareForSend captures functional settings from ArchState.settings at run
     subagentAlwaysParentModel: true,
     pruningMode: 'shadow',
     extensionToggles: { subagent: true, safeguard: false },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'default',
   });
 });
 

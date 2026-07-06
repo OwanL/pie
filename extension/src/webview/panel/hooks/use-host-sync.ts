@@ -15,10 +15,11 @@ import type {
   ModelInfo,
   PruningCatalog,
   PruningSettings,
+  ToolResultPruningSettings,
   ViewState,
   WebviewToHostMessage,
 } from '../../../shared/protocol';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
@@ -40,7 +41,9 @@ export const EMPTY_VIEW_STATE: ViewState = {
   runSummariesBySession: {},
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
+  deferredTriggers: [],
   busy: false,
+  retryStatus: null,
   notice: null,
   noticeKind: null,
   backendReady: false,
@@ -56,6 +59,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   readFilePaths: [],
   pruningResult: null,
   pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
+  toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
   proxySettings: DEFAULT_PROXY_SETTINGS,
   pruningCatalog: {
     skills: [],
@@ -116,6 +120,7 @@ export interface HostSyncState {
 function useHydrateViewState() {
   const stablePrefsRef = useRef<ChatPrefs | null>(null);
   const stablePruningSettingsRef = useRef<PruningSettings | null>(null);
+  const stableToolResultPruningSettingsRef = useRef<ToolResultPruningSettings | null>(null);
   const stablePruningCatalogRef = useRef<PruningCatalog | null>(null);
   /** Reference-stabilised `availableModels` (see `model-list-stabilize.ts`);
    *  seeded with `[]` to mirror `EMPTY_VIEW_STATE.availableModels`. */
@@ -130,6 +135,14 @@ function useHydrateViewState() {
       ...raw.pruningSettings,
     });
     stablePruningSettingsRef.current = pruningSettings;
+    // `rules` is deep-merged so a partial host snapshot (e.g. one missing the
+    // `rules` key) doesn't drop toggle keys — defaults fill any absent toggle.
+    const toolResultPruningSettings = pickStable(stableToolResultPruningSettingsRef.current, {
+      ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+      ...raw.toolResultPruningSettings,
+      rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules, ...(raw.toolResultPruningSettings?.rules ?? {}) },
+    });
+    stableToolResultPruningSettingsRef.current = toolResultPruningSettings;
     const pruningCatalog = pickStable(stablePruningCatalogRef.current, {
       ...EMPTY_VIEW_STATE.pruningCatalog,
       ...raw.pruningCatalog,
@@ -147,6 +160,7 @@ function useHydrateViewState() {
       ...raw,
       prefs,
       pruningSettings,
+      toolResultPruningSettings,
       pruningCatalog,
       availableModels,
     };

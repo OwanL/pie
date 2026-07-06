@@ -105,6 +105,8 @@ export function MessageItemView({
     <MessageItemShell
       messageId={message.id}
       role={message.role}
+      status={message.status}
+      customType={message.customType}
       isCurrentlyStreaming={derived.isCurrentlyStreaming}
       isClickableUserMsg={derived.isClickableUserMsg}
       isEditing={derived.isEditing}

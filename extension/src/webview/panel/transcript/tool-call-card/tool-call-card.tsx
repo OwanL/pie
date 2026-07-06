@@ -13,6 +13,7 @@ import { formatToolCallResultForDisplay } from './format';
 import { isCommandSummaryTool, buildToolCallHeaderSummaryModel } from './summary-model';
 import { ToolCallBody } from './tool-call-body';
 import { ToolCallHeader } from './tool-call-header';
+import type { ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
 import {
   TOOL_CALL_CLOSE_GRACE_MS,
   TOOL_CALL_CLOSE_TRANSITION_MS,
@@ -173,6 +174,10 @@ export function ToolCallCard({
   const errorDetail = toolCall.status === 'failed'
     ? (textFromToolResult(toolCall.result) ?? formatToolCallResultForDisplay(toolCall)) || undefined
     : undefined;
+  // Tool-result-pruner visibility marker: the extension merges
+  // `pruningBadge` into `result.details` (rules that fired + tokens saved).
+  // Surfaced in the header so it's visible even when the card is collapsed.
+  const pruningBadge = (toolCall.result as { details?: { pruningBadge?: ToolResultPruningBadgeData } } | null | undefined)?.details?.pruningBadge;
   const summaryModel = buildToolCallHeaderSummaryModel(
     toolCall.name,
     presentation.summary,
@@ -264,6 +269,7 @@ export function ToolCallCard({
         summaryModel={summaryModel ?? undefined}
         sizeHint={presentation.sizeHint}
         errorDetail={errorDetail}
+        pruningBadge={pruningBadge}
         durationMs={toolCall.durationMs}
         ariaControls={renderBody ? bodyId : undefined}
         onOpenFile={onOpenFile}

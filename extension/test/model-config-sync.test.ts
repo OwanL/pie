@@ -27,6 +27,8 @@ interface SyncModule {
     litellmConfigYaml: string;
     settingsJson: unknown;
   };
+  generateLitellmConfigYaml: (source: unknown, proxy: unknown) => string;
+  validateProxyConfig: (proxy: unknown, source: unknown, opts?: { toleratePending?: boolean }) => void;
   loadSource: (root?: string) => unknown;
   loadAndGenerate: (root?: string) => {
     modelsJson: unknown;
@@ -161,4 +163,59 @@ test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.
   assert.equal(merged.defaultModel, (source as { defaults: { model: string } }).defaults.model);
   assert.equal(merged.defaultProvider, (source as { defaults: { provider: string } }).defaults.provider);
   assert.equal(merged.defaultThinkingLevel, (source as { defaults: { thinkingLevel: string } }).defaults.thinkingLevel);
+});
+
+test('validateProxyConfig throws on a provider in proxy.providers but absent from models.yaml (strict default)', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot) as { providers: Record<string, unknown> };
+  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
+  const proxy = JSON.parse(JSON.stringify(committedSettings.proxy)) as {
+    gateway: unknown;
+    providers: Record<string, unknown>;
+  };
+  // Inject a pending provider that has no models.yaml catalog entry.
+  proxy.providers['pending-only'] = {
+    apiBase: 'https://api.example.com/v1',
+    apiKeyEnv: 'PENDING_ONLY_API_KEY',
+    litellmProvider: 'openai',
+    maxConcurrentRequests: 2,
+    litellmModelInfoId: 'pending-only-shared',
+    modelListOrder: [],
+    alias: {},
+  };
+  assert.throws(() => mod.validateProxyConfig(proxy, source), /unknown provider 'pending-only'/);
+});
+
+test('generate() tolerates a pending provider (in proxy.providers, absent from models.yaml) and emits no routes for it', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot) as { providers: Record<string, unknown> };
+  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
+  const base = JSON.parse(JSON.stringify(committedSettings)) as Record<string, unknown>;
+  const proxy = JSON.parse(JSON.stringify(base.proxy)) as {
+    gateway: unknown;
+    providers: Record<string, unknown>;
+  };
+  proxy.providers['pending-only'] = {
+    apiBase: 'https://api.example.com/v1',
+    apiKeyEnv: 'PENDING_ONLY_API_KEY',
+    litellmProvider: 'openai',
+    maxConcurrentRequests: 2,
+    litellmModelInfoId: 'pending-only-shared',
+    modelListOrder: [],
+    alias: {},
+  };
+  base.proxy = proxy;
+  // generate() must NOT throw on the pending provider.
+  const out = mod.generate(source, base);
+  // The litellm config has a model_list entry per route. The pending provider
+  // contributes zero routes, so no entry should reference pending-only.
+  const generated = YAML.parse(out.litellmConfigYaml) as {
+    model_list: Array<{ model_name: string; litellm_params: { model: string } }>;
+  };
+  const pendingRoutes = generated.model_list.filter((m) => m.litellm_params.model.includes('pending-only'));
+  assert.equal(pendingRoutes.length, 0, 'pending provider must contribute no litellm routes');
+  // The strict validator still rejects it (toleratePending is opt-in).
+  assert.throws(() => mod.validateProxyConfig(proxy, source), /unknown provider 'pending-only'/);
+  // ...but tolerates it when opted in.
+  assert.doesNotThrow(() => mod.validateProxyConfig(proxy, source, { toleratePending: true }));
 });

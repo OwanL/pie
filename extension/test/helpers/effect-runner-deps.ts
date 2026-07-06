@@ -146,6 +146,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
   const service: SessionServiceLike = {
     async hydrateModelState() {},
     setPrefs() {},
+    async setSystemPromptToggles() {},
     bumpSessionDataEpoch(sessionPath: string) {
       calls.push({ kind: 'bumpEpoch', sessionPath });
     },
@@ -158,7 +159,9 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async jumpToLatestTranscript() {},
     async closeSession() {},
     async setPruningSettings() {},
+    async setToolResultPruningSettings() {},
     async setProxySettings() {},
+    async addProxyProvider() {},
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },

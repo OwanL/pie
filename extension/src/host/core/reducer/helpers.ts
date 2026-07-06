@@ -128,6 +128,7 @@ export function evictSession(
   const { [sp]: _e, ...remainingEditing } = state.transcript.editingMessageIdBySession;
   const { [sp]: _pf, ...remainingPagingInFlight } = state.transcript.pagingInFlightBySession;
   const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
+  const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
   const { [sp]: _a, ...remainingAnalytics } = state.sessions.analyticsFactorsBySession;
   const { [sp]: _ct, ...remainingTurns } = state.pending.currentTurnBySession;
   const { [sp]: _m, ...remainingModels } = state.settings.availableModelsBySession;
@@ -235,6 +236,7 @@ export function evictSession(
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,
         interruptInFlightBySession: remainingInterrupts,
+        retryStatusBySession: remainingRetryStatus,
       },
       settings: {
         ...state.settings,
@@ -310,6 +312,16 @@ export function appendLocalUserMessage(
   text: string,
   userParts: UserContentPart[] | undefined,
   createdAt: string,
+  /** Optimistic message status. Defaults to 'completed' (a normal send). The
+   *  steering busy branch passes 'queued' so the message renders as a pending
+   *  follow-up until `QueuedDelivered` promotes it. */
+  status: ChatMessage['status'] = 'completed',
+  /** Host-side synthetic-send tag (e.g. `'deferred-trigger'` for the wake-up
+   *  message). Set on the optimistic message so the webview can differentiate
+   *  it from a typed user message. Not persisted by the backend; re-derived
+   *  from the text prefix on reload by `mapUserMessage`. */
+  customType?: string,
+  customDetails?: unknown,
 ) {
   const list = draft.transcript.bySession[sessionPath] ?? [];
   const existingIndex = list.findIndex((m: ChatMessage) => m.id === id);
@@ -320,7 +332,9 @@ export function appendLocalUserMessage(
       createdAt,
       markdown: markdownFromUserParts(userParts, text),
       userParts,
-      status: 'completed',
+      status,
+      ...(customType !== undefined ? { customType } : {}),
+      ...(customDetails !== undefined ? { customDetails } : {}),
     };
   } else {
     list.push({
@@ -329,7 +343,9 @@ export function appendLocalUserMessage(
       createdAt,
       markdown: markdownFromUserParts(userParts, text),
       userParts,
-      status: 'completed',
+      status,
+      ...(customType !== undefined ? { customType } : {}),
+      ...(customDetails !== undefined ? { customDetails } : {}),
     });
   }
   draft.transcript.bySession[sessionPath] = list;

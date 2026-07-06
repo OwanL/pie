@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
-import { ProxyService } from '../backend/proxy-service';
+import { ProxyService, type ProxyStartOptions } from '../backend/proxy-service';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
 import { normalizeStoredTabPaths } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
@@ -16,6 +16,7 @@ import { SessionService } from './service';
 import { SessionServiceEvents } from './events';
 import { readProxySettings } from './proxy-settings';
 import { ensureProxyMasterKey, PROXY_MASTER_KEY_ENV } from './proxy-master-key';
+import { loadProxyEnvIntoProcess } from './proxy-env';
 import { SessionServiceState } from './state';
 import { buildRestoredSessionSummaries } from '../core/restored-session-summaries';
 import { bootLog } from '../util/audit';
@@ -38,6 +39,10 @@ interface StartSessionBackendOptions {
   openSession: (sessionPath: string) => void;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
+  /** Test seam: override the ProxyService constructor so startup-parallelism tests
+   *  can inject a fake proxy without spawning a real `uv run litellm` child.
+   *  Production leaves it unset → `new ProxyService()`. */
+  createProxyService?: () => ProxyService;
 }
 
 function resolveWorkspaceCwd(): string {
@@ -56,6 +61,10 @@ function applyStoredPrefs(options: StartSessionBackendOptions): void {
 
 async function loadPruningSettingsFromService(options: StartSessionBackendOptions): Promise<void> {
   await options.service.loadPruningSettings();
+}
+
+async function loadToolResultPruningSettingsFromService(options: StartSessionBackendOptions): Promise<void> {
+  await options.service.loadToolResultPruningSettings();
 }
 
 function computeRestorePlan(options: StartSessionBackendOptions) {
@@ -306,9 +315,11 @@ async function startBackendWithLogging(
       cwd: workspaceCwd,
       restoredStartupPath,
     });
+    const spawnStart = Date.now();
     await options.backend.start({ nodePath, sdkPath, backendPath, cwd: workspaceCwd });
     bootLog('session-startup', 'backend.started', {
       restoredStartupPath,
+      durationMs: Date.now() - spawnStart,
     });
     return true;
   } catch (err) {
@@ -338,12 +349,12 @@ async function startBackendWithLogging(
  * Skipped entirely (returns true) when `pie.useProxy` is false, so users who
  * opt out of the proxy are unaffected.
  */
-async function startProxyWithLogging(options: StartSessionBackendOptions): Promise<boolean> {
+async function prepareProxyWithLogging(options: StartSessionBackendOptions): Promise<{ ok: true; startOptions?: ProxyStartOptions } | { ok: false }> {
   const config = vscode.workspace.getConfiguration('pie');
   const useProxy = config.get<boolean>('useProxy', true);
   if (!useProxy) {
     bootLog('session-startup', 'proxy.skipped', { reason: 'pie.useProxy=false' });
-    return true;
+    return { ok: true };
   }
 
   // The proxy lives in `proxy/` under the resolved agentDir (the pie repo root
@@ -356,7 +367,7 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
         'pie.useProxy is on but no agent dir is resolved (PI_CODING_AGENT_DIR unset). ' +
         'The LiteLLM proxy at pie/proxy/ cannot be located. Set pie.agentDir, or turn pie.useProxy off to bypass.',
     });
-    return false;
+    return { ok: false };
   }
 
   const proxyDir = path.join(agentDir, 'proxy');
@@ -376,6 +387,10 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
   // Each configured proxied provider needs its upstream key env var set (litellm
   // sends `os.environ/<apiKeyEnv>` to the upstream). Fail loud listing any that
   // are missing rather than boot a proxy that will 401 every request to them.
+  // First load any keys the user/agent/UI wrote to proxy/.env (gitignored) into
+  // process.env (without overriding OS-installed keys), so providers added via
+  // the "Add Provider" form or the add-provider skill satisfy this check.
+  await loadProxyEnvIntoProcess();
   const proxySettings = await readProxySettings();
   const missingProviderEnvs = Object.entries(proxySettings.providers)
     .map(([name, p]) => ({ name, env: p.apiKeyEnv, set: !!process.env[p.apiKeyEnv] }))
@@ -390,23 +405,32 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
         'Set them and reload, remove the providers from the proxy config, ' +
         'or turn pie.useProxy off to route providers direct (no concurrency limit).',
     });
-    return false;
+    return { ok: false };
   }
 
+  return { ok: true, startOptions: { proxyDir, configPath, port, host } };
+}
+
+/** Spawn the LiteLLM proxy + await /health/liveness. Runs CONCURRENTLY with the
+ *  backend spawn (see startSessionBackend): the proxy env was already loaded
+ *  into process.env by prepareProxyWithLogging, so the backend inherits it at
+ *  spawn and the two readiness waits overlap. The proxy only needs to be ready
+ *  before the first user LLM request (well after backend.ready), not before the
+ *  backend spawns. Returns false (with a notice) on spawn/readiness failure. */
+async function spawnProxyWithLogging(
+  options: StartSessionBackendOptions,
+  startOptions: ProxyStartOptions,
+): Promise<boolean> {
   try {
-    bootLog('session-startup', 'proxy.starting', { proxyDir, port });
-    const proxy = new ProxyService();
+    bootLog('session-startup', 'proxy.starting', { ...startOptions });
+    const proxy = options.createProxyService?.() ?? new ProxyService();
     // Owned by the extension context so the proxy child is killed on shutdown.
     options.context.subscriptions.push(proxy);
-    const startOptions = { proxyDir, configPath, port, host };
+    const spawnStart = Date.now();
     await proxy.start(startOptions);
     // Record the running proxy + its start options so later edits can restart it.
     options.service.setProxyRuntime(proxy, startOptions);
-    bootLog('session-startup', 'proxy.started', { port });
-    // The proxied-provider apiKey in models.json is `$PIE_PROXY_MASTER_KEY`
-    // (the local gate pie just set), which the backend resolves from the
-    // inherited environment. Each provider's UPSTREAM key is sent by litellm
-    // (api_key: os.environ/<apiKeyEnv> in litellm_config.yaml), not by pi.
+    bootLog('session-startup', 'proxy.started', { port: startOptions.port, durationMs: Date.now() - spawnStart });
     return true;
   } catch (err) {
     options.dispatchArch({
@@ -419,6 +443,37 @@ async function startProxyWithLogging(options: StartSessionBackendOptions): Promi
     bootLog('session-startup', 'proxy.startFailed', { message: toErrorMessage(err) });
     return false;
   }
+}
+
+/** Spawn the proxy (when `proxyStartOptions` is set) and the backend
+ *  CONCURRENTLY, awaiting both. Both must succeed before the backend is
+ *  published as ready. If only one succeeds, the winner is stopped so no child
+ *  process is leaked in a not-ready state (the serial flow never started the
+ *  backend when the proxy failed). Extracted so startup-parallelism tests can
+ *  drive it with fakes — see session-startup-overlap.test.ts. */
+export async function spawnProxyAndBackendConcurrently(
+  options: StartSessionBackendOptions,
+  proxyStartOptions: ProxyStartOptions | undefined,
+  backendArgs: { nodePath: string; sdkPath: string; backendPath: string; cwd: string; restoredStartupPath: string | null },
+): Promise<{ proxyReady: boolean; started: boolean }> {
+  const proxyPromise = proxyStartOptions
+    ? spawnProxyWithLogging(options, proxyStartOptions)
+    : Promise.resolve(true);
+  const backendPromise = startBackendWithLogging(
+    options,
+    backendArgs.nodePath,
+    backendArgs.sdkPath,
+    backendArgs.backendPath,
+    backendArgs.cwd,
+    backendArgs.restoredStartupPath,
+  );
+  const [proxyReady, started] = await Promise.all([proxyPromise, backendPromise]);
+  if (started && !proxyReady) {
+    // Backend came up but the proxy failed — stop the backend so it isn't left
+    // running against a not-ready proxy (the serial flow never started it).
+    await options.backend.stop().catch(() => undefined);
+  }
+  return { proxyReady, started };
 }
 
 async function sendRuntimePrefsWithLogging(
@@ -443,6 +498,9 @@ async function sendRuntimePrefsWithLogging(
       bashWarmPoolSize: archState.settings.prefs.bashWarmPoolSize,
       bashFastPath: archState.settings.prefs.bashFastPath,
       bashShellPath: archState.settings.prefs.bashShellPath,
+      bashWarmupTimeoutMs: archState.settings.prefs.bashWarmupTimeoutMs,
+      bashAcquireTimeoutMs: archState.settings.prefs.bashAcquireTimeoutMs,
+      bashDefaultTimeout: archState.settings.prefs.bashDefaultTimeout,
       subagentBuckets: archState.settings.prefs.subagentBuckets,
       subagentNestedAllowedBuckets: archState.settings.prefs.subagentNestedAllowedBuckets,
       subagentDropTools: archState.settings.prefs.subagentDropTools,
@@ -498,6 +556,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   applyStoredPrefs(options);
   await loadPruningSettingsFromService(options);
+  await loadToolResultPruningSettingsFromService(options);
   await options.service.loadProxySettings();
 
   const {
@@ -537,18 +596,28 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
 
-  // Start the LiteLLM proxy before the backend so proxied providers
-  // are reachable on the first request. Fails loud — see startProxyWithLogging.
-  const proxyReady = await startProxyWithLogging(options);
-  if (!proxyReady) {
+  // Prepare the proxy env (master key + provider keys) BEFORE spawning the
+  // backend so the backend inherits it. The proxy PROCESS spawn + readiness
+  // (up to 60s on a first `uv run`) then runs CONCURRENTLY with the backend
+  // spawn — the proxy only needs to be ready before the first user LLM request,
+  // not before the backend spawns. Fails loud — see prepareProxyWithLogging.
+  const proxyPrep = await prepareProxyWithLogging(options);
+  if (!proxyPrep.ok) {
     options.scheduleRender();
     return;
   }
 
   options.events.attach(options.backend);
 
-  const started = await startBackendWithLogging(options, nodePath, sdkPath, backendPath, workspaceCwd, restoredStartupPath);
-  if (!started) {
+  // Overlap the proxy spawn/readiness with the backend spawn/readiness (both
+  // must succeed before publishBackendReady). Extracted so startup-parallelism
+  // tests can drive it with fakes — see session-startup-overlap.test.ts.
+  const { proxyReady, started } = await spawnProxyAndBackendConcurrently(
+    options,
+    proxyPrep.startOptions,
+    { nodePath, sdkPath, backendPath, cwd: workspaceCwd, restoredStartupPath },
+  );
+  if (!proxyReady || !started) {
     options.events.detach();
     options.scheduleRender();
     return;

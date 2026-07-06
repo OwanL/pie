@@ -13,10 +13,12 @@ import {
   validateSessionOpen,
   validateSessionPath,
   validateSettingsSet,
+  validateSystemPromptTogglesSet,
   validateTruncateAfter,
   validateExtensionUiResponse,
   validateOpenTabsSet,
 } from './rpc';
+import { collectWarmBashStats } from './warm-bash-stats';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { SessionContext, SessionContextCreationReason } from './server-types';
@@ -45,6 +47,21 @@ import { BackendError } from './server-io';
  */
 const PROMPT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — tunable
 
+/** Environment key for the interrupt-abort watchdog. */
+const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
+/** Default interrupt-abort watchdog window. If `session.abort()` invoked by
+ *  `message.interrupt` does not settle within this window, `activeRequest` is
+ *  force-cleared so the session is not permanently blocked from sending or
+ *  live-switching models (Bug 4). The healthy-abort path (settles promptly) is
+ *  untouched — this only bounds the never-settles window. */
+const DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS = 30 * 1000;
+function resolveInterruptAbortWatchdogMs(): number {
+  const raw = process.env[INTERRUPT_ABORT_WATCHDOG_ENV];
+  if (raw === undefined || raw === '') return DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS;
+}
+
 export interface BackendRequestHandlerDeps {
   sdkPath: string;
   agentDir: string;
@@ -62,6 +79,12 @@ export interface BackendRequestHandlerDeps {
     selectionToken?: string,
     transcript?: import('../shared/protocol').TranscriptMode,
   ): Promise<SessionOpenedPayload>;
+  /** Apply a complete disabled-entry set for a session: persist to the sidecar,
+   *  rewrite the SDK base prompt, and re-emit `session.opened`. */
+  applySystemPromptToggles(
+    sessionPath: string,
+    disabledEntries: readonly string[],
+  ): Promise<void>;
   loadTranscriptPage(
     sessionPath: string,
     direction: TranscriptPageDirection,
@@ -129,6 +152,15 @@ async function handleRuntimePrefsSet(
   }
   if (params.bashShellPath !== undefined) {
     process.env['PIE_SHELL'] = params.bashShellPath;
+  }
+  if (params.bashWarmupTimeoutMs !== undefined) {
+    process.env['PIE_BASH_WARMUP_TIMEOUT_MS'] = String(params.bashWarmupTimeoutMs);
+  }
+  if (params.bashAcquireTimeoutMs !== undefined) {
+    process.env['PIE_BASH_ACQUIRE_TIMEOUT_MS'] = String(params.bashAcquireTimeoutMs);
+  }
+  if (params.bashDefaultTimeout !== undefined) {
+    process.env['PIE_BASH_DEFAULT_TIMEOUT'] = String(params.bashDefaultTimeout);
   }
   if (params.subagentBuckets !== undefined) {
     process.env[SUBAGENT_BUCKETS_ENV] = JSON.stringify(params.subagentBuckets);
@@ -238,6 +270,17 @@ async function handleSessionTruncateAfter(
     throw new BackendError('STREAMING_BUSY', 'Cannot truncate a session that is currently streaming.');
   }
 
+  // Capture the user's chosen model + thinking level BEFORE truncating. The
+  // SDK stores model choices as `model_change` entries appended at the session
+  // leaf; truncating at an older entry drops every `model_change` that
+  // followed, so the reopened session would silently revert to the previous
+  // model (and the edit turn would then run on that model — an expensive
+  // surprise after a `setModel` the user explicitly made). We re-apply the
+  // captured choice to the fresh context below so the model survives a
+  // transcript truncation. See STATE_CONTRACT § Optimistic Reconciliation.
+  const previousModelId = existingCtx?.session.model?.id;
+  const previousThinkingLevel = existingCtx?.session.thinkingLevel;
+
   const raw = await fs.readFile(params.sessionPath, 'utf8');
   const keepLines: string[] = [];
   for (const line of raw.split('\n')) {
@@ -275,11 +318,67 @@ async function handleSessionTruncateAfter(
     'resume',
   );
   deps.setViewedSessionPath(context.sessionPath);
+
+  // Re-apply the user's model choice if the truncate dropped its
+  // `model_change` entry (the fresh context opened with a different model).
+  // Best-effort: a failure is logged but does NOT abort the truncate — the
+  // worst case is the pre-switch model, which is the status quo without this
+  // fix. `setModel` appends a fresh `model_change` (and `setThinkingLevel` a
+  // `thinking_level_change`) so the choice is durable across future
+  // truncates/reopens, not just this one.
+  await reapplyModelAfterTruncate(context, previousModelId, previousThinkingLevel);
+
   const truncatePayload = await deps.buildSessionOpenedPayload(context.sessionPath);
   deps.emit('session.opened', truncatePayload);
   deps.emitBusyChanged(context, false);
   void deps.emitSessionListChanged();
   return truncatePayload;
+}
+
+/** Re-apply a model + thinking level captured before a truncate to the freshly
+ *  reopened context, so truncating a transcript does not silently revert the
+ *  user's model choice (the `model_change` entry is physically dropped when it
+ *  sat after the edited message). No-op when the new context already matches,
+ *  when there was nothing to restore, or when the session/runtime can't accept
+ *  the switch. Best-effort: logs on failure and continues. */
+async function reapplyModelAfterTruncate(
+  context: SessionContext,
+  previousModelId: string | undefined,
+  previousThinkingLevel: string | undefined,
+): Promise<void> {
+  if (!previousModelId && !previousThinkingLevel) {
+    return;
+  }
+  const modelChanged = !!previousModelId && context.session.model?.id !== previousModelId;
+  const thinkingChanged = !!previousThinkingLevel && context.session.thinkingLevel !== previousThinkingLevel;
+  if (!modelChanged && !thinkingChanged) {
+    return;
+  }
+  try {
+    if (modelChanged && previousModelId && typeof context.session.setModel === 'function') {
+      const available = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
+      const info = available.find((model) => model.id === previousModelId);
+      if (!info) {
+        throw new Error(`Model no longer available in this session: ${previousModelId}`);
+      }
+      const resolvedModel = context.runtime.services.modelRegistry.find(info.provider, info.id);
+      if (!resolvedModel) {
+        throw new Error(`Could not resolve model in registry: ${previousModelId}`);
+      }
+      await context.session.setModel(resolvedModel);
+    }
+    // `setModel` re-clamps the thinking level to the new model's capabilities,
+    // so restore the user's level AFTER the model switch (not before).
+    if (thinkingChanged && previousThinkingLevel && typeof context.session.setThinkingLevel === 'function') {
+      context.session.setThinkingLevel(previousThinkingLevel);
+    }
+  } catch (error) {
+    // The truncate itself succeeded; only the model re-application failed.
+    // Surface a host-side log so this silent revert is debuggable, but do not
+    // throw — the alternative (aborting a truncate that already rewrote the
+    // session file) would corrupt the session.
+    console.warn(`[pie:backend] reapplyModelAfterTruncate failed for ${context.sessionPath}: ${toErrorMessage(error)}`);
+  }
 }
 
 function clearActiveRequest(
@@ -344,8 +443,25 @@ async function handleMessageSend(
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
   const context = await deps.ensureSessionContext(params.sessionPath);
+  // Steering (FollowUp): if a turn is already running, queue this message to
+  // run as a fresh turn after the current one completes via the SDK's
+  // `AgentSession.followUp()`. The agent loop polls the followUp queue between
+  // turns and runs each queued message as its own turn (default
+  // "one-at-a-time" drain). No `activeRequest` is created here (this call
+  // starts no turn) and no pre-commit safety-net timer is armed (followUp has
+  // no pruning prepass). We `await followUp()` so a queuing failure (e.g. the
+  // text is an extension command, or a skill/template expansion error) rejects
+  // the RPC — the host then reverts its optimistic 'queued' message via the
+  // pre-ack `SendResult{ok:false}` path, exactly like a normal send pre-ack
+  // failure. The SDK emits `message_start` (role 'user') when the loop injects
+  // the queued message; the backend forwards that as `message.queuedDelivered`
+  // so the host promotes the message from 'queued' to 'completed'.
   if (context.activeRequest || context.session.isStreaming) {
-    throw new BackendError('REQUEST_IN_PROGRESS', 'A request is already in progress for this session.');
+    const queuedImages = lowerImageInputs(params.inputs);
+    const queuedImagePayload = queuedImages.length > 0 ? queuedImages : undefined;
+    const queuedPromptText = buildPromptText(params.text, params.inputs);
+    await context.session.followUp(queuedPromptText, queuedImagePayload);
+    return { queued: true };
   }
 
   const requestId = crypto.randomUUID();
@@ -482,6 +598,34 @@ async function handleMessageInterrupt(
   }
   const abortRequestId = context.activeRequest?.id;
   context.uiBridge?.cancelAll();
+  // Clear any queued follow-up messages so a Stop cancels pending queued
+  // messages too. The SDK `abort()` preserves the followUp queue; without this
+  // a queued message would be drained by the next `prompt()` and run as part
+  // of an unrelated future send. The host also removes 'queued' transcript
+  // messages on `InterruptResult{ok:true}` to stay in sync.
+  context.session.clearQueue();
+  // Bug 4 watchdog: `session.abort()` is un-awaited and un-bounded today. If it
+  // NEVER settles (a hung provider connection teardown), the `.finally` below
+  // never runs → `activeRequest` stays set forever → the session is permanently
+  // blocked from sending or live-switching models. Race the abort against a
+  // watchdog window; if it wins, force-clear `activeRequest` + emit an
+  // `operational-error` notice so the user can recover without reloading the
+  // window. The healthy-abort path (settles within the window) is unchanged.
+  const watchdogMs = resolveInterruptAbortWatchdogMs();
+  let watchdogFired = false;
+  const watchdogTimer = setTimeout(() => {
+    watchdogFired = true;
+    if (context.activeRequest?.id === abortRequestId) {
+      context.activeRequest = undefined;
+      deps.emitBusyChanged(context, false);
+    }
+    deps.emit('operational-error', {
+      code: 'INTERRUPT_ABORT_STUCK',
+      message: `message.interrupt: session.abort() did not settle within ${watchdogMs}ms — activeRequest force-cleared. The provider connection teardown may be stuck; reload the window if the session stays wedged.`,
+      requestId: abortRequestId,
+      sessionPath: params.sessionPath,
+    });
+  }, watchdogMs);
   void context.session.abort()
     .catch((error: unknown) => {
       deps.emit('error', {
@@ -491,6 +635,8 @@ async function handleMessageInterrupt(
       } satisfies ErrorPayload);
     })
     .finally(() => {
+      clearTimeout(watchdogTimer);
+      if (watchdogFired) return; // the watchdog already cleared; don't clobber.
       // Defensive clear: the SDK normally fires `turn_end` after abort, which
       // clears `activeRequest` via the session-event handler. But if the SDK
       // never fires `turn_end` (e.g. a hung provider connection that abort
@@ -513,6 +659,22 @@ async function handleMessageInterrupt(
  *  `process.env.PIE_OPEN_TABS` (JSON) so the `session_review` tool (running in
  *  this backend process) can list currently-open sessions without host state
  *  access. Fire-and-forget from the host's tab-persistence site. */
+async function handleMessageClearQueue(
+  _deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionPath('message.clearQueue', request.params);
+  const context = _deps.getSessionContext(params.sessionPath);
+  if (!context) {
+    throw new BackendError('SESSION_NOT_FOUND', `Cannot clear queue for an unopened session: ${params.sessionPath}`);
+  }
+  // Clear all queued steering + follow-up messages. The host removes its
+  // optimistic 'queued' transcript messages on the result; this is the
+  // authoritative backend clear so the SDK will not drain them later.
+  const cleared = context.session.clearQueue();
+  return { cleared };
+}
+
 async function handleOpenTabsSet(
   _deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -520,6 +682,21 @@ async function handleOpenTabsSet(
   const params = validateOpenTabsSet(request.params);
   process.env['PIE_OPEN_TABS'] = JSON.stringify(params.tabs);
   return { ok: true, count: params.tabs.length };
+}
+
+/** `systemPromptToggles.set` — apply the complete disabled-entry set for a
+ *  session: persist to the sidecar, rewrite the SDK base prompt, and re-emit
+ *  `session.opened` so the webview's display entries + toggle menu reflect the
+ *  new state. Returns `{ ok: true }`. */
+async function handleSystemPromptTogglesSet(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSystemPromptTogglesSet(request.params);
+  await deps.applySystemPromptToggles(params.sessionPath, params.disabledEntries);
+  const payload = await deps.buildSessionOpenedPayload(params.sessionPath);
+  deps.emit('session.opened', payload);
+  return { ok: true };
 }
 
 async function handleExtensionUiResponse(
@@ -626,6 +803,16 @@ async function handleSettingsSet(
   }
 }
 
+async function handleWarmBashStats(
+  _deps: BackendRequestHandlerDeps,
+  _request: RequestEnvelope,
+): Promise<unknown> {
+  // In-memory read of the warm-bash extension's globalThis registry. The
+  // warm-bash extension registers per-session stats providers in the same
+  // backend process; this aggregates them for the host status strip.
+  return collectWarmBashStats();
+}
+
 const handlers: Record<string, RequestHandler> = {
   'app.ping': handleAppPing,
   'runtimePrefs.set': handleRuntimePrefsSet,
@@ -638,11 +825,14 @@ const handlers: Record<string, RequestHandler> = {
   'session.truncateAfter': handleSessionTruncateAfter,
   'message.send': handleMessageSend,
   'message.interrupt': handleMessageInterrupt,
+  'message.clearQueue': handleMessageClearQueue,
   'extension_ui.response': handleExtensionUiResponse,
   'openTabs.set': handleOpenTabsSet,
   'models.list': handleModelsList,
   'settings.get': handleSettingsGet,
   'settings.set': handleSettingsSet,
+  'systemPromptToggles.set': handleSystemPromptTogglesSet,
+  'warm_bash.stats': handleWarmBashStats,
 };
 
 export async function handleBackendRequest(

@@ -46,6 +46,18 @@ export interface ProxyReadyPayload {
   pid: number;
 }
 
+/** Bug 5 structured-notice payload: fired by {@link ProxyService.stop} when a
+ *  tracked proxy child is about to be killed (the first half of a config
+ *  restart). An in-flight proxied stream routed through the dying proxy will
+ *  get an opaque ECONNRESET/socket-hang-up; without this notice the user
+ *  cannot tell "proxy restarted under me" vs "provider cut" vs "proxy
+ *  throttled". The caller (session-service) wires this to a `NoticeShown`. */
+export interface ProxyInFlightInterruptedPayload {
+  code: 'PROXY_RESTART_IN_FLIGHT';
+  message: string;
+  pid: number;
+}
+
 /** Resolve the `uv` binary, probing common install + PATH locations. */
 function resolveUv(): string {
   // Delegate to the same logic the scripts/proxy.mjs control script uses.
@@ -71,7 +83,17 @@ export class ProxyService implements vscode.Disposable {
   private stderrBuffer = '';
   private readonly stderrLimit = 32 * 1024;
 
-  /** Spawn uv run litellm and resolve once `/health/liveness` returns 200. */
+  /** Bug 5 observability hook: invoked synchronously from {@link stop} BEFORE
+   *  the kill, when a tracked child is about to be torn down. The caller
+   *  (session-service) dispatches a `NoticeShown` so an in-flight proxied
+   *  stream that is about to die with an opaque ECONNRESET is attributable to
+   *  "proxy restarted" instead of looking like a provider cut. Intentionally
+   *  NOT a drain: pie does not track per-session routing through the proxy,
+   *  so a real drain is out of scope for the minimal-diff hardening — the
+   *  notice is the loud, structured fix. */
+  onInFlightInterrupted?: (payload: ProxyInFlightInterruptedPayload) => void;
+
+  /** Spawn the pie proxy wrapper (LiteLLM + metrics route) and resolve once `/health/liveness` returns 200. */
   async start(options: ProxyStartOptions): Promise<ProxyReadyPayload> {
     if (this.proc) {
       throw new Error('Proxy is already running');
@@ -113,7 +135,7 @@ export class ProxyService implements vscode.Disposable {
 
     const proc = cp.spawn(
       resolveUv(),
-      ['run', 'litellm', '--config', configPath, '--port', String(port), '--host', host],
+      ['run', 'python', 'pie_proxy.py', '--config', configPath, '--port', String(port), '--host', host],
       {
         cwd: proxyDir,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -169,7 +191,7 @@ export class ProxyService implements vscode.Disposable {
         settle(() =>
           reject(
             new Error(
-              `Failed to spawn LiteLLM proxy via 'uv run litellm' in ${proxyDir}. ` +
+              `Failed to spawn LiteLLM proxy via 'uv run python pie_proxy.py' in ${proxyDir}. ` +
                 `Ensure 'uv' is installed and on PATH (see pie/proxy/README.md prerequisites). ${err.message}`,
             ),
           ),
@@ -321,6 +343,24 @@ export class ProxyService implements vscode.Disposable {
     if (!proc) return;
     this.proc = undefined;
     const pid = proc.pid;
+
+    // Bug 5 observability: notify BEFORE the kill so an in-flight proxied
+    // stream that is about to die with an opaque ECONNRESET is attributable to
+    // "proxy restarted" instead of looking like a provider cut. We do NOT
+    // drain (pie does not track per-session routing through the proxy); the
+    // notice is the loud, structured fix and the kill is unchanged.
+    if (typeof pid === 'number' && this.onInFlightInterrupted) {
+      try {
+        this.onInFlightInterrupted({
+          code: 'PROXY_RESTART_IN_FLIGHT',
+          message: 'The pie proxy is restarting (config changed). An in-flight proxied turn may have been interrupted.',
+          pid,
+        });
+      } catch {
+        /* a buggy listener must not block the kill */
+      }
+    }
+
     try {
       if (typeof pid === 'number') {
         if (process.platform === 'win32') {

@@ -2,8 +2,10 @@
 /* Thin status strip anchored at the bottom of the panel (below the composer).
    Focused on recent (today / this-week) + current (live / open) activity.
    Per-provider breakdowns and all-time context live in each segment's scoped
-   `title` tooltip rather than dedicated inline chips, so the strip itself stays
-   a single thin line. Host-owned: a pure projection of ViewState.aggregateStats
+   custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
+   chips, so the strip itself stays a single thin line. Custom tooltips are used
+   instead of native `title` because the strip re-renders ~7×/sec during
+   streaming — native `title` tooltips close on every re-render and flicker. Host-owned: a pure projection of ViewState.aggregateStats
    (STATE_CONTRACT § Webview-Local State). */
 
 .aggregate-strip {
@@ -88,8 +90,15 @@
 
 .aggregate-strip-counts {
   color: var(--panel-muted);
-  margin-left: auto;
   padding-left: 6px;
+}
+
+/* Right-align the session-counts segment. It is wrapped in a custom tooltip
+   trigger (`pie-tooltip-trigger`, see aggregate-stats-strip/index.tsx), so the
+   auto margin must live on the trigger — the flex item — not the inner span,
+   otherwise the segment no longer pins to the right edge of the strip. */
+.aggregate-strip-counts-trigger {
+  margin-left: auto;
 }
 
 .aggregate-strip-active {
@@ -113,6 +122,92 @@
 @keyframes aggregate-strip-pulse {
   0%, 100% { opacity: 0.45; }
   50% { opacity: 1; }
+}
+
+.aggregate-strip-warm {
+  color: var(--panel-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.aggregate-strip-warm-label {
+  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
+}
+
+.aggregate-strip-warm-counts {
+  color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted));
+  font-variant-numeric: tabular-nums;
+}
+
+.aggregate-strip-warm-warming {
+  color: var(--panel-accent);
+  font-weight: 600;
+}
+
+/* Waiting deferred-trigger segment. A button (not a span) so it can open the
+   cancel popup; inherits the strip's help-cursor feel via pointer. */
+.aggregate-strip-deferred {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--panel-accent);
+  font: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--panel-radius-sm);
+  transition: background var(--panel-transition-fast), color var(--panel-transition-fast);
+}
+
+.aggregate-strip-deferred:hover {
+  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+}
+
+.aggregate-strip-deferred-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.aggregate-strip-deferred-count {
+  font-size: inherit;
+}
+
+.aggregate-strip-proxy {
+  color: var(--panel-warning);
+  font-variant-numeric: tabular-nums;
+}
+
+.aggregate-strip-proxy-label {
+  color: color-mix(in srgb, var(--panel-warning) 82%, var(--panel-muted));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+}
+
+.aggregate-strip-proxy-value {
+  color: color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-warning));
+  font-weight: 600;
+}
+
+/* Idle (no active/queued requests on any provider): drop the warning tone so
+   the always-present status reads as "no load" rather than an alert. Keeps the
+   segment from flickering in/out between turns while signaling nothing is
+   running. */
+.aggregate-strip-proxy--idle {
+  color: var(--panel-muted);
+}
+
+.aggregate-strip-proxy--idle .aggregate-strip-proxy-label {
+  color: color-mix(in srgb, var(--panel-muted) 85%, var(--panel-foreground));
+}
+
+.aggregate-strip-proxy--idle .aggregate-strip-proxy-value {
+  color: var(--panel-muted);
+  font-weight: 500;
 }
 
 .aggregate-strip-sep {

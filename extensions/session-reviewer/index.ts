@@ -5,6 +5,20 @@ import type { SessionReviewParams } from './src/types.js';
 import { appendReview, readOpenTabs, readReviews } from './src/store.js';
 import { parseSessionTranscript, renderTranscript } from './src/transcript.js';
 
+/** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
+ *  extension id). Mirrors skill-pruner's isExtensionDisabledByToggle so the
+ *  Settings → Extensions checkbox actually disables this tool at runtime. */
+function isDisabledByToggle(): boolean {
+  const raw = process.env['PIE_EXTENSION_TOGGLES_JSON'];
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parsed['session-reviewer'] === false;
+  } catch {
+    return false;
+  }
+}
+
 function ok(text: string, details?: unknown) {
   return {
     content: [{ type: 'text' as const, text }],
@@ -23,7 +37,7 @@ function err(message: string) {
 
 /** Render the open-sessions list with review status as a compact table. */
 function renderOpenList(
-  tabs: { path: string; name: string; messageCount?: number; modifiedAt?: string; done?: boolean; rating?: number; completion?: string; reviewReason?: string }[],
+  tabs: { path: string; name: string; messageCount?: number; modifiedAt?: string; done?: boolean; rating?: number; completion?: string; reviewReason?: string; pinned?: boolean }[],
 ): string {
   if (tabs.length === 0) {
     return 'No open sessions are currently pushed from the host (PIE_OPEN_TABS empty/unset). Open sessions as tabs in the app first.';
@@ -35,10 +49,12 @@ function renderOpenList(
     const reason = t.reviewReason ? truncate(t.reviewReason, 50) : '';
     const name = truncate(t.name || '(unnamed)', 30);
     const msgs = typeof t.messageCount === 'number' ? String(t.messageCount) : '?';
-    return `${done} ${rating} ${completion.padEnd(7)} msgs=${msgs.padStart(3)}  ${name}${reason ? `  — ${reason}` : ''}`;
+    const pin = t.pinned ? '📌 ' : '';
+    return `${done} ${rating} ${completion.padEnd(7)} msgs=${msgs.padStart(3)}  ${pin}${name}${reason ? `  — ${reason}` : ''}`;
   });
-  const header = `Open sessions (${tabs.length}):\n  done rating compl  msgs   name`;
-  return [header, ...rows.map((r) => `  ${r}`), '', 'Paths (use as sessionPath):', ...tabs.map((t) => `  ${t.path}`)].join('\n');
+  const header = `Open sessions (${tabs.length}):
+  done rating compl  msgs   name`;
+  return [header, ...rows.map((r) => `  ${r}`), '', 'Paths (use as sessionPath):', ...tabs.map((t) => `  ${t.path}${t.pinned ? '  (pinned)' : ''}`)].join('\n');
 }
 
 function truncate(s: string, n: number): string {
@@ -60,12 +76,16 @@ export default function (pi: ExtensionAPI) {
       'Before finalizing a session\'s review, use the ask_user tool to check with the user — present your evaluation (completion + proposed rating + reason) and confirm their take. Adjust based on their reply.',
       'completion: fully = task completed; partial = work done but unresolved; setback = left things worse (regression/failed approach worth revisiting).',
       "Only mark a session done when its task is genuinely complete or conclusively stopped — never mark an in-progress/uncertain session done. Recording done=true closes the session's tab (the same close path a user takes, pinned tabs included) to clean up the tab once the host refreshes; a partial/setback review keeps the tab open.",
+      'Pinned tabs (marked 📌 / (pinned) in listOpen) are intentionally kept by the user — leave them alone and do not review or close them unless the user explicitly asks.',
       'Report a final summary table (session → done/rating/completion) after reviewing all sessions.',
       'When using multi-reviewer evaluation, pass `reviewerBuckets` (e.g. ["medium","small"]) and `reviewerCount` on setReview so analytics can distinguish multi-reviewer agent reviews from single-shot ones.',
     ],
     parameters: sessionReviewSchema,
 
     async execute(_toolCallId: string, params: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, _ctx: unknown) {
+      if (isDisabledByToggle()) {
+        return err('The session-reviewer extension is disabled. Enable it in Settings → Extensions to list/read/review sessions.');
+      }
       const p = params as SessionReviewParams;
 
       if (p.action === 'listOpen') {

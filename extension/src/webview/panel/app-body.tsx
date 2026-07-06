@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 import type {
   ViewState,
   WebviewToHostMessage,
@@ -11,6 +11,7 @@ import { RunOutcomeDialog } from './run-outcome-dialog';
 import { NoticeBanner } from './components/notice-banner';
 import { SessionTabs } from './ui';
 import { AggregateStatsStrip } from './ui';
+import { DeferredTriggersMenu } from './aggregate-stats-strip/deferred-triggers-menu';
 import { NoticeContext } from './hooks/notice-context';
 import { AskUserContext } from './hooks/ask-user-context';
 import { useHostSync } from './hooks/use-host-sync';
@@ -45,6 +46,12 @@ export function AppBody({ adapter }: AppBodyProps) {
   // local protocol-sync bookkeeping (in-flight UI gating).
   const [interrupting, setInterrupting] = useState(false);
 
+  // Deferred-triggers cancel popup: webview-local ephemeral UI (the moral
+  // equivalent of `contextMenu` — STATE_CONTRACT § Webview-Local State). Open
+  // position is captured from the strip segment click; dismissed on
+  // click-outside / Escape (handled inside the menu). `null` = closed.
+  const [deferredMenu, setDeferredMenu] = useState<{ x: number; y: number } | null>(null);
+
   // Brief H: bridge from the AppBody-level NoticeBanner's Retry button to the
   //  composer-level live draft. The composer registers its `sendAsRetry` here;
   //  `handleNoticeAction` invokes it on a Retry click. A ref (not state) so a
@@ -75,6 +82,15 @@ export function AppBody({ adapter }: AppBodyProps) {
   useEffect(() => {
     setInterrupting(false);
   }, [derived.activeSessionPath]);
+  // Clear the deferred-triggers popup when no triggers remain. The menu's own
+  // `onClose` (click-outside/Escape/resize) sets state to null, but the render
+  // guard `deferredTriggers.length > 0` can unmount it without calling onClose
+  // (e.g. the last trigger is cancelled via ×, or all triggers fire) — without
+  // this, a stale `{x,y}` would linger and re-open the menu at the old position
+  // when a new trigger is later registered, without a click.
+  useEffect(() => {
+    if (viewState.deferredTriggers.length === 0) setDeferredMenu(null);
+  }, [viewState.deferredTriggers.length]);
   // While an interrupt is in-flight, suppress the transcript's busy-driven
   // typing indicator within one frame (the host clears `busy` only after the
   // abort completes). The transcript components are unchanged — only the
@@ -86,6 +102,13 @@ export function AppBody({ adapter }: AppBodyProps) {
   useSessionRecovery(viewState.backendReady, derived.needsSessionRecovery, derived.recoverySessionPath, viewState.notice, postMessage);
 
   useChatPrefsCss(viewState.prefs);
+
+  // Session lookup for the deferred-triggers menu (resolves watcher session
+  // paths to display names). Memoized on the sessions array ref.
+  const sessionByPath = useMemo(
+    () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
+    [viewState.sessions],
+  );
 
   return (
     <NoticeContext.Provider value={derived.noticeValue}>
@@ -129,6 +152,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           hideConnectingWheel={derived.transcriptHydrating || derived.needsSessionRecovery}
           pendingExtensionUIRequestsBySession={viewState.pendingExtensionUIRequestsBySession}
           runSummariesBySession={viewState.runSummariesBySession}
+          proxyStatusBySession={viewState.proxyStatusBySession}
           onSelect={handlers.handleSelectTab}
           onClose={handlers.handleCloseTab}
           onMove={handlers.handleMoveTab}
@@ -137,6 +161,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           onDuplicate={handlers.handleDuplicateTab}
           onTogglePin={handlers.handleTogglePinTab}
           onRunAction={handlers.handleTabRunAction}
+          deferredSessionPaths={derived.deferredSessionPaths}
         />
       )}
 
@@ -161,6 +186,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningSettings={viewState.pruningSettings}
         systemPrompts={viewState.systemPrompts}
         pruningResult={viewState.pruningResult}
+        proxySessionStatus={derived.activeSessionPath ? (viewState.proxyStatusBySession?.[derived.activeSessionPath] ?? null) : null}
         pendingAssistantModelId={derived.pendingAssistantModelId}
         pendingAssistantThinkingLevel={derived.pendingAssistantThinkingLevel}
         editingMessageId={viewState.editingMessageId}
@@ -177,6 +203,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         isAskUserHandledInline={derived.isAskUserHandledInline}
         postMessage={postMessage}
         busy={viewState.busy}
+        retryStatus={viewState.retryStatus}
         interrupting={interrupting}
         activeSession={viewState.activeSession}
         modelSettings={viewState.modelSettings}
@@ -187,6 +214,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningSettings={viewState.pruningSettings}
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}
+        toolResultPruningSettings={viewState.toolResultPruningSettings}
         proxySettings={viewState.proxySettings}
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
@@ -197,11 +225,27 @@ export function AppBody({ adapter }: AppBodyProps) {
         pendingComposerInputs={viewState.pendingComposerInputs}
         activeRunSummary={viewState.activeRunSummary}
         tokenRateBySession={viewState.tokenRateBySession}
+        activeSessionHasDeferredTriggers={derived.activeSessionHasDeferredTriggers}
         handlers={handlers}
       />
 
-      {derived.showSessionChrome && (
-        <AggregateStatsStrip stats={viewState.aggregateStats} />
+      {derived.showSessionChrome && !viewState.prefs.hideStatusStrip && (
+        <AggregateStatsStrip
+          stats={viewState.aggregateStats}
+          proxyMetrics={viewState.proxyMetrics}
+          deferredTriggers={viewState.deferredTriggers}
+          onOpenDeferredMenu={(x, y) => setDeferredMenu({ x, y })}
+        />
+      )}
+      {deferredMenu && viewState.deferredTriggers.length > 0 && (
+        <DeferredTriggersMenu
+          triggers={viewState.deferredTriggers}
+          sessionByPath={sessionByPath}
+          x={deferredMenu.x}
+          y={deferredMenu.y}
+          onCancel={handlers.handleCancelDeferredTrigger}
+          onClose={() => setDeferredMenu(null)}
+        />
       )}
     </div>
     </AskUserContext.Provider>

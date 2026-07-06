@@ -238,9 +238,18 @@ export function useComposerInput({
   const sendCurrentText = useCallback(() => {
     const trimmed = text.trim();
     if (submitting.current) return;
-    if ((trimmed.length === 0 && pendingComposerInputsLength === 0) || busy) return;
+    if (trimmed.length === 0 && pendingComposerInputsLength === 0) return;
     submitting.current = true;
     onSend(trimmed);
+    // Steering (FollowUp): when sending while already busy (a queued
+    // follow-up), `busy` is already true so the [busy] effect that normally
+    // clears the submit latch won't fire — clear it now so the user can queue
+    // another message. The text is cleared by `resetComposer` below, so the
+    // trimmed-length guard + disabled Send button prevent an accidental
+    // immediate re-send from the same closure.
+    if (busy) {
+      submitting.current = false;
+    }
     // Make the send undoable: sync present to the sent text (no history entry),
     // then checkpoint the clear so Ctrl+Z restores what was just sent.
     clearCheckpointTimer();

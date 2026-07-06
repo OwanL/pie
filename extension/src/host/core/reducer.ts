@@ -33,8 +33,8 @@ export { initialArchState };
 
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
-import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed } from './reducer/result-handlers.js';
-import { handleStreamingEvent } from './reducer/streaming-handlers.js';
+import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult } from './reducer/result-handlers.js';
+import { handleStreamingEvent, handleQueuedDelivered } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
   handleSessionListChanged,
@@ -45,6 +45,8 @@ import {
   handleContextUsageChanged,
   handleSessionMetadataChanged,
   handleRunningSessionsChanged,
+  handleRetryStarted,
+  handleRetryEnded,
   handleUnreadFinishedSessionsChanged,
   handleSessionSummaryUpserted,
   handleSessionSummariesReplaced,
@@ -56,17 +58,29 @@ import {
   handleSessionsInterrupted,
 } from './reducer/session-handlers.js';
 import {
+  handleBackendReadyChanged,
+  handleBackendReadyWatchdogFired,
+  handlePruningSettingsChanged,
+  handleToolResultPruningSettingsChanged,
+  handleProxySettingsChanged,
+  handleWorkspaceCwdChanged,
+  handleTranscriptPageLoaded,
+  handleTranscriptTrimmed,
+  handleAvailableExtensionsChanged,
+  handleAssistantMessageErrorStamped,
+} from './reducer/host-handlers.js';
+import {
+  handleOptimisticMessageInserted,
+  handleOptimisticMessageRemoved,
+  handleFileChangeRemoved,
+} from './reducer/optimistic-handlers.js';
+import {
   handleCustomMessage,
   handleExtensionUIRequest,
   handleError,
   handleNoticeShown,
   handlePendingExtensionUIRequestsCleared,
 } from './reducer/ui-handlers.js';
-import {
-  handleOptimisticMessageInserted,
-  handleOptimisticMessageRemoved,
-  handleFileChangeRemoved,
-} from './reducer/optimistic-handlers.js';
 import {
   handleTruncateResult,
   handleCreateSessionResult,
@@ -75,17 +89,6 @@ import {
   handleCloseSessionResult,
   handlePersistTabsResult,
 } from './reducer/misc-handlers.js';
-import {
-  handleBackendReadyChanged,
-  handleBackendReadyWatchdogFired,
-  handlePruningSettingsChanged,
-  handleProxySettingsChanged,
-  handleWorkspaceCwdChanged,
-  handleTranscriptPageLoaded,
-  handleTranscriptTrimmed,
-  handleAvailableExtensionsChanged,
-  handleAssistantMessageErrorStamped,
-} from './reducer/host-handlers.js';
 import { handleAvailableModelsChanged, handleModelSettingsHydrated } from './reducer/set-model-handlers.js';
 import { handleFileChangesUpdated } from './reducer/file-handlers.js';
 import {
@@ -120,9 +123,15 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
+    case 'SetToolResultPruningSettingsResult':
     case 'SetProxySettingsResult':
+    case 'AddProxyProviderResult':
     case 'ExtensionUiResponseResult': {
       return handleEffectResult(state, event);
+    }
+
+    case 'ClearQueueResult': {
+      return handleClearQueueResult(state, event);
     }
 
     // ─── Backend streaming events ─────────────────────────────────────────
@@ -134,6 +143,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'ToolCall':
     case 'MessageFinished': {
       return handleStreamingEvent(state, event);
+    }
+
+    case 'QueuedDelivered': {
+      return handleQueuedDelivered(state, event);
     }
 
     // ─── Session lifecycle events ─────────────────────────────────────────
@@ -178,6 +191,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'PruningSettingsChanged': {
       return handlePruningSettingsChanged(state, event);
+    }
+
+    case 'ToolResultPruningSettingsChanged': {
+      return handleToolResultPruningSettingsChanged(state, event);
     }
 
     case 'ProxySettingsChanged': {
@@ -244,6 +261,14 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleRunningSessionsChanged(state, event);
     }
 
+    case 'RetryStarted': {
+      return handleRetryStarted(state, event);
+    }
+
+    case 'RetryEnded': {
+      return handleRetryEnded(state, event);
+    }
+
     case 'SessionsInterrupted': {
       return handleSessionsInterrupted(state, event);
     }
@@ -276,10 +301,18 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handlePreflightFailed(state, event);
     }
 
+    case 'PreflightSuperseded': {
+      return handlePreflightSuperseded(state, event);
+    }
+
     // ─── UI events ─────────────────────────────────────────────────────────
 
     case 'CustomMessage': {
       return handleCustomMessage(state, event);
+    }
+
+    case 'QueuedDelivered': {
+      return handleQueuedDelivered(state, event);
     }
 
     case 'ExtensionUIRequest': {

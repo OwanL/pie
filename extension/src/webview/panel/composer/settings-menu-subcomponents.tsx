@@ -5,7 +5,7 @@
  * depend on. The menu is tabbed — appearance and subagent settings render inline
  * inside their tabs rather than as side flyouts.
  */
-export type { OnSetPrefs, OnSetPruningSettings, OnSetProxySettings } from './settings-menu-types';
+export type { OnSetPrefs, OnSetPruningSettings, OnSetProxySettings, OnAddProxyProvider } from './settings-menu-types';
 export { ChatPrefSections } from './settings-menu-chat-prefs';
 export { SoundSection } from './settings-menu-sound';
 export { BashSection } from './settings-menu-bash';

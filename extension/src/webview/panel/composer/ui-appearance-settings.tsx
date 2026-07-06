@@ -336,13 +336,13 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
           type="range"
           class="toolbar-settings-slider toolbar-settings-ui-slider"
           min="8"
-          max="28"
+          max="40"
           step="1"
           value={prefs.uiMessageRailSize}
           onInput={(e) => onSetPrefs({ uiMessageRailSize: Number((e.target as HTMLInputElement).value) })}
           aria-label="Message rail marker size"
         />
-        <div class="toolbar-settings-item-hint">Click target of the user-message jump buttons beside the scrollbar. Larger is easier to click.</div>
+        <div class="toolbar-settings-item-hint">Size of the user-message jump buttons beside the scrollbar — both the click target and the visible dot. Larger is easier to click and see.</div>
       </div>
 
       <UiGroupLabel label="Typography" />

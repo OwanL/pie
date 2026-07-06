@@ -73,6 +73,7 @@ const toolCallCardModule: typeof import('../src/webview/panel/transcript/tool-ca
 const toolCallItemModule: typeof import('../src/webview/panel/transcript/tool-call-item.tsx') = require('../src/webview/panel/transcript/tool-call-item.tsx');
 const virtualRowModule: typeof import('../src/webview/panel/transcript/virtual-list-row.tsx') = require('../src/webview/panel/transcript/virtual-list-row.tsx');
 const systemPromptsModule: typeof import('../src/webview/panel/system-prompts.tsx') = require('../src/webview/panel/system-prompts.tsx');
+const systemPromptToggleMenuModule: typeof import('../src/webview/panel/composer/system-prompt-toggle-menu.tsx') = require('../src/webview/panel/composer/system-prompt-toggle-menu.tsx');
 
 const webviewModules = {
   MessageItem: messageItemModule.MessageItem,
@@ -81,6 +82,7 @@ const webviewModules = {
   ToolCallItem: toolCallItemModule.ToolCallItem,
   TranscriptVirtualRow: virtualRowModule.TranscriptVirtualRow,
   SystemPromptMessage: systemPromptsModule.SystemPromptMessage,
+  SystemPromptToggleMenu: systemPromptToggleMenuModule.SystemPromptToggleMenu,
 };
 
 function loadWebviewModules() {
@@ -782,6 +784,44 @@ test('rendered SystemPromptMessage covers summary fallbacks, suppressed summarie
 
   assert.match(zeroTokenHtml, /1 system prompt/);
   assert.doesNotMatch(zeroTokenHtml, /~\d+ tokens/);
+});
+
+test('SystemPromptToggleMenu hides display-only entries like the provider card', async () => {
+  const { SystemPromptToggleMenu } = await loadWebviewModules();
+  const providerEntry: SystemPromptEntry = {
+    source: 'provider',
+    id: 'provider',
+    availability: 'unknown',
+    title: 'Provider system prompt',
+    text: 'Not directly exposed.',
+    summary: 'umans',
+    toggleable: false,
+  };
+  const harnessEntry: SystemPromptEntry = {
+    source: 'harness',
+    id: 'harness',
+    availability: 'available',
+    title: 'Harness system prompt',
+    text: 'Harness instructions',
+    summary: 'Harness instructions',
+  };
+
+  // With only the non-toggleable provider card, there is nothing to toggle,
+  // so the menu renders nothing (no trigger button).
+  const emptyHtml = renderToString(h(SystemPromptToggleMenu, {
+    prompts: [providerEntry],
+    onSetToggles: () => undefined,
+  }));
+  assert.equal(emptyHtml, '');
+
+  // Once a toggleable entry exists the trigger renders. The dropdown only mounts
+  // when open (SSR defaults to closed); the backend test covers the invariant
+  // that the provider entry carries `toggleable: false` and is never disabled.
+  const triggerHtml = renderToString(h(SystemPromptToggleMenu, {
+    prompts: [providerEntry, harnessEntry],
+    onSetToggles: () => undefined,
+  }));
+  assert.match(triggerHtml, /system-prompt-toggle-trigger/);
 });
 
 test('rendered SystemPromptMessage and TranscriptVirtualRow cover prompt and gap rows', async () => {

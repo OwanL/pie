@@ -285,6 +285,27 @@ test('deriveTurnActivityState returns structured pruning state', () => {
   assert.ok(state!.ariaLabel.includes('pruning'));
 });
 
+test('deriveTurnActivityState returns waitingForSlot when the proxy has parked the session', () => {
+  const state = deriveTurnActivityState({
+    busy: true,
+    transcript: [makeMessage('user-1', 'user')],
+    prefs: DEFAULT_CHAT_PREFS,
+    pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, mode: 'off' },
+    pendingAssistantModelId: 'umans/glm-5.2',
+    proxySessionStatus: {
+      provider: 'umans',
+      state: 'queued',
+      activeSessions: 3,
+      queuedSessions: 2,
+      maxConcurrentRequests: 3,
+    },
+  });
+  assert.ok(state);
+  assert.equal(state!.phase, 'waitingForSlot');
+  assert.equal(state!.label, AGENT_ACTIVITY_LABELS.waitingForSlot);
+  assert.equal(state!.detail, 'umans 3/3 · 2 queued');
+});
+
 test('deriveTurnActivityState returns startingModel phase after pruning', () => {
   const pruningMessage = {
     id: 'prune-1',

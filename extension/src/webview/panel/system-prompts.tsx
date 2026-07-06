@@ -69,35 +69,38 @@ interface SystemPromptMessageProps {
 }
 
 export function SystemPromptMessage({ prompts }: SystemPromptMessageProps) {
-  if (prompts.length === 0) {
+  // Hide entries the user has toggled off — they're also stripped from the
+  // prompt sent to the model, so they shouldn't appear in the transcript.
+  const visiblePrompts = prompts.filter((p) => !p.disabled);
+  if (visiblePrompts.length === 0) {
     return null;
   }
 
   const [groupOpen, setGroupOpen] = useState(false);
 
-  const estimatedTokenCount = estimateSystemPromptTokens(prompts);
+  const estimatedTokenCount = estimateSystemPromptTokens(visiblePrompts);
   const tokenLabel = estimatedTokenCount > 0
     ? formatSystemPromptTokenLabel(estimatedTokenCount)
     : null;
   const tokenTitle = tokenLabel
-    ? getSystemPromptTokenEstimateTitle(prompts)
+    ? getSystemPromptTokenEstimateTitle(visiblePrompts)
     : undefined;
 
-  const label = prompts.length === 1
+  const label = visiblePrompts.length === 1
     ? `1 system prompt`
-    : `${prompts.length} system prompts`;
+    : `${visiblePrompts.length} system prompts`;
 
   const collapsedSummary = useMemo(() => {
     // The provider entry is informational metadata — it describes the system
     // prompt pi sends rather than being one — so exclude it from the group
     // preview even when its resolved provider summary now shows on its own card.
-    const available = prompts.filter((p) => p.source !== 'provider' && getCollapsedSummary(p));
+    const available = visiblePrompts.filter((p) => p.source !== 'provider' && getCollapsedSummary(p));
     if (available.length === 0) return null;
     if (available.length <= 2) {
       return available.map((p) => p.title).join(' · ');
     }
     return `${available[0].title} + ${available.length - 1} more`;
-  }, [prompts]);
+  }, [visiblePrompts]);
 
   return (
     <Collapsible
@@ -120,7 +123,7 @@ export function SystemPromptMessage({ prompts }: SystemPromptMessageProps) {
         </>
       }
     >
-      {prompts.map((prompt) => (
+      {visiblePrompts.map((prompt) => (
         <SystemPromptCard
           key={`${prompt.source}:${prompt.title}`}
           prompt={prompt}

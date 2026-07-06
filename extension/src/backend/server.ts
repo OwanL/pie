@@ -29,6 +29,10 @@ import {
 } from './session-metadata';
 import { ensureReviewsDir, startReviewWatcher } from './session-review-store';
 import {
+  readSystemPromptTogglesForSession,
+  writeSystemPromptTogglesForSession,
+} from './system-prompt-toggle-store';
+import {
   loadSdk,
   loadSdkInternalModule,
   type SdkModule,
@@ -44,8 +48,11 @@ import {
   type SessionPromptState,
 } from './server-types';
 import {
+  applySystemPromptTogglesToOptions,
   buildSessionSystemPrompts,
+  disabledPromptEntryIds,
   normalizePromptText,
+  stripDisabledSectionsFromPrompt,
 } from './system-prompts';
 import {
   buildDisplayTranscriptCache,
@@ -258,6 +265,15 @@ export class BackendServer {
         this.handleSessionEvent(context, event);
       });
 
+      // Apply persisted per-session system-prompt toggles (survives reopen) to
+      // the base prompt the SDK built during runtime creation. Safe to skip
+      // when there are none or when the prompt state isn't exposed yet.
+      const persistedDisabled = readSystemPromptTogglesForSession(sessionPath);
+      if (persistedDisabled.length > 0) {
+        context.systemPromptDisabledEntries = persistedDisabled;
+        await this.applySystemPromptTogglesToBasePrompt(context, persistedDisabled);
+      }
+
       return context;
     });
   }
@@ -433,6 +449,7 @@ export class BackendServer {
       formatSkillsForPrompt: this.sdk.formatSkillsForPrompt,
       tools,
       activeProvider: resolveActiveModel(context),
+      disabledEntries: context.systemPromptDisabledEntries,
     });
   }
 
@@ -448,6 +465,89 @@ export class BackendServer {
     } catch {
       return defaults;
     }
+  }
+
+  /** Compute the harness-template prefix of the full base prompt — the exact
+   *  string `buildSystemPrompt({ cwd, selectedTools, toolSnippets,
+   *  promptGuidelines })` produces (no custom/append/context/skills). Used to
+   *  strip the harness section from the built prompt when the user toggles it
+   *  off. Returns undefined when the prompt state isn't exposed yet. */
+  private async computeHarnessPrefix(context: SessionContext): Promise<string | undefined> {
+    const promptState = this.getSessionPromptState(context);
+    const options = promptState._baseSystemPromptOptions;
+    if (!options) return undefined;
+    try {
+      const { buildSystemPrompt } = await this.getSystemPromptModule();
+      return normalizePromptText(buildSystemPrompt({
+        cwd: options.cwd,
+        selectedTools: options.selectedTools,
+        toolSnippets: options.toolSnippets,
+        promptGuidelines: options.promptGuidelines,
+      }));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Rewrite the SDK session's cached `_baseSystemPrompt` (and the structured
+   *  `_baseSystemPromptOptions`) so the next turn sends a prompt with the
+   *  disabled entries removed. The SDK reads `_baseSystemPrompt` each turn
+   *  (falling back to it when no extension overrides), so this mutation takes
+   *  effect on the next `message.send` without restarting the session. */
+  private async applySystemPromptTogglesToBasePrompt(
+    context: SessionContext,
+    disabledEntries: readonly string[],
+  ): Promise<void> {
+    const promptState = this.getSessionPromptState(context);
+    const options = promptState._baseSystemPromptOptions;
+    if (!options) return;
+
+    const disabled = disabledPromptEntryIds(new Set(disabledEntries));
+    if (disabled.size === 0) {
+      // Nothing disabled — restore the unfiltered base prompt.
+      try {
+        const { buildSystemPrompt } = await this.getSystemPromptModule();
+        const restored = normalizePromptText(buildSystemPrompt(options));
+        if (restored) promptState._baseSystemPrompt = restored;
+      } catch {
+        // leave the existing base prompt untouched
+      }
+      return;
+    }
+
+    const filteredOptions = applySystemPromptTogglesToOptions(options, disabled);
+    let base: string | undefined;
+    try {
+      const { buildSystemPrompt } = await this.getSystemPromptModule();
+      base = normalizePromptText(buildSystemPrompt(filteredOptions));
+    } catch {
+      base = promptState._baseSystemPrompt;
+    }
+    if (base) {
+      const harnessPrefix = await this.computeHarnessPrefix(context);
+      base = stripDisabledSectionsFromPrompt(base, disabled, options.customPrompt, harnessPrefix);
+    }
+    if (base) promptState._baseSystemPrompt = base;
+    // Keep the structured options in sync so downstream extensions (e.g. the
+    // skill-pruner `before_agent_start` hook) see the filtered skill/context
+    // sets instead of re-adding stripped sections from the original options.
+    promptState._baseSystemPromptOptions = filteredOptions;
+  }
+
+  /** Apply a new disabled-entry set for a session: update the SessionContext,
+   *  persist to the sidecar, rewrite the base prompt. (Re-emitting
+   *  `session.opened` is the caller's responsibility — the RPC handler does it
+   *  after this resolves.) The `disabledEntries` array is the complete set. */
+  async applySystemPromptToggles(
+    sessionPath: string,
+    disabledEntries: readonly string[],
+  ): Promise<void> {
+    const context = this.sessionContexts.get(sessionPath);
+    if (!context) return;
+    const next = [...new Set(disabledEntries)];
+    context.systemPromptDisabledEntries = next;
+    writeSystemPromptTogglesForSession(sessionPath, next);
+    await this.applySystemPromptTogglesToBasePrompt(context, next);
   }
 
   private async writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings> {
@@ -548,6 +648,9 @@ export class BackendServer {
       },
       buildSessionOpenedPayload: (sessionPath, selectionToken, transcript) => (
         this.buildSessionOpenedPayload(sessionPath, selectionToken, transcript)
+      ),
+      applySystemPromptToggles: (sessionPath, disabledEntries) => (
+        this.applySystemPromptToggles(sessionPath, disabledEntries)
       ),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)

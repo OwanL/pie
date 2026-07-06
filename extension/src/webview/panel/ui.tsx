@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { memo } from 'preact/compat';
-import { useMemo, useRef } from 'preact/hooks';
+import { useCallback, useMemo, useRef } from 'preact/hooks';
 
 import type {
   ActiveRunSummary,
@@ -17,10 +17,13 @@ import type {
   PruningCatalog,
   PruningResult,
   PruningSettings,
+  RetryStatus,
+  ProxyProviderAddInput,
   ProxySettings,
   ProxySettingsUpdate,
   SystemPromptEntry,
   ThinkingLevel,
+  ToolResultPruningSettings,
   TranscriptWindow,
   WebviewToHostMessage,
 } from '../../shared/protocol';
@@ -46,6 +49,11 @@ interface ComposerProps {
   /** Brief E: optimistic one-frame "stopping…" mirror of an in-flight
    *  interrupt (the host clears `busy` only after the abort round-trip). */
   interrupting?: boolean;
+  /** Live auto-retry status for the active session, or null when no retry is
+   *  in flight. Surfaced as a "Retrying N of M…" chip with a Cancel button
+   *  (Cancel reuses `onInterrupt` — `session.abort()` aborts the retry sleep
+   *  via `abortRetry()`, emitting `auto_retry_end` "Retry cancelled"). */
+  retryStatus: RetryStatus | null;
   sessionPath: string | null;
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
@@ -59,6 +67,7 @@ interface ComposerProps {
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
+  toolResultPruningSettings: ToolResultPruningSettings;
   proxySettings: ProxySettings;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
@@ -79,9 +88,19 @@ interface ComposerProps {
   onRemoveInput: (inputId: string) => void;
   onModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
+  /** Apply the complete disabled-entry set for the active session's system
+   *  prompts. The backend re-emits `session.opened` to update the displayed
+   *  entries + toggle state. */
+  onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
+  onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
   onSetProxySettings: (settings: ProxySettingsUpdate) => void;
+  onAddProxyProvider: (input: ProxyProviderAddInput) => void;
   onMarkComplete?: () => void;
+  /** True when the active session owns a pending deferred trigger — greys out
+   *  the mark-done button with an explanatory tooltip (the trigger must be
+   *  cancelled first, from the status strip). */
+  activeSessionHasDeferredTriggers?: boolean;
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
@@ -93,6 +112,7 @@ interface ComposerProps {
 function ComposerView({
   busy,
   interrupting,
+  retryStatus,
   sessionPath,
   draftText,
   draftRestore,
@@ -106,6 +126,7 @@ function ComposerView({
   pruningSettings,
   pruningCatalog,
   pruningResult,
+  toolResultPruningSettings,
   proxySettings,
   systemPrompts,
   transcript,
@@ -123,9 +144,13 @@ function ComposerView({
   onRemoveInput,
   onModelChange,
   onSetPrefs,
+  onSetSystemPromptToggles,
   onSetPruningSettings,
+  onSetToolResultPruningSettings,
   onSetProxySettings,
+  onAddProxyProvider,
   onMarkComplete,
+  activeSessionHasDeferredTriggers,
   sendRetryDraftRef,
 }: ComposerProps) {
   const composerAreaRef = useRef<HTMLDivElement>(null);
@@ -232,6 +257,17 @@ function ComposerView({
   const runControls = getComposerRunControls(activeRunSummary ?? null);
   const hasUserMessages = transcriptWindow.hasUserMessages;
   const completionAction = runControls.action;
+  // Steering (FollowUp): any optimistic 'queued' user messages (sent while a
+  // turn was running) show a "Clear queued" affordance in the composer actions.
+  const hasQueuedMessages = useMemo(
+    () => transcript.some((m) => m.role === 'user' && m.status === 'queued'),
+    [transcript],
+  );
+  const onClearQueue = useCallback(() => {
+    if (sessionPath) {
+      postMessage({ type: 'clearQueue', sessionPath });
+    }
+  }, [sessionPath, postMessage]);
 
   const canSend = (text.trim().length > 0 || pendingComposerInputs.length > 0) && !submitting.current;
   const attachmentSummary = useMemo(
@@ -249,10 +285,15 @@ function ComposerView({
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
+        toolResultPruningSettings={toolResultPruningSettings}
         proxySettings={proxySettings}
         onSetPrefs={onSetPrefs}
+        onSetSystemPromptToggles={onSetSystemPromptToggles}
+        systemPrompts={systemPrompts}
         onSetPruningSettings={onSetPruningSettings}
+        onSetToolResultPruningSettings={onSetToolResultPruningSettings}
         onSetProxySettings={onSetProxySettings}
+        onAddProxyProvider={onAddProxyProvider}
         availableExtensions={availableExtensions}
         availableModels={availableModels}
         selectedModel={selectedModel}
@@ -279,6 +320,29 @@ function ComposerView({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {retryStatus && (
+          <div class="composer-retry-row flex items-center gap-2" role="status" aria-live="polite">
+            <span class="composer-retry-label flex items-center gap-1.5">
+              <span class="composer-retry-spinner" aria-hidden="true" />
+              Retrying {retryStatus.attempt} of {retryStatus.maxAttempts}
+            </span>
+            {retryStatus.errorMessage && (
+              <span class="composer-retry-error" title={retryStatus.errorMessage}>
+                {retryStatus.errorMessage}
+              </span>
+            )}
+            <button
+              class="action-btn"
+              type="button"
+              onClick={onInterrupt}
+              disabled={interrupting}
+              title={interrupting ? 'Cancelling…' : 'Cancel the retry and stop the request'}
+              aria-label="Cancel retry"
+            >
+              {interrupting ? 'Cancelling…' : 'Cancel'}
+            </button>
+          </div>
+        )}
         <ComposerAttachments
           pendingComposerInputs={pendingComposerInputs}
           attachmentSummary={attachmentSummary}
@@ -301,12 +365,15 @@ function ComposerView({
           busy={busy}
           interrupting={interrupting}
           hasUserMessages={hasUserMessages}
+          hasQueuedMessages={hasQueuedMessages}
           completionAction={completionAction}
           onMarkComplete={onMarkComplete}
           onInterrupt={onInterrupt}
+          onClearQueue={onClearQueue}
           sendCurrentText={sendCurrentText}
           canSend={canSend}
           onOpenFilePicker={onOpenFilePicker}
+          deferredBlockReason={activeSessionHasDeferredTriggers ? 'Cannot mark done: pending deferred trigger(s) — cancel them from the status bar first.' : null}
         />
       </div>
 

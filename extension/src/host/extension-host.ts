@@ -23,6 +23,8 @@ import { SidebarViewProvider } from './sidebar/provider';
 import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
+import { ProxyMetricsService } from './proxy-metrics-service';
+import { EMPTY_WARM_BASH_STATS, type WarmBashStats } from '../shared/protocol/aggregate-stats';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
@@ -45,6 +47,7 @@ import {
 import { deriveSessionNameFromText } from '../shared/session-name';
 import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
+import { getProxyOverview } from './status-bar';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -96,6 +99,7 @@ export class PieExtension implements vscode.Disposable {
   private readonly sidebarProvider: SidebarViewProvider;
   private readonly tokenRateService: TokenRateService;
   private readonly aggregateStatsService: AggregateStatsService;
+  private readonly proxyMetricsService: ProxyMetricsService;
   private readonly statsService: StatsService;
   private readonly service: SessionService;
   private shutdownPromise: Promise<void> | null = null;
@@ -150,6 +154,13 @@ export class PieExtension implements vscode.Disposable {
       statsService: this.statsService,
       tokenRateService: this.tokenRateService,
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
+      fetchWarmBashStats: () => this.backend
+        .request<WarmBashStats>('warm_bash.stats', undefined, { timeoutMs: 2000 })
+        .catch(() => EMPTY_WARM_BASH_STATS),
+      onChanged: () => this.sidebarProvider.scheduleState(),
+    });
+
+    this.proxyMetricsService = new ProxyMetricsService({
       onChanged: () => this.sidebarProvider.scheduleState(),
     });
 
@@ -261,6 +272,7 @@ export class PieExtension implements vscode.Disposable {
     this.updateStatusBar('Starting');
     this.tokenRateService.start();
     this.aggregateStatsService.start();
+    this.proxyMetricsService.start();
     await this.statsService.start();
     await this.service.start();
     // Push the restored open-tab summaries to the backend so the
@@ -282,10 +294,14 @@ export class PieExtension implements vscode.Disposable {
    *  summaries already carry `done`/`rating` merged from the review sidecar. */
   private pushOpenTabsRegistry(): void {
     const sessions = this.archState.sessions.sessions;
+    const pinned = this.archState.sessions.pinnedTabPaths;
     const tabs = this.archState.sessions.openTabPaths
       .filter((p) => !isPendingTabPath(p))
-      .map((p) => sessions.find((s) => s.path === p))
-      .filter((s): s is SessionSummary => !!s);
+      .map((p) => {
+        const s = sessions.find((entry) => entry.path === p);
+        return s ? { ...s, pinned: pinned.includes(p) } : undefined;
+      })
+      .filter((s): s is SessionSummary & { pinned: boolean } => !!s);
     void this.backend.request('openTabs.set', { tabs }).catch(() => {});
   }
 
@@ -556,10 +572,19 @@ export class PieExtension implements vscode.Disposable {
     // pickStable / memo barriers — unchanged slices stay referentially stable
     // across posts.
     const projected = selectViewState(this.archState);
+    const proxyOverview = getProxyOverview(this.archState, {
+      proxyEnabled: vscode.workspace.getConfiguration('pie').get<boolean>('useProxy', true),
+    });
     return {
       ...projected,
       tokenRateBySession: this.tokenRateService.getRates(),
       aggregateStats: this.aggregateStatsService.getAggregateStats(),
+      proxyMetrics: this.proxyMetricsService.getMetrics(),
+      proxyStatusBySession: proxyOverview.bySession,
+      // Active deferred triggers are owned by the `DeferredTriggerRegistry`
+      // (host-side, not in ArchState) — merged here like `aggregateStats` /
+      // `tokenRateBySession` so the pure projection stays service-free.
+      deferredTriggers: this.service.getDeferredTriggers(),
     };
   }
 
@@ -701,6 +726,7 @@ export class PieExtension implements vscode.Disposable {
       this.effectRunner.dispose();
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
+      this.proxyMetricsService.dispose();
       await this.statsService.shutdown();
       this.service.dispose();
       this.sidebarProvider.dispose();

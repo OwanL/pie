@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../src/webview/panel/composer/settings-menu';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS } from '../src/shared/protocol';
 
 let container: HTMLElement;
 
@@ -39,12 +39,15 @@ test('settings menu caps its height to the transcript vertical space', () => {
         pruningSettings: DEFAULT_PRUNING_SETTINGS,
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
+        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
         proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: [],
         availableModels: [],
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
+        onSetToolResultPruningSettings: () => undefined,
         onSetProxySettings: () => undefined,
+        onAddProxyProvider: () => undefined,
       }),
       container,
     );
@@ -81,12 +84,15 @@ test('settings menu keeps a fixed height when switching tabs', () => {
         pruningSettings: DEFAULT_PRUNING_SETTINGS,
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
+        toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
         proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: [],
         availableModels: [],
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
+        onSetToolResultPruningSettings: () => undefined,
         onSetProxySettings: () => undefined,
+        onAddProxyProvider: () => undefined,
       }),
       container,
     );
@@ -110,7 +116,7 @@ test('settings menu keeps a fixed height when switching tabs', () => {
   assert.equal(menu.style.maxHeight, '692px', 'max-height still tracks the viewport cap');
 
   // Switching tabs must not change the height (the original resize complaint).
-  for (const tab of ['appearance', 'bash', 'proxy', 'chat']) {
+  for (const tab of ['appearance', 'proxy', 'chat']) {
     act(() => { click(menu.querySelector(`.toolbar-settings-tab[data-tab="${tab}"]`)); });
     assert.equal(
       menu.style.height,

@@ -34,11 +34,13 @@ import type {
   SendRpcEffect,
   EditRpcEffect,
   InterruptRpcEffect,
+  ClearQueueRpcEffect,
   TruncateRpcEffect,
   ExtensionUiResponseRpcEffect,
   ShowModelSwitchConfirmEffect,
   SetModelRpcEffect,
   SetPrefsRpcEffect,
+  SetSystemPromptTogglesRpcEffect,
   HydrateModelEffect,
   LogEffect,
   PostImperativeEffect,
@@ -52,7 +54,7 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ProxySettings, ProxySettingsUpdate, RunOutcome, ThinkingLevel } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
@@ -83,7 +85,7 @@ export interface TabPersistenceSink {
 
 /** Logger sink for `Log`. Matches the audit-log surface used elsewhere. */
 export interface LogSink {
-  log(level: 'info' | 'warn' | 'error', message: string, data?: unknown): void;
+  log(level: 'debug' | 'info' | 'warn' | 'error', message: string, data?: unknown): void;
 }
 
 /** Callback for posting imperative messages to the webview. */
@@ -103,6 +105,10 @@ export interface ModalSink {
 export interface SessionServiceLike {
   hydrateModelState(sessionPath: string): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): void;
+  /** Push the complete disabled-entry set for a session's system prompts to the
+   *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
+   *  `session.opened` to update host state, so no *Result event is expected. */
+  setSystemPromptToggles(sessionPath: string, disabledEntries: readonly string[]): Promise<void>;
   bumpSessionDataEpoch(sessionPath: string): void;
   /** Notify the run-analytics observer that a session's model config changed
    *  (disk-persisting side effect, not ArchState). Effect-side concern. */
@@ -113,7 +119,9 @@ export interface SessionServiceLike {
   jumpToLatestTranscript(sessionPath: string): Promise<void>;
   closeSession(sessionPath: string, nextPath: string | null): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
+  setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
   setProxySettings(updates: ProxySettingsUpdate): Promise<void>;
+  addProxyProvider(input: import('../../shared/protocol').ProxyProviderAddInput): Promise<void>;
   /** Recover from a failed/timed-out selection: finish the request and
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
@@ -222,6 +230,13 @@ interface InFlightSend {
   sessionPath: string;
   /** Which optimistic op this is — surfaces in the fire error + rollback kind. */
   kind: 'send' | 'edit';
+  /** The local transcript ID for the optimistic user message. Kept so a late
+   *  `PreflightSuperseded` retraction can re-insert the exact message. */
+  localId: string;
+  /** The composed text for the optimistic user message (re-inserted on supersede). */
+  composedText: string;
+  /** User content parts for the optimistic user message (send only). */
+  userParts?: UserContentPart[];
   /** The send-timer handle (cleared at the commit point / pre-ack failure / fire). */
   timer: TimerHandle | null;
   /** The budget this send's timer was armed with (prepass-aware when
@@ -234,6 +249,11 @@ interface InFlightSend {
   requestId?: string;
   /** Guards against double-settle (fire after clear, etc.). */
   disposed: boolean;
+  /** Set to true when the post-ack send-timer fires and `PreflightFailed` is
+   *  dispatched. A later `ClearSendTimer` (late commit) detects this and emits
+   *  a `PreflightSuperseded` retraction so the UI undoes the false-positive
+   *  rollback. */
+  fired: boolean;
   /** Brief H: prior pruning mode captured before a "retry without pruning" send
    *  disabled pruning. Restored when this in-flight send resolves (commit /
    *  fire / pre-ack failure) so pruning returns to the user's prior mode for the
@@ -283,6 +303,7 @@ export class EffectRunner {
       SendRpc: (e) => this.runRpc(e),
       EditRpc: (e) => this.runRpc(e),
       InterruptRpc: (e) => this.runRpc(e),
+      ClearQueueRpc: (e) => this.runRpc(e),
       TruncateRpc: (e) => this.runRpc(e),
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
       // ── Lifecycle kinds: `enqueueLifecycle`-only. ──
@@ -293,6 +314,7 @@ export class EffectRunner {
       ShowModelSwitchConfirm: (e) => this.handleShowModelSwitchConfirm(e),
       SetModelRpc: (e) => this.handleSetModelRpc(e),
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
+      SetSystemPromptTogglesRpc: (e) => this.handleSetSystemPromptTogglesRpc(e),
       Log: (e) => this.handleLog(e),
       PostImperative: (e) => this.handlePostImperative(e),
       OpenFile: (e) => this.handleOpenFile(e),
@@ -316,7 +338,9 @@ export class EffectRunner {
       ContinueTask: this.templateRow({ resultKind: 'ContinueTaskResult', withSessionPath: false, call: (e, d) => { d.statsService.continueTask(e.sessionPath); } }),
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
+      SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
       SetProxySettings: this.templateRow({ resultKind: 'SetProxySettingsResult', withSessionPath: false, call: (e, d) => d.service.setProxySettings(e.settings) }),
+      AddProxyProvider: this.templateRow({ resultKind: 'AddProxyProviderResult', withSessionPath: false, call: (e, d) => d.service.addProxyProvider(e.input) }),
       CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath) }),
       PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths) }),
     };
@@ -364,10 +388,14 @@ export class EffectRunner {
         payload.prefKeys = Object.keys(effect.prefs);
         break;
       case 'SetPruningSettings':
+      case 'SetToolResultPruningSettings':
         payload.settingKeys = Object.keys(effect.settings);
         break;
       case 'SetProxySettings':
         payload.settingKeys = Object.keys(effect.settings);
+        break;
+      case 'AddProxyProvider':
+        payload.providerName = effect.input.name;
         break;
     }
 
@@ -475,6 +503,22 @@ export class EffectRunner {
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: true });
       } catch (err) {
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: false, error: toErrorMessage(err) });
+      }
+    })();
+  }
+
+  /** `SetSystemPromptTogglesRpc` — IIFE (not queued),
+   *  `service.setSystemPromptToggles(...)`. Fire-and-forget: the backend
+   *  re-emits `session.opened` (routed through `SessionOpened`) to update
+   *  `systemPromptsBySession` with fresh `disabled` flags, so no `*Result`
+   *  event is dispatched. Errors are logged via the audit log only — the
+   *  webview's toggle state stays as-is until a successful re-emit. */
+  private handleSetSystemPromptTogglesRpc(effect: SetSystemPromptTogglesRpcEffect): void {
+    void (async () => {
+      try {
+        await this.deps.service.setSystemPromptToggles(effect.sessionPath, effect.disabledEntries);
+      } catch (err) {
+        this.deps.log.log('warn', 'setSystemPromptToggles failed', { scope: 'system-prompt-toggles', error: toErrorMessage(err), sessionPath: effect.sessionPath });
       }
     })();
   }
@@ -634,12 +678,33 @@ export class EffectRunner {
    *  `requestId` known). The pre-ack phase is owned by the `RequestTracker`
    *  timeout (10s for `message.send`), whose rejection clears this timer via
    *  the catch block — so the send-timer never fires pre-ack in practice. */
-  private startInFlightSend(corrId: string, sessionPath: string, kind: 'send' | 'edit', priorPruningMode?: PruningMode): InFlightSend {
+  private startInFlightSend(
+    corrId: string,
+    sessionPath: string,
+    kind: 'send' | 'edit',
+    localId: string,
+    composedText: string,
+    userParts: UserContentPart[] | undefined,
+    priorPruningMode?: PruningMode,
+  ): InFlightSend {
     const abort = new AbortController();
     // Prepass-aware budget (read fresh each send so a runtime prepassTimeoutSec
     // change takes effect); falls back to the static override/default.
     const budgetMs = this.deps.getSendTimerTimeoutMs?.() ?? this.sendTimerTimeoutMs;
-    const send: InFlightSend = { corrId, sessionPath, kind, timer: null, budgetMs, abort, disposed: false, priorPruningMode };
+    const send: InFlightSend = {
+      corrId,
+      sessionPath,
+      kind,
+      localId,
+      composedText,
+      userParts,
+      timer: null,
+      budgetMs,
+      abort,
+      disposed: false,
+      fired: false,
+      priorPruningMode,
+    };
     send.timer = this.timer.schedule(() => this.onSendTimerFire(send), budgetMs);
     this.inFlightSends.set(corrId, send);
     // One in-flight send per session under FIFO serialization. A second send
@@ -659,10 +724,13 @@ export class EffectRunner {
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
     send.disposed = true;
-    this.inFlightSends.delete(send.corrId);
-    if (this.inFlightSendBySession.get(send.sessionPath) === send.corrId) {
-      this.inFlightSendBySession.delete(send.sessionPath);
-    }
+    send.fired = true;
+    // Do NOT delete the entry from the in-flight maps yet. A late commit
+    // (MessageStarted → ClearSendTimer) needs to detect `fired === true` so it
+    // can dispatch a `PreflightSuperseded` retraction that undoes the false-
+    // positive rollback. The entry is removed when the commit-point clear
+    // arrives, or on `dispose()`.
+    send.timer = null;
     // Brief H: restore pruning (a "retry without pruning" send's prepass timed
     //  out — the turn is rolling back, so pruning returns to the user's prior
     //  mode for the next turn).
@@ -689,12 +757,46 @@ export class EffectRunner {
   private clearInFlightSend(corrId: string): void {
     const send = this.inFlightSends.get(corrId);
     if (!send) return;
+    const hadFired = send.fired;
     send.disposed = true;
     if (send.timer) this.timer.cancel(send.timer);
     this.inFlightSends.delete(corrId);
     if (this.inFlightSendBySession.get(send.sessionPath) === send.corrId) {
       this.inFlightSendBySession.delete(send.sessionPath);
     }
+
+    if (hadFired && send.requestId) {
+      // Late commit after a POST-ACK send-timer fire: the turn started streaming
+      // after the false-positive `PreflightFailed` rollback. Emit a retraction
+      // so the reducer restores the optimistic user message, clears the notice,
+      // and restores the running-session state. The snapshot fields come from
+      // the in-flight send context (mirroring what `runSendRpc` knew at
+      // dispatch). Guard on `send.requestId`: a degenerate PRE-ACK fire (the
+      // timer fired before the early-ack — `onSendTimerFire` logged it but
+      // dispatched no `PreflightFailed` because there was no requestId) has
+      // nothing to retract, so it falls through to the normal pruning restore
+      // instead of emitting a stray `PreflightSuperseded`.
+      this.deps.log.log('debug', 'send-timer.superseded', {
+        corrId: send.corrId,
+        requestId: send.requestId,
+        sessionPath: send.sessionPath,
+        budgetMs: send.budgetMs,
+      });
+      this.deps.dispatchEvent({
+        kind: 'PreflightSuperseded',
+        corrId: send.corrId,
+        requestId: send.requestId ?? '',
+        sessionPath: send.sessionPath,
+        localId: send.localId,
+        composedText: send.composedText,
+        userParts: send.userParts,
+        timestamp: Date.now(),
+      });
+      // Pruning mode was already restored when the timer fired; do not
+      // restore it again here.
+      return;
+    }
+
     // Brief H: restore pruning. Reached on pre-ack failure (no commit will
     //  come) and at the commit point (ClearSendTimer — first MessageStarted).
     //  A second call (e.g. clear after fire) no-ops: the send was already
@@ -799,11 +901,11 @@ export class EffectRunner {
       await queues.enqueueSessionOperation(effect.sessionPath, async () => {
         // Start the send-timer at RPC dispatch (queue time) + arm the abort
         // controller (Brief E cancels an in-flight message.send on interrupt).
-        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'send', effect.priorPruningMode);
+        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'send', effect.localId, effect.composedText, effect.userParts, effect.priorPruningMode);
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.prepareForSend(effect.sessionPath, effect.inputs);
-          const response = await backend.request<{ requestId?: string }>('message.send', {
+          const response = await backend.request<{ requestId?: string; queued?: boolean }>('message.send', {
             sessionPath: effect.sessionPath,
             text: effect.text,
             inputs: effect.inputs,
@@ -814,12 +916,23 @@ export class EffectRunner {
           // never commits. The send-timer stays armed — cleared at the commit
           // point (first MessageStarted → ClearSendTimer) or on fire.
           send.requestId = response.requestId;
+          if (response.queued) {
+            // Steering (FollowUp) ack: the backend queued the message because a
+            // turn was already running. No turn is started by this ack, so
+            // there is no commit point (first MessageStarted for a requestId)
+            // to clear the send-timer — clear it now so it cannot fire
+            // `PreflightFailed` for a message that is legitimately waiting in
+            // the follow-up queue. The reducer's `SendResult` ok-path branches
+            // on `queued` to keep the optimistic message as 'queued'.
+            this.clearInFlightSend(effect.corrId);
+          }
           dispatch({
             kind: 'SendResult',
             corrId: effect.corrId,
             sessionPath: effect.sessionPath,
             ok: true,
             requestId: response.requestId,
+            queued: response.queued === true ? true : undefined,
           });
         } catch (err) {
           // Pre-ack failure (RequestTracker timeout/rejection, or abort): no
@@ -851,7 +964,7 @@ export class EffectRunner {
         // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
         // post-ack, pre-commit phase; the abort controller covers the whole
         // truncate-then-send operation (Brief E cancels it on interrupt).
-        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit');
+        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, undefined);
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
@@ -995,12 +1108,14 @@ export class EffectRunner {
  *  Send/Edit have been short-circuited to their dedicated handlers. Kept
  *  exhaustive over this 3-kind set so the helper switches below stay
  *  exhaustive with no `never`-unreachable arms. */
-type RpcEffect = InterruptRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
+type RpcEffect = InterruptRpcEffect | ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
 
 function rpcMethodFor(effect: RpcEffect): string {
   switch (effect.kind) {
     case 'InterruptRpc':
       return 'message.interrupt';
+    case 'ClearQueueRpc':
+      return 'message.clearQueue';
     case 'TruncateRpc':
       return 'session.truncateAfter';
     case 'ExtensionUiResponseRpc':
@@ -1011,6 +1126,8 @@ function rpcMethodFor(effect: RpcEffect): string {
 function rpcParamsFor(effect: RpcEffect): unknown {
   switch (effect.kind) {
     case 'InterruptRpc':
+      return { sessionPath: effect.sessionPath };
+    case 'ClearQueueRpc':
       return { sessionPath: effect.sessionPath };
     case 'TruncateRpc':
       return { sessionPath: effect.sessionPath, entryId: effect.messageId };
@@ -1031,6 +1148,8 @@ function rpcResultFor(
   switch (effect.kind) {
     case 'InterruptRpc':
       return { kind: 'InterruptResult', ...base };
+    case 'ClearQueueRpc':
+      return { kind: 'ClearQueueResult', ...base };
     case 'TruncateRpc':
       return { kind: 'TruncateResult', ...base };
     case 'ExtensionUiResponseRpc':

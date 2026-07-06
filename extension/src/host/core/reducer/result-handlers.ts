@@ -3,7 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
-import { removeFromArray, removeMessage } from './helpers.js';
+import { addToArray, appendLocalUserMessage, removeFromArray, removeMessage } from './helpers.js';
 import type { Event, EffectResultEvent } from '../events.js';
 import { applySetModelOptimistic, dropSetModelPending, revertSetModel } from './set-model-handlers.js';
 import { mapSendOrEditError, mapPreflightError } from '../../../shared/error-mapping.js';
@@ -29,10 +29,50 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
       draft.sessions.runningSessionPaths = draft.sessions.runningSessionPaths.filter(
         (p: string) => p !== event.sessionPath,
       );
+      // Steering (FollowUp): the backend clears the SDK follow-up queue on
+      // interrupt (see `handleMessageInterrupt`). Drop the optimistic 'queued'
+      // transcript messages and their `pending` snapshots so a late
+      // `QueuedDelivered` cannot re-promote a message the user already
+      // cancelled by stopping.
+      const list = draft.transcript.bySession[event.sessionPath];
+      if (list) {
+        draft.transcript.bySession[event.sessionPath] = list.filter(
+          (m) => !(m.role === 'user' && m.status === 'queued'),
+        );
+      }
+      for (const [corrId, op] of Object.entries(draft.pending.ops)) {
+        if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.ops[corrId];
+      }
+      for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
+        if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.promoted[corrId];
+      }
     }
   });
 
   return { state: nextState, effects };
+}
+
+export function handleClearQueueResult(state: ArchState, event: Extract<Event, { kind: 'ClearQueueResult' }>): ReducerResult {
+  // The transcript 'queued' messages + pending snapshots were already removed
+  // optimistically in `handleClearQueue`. On success there is nothing more to
+  // do. On failure we only log: the backend follow-up queue may still contain
+  // the messages, but the UI no longer shows them, and a later
+  // `QueuedDelivered` for a removed message no-ops (findIndex finds nothing).
+  if (!event.ok) {
+    return {
+      state,
+      effects: [
+        {
+          kind: 'Log',
+          corrId: event.corrId,
+          level: 'error',
+          message: `ClearQueue failed for session ${event.sessionPath}`,
+          data: { error: event.error },
+        },
+      ],
+    };
+  }
+  return { state, effects: [] };
 }
 
 export function handleSendResult(state: ArchState, event: Extract<Event, { kind: 'SendResult' }>): ReducerResult {
@@ -54,21 +94,42 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         ...pending,
         ...(event.requestId ? { requestId: event.requestId } : {}),
       };
-      // Brief F: the prompt was queued (post-ack, pre-commit) — the pruning
-      // prepass now runs. Surface a live, cancelable status chip. `startedAt`
-      // is read from the promoted op by the projection (pure, from the Send
-      // command timestamp).
-      draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
-      // Composer inputs were cleared at SEND time (handleSend captures the
-      // snapshot onto the PendingOp and clears `pendingComposerInputsBySession`
-      // so the composer is immediately clean). Nothing to clear here at ack
-      // time — the inputs ride on the promoted snapshot for a post-ack
-      // `PreflightFailed` rollback.
-      if (event.requestId) {
-        draft.pending.requestIdToLocalId[event.requestId] = {
-          sessionPath: pending.sessionPath,
-          localId: pending.localId,
-        };
+      if (event.queued) {
+        // Steering (FollowUp) ack: the message is queued, not running yet —
+        // no pruning prepass runs for a followUp, and there is no requestId
+        // to bind. Force the optimistic message to 'queued' (handleSend's
+        // busy branch already inserted it as 'queued', but this also covers
+        // the boundary race where handleSend saw the session as idle yet the
+        // backend saw it as busy and queued the message).
+        const list = draft.transcript.bySession[pending.sessionPath];
+        if (list) {
+          const idx = list.findIndex((m) => m.id === pending.localId);
+          if (idx >= 0 && list[idx].role === 'user') {
+            list[idx].status = 'queued';
+          }
+        }
+      } else {
+        // Normal ack: the pruning prepass now runs. Surface a live, cancelable
+        // status chip. `startedAt` is read from the promoted op by the
+        // projection (pure, from the Send command timestamp).
+        draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
+        if (event.requestId) {
+          draft.pending.requestIdToLocalId[event.requestId] = {
+            sessionPath: pending.sessionPath,
+            localId: pending.localId,
+          };
+        }
+        // Boundary race: handleSend's busy branch inserted this as 'queued'
+        // but the backend started a normal turn (the prior turn had just
+        // finished). Promote the optimistic message to 'completed' so the
+        // prepass chip + streaming reconcile against a normal send.
+        const list = draft.transcript.bySession[pending.sessionPath];
+        if (list) {
+          const idx = list.findIndex((m) => m.id === pending.localId);
+          if (idx >= 0 && list[idx].role === 'user' && list[idx].status === 'queued') {
+            list[idx].status = 'completed';
+          }
+        }
       }
     });
     return { state: nextState, effects: [] };
@@ -94,11 +155,16 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     draft.pending.ops = restOps;
     // Remove optimistic message from transcript
     removeMessage(draft, pending.sessionPath, pending.localId);
-    // Clear busy state set optimistically at send time
-    draft.sessions.runningSessionPaths = removeFromArray(
-      draft.sessions.runningSessionPaths,
-      pending.sessionPath,
-    );
+    // Clear busy state set optimistically at send time. A queued (follow-up)
+    // send never added the session to `runningSessionPaths` (the session was
+    // already running its original turn), so it must not clear it here — the
+    // original turn is still in flight.
+    if (!pending.queued) {
+      draft.sessions.runningSessionPaths = removeFromArray(
+        draft.sessions.runningSessionPaths,
+        pending.sessionPath,
+      );
+    }
     // Brief H: map the raw RPC error (which may carry a `req-NN` id) to a
     // plain-language notice + a failure kind that the webview renders recovery
     // buttons for. A user-initiated cancel (Brief E abort) returns null →
@@ -244,6 +310,42 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
   return { state: nextState, effects };
 }
 
+/**
+ * Late commit after a send-timer fire (false-positive `PreflightFailed`). The
+ * turn started streaming after the rollback, so undo the rollback: re-insert the
+ * optimistic user message, restore the session to `runningSessionPaths`, and
+ * clear the `prepass-timeout` notice. This is idempotent — a duplicate event
+ * finds the message already present and no-ops.
+ */
+export function handlePreflightSuperseded(state: ArchState, event: Extract<Event, { kind: 'PreflightSuperseded' }>): ReducerResult {
+  const { sessionPath, localId, composedText, userParts, timestamp } = event;
+
+  const nextState = produce(state, (draft) => {
+    const list = draft.transcript.bySession[sessionPath];
+    const alreadyPresent = list?.some((m) => m.id === localId) ?? false;
+    if (!alreadyPresent) {
+      appendLocalUserMessage(
+        draft,
+        sessionPath,
+        localId,
+        composedText ?? '',
+        userParts,
+        new Date(timestamp).toISOString(),
+      );
+    }
+
+    draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, sessionPath);
+
+    if (draft.settings.noticeKind === 'prepass-timeout') {
+      draft.settings.notice = null;
+      draft.settings.noticeKind = null;
+      draft.settings.noticeRaw = null;
+    }
+  });
+
+  return { state: nextState, effects: [] };
+}
+
 export function handleEditResult(state: ArchState, event: Extract<Event, { kind: 'EditResult' }>): ReducerResult {
   const pending = state.pending.ops[event.corrId];
   if (!pending) return { state, effects: [] };
@@ -338,7 +440,7 @@ export function handleSetPrefsResult(state: ArchState, _event: Extract<Event, { 
   return { state, effects: [] };
 }
 
-export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' }>): ReducerResult {
+export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' }>): ReducerResult {
   switch (event.kind) {
     case 'InterruptResult':
       return handleInterruptResult(state, event);
@@ -395,7 +497,9 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
+    case 'SetToolResultPruningSettingsResult':
     case 'SetProxySettingsResult':
+    case 'AddProxyProviderResult':
     case 'ExtensionUiResponseResult': {
       if (!event.ok) {
         return {

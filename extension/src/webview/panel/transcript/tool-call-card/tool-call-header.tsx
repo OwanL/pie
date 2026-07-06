@@ -11,6 +11,7 @@ import { CollapsedSummary } from './collapsed-summary';
 import { ToolCallStatusGlyph } from './status-glyph';
 import { buildToolCallHeaderSummaryModel } from './summary-model';
 import type { ToolCallHeaderSummaryModel } from './types';
+import { ToolResultPruningBadge, type ToolResultPruningBadgeData } from '../tool-result-pruning-badge';
 
 interface ToolCallHeaderProps {
   open: boolean;
@@ -23,6 +24,9 @@ interface ToolCallHeaderProps {
   summaryModel?: ToolCallHeaderSummaryModel;
   sizeHint?: string;
   errorDetail?: string;
+  /** Inline ✂ badge from the tool-result-pruner extension (`result.details.pruningBadge`).
+   *  Rendered before the duration so it's visible even when the card is collapsed. */
+  pruningBadge?: ToolResultPruningBadgeData | null;
   durationMs?: number;
   /** id of the body region this header controls, set as `aria-controls`.
    *  Only passed when the body is actually mounted (see ToolCallCard) so the
@@ -35,7 +39,7 @@ interface ToolCallHeaderProps {
   onToggle: () => void;
 }
 
-export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, durationMs, ariaControls, onOpenFile, onToggle }: ToolCallHeaderProps) {
+export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, summary, summaryPath, summaryModel, sizeHint, errorDetail, pruningBadge, durationMs, ariaControls, onOpenFile, onToggle }: ToolCallHeaderProps) {
   const statusTone =
     status === 'failed' ? 'failed'
     : null;
@@ -83,6 +87,7 @@ export function ToolCallHeader({ open, bodyVisible, name, nameTitle, status, sum
         ) : null}
         {showSizeHint && <span class="ml-auto block min-w-0 max-w-[var(--tool-call-size-column-width)] flex-[0_0_var(--tool-call-size-column-width)] truncate text-right font-mono text-[10px] text-muted/50">{sizeHint}</span>}
       </div>
+      {pruningBadge && <ToolResultPruningBadge badge={pruningBadge} />}
       {durationLabel && <span class="ml-auto flex-none whitespace-nowrap font-mono text-[10px] text-muted/60 [font-variant-numeric:tabular-nums]" title="Tool execution time">{durationLabel}</span>}
       {status !== 'failed' && <ToolCallStatusGlyph status={status} />}
       {statusTone && statusLabel && (

@@ -5,4 +5,5 @@ export * from './messages.js';
 export * from './sessions.js';
 export * from './settings.js';
 export * from './aggregate-stats.js';
+export * from './deferred-triggers.js';
 export * from './webview.js';

@@ -1,7 +1,7 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, mergeProxySettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeToolResultPruningSettings, mergeProxySettings, buildProxyProviderEntry, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage } from './helpers.js';
@@ -23,6 +23,33 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
   };
 }
 
+export function handleClearQueue(state: ArchState, cmd: Extract<Command, { kind: 'ClearQueue' }>): ReducerResult {
+  // Steering (FollowUp): remove all optimistic 'queued' transcript messages
+  // for this session and ask the backend to drop them from the SDK follow-up
+  // queue (`message.clearQueue`) so they will not run later. Does NOT touch
+  // `runningSessionPaths` and does NOT interrupt the current turn. Also drops
+  // any `pending.ops`/`pending.promoted` entries flagged `queued` for this
+  // session so a later `QueuedDelivered` cannot re-promote a cleared message.
+  const nextState = produce(state, (draft) => {
+    const list = draft.transcript.bySession[cmd.sessionPath];
+    if (list) {
+      draft.transcript.bySession[cmd.sessionPath] = list.filter(
+        (m) => !(m.role === 'user' && m.status === 'queued'),
+      );
+    }
+    for (const [corrId, op] of Object.entries(draft.pending.ops)) {
+      if (op.queued && op.sessionPath === cmd.sessionPath) delete draft.pending.ops[corrId];
+    }
+    for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
+      if (op.queued && op.sessionPath === cmd.sessionPath) delete draft.pending.promoted[corrId];
+    }
+  });
+  return {
+    state: nextState,
+    effects: [{ kind: 'ClearQueueRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+  };
+}
+
 export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send' }>): ReducerResult {
   // If the target session is still a pending tab (backend `session.create`
   // in flight), queue the send into ArchState instead of emitting `SendRpc`.
@@ -35,7 +62,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   // the normal (non-pending) path below.
   if (isPendingTabPath(cmd.sessionPath)) {
     const nextState = produce(state, (draft) => {
-      appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString());
+      appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
       draft.pending.sendQueueBySession[cmd.sessionPath] = [
         ...(draft.pending.sendQueueBySession[cmd.sessionPath] ?? []),
         {
@@ -71,7 +98,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   // each entry as a `Send` Command, which goes through the normal path below.
   if (!state.settings.backendReady) {
     const nextState = produce(state, (draft) => {
-      appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString());
+      appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
       draft.pending.backendReadyQueueBySession[cmd.sessionPath] = [
         ...(draft.pending.backendReadyQueueBySession[cmd.sessionPath] ?? []),
         {
@@ -98,6 +125,61 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
     };
   }
 
+  // Steering (FollowUp): a turn is already running for this session. Queue
+  // the message as a follow-up (SDK `AgentSession.followUp()`) — it runs as a
+  // fresh turn after the current one completes. Insert the optimistic user
+  // message with status 'queued' (rendered dimmed + badged), record a
+  // PendingOp flagged `queued` so the `!ok` rollback knows not to clear
+  // `runningSessionPaths` (the session is still running the original turn,
+  // not this queued send), and emit a `SendRpc`. The session is already in
+  // `runningSessionPaths` so we do NOT re-add it. Draft + composer inputs are
+  // cleared as for a normal send (captured onto the PendingOp for rollback).
+  // No prepass chip is set — followUp has no pruning prepass.
+  if (state.sessions.runningSessionPaths.includes(cmd.sessionPath)) {
+    const inputsSnapshot = state.composer.pendingComposerInputsBySession[cmd.sessionPath] ?? [];
+    const nextState = produce(state, (draft) => {
+      appendLocalUserMessage(
+        draft,
+        cmd.sessionPath,
+        cmd.localId,
+        cmd.composedText,
+        cmd.userParts,
+        new Date(cmd.timestamp).toISOString(),
+        'queued',
+        cmd.customType,
+        cmd.customDetails,
+      );
+      draft.pending.ops[cmd.corrId] = {
+        kind: 'send',
+        sessionPath: cmd.sessionPath,
+        localId: cmd.localId,
+        previousSummary: cmd.previousSummary,
+        text: cmd.text,
+        inputs: [...inputsSnapshot],
+        startedAt: cmd.timestamp,
+        queued: true,
+      };
+      delete draft.composer.draftTextBySession[cmd.sessionPath];
+      delete draft.composer.pendingComposerInputsBySession[cmd.sessionPath];
+    });
+    return {
+      state: nextState,
+      effects: [
+        {
+          kind: 'SendRpc',
+          corrId: cmd.corrId,
+          sessionPath: cmd.sessionPath,
+          text: cmd.text,
+          inputs: cmd.inputs,
+          localId: cmd.localId,
+          composedText: cmd.composedText,
+          userParts: cmd.userParts,
+          priorPruningMode: cmd.priorPruningMode,
+        },
+      ],
+    };
+  }
+
   // Normal path: insert optimistic user message + mark session busy
   // immediately so the webview shows an activity indicator right away
   // (instead of waiting for the backend's agent_start event which fires
@@ -109,7 +191,7 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
   // wires the webview `sendRejected.inputs` restore from the same payload.
   const inputsSnapshot = state.composer.pendingComposerInputsBySession[cmd.sessionPath] ?? [];
   const nextState = produce(state, (draft) => {
-    appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString());
+    appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString(), 'completed', cmd.customType, cmd.customDetails);
     draft.pending.ops[cmd.corrId] = {
       kind: 'send',
       sessionPath: cmd.sessionPath,
@@ -146,6 +228,8 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         text: cmd.text,
         inputs: cmd.inputs,
         localId: cmd.localId,
+        composedText: cmd.composedText,
+        userParts: cmd.userParts,
         priorPruningMode: cmd.priorPruningMode,
       },
     ],
@@ -184,6 +268,7 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
         messageId: cmd.messageId,
         text: cmd.text,
         localId: cmd.localId,
+        composedText: cmd.text,
       },
     ],
   };
@@ -352,6 +437,30 @@ export function handleSetPruningSettings(state: ArchState, cmd: Extract<Command,
   };
 }
 
+export function handleSetToolResultPruningSettings(state: ArchState, cmd: Extract<Command, { kind: 'SetToolResultPruningSettings' }>): ReducerResult {
+  // Option B: apply optimistically for instant UI. The service keeps its
+  // catch+mirror+notice (graceful degradation when PI_CODING_AGENT_DIR is
+  // absent), so SetToolResultPruningSettingsResult is always {ok:true} and no
+  // snapshot/revert is needed. mergeToolResultPruningSettings matches the
+  // disk-write merge so optimistic state == persisted state.
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        toolResultPruningSettings: mergeToolResultPruningSettings(state.settings.toolResultPruningSettings, cmd.settings),
+      },
+    },
+    effects: [
+      {
+        kind: 'SetToolResultPruningSettings',
+        corrId: cmd.corrId,
+        settings: cmd.settings,
+      },
+    ],
+  };
+}
+
 export function handleSetProxySettings(state: ArchState, cmd: Extract<Command, { kind: 'SetProxySettings' }>): ReducerResult {
   // Optimistic apply for instant UI, mirroring handleSetPruningSettings. The
   // service persists + regenerates litellm_config.yaml + restarts the proxy;
@@ -372,6 +481,41 @@ export function handleSetProxySettings(state: ArchState, cmd: Extract<Command, {
         kind: 'SetProxySettings',
         corrId: cmd.corrId,
         settings: cmd.settings,
+      },
+    ],
+  };
+}
+
+export function handleAddProxyProvider(state: ArchState, cmd: Extract<Command, { kind: 'AddProxyProvider' }>): ReducerResult {
+  // The message-router validates input + dedupes before dispatching, so by the
+  // time we get here the entry is buildable + the name is free. Guard anyway:
+  // if somehow unbuildable, no-op (the router already showed a notice).
+  const entry = buildProxyProviderEntry(cmd.input);
+  if (!entry) {
+    return { state, effects: [] };
+  }
+  const name = cmd.input.name.trim().toLowerCase();
+  // Optimistic apply: merge a fresh pending `proxy.providers.<name>` entry
+  // (empty modelListOrder, <name>-shared model-info id). The service then
+  // persists the key to proxy/.env + writes settings.json + runs sync-models +
+  // restarts the proxy; on failure it reloads proxy settings from disk
+  // (ProxySettingsChanged) to revert this optimistic entry. buildProxyProviderEntry
+  // is shared with the service so optimistic state == persisted state.
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        proxySettings: mergeProxySettings(state.settings.proxySettings, {
+          providers: { [name]: entry },
+        }),
+      },
+    },
+    effects: [
+      {
+        kind: 'AddProxyProvider',
+        corrId: cmd.corrId,
+        input: cmd.input,
       },
     ],
   };

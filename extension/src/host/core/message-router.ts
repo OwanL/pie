@@ -2,7 +2,8 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, PruningMode, ProxySettingsUpdate } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, ToolResultPruningSettings, PruningMode, ProxySettingsUpdate } from '../../shared/protocol';
+import { deriveApiKeyEnv } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
@@ -29,7 +30,14 @@ export interface SessionServiceLike {
   jumpToLatestTranscript(sessionPath?: string): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
+  setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
   setProxySettings(updates: ProxySettingsUpdate): Promise<void>;
+  addProxyProvider(input: import('../../shared/protocol').ProxyProviderAddInput): Promise<void>;
+  /** Notify deferred triggers that the user sent a message in `sessionPath`. */
+  notifyUserInput(sessionPath: string): void;
+  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
+   *  omitted). Invoked by the webview's status-strip cancel affordance. */
+  cancelDeferredTrigger(sessionPath: string, triggerId?: string): void;
 }
 
 /**
@@ -93,6 +101,8 @@ export class MessageRouter {
 
       case 'interrupt':
         return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>);
+      case 'clearQueue':
+        return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>);
 
       case 'openFilePicker':
         return await this.onOpenFilePicker();
@@ -160,14 +170,23 @@ export class MessageRouter {
       case 'setFileRead':
         return this.onSetFileRead(msg as Extract<WebviewToHostMessage, { type: 'setFileRead' }>);
 
+      case 'setSystemPromptToggles':
+        return this.onSetSystemPromptToggles(msg as Extract<WebviewToHostMessage, { type: 'setSystemPromptToggles' }>);
+
       case 'setPrefs':
         return this.onSetPrefs(msg as Extract<WebviewToHostMessage, { type: 'setPrefs' }>);
 
       case 'setPruningSettings':
         return await this.onSetPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>);
 
+      case 'setToolResultPruningSettings':
+        return await this.onSetToolResultPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setToolResultPruningSettings' }>);
+
       case 'setProxySettings':
         return await this.onSetProxySettings(msg as Extract<WebviewToHostMessage, { type: 'setProxySettings' }>);
+
+      case 'addProxyProvider':
+        return await this.onAddProxyProvider(msg as Extract<WebviewToHostMessage, { type: 'addProxyProvider' }>);
 
       case 'startEdit':
         return this.onStartEdit(msg as Extract<WebviewToHostMessage, { type: 'startEdit' }>);
@@ -206,6 +225,9 @@ export class MessageRouter {
 
       case 'retrySend':
         return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>);
+
+      case 'cancelDeferredTrigger':
+        return this.onCancelDeferredTrigger(msg as Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>);
 
       default:
         return;
@@ -288,6 +310,12 @@ export class MessageRouter {
       kind: 'Command',
       cmd: { kind: 'Send', corrId, sessionPath, text, inputs, composedText, localId, userParts, previousSummary, priorPruningMode: opts?.priorPruningMode, timestamp: Date.now() },
     });
+    // After the user's message is dispatched, fire any `user_input` deferred
+    // trigger for this session. The wake-up it injects lands as a follow-up
+    // (queued after the user's turn) rather than preempting the user's
+    // message. Synthetic wake-up sends bypass `onSend`, so this never
+    // self-triggers.
+    this.service.notifyUserInput(sessionPath);
   }
 
   private async onEditMessage(msg: Extract<WebviewToHostMessage, { type: 'editMessage' }>): Promise<void> {
@@ -335,6 +363,19 @@ export class MessageRouter {
     });
     // Completion-notification suppression is now set in the EffectRunner's
     // InterruptRpc path (the side-effect executor), not as a router side-call.
+  }
+
+  private onClearQueue(msg: Extract<WebviewToHostMessage, { type: 'clearQueue' }>): void {
+    const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
+    if (!sessionPath) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: clearQueue arrived without a sessionPath.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'ClearQueue', corrId, sessionPath },
+    });
   }
 
   private async onOpenFilePicker(): Promise<void> {
@@ -576,6 +617,19 @@ export class MessageRouter {
     });
   }
 
+  private onSetSystemPromptToggles(msg: Extract<WebviewToHostMessage, { type: 'setSystemPromptToggles' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: {
+        kind: 'SetSystemPromptToggles',
+        corrId: crypto.randomUUID(),
+        sessionPath: msg.sessionPath,
+        disabledEntries: [...msg.disabledEntries],
+      },
+    });
+    this.scheduleRender();
+  }
+
   private onRevertFile(msg: Extract<WebviewToHostMessage, { type: 'revertFile' }>): void {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
@@ -602,11 +656,83 @@ export class MessageRouter {
     this.scheduleRender();
   }
 
+  private async onSetToolResultPruningSettings(msg: Extract<WebviewToHostMessage, { type: 'setToolResultPruningSettings' }>): Promise<void> {
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'SetToolResultPruningSettings', corrId, settings: msg.settings },
+    });
+    this.scheduleRender();
+  }
+
   private async onSetProxySettings(msg: Extract<WebviewToHostMessage, { type: 'setProxySettings' }>): Promise<void> {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetProxySettings', corrId, settings: msg.settings },
+    });
+    this.scheduleRender();
+  }
+
+  private async onAddProxyProvider(msg: Extract<WebviewToHostMessage, { type: 'addProxyProvider' }>): Promise<void> {
+    const input = msg.input;
+    // Validate input before dispatching — invalid adds never reach the reducer
+    // (so no phantom provider entry appears in the UI). On success the reducer
+    // applies optimistically + the service persists/syncs/restarts; on failure
+    // the service reloads from disk to revert.
+    const name = (input?.name ?? '').trim().toLowerCase();
+    const apiBase = (input?.apiBase ?? '').trim();
+    const apiKey = input?.apiKey ?? '';
+    const litellmProvider = (input?.litellmProvider ?? '').trim();
+    if (!/^[a-z][a-z0-9_-]{0,62}$/.test(name)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: name must be 1–63 chars, start with a lowercase letter, and only contain lowercase letters, digits, “_” or “-”.' });
+      this.scheduleRender();
+      return;
+    }
+    const existing = Object.keys(this.getArchState().settings.proxySettings.providers)
+      .map((n) => n.toLowerCase());
+    if (existing.includes(name)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: a provider named “${name}” already exists in the proxy config.` });
+      this.scheduleRender();
+      return;
+    }
+    // Also guard the derived apiKeyEnv: deriveApiKeyEnv is non-injective
+    // (foo / foo- / foo_ all -> FOO_API_KEY), so a colliding name would silently
+    // overwrite another provider's key in proxy/.env + share one env var.
+    const apiKeyEnv = deriveApiKeyEnv(name);
+    if (!apiKeyEnv) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: could not derive an API key env var for “${name}”.` });
+      this.scheduleRender();
+      return;
+    }
+    const envCollide = Object.entries(this.getArchState().settings.proxySettings.providers)
+      .filter(([, p]) => p.apiKeyEnv === apiKeyEnv);
+    if (envCollide.length > 0) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: the name “${name}” would share the env var ${apiKeyEnv} with an existing provider (${envCollide.map(([n]) => n).join(', ')}). Pick a more distinct name.` });
+      this.scheduleRender();
+      return;
+    }
+    let baseUrl: URL | null = null;
+    try { baseUrl = apiBase ? new URL(apiBase) : null; } catch { baseUrl = null; }
+    if (!baseUrl || (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:')) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: API base must be a valid http(s) URL (e.g. https://api.example.com/v1).' });
+      this.scheduleRender();
+      return;
+    }
+    if (!apiKey) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: an API key is required. It is stored safely in proxy/.env (gitignored), referenced by an env var — never written to settings.json or models.yaml.' });
+      this.scheduleRender();
+      return;
+    }
+    if (!litellmProvider) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: a LiteLLM provider type is required (e.g. “openai” for OpenAI-compatible endpoints, “anthropic”, “azure”).' });
+      this.scheduleRender();
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'AddProxyProvider', corrId, input: { name, apiBase, apiKey, litellmProvider, maxConcurrentRequests: input.maxConcurrentRequests } },
     });
     this.scheduleRender();
   }
@@ -752,6 +878,19 @@ export class MessageRouter {
       },
       priorPruningMode !== undefined ? { priorPruningMode } : undefined,
     );
+  }
+
+  /** `cancelDeferredTrigger` — cancel a deferred trigger (or all for the
+   *  session when `triggerId` is omitted) from the webview's status-strip
+   *  cancel affordance. Side-effect only (no reducer event): the registry
+   *  owns the in-memory set + sidecar op, and requests its own re-render. */
+  private onCancelDeferredTrigger(msg: Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>): void {
+    const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
+    if (!sessionPath) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: cancelDeferredTrigger arrived without a sessionPath.' });
+      return;
+    }
+    this.service.cancelDeferredTrigger(sessionPath, msg.triggerId);
   }
 
   // ---------------------------------------------------------------------------

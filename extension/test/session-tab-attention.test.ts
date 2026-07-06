@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { SessionTab } from '../src/webview/panel/session-tabs';
-import type { SessionSummary } from '../src/shared/protocol';
+import type { ProxySessionStatus, SessionSummary } from '../src/shared/protocol';
 
 // Derive the props type from the component so the test stays in sync with the
 // real SessionTab signature without exporting a separate interface.
@@ -51,8 +51,10 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     // plain host path.
     activePath: null,
     hasPendingExtensionUIRequest: false,
+    proxySessionStatus: null,
     activeRunSummary: null,
     isPinned: false,
+    hasDeferredTriggers: false,
     onContextMenu: noop,
     onPointerDown: noop,
     onClick: noop,
@@ -144,6 +146,30 @@ test('pinned tab renders an avatar instead of a label, hides the close button, a
   // The full name is still reachable on hover.
   const main = tab.querySelector('.session-tab-main') as HTMLElement;
   assert.equal(main.getAttribute('title'), 'Alpha');
+});
+
+test('parked proxy sessions get a distinct class, pause badge, and explanatory title', () => {
+  const alpha = makeSession('/sessions/alpha', 'Alpha');
+  const parked: ProxySessionStatus = {
+    provider: 'umans',
+    state: 'queued',
+    activeSessions: 3,
+    queuedSessions: 2,
+    maxConcurrentRequests: 3,
+  };
+  const tab = renderTab({
+    tabPath: '/sessions/alpha',
+    activePath: alpha.path,
+    proxySessionStatus: parked,
+    runningPathSet: new Set(['/sessions/alpha']),
+  });
+
+  assert.ok(classList(tab).includes('running'));
+  assert.ok(classList(tab).includes('parked'));
+  assert.ok(tab.querySelector('.session-tab-parked'));
+
+  const main = tab.querySelector('.session-tab-main') as HTMLElement;
+  assert.equal(main.getAttribute('title'), 'Alpha (waiting for proxy slot: umans 3/3, 2 queued)');
 });
 
 test('pending request wins title precedence over unread-finished', () => {

@@ -345,6 +345,15 @@ export interface RuntimePrefsSetParams {
   bashWarmPoolSize?: number;
   bashFastPath?: boolean;
   bashShellPath?: string;
+  /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
+   *  default. Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000]. */
+  bashWarmupTimeoutMs?: number;
+  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
+   *  default. Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
+  bashAcquireTimeoutMs?: number;
+  /** Default timeout (seconds) for bash commands that don't specify one.
+   *  Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
+  bashDefaultTimeout?: number;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
   subagentDropTools?: string[];
@@ -478,7 +487,10 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashFastPath = rawBashFastPath === undefined ? undefined : typeof rawBashFastPath === 'boolean' ? rawBashFastPath : fail('runtimePrefs.set', 'bashFastPath must be a boolean when provided');
   const rawBashShellPath = (params as Record<string, unknown>)['bashShellPath'];
   const bashShellPath = rawBashShellPath === undefined ? undefined : typeof rawBashShellPath === 'string' ? rawBashShellPath : fail('runtimePrefs.set', 'bashShellPath must be a string when provided');
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools };
+  const bashWarmupTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashWarmupTimeoutMs', (params as Record<string, unknown>)['bashWarmupTimeoutMs'], 0, 60000);
+  const bashAcquireTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashAcquireTimeoutMs', (params as Record<string, unknown>)['bashAcquireTimeoutMs'], 0, 60000);
+  const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
+  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashAcquireTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools };
 }
 
 export interface OpenTabsSetParams {
@@ -529,4 +541,35 @@ export function validateSettingsSet(params: unknown): SettingsSetParams {
     out.defaultThinkingLevel = dt as ThinkingLevel;
   }
   return out;
+}
+
+export interface SystemPromptTogglesSetParams {
+  sessionPath: string;
+  /** Complete set of disabled entry ids for the session (not a delta). An
+   *  empty array re-enables everything. */
+  disabledEntries: string[];
+}
+
+/** Validate `systemPromptToggles.set` (host -> backend). The host sends the
+ *  complete disabled-entry set for a session; the backend persists it, rewrites
+ *  the SDK base prompt, and re-emits `session.opened`. */
+export function validateSystemPromptTogglesSet(params: unknown): SystemPromptTogglesSetParams {
+  if (!isObj(params)) fail('systemPromptToggles.set', 'expected an object');
+  const sessionPath = (params as Record<string, unknown>)['sessionPath'];
+  if (typeof sessionPath !== 'string' || !sessionPath) {
+    fail('systemPromptToggles.set', 'sessionPath must be a non-empty string');
+  }
+  const rawEntries = (params as Record<string, unknown>)['disabledEntries'];
+  if (!Array.isArray(rawEntries)) {
+    fail('systemPromptToggles.set', 'disabledEntries must be an array of strings');
+  }
+  const disabledEntries: string[] = [];
+  for (let i = 0; i < rawEntries.length; i += 1) {
+    const entry = rawEntries[i];
+    if (typeof entry !== 'string' || !entry) {
+      fail('systemPromptToggles.set', `disabledEntries[${i}] must be a non-empty string`);
+    }
+    disabledEntries.push(entry);
+  }
+  return { sessionPath: sessionPath as string, disabledEntries };
 }

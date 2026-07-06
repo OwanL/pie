@@ -86,6 +86,28 @@ export function handleSetFileRead(state: ArchState, cmd: Extract<Command, { kind
   };
 }
 
+/** `SetSystemPromptToggles` — no host state mutation. The backend owns the
+ *  toggle set and re-emits `session.opened` with updated `disabled` flags on
+ *  each `SystemPromptEntry`; that re-emit (routed through `SessionOpened`) is
+ *  what updates `systemPromptsBySession`. This reducer only emits the RPC
+ *  effect that pushes the new set to the backend. */
+export function handleSetSystemPromptToggles(
+  _state: ArchState,
+  cmd: Extract<Command, { kind: 'SetSystemPromptToggles' }>,
+): ReducerResult {
+  return {
+    state: _state,
+    effects: [
+      {
+        kind: 'SetSystemPromptTogglesRpc',
+        corrId: cmd.corrId,
+        sessionPath: cmd.sessionPath,
+        disabledEntries: [...cmd.disabledEntries],
+      },
+    ],
+  };
+}
+
 export function handleAddFilesystemPaths(state: ArchState, cmd: Extract<Command, { kind: 'AddFilesystemPaths' }>): ReducerResult {
   // The reducer owns the composer-input append (pure): for each path,
   // create a `filesystemPathRef` input (ID from corrId, name from

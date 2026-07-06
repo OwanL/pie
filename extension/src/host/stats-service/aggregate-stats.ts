@@ -20,6 +20,7 @@ import type {
   AggregateProviderThroughput,
   AggregateStats,
 } from '../../shared/protocol';
+import { EMPTY_WARM_BASH_STATS } from '../../shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
 import type { RunSnapshot } from '../run-analytics';
 
@@ -438,11 +439,25 @@ export function computeAggregateStats(
   }
 
   // ── Live aggregate tok/s: sum of measured rates across running sessions ──
+  // Only sessions ACTIVELY generating contribute. A session paused on a tool
+  // call (or between turns) holds its last rate for the chip display (the
+  // chip shows '⏸ 200 tok/s' — see token-rate.ts, whose paused branch returns
+  // state:'paused' with a held `rate`) but must NOT inflate the status-bar
+  // total for the whole tool-call duration. The contract documents this as
+  // "0 when no session is generating". Filtering on `state.state ===
+  // 'generating'` (in addition to `rate > 0`) is what excludes the stale held
+  // rate; `rate > 0` alone sums it for the entire pause.
   let liveTokensPerSecond = 0;
   const runningSet = new Set(runningSessionPaths);
   for (const sessionPath of runningSet) {
     const state = ratesBySession[sessionPath];
-    if (state && typeof state.rate === 'number' && Number.isFinite(state.rate) && state.rate > 0) {
+    if (
+      state
+      && state.state === 'generating'
+      && typeof state.rate === 'number'
+      && Number.isFinite(state.rate)
+      && state.rate > 0
+    ) {
       liveTokensPerSecond += state.rate;
     }
   }
@@ -475,6 +490,7 @@ export function computeAggregateStats(
     runCount: runs.length,
     sessionCount: sessionPaths.size,
     lastRun,
+    warmBash: EMPTY_WARM_BASH_STATS,
     ready: true,
   };
 }

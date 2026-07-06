@@ -23,6 +23,9 @@ export interface OpenTabSummary {
   completion?: Completion;
   reviewReason?: string;
   evaluatedAt?: string;
+  /** True when this tab is pinned (browser-style pinned tab). Lets the
+   *  listOpen output show which tabs are pinned so reviewers can skip them. */
+  pinned?: boolean;
 }
 
 /** A review record the tool appends to the sidecar (`reviews.jsonl`). */

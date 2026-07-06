@@ -95,7 +95,7 @@ test('serialization: SendRpc queued before InterruptRpc executes send first (FIF
   const runner = new EffectRunner(deps);
 
   // Queue send, then immediately queue interrupt for the same session.
-  const sendEffect: Effect = { kind: 'SendRpc', corrId: 'c-send', sessionPath: '/a', text: 'hi', inputs: [], localId: 'local-1' };
+  const sendEffect: Effect = { kind: 'SendRpc', corrId: 'c-send', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'local-1' };
   const interruptEffect: Effect = { kind: 'InterruptRpc', corrId: 'c-int', sessionPath: '/a' };
 
   runner.run(sendEffect);
@@ -119,7 +119,7 @@ test('serialization: interrupt does not race ahead of a preceding send on the sa
 
   // Simulate the real scenario: reducer returns SendRpc from a Send command,
   // then InterruptRpc from an Interrupt command issued immediately after.
-  runner.run({ kind: 'SendRpc', corrId: 'c1', sessionPath: '/s', text: 'msg', inputs: [], localId: 'local-2' });
+  runner.run({ kind: 'SendRpc', corrId: 'c1', sessionPath: '/s', text: 'msg', inputs: [], composedText: 'hi', localId: 'local-2' });
   runner.run({ kind: 'InterruptRpc', corrId: 'c2', sessionPath: '/s' });
 
   await settle();
@@ -183,7 +183,7 @@ test('interrupt: non-interrupt RPCs do not set the completion-suppression flag',
   const { deps, suppressCalls } = makeSerializingDeps();
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], localId: 'local-3' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'local-3' });
   await settle();
 
   assert.deepEqual(suppressCalls, [], 'only InterruptRpc sets the suppress flag');

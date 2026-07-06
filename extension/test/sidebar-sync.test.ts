@@ -8,7 +8,7 @@ import {
   flushDirtySnapshot,
   reconcilePostedMessageDelivery,
 } from '../src/host/sidebar/sync';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PROXY_SETTINGS, EMPTY_AGGREGATE_STATS, type ViewState, type HostToWebviewMessage } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, EMPTY_AGGREGATE_STATS, type ViewState, type HostToWebviewMessage } from '../src/shared/protocol';
 
 const baseViewState: ViewState = {
   sessions: [],
@@ -33,8 +33,10 @@ const baseViewState: ViewState = {
   runSummariesBySession: {},
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
+  deferredTriggers: [],
   draftText: '',
   busy: false,
+  retryStatus: null,
   notice: null,
   backendReady: true,
   workspaceCwd: '/workspace',
@@ -60,6 +62,7 @@ const baseViewState: ViewState = {
     provider: 'github-copilot',
     thinkingLevel: 'minimal' as const,
   },
+  toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
   proxySettings: DEFAULT_PROXY_SETTINGS,
   pruningCatalog: {
     skills: [],

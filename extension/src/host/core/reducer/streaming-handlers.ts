@@ -294,3 +294,26 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
     }
   }
 }
+
+/** Steering (FollowUp): the agent loop injected a queued follow-up user
+ *  message into a turn. Promote the EARLIEST optimistic 'queued' user message
+ *  to 'completed' (FIFO — the SDK drains the follow-up queue one message at a
+ *  time in enqueue order, so the first remaining 'queued' message is the one
+ *  now running). Drop its `pending.promoted` rollback snapshot (by localId) —
+ *  the message has committed to a turn, so a later failure is an in-turn
+ *  error, never a rollback. The subsequent assistant `MessageStarted` appends
+ *  the reply under the in-progress request's id via the existing path. */
+export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { kind: 'QueuedDelivered' }>): ReducerResult {
+  const list = state.transcript.bySession[event.sessionPath];
+  if (!list) return { state, effects: [] };
+  const idx = list.findIndex((m) => m.role === 'user' && m.status === 'queued');
+  if (idx < 0) return { state, effects: [] };
+  const localId = list[idx].id;
+  const nextState = produce(state, (draft) => {
+    draft.transcript.bySession[event.sessionPath][idx].status = 'completed';
+    for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
+      if (op.queued && op.localId === localId) delete draft.pending.promoted[corrId];
+    }
+  });
+  return { state: nextState, effects: [] };
+}

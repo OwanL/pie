@@ -162,6 +162,63 @@ export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, 
 export type Mode = "single" | "parallel" | "chain";
 type ErrorResponse = { content: { type: "text"; text: string }[]; details: SubagentDetails; isError: true };
 
+/** Environment key for the last-resort settlement deadline (milliseconds).
+ *  See {@link resolveSettlementMs}. */
+const SETTLEMENT_ENV = "PIE_SUBAGENT_SETTLEMENT_MS";
+/** Default settlement net: 30 minutes. This is a defense-in-depth last resort,
+ *  NOT the primary hang fix — abort propagation (Slice A) and abortable
+ *  concurrency (Slice A) handle the known hang classes structurally. The net
+ *  exists so that even a future bug that reintroduces an unbounded wait can't
+ *  dangle the parent session forever. */
+export const DEFAULT_SETTLEMENT_MS = 30 * 60 * 1000;
+
+/** Resolve the settlement deadline for a subagent tool call, in milliseconds.
+ *
+ * Reads `PIE_SUBAGENT_SETTLEMENT_MS`:
+ * - Unset/empty → {@link DEFAULT_SETTLEMENT_MS} (the net is ON by default).
+ * - `0` → explicitly disabled (no net; only for debugging/emergency).
+ * - A positive number → the deadline in ms.
+ * - Invalid (NaN/negative) → {@link DEFAULT_SETTLEMENT_MS}.
+ *
+ * Returns the deadline in ms, or `0` to disable the net entirely.
+ */
+export function resolveSettlementMs(): number {
+	const raw = process.env[SETTLEMENT_ENV];
+	if (raw === undefined || raw === "") return DEFAULT_SETTLEMENT_MS;
+	const ms = Number(raw);
+	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SETTLEMENT_MS;
+	return ms;
+}
+
+/** Environment key for the post-deadline grace period (milliseconds).
+ *  See {@link resolveSettlementGraceMs}. */
+const SETTLEMENT_GRACE_ENV = "PIE_SUBAGENT_SETTLEMENT_GRACE_MS";
+/** Default grace given to a force-settled dispatch to surface its own abort
+ *  result before we synthesize one (prefers the real abort result over a
+ *  synthesized error). */
+export const DEFAULT_SETTLEMENT_GRACE_MS = 5000;
+
+/** Resolve the grace period allowed after the settlement deadline fires before
+ *  synthesizing a terminal error toolResult. Unset/invalid → default; `0` →
+ *  skip the grace and synthesize immediately (useful in tests). */
+export function resolveSettlementGraceMs(): number {
+	const raw = process.env[SETTLEMENT_GRACE_ENV];
+	if (raw === undefined || raw === "") return DEFAULT_SETTLEMENT_GRACE_MS;
+	const ms = Number(raw);
+	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SETTLEMENT_GRACE_MS;
+	return ms;
+}
+
+/** Sentinel resolved by the settlement timer when the dispatch hasn't returned. */
+const FORCE_SETTLE = Symbol("pie:subagent:force-settle");
+
+/** Loud log for a settlement / hardening event. Mirrors the runner's `logLoud`
+ *  shape so logs are uniformly grep-able under `source: "pie:subagent"`. Kept
+ *  local to execute.ts to avoid a new cross-module import for one helper. */
+function logLoud(event: string, details: Record<string, unknown>): void {
+	console.error(JSON.stringify({ source: "pie:subagent", event, ...details }));
+}
+
 /** Returns the standard response when the tool is disabled. */
 function disabledErrorResponse(params: SubagentParams): ErrorResponse {
 	return {
@@ -457,7 +514,16 @@ export async function execute(
 	if (!runtimeCtx.budget) runtimeCtx.budget = { sessions: 0 };
 
 	const checkSessionLimit = createSessionLimitChecker();
-	const discovery = discoverAgents(ctx.cwd, agentScope);
+	// Project-local agents are found by walking up from a cwd looking for an
+	// `agents/` dir. The session cwd (`ctx.cwd`) is the VS Code workspace root,
+	// which may sit ABOVE the actual project (e.g. a multi-repo workspace whose
+	// `agents/` lives in a subdirectory). Include each per-task `cwd` so a caller
+	// can point at a nested project root and have its agents discovered.
+	const discoveryCwds = [ctx.cwd];
+	if (params.cwd) discoveryCwds.push(params.cwd);
+	if (params.tasks) for (const t of params.tasks) if (t.cwd) discoveryCwds.push(t.cwd);
+	if (params.chain) for (const s of params.chain) if (s.cwd) discoveryCwds.push(s.cwd);
+	const discovery = discoverAgents(discoveryCwds, agentScope);
 	const agents = discovery.agents;
 	const validation = validateSubagentParams(params, agents);
 	if (!validation.ok) {
@@ -498,7 +564,46 @@ export async function execute(
 		allToolNames = undefined;
 	}
 
-	return dispatchToMode(
+	// Settlement net (last-resort, defense-in-depth): guarantee `execute()`
+	// ALWAYS returns within `settlementMs` even if a downstream phase (a future
+	// bug, an SDK that ignores abort, a dead provider stream the proxy didn't
+	// surface) hangs forever. This is NOT the primary hang fix — abort
+	// propagation (Slice A) + abortable concurrency (Slice A) + dead-stream
+	// surfacing at the proxy (Slice C) handle the known hang classes
+	// structurally. The net exists so the parent session can *never* dangle even
+	// if a future bug reintroduces an unbounded wait. On timeout it aborts the
+	// run (so runner.ts can return its own abort result), then force-returns a
+	// synthesized error toolResult if the dispatch still doesn't settle.
+	const settlementMs = resolveSettlementMs();
+	if (settlementMs <= 0) {
+		return dispatchToMode(
+			mode,
+			params,
+			ctx,
+			agents,
+			checkSessionLimit,
+			runtimeCtx,
+			makeDetailsBound,
+			onUpdate,
+			signal,
+			selectionCtx,
+			_toolCallId,
+			ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
+			parentSessionId,
+			allToolNames,
+		);
+	}
+
+	// Combine the parent signal with a settlement controller so a settlement
+	// abort propagates into runner.ts just like a user "Stop" (the runner's
+	// pre-spawn `raceAbort` and prompt-phase abort both honor it).
+	const settlementController = new AbortController();
+	const runSignal: AbortSignal =
+		typeof AbortSignal.any === "function"
+			? AbortSignal.any([signal, settlementController.signal])
+			: signal;
+
+	const dispatchPromise = dispatchToMode(
 		mode,
 		params,
 		ctx,
@@ -507,11 +612,83 @@ export async function execute(
 		runtimeCtx,
 		makeDetailsBound,
 		onUpdate,
-		signal,
+		runSignal,
 		selectionCtx,
 		_toolCallId,
 		ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
 		parentSessionId,
 		allToolNames,
 	);
+	// Swallow a late rejection from an orphaned dispatch so it never surfaces as
+	// an unhandled rejection after we've already returned a synthesized result.
+	dispatchPromise.catch(() => {});
+
+	let settlementTimer: NodeJS.Timeout | undefined;
+	const settlementTimerPromise: Promise<typeof FORCE_SETTLE> = new Promise((resolve) => {
+		settlementTimer = setTimeout(() => resolve(FORCE_SETTLE), settlementMs);
+		// Allow the process to exit even if the timer is still armed (defensive:
+		// the timer is cleared in the finally below on the normal path).
+		settlementTimer.unref?.();
+	});
+
+	try {
+		const winner = await Promise.race([dispatchPromise, settlementTimerPromise]);
+		if (winner !== FORCE_SETTLE) {
+			// Dispatch returned first (normal case AND the abort-quickly case,
+			// because on settlement abort runner.ts aborts and returns its own
+			// abort result, which dispatchToMode turns into the response).
+			return winner;
+		}
+
+		// FORCE_SETTLE won: the dispatch hasn't returned within the deadline.
+		// Abort the run so runner.ts can return a proper abort result, then give
+		// the dispatch a short grace to surface that result (prefer the real
+		// abort result over a synthesized one). Loud-log + user-visible message.
+		const cause = `subagent settlement deadline exceeded (${settlementMs / 1000}s)`;
+		settlementController.abort(new Error(cause));
+		logLoud("subagent force-settled", {
+			toolCallId: _toolCallId,
+			mode,
+			stage: "settlement-deadline",
+			settlementMs,
+			cause,
+		});
+		onUpdate?.({
+			content: [
+				{ type: "text", text: `⚠ Subagent force-settled: did not return within ${settlementMs / 1000}s. This is a bug — please report. See logs for [pie:subagent].` },
+			],
+			details: makeDetailsBound(mode, []),
+		});
+
+		const graceMs = resolveSettlementGraceMs();
+		let graceTimer: NodeJS.Timeout | undefined;
+		const gracePromise: Promise<typeof FORCE_SETTLE> = new Promise((resolve) => {
+			graceTimer = setTimeout(() => resolve(FORCE_SETTLE), graceMs);
+			graceTimer.unref?.();
+		});
+		try {
+			const graceWinner = await Promise.race([dispatchPromise, gracePromise]);
+			if (graceWinner !== FORCE_SETTLE) {
+				return graceWinner;
+			}
+		} finally {
+			if (graceTimer) clearTimeout(graceTimer);
+		}
+
+		// Dispatch still didn't settle after the grace window: synthesize a
+		// terminal error toolResult so the SDK writes a result and the parent
+		// transcript records the failure rather than dangling forever.
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Subagent did not settle within ${settlementMs / 1000}s and was force-settled. This is a bug — please report.`,
+				},
+			],
+			details: makeDetailsBound(mode, []),
+			isError: true,
+		};
+	} finally {
+		if (settlementTimer) clearTimeout(settlementTimer);
+	}
 }

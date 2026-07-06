@@ -205,7 +205,7 @@ test('EffectRunner dispatches a failure result when an RPC rejects', async () =>
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c3', sessionPath: '/a', text: 'hi', inputs: [], localId: 'local-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c3', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'local-1' });
   await settle();
 
   assert.equal(events.length, 1);
@@ -484,7 +484,7 @@ test('EffectRunner SendRpc keeps the send-timer armed after early-ack (cleared a
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-ok', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-ok', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   // Early-ack succeeded (SendResult{ok:true}); the send-timer stays armed — it
   // owns the post-ack, pre-commit phase and is cleared at the commit point
@@ -517,7 +517,7 @@ test('EffectRunner SendRpc send-timer dispatches PreflightFailed on timeout (pos
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-pf', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-pf', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   // Early-ack happened (SendResult{ok:true}); the send-timer is armed (no
   // commit point reached — no ClearSendTimer dispatched).
@@ -556,7 +556,7 @@ test('EffectRunner SendRpc send-timer budget honors getSendTimerTimeoutMs (prepa
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-pp', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-pp' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-pp', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-pp' });
   await settle();
   assert.equal(timers.size, 1); // send-timer armed after early-ack
   timers.runAll(); // fire
@@ -618,7 +618,7 @@ test('EffectRunner SendRpc clears the send-timer on pre-ack failure (no spurious
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-fail', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-fail', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   // The failure path must have cancelled the send-timer; firing pending timers
   // must not produce a spurious PreflightFailed.
@@ -635,12 +635,13 @@ test('EffectRunner SendRpc clears the send-timer on pre-ack failure (no spurious
   runner.dispose();
 });
 
-test('EffectRunner send-timer fire is idempotent — a late ClearSendTimer no-ops (no double dispatch)', async () => {
-  // Double-rollback absence: if the send-timer fires (PreflightFailed) and the
-  // commit point then arrives late, the ClearSendTimer is a no-op (the send is
-  // already disposed) — exactly one PreflightFailed, never two. The reducer's
-  // handlePreflightFailed also no-ops if promoted was already dropped, so a
-  // post-fire commit cannot double-rollback.
+test('EffectRunner send-timer fire then late commit retracts the false-positive (PreflightSuperseded) — no double PreflightFailed', async () => {
+  // False-positive retraction (hardening): if the send-timer fires
+  // (PreflightFailed) because the provider was slow to first-token, and the
+  // commit point then arrives late (the turn actually started streaming),
+  // ClearSendTimer detects `fired === true` and dispatches a PreflightSuperseded
+  // retraction so the reducer undoes the rollback. Exactly one PreflightFailed is
+  // ever dispatched (no double-rollback); the second event is the retraction.
   const timers = new FakeTimerSink();
   const dispatchedEvents: Event[] = [];
   const { deps } = makeEffectRunnerDeps({
@@ -651,16 +652,57 @@ test('EffectRunner send-timer fire is idempotent — a late ClearSendTimer no-op
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-dd', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-dd', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   timers.runAll(); // fire → PreflightFailed dispatched once
-  assert.equal(dispatchedEvents.length, 1);
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1);
   assert.equal(dispatchedEvents[0]?.kind, 'PreflightFailed');
 
-  // A late ClearSendTimer (commit point arriving after the fire) must no-op.
+  // A late ClearSendTimer (commit point arriving after the fire) retracts the
+  // false-positive: dispatches PreflightSuperseded (NOT a second PreflightFailed).
   runner.run({ kind: 'ClearSendTimer', corrId: 'c-dd' });
   timers.runAll();
-  assert.equal(dispatchedEvents.length, 1); // still exactly one
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1); // still exactly one PreflightFailed
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightSuperseded').length, 1); // exactly one retraction
+  const retract = dispatchedEvents.find((e) => e.kind === 'PreflightSuperseded');
+  if (retract?.kind === 'PreflightSuperseded') {
+    assert.equal(retract.corrId, 'c-dd');
+    assert.equal(retract.sessionPath, '/a');
+    assert.equal(retract.localId, 'loc-1');
+    assert.equal(retract.composedText, 'hi');
+    assert.equal(retract.requestId, 'req-dd');
+    assert.equal(typeof retract.timestamp, 'number');
+  }
+  runner.dispose();
+});
+
+test('EffectRunner send-timer pre-ack fire (no requestId) does NOT emit a stray PreflightSuperseded on late clear', async () => {
+  // Degenerate case (hardening): the send-timer fired BEFORE the early-ack
+  // stamped a requestId. `onSendTimerFire` logs a warn but dispatches NO
+  // `PreflightFailed` (it has no requestId to attribute). A late ClearSendTimer
+  // must NOT emit a stray `PreflightSuperseded` — there was no false-positive
+  // notice/rollback to retract — so it falls through to the normal pruning
+  // restore. Guards against a spurious retraction for a turn that never
+  // surfaced an error in the first place.
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => new Promise(() => {}), // never early-acks → no requestId stamped
+    sendTimerTimeoutMs: 50,
+    timer: timers,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SendRpc', corrId: 'c-pre', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-pre' });
+  await settle();
+  timers.runAll(); // pre-ack fire → warn logged, NO PreflightFailed (no requestId)
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 0);
+
+  // A late ClearSendTimer must not retract a false-positive that never happened.
+  runner.run({ kind: 'ClearSendTimer', corrId: 'c-pre' });
+  await settle();
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightSuperseded').length, 0);
   runner.dispose();
 });
 
@@ -673,7 +715,7 @@ test('EffectRunner dispose clears all send-timers', async () => {
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-dispose', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-ttl-dispose', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   // Dispose before the timer can fire; firing pending timers must not dispatch.
   runner.dispose();
@@ -697,7 +739,7 @@ test('EffectRunner abortInFlightSend cancels an in-flight message.send (pre-ack)
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-abort', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-abort', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   // The send is in-flight (pre-ack, hanging). Abort it (Brief E interrupt).
   assert.equal(runner.abortInFlightSend('/a'), true);
@@ -732,7 +774,7 @@ test('EffectRunner abortInFlightSend returns false when the send already early-a
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-cl', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-cl', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-1' });
   await settle();
   runner.run({ kind: 'ClearSendTimer', corrId: 'c-cl' });
   assert.equal(runner.abortInFlightSend('/a'), false);
@@ -757,7 +799,7 @@ test('EffectRunner SendRpc restores prior pruning mode at the commit point (Brie
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-rp', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-rp', priorPruningMode: 'auto' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-rp', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-rp', priorPruningMode: 'auto' });
   await settle();
   // Early-ack: NO restore yet — the prepass is still running (pruning must stay
   // off until the turn commits).
@@ -787,7 +829,7 @@ test('EffectRunner SendRpc restores prior pruning mode on send-timer fire (Prefl
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-fire', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-fire', priorPruningMode: 'shadow' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-fire', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-fire', priorPruningMode: 'shadow' });
   await settle();
   // No commit point — fire the send-timer (PreflightFailed: the turn never
   // started streaming). The prepass ran (and timed out), so restoring is safe.
@@ -810,7 +852,7 @@ test('EffectRunner SendRpc restores prior pruning mode on pre-ack failure (Brief
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-paf', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-paf', priorPruningMode: 'custom' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-paf', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-paf', priorPruningMode: 'custom' });
   await settle();
   // Pre-ack failure: SendResult{ok:false} (no commit will come) + restore. The
   // prepass never ran (the RPC itself failed), so restoring is safe.
@@ -831,7 +873,7 @@ test('EffectRunner SendRpc does NOT touch pruning for a normal send (no priorPru
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-norm', sessionPath: '/a', text: 'hi', inputs: [], localId: 'loc-norm' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-norm', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-norm' });
   await settle();
   runner.run({ kind: 'ClearSendTimer', corrId: 'c-norm' });
   timers.runAll();

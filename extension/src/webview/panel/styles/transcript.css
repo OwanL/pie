@@ -280,6 +280,30 @@
   outline-offset: 2px;
 }
 
+/* ── Deferred-trigger wake-up bubble ───────────────────────────────────── */
+/* A host-injected user message that resumes a deferred session. It honestly
+   enters the transcript as a user turn (so it stays a right-aligned user
+   bubble), but the solid accent fill is swapped for a muted surface and a
+   dashed accent outline so it reads as system-injected rather than typed.
+   An "Auto-resume" header label (see message-item/header.tsx) completes the
+   differentiation. */
+.deferred-trigger-bubble {
+  background: color-mix(in srgb, var(--panel-subtle-surface) 55%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--panel-accent) 42%, var(--panel-border-subtle));
+}
+
+.deferred-trigger-bubble:hover {
+  /* Keep the dashed outline; just deepen the fill slightly on hover so the
+     click-to-edit affordance still reads. */
+  background: color-mix(in srgb, var(--panel-subtle-surface) 80%, transparent);
+}
+
+@media (forced-colors: active) {
+  .deferred-trigger-bubble {
+    border-style: dashed;
+  }
+}
+
 /* ── User-message rail (jump-to-prompt minimap) ──────────────────────────── */
 /* A thin vertical strip of clickable markers rendered in the gap just to the
    left of the scrollbar. Each marker corresponds to a user message; clicking
@@ -310,10 +334,12 @@
   pointer-events: none;
   z-index: 5;
   /* Hit-area height + visible dot size driven by the uiMessageRailSize pref
-     (see use-chat-prefs-css.ts). The dot scales with the click target but is
-     clamped so it never exceeds the 10px rail width, even on hover. */
-  --marker-dot: clamp(3px, calc(var(--message-rail-marker-size, 18px) * 0.3), 6px);
-  --marker-dot-hover: clamp(5px, calc(var(--message-rail-marker-size, 18px) * 0.6), 10px);
+     (see use-chat-prefs-css.ts). The dot scales with the click target across
+     the full slider range, clamped so it never exceeds the 10px rail width
+     (8px resting, 10px on hover). The resting dot is rendered more opaque so
+     markers stay visible without hovering. */
+  --marker-dot: clamp(4px, calc(var(--message-rail-marker-size, 20px) * 0.4), 8px);
+  --marker-dot-hover: clamp(6px, calc(var(--message-rail-marker-size, 20px) * 0.7), 10px);
 }
 
 .transcript-message-rail-marker {
@@ -340,7 +366,7 @@
   width: var(--marker-dot);
   height: var(--marker-dot);
   border-radius: 2px;
-  background: color-mix(in srgb, var(--panel-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--panel-accent) 55%, transparent);
   transition:
     background var(--panel-transition-fast),
     width var(--panel-duration-fast) var(--panel-ease-out-expo);

@@ -175,6 +175,17 @@ export interface ChatPrefs {
   /** Explicit bash binary path for the warm pool + fallback (default: auto-detect
    *  Git Bash / bash). Mirrored via PIE_SHELL. */
   bashShellPath: string;
+  /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
+   *  default (10000). Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000].
+ *  Applies on the next bash call (the pool is rebuilt live when this changes). */
+  bashWarmupTimeoutMs: number;
+  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
+   *  default (15000). Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
+  bashAcquireTimeoutMs: number;
+  /** Default timeout (seconds) for bash commands that don't specify one.
+   *  The upstream SDK default is 600s; this caps the worst-case hang for a
+   *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
+  bashDefaultTimeout: number;
   /** User-configured model ids per bucket for subagent model selection. The
    *  subagent tool picks uniformly at random from the requested bucket; an empty
    *  bucket falls back to the parent's active model. Mirrored to the in-process
@@ -256,12 +267,32 @@ export interface ChatPrefs {
    *  bottom of a turn). Tools/subagents add one header row on top. Default 2
    *  reproduces the bundled 2-row (reasoning) / 3-row (tool) preview. */
   activityTailLines: number;
-  /** Hit-area height (px) of the clickable user-message markers in the thin
-   *  rail to the left of the transcript scrollbar. Each marker is a jump-to
-   *  button; this controls the click-target size (the visible dot scales with
-   *  it). Default 18 is a comfortable click target; smaller values are more
-   *  compact, larger values are easier to click. Range 8–28. */
+  /** Size (px) of the clickable user-message markers in the thin rail to the
+   *  left of the transcript scrollbar. Each marker is a jump-to button; this
+   *  controls the click-target height AND the visible dot size (the dot scales
+   *  with it, clamped to the 10px rail width). Default 20 is a comfortable,
+   *  clearly visible marker; smaller values are more compact, larger values are
+   *  easier to click and see. Range 8–40. */
   uiMessageRailSize: number;
+  /** Hide the bottom usage status strip (today/wk cost, tok/s, tab count, last
+   *  run). The strip is auxiliary info, not core to chatting; this hides it
+   *  entirely. Default false (visible). */
+  hideStatusStrip: boolean;
+  /** Hide the tokens-per-second (tok/s) indicator chip in the composer
+   *  toolbar. Default false (visible). */
+  hideTokenRate: boolean;
+  /** Hide the per-session token-usage indicator chip in the composer toolbar.
+   *  Default false (visible). */
+  hideSessionTokens: boolean;
+  /** Hide the per-session cost indicator chip in the composer toolbar.
+   *  Default false (visible). */
+  hideSessionCost: boolean;
+  /** Hide the context-window usage indicator chip in the composer toolbar.
+   *  Default false (visible). */
+  hideContextIndicator: boolean;
+  /** Hide the run-status chip (scored/open/etc.) in the composer toolbar.
+   *  Default false (visible). */
+  hideRunStatus: boolean;
 }
 
 /** Environment key used to expose pie provider toggles to in-process pi extensions. */
@@ -313,6 +344,9 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   bashWarmPoolSize: 2,
   bashFastPath: true,
   bashShellPath: '',
+  bashWarmupTimeoutMs: 0,
+  bashAcquireTimeoutMs: 0,
+  bashDefaultTimeout: 60,
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
   subagentDropTools: [],
@@ -335,7 +369,13 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   extensionToggles: {},
   providerToggles: {},
   activityTailLines: 2,
-  uiMessageRailSize: 18,
+  uiMessageRailSize: 20,
+  hideStatusStrip: false,
+  hideTokenRate: false,
+  hideSessionTokens: false,
+  hideSessionCost: false,
+  hideContextIndicator: false,
+  hideRunStatus: false,
 };
 
 export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
@@ -350,6 +390,84 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   prepassTimeoutSec: null,
   autoSkipBelowTokens: null,
 };
+
+export interface ToolResultPruningRuleToggles {
+  ansi: boolean;
+  whitespace: boolean;
+  blankRun: boolean;
+  jsonMinify: boolean;
+  /** Lossy-recoverable rules (only run under the `default` profile). */
+  lsLong: boolean;
+  gitLog: boolean;
+}
+
+export interface ToolResultPruningSettings {
+  enabled: boolean;
+  profile: 'default' | 'security';
+  rules: ToolResultPruningRuleToggles;
+  /** Allowlist of tool names pruning acts on. `null` (default) = all tools
+   *  except `read` are eligible. A non-empty array restricts pruning to the
+   *  listed tools; an empty array prunes nothing. `read` is always skipped
+   *  (hard safety) even if listed. Configurable from the settings menu. */
+  tools: string[] | null;
+}
+
+export const DEFAULT_TOOL_RESULT_PRUNING_SETTINGS: ToolResultPruningSettings = {
+  enabled: true,
+  profile: 'default',
+  rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true },
+  tools: null,
+};
+
+/** Partial update shape for {@link mergeToolResultPruningSettings}. The
+ *  `rules` sub-object is itself partial (deep-merge: each toggle is replaced
+ *  when present), so callers can flip one toggle without spreading the rest. */
+export type ToolResultPruningSettingsUpdate = Partial<Omit<ToolResultPruningSettings, 'rules'>> & {
+  rules?: Partial<ToolResultPruningRuleToggles>;
+};
+
+/**
+ * Pure merge of a partial tool-result-pruning-settings update into the
+ * current settings.
+ *
+ * Top-level scalars (`enabled`, `profile`) are replaced when present in
+ * `updates`. The `rules` sub-object is deep-merged: each toggle is replaced
+ * when present. This must produce the same shape as the disk-write merge in
+ * `writeToolResultPruningSettings` so the reducer's optimistic state matches
+ * the persisted state.
+ */
+export function mergeToolResultPruningSettings(
+  current: ToolResultPruningSettings,
+  updates: ToolResultPruningSettingsUpdate,
+): ToolResultPruningSettings {
+  // Preserve the `rules` object reference when the update omits it (avoids
+  // needless re-renders downstream of the reducer's optimistic apply). A
+  // partial `rules` sub-object is deep-merged toggle-by-toggle into a new object.
+  const rules = updates.rules === undefined
+    ? current.rules
+    : {
+        ansi: updates.rules.ansi !== undefined ? updates.rules.ansi : current.rules.ansi,
+        whitespace: updates.rules.whitespace !== undefined ? updates.rules.whitespace : current.rules.whitespace,
+        blankRun: updates.rules.blankRun !== undefined ? updates.rules.blankRun : current.rules.blankRun,
+        jsonMinify: updates.rules.jsonMinify !== undefined ? updates.rules.jsonMinify : current.rules.jsonMinify,
+        lsLong: updates.rules.lsLong !== undefined ? updates.rules.lsLong : current.rules.lsLong,
+        gitLog: updates.rules.gitLog !== undefined ? updates.rules.gitLog : current.rules.gitLog,
+      };
+  // `tools`: preserve the current value/reference when omitted; copy arrays so
+  // the reducer never aliases the caller's array; pass `null` through as a real
+  // value (clears the allowlist).
+  const tools = updates.tools === undefined
+    ? current.tools
+    : Array.isArray(updates.tools)
+      ? [...updates.tools]
+      : updates.tools;
+  return {
+    enabled: updates.enabled !== undefined ? updates.enabled : current.enabled,
+    profile: updates.profile !== undefined ? updates.profile : current.profile,
+    rules,
+    tools,
+  };
+}
 
 /**
  * Pure merge of a partial pruning-settings update into the current settings.
@@ -399,6 +517,78 @@ export interface ProxyProviderUpstream {
   litellmModelInfoId: string;
   modelListOrder: string[];
   alias: Record<string, string>;
+}
+
+/** Input for the "Add Provider" form in the proxy settings UI. The host owns
+ *  the deterministic wiring: it derives `apiKeyEnv` from `name` (`<NAME>_API_KEY`),
+ *  stores the `apiKey` safely in `proxy/.env` (gitignored) + `process.env`,
+ *  writes a `proxy.providers.<name>` entry to settings.json (with an empty
+ *  `modelListOrder` and a `<name>-shared` model-info id), runs `sync-models`,
+ *  and restarts the proxy. The provider's model CATALOG (`models.yaml`
+ *  `providers.<name>` + `profileOrder` + populating `modelListOrder`) is added
+ *  separately by the `add-provider` skill — until then the provider is
+ *  "pending" (routes nothing, sync-models tolerates it).
+ *
+ *  `apiKey` is the actual secret (never persisted to settings.json/models.yaml);
+ *  `name` is the provider key used across proxy.providers + models.yaml. */
+export interface ProxyProviderAddInput {
+  /** Provider key (lowercase, no spaces; e.g. `openrouter`). Used as the
+   *  `proxy.providers.<name>` + `models.yaml providers.<name>` key. */
+  name: string;
+  /** Upstream API base URL (e.g. `https://openrouter.ai/api/v1`). */
+  apiBase: string;
+  /** Upstream API key (the secret). Stored to `proxy/.env` as `<NAME>_API_KEY`,
+   *  never written to settings.json/models.yaml. */
+  apiKey: string;
+  /** LiteLLM provider type for routing (e.g. `openai` for OpenAI-compatible
+   *  endpoints, `anthropic`, `azure`, ...). */
+  litellmProvider: string;
+  /** Per-provider concurrency cap (LiteLLM `max_parallel_requests`). Default 4. */
+  maxConcurrentRequests?: number;
+}
+
+/** Default per-provider concurrency cap when none is supplied. Matches the
+ *  umans upstream (4 concurrent active sessions). */
+export const DEFAULT_PROXY_PROVIDER_MAX_CONCURRENT = 4;
+
+/** Derive an `apiKeyEnv` var name from a provider name: uppercase, non-
+ *  alphanumerics → `_`, suffixed with `_API_KEY` (e.g. `openrouter` →
+ *  `OPENROUTER_API_KEY`, `my-provider` → `MY_PROVIDER_API_KEY`). Returns null
+ *  when the name has no usable alphanumerics. Pure (no side effects) so the
+ *  reducer and the host service can share it and stay in sync. */
+export function deriveApiKeyEnv(providerName: string): string | null {
+  const cleaned = providerName
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!cleaned) return null;
+  return `${cleaned}_API_KEY`;
+}
+
+/** Build the full `ProxyProviderUpstream` entry for a newly-added provider.
+ *  Used by BOTH the reducer (optimistic apply) and the host service (persist),
+ *  so optimistic state always matches persisted state — mirroring the
+ *  `mergeProxySettings` contract for `SetProxySettings`. The entry starts
+ *  "pending": `modelListOrder` is empty and `litellmModelInfoId` is
+ *  `<name>-shared` (account-wide semaphore, like umans). The add-provider skill
+ *  populates `modelListOrder` + the models.yaml catalog separately. */
+export function buildProxyProviderEntry(input: ProxyProviderAddInput): ProxyProviderUpstream | null {
+  const name = input.name.trim().toLowerCase();
+  if (!name) return null;
+  const apiKeyEnv = deriveApiKeyEnv(name);
+  if (!apiKeyEnv) return null;
+  return {
+    apiBase: input.apiBase.trim(),
+    apiKeyEnv,
+    litellmProvider: input.litellmProvider.trim(),
+    maxConcurrentRequests: input.maxConcurrentRequests && input.maxConcurrentRequests >= 1
+      ? Math.floor(input.maxConcurrentRequests)
+      : DEFAULT_PROXY_PROVIDER_MAX_CONCURRENT,
+    litellmModelInfoId: `${name}-shared`,
+    modelListOrder: [],
+    alias: {},
+  };
 }
 
 export interface ProxySettings {

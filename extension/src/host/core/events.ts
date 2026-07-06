@@ -23,6 +23,7 @@ import type {
   ExtensionUIRequestPayload,
   SessionOpenedPayload,
   PruningSettings,
+  ToolResultPruningSettings,
   ProxySettings,
   FileChangeEntry,
   ActiveRunSummary,
@@ -32,6 +33,7 @@ import type {
   ComposerInput,
   TranscriptWindow,
   ModelSettings,
+  UserContentPart,
 } from '../../shared/protocol';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -47,8 +49,15 @@ export interface SendResultEvent {
   corrId: string;
   sessionPath: string;
   ok: boolean;
-  /** Backend-assigned request ID, used to bind events to sessions. */
+  /** Backend-assigned request ID, used to bind events to sessions. Absent for
+   *  a queued (follow-up) send — the backend acks `{ queued: true }` with no
+   *  `requestId` because no turn is started by the enqueue; the message runs
+   *  later as a fresh turn under the in-progress request's id. */
   requestId?: string;
+  /** True when the send was queued as a follow-up (sent while a turn was
+   *  already running). The host keeps the optimistic message as 'queued'
+   *  and awaits `QueuedDelivered` to promote it to 'completed'. */
+  queued?: boolean;
   error?: string;
 }
 
@@ -75,6 +84,14 @@ export interface InterruptResultEvent {
 
 export interface TruncateResultEvent {
   kind: 'TruncateResult';
+  corrId: string;
+  sessionPath: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface ClearQueueResultEvent {
+  kind: 'ClearQueueResult';
   corrId: string;
   sessionPath: string;
   ok: boolean;
@@ -223,8 +240,22 @@ export interface SetPruningSettingsResultEvent {
   error?: string;
 }
 
+export interface SetToolResultPruningSettingsResultEvent {
+  kind: 'SetToolResultPruningSettingsResult';
+  corrId: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface SetProxySettingsResultEvent {
   kind: 'SetProxySettingsResult';
+  corrId: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface AddProxyProviderResultEvent {
+  kind: 'AddProxyProviderResult';
   corrId: string;
   ok: boolean;
   error?: string;
@@ -253,6 +284,7 @@ export type EffectResultEvent =
   | EditResultEvent
   | InterruptResultEvent
   | TruncateResultEvent
+  | ClearQueueResultEvent
   | OpenSessionResultEvent
   | CreateSessionResultEvent
   | PersistTabsResultEvent
@@ -271,7 +303,9 @@ export type EffectResultEvent =
   | OpenFileInEditorResultEvent
   | OpenFileResultEvent
   | SetPruningSettingsResultEvent
+  | SetToolResultPruningSettingsResultEvent
   | SetProxySettingsResultEvent
+  | AddProxyProviderResultEvent
   | CloseSessionResultEvent
   | DuplicateSessionResultEvent;
 
@@ -443,6 +477,12 @@ export interface PruningSettingsChangedEvent {
   pruningSettings: PruningSettings;
 }
 
+/** Emitted when tool-result pruning settings change. */
+export interface ToolResultPruningSettingsChangedEvent {
+  kind: 'ToolResultPruningSettingsChanged';
+  toolResultPruningSettings: ToolResultPruningSettings;
+}
+
 /** Emitted when proxy settings change. */
 export interface ProxySettingsChangedEvent {
   kind: 'ProxySettingsChanged';
@@ -567,6 +607,30 @@ export interface PreflightFailedEvent {
   error: string;
 }
 
+/** Late commit after a send-timer fire. The post-ack send-timer fired and
+ *  dispatched `PreflightFailed`, rolling back the optimistic user message and
+ *  surfacing a `prepass-timeout` notice, but the turn has now started streaming
+ *  anyway. The reducer reverts the rollback: it restores the optimistic user
+ *  message, clears the notice, and restores `runningSessionPaths` so the UI
+ *  shows the turn continuing. This is a retraction, not a failure. */
+export interface PreflightSupersededEvent {
+  kind: 'PreflightSuperseded';
+  corrId: string;
+  requestId: string;
+  sessionPath: string;
+  localId: string;
+  text?: string;
+  inputs?: ComposerInput[];
+  composedText?: string;
+  userParts?: UserContentPart[];
+  previousSummary?: SessionSummary | null;
+  /** Injected by the effect layer (EffectRunner stamps the current wall-clock
+   *  time); required so the pure reducer spine can format it with
+   *  `new Date(timestamp)` without reading the clock itself (arch-boundary-guards
+   *  bans clock reads in the reducer spine). */
+  timestamp: number;
+}
+
 /** Emitted when a session's transcript is trimmed (eviction). */
 export interface TranscriptTrimmedEvent {
   kind: 'TranscriptTrimmed';
@@ -642,6 +706,43 @@ export interface SessionsInterruptedEvent {
   reason: string;
 }
 
+/** Steering (FollowUp): the agent loop injected a queued follow-up user
+ *  message into a turn. The host promotes its earliest optimistic 'queued'
+ *  transcript message to 'completed' (FIFO — the SDK drains the follow-up
+ *  queue one message at a time in enqueue order). `text` is observational only
+ *  (the SDK may have expanded skill/template commands, so it can differ from
+ *  what the user typed) and is not used for matching. */
+export interface QueuedDeliveredEvent {
+  kind: 'QueuedDelivered';
+  sessionPath: string;
+  text: string;
+}
+
+/** The SDK began an auto-retry attempt (transient provider error). The
+ *  reducer records per-session retry status so the webview can surface a
+ *  "Retrying N of M…" chip with a Cancel affordance. Independent of the busy
+ *  flag (a retry sleeps between turns; busy stays true via the `willRetry`
+ *  gate on `agent_end`). */
+export interface RetryStartedEvent {
+  kind: 'RetryStarted';
+  sessionPath: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorMessage: string;
+}
+
+/** An auto-retry attempt concluded — success (the retried turn produced a
+ *  non-error message), final failure (retries exhausted), or cancellation
+ *  (`session.abort()` aborted the retry sleep). Clears retry status. */
+export interface RetryEndedEvent {
+  kind: 'RetryEnded';
+  sessionPath: string;
+  success: boolean;
+  attempt: number;
+  finalError?: string;
+}
+
 export type BackendEvent =
   | MessageStartedEvent
   | MessageAbortedEvent
@@ -657,7 +758,10 @@ export type BackendEvent =
   | ExtensionUIRequestEvent
   | ErrorEvent
   | SessionOpenedEvent
-  | SessionClosedEvent;
+  | SessionClosedEvent
+  | QueuedDeliveredEvent
+  | RetryStartedEvent
+  | RetryEndedEvent;
 
 /** Emitted when a session summary is upserted (used for placeholder creation). */
 export interface SessionSummaryUpsertedEvent {
@@ -674,6 +778,7 @@ export type HostEvent =
   | BackendReadyChangedEvent
   | BackendReadyWatchdogFiredEvent
   | PruningSettingsChangedEvent
+  | ToolResultPruningSettingsChangedEvent
   | ProxySettingsChangedEvent
   | WorkspaceCwdChangedEvent
   | TranscriptPageLoadedEvent
@@ -697,6 +802,7 @@ export type HostEvent =
   | TabOpenedEvent
   | OpenTabsChangedEvent
   | PreflightFailedEvent
+  | PreflightSupersededEvent
   | SessionsInterruptedEvent;
 
 export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;

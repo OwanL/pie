@@ -25,8 +25,10 @@ import type {
   ModelInfo,
   PruningSettings,
   PruningMode,
+  ToolResultPruningSettings,
   ContextWindowUsage,
   SessionAnalyticsFactors,
+  RetryStatus,
   ChatPrefs,
   ExtensionInfo,
   ExtensionUIRequestPayload,
@@ -40,6 +42,7 @@ import type { NoticeKind } from '../../shared/error-mapping.js';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
+  DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   DEFAULT_PROXY_SETTINGS,
   mergeProxySettings,
 } from '../../shared/protocol';
@@ -98,6 +101,12 @@ export interface SessionsState {
   analyticsFactorsBySession: Record<string, SessionAnalyticsFactors | null>;
   /** Per-session interrupt-in-flight flag (formerly SessionArchState). */
   interruptInFlightBySession: Record<string, boolean>;
+  /** Per-session live auto-retry status (absent entry = no retry in flight).
+   *  Driven by the SDK's `auto_retry_start` / `auto_retry_end` events; surfaced
+   *  to the webview as a "Retrying N of M…" chip with a Cancel button.
+   *  Independent of `runningSessionPaths` (a retry sleeps between turns and the
+   *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
+  retryStatusBySession: Record<string, RetryStatus>;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +122,8 @@ export interface SettingsState {
   modelSettings: ModelSettings | null;
   /** Pruning configuration. */
   pruningSettings: PruningSettings;
+  /** Tool-result pruning configuration (settings.json `toolResultPruning` block). */
+  toolResultPruningSettings: ToolResultPruningSettings;
   /** LiteLLM proxy configuration (settings.json `proxy` block — the SSoT). */
   proxySettings: ProxySettings;
   /** Available models per session. */
@@ -220,6 +231,14 @@ export interface PendingOp {
    *  prepass runs. Brief F's `prepassStartedAt` ViewState field is the active
    *  session's promoted op `startedAt` (null when no promoted op exists). */
   startedAt: number;
+  /** Steering (FollowUp): true when this send was issued while a turn was
+   *  already running, so the backend queued it as a follow-up (`message.send`
+   *  acked `{ queued: true }`). Set by `handleSend`'s busy branch. The `!ok`
+   *  rollback uses this to avoid clearing `runningSessionPaths` (the session is
+   *  still running the original turn, not this queued send). The ok-path uses
+   *  `SendResult.queued` (authoritative backend ack) to reconcile the
+   *  optimistic message status. */
+  queued?: boolean;
 }
 
 /** The pruning prepass phase for a session, surfaced as the live/cancelable
@@ -418,10 +437,12 @@ export function createInitialArchState(): ArchState {
       workspaceCwd: null,
       analyticsFactorsBySession: {},
       interruptInFlightBySession: {},
+      retryStatusBySession: {},
     },
     settings: {
       modelSettings: null,
       pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
+      toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
       proxySettings: mergeProxySettings(DEFAULT_PROXY_SETTINGS, {}),
       availableModelsBySession: {},
       contextUsageBySession: {},

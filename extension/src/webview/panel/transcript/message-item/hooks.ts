@@ -123,10 +123,12 @@ export function useMessageItemDerived({
   const statusLabel =
     message.status === 'interrupted' ? 'Interrupted'
     : message.status === 'error' ? 'Error'
+    : message.status === 'queued' ? 'Queued'
     : null;
   const statusTone: StatusTone =
     message.status === 'interrupted' ? 'interrupted'
     : message.status === 'error' ? 'error'
+    : message.status === 'queued' ? 'neutral'
     : 'neutral';
   const replyMeta = assistantReplyMeta(message);
   const assistantMetaTooltip = formatAssistantMetaTooltip(message);

@@ -103,7 +103,7 @@ test('Brief E (a): interrupt aborts an in-flight pre-ack message.send AND enqueu
 
   // Default (inline) queues call the session-op task synchronously, so
   // `startInFlightSend` arms the AbortController before this call returns.
-  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], localId: 'l1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
   runner.run({ kind: 'InterruptRpc', corrId: 'c-int', sessionPath: '/s' });
 
   await settle();
@@ -147,7 +147,7 @@ test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll bac
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], localId: 'l1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c-send', sessionPath: '/s', text: 'hi', inputs: [], composedText: 'hi', localId: 'l1' });
   await settle(); // early-ack → SendResult{ok:true}; send-timer armed (in-flight).
 
   // Commit point: first MessageStarted → reducer emits ClearSendTimer → the
@@ -175,32 +175,35 @@ test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll bac
   runner.dispose();
 });
 
-// ─── (c) Rapid multi-prompt: a second send while a turn is in-flight is
-//        REJECTED (REQUEST_IN_PROGRESS), not queued. The effect-runner surfaces
-//        it as SendResult{ok:false} (a send failure, not a silent drop or a
-//        deferred-prompt queue). STATE_CONTRACT "Execution Ordering" holds
-//        (serialization, not deferral). ────────────────────────────────────────
-test('Brief E (c): a second send while a turn is in-flight is rejected (not queued)', async () => {
+// ─── (c) Rapid multi-prompt: a second send while a turn is in-flight is now
+//        QUEUED as a follow-up (steering) — the backend acks { queued: true }
+//        instead of rejecting with REQUEST_IN_PROGRESS. The effect-runner
+//        surfaces it as SendResult{ok:true, queued:true}, clears the send-timer
+//        (a queued send has no commit point), and emits no requestId.
+//        STATE_CONTRACT "Execution Ordering" still holds (serialization, not
+//        deferral — the second send runs after the first settles in the
+//        per-session queue). ────────────────────────────────────────────────
+test('Brief E (c): a second send while a turn is in-flight is queued as a follow-up (steering)', async () => {
   const timers = new FakeTimerSink();
   let sendCount = 0;
   const { deps, events } = makeEffectRunnerDeps({
     timer: timers,
     queues: makeSerializingQueues(),
-    // First message.send early-acks; the second throws the backend's
-    // REQUEST_IN_PROGRESS guard (the first turn is still active).
+    // First message.send early-acks with a requestId; the second acks
+    // { queued: true } (the backend queued it as a follow-up).
     requestImpl: async (method: string) => {
       if (method === 'message.send') {
         sendCount += 1;
         if (sendCount === 1) return { requestId: 'r1' };
-        throw new Error('A request is already in progress for this session.');
+        return { queued: true };
       }
       return {};
     },
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'SendRpc', corrId: 'c1', sessionPath: '/s', text: 'first', inputs: [], localId: 'l1' });
-  runner.run({ kind: 'SendRpc', corrId: 'c2', sessionPath: '/s', text: 'second', inputs: [], localId: 'l2' });
+  runner.run({ kind: 'SendRpc', corrId: 'c1', sessionPath: '/s', text: 'first', inputs: [], composedText: 'hi', localId: 'l1' });
+  runner.run({ kind: 'SendRpc', corrId: 'c2', sessionPath: '/s', text: 'second', inputs: [], composedText: 'hi', localId: 'l2' });
   await settle();
 
   const sendResults = events.filter((e) => e.kind === 'SendResult') as Extract<EffectResultEvent, { kind: 'SendResult' }>[];
@@ -208,9 +211,9 @@ test('Brief E (c): a second send while a turn is in-flight is rejected (not queu
 
   const r1 = sendResults.find((e) => e.corrId === 'c1');
   const r2 = sendResults.find((e) => e.corrId === 'c2');
-  assert.ok(r1 && r1.ok, 'first send early-acked ok:true (the in-flight turn)');
-  assert.ok(r2 && !r2.ok, 'second send is REJECTED (ok:false), not queued');
-  assert.match(r2!.error ?? '', /already in progress/i, 'rejection surfaces the REQUEST_IN_PROGRESS cause');
+  assert.ok(r1 && r1.ok && r1.requestId === 'r1', 'first send early-acked ok:true with requestId');
+  assert.ok(r2 && r2.ok && r2.queued === true, 'second send is QUEUED (ok:true, queued:true), not rejected');
+  assert.ok(!r2!.requestId, 'queued send has no requestId (no turn is started by the enqueue)');
 
   runner.dispose();
 });

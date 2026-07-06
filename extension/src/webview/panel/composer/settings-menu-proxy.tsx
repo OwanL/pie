@@ -4,11 +4,12 @@
 import { useState } from 'preact/hooks';
 import type { ProxyGatewaySettings, ProxyProviderUpstream, ProxySettings, ProxySettingsUpdate } from '../../../shared/protocol';
 import { CollapsibleChevron } from '../components/chevron';
-import type { OnSetProxySettings } from './settings-menu-types';
+import type { OnAddProxyProvider, OnSetProxySettings } from './settings-menu-types';
 
 interface ProxySectionProps {
   proxySettings: ProxySettings;
   onSetProxySettings: OnSetProxySettings;
+  onAddProxyProvider: OnAddProxyProvider;
 }
 
 /** A labeled row with a text <input>, reusing the select control styling. */
@@ -179,7 +180,141 @@ function ProviderGroup({
   );
 }
 
-export function ProxySection({ proxySettings, onSetProxySettings }: ProxySectionProps) {
+/** Common LiteLLM provider types offered as autocomplete for the Add Provider
+ *  form's "LiteLLM provider" field. The user can still type any value. */
+const COMMON_LITELLM_PROVIDERS = [
+  'openai',
+  'anthropic',
+  'azure',
+  'mistral',
+  'cohere',
+  'gemini',
+  'groq',
+  'together_ai',
+  'huggingface',
+  'openrouter',
+  'vertex_ai',
+  'bedrock',
+  'custom',
+];
+
+/** Collapsible "Add provider" form. Collects the deterministic fields the host
+ *  owns (name, API base, API key, LiteLLM provider type, max concurrent) and
+ *  submits them via `onAddProxyProvider`. The host stores the key safely in
+ *  proxy/.env, writes `proxy.providers.<name>` to settings.json, runs sync-models,
+ *  and restarts the proxy. The model catalog (models.yaml) is added separately
+ *  via the add-provider skill — until then the new provider is "pending" and
+ *  routes nothing. */
+function AddProviderForm({ onAddProxyProvider }: { onAddProxyProvider: OnAddProxyProvider }) {
+  const [expanded, setExpanded] = useState(false);
+  const [name, setName] = useState('');
+  const [apiBase, setApiBase] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [litellmProvider, setLitellmProvider] = useState('openai');
+  const [maxConcurrent, setMaxConcurrent] = useState(4);
+
+  const canSubmit = name.trim() !== '' && apiBase.trim() !== '' && apiKey.trim() !== '' && litellmProvider.trim() !== '';
+
+  const submit = () => {
+    if (!canSubmit) return;
+    onAddProxyProvider({
+      name: name.trim(),
+      apiBase: apiBase.trim(),
+      apiKey: apiKey.trim(),
+      litellmProvider: litellmProvider.trim(),
+      maxConcurrentRequests: maxConcurrent,
+    });
+    // Reset + collapse — the new provider appears as an editable ProviderGroup
+    // above (optimistic apply) and a notice explains the next step.
+    setName('');
+    setApiBase('');
+    setApiKey('');
+    setLitellmProvider('openai');
+    setMaxConcurrent(4);
+    setExpanded(false);
+  };
+
+  return (
+    <div class="toolbar-settings-ext-group">
+      <div class="toolbar-settings-ext-row">
+        <span class="toolbar-settings-item-label">Add provider</span>
+        <button
+          class={`toolbar-settings-ext-chevron${expanded ? ' expanded' : ''}`}
+          type="button"
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} add provider form`}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <CollapsibleChevron open={expanded} size={12} />
+        </button>
+      </div>
+      {expanded && (
+        <div class="toolbar-settings-ext-settings">
+          <TextRow
+            label="Name"
+            value={name}
+            ariaLabel="new provider name"
+            onCommit={setName}
+          />
+          <TextRow
+            label="API base"
+            value={apiBase}
+            ariaLabel="new provider API base URL"
+            onCommit={setApiBase}
+          />
+          <div class="toolbar-settings-item toolbar-settings-mode-row">
+            <span class="toolbar-settings-item-label">API key</span>
+            <input
+              type="password"
+              class="toolbar-settings-select"
+              value={apiKey}
+              spellcheck={false}
+              placeholder="stored in proxy/.env (gitignored)"
+              aria-label="new provider API key"
+              onChange={(e) => setApiKey((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="toolbar-settings-item toolbar-settings-mode-row">
+            <span class="toolbar-settings-item-label">LiteLLM provider</span>
+            <input
+              type="text"
+              class="toolbar-settings-select"
+              value={litellmProvider}
+              list="litellm-provider-options"
+              spellcheck={false}
+              aria-label="new provider LiteLLM provider type"
+              onChange={(e) => setLitellmProvider((e.target as HTMLInputElement).value)}
+            />
+            <datalist id="litellm-provider-options">
+              {COMMON_LITELLM_PROVIDERS.map((p) => <option value={p} />)}
+            </datalist>
+          </div>
+          <StepperRow
+            label="Max concurrent"
+            value={maxConcurrent}
+            min={1}
+            ariaLabel="new provider max concurrent requests"
+            onCommit={setMaxConcurrent}
+          />
+          <div class="toolbar-settings-item toolbar-settings-mode-row">
+            <button
+              type="button"
+              class="toolbar-settings-stepper-btn"
+              disabled={!canSubmit}
+              aria-label="Add provider"
+              onClick={submit}
+            >Add provider</button>
+          </div>
+          <div class="toolbar-settings-item-hint">
+            The key is written to proxy/.env (gitignored) as <code>{'<NAME>_API_KEY'}</code> and referenced by an env var — never stored in settings.json or models.yaml. Models aren't wired by this form: run the <code>add-provider</code> skill afterward to add the models.yaml catalog + populate the model list so the provider routes traffic.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ProxySection({ proxySettings, onSetProxySettings, onAddProxyProvider }: ProxySectionProps) {
   const { gateway } = proxySettings;
   const setGateway = (partial: ProxySettingsUpdate['gateway']) =>
     onSetProxySettings({ gateway: partial });
@@ -217,8 +352,9 @@ export function ProxySection({ proxySettings, onSetProxySettings }: ProxySection
         {Object.entries(proxySettings.providers).map(([name, provider]) => (
           <ProviderGroup key={name} name={name} provider={provider} onSetProxySettings={onSetProxySettings} />
         ))}
+        <AddProviderForm onAddProxyProvider={onAddProxyProvider} />
         <div class="toolbar-settings-item-hint">
-          Changes regenerate the proxy config and restart the LiteLLM proxy. In-flight proxied requests may be interrupted. The master key is pie-managed (auto-generated). Add providers in settings.json `proxy.providers` + models.yaml.
+          Changes regenerate the proxy config and restart the LiteLLM proxy. In-flight proxied requests may be interrupted. The master key is pie-managed (auto-generated). Use "Add provider" to add a new proxied upstream (its model catalog is wired separately via the add-provider skill).
         </div>
       </div>
     </div>

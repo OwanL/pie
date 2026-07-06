@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, serializeJsonLine } from '../../shared/jsonl';
+import { getDeferredTriggersDir } from '../../shared/deferred-triggers-paths';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
@@ -54,6 +55,7 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'app.ping': 10_000,
   'message.send': 10_000,
   'message.interrupt': 15_000,
+  'message.clearQueue': 10_000,
   'extension_ui.response': 10_000,
 };
 
@@ -99,6 +101,12 @@ export class BackendClient implements vscode.Disposable {
     const reviewsDirEnv = sessionDirEnv
       ? path.join(path.dirname(sessionDirEnv), 'session-reviews')
       : undefined;
+    // Deferred-trigger sidecar (sibling of sessions dir). The host registry
+    // (reader/fire-writer) and the `defer_trigger` tool (register/cancel
+    // writer) agree on the location: the host derives it via
+    // `getDeferredTriggersDir()` (same env), the backend tool reads
+    // `PIE_TRIGGERS_DIR` set here.
+    const triggersDirEnv = getDeferredTriggersDir();
     const proc = cp.spawn(
       options.nodePath,
       [options.backendPath, '--sdkPath', options.sdkPath, '--cwd', options.cwd],
@@ -109,6 +117,7 @@ export class BackendClient implements vscode.Disposable {
           PIE_EDITOR_VERSION: vscode.version,
           ...(sessionDirEnv ? { PI_CODING_AGENT_SESSION_DIR: sessionDirEnv } : {}),
           ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
+          ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
           ...trustedRootEnv,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -122,6 +131,7 @@ export class BackendClient implements vscode.Disposable {
       sdkPath: options.sdkPath,
       sessionDir: sessionDirEnv ?? null,
       reviewsDir: reviewsDirEnv ?? null,
+      triggersDir: triggersDirEnv ?? null,
     });
 
     this.proc = proc;

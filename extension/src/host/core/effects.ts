@@ -18,7 +18,7 @@
  * so the reducer can reconcile optimistic state (Phase 4).
  */
 
-import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode } from '../../shared/protocol';
+import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, UserContentPart } from '../../shared/protocol';
 import type { PendingSendQueueEntry } from './arch-state';
 import type { BackendReadyQueueEntry } from './arch-state';
 
@@ -34,6 +34,12 @@ export interface SendRpcEffect extends EffectBase {
   inputs: ComposerInput[];
   /** Pre-generated local ID for optimistic message reconciliation. */
   localId: string;
+  /** Composed text (text + input annotations) for the optimistic transcript entry.
+   *  Carried through to the EffectRunner so a late `PreflightSuperseded` retraction
+   *  can re-insert the exact optimistic user message that `handleSend` inserted. */
+  composedText: string;
+  /** User content parts for rich rendering of the optimistic message. */
+  userParts?: UserContentPart[];
   /** Brief H: prior pruning mode to restore after a "retry without pruning" send
    *  resolves (threads `SendCommand.priorPruningMode` → the EffectRunner's
    *  in-flight send, which restores it at commit/fire/pre-ack-failure). */
@@ -47,10 +53,19 @@ export interface EditRpcEffect extends EffectBase {
   text: string;
   /** Pre-generated local ID for optimistic message reconciliation. */
   localId: string;
+  /** Composed text for the optimistic replacement message. Carried through to the
+   *  EffectRunner so a late `PreflightSuperseded` retraction can re-insert the exact
+   *  optimistic user message that `handleEdit` inserted. */
+  composedText?: string;
 }
 
 export interface InterruptRpcEffect extends EffectBase {
   kind: 'InterruptRpc';
+  sessionPath: string;
+}
+
+export interface ClearQueueRpcEffect extends EffectBase {
+  kind: 'ClearQueueRpc';
   sessionPath: string;
 }
 
@@ -84,7 +99,7 @@ export interface PersistTabsEffect extends EffectBase {
   pinnedTabPaths: string[];
 }
 
-export type LogLevel = 'info' | 'warn' | 'error';
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogEffect extends EffectBase {
   kind: 'Log';
@@ -115,6 +130,17 @@ export interface ShowModelSwitchConfirmEffect extends EffectBase {
 export interface SetPrefsRpcEffect extends EffectBase {
   kind: 'SetPrefsRpc';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Push the complete disabled-entry set for a session's system prompts to the
+ *  backend (`systemPromptToggles.set`). The backend persists it, rewrites the
+ *  SDK base prompt, and re-emits `session.opened` — the re-emit (not this RPC's
+ *  result) is what updates the host's `systemPromptsBySession`, so this effect
+ *  is fire-and-forget (no *Result event). */
+export interface SetSystemPromptTogglesRpcEffect extends EffectBase {
+  kind: 'SetSystemPromptTogglesRpc';
+  sessionPath: string;
+  disabledEntries: string[];
 }
 
 /** Hydrate a session's model state from the backend (fire-and-forget; the
@@ -211,9 +237,19 @@ export interface SetPruningSettingsEffect extends EffectBase {
   settings: Partial<import('../../shared/protocol').PruningSettings>;
 }
 
+export interface SetToolResultPruningSettingsEffect extends EffectBase {
+  kind: 'SetToolResultPruningSettings';
+  settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
+}
+
 export interface SetProxySettingsEffect extends EffectBase {
   kind: 'SetProxySettings';
   settings: import('../../shared/protocol').ProxySettingsUpdate;
+}
+
+export interface AddProxyProviderEffect extends EffectBase {
+  kind: 'AddProxyProvider';
+  input: import('../../shared/protocol').ProxyProviderAddInput;
 }
 
 export interface CloseSessionEffect extends EffectBase {
@@ -242,6 +278,7 @@ export type Effect =
   | SendRpcEffect
   | EditRpcEffect
   | InterruptRpcEffect
+  | ClearQueueRpcEffect
   | TruncateRpcEffect
   | OpenSessionEffect
   | CreateSessionEffect
@@ -249,6 +286,7 @@ export type Effect =
   | LogEffect
   | SetModelRpcEffect
   | SetPrefsRpcEffect
+  | SetSystemPromptTogglesRpcEffect
   | ShowModelSwitchConfirmEffect
   | HydrateModelEffect
   | PostImperativeEffect
@@ -270,7 +308,9 @@ export type Effect =
   | OpenFileInEditorEffect
   | OpenFileEffect
   | SetPruningSettingsEffect
+  | SetToolResultPruningSettingsEffect
   | SetProxySettingsEffect
+  | AddProxyProviderEffect
   | CloseSessionEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect

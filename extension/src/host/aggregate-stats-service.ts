@@ -3,13 +3,13 @@ import * as path from 'node:path';
 
 import { loadModelPricing } from '../backend/pricing';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
-import type { AggregateStats } from '../shared/protocol/aggregate-stats';
-import { EMPTY_AGGREGATE_STATS } from '../shared/protocol/aggregate-stats';
+import { EMPTY_AGGREGATE_STATS, type AggregateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import type { StatsService } from './stats-service';
 import { computeAggregateStats } from './stats-service/aggregate-stats';
 import type { RunSnapshot } from './run-analytics';
+import type { TokenRateIndicatorState } from '../shared/token-rate';
 import { appendPieLog } from './util/pie-log';
 
 /**
@@ -48,6 +48,10 @@ export interface AggregateStatsServiceDeps {
   /** Resolve the agent dir containing `models.json`. Called each tick so a
    *  runtime `pie.agentDir` change is picked up. Returns null when unresolved. */
   getAgentDir: () => string | null;
+  /** Poll live warm-bash pool metrics from the backend (in-memory registry read
+   *  via the `warm_bash.stats` RPC). Resolves to {@link EMPTY_WARM_BASH_STATS}
+   *  on any failure so the strip hides the segment rather than freezing. */
+  fetchWarmBashStats: () => Promise<WarmBashStats>;
   /** Called when the posted aggregate changed, so the host can schedule a
    *  debounced snapshot post to the webview. */
   onChanged: () => void;
@@ -138,6 +142,19 @@ export class AggregateStatsService {
       && signaturesEqual(this.lastDataSignature, signature)
       && runningSessionPaths.length === 0;
 
+    // Live warm-bash metrics from the backend (in-memory, same-process registry
+    // read via RPC). Cheap; polled every tick so ready/warming counts stay
+    // current. Failures retain the cached value so a transient RPC hiccup
+    // never freezes the segment.
+    let warmBash = this.cached.warmBash;
+    try {
+      warmBash = await this.deps.fetchWarmBashStats();
+    } catch (error) {
+      appendPieLog('warn', 'aggregate-stats', 'warm_bash.stats poll failed; retaining cached', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     let next: AggregateStats;
     if (dataUnchanged) {
       // Only refresh the live/current fields cheaply from in-memory state.
@@ -146,6 +163,7 @@ export class AggregateStatsService {
         liveTokensPerSecond: sumLiveRate(runningSessionPaths, ratesBySession),
         runningSessionCount: runningSessionPaths.length,
         openTabCount,
+        warmBash,
       };
     } else {
       const pricingMap = this.loadPricingCached();
@@ -157,6 +175,7 @@ export class AggregateStatsService {
         if (run) runs.push(run);
       }
       next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession, openTabCount);
+      next.warmBash = warmBash;
       this.lastDataSignature = signature;
     }
 
@@ -235,15 +254,27 @@ function signaturesEqual(a: DataSignature | null, b: DataSignature | null): bool
   return a.snapshotsMtimeMs === b.snapshotsMtimeMs && a.checkpointMtimeMs === b.checkpointMtimeMs;
 }
 
-function sumLiveRate(
+/** Sum of live tok/s across currently-running sessions, counting ONLY sessions
+ *  that are actively generating. A paused session's held rate is excluded so a
+ *  long tool call does not inflate the aggregate — the same predicate as the
+ *  live-rate loop in {@link computeAggregateStats}. The param is widened to
+ *  {@link TokenRateIndicatorState} (from `TokenRateService.getRates()`) so the
+ *  `state` field is available to filter on. Exported for unit testing. */
+export function sumLiveRate(
   runningSessionPaths: string[],
-  ratesBySession: Record<string, { rate?: number }>,
+  ratesBySession: Record<string, TokenRateIndicatorState>,
 ): number {
   let sum = 0;
   for (const sessionPath of runningSessionPaths) {
-    const rate = ratesBySession[sessionPath]?.rate;
-    if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
-      sum += rate;
+    const state = ratesBySession[sessionPath];
+    if (
+      state
+      && state.state === 'generating'
+      && typeof state.rate === 'number'
+      && Number.isFinite(state.rate)
+      && state.rate > 0
+    ) {
+      sum += state.rate;
     }
   }
   return sum;
@@ -283,6 +314,17 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
     || a.todayToolCallCount !== b.todayToolCallCount
     || a.todayTouchedFileCount !== b.todayTouchedFileCount
     || a.ready !== b.ready
+    // Warm-bash live metrics (ready/warming flaps + exec counters are
+    // perceptible changes worth a post).
+    || a.warmBash.enabled !== b.warmBash.enabled
+    || a.warmBash.poolSize !== b.warmBash.poolSize
+    || a.warmBash.ready !== b.warmBash.ready
+    || a.warmBash.warming !== b.warmBash.warming
+    || a.warmBash.fastPathEnabled !== b.warmBash.fastPathEnabled
+    || a.warmBash.totalFastPath !== b.warmBash.totalFastPath
+    || a.warmBash.totalWarm !== b.warmBash.totalWarm
+    || a.warmBash.totalFallback !== b.warmBash.totalFallback
+    || a.warmBash.totalWarmupFailures !== b.warmBash.totalWarmupFailures
   ) {
     return false;
   }

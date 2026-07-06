@@ -11,9 +11,18 @@ export interface ComposerActionsProps {
    *  only after the abort round-trip completes). */
   interrupting?: boolean;
   hasUserMessages: boolean;
+  /** Steering (FollowUp): true when the transcript has pending 'queued' user
+   *  messages (sent while a turn was running). Shows a "Clear queued"
+   *  affordance to cancel them without stopping the current turn. */
+  hasQueuedMessages: boolean;
   completionAction: ReturnType<typeof getComposerRunControls>['action'];
   onMarkComplete?: () => void;
+  /** When set, the mark-done button is disabled and its tooltip is replaced
+   *  with this reason (e.g. a pending deferred trigger blocks marking done). */
+  deferredBlockReason?: string | null;
   onInterrupt: () => void;
+  /** Steering (FollowUp): cancel all queued messages for this session. */
+  onClearQueue: () => void;
   sendCurrentText: () => void;
   canSend: boolean;
   onOpenFilePicker: () => void;
@@ -23,9 +32,12 @@ export function ComposerActions({
   busy,
   interrupting,
   hasUserMessages,
+  hasQueuedMessages,
   completionAction,
   onMarkComplete,
+  deferredBlockReason,
   onInterrupt,
+  onClearQueue,
   sendCurrentText,
   canSend,
   onOpenFilePicker,
@@ -48,9 +60,10 @@ export function ComposerActions({
           <button
             class={`composer-run-action ${completionAction.tone}`}
             type="button"
-            title={completionAction.title}
+            title={deferredBlockReason ?? completionAction.title}
             aria-label={completionAction.ariaLabel}
-            disabled={busy || !hasUserMessages || !onMarkComplete}
+            aria-disabled={deferredBlockReason ? 'true' : undefined}
+            disabled={busy || !hasUserMessages || !onMarkComplete || !!deferredBlockReason}
             onClick={() => onMarkComplete?.()}
           >
             {completionAction.text}
@@ -58,7 +71,18 @@ export function ComposerActions({
         )}
       </div>
       <div class="composer-actions-right ml-auto flex flex-wrap items-center gap-2">
-        {busy ? (
+        {hasQueuedMessages && (
+          <button
+            class="action-btn"
+            type="button"
+            title="Clear queued messages (does not stop the current turn)"
+            onClick={onClearQueue}
+            aria-label="Clear queued messages"
+          >
+            Clear queued
+          </button>
+        )}
+        {busy && (
           interrupting ? (
             <button
               class="action-btn danger"
@@ -81,18 +105,17 @@ export function ComposerActions({
               Stop
             </button>
           )
-        ) : (
-          <button
-            class="action-btn primary"
-            type="button"
-            title="Send (Enter)"
-            onClick={sendCurrentText}
-            disabled={!canSend}
-            aria-label="Send message"
-          >
-            Send
-          </button>
         )}
+        <button
+          class="action-btn primary"
+          type="button"
+          title={busy ? 'Queue (Enter) — runs after the current turn' : 'Send (Enter)'}
+          onClick={sendCurrentText}
+          disabled={!canSend}
+          aria-label={busy ? 'Queue message' : 'Send message'}
+        >
+          {busy ? 'Queue' : 'Send'}
+        </button>
       </div>
     </div>
   );

@@ -11,7 +11,7 @@ import type { TranscriptRow } from './virtual-list-rows';
 /** Default hit-area height per marker (px) when no pref is supplied. The
  *  user-configurable `uiMessageRailSize` pref overrides this; the visible dot
  *  scales with it via the `--message-rail-marker-size` CSS var. */
-const DEFAULT_MARKER_HIT_HEIGHT_PX = 18;
+const DEFAULT_MARKER_HIT_HEIGHT_PX = 20;
 /** Minimum vertical gap between consecutive marker centers (px). Set equal to
  *  the hit height so adjacent hit areas touch without overlapping — every
  *  visible marker is individually clickable. In very long sessions dense

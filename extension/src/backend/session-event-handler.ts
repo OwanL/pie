@@ -5,6 +5,9 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  QueuedDeliveredPayload,
+  RetryEndedPayload,
+  RetryStartedPayload,
   ToolFinishedPayload,
   ToolProgressPayload,
   ToolStartedPayload,
@@ -32,6 +35,60 @@ const FIRST_CONTENT_EVENT_TYPES = new Set([
 const DEFAULT_UNEXPECTED_INTERRUPT_REASON =
   'The session stopped unexpectedly before the assistant finished responding.';
 
+/** Environment key for the willRetry watchdog grace (added on top of the
+ *  SDK's reported backoff `delayMs`). */
+const WILLRETRY_WATCHDOG_GRACE_ENV = 'PIE_WILLRETRY_WATCHDOG_GRACE_MS';
+/** Default grace added on top of the SDK's backoff delayMs before the
+ *  watchdog declares a retry stuck. Generous so a legitimately slow provider
+ *  doesn't trip it, but bounded so a backoff that never completes is surfaced. */
+const DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS = 60 * 1000;
+function resolveWillRetryWatchdogGraceMs(): number {
+  const raw = process.env[WILLRETRY_WATCHDOG_GRACE_ENV];
+  if (raw === undefined || raw === '') return DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_WILLRETRY_WATCHDOG_GRACE_MS;
+}
+
+/** Arm / re-arm the willRetry watchdog. If the watchdog elapses without the
+ *  retry completing (auto_retry_end OR agent_end willRetry:false), emit an
+ *  operational-error + retry.stuck notice so the user can recover instead of
+ *  the session sitting in willRetry forever. Returns a clear function to call
+ *  when the retry completes / the turn ends. */
+function armWillRetryWatchdog(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  delayMs: number,
+): () => void {
+  // Clear any existing watchdog so re-arming (e.g. on auto_retry_start) replaces it.
+  if (context.willRetryWatchdogTimer) {
+    clearTimeout(context.willRetryWatchdogTimer);
+    context.willRetryWatchdogTimer = undefined;
+  }
+  const grace = resolveWillRetryWatchdogGraceMs();
+  const windowMs = Math.max(delayMs, 0) + grace;
+  context.willRetryWatchdogTimer = setTimeout(() => {
+    context.willRetryWatchdogTimer = undefined;
+    deps.emit('operational-error', {
+      code: 'RETRY_STUCK',
+      message: `A retry has not completed within ${windowMs}ms (delayMs=${delayMs} + ${grace}ms grace). The provider may be down mid-backoff or an extension hook blocked the retry. Reload the window if the session stays wedged.`,
+      sessionPath: context.sessionPath,
+      requestId: context.activeRequest?.id,
+    });
+    deps.emit('retry.stuck', {
+      sessionPath: context.sessionPath,
+      delayMs,
+      graceMs: grace,
+      requestId: context.activeRequest?.id,
+    });
+  }, windowMs);
+  return () => {
+    if (context.willRetryWatchdogTimer) {
+      clearTimeout(context.willRetryWatchdogTimer);
+      context.willRetryWatchdogTimer = undefined;
+    }
+  };
+}
+
 function logBackendDiagnostic(event: string, payload: Record<string, unknown>): void {
   process.stderr.write(`[pie:backend] ${JSON.stringify({
     ts: new Date().toISOString(),
@@ -54,6 +111,28 @@ function summarizePayload(value: unknown): string | undefined {
   } catch {
     return String(value).slice(0, 500);
   }
+}
+
+/** Best-effort extraction of plain text from an injected queued user message's
+ *  content. The host promotes 'queued' transcript messages by FIFO order (the
+ *  SDK drains the follow-up queue one at a time in enqueue order), so this text
+ *  is for observability only — not matching — and may differ from what the user
+ *  typed if the SDK expanded skill/template commands. */
+function extractUserMessageText(message: { content?: unknown }): string {
+  const content = message.content;
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part && typeof part === 'object' && (part as { type?: string }).type === 'text'
+          ? String((part as { text?: string }).text ?? '')
+          : '',
+      )
+      .join('');
+  }
+  return '';
 }
 
 export interface BackendSessionEventHandlerDeps {
@@ -90,6 +169,24 @@ export function handleSdkSessionEvent(
     }
 
     case 'message_start': {
+      // Steering (FollowUp): the agent loop emits `message_start` with
+      // role 'user' when it injects a queued follow-up message into a turn.
+      // Forward it as `message.queuedDelivered` so the host promotes its
+      // optimistic 'queued' transcript message to 'completed'. This fires
+      // within the same agent run (context.activeRequest is still the original
+      // send's request); the subsequent assistant `message_start` for this
+      // follow-up turn appends a new assistant message under the same
+      // requestId, reusing the existing streaming path. The normal (non-queued)
+      // user prompt does NOT emit a user-role message_start — the host inserts
+      // that optimistically — so this branch only fires for injected queued
+      // messages.
+      if (event.message?.role === 'user') {
+        deps.emit('message.queuedDelivered', {
+          sessionPath: context.sessionPath,
+          text: extractUserMessageText(event.message),
+        } satisfies QueuedDeliveredPayload);
+        return;
+      }
       if (event.message?.role !== 'assistant' || !context.activeRequest) {
         return;
       }
@@ -356,6 +453,28 @@ export function handleSdkSessionEvent(
     }
 
     case 'agent_end': {
+      // The SDK re-emits `agent_end` mid-retry with `willRetry: true` (after a
+      // transient error, before the backoff sleep + retry turn). Finalizing
+      // here would clear `activeRequest` — breaking the retry turn's streaming,
+      // since `message_start` / `message_end` are gated on it — and flicker
+      // `busy` false (then true again on the retry's `agent_start`), which
+      // also prematurely fires `session_finished` deferred triggers. Skip
+      // finalization on a will-retry `agent_end`; the final `agent_end`
+      // (`willRetry: false`) performs the normal idle cleanup below.
+      if (event.willRetry) {
+        // Bug 6 watchdog: arm a watchdog bounding the willRetry window. If the
+        // SDK's backoff/retry never completes (provider dies mid-backoff, or an
+        // extension hook blocks the retry), `activeRequest` would stay set
+        // forever with no observable failure. The watchdog emits
+        // `operational-error` + `retry.stuck` after the backoff delay + grace so
+        // the user can recover instead of reloading the window. Re-armed with
+        // the real delayMs on `auto_retry_start`; cleared on `auto_retry_end` /
+        // the final `agent_end willRetry:false`.
+        // delayMs is unknown here (the SDK doesn't carry it on agent_end); use
+        // 0 until auto_retry_start refines it (the grace alone bounds it).
+        context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, 0);
+        return;
+      }
       const requestId = context.activeRequest?.id;
       const messageId = context.activeRequest?.lastAssistantMessageId;
       const modelId = context.activeRequest?.modelId;
@@ -364,6 +483,12 @@ export function handleSdkSessionEvent(
 
       deps.emitBusyChanged(context, false);
       deps.emitContextUsageChanged(context);
+
+      // Bug 6 watchdog: clear on the final (non-retrying) agent_end.
+      if (context.willRetryWatchdogClear) {
+        context.willRetryWatchdogClear();
+        context.willRetryWatchdogClear = undefined;
+      }
 
       // Clear activeRequest BEFORE emitting session.opened so the payload
       // sees the final idle state instead of a stale in-progress request.
@@ -389,6 +514,39 @@ export function handleSdkSessionEvent(
         } satisfies MessageAbortedPayload);
       }
 
+      return;
+    }
+
+    case 'auto_retry_start': {
+      // Bug 6 watchdog: re-arm with the SDK's reported backoff delayMs so the
+      // window matches the real retry cadence (not the conservative 0 from
+      // agent_end willRetry). The grace is added on top.
+      if (context.willRetryWatchdogClear !== undefined) {
+        context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, event.delayMs ?? 0);
+      }
+      deps.emit('retry.started', {
+        sessionPath: context.sessionPath,
+        attempt: event.attempt ?? 0,
+        maxAttempts: event.maxAttempts ?? 0,
+        delayMs: event.delayMs ?? 0,
+        errorMessage: event.errorMessage ?? '',
+      } satisfies RetryStartedPayload);
+      return;
+    }
+
+    case 'auto_retry_end': {
+      // Bug 6 watchdog: clear on retry completion (success or final failure).
+      // The subsequent agent_end willRetry:false will re-clear (idempotent).
+      if (context.willRetryWatchdogClear) {
+        context.willRetryWatchdogClear();
+        context.willRetryWatchdogClear = undefined;
+      }
+      deps.emit('retry.ended', {
+        sessionPath: context.sessionPath,
+        success: event.success === true,
+        attempt: event.attempt ?? 0,
+        finalError: event.finalError,
+      } satisfies RetryEndedPayload);
       return;
     }
 

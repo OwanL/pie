@@ -499,6 +499,37 @@
   white-space: nowrap;
 }
 
+/* ── Tool-result-pruner inline ✂ badge (header) ─────────────────────────── */
+/* Subtle chip shown in the tool-call header when the tool-result-pruner
+   extension losslessly rewrote a tool's output (ANSI strip, whitespace trim,
+   blank-run collapse, JSON minify). Sits next to the duration so it stays
+   visible when the card is collapsed. Mirrors the muted, monospace,
+   tabular-nums tone of the duration label and the .tool-call-truncated-text
+   ellipsis pattern; the soft muted background echoes the .status-chip chip
+   look without its uppercase/dot styling. */
+.tool-result-pruning-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 260px;
+  padding: 0 5px;
+  border-radius: var(--panel-radius-sm);
+  background: color-mix(in srgb, var(--panel-muted) 8%, transparent);
+  color: var(--panel-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-result-pruning-badge-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tool-call-truncated-fulllog {
   flex: 0 0 auto;
   display: inline-flex;

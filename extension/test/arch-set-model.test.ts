@@ -102,6 +102,65 @@ function reduceFrom(state: ArchState, ...events: Event[]): ArchState {
   return s;
 }
 
+// ─── SessionOpened must not revert an in-flight SetModel ─────────────────────
+
+test('SessionOpened does not clobber an in-flight optimistic SetModel (global default + per-session badge)', () => {
+  // User picks a new model; the reducer applies it optimistically and records
+  // the pending SetModel (SetModelRpc is still in flight).
+  const afterSet = reduceFrom(buildState({ defaultModel: 'old-model', sessionModelId: 'old-model' }),
+    cmd('c1', 'new-model'));
+  assert.equal(afterSet.settings.modelSettings?.defaultModel, 'new-model');
+  assert.equal(afterSet.sessions.sessions.find((s) => s.path === SESSION)?.modelId, 'new-model');
+  assert.ok(afterSet.pending.setModelByCorrId.c1, 'pending SetModel entry should exist');
+
+  // A stale session.opened arrives before settings.set commits: its
+  // modelSettings + per-session badge still reflect the PRE-switch state.
+  const staleOpened: Event = {
+    kind: 'SessionOpened',
+    sessionPath: SESSION,
+    payload: {
+      session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'old-model', thinkingLevel: 'medium' },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      modelSettings: { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+    },
+  };
+  const afterOpened = reduceFrom(afterSet, staleOpened);
+
+  // The in-flight SetModel owns the model state — the stale snapshot must not
+  // revert the global default or the per-session badge.
+  assert.equal(afterOpened.settings.modelSettings?.defaultModel, 'new-model',
+    'global modelSettings must keep the in-flight optimistic model, not the stale payload');
+  assert.equal(afterOpened.sessions.sessions.find((s) => s.path === SESSION)?.modelId, 'new-model',
+    'per-session badge must keep the in-flight optimistic model, not the stale payload');
+  assert.equal(afterOpened.sessions.sessions.find((s) => s.path === SESSION)?.thinkingLevel, 'high');
+  // The pending entry is untouched (SetModelResult will still reconcile it).
+  assert.ok(afterOpened.pending.setModelByCorrId.c1);
+});
+
+test('SessionOpened applies payload modelSettings when no SetModel is in flight (hydration path preserved)', () => {
+  // No pending SetModel: the payload's modelSettings is the authoritative
+  // hydration from settings.json and must be applied (regression guard for
+  // the in-flight guard above being too aggressive).
+  const base = buildState({ defaultModel: 'old-model', sessionModelId: 'old-model' });
+  const opened: Event = {
+    kind: 'SessionOpened',
+    sessionPath: SESSION,
+    payload: {
+      session: { path: SESSION, name: 'S', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 0, modelId: 'hydrated-model', thinkingLevel: 'low' },
+      transcript: [],
+      transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
+      busy: false,
+      modelSettings: { defaultModel: 'hydrated-model', defaultThinkingLevel: 'low' },
+    },
+  };
+  const after = reduceFrom(base, opened);
+  assert.equal(after.settings.modelSettings?.defaultModel, 'hydrated-model');
+  assert.equal(after.sessions.sessions.find((s) => s.path === SESSION)?.modelId, 'hydrated-model');
+  assert.equal(after.sessions.sessions.find((s) => s.path === SESSION)?.thinkingLevel, 'low');
+});
+
 // ─── Guard (relocated from service) ─────────────────────────────────────────
 
 test('SetModel for a missing session reference sets a notice and changes nothing', () => {

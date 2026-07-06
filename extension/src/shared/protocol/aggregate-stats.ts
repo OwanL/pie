@@ -91,6 +91,46 @@ export interface AggregateLastRun {
   outputTokens: number;
 }
 
+/** Live warm-bash pool metrics, aggregated across all open sessions.
+ *  Reported by the warm-bash extension (backend child process) via a
+ *  `Symbol.for` globalThis registry and polled host-side each aggregate tick.
+ *  `enabled` is false (and counts zero) when warm bash is disabled or no bash
+ *  call has built a pool yet — the status strip hides the segment in that case. */
+export interface WarmBashStats {
+  /** Warm bash is active for at least one session (pool size > 0, not disposed). */
+  enabled: boolean;
+  /** Configured warm pool size (sum across active sessions). */
+  poolSize: number;
+  /** Idle warm workers ready to serve a command immediately. */
+  ready: number;
+  /** Workers currently warming (spawned but not yet ready). */
+  warming: number;
+  /** Fast-path toggle is on for at least one session. */
+  fastPathEnabled: boolean;
+  /** Commands run via the execFile fast path (no shell at all). */
+  totalFastPath: number;
+  /** Commands run via the warm pool (pre-warmed shell + marker protocol). */
+  totalWarm: number;
+  /** Commands run via the fresh-spawn fallback (today's exact path). */
+  totalFallback: number;
+  /** Warmup attempts that failed (timed out / shell unavailable). */
+  totalWarmupFailures: number;
+}
+
+/** Empty warm-bash stats (disabled, zero counts) used as the default before the
+ *  first host poll lands and as the registry-empty fallback. Stable reference. */
+export const EMPTY_WARM_BASH_STATS: WarmBashStats = {
+  enabled: false,
+  poolSize: 0,
+  ready: 0,
+  warming: 0,
+  fastPathEnabled: false,
+  totalFastPath: 0,
+  totalWarm: 0,
+  totalFallback: 0,
+  totalWarmupFailures: 0,
+};
+
 /**
  * Aggregate stats across all runs (completed + open) for the current
  * workspace, with a recent/current focus. All cost figures are in USD.
@@ -137,6 +177,9 @@ export interface AggregateStats {
   runningSessionCount: number;
   /** Number of currently-open session tabs (current UI state, not analytics). */
   openTabCount: number;
+  /** Live warm-bash pool metrics (ready/warming counts + execution breakdown),
+   *  polled from the backend. See {@link WarmBashStats}. */
+  warmBash: WarmBashStats;
 
   // ── All-time (tooltip context only) ──
   /** Total cost across all runs (sum of {@link costByProvider}). */
@@ -182,6 +225,7 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   liveTokensPerSecond: 0,
   runningSessionCount: 0,
   openTabCount: 0,
+  warmBash: EMPTY_WARM_BASH_STATS,
   totalCost: 0,
   costByProvider: [],
   tokensPerSecond: 0,

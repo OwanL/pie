@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatPrefs, PruningSettings, ToolCall } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, PruningSettings, ProxySessionStatus, ToolCall } from '../../../shared/protocol';
 import { assistantPartsFromMessage, toolCallsFromMessageParts } from '../../../shared/chat-message-parts';
 import { isPruningResultMessage } from './pruning';
 import {
@@ -15,6 +15,7 @@ export const AGENT_ACTIVITY_LABELS = {
   responding: 'responding',
   runningTools: 'running tools',
   thinking: 'thinking',
+  waitingForSlot: 'waiting for proxy slot',
 } as const;
 
 export type AgentActivityLabel = typeof AGENT_ACTIVITY_LABELS[keyof typeof AGENT_ACTIVITY_LABELS];
@@ -25,8 +26,8 @@ export type AgentActivityLabel = typeof AGENT_ACTIVITY_LABELS[keyof typeof AGENT
  * Terminal states (interrupted, error) are owned by message status UI.
  */
 export interface TurnActivityState {
-  /** Primary phase identifier: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'runningTool' | 'streaming' */
-  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'runningTool' | 'streaming';
+  /** Primary phase identifier: 'preparing' | 'pruning' | 'startingModel' | 'waitingForSlot' | 'thinking' | 'runningTool' | 'streaming' */
+  phase: 'preparing' | 'pruning' | 'startingModel' | 'waitingForSlot' | 'thinking' | 'runningTool' | 'streaming';
   /** Human-readable label for this phase */
   label: string;
   /** Additional detail text (e.g., specific tool name, tool count) */
@@ -57,6 +58,7 @@ interface PendingActivityOptions {
   pruningSettings: Pick<PruningSettings, 'mode'>;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ChatMessage['thinkingLevel'];
+  proxySessionStatus?: ProxySessionStatus | null;
 }
 
 function isSkillPrunerActive(
@@ -98,6 +100,13 @@ function formatModelLabel(modelId?: string, thinkingLevel?: ChatMessage['thinkin
   return model;
 }
 
+function formatProxyQueueDetail(status: ProxySessionStatus): string {
+  const queuePart = status.queuedSessions > 0
+    ? ` · ${status.queuedSessions} queued`
+    : '';
+  return `${status.provider} ${status.activeSessions}/${status.maxConcurrentRequests}${queuePart}`;
+}
+
 /**
  * Derive structured in-flight activity state for the current turn.
  * Returns null when not busy.
@@ -109,6 +118,7 @@ export function deriveTurnActivityState({
   pruningSettings,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  proxySessionStatus,
 }: PendingActivityOptions): TurnActivityState | null {
   if (!busy) {
     return null;
@@ -203,6 +213,17 @@ export function deriveTurnActivityState({
       tone: 'processing',
       ariaLabel: 'Agent is thinking',
       pendingModelLabel: formatModelLabel(assistant.modelId || pendingAssistantModelId, assistant.thinkingLevel || pendingAssistantThinkingLevel),
+    };
+  }
+
+  if (proxySessionStatus?.state === 'queued') {
+    return {
+      phase: 'waitingForSlot',
+      label: AGENT_ACTIVITY_LABELS.waitingForSlot,
+      detail: formatProxyQueueDetail(proxySessionStatus),
+      tone: 'processing',
+      ariaLabel: `Agent is waiting for a proxy slot on ${proxySessionStatus.provider}`,
+      pendingModelLabel: formatModelLabel(pendingAssistantModelId, pendingAssistantThinkingLevel),
     };
   }
 

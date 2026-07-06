@@ -172,6 +172,9 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
@@ -180,7 +183,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -200,6 +203,9 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
@@ -222,6 +228,9 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
@@ -260,6 +269,9 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
       subagentDropTools: undefined,
@@ -282,6 +294,9 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
       subagentDropTools: undefined,
@@ -318,6 +333,9 @@ test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
       bashWarmPoolSize: undefined,
       bashFastPath: undefined,
       bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashAcquireTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: ['ask_user', 'web_search'],

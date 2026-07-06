@@ -15,13 +15,16 @@ import type {
   ChatMessage,
   ComposerInput,
   ContextWindowUsage,
+  DeferredTriggerView,
   FileChangeEntry,
   ModelInfo,
   PruningCatalog,
   PruningDetails,
   PruningResult,
+  RetryStatus,
   SessionSummary,
   SystemPromptEntry,
+  ToolResultPruningSettings,
   TranscriptWindow,
   ViewState,
 } from '../../shared/protocol';
@@ -47,6 +50,7 @@ const EMPTY_COMPOSER_INPUTS: ComposerInput[] = [];
 const EMPTY_FILE_CHANGES: FileChangeEntry[] = [];
 const EMPTY_READ_PATHS: string[] = [];
 const EMPTY_PRUNING_CATALOG: PruningCatalog = { skills: [], tools: [] };
+const EMPTY_DEFERRED_TRIGGERS: readonly DeferredTriggerView[] = [];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -364,6 +368,13 @@ function projectViewState(state: ArchState): ViewState {
   // ── Derived busy flag ──
   const busy = !!activePath && sessions.runningSessionPaths.includes(activePath);
 
+  // ── Live auto-retry status for the active session ──
+  // Independent of `busy`: a retry sleeps between turns and the `willRetry`
+  // gate on `agent_end` keeps `busy` true, but this is the authoritative
+  // "a retry is in flight" signal the webview chips on (absent entry = null).
+  const retryStatus: RetryStatus | null =
+    activePath ? sessions.retryStatusBySession[activePath] ?? null : null;
+
   // ── Pruning projection ──
   const pruningResult = selectActivePruningResult(state);
   const pruningCatalog = selectActivePruningCatalog(activePath, sessions.analyticsFactorsBySession);
@@ -393,8 +404,14 @@ function projectViewState(state: ArchState): ViewState {
     // projection must not read services or disk (STATE_CONTRACT § Reducer
     // Purity).
     aggregateStats: EMPTY_AGGREGATE_STATS,
+    // Placeholder: active deferred triggers are read host-side from the
+    // `DeferredTriggerRegistry` (owned by `SessionService`) and merged in by
+    // `PieExtension.buildViewState`. The pure projection must not read services
+    // (STATE_CONTRACT § Reducer Purity).
+    deferredTriggers: EMPTY_DEFERRED_TRIGGERS as DeferredTriggerView[],
     draftText: activeDraftText,
     busy,
+    retryStatus,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
     noticeRaw: settings.noticeRaw,
@@ -411,7 +428,10 @@ function projectViewState(state: ArchState): ViewState {
     availableExtensions: settings.availableExtensions,
     pruningResult,
     pruningSettings: settings.pruningSettings,
+    toolResultPruningSettings: settings.toolResultPruningSettings,
     proxySettings: settings.proxySettings,
+    proxyMetrics: [],
+    proxyStatusBySession: {},
     pruningCatalog,
     prepassPhase: prepass.phase,
     prepassStartedAt: prepass.startedAt,

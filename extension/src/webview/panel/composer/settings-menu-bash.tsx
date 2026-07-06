@@ -22,8 +22,7 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
     if (shellDraft !== prefs.bashShellPath) onSetPrefs({ bashShellPath: shellDraft });
   };
   return (
-    <div key="bash" class="toolbar-settings-section">
-      <div class="toolbar-settings-section-label">Bash</div>
+    <div class="toolbar-settings-ext-settings">
       <div class="toolbar-settings-list">
         {/* Warm pool size */}
         <div class="toolbar-settings-ui-control">
@@ -82,6 +81,52 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
           />
           <div class="toolbar-settings-item-hint">
             Leave blank to auto-detect. Used by both the warm pool and the fallback.
+          </div>
+        </div>
+
+        {/* Warmup timeout */}
+        <div class="toolbar-settings-ui-control">
+          <div class="toolbar-settings-ui-control-head">
+            <span class="toolbar-settings-ui-control-label">Warmup timeout</span>
+            <span class="toolbar-settings-ui-control-value">
+              {prefs.bashWarmupTimeoutMs === 0 ? 'default' : `${Math.round(prefs.bashWarmupTimeoutMs / 1000)}s`}
+            </span>
+          </div>
+          <input
+            type="range"
+            class="toolbar-settings-slider toolbar-settings-ui-slider"
+            min="0"
+            max="60"
+            step="1"
+            value={Math.round(prefs.bashWarmupTimeoutMs / 1000)}
+            onInput={(e) => onSetPrefs({ bashWarmupTimeoutMs: Number((e.target as HTMLInputElement).value) * 1000 })}
+            aria-label="Warm bash warmup timeout"
+          />
+          <div class="toolbar-settings-item-hint">
+            How long to wait for a bash process to be ready before falling back. 0 = default (10s). Useful on slow shells / WSL.
+          </div>
+        </div>
+
+        {/* Acquire timeout */}
+        <div class="toolbar-settings-ui-control">
+          <div class="toolbar-settings-ui-control-head">
+            <span class="toolbar-settings-ui-control-label">Acquire timeout</span>
+            <span class="toolbar-settings-ui-control-value">
+              {prefs.bashAcquireTimeoutMs === 0 ? 'default' : `${Math.round(prefs.bashAcquireTimeoutMs / 1000)}s`}
+            </span>
+          </div>
+          <input
+            type="range"
+            class="toolbar-settings-slider toolbar-settings-ui-slider"
+            min="0"
+            max="60"
+            step="1"
+            value={Math.round(prefs.bashAcquireTimeoutMs / 1000)}
+            onInput={(e) => onSetPrefs({ bashAcquireTimeoutMs: Number((e.target as HTMLInputElement).value) * 1000 })}
+            aria-label="Warm bash acquire timeout"
+          />
+          <div class="toolbar-settings-item-hint">
+            How long to wait for a warm worker when the pool is empty before falling back to a fresh spawn. 0 = default (15s).
           </div>
         </div>
       </div>

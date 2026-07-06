@@ -1931,6 +1931,65 @@ test('reducer: PreflightFailed after the commit point (promoted already dropped)
   assert.deepEqual(result.effects, []);
 });
 
+test('reducer: PreflightSuperseded retracts a false-positive prepass-timeout (restores message + running + clears notice)', () => {
+  // Late-commit retraction (hardening): the send-timer fired a false-positive
+  // PreflightFailed (provider delay, not a real failure), which removed the
+  // optimistic user message, cleared runningSessionPaths, and surfaced a
+  // prepass-timeout notice. When the turn then actually starts streaming, the
+  // effect runner dispatches PreflightSuperseded to undo that rollback so the
+  // user is not left with a scary error for a turn that is proceeding normally.
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, runningSessionPaths: [] }, // cleared by PreflightFailed
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: { '/s': [] }, // optimistic message removed by PreflightFailed
+      windowBySession: { '/s': { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false } },
+    },
+    settings: {
+      ...initialArchState.settings,
+      notice: 'Timed out waiting for the turn to start streaming (120s)',
+      noticeKind: 'prepass-timeout',
+      noticeRaw: 'Timed out waiting for the turn to start streaming (120s)',
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'PreflightSuperseded',
+    corrId: 'c-1',
+    requestId: 'req-1',
+    sessionPath: '/s',
+    localId: 'loc-1',
+    composedText: 'hi',
+    timestamp: 1000,
+  });
+
+  // Optimistic user message re-inserted.
+  const msgs = result.state.transcript.bySession['/s'] ?? [];
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0]?.id, 'loc-1');
+  assert.equal(msgs[0]?.markdown, 'hi');
+  // Running state restored.
+  assert.ok(result.state.sessions.runningSessionPaths.includes('/s'));
+  // False-positive notice cleared.
+  assert.equal(result.state.settings.notice, null);
+  assert.equal(result.state.settings.noticeKind, null);
+  // No effects (retraction is a pure state restore).
+  assert.deepEqual(result.effects, []);
+
+  // Idempotent: a duplicate retraction finds the message already present and no-ops.
+  const result2 = reducer(result.state, {
+    kind: 'PreflightSuperseded',
+    corrId: 'c-1',
+    requestId: 'req-1',
+    sessionPath: '/s',
+    localId: 'loc-1',
+    composedText: 'hi',
+    timestamp: 1000,
+  });
+  assert.equal((result2.state.transcript.bySession['/s'] ?? []).length, 1);
+});
+
 test('reducer: post-ack PreflightFailed rolls back an EDIT via promoted (no sendRejected; kind-aware notice)', () => {
   // Post-ack edit failure: the edit was promoted (EditResult{ok:true}), so the
   // rollback snapshot lives in `promoted`. PreflightFailed rolls it back — but,

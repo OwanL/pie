@@ -138,6 +138,31 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
       }
     : payload.session;
 
+  // Defensive model-picker hardening (STATE_CONTRACT § Optimistic
+  // Reconciliation). An in-flight optimistic `SetModel` owns the model state
+  // for this session: the reducer already flipped the global default + the
+  // per-session badge, and `SetModelRpc` (settings.set) is en route. A
+  // `session.opened` that lands before that write commits reads `settings.json`
+  // and `buildCurrentSummary` from the PRE-switch state, so naively applying
+  // its `modelSettings` / per-session badge would silently revert the user's
+  // just-made choice. The lifecycle queue normally serializes `SetModelRpc`
+  // before any `session.opened` for the same session, but guard against any
+  // unforeseen event ordering so the picker stays trustworthy — preserve the
+  // in-flight optimistic model for both the global default and the badge.
+  // The `snapshot !== null` check scopes the guard to entries that have
+  // actually been optimistically applied; the modal-pending stash
+  // (`snapshot === null`) has not flipped any state, so a `session.opened`
+  // during the modal window must still hydrate normally.
+  const inFlightSetModel = Object.values(state.pending.setModelByCorrId)
+    .find((p) => p.sessionPath === sessionPath && p.snapshot !== null);
+  const guardedSummary: SessionSummary = inFlightSetModel
+    ? {
+        ...openedSummary,
+        modelId: inFlightSetModel.modelSettings.defaultModel,
+        thinkingLevel: inFlightSetModel.modelSettings.defaultThinkingLevel,
+      }
+    : openedSummary;
+
   // Any aliases discovered while merging must be stored so that later
   // backend events carrying the SDK-assigned message id resolve to the
   // streaming row the host kept.
@@ -151,7 +176,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     sessions: {
       ...next.sessions,
       runningSessionPaths: nextRunningSessionPaths,
-      sessions: upsertSessionSummary(next.sessions.sessions, openedSummary),
+      sessions: upsertSessionSummary(next.sessions.sessions, guardedSummary),
       ...(payload.analyticsFactors && {
         analyticsFactorsBySession: {
           ...next.sessions.analyticsFactorsBySession,
@@ -168,7 +193,10 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
           [sessionPath]: payload.availableModels,
         },
       }),
-      ...(payload.modelSettings && {
+      // Apply the global default from settings.json UNLESS an in-flight
+      // optimistic SetModel owns it (see `inFlightSetModel` above) — a stale
+      // pre-write reading must not revert the user's just-made choice.
+      ...(!inFlightSetModel && payload.modelSettings && {
         modelSettings: payload.modelSettings,
       }),
       ...(payload.contextUsage !== undefined && {
@@ -324,6 +352,56 @@ export function handleRunningSessionsChanged(state: ArchState, event: Extract<Ev
   };
 }
 
+/** Record live auto-retry status for a session so the webview can surface a
+ *  "Retrying N of M…" chip with a Cancel button. The SDK emits
+ *  `auto_retry_start` after a transient error, just before the backoff sleep;
+ *  each attempt overwrites the previous (no intervening `auto_retry_end` between
+ *  attempts N and N+1). Pure (spread only). */
+export function handleRetryStarted(state: ArchState, event: Extract<Event, { kind: 'RetryStarted' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        retryStatusBySession: {
+          ...state.sessions.retryStatusBySession,
+          [event.sessionPath]: {
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            delayMs: event.delayMs,
+            errorMessage: event.errorMessage,
+          },
+        },
+      },
+    },
+    effects: [],
+  };
+}
+
+/** Clear auto-retry status for a session. Emitted on retry success (retried turn
+ *  produced a non-error message), final failure (retries exhausted), or
+ *  cancellation (`session.abort()` aborted the retry sleep → "Retry cancelled").
+ *  No-op if the session has no recorded retry status (defensive against a
+ *  stray/late event). Pure (spread + delete on a shallow copy). */
+export function handleRetryEnded(state: ArchState, event: Extract<Event, { kind: 'RetryEnded' }>): ReducerResult {
+  const prev = state.sessions.retryStatusBySession;
+  if (!(event.sessionPath in prev)) {
+    return { state, effects: [] };
+  }
+  const nextRetryStatus = { ...prev };
+  delete nextRetryStatus[event.sessionPath];
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        retryStatusBySession: nextRetryStatus,
+      },
+    },
+    effects: [],
+  };
+}
+
 /**
  * Mark every still-streaming assistant message in each listed session as
  * `interrupted` and stamp `errorDetail` with the supplied reason. Dispatched by
@@ -342,6 +420,10 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
 
   const nextState = produce(state, (draft) => {
     for (const sessionPath of sessionPaths) {
+      // A backend death mid-retry leaves a stale retry status; the retry is
+      // dead (no `auto_retry_end` will fire), so clear it alongside the
+      // streaming-message interruption.
+      delete draft.sessions.retryStatusBySession[sessionPath];
       const list = draft.transcript.bySession[sessionPath];
       if (!list) continue;
       // Walk newest-first because the streaming message is almost always the

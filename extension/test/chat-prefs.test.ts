@@ -7,6 +7,8 @@ import {
   getChatPrefContextLabel,
   getChatPrefContextValue,
   getToolCallContextType,
+  isAskUserForSubagentsEnabled,
+  setAskUserForSubagents,
   setBucketModels,
   setNestedAllowedBucket,
   toggleChatPref,
@@ -30,6 +32,9 @@ const prefs: ChatPrefs = {
   bashWarmPoolSize: 2,
   bashFastPath: true,
   bashShellPath: '',
+  bashWarmupTimeoutMs: 0,
+  bashAcquireTimeoutMs: 0,
+  bashDefaultTimeout: 60,
   subagentBuckets: { small: [], medium: [], frontier: [] },
   subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
   subagentDropTools: [],
@@ -53,23 +58,34 @@ const prefs: ChatPrefs = {
   providerToggles: {},
   activityTailLines: 2,
   uiMessageRailSize: 18,
+  hideStatusStrip: false,
+  hideTokenRate: false,
+  hideSessionTokens: false,
+  hideSessionCost: false,
+  hideContextIndicator: false,
+  hideRunStatus: false,
 };
 
-test('chat pref menu sections expose transcript, notifications, and diagnostics toggles', () => {
-  assert.equal(CHAT_PREF_MENU_SECTIONS.length, 3);
+test('chat pref menu sections expose transcript, display, notifications, and diagnostics toggles', () => {
+  assert.equal(CHAT_PREF_MENU_SECTIONS.length, 4);
   assert.equal(CHAT_PREF_MENU_SECTIONS[0]?.id, 'transcript');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[0]?.items.map((item) => item.key),
     ['autoExpandReasoning', 'autoExpandToolCalls', 'autoExpandSubagentCalls'],
   );
-  assert.equal(CHAT_PREF_MENU_SECTIONS[1]?.id, 'notifications');
+  assert.equal(CHAT_PREF_MENU_SECTIONS[1]?.id, 'display');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[1]?.items.map((item) => item.key),
-    ['suppressCompletionNotifications'],
+    ['hideStatusStrip', 'hideTokenRate', 'hideSessionTokens', 'hideSessionCost', 'hideContextIndicator', 'hideRunStatus'],
   );
-  assert.equal(CHAT_PREF_MENU_SECTIONS[2]?.id, 'diagnostics');
+  assert.equal(CHAT_PREF_MENU_SECTIONS[2]?.id, 'notifications');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[2]?.items.map((item) => item.key),
+    ['suppressCompletionNotifications'],
+  );
+  assert.equal(CHAT_PREF_MENU_SECTIONS[3]?.id, 'diagnostics');
+  assert.deepEqual(
+    CHAT_PREF_MENU_SECTIONS[3]?.items.map((item) => item.key),
     ['runtimeAuditLog'],
   );
 });
@@ -112,6 +128,9 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     bashWarmPoolSize: 2,
     bashFastPath: true,
     bashShellPath: '',
+    bashWarmupTimeoutMs: 0,
+    bashAcquireTimeoutMs: 0,
+    bashDefaultTimeout: 60,
     subagentBuckets: { small: [], medium: [], frontier: [] },
     subagentNestedAllowedBuckets: { small: true, medium: true, frontier: true },
   subagentDropTools: [],
@@ -135,6 +154,12 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     providerToggles: {},
     activityTailLines: 2,
     uiMessageRailSize: 18,
+    hideStatusStrip: false,
+    hideTokenRate: false,
+    hideSessionTokens: false,
+    hideSessionCost: false,
+    hideContextIndicator: false,
+    hideRunStatus: false,
   });
 });
 
@@ -190,4 +215,37 @@ test('setNestedAllowedBucket preserves the other two tiers', () => {
     subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
   });
   assert.deepEqual(populated.subagentNestedAllowedBuckets, { small: true, medium: false, frontier: false });
+});
+
+test('isAskUserForSubagentsEnabled reflects the drop-tools list', () => {
+  assert.equal(isAskUserForSubagentsEnabled(prefs), true);
+  const dropped: ChatPrefs = { ...prefs, subagentDropTools: ['ask_user'] };
+  assert.equal(isAskUserForSubagentsEnabled(dropped), false);
+  // Other tools in the list do not affect ask_user membership.
+  const others: ChatPrefs = { ...prefs, subagentDropTools: ['web_search'] };
+  assert.equal(isAskUserForSubagentsEnabled(others), true);
+});
+
+test('setAskUserForSubagents adds ask_user when disabling and removes it when enabling', () => {
+  // Disabling on an empty list adds ask_user.
+  const disablePatch = setAskUserForSubagents(prefs, false);
+  assert.deepEqual(disablePatch, { subagentDropTools: ['ask_user'] });
+  // Source prefs untouched.
+  assert.deepEqual(prefs.subagentDropTools, []);
+
+  // Disabling is idempotent — already-present ask_user is not duplicated.
+  const alreadyDropped: ChatPrefs = { ...prefs, subagentDropTools: ['ask_user', 'web_search'] };
+  const idempotent = setAskUserForSubagents(alreadyDropped, false);
+  assert.deepEqual(idempotent, { subagentDropTools: ['ask_user', 'web_search'] });
+
+  // Enabling removes ask_user while preserving other dropped tools.
+  const enablePatch = setAskUserForSubagents(alreadyDropped, true);
+  assert.deepEqual(enablePatch, { subagentDropTools: ['web_search'] });
+
+  // Enabling when ask_user is not present is a no-op (returns an equivalent list
+  // without ask_user — no mutation of source).
+  const clean: ChatPrefs = { ...prefs, subagentDropTools: ['web_search'] };
+  const noOp = setAskUserForSubagents(clean, true);
+  assert.deepEqual(noOp, { subagentDropTools: ['web_search'] });
+  assert.deepEqual(clean.subagentDropTools, ['web_search']);
 });

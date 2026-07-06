@@ -3,9 +3,10 @@
 
 import { memo } from 'preact/compat';
 
-import type { AggregateStats, AggregateLastRun } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun, DeferredTriggerView, ProxyProviderMetrics, WarmBashStats } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
+import { Tooltip } from '../components/tooltip';
 
 /**
  * Thin status strip anchored at the bottom of the panel (below the composer).
@@ -14,8 +15,10 @@ import { cx } from '../utils/cx';
  *   today $X · wk $Y · tok/s (live when running, else today's mean) · N tabs
  *
  * Per-provider breakdowns and all-time context live in each segment's scoped
- * `title` tooltip rather than dedicated inline chips, so the strip itself stays
- * a single thin line.
+ * custom tooltip (`Tooltip`, frozen while visible) rather than dedicated inline
+ * chips, so the strip itself stays a single thin line. Custom tooltips are
+ * used instead of native `title` because the strip re-renders ~7×/sec during
+ * streaming — native `title` tooltips close on every re-render and flicker.
  *
  * Host-owned (STATE_CONTRACT § Webview-Local State): the strip is a pure
  * projection of `ViewState.aggregateStats`; it computes nothing itself.
@@ -23,9 +26,48 @@ import { cx } from '../utils/cx';
 
 interface AggregateStatsStripProps {
   stats: AggregateStats;
+  proxyMetrics?: ProxyProviderMetrics[];
+  /** Currently-active deferred triggers (all sessions). When non-empty, the
+   *  strip shows a clickable waiting-trigger segment that opens the cancel
+   *  popup. */
+  deferredTriggers: DeferredTriggerView[];
+  /** Open the deferred-triggers cancel popup at the click position. */
+  onOpenDeferredMenu: (x: number, y: number) => void;
 }
 
-function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
+export interface ProxyStripProviderSummary {
+  provider: string;
+  activeRequests: number;
+  queuedRequests: number;
+  maxConcurrentRequests: number;
+  maxedOut: boolean;
+}
+
+export function summarizeProxyStrip(proxyMetrics?: ProxyProviderMetrics[]): ProxyStripProviderSummary[] {
+  if (!proxyMetrics || proxyMetrics.length === 0) return [];
+  return [...proxyMetrics]
+    .map((metric) => ({
+      provider: metric.provider,
+      activeRequests: metric.activeRequests,
+      queuedRequests: metric.queuedRequests,
+      maxConcurrentRequests: metric.maxConcurrentRequests,
+      maxedOut: metric.activeRequests >= metric.maxConcurrentRequests,
+    }))
+    .sort((left, right) => {
+      if (right.queuedRequests !== left.queuedRequests) return right.queuedRequests - left.queuedRequests;
+      if (right.activeRequests !== left.activeRequests) return right.activeRequests - left.activeRequests;
+      return left.provider.localeCompare(right.provider);
+    });
+}
+
+export function formatProxyStripSummary(summaries: readonly ProxyStripProviderSummary[]): string | null {
+  if (summaries.length === 0) return null;
+  return summaries
+    .map((summary) => `${summary.provider} ${summary.activeRequests}/${summary.maxConcurrentRequests}${summary.queuedRequests > 0 ? ` +${summary.queuedRequests}q` : summary.maxedOut ? '!' : ''}`)
+    .join(', ');
+}
+
+function AggregateStatsStripView({ stats, proxyMetrics, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
   const {
     ready,
     todayCost,
@@ -43,6 +85,10 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
   // Throughput headline: live when running, else today's mean, else all-time
   // mean (label-agnostic inline; the tooltip distinguishes the source).
   const running = runningSessionCount > 0;
+  const proxySummaries = summarizeProxyStrip(proxyMetrics);
+  const proxyHeadline = formatProxyStripSummary(proxySummaries);
+  const proxyIdle = proxySummaries.length > 0
+    && proxySummaries.every((summary) => summary.activeRequests === 0 && summary.queuedRequests === 0);
   const headlineRate = running
     ? liveTokensPerSecond
     : (todayTokensPerSecond > 0 ? todayTokensPerSecond : tokensPerSecond);
@@ -56,49 +102,100 @@ function AggregateStatsStripView({ stats }: AggregateStatsStripProps) {
       role="status"
       aria-label={ariaLabel(stats)}
     >
-      <span
-        class="aggregate-strip-seg aggregate-strip-seg--primary"
-        title={todayTooltip(stats)}
-      >
-        today <span class="aggregate-strip-cost">{formatCostAdaptive(todayCost)}</span>
-      </span>
+      <Tooltip content={todayTooltip(stats)} placement="top" freezeWhileVisible>
+        <span class="aggregate-strip-seg aggregate-strip-seg--primary">
+          today <span class="aggregate-strip-cost">{formatCostAdaptive(todayCost)}</span>
+        </span>
+      </Tooltip>
       <Sep />
-      <span class="aggregate-strip-seg" title={weekTooltip(stats)}>
-        wk <span class="aggregate-strip-cost">{formatCostAdaptive(weekCost)}</span>
-      </span>
+      <Tooltip content={weekTooltip(stats)} placement="top" freezeWhileVisible>
+        <span class="aggregate-strip-seg">
+          wk <span class="aggregate-strip-cost">{formatCostAdaptive(weekCost)}</span>
+        </span>
+      </Tooltip>
       <Sep />
-      <span class="aggregate-strip-seg aggregate-strip-tokens" title={todayTooltip(stats)}>
-        <span class="aggregate-strip-tok-down">↓{formatCompactTokens(todayInputTokens)}</span>
-        {' '}<span class="aggregate-strip-tok-up">↑{formatCompactTokens(todayOutputTokens)}</span>
-      </span>
+      <Tooltip content={todayTooltip(stats)} placement="top" freezeWhileVisible>
+        <span class="aggregate-strip-seg aggregate-strip-tokens">
+          <span class="aggregate-strip-tok-down">↓{formatCompactTokens(todayInputTokens)}</span>
+          {' '}<span class="aggregate-strip-tok-up">↑{formatCompactTokens(todayOutputTokens)}</span>
+        </span>
+      </Tooltip>
       <Sep />
-      <span class="aggregate-strip-seg" title={throughputTooltip(stats, rateSource)}>
-        {rateSource === 'live' && <span class="aggregate-strip-live-tag">live</span>}
-        {rateSource === 'none'
-          ? <span class="aggregate-strip-rate">—</span>
-          : <span class="aggregate-strip-rate">{formatRate(headlineRate)}</span>}
-        <span class="aggregate-strip-unit"> tok/s</span>
-      </span>
+      <Tooltip content={throughputTooltip(stats, rateSource)} placement="top" freezeWhileVisible>
+        <span class="aggregate-strip-seg">
+          {rateSource === 'live' && <span class="aggregate-strip-live-tag">live</span>}
+          {rateSource === 'none'
+            ? <span class="aggregate-strip-rate">—</span>
+            : <span class="aggregate-strip-rate">{formatRate(headlineRate)}</span>}
+          <span class="aggregate-strip-unit"> tok/s</span>
+        </span>
+      </Tooltip>
       {lastRun && (
         <>
           <Sep />
-          <span class="aggregate-strip-seg" title={lastRunTooltip(lastRun)}>
-            last <span class="aggregate-strip-cost">{formatCostAdaptive(lastRun.cost)}</span>
-            <span class="aggregate-strip-dur">{formatDuration(lastRun.durationMs)}</span>
-          </span>
+          <Tooltip content={lastRunTooltip(lastRun)} placement="top" freezeWhileVisible>
+            <span class="aggregate-strip-seg">
+              last <span class="aggregate-strip-cost">{formatCostAdaptive(lastRun.cost)}</span>
+              <span class="aggregate-strip-dur">{formatDuration(lastRun.durationMs)}</span>
+            </span>
+          </Tooltip>
+        </>
+      )}
+      {stats.warmBash.enabled && (
+        <>
+          <Sep />
+          <Tooltip content={warmBashTooltip(stats.warmBash)} placement="top" freezeWhileVisible>
+            <span class="aggregate-strip-seg aggregate-strip-warm">
+              <span class="aggregate-strip-warm-label">warm</span>
+              <span class="aggregate-strip-warm-counts">{stats.warmBash.ready}/{stats.warmBash.poolSize}</span>
+              {stats.warmBash.warming > 0 && (
+                <span class="aggregate-strip-warm-warming" aria-hidden="true">↑{stats.warmBash.warming}</span>
+              )}
+            </span>
+          </Tooltip>
+        </>
+      )}
+      {proxyHeadline && (
+        <>
+          <Sep />
+          <Tooltip content={proxyTooltip(proxySummaries)} placement="top" freezeWhileVisible>
+            <span class={cx('aggregate-strip-seg', 'aggregate-strip-proxy', proxyIdle && 'aggregate-strip-proxy--idle')}>
+              <span class="aggregate-strip-proxy-label">proxy</span>
+              <span class="aggregate-strip-proxy-value">{proxyHeadline}</span>
+            </span>
+          </Tooltip>
+        </>
+      )}
+      {deferredTriggers.length > 0 && (
+        <>
+          <Sep />
+          <Tooltip content={deferredTooltip(deferredTriggers)} placement="top" freezeWhileVisible>
+            <button
+              type="button"
+              class="aggregate-strip-seg aggregate-strip-deferred"
+              title={`Pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'} — click to cancel`}
+              aria-label={`${deferredTriggers.length} pending deferred trigger${deferredTriggers.length === 1 ? '' : 's'}. Click to open cancel menu.`}
+              onClick={(e) => onOpenDeferredMenu(e.clientX, e.clientY)}
+            >
+              <span class="aggregate-strip-deferred-icon" aria-hidden="true">⏳</span>
+              <span class="aggregate-strip-deferred-count">{deferredTriggers.length} deferred</span>
+            </button>
+          </Tooltip>
         </>
       )}
       <Sep />
-      <span class="aggregate-strip-seg aggregate-strip-counts" title={sessionsTooltip(stats)}>
-        {openTabCount} tab{openTabCount === 1 ? '' : 's'}
-        {running && (
-          <span class="aggregate-strip-active">
-            {' · '}
-            <span class="aggregate-strip-active-dot" aria-hidden="true" />
-            {runningSessionCount} active
-          </span>
-        )}
-      </span>
+      <Tooltip content={sessionsTooltip(stats)} placement="top" freezeWhileVisible triggerClassName="aggregate-strip-counts-trigger">
+        <span class="aggregate-strip-seg aggregate-strip-counts">
+          {openTabCount} tab{openTabCount === 1 ? '' : 's'}
+          {running && (
+            <span class="aggregate-strip-active">
+              {' · '}
+              <span class="aggregate-strip-active-dot" aria-hidden="true" />
+              {runningSessionCount} active
+            </span>
+          )}
+        </span>
+      </Tooltip>
     </div>
   );
 }
@@ -119,7 +216,23 @@ function arePropsEqual(
   prev: AggregateStatsStripProps,
   next: AggregateStatsStripProps,
 ): boolean {
-  return prev.stats === next.stats || statsSignature(prev.stats) === statsSignature(next.stats);
+  return (prev.stats === next.stats || statsSignature(prev.stats) === statsSignature(next.stats))
+    && deferredSignature(prev.deferredTriggers) === deferredSignature(next.deferredTriggers)
+    && proxyMetricsSignature(prev.proxyMetrics) === proxyMetricsSignature(next.proxyMetrics);
+}
+
+/** Compact membership signature of the active deferred-trigger set, so the
+ *  strip skips re-render when the set is unchanged across a fresh host-serialised
+ *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
+function deferredSignature(t: DeferredTriggerView[]): string {
+  return t.map((x) => `${x.id}:${x.sessionPath}`).sort().join(',');
+}
+
+function proxyMetricsSignature(proxyMetrics?: ProxyProviderMetrics[]): string {
+  if (!proxyMetrics) return '';
+  return proxyMetrics
+    .map((metric) => `${metric.provider}:${metric.modelInfoId}:${metric.activeRequests}:${metric.queuedRequests}:${metric.maxConcurrentRequests}`)
+    .join('|');
 }
 
 function statsSignature(s: AggregateStats): string {
@@ -140,6 +253,9 @@ function statsSignature(s: AggregateStats): string {
     s.tokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.todayTokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.lastRun ? `${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.endedAt}:${s.lastRun.modelId}` : '',
+    s.warmBash.enabled, s.warmBash.poolSize, s.warmBash.ready, s.warmBash.warming,
+    s.warmBash.fastPathEnabled, s.warmBash.totalFastPath, s.warmBash.totalWarm,
+    s.warmBash.totalFallback, s.warmBash.totalWarmupFailures,
   ].join('|');
 }
 
@@ -272,6 +388,35 @@ function lastRunTooltip(r: AggregateLastRun): string {
   return lines.join('\n');
 }
 
+function warmBashTooltip(w: WarmBashStats): string {
+  const lines: string[] = [
+    `Warm bash: pool ${w.poolSize}  ·  ${w.ready} ready  ·  ${w.warming} warming`,
+    `Fast path: ${w.fastPathEnabled ? 'on' : 'off'}`,
+  ];
+  const totalExecs = w.totalFastPath + w.totalWarm + w.totalFallback;
+  if (totalExecs > 0) {
+    lines.push('');
+    lines.push(`Executions: ${totalExecs} total`);
+    lines.push(`  ${w.totalFastPath} fast path  ·  ${w.totalWarm} warm  ·  ${w.totalFallback} fallback`);
+  }
+  if (w.totalWarmupFailures > 0) {
+    lines.push(`Warmup failures: ${w.totalWarmupFailures}`);
+  }
+  lines.push('');
+  lines.push('Tune in Settings → Bash (pool size, fast path, timeouts).');
+  return lines.join('\n');
+}
+
+function proxyTooltip(summaries: readonly ProxyStripProviderSummary[]): string {
+  const lines: string[] = ['Proxy concurrency:', ''];
+  for (const summary of summaries) {
+    lines.push(`  ${pad(summary.provider, 14)}${summary.activeRequests}/${summary.maxConcurrentRequests}${summary.queuedRequests > 0 ? `  ·  ${summary.queuedRequests} queued` : summary.maxedOut ? '  ·  maxed' : ''}`);
+  }
+  lines.push('');
+  lines.push('Queued sessions are parked waiting for a provider slot.');
+  return lines.join('\n');
+}
+
 function sessionsTooltip(s: AggregateStats): string {
   if (!s.ready) return 'Computing usage stats…';
   const lines: string[] = [
@@ -283,5 +428,21 @@ function sessionsTooltip(s: AggregateStats): string {
   lines.push(`All-time tokens: ↓${formatCompactTokens(s.totalInputTokens)} in  ↑${formatCompactTokens(s.totalOutputTokens)} out`);
   lines.push(`  cache ${formatCompactTokens(s.totalCacheReadTokens)} read / ${formatCompactTokens(s.totalCacheWriteTokens)} write`);
   lines.push(`${s.runCount} runs (all-time)`);
+  return lines.join('\n');
+}
+
+/** Tooltip for the waiting-trigger segment: one line per active trigger
+ *  (session + condition + note), so the user can preview before opening the
+ *  cancel popup. */
+function deferredTooltip(triggers: DeferredTriggerView[]): string {
+  const lines: string[] = [
+    `${triggers.length} pending deferred trigger${triggers.length === 1 ? '' : 's'} — click to cancel`,
+    '',
+  ];
+  for (const t of triggers) {
+    const note = t.note.trim() || '(no note)';
+    const head = `${t.sessionPath.split(/[\\/]/).pop() ?? t.sessionPath}: ${note}`;
+    lines.push(head.length > 80 ? `${head.slice(0, 77)}…` : head);
+  }
   return lines.join('\n');
 }

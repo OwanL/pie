@@ -23,6 +23,7 @@ import type {
   ComposerInputDraft,
   PruningMode,
   PruningSettings,
+  ToolResultPruningSettings,
   RunOutcome,
   StateAppliedPayload,
   ThinkingLevel,
@@ -155,6 +156,12 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'subagentAlwaysParentModel',
     'runtimeAuditLog',
     'bashFastPath',
+    'hideStatusStrip',
+    'hideTokenRate',
+    'hideSessionTokens',
+    'hideSessionCost',
+    'hideContextIndicator',
+    'hideRunStatus',
   ];
   const toggleKeys: Array<keyof ChatPrefs> = [
     'extensionToggles',
@@ -168,6 +175,9 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     subagentMaxConcurrency: [1, 16],
     subagentMaxParallelTasks: [1, 16],
     bashWarmPoolSize: [0, 8],
+    bashWarmupTimeoutMs: [0, 60000],
+    bashAcquireTimeoutMs: [0, 60000],
+    bashDefaultTimeout: [1, 600],
     uiBaseFontSize: [10, 24],
     uiComposerFontSize: [11, 28],
     expandedSectionFontSize: [8, 32],
@@ -175,7 +185,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
-    uiMessageRailSize: [8, 28],
+    uiMessageRailSize: [8, 40],
   };
   const stringKeys: Array<keyof ChatPrefs> = [
     'uiFontSans',
@@ -238,6 +248,38 @@ function validatePruningSettingsPatch(value: unknown): value is Partial<PruningS
       if (v !== undefined && (typeof v !== 'string' || v.length === 0)) return false;
     } else if (key === 'thinkingLevel') {
       if (v !== undefined && (typeof v !== 'string' || !THINKING_LEVEL_SET.has(v as ThinkingLevel))) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+const VALID_TOOL_RESULT_PRUNING_PROFILES = new Set<ToolResultPruningSettings['profile']>(['default', 'security']);
+
+function validateToolResultPruningSettingsPatch(value: unknown): value is Partial<ToolResultPruningSettings> {
+  if (!isObject(value)) return false;
+  for (const key of Object.keys(value)) {
+    const v = (value as Record<string, unknown>)[key];
+    if (key === 'enabled') {
+      if (v !== undefined && typeof v !== 'boolean') return false;
+    } else if (key === 'profile') {
+      if (v !== undefined && (typeof v !== 'string' || !VALID_TOOL_RESULT_PRUNING_PROFILES.has(v as ToolResultPruningSettings['profile']))) return false;
+    } else if (key === 'rules') {
+      if (v !== undefined && !isObject(v)) return false;
+      const rules = v as Record<string, unknown>;
+      for (const ruleKey of Object.keys(rules)) {
+        if (!['ansi', 'whitespace', 'blankRun', 'jsonMinify', 'lsLong', 'gitLog'].includes(ruleKey)) return false;
+        const ruleValue = rules[ruleKey];
+        if (ruleValue !== undefined && typeof ruleValue !== 'boolean') return false;
+      }
+    } else if (key === 'tools') {
+      if (v !== undefined && v !== null && !Array.isArray(v)) return false;
+      if (Array.isArray(v)) {
+        for (const entry of v) {
+          if (typeof entry !== 'string' || entry.length === 0) return false;
+        }
+      }
     } else {
       return false;
     }
@@ -310,6 +352,11 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('interrupt: missing `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'cancelDeferredTrigger':
+      if (!isString(value.sessionPath)) return fail('cancelDeferredTrigger: missing `sessionPath`');
+      if (value.triggerId !== undefined && !isString(value.triggerId)) return fail('cancelDeferredTrigger: bad `triggerId`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'openSession':
     case 'closeSession':
     case 'duplicateSession':
@@ -353,6 +400,10 @@ export function validateWebviewToHostMessage(
       if (!validatePruningSettingsPatch(value.settings)) return fail('setPruningSettings: invalid `settings` patch');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'setToolResultPruningSettings':
+      if (!validateToolResultPruningSettingsPatch(value.settings)) return fail('setToolResultPruningSettings: invalid `settings` patch');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'openFileDiff':
     case 'openFileInEditor':
     case 'revertFile':
@@ -364,6 +415,11 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('setFileRead: missing string `sessionPath`');
       if (!isString(value.filePath)) return fail('setFileRead: missing string `filePath`');
       if (typeof value.read !== 'boolean') return fail('setFileRead: missing boolean `read`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'setSystemPromptToggles':
+      if (!isString(value.sessionPath)) return fail('setSystemPromptToggles: missing string `sessionPath`');
+      if (!Array.isArray(value.disabledEntries)) return fail('setSystemPromptToggles: missing `disabledEntries` array');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'startEdit':
