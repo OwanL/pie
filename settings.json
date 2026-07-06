@@ -1,7 +1,7 @@
 {
-  "defaultModel": "glm-5.2:cloud",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "ollama",
+  "defaultModel": "umans-glm-5.2",
+  "defaultThinkingLevel": "low",
+  "defaultProvider": "umans",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -30,7 +30,7 @@
         "apiBase": "https://api.code.umans.ai/v1",
         "apiKeyEnv": "UMANS_API_KEY",
         "litellmProvider": "openai",
-        "maxConcurrentRequests": 4,
+        "maxConcurrentRequests": 3,
         "litellmModelInfoId": "umans-shared",
         "modelListOrder": [
           "umans",
@@ -49,6 +49,7 @@
     }
   },
   "httpIdleTimeoutMs": 0,
+  "bashDefaultTimeout": 60,
   "packages": [
     "npm:pi-web-access@0.13.0"
   ],

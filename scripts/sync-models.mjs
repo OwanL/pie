@@ -149,18 +149,30 @@ function validateExtra(source) {
 
 /** Load and validate the `proxy` block from settings.json. Returns the proxy
  *  config object `{ gateway, providers }`. Cross-validates per-provider
- *  upstream routing (modelListOrder / alias) against the models.yaml catalog. */
-export function loadProxyConfig(root = repoRoot()) {
+ *  upstream routing (modelListOrder / alias) against the models.yaml catalog.
+ *  Strict (default): a `proxy.providers` entry whose provider is absent from
+ *  models.yaml throws — pass `{ toleratePending: true }` to skip such entries
+ *  instead (used by generate()/sync() so a provider added via the pie UI — whose
+ *  models.yaml catalog entry is added separately by the add-provider skill —
+ *  doesn't break proxy regeneration while pending). */
+export function loadProxyConfig(root = repoRoot(), opts = {}) {
   const existingSettings = JSON.parse(readFileSync(path.join(root, 'settings.json'), 'utf8'));
   const proxy = existingSettings.proxy;
   const source = loadSource(root);
-  validateProxyConfig(proxy, source);
+  validateProxyConfig(proxy, source, opts);
   return proxy;
 }
 
 /** Validate the settings.json `proxy` block shape + cross-field consistency
- *  against the models.yaml model catalog. Throws on any invalid/missing field. */
-export function validateProxyConfig(proxy, source) {
+ *  against the models.yaml model catalog. Throws on any invalid/missing field.
+ *
+ *  `opts.toleratePending` (default false): when true, a `proxy.providers` entry
+ *  whose provider is absent from the models.yaml catalog is SKIPPED (treated as
+ *  a pending provider whose catalog entry the add-provider skill hasn't added
+ *  yet) instead of throwing. Per-provider routing validation (modelListOrder /
+ *  alias against the catalog) only runs for providers that ARE in the catalog. */
+export function validateProxyConfig(proxy, source, opts = {}) {
+  const toleratePending = !!opts.toleratePending;
   if (!proxy || typeof proxy !== 'object') {
     throw new Error("settings.json `proxy` is missing or not an object — required to generate proxy/litellm_config.yaml.");
   }
@@ -191,7 +203,10 @@ export function validateProxyConfig(proxy, source) {
   for (const [pname, up] of Object.entries(providers)) {
     if (!up || typeof up !== 'object') throw new Error(`proxy.providers.${pname} is not an object`);
     const provider = source.providers[pname];
-    if (!provider) throw new Error(`proxy.providers references unknown provider '${pname}' (not in models.yaml)`);
+    if (!provider) {
+      if (toleratePending) continue;
+      throw new Error(`proxy.providers references unknown provider '${pname}' (not in models.yaml)`);
+    }
     if (typeof up.apiBase !== 'string') throw new Error(`proxy.providers.${pname}.apiBase must be a string`);
     if (typeof up.apiKeyEnv !== 'string' || up.apiKeyEnv.length === 0)
       throw new Error(`proxy.providers.${pname}.apiKeyEnv must be a non-empty string`);
@@ -320,7 +335,11 @@ export function generateLitellmConfigYaml(source, proxy) {
   const modelList = [];
   for (const [pname, up] of Object.entries(proxy.providers)) {
     const provider = source.providers[pname];
-    if (!provider) throw new Error(`proxy.providers references unknown provider '${pname}' (not in models.yaml)`);
+    // A provider present in proxy.providers but absent from the models.yaml
+    // catalog is "pending" (added via the pie UI; its catalog entry is added
+    // separately by the add-provider skill). Skip it — it contributes no
+    // routes until its catalog entry exists, so the proxy stays healthy.
+    if (!provider) continue;
     const modelIds = new Set(provider.models.map((m) => m.id));
     for (const name of up.modelListOrder) {
       let targetModel;
@@ -393,7 +412,11 @@ export function generateSettings(source, existingSettings) {
  *  config generation — the latter reads its `proxy` block). */
 export function generate(source, existingSettings) {
   const proxy = existingSettings?.proxy;
-  validateProxyConfig(proxy, source);
+  // Tolerate pending providers (in proxy.providers but not yet in the
+  // models.yaml catalog) so regenerating after a UI add — before the
+  // add-provider skill has added the catalog entry — doesn't throw and leave
+  // the proxy unable to restart. Pending providers contribute no routes.
+  validateProxyConfig(proxy, source, { toleratePending: true });
   return {
     modelsJson: generateModelsJson(source),
     modelProfilesYaml: generateModelProfilesYaml(source),

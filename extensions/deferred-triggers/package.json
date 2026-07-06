@@ -1,0 +1,10 @@
+{
+  "name": "deferred-triggers",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

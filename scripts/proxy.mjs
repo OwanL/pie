@@ -88,8 +88,8 @@ function resolveUv() {
 /** Spawn uv run litellm (foreground). Inherits stdio so Ctrl+C propagates. */
 function runForeground() {
   const uv = resolveUv();
-  log(`starting litellm (foreground) via ${uv} on ${baseUrl}`);
-  const child = spawn(uv, ['run', 'litellm', '--config', configPath, '--port', String(PORT), '--host', HOST], {
+  log(`starting litellm (foreground, pie wrapper) via ${uv} on ${baseUrl}`);
+  const child = spawn(uv, ['run', 'python', 'pie_proxy.py', '--config', configPath, '--port', String(PORT), '--host', HOST], {
     cwd: proxyDir,
     stdio: 'inherit',
     windowsHide: false,
@@ -144,9 +144,9 @@ async function startBackground() {
     }
   }
   const uv = resolveUv();
-  log(`starting litellm (background) via ${uv} on ${baseUrl}; logs → ${logFile}`);
+  log(`starting litellm (background, pie wrapper) via ${uv} on ${baseUrl}; logs → ${logFile}`);
   const out = fs.openSync(logFile, 'a');
-  const child = spawn(uv, ['run', 'litellm', '--config', configPath, '--port', String(PORT), '--host', HOST], {
+  const child = spawn(uv, ['run', 'python', 'pie_proxy.py', '--config', configPath, '--port', String(PORT), '--host', HOST], {
     cwd: proxyDir,
     stdio: ['ignore', out, out],
     detached: true,

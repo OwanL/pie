@@ -109,6 +109,16 @@ const PACKAGE_CONFIGS = [
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
+  {
+    id: 'deferred-triggers',
+    cwd: repoRoot,
+    testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/deferred-triggers/**/*.ts'],
+    // store.ts (replay + sidecar I/O) is the unit-testable core; index.ts is
+    // env-glue (registers the `defer_trigger` tool) and needs the pi runtime.
+    // types-global.d.ts is ambient only.
+    thresholds: { lines: 80, branches: 70 },
+  },
 ];
 
 const PACKAGE_LOOKUP = new Map();

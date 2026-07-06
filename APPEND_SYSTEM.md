@@ -7,7 +7,3 @@
 - If you want to ask the user a question, use the ask_user tool.
 
 - Verify your work before completion. Reserve a sub-agent verification pass for non-trivial changes; for trivial edits, inline verification (re-reading the diff, a quick check) is fine. The spirit is to verify before declaring done, not to mandate a sub-agent call for every change.
-
-- Commit your changes after task completion if working in a repo (scoped to just your changes, there may be unrelated local changes from other work streams, dont commit these)
-
-- If you run into inefficiencies of any kind, be it bugs, quality, inaccuracies or other issues with agent infrastructure (tools, prompts, extensions, skills etc), then take action to fix it, as to make this tool / setup self improving.

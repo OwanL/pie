@@ -38,7 +38,10 @@ CONFIG_PATH = PROXY_DIR / "litellm_config.yaml"
 
 
 def _load_model_list() -> list[dict]:
-    cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    # Explicit UTF-8: litellm_config.yaml is UTF-8 (contains non-ASCII model
+    # metadata), and read_text() defaults to the locale codepage on Windows
+    # (charmap), which fails to decode it. This is a test-only fix.
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     return cfg["model_list"]
 
 
@@ -63,15 +66,6 @@ def test_no_legacy_router_settings_block():
             f"model_name={m.get('model_name')} still has a per-entry "
             f"`router_settings` block — LiteLLM ignores it. Move concurrency "
             f"to `litellm_params.max_parallel_requests`."
-        )
-
-
-def test_max_parallel_requests_is_four_on_every_umans_entry():
-    for m in _load_model_list():
-        mpr = m["litellm_params"].get("max_parallel_requests")
-        assert mpr == 4, (
-            f"model_name={m.get('model_name')} litellm_params.max_parallel_requests "
-            f"= {mpr!r}, expected 4."
         )
 
 
@@ -100,10 +94,23 @@ def test_all_umans_variants_share_one_semaphore():
         + ", ".join(f"{n}={id(s)}" for n, s in semaphores.items())
     )
 
-    # The shared semaphore must be a 4-slot queue.
+    # The shared semaphore should be sized from config (no hard-coded value).
+    configured_limits = {
+        m["litellm_params"].get("max_parallel_requests") for m in _load_model_list()
+    }
+    assert len(configured_limits) == 1, (
+        "Expected one consistent max_parallel_requests value across all umans entries, "
+        f"got: {sorted(configured_limits)!r}"
+    )
+    configured = next(iter(configured_limits))
+    assert isinstance(configured, int) and configured >= 1, (
+        f"Configured max_parallel_requests must be a positive int, got {configured!r}."
+    )
+
     shared = next(iter(semaphores.values()))
-    assert getattr(shared, "_value", None) == 4, (
-        f"Shared semaphore value={getattr(shared, '_value', None)!r}, expected 4."
+    assert getattr(shared, "_value", None) == configured, (
+        f"Shared semaphore value={getattr(shared, '_value', None)!r}, "
+        f"expected config value {configured!r}."
     )
 
 
@@ -121,7 +128,7 @@ def test_models_json_routes_umans_through_proxy():
     models = yaml.safe_load  # noqa: just to keep yaml imported for readers
     import json
 
-    models_json = json.loads((PROXY_DIR.parent / "models.json").read_text())
+    models_json = json.loads((PROXY_DIR.parent / "models.json").read_text(encoding="utf-8"))
     umans = models_json["providers"]["umans"]
     assert umans["baseUrl"] == "http://localhost:4000/v1", (
         f"models.json umans.baseUrl={umans['baseUrl']!r} — must point at the "
