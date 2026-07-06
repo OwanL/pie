@@ -188,4 +188,30 @@ export const settingsCharts: ChartEntry[] = [
       await ctx.renderSpec('chart-settings-extension-toggles', spec, 'No scored runs with extension-toggle tracking match the current filters.', ctx.renderToken);
     },
   },
+  {
+    id: 'chart-settings-tool-result-pruning',
+    render: async (ctx: ChartContext) => {
+      // Bucket completed runs by whether tool-result pruning was enabled at run
+      // start (true / false / null=untracked) and contrast average satisfaction.
+      // Answers "are outcomes better with or without the system?" Read-tool
+      // results are never pruned (hard safety guard), so the On bucket reflects
+      // bash/ls/grep/find/etc. output pruning only.
+      const runs = completedRuns(ctx.runs);
+      const onRuns = runs.filter((run) => run.fsToolResultPruningEnabled === true);
+      const offRuns = runs.filter((run) => run.fsToolResultPruningEnabled === false);
+      const untrackedRuns = runs.filter((run) => run.fsToolResultPruningEnabled === null);
+      const rows = toImpactRows([
+        { group: 'On', runs: onRuns },
+        { group: 'Off', runs: offRuns },
+        { group: '(untracked)', runs: untrackedRuns },
+      ]);
+      const totalScored = runs.filter((run) => run.satisfaction !== null).length;
+      ctx.setNote(
+        'settings-tool-result-pruning-note',
+        `Average satisfaction for runs with tool-result pruning enabled (On) vs. disabled (Off). ${totalScored} scored runs in view; the system is on by default, so Off is skewed toward sessions where the user explicitly turned it off (selection bias). (untracked) covers runs recorded before tracking existed.`,
+        ctx.renderToken,
+      );
+      await ctx.renderSpec('chart-settings-tool-result-pruning', satisfactionBarSpec(rows), 'No scored runs with tool-result-pruning tracking match the current filters.', ctx.renderToken);
+    },
+  },
 ];

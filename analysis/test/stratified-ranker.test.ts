@@ -71,6 +71,8 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
     fsPruningMode: null,
     fsPruningEnabled: null,
     fsExtensionToggles: {},
+    fsToolResultPruningEnabled: null,
+    fsToolResultPruningProfile: null,
     sendCount: 1,
     assistantTurnCount: 1,
     assistantTurnDurationMs: 1000,

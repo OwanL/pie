@@ -9,28 +9,54 @@
  * docs/TOOL-RESULT-PRUNING.md §6 for the verified persistence chain) and
  * cache-safe (only new results are touched, never stored history).
  *
- * MVP scope: the LOSSLESS tier only — ANSI strip, trailing-whitespace trim,
- * blank-run collapse, JSON minify. No recall stash needed (lossless ⇒ no
- * recoverable loss). The lossy tier (ls -l, git log, tabular, stack traces) +
- * recall stash land in a follow-up pass; the Rule/pipeline seam is shaped for
- * them (RuleResult gains a `marker` field and the pipeline gains stash +
- * `details.pruning` wiring then — see README). Per-rule token measurement
- * (§9.3) is wired NOW via logger.ts → data/tool-result-pruning.jsonl, ingested
- * by the analysis pipeline.
+ * Two tiers (§7.2):
+ *   - LOSSLESS (always on, per-rule-toggled): ANSI strip, trailing-whitespace
+ *     trim, blank-run collapse, JSON minify. Semantically identical ⇒ no
+ *     recall stash needed.
+ *   - LOSSY-recoverable (only under the `default` profile; per-rule-toggled):
+ *     `ls -l` → names + dir marker, `git log` → oneline. Lossy ⇒ a recall
+ *     stash is REQUIRED before the rewrite may enter history (§7.3): the
+ *     post-truncation, pre-pruning text is written to a temp file, a fidelity
+ *     marker `[pruned: <rules> — raw: <path>]` is prepended so the agent sees
+ *     what was removed, and `details.pruning = { id, rawPath, rules }` records
+ *     the recall contract. The agent recovers the raw by pointing the existing
+ *     `read` tool at `rawPath` (the whole pipeline skips `read`, so recall is
+ *     faithful). If the stash write fails, the lossy rewrite is abandoned and
+ *     the lossless-only result is used instead — never silently drop (§7.3).
  *
  * Config (settings.json, sibling to `pruning` which is owned by skill-pruner):
- *   "toolResultPruning": { "enabled": true, "profile": "default" }
+ *   "toolResultPruning": { "enabled": true, "profile": "default",
+ *                           "rules": { "ansi": true, "whitespace": true,
+ *                                      "blankRun": true, "jsonMinify": true,
+ *                                      "lsLong": true, "gitLog": true } }
  *
  *   - enabled: master switch (default true)
  *   - profile: "default" | "security" — security keeps columns/permissions
- *     the agent may need (matters once the lossy column-drop rules ship;
- *     lossless rules run under every profile)
+ *     (lossy rules off; lossless rules run under every profile)
+ *   - rules: per-rule toggles (default all on). A disabled rule is skipped
+ *     entirely — it never fires.
+ *
+ * Visibility: when pruning meaningfully changes the BPE count (tokensSaved > 0),
+ * the patch merges a `pruningBadge` into the result's existing `details`
+ * (spread, never replace) so built-in tool details (bash `truncated`/
+ * `fullOutputPath`, etc.) are preserved. The badge carries the fired rule names
+ * + tokens saved so the transcript can show an inline ✂ marker. It is an
+ * intentional human-visibility exception to the "telemetry stays out of
+ * history" rule (rules + tokens only; no raw path). A 0-token rewrite (e.g.
+ * normalizing a whitespace-only line) still applies its content patch but gets
+ * no chip — ~45% of rewrites saved 0 tokens in production, all visual noise.
+ * The lossy `details.pruning` recall contract (§7.3) is separate: it carries
+ * the raw path and is always set when a lossy rule fires.
  *
  * The extension can also be turned off via PIE_EXTENSION_TOGGLES_JSON
  * { "tool-result-pruner": false }, the same global toggle skill-pruner honors.
  */
 
 import type { ExtensionAPI, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
+import { randomBytes } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { isExtensionDisabledByToggle, loadConfig } from "./config.js";
 import { recordPruning } from "./logger.js";
 import { runPipeline } from "./pipeline.js";
@@ -43,6 +69,57 @@ function getSessionId(ctx: unknown): string {
   return typeof id === "string" && id.length > 0 ? id : "unknown";
 }
 
+// --- Recall stash (§7.3) --------------------------------------------------
+// Mirrors pi's OutputAccumulator temp-file convention (output-accumulator.js):
+// `join(tmpdir(), `${prefix}-${randomBytes(8).toString("hex")}.log`)`. We use a
+// `.txt` extension + `pruned-raw-` prefix so the stash is self-describing. The
+// agent reads it back with the existing `read` tool (the pipeline skips `read`,
+// so recall returns the pre-pruning text verbatim).
+//
+// TODO(session-scope cleanup): design §7.3 specifies session-scoped stashes
+// cleaned on session end. We currently leave them for the OS to reap from
+// tmpdir (small, per-result). Wiring `session_shutdown` to delete a session's
+// stashes needs reliable per-session path tracking (the event carries no id;
+// ctx.sessionManager.getSessionId() is the only join key) — deferred to avoid
+// a cleanup that could delete another live session's recall raw.
+let stashDirOverride: string | null = null;
+
+/** Test seam: redirect the recall stash to a specific dir (null = os.tmpdir()). */
+export function setStashDirForTesting(dir: string | null): void {
+  stashDirOverride = dir;
+}
+
+function stashPath(): { id: string; rawPath: string } {
+  const id = `pruned-raw-${randomBytes(8).toString("hex")}`;
+  const dir = stashDirOverride ?? tmpdir();
+  return { id, rawPath: join(dir, `${id}.txt`) };
+}
+
+/** Write the pre-pruning text to a temp file for recall. Best-effort: the
+ *  caller (the tool_result handler) treats a throw as "stash failed → fall
+ *  back to lossless" (§7.3 hard gate). */
+async function writeStash(rawPath: string, text: string): Promise<void> {
+  await mkdir(dirname(rawPath), { recursive: true });
+  await writeFile(rawPath, text, "utf-8");
+}
+
+/** Build the fidelity marker the agent sees: `[pruned: <rule> (<desc>); ... — raw: <path>]`. */
+function buildFidelityMarker(recallRules: string[], markers: string[], rawPath: string): string {
+  const parts = recallRules.map((r, i) => {
+    const m = markers[i];
+    return m ? `${r} (${m})` : r;
+  });
+  return `[pruned: ${parts.join("; ")} — raw: ${rawPath}]`;
+}
+
+/** Minimum net tokens a lossy rewrite must save (after the fidelity-marker
+ *  overhead) to be worth applying. The marker carries the recall path — on
+ *  long-temp-path platforms (Windows) it can cost ~30 tokens, so pruning a
+ *  tiny `ls -l` (2 entries) would *increase* context. This gate ensures lossy
+ *  only applies when it clearly helps; otherwise the lossless-only result is
+ *  used (no marker, no stash, no recall contract). */
+const LOSSY_MIN_NET_SAVED = 8;
+
 export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event: ToolResultEvent, ctx: unknown): Promise<ToolResultEventResult | undefined> => {
     if (isExtensionDisabledByToggle()) return undefined;
@@ -50,26 +127,78 @@ export default function (pi: ExtensionAPI) {
     const result = runPipeline(event, config);
     if (!result) return undefined;
 
+    // Assemble the final text the model sees. Lossy rewrites require a recall
+    // stash before they may enter history (§7.3). The fidelity marker carries
+    // the recall path, so it has a real token cost — we only apply the lossy
+    // rewrite when it saves meaningfully MORE than the marker overhead
+    // (LOSSY_MIN_NET_SAVED); otherwise the lossless-only result is used (no
+    // marker, no stash). If the stash write itself fails, fall back to
+    // lossless — never silently drop (§7.3 hard gate).
+    let finalText = result.meta.afterText;
+    let effectiveRules = result.meta.rules;
+    const details: Record<string, unknown> = { ...(event.details as object | null | undefined) };
+
+    if (result.meta.recallRules.length > 0) {
+      // Build the candidate (marker + lossy text) and measure net savings
+      // vs the LOSSLESS fallback — the real alternative the agent gets when
+      // lossy is skipped. Comparing against `beforeText` (the original) would
+      // fold lossless savings (e.g. ANSI strip) into the gate and let lossy
+      // apply when it *increases* context vs the lossless-only result. Measured
+      // BEFORE touching disk — avoids orphan stash files for tiny outputs.
+      const { id, rawPath } = stashPath();
+      const marker = buildFidelityMarker(result.meta.recallRules, result.meta.markers, rawPath);
+      const candidate = `${marker}\n${result.meta.afterText}`;
+      const netSaved = countTokens(result.meta.losslessText) - countTokens(candidate);
+      if (netSaved >= LOSSY_MIN_NET_SAVED) {
+        try {
+          await writeStash(rawPath, result.meta.beforeText);
+          finalText = candidate;
+          details.pruning = { id, rawPath, rules: result.meta.recallRules };
+        } catch {
+          // §7.3 hard gate: stash write failed → abandon lossy, use lossless.
+          finalText = result.meta.losslessText;
+          effectiveRules = result.meta.rules.filter((r) => !result.meta.recallRules.includes(r));
+        }
+      } else {
+        // Marker overhead eats the savings (tiny output) → not worth lossy.
+        finalText = result.meta.losslessText;
+        effectiveRules = result.meta.rules.filter((r) => !result.meta.recallRules.includes(r));
+      }
+    }
+
+    // If lossy was skipped/failed and no lossless rule fired, nothing
+    // effectively changed — return undefined so history keeps the original.
+    if (effectiveRules.length === 0) return undefined;
+
+    // Token math is shared by the analytics record and the visibility badge.
+    // countTokens never throws (falls back to chars/4), so this is safe.
+    const beforeTokens = countTokens(result.meta.beforeText);
+    const afterTokens = countTokens(finalText);
+    const tokensSaved = Math.max(0, beforeTokens - afterTokens);
+
     // Analytics: record which rules fired + before/after token counts. Only
-    // when pruning actually changed content (no event for no-op results).
-    // Best-effort — recordPruning swallows write failures.
+    // when pruning actually changed content. Best-effort — recordPruning
+    // swallows write failures so telemetry never breaks the pruning path.
     try {
-      const beforeTokens = countTokens(result.meta.beforeText);
-      const afterTokens = countTokens(result.meta.afterText);
       recordPruning({
         event: "tool_result_pruned",
         sessionId: getSessionId(ctx),
         toolName: event.toolName,
-        rules: result.meta.rules,
+        rules: effectiveRules,
         beforeTokens,
         afterTokens,
-        tokensSaved: Math.max(0, beforeTokens - afterTokens),
+        tokensSaved,
         timestamp: new Date().toISOString(),
       });
     } catch {
       // Telemetry must never break the pruning path.
     }
 
-    return result.patch;
+    // Visibility badge (noise-gated on tokensSaved > 0 — see header). The
+    // content patch always applies; only the chip is gated.
+    if (tokensSaved > 0) {
+      details.pruningBadge = { rules: effectiveRules, tokensSaved };
+    }
+    return { content: [{ type: "text", text: finalText }], details };
   });
 }

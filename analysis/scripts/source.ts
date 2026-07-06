@@ -691,6 +691,8 @@ function coerceFunctionalSettings(value: unknown): FunctionalSettingsSnapshot | 
     subagentAlwaysParentModel: value.subagentAlwaysParentModel === true,
     pruningMode,
     extensionToggles: coerceBooleanRecord(value.extensionToggles),
+    toolResultPruningEnabled: value.toolResultPruningEnabled === true || value.toolResultPruningEnabled === false ? value.toolResultPruningEnabled : null,
+    toolResultPruningProfile: value.toolResultPruningProfile === 'default' || value.toolResultPruningProfile === 'security' ? value.toolResultPruningProfile : null,
   };
 }
 

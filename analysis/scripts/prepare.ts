@@ -191,6 +191,8 @@ function prepareRun(
     fsPruningMode: run.functionalSettings?.pruningMode ?? null,
     fsPruningEnabled: run.functionalSettings ? run.functionalSettings.pruningMode !== 'off' : null,
     fsExtensionToggles: { ...(run.functionalSettings?.extensionToggles ?? {}) },
+    fsToolResultPruningEnabled: run.functionalSettings?.toolResultPruningEnabled ?? null,
+    fsToolResultPruningProfile: run.functionalSettings?.toolResultPruningProfile ?? null,
     sendCount: run.sendCount,
     assistantTurnCount: run.assistantTurnCount,
     assistantTurnDurationMs: run.assistantTurnDurationMs,

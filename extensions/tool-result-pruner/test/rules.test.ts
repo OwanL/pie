@@ -77,14 +77,29 @@ describe('lossless rules', () => {
     });
 
     test('keeps single and double blank lines as-is except at edges', () => {
-      // double blank between paragraphs stays (run < 3), but trailing blanks trim
+      // double blank between paragraphs stays (run < 3); trailing blanks trim
+      // to a single newline (terminal newline kept — see "terminal newline" test).
       const out = rule("collapse-blank-runs", mod).run("a\n\nb\n\n", ctx);
-      assert.equal(out?.text, "a\n\nb");
+      assert.equal(out?.text, "a\n\nb\n");
     });
 
-    test('trims leading and trailing blank lines', () => {
+    test('trims leading blank lines, keeps a terminal newline', () => {
+      // leading blanks trim fully; a single trailing newline (terminal) is kept
+      // so the rule doesn't fire on ~every command output for a ~1-token gain.
       const out = rule("collapse-blank-runs", mod).run("\n\n\na\n", ctx);
-      assert.equal(out?.text, "a");
+      assert.equal(out?.text, "a\n");
+    });
+
+    test('no-op on a single trailing newline (terminal newline)', () => {
+      // The common case: command output ends with one \n. Trimming it would
+      // fire on ~every result for a ~1-token gain — pure noise. Keep it.
+      assert.equal(rule("collapse-blank-runs", mod).run("a\nb\n", ctx), null);
+      assert.equal(rule("collapse-blank-runs", mod).run("output\n", ctx), null);
+    });
+
+    test('trims 2+ trailing blanks down to a single newline', () => {
+      const out = rule("collapse-blank-runs", mod).run("a\n\n\n", ctx);
+      assert.equal(out?.text, "a\n");
     });
 
     test('treats whitespace-only lines as blank', () => {

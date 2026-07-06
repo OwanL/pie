@@ -363,14 +363,28 @@ restate or re-own it.
    results (grill Q4) so recall is faithful. Separation (grill Q1): pruning's
    recall owns only pruning's loss; pi's `fullOutputPath` marker owns
    truncation's loss.
-2. **MVP scope -- RESOLVED & SHIPPED:** the lossless tier is implemented in
-   `extensions/tool-result-pruner/` (ANSI strip, trailing-whitespace trim,
-   blank-run collapse, JSON minify). The `Rule`/`RuleContext`/`Profile` types
-   are in place; `RuleResult` (marker field) and the pipeline (stash +
-   `details.pruning` wiring) gain their lossy-tier additions in the follow-up
-   pass. Config key `toolResultPruning` (sibling to `pruning`, which skill-pruner
-   owns); extension id `tool-result-pruner`. The lossy tier + recall stash is
-   that follow-up.
+2. **MVP scope -- RESOLVED & SHIPPED (lossless + lossy tiers):** the
+   lossless tier (ANSI strip, trailing-whitespace trim, blank-run collapse,
+   JSON minify) and the lossy-recoverable tier (`ls -l` → names, `git log` →
+   oneline) are both implemented in `extensions/tool-result-pruner/`.
+   `RuleResult` gained its `marker` field; the pipeline gained lossy
+   orchestration (profile-gated, per-rule-toggled, lossless-before-lossy) and
+   returns `meta.recallRules`/`meta.markers`/`meta.losslessText`; `index.ts`
+   owns the recall stash (temp file + fidelity marker + `details.pruning`) and
+   a net-savings gate (`LOSSY_MIN_NET_SAVED`) so the marker overhead never
+   *increases* context on tiny outputs. Recovery reuses the existing `read`
+   tool on the stashed raw path (the pipeline skips `read`, so recall is
+   faithful). Config key `toolResultPruning` (sibling to `pruning`, which
+   skill-pruner owns); extension id `tool-result-pruner`. Each rule is
+   independently toggleable via `rules.{ansi,whitespace,blankRun,jsonMinify,
+   lsLong,gitLog}` (a disabled rule is skipped entirely); a settings UI
+   (enabled + profile + tools + per-rule toggles, incl. the 2 lossy rows)
+   and an inline `pruningBadge` transcript marker ship with both tiers — see
+   items 5 and 7. `collapse-blank-runs` was softened to keep a terminal
+   newline (it fired on ~94% of results for a ~1-token gain) and the badge is
+   noise-gated on `tokensSaved > 0` (~45% of lossless rewrites saved 0 tokens
+   in production telemetry). Still deferred: tabular column-drop (`ps`/`docker
+   ps`/`kubectl`/`df`) and stack-trace dedupe — fiddlier shape detection.
 3. **Measurement — RESOLVED & SHIPPED:** per-pruned-result before/after token
    counts + which rules fired are written to `data/tool-result-pruning.jsonl`
    by `extensions/tool-result-pruner/logger.ts`, and ingested end-to-end by the
@@ -381,24 +395,58 @@ restate or re-own it.
    rules are worth shipping and whether any starved the agent.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
-5. **Config — RESOLVED:** `toolResultPruning: { enabled, profile }` block in
-   `settings.json`, sibling to `pruning` (do not overload that flag). Tier-1
-   always on; tier-2 profile-selectable (`default` runs lossy; `security`
-   keeps permissions/columns). Toggleable via `PIE_EXTENSION_TOGGLES_JSON`.
+5. **Config — RESOLVED & SHIPPED:** `toolResultPruning: { enabled, profile,
+   rules: { ansi, whitespace, blankRun, jsonMinify } }` block in `settings.json`,
+   sibling to `pruning` (do not overload that flag). Tier-1 (lossless) always on
+   by default; each rule independently toggleable. Tier-2 will be
+   profile-selectable (`default` runs lossy; `security` keeps
+   permissions/columns) when the lossy tier ships. A settings UI mirrors the
+   skill-pruner settings flow end-to-end (host persistence + reducer + webview):
+   enabled toggle, profile select, and 4 per-rule toggles, surfaced in the
+   composer settings menu under the `tool-result-pruner` extension. Also
+   toggleable via `PIE_EXTENSION_TOGGLES_JSON`.
 6. **Orthogonal win (separate effort):** `before_provider_request` to trim tool
    descriptions / drop unused tools (the llmtrim/yoke `PassDropUnusedSkills`
    idea — i.e. extend `skill-pruner`). Do not conflate with tool-result pruning.
+7. **Visibility — RESOLVED & SHIPPED:** when a lossless rule fires, the
+   `tool_result` handler merges a `pruningBadge: { rules: string[]; tokensSaved:
+   number }` into the result's existing `details` (spread, never replace, so
+   built-in details like bash `truncated`/`fullOutputPath` are preserved). The
+   badge flows the full durability chain (`finalizeExecutedToolCall` →
+   `tool_execution_end` → host → webview `toolCall.result.details` → session
+   JSONL) and renders an inline `✂ pruned · <rules> · ~<n> tokens saved` chip on
+   the tool-call header, visible even when collapsed. This is an intentional
+   human-visibility exception to the "telemetry stays out of history" rule
+   (rules + tokens only; no raw path; lossless ⇒ no recall needed). It is
+   DISTINCT from the future lossy `details.pruning` recall contract (§7.3),
+   which is reserved for the lossy tier and NOT used here.
 
 ### Implementation status
 
-- `extensions/tool-result-pruner/` — MVP lossless tier. Files: `index.ts`
-  (registers `pi.on("tool_result")`), `config.ts` (cached loader + toggle),
-  `types.ts`, `rules.ts` (4 lossless rules, §7.2 order), `pipeline.ts` (guards
-  + orchestration), `types-global.d.ts`, `test/` (rules, pipeline, config).
+- `extensions/tool-result-pruner/` — lossless **and** lossy tiers. Files:
+  `index.ts` (registers `pi.on("tool_result")`; recall stash + fidelity marker
+  + `details.pruning` + net-savings gate + `pruningBadge` noise gate),
+  `config.ts` (cached loader + toggle + per-rule parse), `types.ts`
+  (`RuleToggles` incl. `lsLong`/`gitLog`, `RULE_KEY_BY_NAME`, `PruningRecall`,
+  `PruningMeta` with `recallRules`/`markers`/`losslessText`), `rules.ts`
+  (4 lossless rules; `collapse-blank-runs` keeps a terminal newline),
+  `lossy-rules.ts` (`ls-long`, `git-log`; args-as-signal detection, diff-option
+  exclusions for `git log`), `pipeline.ts` (guards + lossless-then-lossy
+  orchestration, profile-gated), `tokenize.ts`, `types-global.d.ts`, `test/`
+  (rules, lossy-rules, pipeline, config, index, logger).
 - Wired into `extension/package.json` (`typecheck:tool-result-pruner`),
   root `package.json` (`extensions:typecheck` / `extensions:test`), and
   `scripts/run-tests.mjs` (package `tool-result-pruner`, 98% lines gate).
-- `settings.json` carries the default `toolResultPruning` block.
+- `settings.json` carries the default `toolResultPruning` block
+  (`{ enabled, profile, rules }`).
+- Settings UI: mirrors the skill-pruner settings flow — host persistence
+  (`tool-result-pruning-settings{,-persistence}.ts`), service set/load, arch
+  state, events/commands/reducer/effect-runner/projection/message-router,
+  validation, and a webview settings component
+  (`settings-menu-tool-result-pruner.tsx`) with enabled + profile + 4 per-rule
+  toggles.
+- Inline visibility: `tool-result-pruning-badge.tsx` renders the `pruningBadge`
+  chip on the tool-call header (§9.7).
 - Analytics wired: `logger.ts` records `tool_result_pruned` events;
   `analysis/scripts/{contracts,source,prepare,duckdb,site-data}.ts` ingest
   them into a `tool_result_pruning` DuckDB table and a

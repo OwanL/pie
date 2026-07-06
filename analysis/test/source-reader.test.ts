@@ -435,11 +435,15 @@ test('coerceRunSnapshot preserves functional settings and defaults missing ones 
     subagentAlwaysParentModel: true,
     pruningMode: 'auto',
     extensionToggles: { subagent: true, safeguard: 'no' },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'security',
   };
   assert.deepEqual(coerceRunSnapshot(run)?.functionalSettings, {
     subagentAlwaysParentModel: true,
     pruningMode: 'auto',
     extensionToggles: { subagent: true },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'security',
   });
 
   // Invalid pruningMode -> treated as untracked (null), even if other fields are present.

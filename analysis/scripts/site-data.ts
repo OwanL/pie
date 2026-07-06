@@ -25,6 +25,8 @@ import {
   type TimelineRow,
   type TokenThroughputData,
   type ToolResultPruningImpactData,
+  type ToolResultPruningOutcomeBucket,
+  type ToolResultPruningOutcomeData,
   type ToolUsageAggregateRow,
   type ToolUsageData,
   type TreatmentComparisonData,
@@ -545,6 +547,65 @@ function createPruningImpact(prepared: PreparedAnalyticsData): PruningImpactData
   };
 }
 
+/** Mean of a numeric field over a set of runs; null when the set is empty. */
+function meanOver(runs: PreparedRunRow[], pick: (r: PreparedRunRow) => number): number | null {
+  if (runs.length === 0) return null;
+  return runs.reduce((sum, r) => sum + pick(r), 0) / runs.length;
+}
+
+/** Fraction of runs satisfying a predicate; null when the set is empty. */
+function rateOver(runs: PreparedRunRow[], predicate: (r: PreparedRunRow) => boolean): number | null {
+  if (runs.length === 0) return null;
+  return runs.filter(predicate).length / runs.length;
+}
+
+/** Build the outcome-comparison payload: bucket completed runs by whether
+ *  tool-result-pruning was enabled at run start and contrast satisfaction /
+ *  resolution / first-attempt-success / tool-failure / churn signals. This
+ *  answers the user's question: are outcomes better with or without the
+ *  system? */
+function buildToolResultPruningOutcomes(prepared: PreparedAnalyticsData): ToolResultPruningOutcomeData {
+  const completed = prepared.runs.filter((r) => r.status !== 'open');
+  const buckets = new Map<string, PreparedRunRow[]>();
+  for (const run of completed) {
+    const key = run.fsToolResultPruningEnabled === null ? 'null' : String(run.fsToolResultPruningEnabled);
+    const list = buckets.get(key) ?? [];
+    list.push(run);
+    buckets.set(key, list);
+  }
+  const order: (boolean | null)[] = [true, false, null];
+  const bucketRows = order
+    .filter((k) => buckets.has(k === null ? 'null' : String(k)))
+    .map((k) => {
+      const list = buckets.get(k === null ? 'null' : String(k))!;
+      const scored = list.filter((r) => r.satisfaction !== null);
+      const resolvedCount = scored.filter((r) => r.resolution === 'resolved').length;
+      return {
+        enabled: k,
+        runCount: list.length,
+        scoredRunCount: scored.length,
+        meanSatisfaction: meanOver(scored, (r) => r.satisfaction ?? 0),
+        resolvedRate: scored.length > 0 ? resolvedCount / scored.length : null,
+        firstAttemptSuccessRate: rateOver(list, (r) => r.firstAttemptSuccess),
+        meanToolFailureCount: meanOver(list, (r) => r.toolFailureCount),
+        meanEditCount: meanOver(list, (r) => r.fileEditCount),
+        meanAssistantTurnCount: meanOver(list, (r) => r.assistantTurnCount),
+        meanBusyDurationMs: meanOver(list, (r) => r.busyDurationMs),
+      } satisfies ToolResultPruningOutcomeBucket;
+    });
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    buckets: bucketRows,
+    notes: [
+      'Compares completed (non-open) runs bucketed by whether tool-result pruning was enabled at run start.',
+      'enabled=true: pruning active; enabled=false: disabled (config.enabled=false or extension toggle off); enabled=null: run predates the field (untracked).',
+      'read-tool results are never pruned (hard safety guard), so enabled runs prune bash/ls/grep/find/etc. output only — the comparison reflects that scope.',
+      'The system is enabled by default, so the disabled bucket may be small or skewed toward sessions where the user explicitly turned it off (selection bias).',
+      'meanSatisfaction / resolvedRate are computed over scored runs only; the other means over all completed runs in the bucket.',
+    ],
+  };
+}
+
 function createToolResultPruningImpact(prepared: PreparedAnalyticsData): ToolResultPruningImpactData {
   const rows = prepared.toolResultPruning;
   const totalTokensSaved = rows.reduce((sum, r) => sum + r.tokensSaved, 0);
@@ -759,6 +820,7 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     modelLeaderboard: createModelLeaderboard(prepared),
     pruningImpact: createPruningImpact(prepared),
     toolResultPruningImpact: createToolResultPruningImpact(prepared),
+    toolResultPruningOutcomes: buildToolResultPruningOutcomes(prepared),
     agentReviewComparison: buildAgentReviewComparison(prepared),
     backendErrors: createBackendErrors(prepared),
     fileExtensions: createFileExtensions(prepared),
@@ -779,6 +841,7 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'model-leaderboard.json': bundle.modelLeaderboard,
     'pruning-impact.json': bundle.pruningImpact,
     'tool-result-pruning-impact.json': bundle.toolResultPruningImpact,
+    'tool-result-pruning-outcomes.json': bundle.toolResultPruningOutcomes,
     'agent-review-comparison.json': bundle.agentReviewComparison,
     'backend-errors.json': bundle.backendErrors,
     'file-types.json': bundle.fileExtensions,
@@ -992,6 +1055,13 @@ function validateToolResultPruningImpact(data: unknown): asserts data is ToolRes
   assert(Array.isArray(data.summary.byTool), 'tool-result-pruning-impact.json summary is missing byTool.');
 }
 
+function validateToolResultPruningOutcomes(data: unknown): asserts data is ToolResultPruningOutcomeData {
+  assert(isRecord(data), 'tool-result-pruning-outcomes.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'tool-result-pruning-outcomes.json has an unexpected schemaVersion.');
+  assert(Array.isArray(data.buckets), 'tool-result-pruning-outcomes.json is missing buckets.');
+  assert(Array.isArray(data.notes), 'tool-result-pruning-outcomes.json is missing notes.');
+}
+
 function validateAgentReviewComparison(data: unknown): asserts data is AgentReviewComparisonData {
   assert(isRecord(data), 'agent-review-comparison.json must contain an object.');
   assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'agent-review-comparison.json has an unexpected schemaVersion.');
@@ -1047,6 +1117,7 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateModelLeaderboard(bundle.modelLeaderboard);
   validatePruningImpact(bundle.pruningImpact);
   validateToolResultPruningImpact(bundle.toolResultPruningImpact);
+  validateToolResultPruningOutcomes(bundle.toolResultPruningOutcomes);
   validateAgentReviewComparison(bundle.agentReviewComparison);
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
@@ -1072,6 +1143,7 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     modelLeaderboard: files['model-leaderboard.json'] as SiteDataBundle['modelLeaderboard'],
     pruningImpact: files['pruning-impact.json'] as SiteDataBundle['pruningImpact'],
     toolResultPruningImpact: files['tool-result-pruning-impact.json'] as SiteDataBundle['toolResultPruningImpact'],
+    toolResultPruningOutcomes: files['tool-result-pruning-outcomes.json'] as SiteDataBundle['toolResultPruningOutcomes'],
     agentReviewComparison: files['agent-review-comparison.json'] as SiteDataBundle['agentReviewComparison'],
     backendErrors: files['backend-errors.json'] as SiteDataBundle['backendErrors'],
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],

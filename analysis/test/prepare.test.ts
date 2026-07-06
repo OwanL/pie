@@ -171,12 +171,16 @@ test('prepareSourceAnalytics flattens functional settings into fs* columns', asy
     subagentAlwaysParentModel: true,
     pruningMode: 'shadow',
     extensionToggles: { subagent: true, safeguard: false },
+    toolResultPruningEnabled: true,
+    toolResultPruningProfile: 'security',
   };
   const offRun = fixture.completedRuns[1] as any;
   offRun.functionalSettings = {
     subagentAlwaysParentModel: false,
     pruningMode: 'off',
     extensionToggles: {},
+    toolResultPruningEnabled: false,
+    toolResultPruningProfile: 'default',
   };
 
   const prepared = prepareSourceAnalytics(fixture);
@@ -187,12 +191,16 @@ test('prepareSourceAnalytics flattens functional settings into fs* columns', asy
   assert.equal(trackedRow.fsPruningMode, 'shadow');
   assert.equal(trackedRow.fsPruningEnabled, true);
   assert.deepEqual(trackedRow.fsExtensionToggles, { subagent: true, safeguard: false });
+  assert.equal(trackedRow.fsToolResultPruningEnabled, true);
+  assert.equal(trackedRow.fsToolResultPruningProfile, 'security');
 
   const offRow = byId.get(offRun.runId)!;
   assert.equal(offRow.fsSubagentAlwaysParentModel, false);
   assert.equal(offRow.fsPruningMode, 'off');
   assert.equal(offRow.fsPruningEnabled, false);
   assert.deepEqual(offRow.fsExtensionToggles, {});
+  assert.equal(offRow.fsToolResultPruningEnabled, false);
+  assert.equal(offRow.fsToolResultPruningProfile, 'default');
 
   // Runs recorded before tracking existed flatten to null / empty.
   const untrackedRun = fixture.completedRuns[2] as any;
@@ -201,6 +209,8 @@ test('prepareSourceAnalytics flattens functional settings into fs* columns', asy
   assert.equal(untrackedRow.fsPruningMode, null);
   assert.equal(untrackedRow.fsPruningEnabled, null);
   assert.deepEqual(untrackedRow.fsExtensionToggles, {});
+  assert.equal(untrackedRow.fsToolResultPruningEnabled, null);
+  assert.equal(untrackedRow.fsToolResultPruningProfile, null);
 });
 
 test('prepareSourceAnalytics flattens per-turn throughput samples and precomputes tokensPerSecond', async () => {

@@ -12,7 +12,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { parseJsonOrThrow, toErrorMessage } from "../../shared/error-message.js";
-import { DEFAULT_CONFIG, VALID_PROFILES, type Profile, type ToolResultPruningConfig } from "./types.js";
+import { DEFAULT_CONFIG, DEFAULT_RULE_TOGGLES, RULE_KEY_BY_NAME, VALID_PROFILES, type Profile, type ToolResultPruningConfig } from "./types.js";
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
 const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..");
@@ -31,10 +31,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
 }
 
+/** Deep-clone a config so the `rules` sub-object is never shared with
+ *  `DEFAULT_CONFIG` or the cache. parseConfig mutates `config.rules[key]`,
+ *  and loadConfig returns clones so callers can't mutate the cache — both
+ *  require the nested `rules` object to be copied, not aliased. */
+function cloneConfig(config: ToolResultPruningConfig): ToolResultPruningConfig {
+  return { ...config, rules: { ...config.rules }, tools: config.tools ? [...config.tools] : null };
+}
+
 /** Parse the `toolResultPruning` block, validating each field. Unknown
  *  fields are ignored; invalid fields fall back to defaults with a warning. */
 function parseConfig(raw: unknown): ToolResultPruningConfig {
-  const config: ToolResultPruningConfig = { ...DEFAULT_CONFIG };
+  const config: ToolResultPruningConfig = cloneConfig(DEFAULT_CONFIG);
   if (!isRecord(raw)) {
     warn("settings.toolResultPruning must be an object; using defaults");
     return config;
@@ -52,6 +60,43 @@ function parseConfig(raw: unknown): ToolResultPruningConfig {
     warn(`invalid toolResultPruning.profile '${String(raw.profile)}'; using default '${DEFAULT_CONFIG.profile}'`);
   }
 
+  // Per-rule toggles. Each of the 4 booleans is parsed defensively; an invalid
+  // value falls back to the default for that key with a warning. Unknown keys
+  // are ignored. A missing/invalid `rules` object keeps all defaults.
+  if (raw.rules === undefined) {
+    // keep DEFAULT_CONFIG.rules
+  } else if (isRecord(raw.rules)) {
+    for (const key of Object.values(RULE_KEY_BY_NAME)) {
+      const value = (raw.rules as Record<string, unknown>)[key];
+      if (typeof value === "boolean") {
+        config.rules[key] = value;
+      } else if (value !== undefined) {
+        warn(`invalid toolResultPruning.rules.${key} '${String(value)}'; using default '${DEFAULT_RULE_TOGGLES[key]}'`);
+      }
+    }
+  } else {
+    warn("settings.toolResultPruning.rules must be an object; using defaults");
+  }
+
+  // Allowlist of tool names pruning acts on. `null` (or absent) = all non-read
+  // tools (default). An array (incl. empty) restricts to the listed tools.
+  // Each entry must be a non-empty string; invalid entries are dropped.
+  if (raw.tools === undefined || raw.tools === null) {
+    // keep DEFAULT_CONFIG.tools (null)
+  } else if (Array.isArray(raw.tools)) {
+    const tools: string[] = [];
+    for (const entry of raw.tools) {
+      if (typeof entry === "string" && entry.length > 0) {
+        tools.push(entry);
+      } else {
+        warn(`invalid toolResultPruning.tools entry '${String(entry)}'; dropped`);
+      }
+    }
+    config.tools = tools;
+  } else {
+    warn("settings.toolResultPruning.tools must be an array of tool names or null; using default (all non-read tools)");
+  }
+
   return config;
 }
 
@@ -60,7 +105,7 @@ function parseConfig(raw: unknown): ToolResultPruningConfig {
  *  mutate the cache. */
 export function loadConfig(settingsPath: string = SETTINGS_PATH): ToolResultPruningConfig {
   // Test override short-circuits before any disk access.
-  if (overrideActive && cached) return { ...cached };
+  if (overrideActive && cached) return cloneConfig(cached);
 
   let mtimeMs: number | null = null;
   try {
@@ -70,14 +115,14 @@ export function loadConfig(settingsPath: string = SETTINGS_PATH): ToolResultPrun
   }
 
   if (cached && cachedMtimeMs !== null && mtimeMs === cachedMtimeMs) {
-    return { ...cached };
+    return cloneConfig(cached);
   }
 
   if (mtimeMs === null) {
     // settings.json missing or unreadable: use defaults (cached).
-    cached = { ...DEFAULT_CONFIG };
+    cached = cloneConfig(DEFAULT_CONFIG);
     cachedMtimeMs = null;
-    return { ...cached };
+    return cloneConfig(cached);
   }
 
   let parsed: unknown;
@@ -85,21 +130,21 @@ export function loadConfig(settingsPath: string = SETTINGS_PATH): ToolResultPrun
     parsed = parseJsonOrThrow(readFileSync(settingsPath, "utf-8"), "tool-result-pruner settings");
   } catch (error) {
     warn(`failed to parse settings.json at ${settingsPath}; using defaults: ${toErrorMessage(error)}`);
-    cached = { ...DEFAULT_CONFIG };
+    cached = cloneConfig(DEFAULT_CONFIG);
     cachedMtimeMs = mtimeMs;
-    return { ...cached };
+    return cloneConfig(cached);
   }
 
   if (!isRecord(parsed) || !("toolResultPruning" in parsed)) {
     // No block present: defaults (this is the common path until the user opts in).
-    cached = { ...DEFAULT_CONFIG };
+    cached = cloneConfig(DEFAULT_CONFIG);
     cachedMtimeMs = mtimeMs;
-    return { ...cached };
+    return cloneConfig(cached);
   }
 
   cached = parseConfig(parsed.toolResultPruning);
   cachedMtimeMs = mtimeMs;
-  return { ...cached };
+  return cloneConfig(cached);
 }
 
 /** Test seam: reset the cache so the next loadConfig() re-reads disk. */
@@ -112,7 +157,7 @@ export function resetConfigCache(): void {
 /** Test seam: inject a config without touching disk. Pass null to clear. */
 export function setConfigOverrideForTesting(config: ToolResultPruningConfig | null): void {
   if (config) {
-    cached = { ...config };
+    cached = cloneConfig(config);
     overrideActive = true;
   } else {
     cached = null;

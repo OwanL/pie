@@ -29,6 +29,7 @@ export const SITE_DATA_FILE_NAMES = [
   'model-leaderboard.json',
   'pruning-impact.json',
   'tool-result-pruning-impact.json',
+  'tool-result-pruning-outcomes.json',
   'agent-review-comparison.json',
   'backend-errors.json',
   'file-types.json',
@@ -102,6 +103,11 @@ export interface FunctionalSettingsSnapshot {
   pruningMode: PruningMode;
   /** Per-extension enabled/disabled toggles at run start (extension id -> enabled). */
   extensionToggles: Record<string, boolean>;
+  /** Tool-result-pruning enabled flag at run start (null = untracked, predates field). Backs the
+   *  outcome comparison: are runs better with tool-result pruning on or off? */
+  toolResultPruningEnabled: boolean | null;
+  /** Tool-result-pruning profile at run start (null = untracked). */
+  toolResultPruningProfile: 'default' | 'security' | null;
 }
 
 export interface SubagentTaskScoreRollup {
@@ -378,6 +384,10 @@ export interface PreparedRunRow {
   fsPruningEnabled: boolean | null;
   /** Per-extension enabled/disabled toggles at run start (empty when untracked). */
   fsExtensionToggles: Record<string, boolean>;
+  /** Tool-result-pruning enabled flag at run start (null = untracked, predates field). */
+  fsToolResultPruningEnabled: boolean | null;
+  /** Tool-result-pruning profile at run start (null = untracked). */
+  fsToolResultPruningProfile: 'default' | 'security' | null;
   sendCount: number;
   assistantTurnCount: number;
   assistantTurnDurationMs: number;
@@ -990,6 +1000,43 @@ export interface ToolResultPruningImpactData {
   summary: ToolResultPruningSummary;
 }
 
+/** One outcome bucket comparing runs with tool-result-pruning on vs off.
+ *  `enabled` is the bucket key: `true` = pruning active at run start, `false` =
+ *  disabled, `null` = untracked (run predates the field). Backs the
+ *  tool-result-pruning-outcomes.json site-data file so the user can see whether
+ *  outcomes tend to be better with or without the system. */
+export interface ToolResultPruningOutcomeBucket {
+  enabled: boolean | null;
+  /** All non-open runs in this bucket (closed/scored). */
+  runCount: number;
+  /** Runs in this bucket with a user outcome (satisfaction != null). */
+  scoredRunCount: number;
+  /** Mean user satisfaction (1–5) over scored runs; null when none scored. */
+  meanSatisfaction: number | null;
+  /** Fraction of scored runs resolved (resolution === 'resolved'); null when none scored. */
+  resolvedRate: number | null;
+  /** Fraction of runs that succeeded on the first attempt (no message edits / retries); null when runCount is 0. */
+  firstAttemptSuccessRate: number | null;
+  /** Mean tool-failure count over non-open runs; null when runCount is 0. */
+  meanToolFailureCount: number | null;
+  /** Mean file-edit count over non-open runs; null when runCount is 0. */
+  meanEditCount: number | null;
+  /** Mean assistant-turn count over non-open runs; null when runCount is 0. */
+  meanAssistantTurnCount: number | null;
+  /** Mean busy-duration (ms) over non-open runs; null when runCount is 0. */
+  meanBusyDurationMs: number | null;
+}
+
+/** Site-data payload comparing run outcomes by tool-result-pruning enabled state.
+ *  Answers "are outcomes better with or without tool-result pruning?" by
+ *  bucketing completed runs and contrasting satisfaction / resolution /
+ *  first-attempt-success / tool-failure / churn signals. */
+export interface ToolResultPruningOutcomeData {
+  schemaVersion: number;
+  buckets: ToolResultPruningOutcomeBucket[];
+  notes: string[];
+}
+
 /** Agreement signal between agent rating and user satisfaction, computed only over runs
  *  scored by BOTH (an agent review AND a user outcome). */
 export interface AgentReviewAgreementSummary {
@@ -1090,6 +1137,7 @@ export interface SiteDataBundle {
   modelLeaderboard: ModelLeaderboardData;
   pruningImpact: PruningImpactData;
   toolResultPruningImpact: ToolResultPruningImpactData;
+  toolResultPruningOutcomes: ToolResultPruningOutcomeData;
   agentReviewComparison: AgentReviewComparisonData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;

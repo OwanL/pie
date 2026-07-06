@@ -165,3 +165,50 @@ test('readToolResultPruningLog-style ingestion is best-effort (missing file → 
   assert.equal(coerced.toolResultPruningEvents[1]!.toolName, 'ls');
   void path; // keep import meaningful for future file-based reads
 });
+
+test('tool-result-pruning-outcomes.json buckets runs by enabled state and contrasts satisfaction', async () => {
+  const fixture = deepClone(await loadFixture());
+  // Stamp toolResultPruningEnabled onto the first three completed runs: true / false / true.
+  const completed = fixture.completedRuns;
+  completed[0]!.functionalSettings = {
+    subagentAlwaysParentModel: false, pruningMode: 'auto', extensionToggles: {},
+    toolResultPruningEnabled: true, toolResultPruningProfile: 'default',
+  };
+  completed[1]!.functionalSettings = {
+    subagentAlwaysParentModel: false, pruningMode: 'auto', extensionToggles: {},
+    toolResultPruningEnabled: false, toolResultPruningProfile: 'default',
+  };
+  completed[2]!.functionalSettings = {
+    subagentAlwaysParentModel: false, pruningMode: 'auto', extensionToggles: {},
+    toolResultPruningEnabled: true, toolResultPruningProfile: 'security',
+  };
+  // Give the runs user outcomes so the scored counts are nonzero.
+  for (const [i, run] of completed.entries()) {
+    if (i >= 3) break;
+    run.scored = true;
+    run.outcome = { resolution: i === 1 ? 'partially_resolved' : 'resolved', satisfaction: i === 1 ? 3 : 5 };
+  }
+
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(fixture));
+  validateSiteDataBundle(bundle);
+
+  const byEnabled = new Map(bundle.toolResultPruningOutcomes.buckets.map((b) => [String(b.enabled), b]));
+  assert.equal(byEnabled.get('true')!.runCount, 2);
+  assert.equal(byEnabled.get('true')!.scoredRunCount, 2);
+  assert.equal(byEnabled.get('true')!.meanSatisfaction, 5);
+  assert.equal(byEnabled.get('false')!.runCount, 1);
+  assert.equal(byEnabled.get('false')!.scoredRunCount, 1);
+  assert.equal(byEnabled.get('false')!.meanSatisfaction, 3);
+  assert.equal(byEnabled.get('false')!.resolvedRate, 0); // partially_resolved
+  assert.ok(byEnabled.get('true')!.resolvedRate === 1);
+  // Legacy runs (no functionalSettings) land in the null bucket.
+  assert.ok(byEnabled.has('null'));
+  assert.ok(bundle.toolResultPruningOutcomes.notes.length > 0);
+
+  // Round-trips through write/read.
+  await withTempDir(async (dir) => {
+    await writeSiteData(dir, bundle);
+    const roundTrip = await readSiteDataBundle(dir);
+    assert.equal(roundTrip.toolResultPruningOutcomes.buckets.length, bundle.toolResultPruningOutcomes.buckets.length);
+  });
+});

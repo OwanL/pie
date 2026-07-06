@@ -49,11 +49,15 @@ function trimTrailingWhitespace(text: string, _ctx: RuleContext): RuleResult | n
 }
 
 // ---------------------------------------------------------------------------
-// 3. Blank-run collapse (3+ → 1) + trim leading/trailing blank lines.
+// 3. Blank-run collapse (3+ → 1) + trim leading blank lines + trim trailing
+//    blank *runs* (2+) down to a single newline.
 //
 // A "blank" line is one with no non-whitespace chars. Three or more in a row
-// collapse to a single blank line; the whole output also loses leading/trailing
-// blank lines. Common after ANSI strip + log output.
+// collapse to a single blank line; leading blank lines trim fully; trailing
+// blank runs (2+) trim down to a single newline. A *single* trailing newline
+// (the terminal `\n` that ends almost all command output) is deliberately
+// KEPT — trimming it fired on ~94% of results for a ~1-token gain, pure badge
+// noise. Common after ANSI strip + log output.
 // ---------------------------------------------------------------------------
 function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
   if (!text.includes("\n")) return null;
@@ -85,7 +89,9 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
     }
   }
   const trailingBlanks = firstNonBlank === -1 ? lines.length : lines.length - 1 - lastNonBlankIndex(lines);
-  const needsCollapse = hasLongRun || hasNonEmptyBlank || leadingBlanks > 0 || trailingBlanks > 0;
+  // A single trailing blank is the terminal newline of normal command output —
+  // not worth rewriting (see header). Only a trailing *run* (2+) triggers.
+  const needsCollapse = hasLongRun || hasNonEmptyBlank || leadingBlanks > 0 || trailingBlanks > 1;
   if (!needsCollapse) return null;
 
   const out: string[] = [];
@@ -99,9 +105,14 @@ function collapseBlankRuns(text: string, _ctx: RuleContext): RuleResult | null {
       out.push(line);
     }
   }
-  // Trim leading/trailing blank lines.
+  // Trim leading blank lines fully.
   while (out.length > 0 && out[0].trim() === "") out.shift();
-  while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
+  // Trim trailing blank lines, but keep at most one — a terminal newline is
+  // the natural end of command output, and trimming it fires on ~every result
+  // for a ~1-token gain (pure noise). Only genuine trailing runs (2+) trim.
+  while (out.length > 1 && out[out.length - 1].trim() === "" && out[out.length - 2].trim() === "") {
+    out.pop();
+  }
   return maybe(text, out.join("\n"));
 }
 
