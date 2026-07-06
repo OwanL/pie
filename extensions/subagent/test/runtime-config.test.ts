@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveSubagentTimeoutMs } from "../runner.js";
+import { resolveSubagentTimeoutMs, DEFAULT_SUBAGENT_TIMEOUT_MS } from "../runner.js";
 import { resolveParallelPreviewLimit, previewText } from "../formatting.js";
 import { PARALLEL_SUMMARY_PREVIEW } from "../types.js";
 
@@ -25,17 +25,20 @@ test.after(() => {
 });
 
 // ============================================================
-// resolveSubagentTimeoutMs — default is DISABLED (no timeout)
+// resolveSubagentTimeoutMs — default is DEFAULT_SUBAGENT_TIMEOUT_MS (15min)
+// Phase 2: the per-prompt timeout was promoted from opt-in to a sane default so
+// a hung provider stream / hung SDK can't dangle the parent indefinitely. `0`
+// explicitly disables; unset/empty/invalid fall back to the default.
 // ============================================================
 
-test("resolveSubagentTimeoutMs: unset → 0 (timeout disabled)", () => {
+test("resolveSubagentTimeoutMs: unset → DEFAULT_SUBAGENT_TIMEOUT_MS (15min net)", () => {
 	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
-	assert.equal(resolveSubagentTimeoutMs(), 0);
+	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
-test("resolveSubagentTimeoutMs: empty string → 0", () => {
+test("resolveSubagentTimeoutMs: empty string → DEFAULT_SUBAGENT_TIMEOUT_MS", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "";
-	assert.equal(resolveSubagentTimeoutMs(), 0);
+	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
 test("resolveSubagentTimeoutMs: positive ms → that value", () => {
@@ -48,14 +51,14 @@ test("resolveSubagentTimeoutMs: 0 → 0 (disabled)", () => {
 	assert.equal(resolveSubagentTimeoutMs(), 0);
 });
 
-test("resolveSubagentTimeoutMs: negative → 0 (disabled)", () => {
+test("resolveSubagentTimeoutMs: negative → DEFAULT_SUBAGENT_TIMEOUT_MS (invalid falls back to default)", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "-5";
-	assert.equal(resolveSubagentTimeoutMs(), 0);
+	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
-test("resolveSubagentTimeoutMs: non-numeric → 0 (disabled)", () => {
+test("resolveSubagentTimeoutMs: non-numeric → DEFAULT_SUBAGENT_TIMEOUT_MS (invalid falls back to default)", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "abc";
-	assert.equal(resolveSubagentTimeoutMs(), 0);
+	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
 test("resolveSubagentTimeoutMs: positive float → accepted", () => {
