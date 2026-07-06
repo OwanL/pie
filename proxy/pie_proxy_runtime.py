@@ -317,15 +317,31 @@ _STREAM_LIVENESS_PATCHED = False
 
 
 def install_stream_liveness_middleware(app: Any) -> None:
-    """Install a Starlette ``BaseHTTPMiddleware`` that wraps streaming
-    chat-completion responses so a stalled upstream (no chunk within the idle
-    window) is terminated with an explicit SSE error event + close.
+    """Install a raw ASGI middleware that bounds the header phase so a stalled
+    upstream can't hang a uvicorn worker (the reused-proxy hang root cause).
 
-    This is the transport-layer liveness check (Slice C): the SDK then sees a
-    terminal error on the stream instead of hanging on the next chunk forever.
-    Non-SSE (JSON) responses are left untouched here — a stalled non-streaming
-    request is caught by the SDK's own request timeout / the settlement net in
-    ``execute.ts``; the proxy only owns the streaming path.
+    Why raw ASGI, not Starlette BaseHTTPMiddleware:
+    BaseHTTPMiddleware backs `call_next` with a size-0 anyio memory stream
+    (rendezvous) and runs the downstream as a child task of the dispatch task
+    group. If the downstream (litellm router → httpx) stalls before sending
+    http.response.start, `recv_stream.receive()` parks, `dispatch` can't
+    return, and the task group's `__aexit__` blocks waiting for the child
+    (which is parked in httpx for the full router timeout). The middleware
+    task holds an event-loop slot + an httpx connection + a semaphore slot
+    for up to 600s per stalled request; enough of these saturates the single
+    worker and /health/liveness stops responding. `asyncio.wait_for` on
+    `call_next` cancels the host task which *usually* propagates to the child
+    via the task-group cancel scope, but if the stall is inside a litellm
+    `asyncio.shield` (retry/callback path) the cancel bounces and the task
+    still pins.
+
+    The raw ASGI middleware owns the downstream task directly: on header
+    timeout it sends a 504 to the client, then cancels + shielded-reaps the
+    downstream task so the slot is released regardless of litellm shielding.
+    The body phase is bounded by wrap_stream_with_liveness (unchanged — it
+    wraps the streaming body_iterator which Starlette exposes once headers
+    are sent, and at that point the rendezvous is satisfied so the body
+    wrapper is cancellation-clean).
 
     Idempotent: a second call is a no-op.
     """
@@ -334,40 +350,31 @@ def install_stream_liveness_middleware(app: Any) -> None:
         return
     _STREAM_LIVENESS_PATCHED = True
 
+    # Header phase: raw ASGI middleware (durable — owns the downstream task,
+    # can preempt the client with a 504 even when litellm shields the stalled
+    # call, which would defeat BaseHTTPMiddleware's task-group cancel).
+    app.add_middleware(StreamLivenessASGIMiddleware)
+
+    # Body phase: BaseHTTPMiddleware is safe here because by the time
+    # dispatch returns the rendezvous is already satisfied (http.response.start
+    # was sent), so the task group exits cleanly. The wrapper replaces the
+    # StreamingResponse body_iterator with a liveness-bounded one so a stalled
+    # mid-stream chunk surfaces as a terminal SSE error instead of hanging.
+    _install_body_liveness_middleware(app)
+
+
+def _install_body_liveness_middleware(app: Any) -> None:
+    """Install a BaseHTTPMiddleware that wraps SSE body iterators with a
+    liveness bound. Safe (unlike the header phase) because by the time
+    ``dispatch`` returns the http.response.start rendezvous is satisfied, so
+    the task group exits cleanly — there's no stall-before-headers window.
+    """
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request as StarletteRequest
-    from starlette.responses import StreamingResponse
 
-    class StreamLivenessMiddleware(BaseHTTPMiddleware):
+    class BodyLivenessMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[override]
-            # Bug: bound the header phase. A stalled upstream BEFORE headers
-            # (no response start) would otherwise block `await call_next` for
-            # the full 600s router timeout, saturating the uvicorn event loop so
-            # even /health/liveness stops responding (the reused-proxy hang).
-            # asyncio.wait_for surfaces a stalled header phase promptly; the
-            # stream-body phase is bounded separately by wrap_stream_with_liveness.
-            header_timeout = resolve_header_timeout_s()
-            try:
-                if header_timeout > 0:
-                    response = await asyncio.wait_for(call_next(request), timeout=header_timeout)
-                else:
-                    response = await call_next(request)
-            except asyncio.TimeoutError:
-                _proxy_log(
-                    f"header phase stalled: no response start within {header_timeout:.0f}s "
-                    f"(path={request.url.path}); surfacing 504"
-                )
-                return JSONResponse(
-                    {"error": {"message": f"upstream header phase stalled: no response start within {header_timeout:.0f}s",
-                                "type": "upstream_header_stalled"}},
-                    status_code=504,
-                )
-            # Only SSE chat-completion streams need wrapping. The body_iterator
-            # is the async generator backing a Starlette StreamingResponse; we
-            # replace it with the liveness-wrapped version so each chunk fetch is
-            # bounded by the idle timeout. Non-streaming / non-SSE responses
-            # pass through unchanged (their bodies are already buffered and
-            # bound by the request timeout).
+            response = await call_next(request)
             media_type = getattr(response, "media_type", None)
             body_iterator = getattr(response, "body_iterator", None)
             if (
@@ -376,26 +383,109 @@ def install_stream_liveness_middleware(app: Any) -> None:
                 and hasattr(body_iterator, "__anext__")
             ):
                 idle = resolve_stream_idle_timeout_s()
-                # Extract a model hint for logs from the request path/body if
-                # cheaply available (best-effort; falls back to "unknown").
-                model = "unknown"
-                try:
-                    path = getattr(request, "url", None)
-                    if path is not None:
-                        path_str = str(path)
-                        # /v1/chat/completions or /chat/completions — no model in
-                        # path; leave as "unknown". A body parse would be too
-                        # invasive here (consumes the stream).
-                        if "chat/completions" not in path_str and "completions" not in path_str:
-                            # Not a chat-completion stream — leave it unwrapped.
-                            return response
-                except Exception:
-                    pass
+                path = str(getattr(request, "url", ""))
+                if "chat/completions" not in path and "completions" not in path:
+                    return response
                 if idle > 0:
-                    wrapped = wrap_stream_with_liveness(
-                        body_iterator, idle, model=model
+                    response.body_iterator = wrap_stream_with_liveness(  # type: ignore[attr-defined]
+                        body_iterator, idle, model="unknown"
                     )
-                    response.body_iterator = wrapped  # type: ignore[attr-defined]
             return response
 
-    app.add_middleware(StreamLivenessMiddleware)
+    app.add_middleware(BodyLivenessMiddleware)
+
+
+class StreamLivenessASGIMiddleware:
+    """Raw ASGI middleware: bounds the upstream header phase.
+
+    Spawns the downstream (litellm router) as a task we own, and interposes
+    on `send` to detect http.response.start. If the downstream never starts
+    within the header timeout, we send a 504 directly to the client, then
+    cancel + shielded-reap the downstream so it doesn't leak a worker slot
+    + httpx connection + semaphore permit — even if litellm shielded the
+    stalled call (which would defeat BaseHTTPMiddleware's task-group cancel).
+    """
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        header_timeout = resolve_header_timeout_s()
+        if header_timeout <= 0:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        started = False
+        header_fail = False
+
+        async def downstream_send(message: dict) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        downstream_task = asyncio.ensure_future(
+            self.app(scope, receive, downstream_send)
+        )
+
+        try:
+            await asyncio.wait_for(asyncio.shield(downstream_task), timeout=header_timeout)
+            return  # downstream completed cleanly (started + finished)
+        except asyncio.TimeoutError:
+            header_fail = True
+            if started:
+                # Downstream started the response but didn't finish within the
+                # header window — let the body phase (wrap_stream_with_liveness)
+                # handle it; don't send a conflicting response.start.
+                _proxy_log(
+                    f"header phase timeout but response already started "
+                    f"(path={path}); deferring to body-phase liveness"
+                )
+                return
+            _proxy_log(
+                f"header phase stalled: no response start within "
+                f"{header_timeout:.0f}s (path={path}); surfacing 504"
+            )
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 504,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": json.dumps(
+                        {
+                            "error": {
+                                "message": f"upstream header phase stalled: no response start within {header_timeout:.0f}s",
+                                "type": "upstream_header_stalled",
+                            }
+                        }
+                    ).encode("utf-8"),
+                }
+            )
+        except Exception:
+            if not started:
+                raise
+            return
+        finally:
+            if header_fail and not downstream_task.done():
+                downstream_task.cancel()
+                # Shielded reap so we don't await a shielded downstream forever
+                # — give it a short grace to unwind, then drop it.
+                try:
+                    await asyncio.wait_for(asyncio.shield(downstream_task), timeout=5)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    _proxy_log(
+                        f"downstream did not cancel within 5s grace "
+                        f"(path={path}); leaked task will be reaped by router timeout"
+                    )
+                except Exception:
+                    pass
