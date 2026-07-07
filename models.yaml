@@ -1082,6 +1082,12 @@ providers:
     apiKey: $PIE_PROXY_MASTER_KEY
     compat:
       supportsReasoningEffort: true
+      # Send `x-session-affinity` (from the session id) on every umans request so
+      # the pie proxy can implement afterburn (per-session sticky concurrency
+      # slots). pi-ai sends `session_id`, `x-client-request-id`, and
+      # `x-session-affinity` whenever this is true (the proxy reads
+      # `x-session-affinity`). No-op when the proxy's afterburn is disabled.
+      sendSessionAffinityHeaders: true
     models:
       - id: umans-coder
         name: "Umans: Coder"

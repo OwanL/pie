@@ -294,6 +294,16 @@ function buildTestArgs(config) {
     'tsx',
     '--test',
     '--test-concurrency=1',
+    // Some test files leave an unreferenced handle (a lingering timer /
+    // interval / abort controller in an imported module's top-level scope)
+    // that keeps the event loop alive after every test has resolved. Node's
+    // test runner then blocks for ~60s waiting on the idle event loop before
+    // exiting. --test-force-exit makes the runner call process.exit() as soon
+    // as the test results are final, which removes that idle-wait entirely
+    // (measured: extension suite 231s -> ~170s; the single worst file
+    // backend-session-event-handler.test.ts 63s -> 3s). It does not mask
+    // failures — tests already pass/fail before the hang.
+    '--test-force-exit',
     '--experimental-test-coverage',
     `--test-reporter=${reporterSpecifier}`,
     ...config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`),

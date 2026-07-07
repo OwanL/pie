@@ -187,6 +187,16 @@ export function validateProxyConfig(proxy, source, opts = {}) {
     throw new Error('proxy.gateway.routerSettings.retryAfter must be boolean');
   if (typeof routerSettings.timeout !== 'number' || routerSettings.timeout < 0)
     throw new Error('proxy.gateway.routerSettings.timeout must be a non-negative integer');
+  // Optional: per-exception retry overrides, emitted verbatim to LiteLLM's
+  // `router_settings.retry_policy`. Keys are LiteLLM's PascalCase field names.
+  if (routerSettings.retryPolicy !== undefined) {
+    if (!routerSettings.retryPolicy || typeof routerSettings.retryPolicy !== 'object')
+      throw new Error('proxy.gateway.routerSettings.retryPolicy must be an object');
+    for (const [k, v] of Object.entries(routerSettings.retryPolicy)) {
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0)
+        throw new Error(`proxy.gateway.routerSettings.retryPolicy.${k} must be a non-negative integer`);
+    }
+  }
   if (!litellmSettings || typeof litellmSettings !== 'object')
     throw new Error('proxy.gateway.litellmSettings is missing');
   if (typeof litellmSettings.dropParams !== 'boolean')
@@ -213,6 +223,8 @@ export function validateProxyConfig(proxy, source, opts = {}) {
     if (typeof up.litellmProvider !== 'string') throw new Error(`proxy.providers.${pname}.litellmProvider must be a string`);
     if (typeof up.maxConcurrentRequests !== 'number' || up.maxConcurrentRequests < 1)
       throw new Error(`proxy.providers.${pname}.maxConcurrentRequests must be a positive integer`);
+    if (up.afterburnSeconds !== undefined && (typeof up.afterburnSeconds !== 'number' || up.afterburnSeconds < 0 || Number.isNaN(up.afterburnSeconds)))
+      throw new Error(`proxy.providers.${pname}.afterburnSeconds must be a non-negative number`);
     if (typeof up.litellmModelInfoId !== 'string') throw new Error(`proxy.providers.${pname}.litellmModelInfoId must be a string`);
     if (!Array.isArray(up.modelListOrder)) throw new Error(`proxy.providers.${pname}.modelListOrder must be an array`);
     if (!up.alias || typeof up.alias !== 'object') throw new Error(`proxy.providers.${pname}.alias must be an object`);
@@ -370,6 +382,7 @@ export function generateLitellmConfigYaml(source, proxy) {
       num_retries: g.routerSettings.numRetries,
       retry_after: g.routerSettings.retryAfter,
       timeout: g.routerSettings.timeout,
+      ...(g.routerSettings.retryPolicy ? { retry_policy: g.routerSettings.retryPolicy } : {}),
     },
     litellm_settings: {
       drop_params: g.litellmSettings.dropParams,

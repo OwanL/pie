@@ -736,7 +736,8 @@
       "api": "openai-completions",
       "apiKey": "$PIE_PROXY_MASTER_KEY",
       "compat": {
-        "supportsReasoningEffort": true
+        "supportsReasoningEffort": true,
+        "sendSessionAffinityHeaders": true
       },
       "models": [
         {

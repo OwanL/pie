@@ -1,7 +1,7 @@
 {
-  "defaultModel": "glm-5.2:cloud",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "ollama",
+  "defaultModel": "umans-glm-5.2",
+  "defaultThinkingLevel": "medium",
+  "defaultProvider": "umans",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -16,7 +16,10 @@
       "routerSettings": {
         "numRetries": 2,
         "retryAfter": true,
-        "timeout": 600
+        "timeout": 600,
+        "retryPolicy": {
+          "RateLimitErrorRetries": 0
+        }
       },
       "litellmSettings": {
         "dropParams": true
@@ -30,7 +33,7 @@
         "apiBase": "https://api.code.umans.ai/v1",
         "apiKeyEnv": "UMANS_API_KEY",
         "litellmProvider": "openai",
-        "maxConcurrentRequests": 3,
+        "maxConcurrentRequests": 2,
         "litellmModelInfoId": "umans-shared",
         "modelListOrder": [
           "umans",
@@ -44,7 +47,8 @@
         ],
         "alias": {
           "umans": "umans-coder"
-        }
+        },
+        "afterburnSeconds": 15
       }
     }
   },
@@ -54,8 +58,8 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "umans-flash",
-    "provider": "umans",
+    "model": "gpt-5-mini",
+    "provider": "github-copilot",
     "thinkingLevel": "low",
     "tools": {
       "alwaysKeep": [
