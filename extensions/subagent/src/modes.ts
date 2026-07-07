@@ -71,6 +71,30 @@ function createErrorResult(agent: string, task: string, errorMessage: string, st
 	};
 }
 
+/** Placeholder result for a task that was never started because the parent
+ *  aborted while it was queued behind `mapWithConcurrencyLimit`. This is the
+ *  "scout :2" case: the worker never entered `runSingleAgent`, so there's no
+ *  `onAbort` handler, no `child.abort.invoked` log, and no `session.abort()`
+ *  call. Returning this placeholder from the worker slot lets
+ *  `Promise.all(workers)` settle promptly when the parent aborts — without it,
+ *  the queued task would start `runSingleAgent` with an already-aborted signal,
+ *  hitting the `parentAlreadyAborted` branch where `createSession` and
+ *  `runPrompt()` run without `raceAbort` and can hang a dead proxy
+ *  indefinitely (30-min settlement timer is the only escape). */
+function createAbortedPlaceholderResult(agent: string, task: string, step?: number): SingleResult {
+	return {
+		agent,
+		agentSource: "unknown",
+		task,
+		exitCode: 1,
+		messages: [],
+		stderr: "",
+		usage: emptyUsage(),
+		errorMessage: "Subagent was skipped (parent aborted while queued)",
+		step,
+	};
+}
+
 /** Pick the most informative message we have for a failed result. */
 function failureMessage(result: SingleResult): string {
 	return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
@@ -264,29 +288,55 @@ export async function executeParallelMode(
 	const allResults = createPendingResultsForTasks(params.tasks!);
 	const emitParallelUpdate = makeParallelUpdateEmitter(allResults, makeDetails, onUpdate);
 
-	const results = await mapWithConcurrencyLimit(params.tasks!, getMaxConcurrency(), (t, index) =>
-		runParallelTask(t, index, {
-			ctx,
-			agents,
-			signal,
-			selectionCtx,
-			runtimeCtx,
-			makeDetails,
-			allResults,
-			emitUpdate: emitParallelUpdate,
-			checkSessionLimit,
-			// Mirror the webview's SubagentCallContext: it uses `${id}:${index}` only
-			// when multiple results render (results.length > 1). A single-task
-			// parallel call renders as one block with the bare id, so stamp bare to
-			// match — otherwise the inline ask_user prompt never finds its request.
-			_toolCallId: params.tasks!.length > 1 ? `${_toolCallId}:${index}` : _toolCallId,
-			parentUiBridge,
-			parentSessionId,
-			allToolNames,
-		}),
+	// Pass the parent abort signal to `mapWithConcurrencyLimit` so queued
+	// workers (the "scout :2" case — still waiting for a free slot when the
+	// parent aborts) skip their item instead of entering `runSingleAgent`
+	// with an already-aborted signal. Without this, scout :2 would hit the
+	// `parentAlreadyAborted` branch where `createSession` and `runPrompt()`
+	// run without `raceAbort` — a hung SDK/dead proxy then dangles the worker
+	// until the 30-min settlement timer fires. Skipped slots get an explicit
+	// "skipped" result below so the final formatted output is complete.
+	const results = await mapWithConcurrencyLimit(
+		params.tasks!,
+		getMaxConcurrency(),
+		(t, index) =>
+			runParallelTask(t, index, {
+				ctx,
+				agents,
+				signal,
+				selectionCtx,
+				runtimeCtx,
+				makeDetails,
+				allResults,
+				emitUpdate: emitParallelUpdate,
+				checkSessionLimit,
+				// Mirror the webview's SubagentCallContext: it uses `${id}:${index}` only
+				// when multiple results render (results.length > 1). A single-task
+				// parallel call renders as one block with the bare id, so stamp bare to
+				// match — otherwise the inline ask_user prompt never finds its request.
+				_toolCallId: params.tasks!.length > 1 ? `${_toolCallId}:${index}` : _toolCallId,
+				parentUiBridge,
+				parentSessionId,
+				allToolNames,
+			}),
+		signal,
 	);
 
-	return formatParallelResult(results, makeDetails);
+	// Skipped slots (scout :2) are `undefined` from the `mapWithConcurrencyLimit`
+	// signal-aborted placeholder. Replace them with an explicit aborted result so
+	// `formatParallelResult` sees a full array and the user sees a clear message.
+	for (let i = 0; i < results.length; i++) {
+		if (results[i] === undefined) {
+			const task = params.tasks![i];
+			// Prefer the pending result already tracked in allResults (it has
+			// the correct agent name + task), stamped with the abort message.
+			results[i] = createAbortedPlaceholderResult(task.agent, task.task);
+			allResults[i] = results[i];
+		}
+	}
+	emitParallelUpdate();
+
+	return formatParallelResult(results as SingleResult[], makeDetails);
 }
 
 interface ParallelTaskArgs {

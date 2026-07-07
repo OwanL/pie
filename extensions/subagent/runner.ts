@@ -280,15 +280,35 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	items: TIn[],
 	concurrency: number,
 	fn: (item: TIn, index: number) => Promise<TOut>,
+	/** When provided and already aborted, workers that haven't started `fn`
+	 *  yet (still queued waiting for a free slot) skip their item and return
+	 *  the `abortedPlaceholder` instead. This prevents a queued worker from
+	 *  starting `fn` after the parent has already aborted — which in the
+	 *  subagent case means `runSingleAgent` is entered with an already-aborted
+	 *  signal, hitting the `parentAlreadyAborted` branch where `createSession`
+	 *  and `runPrompt()` run without `raceAbort` and can hang a dead proxy
+	 *  indefinitely (the 30-min settlement timer is the only escape). */
+	signal?: AbortSignal,
+	abortedPlaceholder?: TOut,
 ): Promise<TOut[]> {
 	if (items.length === 0) return [];
 	const limit = Math.max(1, Math.min(concurrency, items.length));
+	const placeholder = abortedPlaceholder ?? (undefined as TOut);
 	const results: TOut[] = new Array(items.length);
 	let nextIndex = 0;
 	const workers = new Array(limit).fill(null).map(async () => {
 		while (true) {
 			const current = nextIndex++;
 			if (current >= items.length) return;
+			// If the parent aborted while this worker was queued (waiting for a
+			// free slot), skip the remaining items — they would enter `fn` with
+			// an already-aborted signal, which for subagents means the
+			// unraced `createSession`/`runPrompt` hang. Returning the
+			// placeholder lets `Promise.all` settle promptly.
+			if (signal?.aborted) {
+				results[current] = placeholder;
+				continue;
+			}
 			results[current] = await fn(items[current], current);
 		}
 	});
@@ -531,6 +551,29 @@ async function raceAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>
 	});
 }
 
+/** Race a promise against a timeout — used ONLY for the `parentAlreadyAborted`
+ *  branch where `raceAbort` can't be used (the signal is already aborted so
+ *  `raceAbort` would throw immediately). Without this, a hung SDK/dead proxy
+ *  that ignores `session.abort()` would dangle the worker until the 30-min
+ *  settlement timer fires (the "scout :2 starts after abort" timing window).
+ *  The timeout is long enough for a fast SDK to settle (especially after
+ *  `session.abort()` is called), short enough that the user isn't stuck. */
+function raceTimeout<T>(stage: string, ms: number, promise: Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(abortError(stage)), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(err) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+		);
+	});
+}
+
 /** Emit a structured, machine-readable error log for a subagent hardening
  *  event (abort, force-settle, pre-spawn failure). Pinned to `[pie:subagent]`
  *  via a `source` field so it's grep-able in the host log stream. Loud, not
@@ -654,6 +697,78 @@ function teardownSession(unsubscribe: () => void, session: { dispose: () => void
 		session.dispose();
 	} catch {
 		/* ignore */
+	}
+}
+
+/**
+ * Process signals whose listeners we audit around subagent session creation.
+ *
+ * The pi SDK's `DefaultResourceLoader.reload()` pulls in transitive provider
+ * HTTP-handler code (notably `@smithy/node-http-handler` via the AWS SDK
+ * dependency tree, reached while loading provider/model metadata) that
+ * registers a per-loader exit-signal cleanup closure shaped like
+ * `() => { for (const p of pools.values()) p.dispose(); }`. The SDK never
+ * exposes a handle to remove it, and `DefaultResourceLoader` has no
+ * `destroy()`/`dispose()`, so each subagent session leaks one such closure
+ * on each of these signals — never removed. With `MAX_PARALLEL_TASKS=8` plus
+ * nested runs, the count crosses Node's default cap (10) and the host emits
+ * `MaxListenersExceededWarning: N SIGINT listeners added to [process]`,
+ * which looks like a pie memory leak.
+ *
+ * The leaked closures are pure no-arg pool-disposers: on a still-living host
+ * the pools are already torn down by the time they could fire, so they are
+ * harmless-but-accumulating. `reclaimOrphanedSignalListeners` removes the
+ * ones added during a session so the host's listener count stays bounded at
+ * the pre-session baseline. It matches ONLY the orphaned pool-dispose shape
+ * (structural signature), never pie's own listeners or signal-exit's
+ * idempotent singleton — so a future SDK that stops leaking, or that fixes
+ * the registration to be removable, is unaffected (there is simply nothing
+ * to remove).
+ */
+const EXIT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const;
+
+/** Structural signature of the orphaned pool-dispose cleanup closure leaked
+ *  by the SDK's transitive HTTP-handler deps per `resourceLoader.reload()`.
+ *  Matches `() => { for (const p of pools.values()) p.dispose(); }` — the
+ *  `pools.values()` iterable + `.dispose()` call is specific enough that
+ *  legitimate signal-exit / pie listeners never match. */
+const ORPHAN_POOL_DISPOSE_RE = /pools\.values\(\)/;
+
+/** Snapshot the current listeners on every exit signal so a later
+ *  {@link reclaimOrphanedSignalListeners} can remove only the listeners added
+ *  since the snapshot. Returns an opaque handle. */
+function snapshotSignalListeners(): Map<string, Set<Function>> {
+	const snap = new Map<string, Set<Function>>();
+	for (const sig of EXIT_SIGNALS) {
+		snap.set(sig, new Set(process.listeners(sig) as unknown as Function[]));
+	}
+	return snap;
+}
+
+/** Remove exit-signal listeners added since `before` that match the orphaned
+ *  pool-dispose shape. Pie's own listeners, signal-exit's singleton, and any
+ *  listener present in the snapshot are preserved. No-ops when the SDK has
+ *  nothing to clean up (e.g. the mock SDK in tests, or a fixed upstream). */
+function reclaimOrphanedSignalListeners(before: Map<string, Set<Function>>): void {
+	for (const sig of EXIT_SIGNALS) {
+		const prev = before.get(sig);
+		if (!prev) continue;
+		for (const fn of process.listeners(sig) as unknown as Function[]) {
+			if (prev.has(fn)) continue;
+			let body = "";
+			try {
+				body = fn.toString();
+			} catch {
+				continue;
+			}
+			if (ORPHAN_POOL_DISPOSE_RE.test(body)) {
+				try {
+					process.removeListener(sig, fn as Parameters<typeof process.removeListener>[1]);
+				} catch {
+					/* ignore */
+				}
+			}
+		}
 	}
 }
 
@@ -800,18 +915,33 @@ export async function runSingleAgent(
 	// On any abort/failure here we return a loud SingleResult instead of letting
 	// `execute()` never return (which would silently dangle the parent).
 	//
-	// Already-aborted-at-entry is a special case: we still spawn (the existing
-	// `parentAlreadyAborted` branch below settles pending UI and produces a
-	// clean "preparing" result), so here we acquire the permit WITHOUT the signal
-	// (so the abortable Semaphore doesn't reject) and skip `raceAbort` on reload
-	// (reload is fast and idempotent). createSession is still raced so a hung
-	// SDK can't dangle an already-stopped parent — the settlement net (Slice B)
-	// is the last-resort backstop if abort-while-spawning is ignored.
+	// Already-aborted-at-entry is a special case: the parent signal is already
+	// aborted (the common path is `mapWithConcurrencyLimit` skipping queued
+	// workers, but a timing window exists where the signal fires AFTER the
+	// queue check but BEFORE `createSession`). We still need to create the
+	// session + run the prompt to settle pending UI, but since `raceAbort`
+	// would throw immediately on an already-aborted signal, we race against a
+	// short timeout instead — so a hung SDK/dead proxy can't dangle the worker
+	// for 30 minutes until the settlement timer fires.
 	const parentAlreadyAborted = signal?.aborted === true;
+	// When already aborted, use a 10s timeout for createSession + prompt
+	// phases — long enough for a fast SDK to settle (especially after
+	// session.abort() is called), short enough that the user doesn't wait
+	// minutes for a dead proxy. This is the defense-in-depth backstop for the
+	// timing window between `mapWithConcurrencyLimit`'s signal check and
+	// `fn()` executing.
+	const ALREADY_ABORTED_TIMEOUT_MS = 10_000;
+	// Snapshot exit-signal listeners BEFORE `resourceLoader.reload()`. The
+	// SDK's loader pulls in transitive provider HTTP-handler code that leaks
+	// an orphaned pool-dispose SIGINT/SIGTERM closure per reload (see
+	// `reclaimOrphanedSignalListeners`); capturing the baseline here lets the
+	// `finally` below reclaim exactly those additions so the host's listener
+	// count stays bounded across many parallel/nested subagent runs.
+	const signalListenersBefore = snapshotSignalListeners();
 	let session: SessionLike;
 	try {
 		if (parentAlreadyAborted) {
-			await resourceLoader.reload();
+			await raceTimeout("loading subagent resources (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, resourceLoader.reload());
 		} else {
 			await raceAbort(signal, resourceLoader.reload(), "loading subagent resources");
 		}
@@ -827,7 +957,7 @@ export async function runSingleAgent(
 				resourceLoader,
 			});
 			const created = parentAlreadyAborted
-				? await createSessionPromise
+				? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
 				: await raceAbort(signal, createSessionPromise, "creating subagent session");
 			session = created.session;
 		} finally {
@@ -853,6 +983,10 @@ export async function runSingleAgent(
 			content: [{ type: "text", text: `⚠ ${agentName}: ${currentResult.errorMessage}` }],
 			details: makeDetails([currentResult]),
 		});
+		// Reclaim any orphaned exit-signal listeners the loader leaked before
+		// the pre-spawn phase failed (reload may have run partially). See the
+		// snapshot above and `reclaimOrphanedSignalListeners`.
+		reclaimOrphanedSignalListeners(signalListenersBefore);
 		return currentResult;
 	}
 
@@ -900,11 +1034,13 @@ export async function runSingleAgent(
 	try {
 		if (parentAlreadyAborted) {
 			// If the parent signal is already aborted, run the prompt anyway
-			// (it'll abort quickly) and return an explicit abort result.
+			// (it'll abort quickly after session.abort()) and return an explicit
+			// abort result. Race against a short timeout so a hung SDK/dead
+			// proxy that ignores session.abort() can't dangle the worker.
 			void session.abort();
 			// Settle any in-flight parent-bridge ask_user prompt so it can't hang.
 			proxy?.cancelAll();
-			await runPrompt();
+			await raceTimeout("prompt (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, runPrompt());
 			currentResult.exitCode = 1;
 			if (!currentResult.errorMessage) currentResult.errorMessage = `Subagent was aborted (while ${stageRef.value})`;
 			return currentResult;
@@ -995,5 +1131,11 @@ export async function runSingleAgent(
 		return currentResult;
 	} finally {
 		teardownSession(unsubscribe, session);
+		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
+		// during this session (see `snapshotSignalListeners` above). Runs after
+		// `teardownSession` so the session's own disposal has settled; the
+		// reclaimed closures are pure no-arg pool-disposers that are no-ops on
+		// a live host anyway. No-op for the mock SDK / a fixed upstream.
+		reclaimOrphanedSignalListeners(signalListenersBefore);
 	}
 }
