@@ -87,10 +87,26 @@ function AssistantParts({
     <>
       {items.map((item) => {
         if (item.type === 'parallel') {
+          // While at least one sibling in the batch is still running, mark the
+          // finished (completed) members so the user can see at a glance which
+          // calls have settled vs which are still active. The mark is
+          // transient: once every member is done, `blockActive` flips false and
+          // no member carries the class — "done" is then implicit. Failed
+          // members are excluded so their failure treatment stays prominent.
+          const blockActive = item.items.some(
+            ({ part }) => part.toolCall.status === 'running',
+          );
           return (
             <div class="tool-call-parallel-group" key={`pg-${messageId}-${item.groupId}`}>
               {item.items.map(({ part, index }) => (
-                <div class="tool-call-list" key={`tool-${part.toolCall.id}-${index}`}>
+                <div
+                  class={
+                    blockActive && part.toolCall.status === 'completed'
+                      ? 'tool-call-list tool-call-parallel-item-done'
+                      : 'tool-call-list'
+                  }
+                  key={`tool-${part.toolCall.id}-${index}`}
+                >
                   {renderToolCall(part.toolCall, onContextMenu)}
                 </div>
               ))}

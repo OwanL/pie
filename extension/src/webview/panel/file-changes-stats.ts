@@ -58,12 +58,31 @@ export const KIND_LABEL: Record<FileChangeKind, string> = {
 
 /** Last path segment — the file's name without its directory. */
 export function basename(path: string): string {
-  // Find the last path separator ("/" or "\") without a regex literal so the
+  // Trim trailing separators ("/" or "\") so a directory path such as
+  // "src/dir/" yields "dir" rather than the empty string.
+  let end = path.length;
+  while (end > 0) {
+    const c = path.charCodeAt(end - 1);
+    if (c !== 47 && c !== 92) break; // 47 = '/', 92 = '\'
+    end--;
+  }
+  // An all-separator path ("/", "\") or a Windows drive root ("C:\" / "C:")
+  // names itself — there is no further segment to extract.
+  if (end === 0) return path;
+  if (
+    end === 2 &&
+    ((path.charCodeAt(0) >= 65 && path.charCodeAt(0) <= 90) ||
+      (path.charCodeAt(0) >= 97 && path.charCodeAt(0) <= 122)) &&
+    path.charCodeAt(1) === 58 // ':'
+  ) {
+    return path;
+  }
+  // Find the last separator within [0, end) without a regex literal so the
   // source has no backslash escapes to mangle across tool/JSON round-trips.
-  let i = path.length;
+  let i = end;
   while (i-- > 0) {
     const c = path.charCodeAt(i);
     if (c === 47 || c === 92) break; // 47 = forward slash, 92 = backslash
   }
-  return i < 0 ? path : path.slice(i + 1);
+  return i < 0 ? path.slice(0, end) : path.slice(i + 1, end);
 }

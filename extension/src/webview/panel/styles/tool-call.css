@@ -242,6 +242,24 @@
   border-left: 2px solid color-mix(in srgb, var(--panel-accent) 16%, var(--panel-border));
 }
 
+/* ── Parallel batch: finished-while-block-active marker ──────────────────── */
+/* While a parallel batch is still in flight (at least one sibling `running`),
+   the completed members get a muted, struck-through header so the still-active
+   calls stand out. The mark is transient: once every member finishes the
+   wrapper class is no longer applied (see content.tsx), so the cards revert to
+   their normal completed styling and "done" reads as implicit. Failed members
+   are never marked here — their failure treatment stays prominent. */
+.tool-call-parallel-item-done .tool-call-header {
+  opacity: 0.55;
+}
+
+.tool-call-parallel-item-done .tool-call-header .transcript-header-title-mono,
+.tool-call-parallel-item-done .tool-call-header .transcript-header-summary-mono,
+.tool-call-parallel-item-done .tool-call-header .transcript-header-command-preview {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--panel-muted) 60%, transparent);
+}
+
 /* ── Nested (depth ≥ 2) subagent header ─────────────────────────────────── */
 /* A nested subagent renders inside a parent subagent's bounded scroll region.
    Depth-1 headers are already `relative` (non-pinning; see `.subagent-header`

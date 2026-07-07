@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useState } from 'preact/hooks';
-import type { ProxyGatewaySettings, ProxyProviderUpstream, ProxySettings, ProxySettingsUpdate } from '../../../shared/protocol';
+import type { ProxyProviderUpstream, ProxySettings, ProxySettingsUpdate } from '../../../shared/protocol';
 import { CollapsibleChevron } from '../components/chevron';
 import type { OnAddProxyProvider, OnSetProxySettings } from './settings-menu-types';
 
@@ -160,6 +160,13 @@ function ProviderGroup({
             min={1}
             ariaLabel={`${name} max concurrent requests`}
             onCommit={(maxConcurrentRequests) => update({ maxConcurrentRequests })}
+          />
+          <StepperRow
+            label="Afterburn (s)"
+            value={provider.afterburnSeconds ?? 0}
+            min={0}
+            ariaLabel={`${name} afterburn seconds (0 = disabled)`}
+            onCommit={(afterburnSeconds) => update({ afterburnSeconds })}
           />
           {/* Read-only advanced fields — tied to the model catalog, not editable here. */}
           <div class="toolbar-settings-item toolbar-settings-mode-row">
@@ -354,7 +361,7 @@ export function ProxySection({ proxySettings, onSetProxySettings, onAddProxyProv
         ))}
         <AddProviderForm onAddProxyProvider={onAddProxyProvider} />
         <div class="toolbar-settings-item-hint">
-          Changes regenerate the proxy config and restart the LiteLLM proxy. In-flight proxied requests may be interrupted. The master key is pie-managed (auto-generated). Use "Add provider" to add a new proxied upstream (its model catalog is wired separately via the add-provider skill).
+          Edits here apply once when you close this settings menu — they're batched so rapid clicks (steppers, toggles) don't each trigger their own restart. Closing regenerates the proxy config and restarts the LiteLLM proxy once; in-flight proxied requests may be interrupted. The master key is pie-managed (auto-generated). "Add provider" applies immediately (its model catalog is wired separately via the add-provider skill).
         </div>
       </div>
     </div>

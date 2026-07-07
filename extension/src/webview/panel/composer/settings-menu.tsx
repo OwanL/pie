@@ -1,10 +1,38 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, ToolResultPruningSettings } from '../../../shared/protocol';
+import { mergeProxySettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker } from './model-list';
+
+/** Merge two partial proxy-settings updates into one, last-write-wins per
+ *  gateway sub-object and per-provider-field. Used to coalesce every click in
+ *  the Proxy tab (steppers, toggles, text commits) into a single update that
+ *  is sent once the settings menu closes, instead of one restart-triggering
+ *  RPC per click. */
+function mergeProxyUpdates(a: ProxySettingsUpdate, b: ProxySettingsUpdate): ProxySettingsUpdate {
+  const gateway = (a.gateway || b.gateway)
+    ? {
+        routerSettings: b.gateway?.routerSettings ?? a.gateway?.routerSettings,
+        litellmSettings: b.gateway?.litellmSettings ?? a.gateway?.litellmSettings,
+        generalSettings: b.gateway?.generalSettings ?? a.gateway?.generalSettings,
+      }
+    : undefined;
+  const providers = (a.providers || b.providers)
+    ? {
+        ...a.providers,
+        ...Object.fromEntries(
+          Object.entries(b.providers ?? {}).map(([name, partial]) => [
+            name,
+            { ...(a.providers?.[name] ?? {}), ...partial },
+          ]),
+        ),
+      }
+    : undefined;
+  return { gateway, providers };
+}
 
 import {
   computeKeepCatalog,
@@ -235,6 +263,32 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const tablistRef = useRef<HTMLDivElement>(null);
 
+  // Proxy settings edits (steppers, toggles, text commits) are batched
+  // locally instead of firing one restart-triggering RPC per click: each edit
+  // in the Proxy tab is optimistically merged into `pendingProxyUpdate` (and
+  // reflected in `draftProxySettings` for display), and the single coalesced
+  // update is only sent to the host — which regenerates the LiteLLM config and
+  // restarts the proxy once — when the settings menu closes.
+  const [pendingProxyUpdate, setPendingProxyUpdate] = useState<ProxySettingsUpdate | null>(null);
+  const draftProxySettings = useMemo(
+    () => (pendingProxyUpdate ? mergeProxySettings(proxySettings, pendingProxyUpdate) : proxySettings),
+    [proxySettings, pendingProxyUpdate],
+  );
+  const queueProxySettings = useCallback((update: ProxySettingsUpdate) => {
+    setPendingProxyUpdate((prev) => (prev ? mergeProxyUpdates(prev, update) : update));
+  }, []);
+  const flushProxyUpdate = useCallback(() => {
+    setPendingProxyUpdate((prev) => {
+      if (prev) onSetProxySettings(prev);
+      return null;
+    });
+  }, [onSetProxySettings]);
+  const closeMenu = useCallback((refocus?: boolean) => {
+    flushProxyUpdate();
+    setOpen(false);
+    if (refocus) triggerRef.current?.focus();
+  }, [flushProxyUpdate]);
+
   // Extract unique providers from available models, sorted alphabetically.
   const providers = useMemo(
     () => [...new Set(availableModels.map((m) => m.provider))].sort((a, b) => a.localeCompare(b)),
@@ -406,14 +460,14 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
     }
 
     // Proxy boolean toggles.
-    const { gateway } = proxySettings;
+    const { gateway } = draftProxySettings;
     entries.push({
       type: 'toggle',
       id: 'proxy:retryAfter',
       label: 'Retry after header',
       haystack: 'proxy retry after header'.toLowerCase(),
       checked: !!gateway.routerSettings.retryAfter,
-      apply: () => onSetProxySettings({ gateway: { routerSettings: { ...gateway.routerSettings, retryAfter: !gateway.routerSettings.retryAfter } } }),
+      apply: () => queueProxySettings({ gateway: { routerSettings: { ...gateway.routerSettings, retryAfter: !gateway.routerSettings.retryAfter } } }),
     });
     entries.push({
       type: 'toggle',
@@ -421,11 +475,11 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       label: 'Drop unknown params',
       haystack: 'proxy drop unknown params'.toLowerCase(),
       checked: !!gateway.litellmSettings.dropParams,
-      apply: () => onSetProxySettings({ gateway: { litellmSettings: { dropParams: !gateway.litellmSettings.dropParams } } }),
+      apply: () => queueProxySettings({ gateway: { litellmSettings: { dropParams: !gateway.litellmSettings.dropParams } } }),
     });
 
     return entries;
-  }, [visibleTabs, availableExtensions, providers, prefs, proxySettings, onSetPrefs, onSetProxySettings]);
+  }, [visibleTabs, availableExtensions, providers, prefs, draftProxySettings, onSetPrefs, queueProxySettings]);
 
   const q = query.trim().toLowerCase();
   const searchResults = useMemo(() => {
@@ -487,7 +541,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
         if (target instanceof HTMLElement && target.closest('.model-picker-dropdown')) {
           return;
         }
-        setOpen(false);
+        closeMenu();
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -508,8 +562,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
         setQuery('');
         return;
       }
-      setOpen(false);
-      triggerRef.current?.focus();
+      closeMenu(true);
     };
 
     document.addEventListener('mousedown', handlePointerDown);
@@ -518,7 +571,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open, query]);
+  }, [open, query, closeMenu]);
 
   // WAI-ARIA tabs pattern: arrow keys move selection between visible tabs and
   // focus follows, so the tab strip is keyboard-navigable without Tab cycling.
@@ -551,7 +604,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
         aria-haspopup="dialog"
         aria-expanded={open}
         title="Chat settings"
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => (open ? closeMenu() : setOpen(true))}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
@@ -567,7 +620,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
               type="button"
               class="toolbar-settings-close"
               aria-label="Close settings"
-              onClick={() => { setOpen(false); triggerRef.current?.focus(); }}
+              onClick={() => closeMenu(true)}
             >
               <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <line x1="3" y1="3" x2="10" y2="10" />
@@ -704,7 +757,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                   <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} />
                 )}
                 {effectiveTab === 'proxy' && (
-                  <ProxySection proxySettings={proxySettings} onSetProxySettings={onSetProxySettings} onAddProxyProvider={onAddProxyProvider} />
+                  <ProxySection proxySettings={draftProxySettings} onSetProxySettings={queueProxySettings} onAddProxyProvider={onAddProxyProvider} />
                 )}
               </>
             )}
