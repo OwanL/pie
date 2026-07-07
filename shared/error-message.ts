@@ -24,6 +24,49 @@ export function toErrorMessage(err: unknown): string {
   return String(err);
 }
 
+/** Connection-level error signature. The OpenAI SDK raises
+ *  `APIConnectionError` (message "Connection error.", `status` undefined) when
+ *  NO HTTP response was received — ECONNREFUSED, ECONNRESET, socket hang-up,
+ *  fetch failure, or a pre-headers timeout. This is exactly the case where a
+ *  real upstream rejection (e.g. umans account suspended) gets hidden behind a
+ *  generic "Connection error.": the proxy was unreachable/wedged instead of
+ *  returning a clean HTTP error. When the proxy DOES return a clean 429/5xx,
+ *  the SDK raises a typed error carrying the body, so the real reason surfaces;
+ *  this helper only matches the no-response case. */
+const CONNECTION_ERROR_RE =
+  /connection error|connection refused|socket hang up|econnreset|econnrefused|enotfound|fetch failed|network error|etimedout/i;
+
+/** True if `err` looks like a connection-level error (no HTTP response). */
+export function isConnectionError(err: unknown): boolean {
+  if (err == null) return false;
+  const msg = toErrorMessage(err);
+  if (CONNECTION_ERROR_RE.test(msg)) return true;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && CONNECTION_ERROR_RE.test(toErrorMessage(cause))) return true;
+  // OpenAI SDK APIConnectionError: no `status` (undefined) + named class.
+  if (typeof err === 'object') {
+    const e = err as { status?: unknown; name?: string };
+    if (e.status === undefined && typeof e.name === 'string'
+      && /APIConnectionError|ConnectionError/i.test(e.name)) return true;
+  }
+  return false;
+}
+
+/** Normalize a thrown value into a user-facing message, ENRICHING
+ *  connection-level errors with the real transport `cause` + a pointer to the
+ *  pie proxy so the user sees something actionable instead of a bare
+ *  "Connection error." Non-connection errors (including clean 429/5xx with a
+ *  body) pass through `toErrorMessage` unchanged so the real upstream reason
+ *  (e.g. "account_suspended") is preserved. */
+export function enrichConnectionError(err: unknown): string {
+  const base = toErrorMessage(err);
+  if (!isConnectionError(err)) return base;
+  const cause = (err as { cause?: unknown }).cause;
+  const causeMsg = cause ? toErrorMessage(cause) : '';
+  const detail = causeMsg && !/connection error/i.test(causeMsg) ? ` (${causeMsg})` : '';
+  return `Connection error${detail} — the pie proxy (localhost:4000) may be down or wedged, or the upstream dropped the connection. Run \`npm run proxy:health\` or reload the window; if umans is rate-limited the proxy circuit-breaker will surface that as a clear 429 once it recovers.`;
+}
+
 /** Parse JSON, throwing a contextual Error that names what was being parsed
  *  (`label`) so callers see e.g. "settings.json: invalid JSON — Unexpected
  *  token } in JSON at position 42" rather than a bare SyntaxError. Use for

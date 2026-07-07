@@ -2,4 +2,4 @@
  *  Re-exports from the root `shared/` package so every package (extension,
  *  analysis, pi extensions) shares one implementation. Existing host call
  *  sites keep importing from '../util/error-message'. */
-export { toErrorMessage, parseJsonOrThrow } from '../../../../shared/error-message.js';
+export { toErrorMessage, parseJsonOrThrow, enrichConnectionError, isConnectionError } from '../../../../shared/error-message.js';
