@@ -146,3 +146,57 @@ test('after stop(), proc is cleared so a second stop() is a no-op', async () => 
   assert.equal(noticeCount, 1, 'notice must only fire once across two stops');
   assert.equal((service as unknown as { proc?: unknown }).proc, undefined, 'proc must remain undefined');
 });
+
+test('stop() default reason is "config" and the message says "config changed"', async () => {
+  const { service } = createServiceWithProc(7788);
+  const notices: Array<{ reason: string; message: string }> = [];
+  service.onInFlightInterrupted = (payload) => {
+    notices.push({ reason: payload.reason, message: payload.message });
+  };
+
+  await service.stop();
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].reason, 'config');
+  assert.match(notices[0].message, /config changed/i, 'default stop() must say "config changed"');
+});
+
+test('stop("health-monitor") surfaces "became unresponsive", NOT "config changed"', async () => {
+  const { service } = createServiceWithProc(9090);
+  const notices: Array<{ reason: string; message: string }> = [];
+  service.onInFlightInterrupted = (payload) => {
+    notices.push({ reason: payload.reason, message: payload.message });
+  };
+
+  await service.stop('health-monitor');
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].reason, 'health-monitor');
+  assert.doesNotMatch(
+    notices[0].message, /config changed/i,
+    'a health-monitor recovery must NOT be mislabeled as a config edit',
+  );
+  assert.match(
+    notices[0].message, /unresponsive/i,
+    'a health-monitor recovery must say the proxy became unresponsive',
+  );
+  assert.match(
+    notices[0].message, /proxy.*restart|restart.*proxy/i,
+    'the message must still mention "proxy restart" so the generic test regex holds',
+  );
+});
+
+test('stop("dispose") surfaces a stopping notice, NOT "config changed"', async () => {
+  const { service } = createServiceWithProc(9091);
+  const notices: Array<{ reason: string; message: string }> = [];
+  service.onInFlightInterrupted = (payload) => {
+    notices.push({ reason: payload.reason, message: payload.message });
+  };
+
+  await service.stop('dispose');
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].reason, 'dispose');
+  assert.doesNotMatch(notices[0].message, /config changed/i, 'dispose must not be mislabeled as a config edit');
+  assert.match(notices[0].message, /stopping/i, 'dispose must say the proxy is stopping');
+});

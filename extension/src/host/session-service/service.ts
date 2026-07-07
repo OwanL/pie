@@ -22,7 +22,7 @@ import {
   type ProxySettingsStorage,
 } from './proxy-settings-persistence';
 import { readProxySettings, writeProxySettings } from './proxy-settings';
-import { writeProxyEnvKey, loadProxyEnvIntoProcess } from './proxy-env';
+import { writeProxyEnvKey } from './proxy-env';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
@@ -62,6 +62,15 @@ export class SessionService implements vscode.Disposable {
    *  startup once `proxy.start()` succeeds so later edits can restart it. */
   private proxyService?: ProxyService;
   private proxyStartOptions?: ProxyStartOptions;
+  /** Serializes `regenerateProxyConfigAndRestart` calls. Multiple settings
+   *  edits in quick succession (e.g. rapid stepper clicks before the settings
+   *  menu batching landed, or a settings edit racing `addProxyProvider`) used
+   *  to fire overlapping `restart()` calls — each one's `stop()` could kill
+   *  the OTHER call's freshly-spawned (and already-ready) proxy, surfacing a
+   *  spurious "LiteLLM proxy exited before becoming ready (code 1)" even though
+   *  the log tail shows a clean startup. Chaining onto this promise ensures
+   *  restarts run one at a time. */
+  private proxyRestartChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -382,6 +391,11 @@ export class SessionService implements vscode.Disposable {
     // stream, surface a structured NoticeShown so the user can tell "proxy
     // restarted under me" vs "provider cut" vs "proxy throttled". The hook
     // fires synchronously from ProxyService.stop() BEFORE the kill.
+    //
+    // `payload.reason` distinguishes a deliberate config restart from a
+    // health-monitor recovery (the proxy became unresponsive under parallel
+    // load). The message is already accurate per-reason; the log tag carries
+    // it so a grep can separate the two failure classes without parsing text.
     proxy.onInFlightInterrupted = (payload) => {
       this.dispatchArch({
         kind: 'NoticeShown',
@@ -390,6 +404,18 @@ export class SessionService implements vscode.Disposable {
       appendPieLog('warn', 'proxy-restart', 'in-flight proxied stream interrupted by proxy restart', {
         code: payload.code,
         pid: payload.pid,
+        reason: payload.reason,
+      });
+    };
+    // Dedicated telemetry for the health-monitor reclaim path. stop() with
+    // reason 'health-monitor' already fired the accurate NoticeShown above;
+    // this hook fires AFTER the reclaim+respawn so the log confirms recovery
+    // (not just the interruption). Previously this callback was declared on
+    // ProxyService but NEVER wired — the reclaim was invisible.
+    proxy.onProxyHungReclaimed = (payload) => {
+      appendPieLog('warn', 'proxy-restart', 'health monitor reclaimed + respawned unresponsive proxy', {
+        port: payload.port,
+        reason: payload.reason,
       });
     };
   }
@@ -489,10 +515,19 @@ export class SessionService implements vscode.Disposable {
 
   /** Regenerate proxy/litellm_config.yaml from settings.json via sync-models
    *  and restart the LiteLLM proxy so the new config takes effect. Shared by
-   *  setProxySettings (field edits) + addProxyProvider (new provider). On a
-   *  sync/restart failure, dispatch a NoticeShown (the persisted config is
-   *  left intact — the user can fix it and retry, or reload the window). */
+   *  setProxySettings (field edits) + addProxyProvider (new provider). Queued
+   *  onto `proxyRestartChain` so overlapping calls never race each other's
+   *  stop()/spawn(); each call still runs to completion (including its own
+   *  error handling) even if an earlier queued call failed. */
   private async regenerateProxyConfigAndRestart(): Promise<void> {
+    const run = this.proxyRestartChain.then(() => this.doRegenerateProxyConfigAndRestart());
+    // Swallow so a failed run doesn't poison the chain for subsequent callers
+    // (each run already reports its own failure via NoticeShown).
+    this.proxyRestartChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doRegenerateProxyConfigAndRestart(): Promise<void> {
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     if (!agentDir) {
       // No agent dir = no proxy config to regenerate; nothing to restart.
@@ -513,18 +548,26 @@ export class SessionService implements vscode.Disposable {
     }
 
     // Restart the proxy so the new config is loaded. LiteLLM has no /reload
-    // endpoint, so a full stop+start is required. A failure here surfaces a
-    // notice but leaves the persisted config intact (the user can fix it and
+    // endpoint, so a full stop+start is required. A transient failure here
+    // (e.g. the old process's port hadn't fully released yet) is retried once
+    // before giving up — otherwise a single flaky restart left the proxy dead
+    // until a full window reload. Only the second failure surfaces a notice;
+    // the persisted config is left intact either way (the user can fix it and
     // retry, or reload the window).
     if (this.proxyService && this.proxyStartOptions) {
       try {
         await this.proxyService.restart(this.proxyStartOptions);
-      } catch (err) {
-        this.dispatchArch({
-          kind: 'NoticeShown',
-          notice: `Proxy config regenerated, but the LiteLLM proxy failed to restart: ${toErrorMessage(err)}. Reload the window to retry.`,
-        });
-        appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update', { error: toErrorMessage(err) });
+      } catch (firstErr) {
+        appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update, retrying once', { error: toErrorMessage(firstErr) });
+        try {
+          await this.proxyService.restart(this.proxyStartOptions);
+        } catch (err) {
+          this.dispatchArch({
+            kind: 'NoticeShown',
+            notice: `Proxy config regenerated, but the LiteLLM proxy failed to restart: ${toErrorMessage(err)}. Reload the window to retry.`,
+          });
+          appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update (retry also failed)', { error: toErrorMessage(err) });
+        }
       }
     }
   }

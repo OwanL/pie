@@ -6,8 +6,9 @@
  * per-provider concurrency limits can be enforced centrally. See
  * docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
  *
- * Lifecycle mirrors `BackendClient`: spawn → wait for a readiness signal →
- * resolve / reject. The readiness signal is an HTTP 200 from
+ * Lifecycle mirrors `BackendClient`: reclaim any existing holder on the target
+ * port, spawn a fresh process, wait for a readiness signal, then resolve /
+ * reject. The readiness signal is an HTTP 200 from
  * `/health/liveness` instead of a JSON-RPC `backend.ready` event. On failure
  * the caller (startup.ts) dispatches a `NoticeShown` and DOES NOT start the
  * backend — "fail loud" by design (no silent fallback to direct routing).
@@ -26,7 +27,7 @@ import * as cp from 'node:child_process';
 import * as http from 'node:http';
 import type * as vscode from 'vscode';
 
-import { bootLog } from '../util/audit';
+import { appendPieLog, bootLog } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
 
 /** Default readiness timeout for the proxy's `/health/liveness` to answer 200. */
@@ -40,10 +41,21 @@ const HEALTH_POLL_INTERVAL_MS = 500;
  *  turn fails with an opaque "Connection error.". The monitor probes
  *  /health/liveness on an interval; after N consecutive failures it reclaims
  *  the port and (when start options are known) respawns a fresh tracked child.
- *  Env-tunable so a tight test can shrink the window. */
+ *  Env-tunable so a tight test can shrink the window.
+ *
+ *  A busy-but-alive proxy (parallel subagent streaming saturating the single
+ *  uvicorn worker + the shared max_parallel_requests:2 semaphore) can be SLOW
+ *  to answer /health/liveness without being dead. Killing it on a transient
+ *  slow-probe disrupts every in-flight stream (the disruptive popup). So the
+ *  monitor distinguishes REFUSED (the process is gone — dead) from TIMEOUT
+ *  (the process is alive but event-loop-starved — busy). Both eventually
+ *  recover, but TIMEOUT needs a much higher threshold so a sustained busy
+ *  window under load does NOT cascade into a self-inflicted restart storm. */
 const PROXY_HEALTH_MONITOR_ENV = 'PIE_PROXY_HEALTH_MONITOR_MS';
 const DEFAULT_PROXY_HEALTH_MONITOR_MS = 30_000; // every 30s
-const PROXY_HEALTH_FAIL_THRESHOLD = 3; // 3 consecutive misses ≈ 90s dead
+const PROXY_HEALTH_FAIL_THRESHOLD = 3; // 3 consecutive REFUSED ≈ 90s dead
+const PROXY_HEALTH_SLOW_THRESHOLD = 6; // 6 consecutive TIMEOUT ≈ 3min starved
+const PROXY_HEALTH_PROBE_TIMEOUT_MS = 10_000; // generous for a busy event loop
 
 function resolveHealthMonitorIntervalMs(): number {
   const raw = process.env[PROXY_HEALTH_MONITOR_ENV];
@@ -75,7 +87,24 @@ export interface ProxyInFlightInterruptedPayload {
   code: 'PROXY_RESTART_IN_FLIGHT';
   message: string;
   pid: number;
+  /** Why the proxy is being stopped, so the caller can log/surface an accurate
+   *  message instead of the stale hard-coded "config changed". */
+  reason: ProxyStopReason;
 }
+
+/** Why {@link ProxyService.stop} is tearing down the tracked proxy child.
+ *  Determines the user-facing message so a health-monitor recovery (the proxy
+ *  became unresponsive under parallel load) is NOT mislabeled as a config edit. */
+export type ProxyStopReason = 'config' | 'health-monitor' | 'dispose';
+
+/** User-facing messages per stop reason. All mention "proxy" + "restart" so the
+ *  existing test regex (`/proxy.*restart|restart.*proxy/i`) holds, while the
+ *  cause is accurate. */
+const PROXY_STOP_REASON_MESSAGES: Record<ProxyStopReason, string> = {
+  config: 'The pie proxy is restarting (config changed). An in-flight proxied turn may have been interrupted.',
+  'health-monitor': 'The pie proxy became unresponsive and is restarting. An in-flight proxied turn may have been interrupted.',
+  dispose: 'The pie proxy is stopping. An in-flight proxied turn may have been interrupted.',
+};
 
 /** Resolve the `uv` binary, probing common install + PATH locations. */
 function resolveUv(): string {
@@ -108,6 +137,10 @@ export class ProxyService implements vscode.Disposable {
    *  Cleared by stop()/dispose()/restart(). */
   private healthMonitor?: ReturnType<typeof setInterval>;
   private healthFailures = 0;
+  /** Consecutive TIMEOUT probes (busy-but-alive). Tracked separately from
+   *  `healthFailures` (REFUSED = dead) so a sustained parallel-load window
+   *  needs many more slow-probes before the monitor kills an alive proxy. */
+  private healthSlowFailures = 0;
   /** Cached start options so the monitor can respawn a fresh tracked child after
    *  reclaiming a hung reused proxy. */
   private lastStartOptions?: ProxyStartOptions;
@@ -134,41 +167,11 @@ export class ProxyService implements vscode.Disposable {
     const { configPath, proxyDir, port, host } = options;
     const baseUrl = `http://${host}:${port}`;
 
-    // Fast path: a healthy litellm from a prior run may already be bound to
-    // `port`. Reuse it instead of killing + respawning an identical process.
-    // The /health/liveness 200 confirms a litellm is up (the path is litellm-
-    // specific, so a stray non-litellm holder won't satisfy it), and the probe
-    // is a plain HTTP GET — connection-refused returns in ~1ms, so the common
-    // "nothing on the port" case pays no spawnSync cost at all. We do NOT
-    // track the reused child (this.proc stays undefined), so dispose()/stop()
-    // leaves it running — correct, since we didn't spawn it and it may belong
-    // to another window.
-    //
-    // Limitation: if the pie-managed master key (PIE_PROXY_MASTER_KEY) changed
-    // since the holder was started, its master_key is stale and proxied
-    // requests will 401. The key is persisted (stable across reloads), so this
-    // is rare; the user can recover by killing the port holder or changing
-    // pie.proxyPort.
-    if (await this.healthCheck(baseUrl, 1500)) {
-      bootLog('proxy-service', 'start.reused', { port });
-      // Bug: arm a health monitor for the reused proxy. We did NOT spawn it
-      // (this.proc stays undefined), so without a monitor a mid-session hang
-      // (uvicorn wedged by a stalled upstream) is invisible — the backend
-      // keeps pointing at a dead port. The monitor probes /health/liveness;
-      // after N consecutive misses it reclaims the port + respawns a fresh
-      // tracked child so the backend recovers without a window reload.
-      this.lastStartOptions = options;
-      this.armHealthMonitor(baseUrl);
-      return { port, baseUrl, pid: 0 };
-    }
-
-    // No healthy proxy on the port. Guard against an orphaned litellm from a
-    // prior session still bound to `port` — without this, uvicorn silently
-    // falls back to an EPHEMERAL port (e.g. 25962) and the pidfile/baseURL pi
-    // is configured for points at a port nothing is listening on — random
-    // "session stopped" failures with no error. The holder with no tracked
-    // child is orphaned by definition, so auto-reclaim it. Mirrors
-    // scripts/proxy.mjs startBackground().
+    // Always start fresh on app startup/restart. Reclaim any existing holder
+    // first (including an otherwise-healthy prior-run proxy) so config/env and
+    // process state cannot leak across restarts. Also prevents uvicorn from
+    // silently falling back to an EPHEMERAL port when the configured one is
+    // already bound.
     await this.reclaimOrphanedPort(port, host);
 
     this.lastStartOptions = options;
@@ -201,7 +204,7 @@ export class ProxyService implements vscode.Disposable {
       });
     }
 
-    return new Promise<ProxyReadyPayload>((resolve, reject) => {
+    const ready = await new Promise<ProxyReadyPayload>((resolve, reject) => {
       let settled = false;
 
       const settle = (fn: () => void) => {
@@ -276,19 +279,45 @@ export class ProxyService implements vscode.Disposable {
         ),
       );
     });
+    // Bug: a SPAWNED (tracked) proxy can wedge while staying alive — the
+    // uvicorn worker's event loop blocks (slow upstream holding the GIL via
+    // a sync code path), the listen backlog exhausts and the OS RSTs new
+    // SYNs, or all max_parallel_requests semaphore slots leak via the
+    // stream-liveness middleware's shielded-reap. The `exit` listener never
+    // fires for a wedged-but-alive child, so without a health monitor the
+    // proxy stays wedged indefinitely and EVERY proxied turn (including the
+    // skill-pruner prepass) fails with an opaque "Connection error." until a
+    // manual window reload. Arm the monitor here so the spawned path is
+    // supervised too — previously it was only armed for the reused fast-path.
+    this.armHealthMonitor(baseUrl);
+    return ready;
   }
 
-  /** GET /health/liveness → true on 200. Quiet — never throws. */
+  /** GET /health/liveness → true on 200. Quiet — never throws. Used by the
+   *  readiness poll (which treats any non-200 as "not ready yet"). */
   private healthCheck(baseUrl: string, timeoutMs: number): Promise<boolean> {
+    return this.probeLiveness(baseUrl, timeoutMs).then((r) => r === 'healthy');
+  }
+
+  /** Tri-state liveness probe. Distinguishes REFUSED (the process is gone —
+   *  dead) from TIMEOUT (the process is alive but event-loop-starved under
+   *  parallel load — busy). The monitor treats these with different thresholds
+   *  so a sustained busy window does NOT kill an alive proxy mid-stream. */
+  private probeLiveness(baseUrl: string, timeoutMs: number): Promise<'healthy' | 'refused' | 'timeout'> {
     return new Promise((resolve) => {
       const req = http.get(`${baseUrl}/health/liveness`, { timeout: timeoutMs }, (res) => {
         res.resume();
-        resolve(res.statusCode === 200);
+        resolve(res.statusCode === 200 ? 'healthy' : 'refused');
       });
-      req.on('error', () => resolve(false));
+      req.on('error', (err) => {
+        // ECONNREFUSED/ECONNRESET → the port isn't accepting (process gone or
+        // wedged socket). Anything else (incl. DNS) → treat as refused too.
+        const code = (err as NodeJS.ErrnoException).code;
+        resolve(code === 'ETIMEDOUT' ? 'timeout' : 'refused');
+      });
       req.on('timeout', () => {
         req.destroy();
-        resolve(false);
+        resolve('timeout');
       });
     });
   }
@@ -363,7 +392,7 @@ export class ProxyService implements vscode.Disposable {
    *  stale-config proxy and never pick up the new config. */
   async restart(options: ProxyStartOptions): Promise<ProxyReadyPayload> {
     const { port, host } = options;
-    await this.stop();
+    await this.stop('config');
     // Kill any port holder we didn't spawn (a reused proxy from a prior run),
     // otherwise start() would reuse the stale-config proxy and never load the
     // new config.
@@ -385,24 +414,56 @@ export class ProxyService implements vscode.Disposable {
   private armHealthMonitor(baseUrl: string): void {
     if (this.healthMonitor) return;
     this.healthFailures = 0;
+    this.healthSlowFailures = 0;
     const interval = resolveHealthMonitorIntervalMs();
     this.healthMonitor = setInterval(async () => {
-      const up = await this.healthCheck(baseUrl, Math.min(interval, 5000));
-      if (up) {
+      const result = await this.probeLiveness(baseUrl, PROXY_HEALTH_PROBE_TIMEOUT_MS);
+      if (result === 'healthy') {
         this.healthFailures = 0;
+        this.healthSlowFailures = 0;
         return;
       }
-      this.healthFailures += 1;
-      if (this.healthFailures < PROXY_HEALTH_FAIL_THRESHOLD) return;
-      // The reused proxy has hung (N consecutive misses). Reclaim the port +
-      // respawn a fresh tracked child so the backend recovers.
-      bootLog('proxy-service', 'health-monitor.hung', { port: this.lastStartOptions?.port, failures: this.healthFailures });
+      // Separate the two hang classes so a BUSY proxy (TIMEOUT — alive but
+      // event-loop-starved under parallel streaming) is NOT killed as
+      // aggressively as a DEAD one (REFUSED — process gone).
+      if (result === 'timeout') {
+        this.healthSlowFailures += 1;
+        // A transient slow probe under load is common; only reclaim after a
+        // SUSTAINED starvation window (PROXY_HEALTH_SLOW_THRESHOLD × interval).
+        if (this.healthSlowFailures < PROXY_HEALTH_SLOW_THRESHOLD) return;
+      } else {
+        this.healthFailures += 1;
+        this.healthSlowFailures = 0;
+        if (this.healthFailures < PROXY_HEALTH_FAIL_THRESHOLD) return;
+      }
+      // The proxy has hung (N consecutive misses of the relevant class) —
+      // covers BOTH the reused fast-path (this.proc undefined) AND a SPAWNED
+      // tracked child that wedged while alive. Reclaim the port + respawn a
+      // fresh tracked child.
+      //
+      // Double-log: bootLog (boot-trace JSONL, gated on PI_BOOT_LOG) AND
+      // appendPieLog (always-on, writes pie.log). Without appendPieLog the
+      // recovery is INVISIBLE in the default config — the only visible
+      // symptom was the popup from stop()→onInFlightInterrupted, which made
+      // the restart look like a config edit ("config changed") instead of a
+      // health-monitor reclaim. See pie-proxy-health-monitor-false-restart.md.
+      const hungPayload = { port: this.lastStartOptions?.port, failures: this.healthFailures, slowFailures: this.healthSlowFailures, hangClass: result };
+      bootLog('proxy-service', 'health-monitor.hung', hungPayload);
+      appendPieLog('warn', 'health-monitor', 'health monitor: proxy hung — reclaiming + respawning', hungPayload);
       this.disarmHealthMonitor();
       const opts = this.lastStartOptions;
       if (opts) {
+        // Stop the tracked child FIRST. A SPAWNED proxy that wedged still has
+        // this.proc set, and the respawn's start() would throw "Proxy is
+        // already running" + leave the wedged child on the port without this.
+        // stop() also taskkill /T /F the wedged uvicorn so the port releases.
+        // No-op when this.proc is undefined (reused-path hang).
+        // Pass reason 'health-monitor' so the in-flight notice says "became
+        // unresponsive", NOT the misleading "config changed".
+        try { await this.stop('health-monitor'); } catch { /* best-effort */ }
         try { await this.reclaimOrphanedPort(opts.port, opts.host); } catch { /* best-effort */ }
         try {
-          this.onProxyHungReclaimed?.({ port: opts.port, reason: 'reused proxy hung — health monitor reclaimed + respawned' });
+          this.onProxyHungReclaimed?.({ port: opts.port, reason: 'proxy hung — health monitor reclaimed + respawned' });
         } catch { /* listener must not block recovery */ }
         try {
           // Respawn a fresh tracked child. This sets this.proc + re-establishes
@@ -410,6 +471,7 @@ export class ProxyService implements vscode.Disposable {
           await this.start(opts);
         } catch (err) {
           bootLog('proxy-service', 'health-monitor.respawn.failed', { port: opts.port, error: toErrorMessage(err) });
+          appendPieLog('error', 'health-monitor', 'health monitor: respawn failed after reclaim', { port: opts.port, error: toErrorMessage(err) });
         }
       }
     }, interval);
@@ -423,9 +485,10 @@ export class ProxyService implements vscode.Disposable {
       this.healthMonitor = undefined;
     }
     this.healthFailures = 0;
+    this.healthSlowFailures = 0;
   }
 
-  async stop(): Promise<void> {
+  async stop(reason: ProxyStopReason = 'config'): Promise<void> {
     // Bug: clear the reused-proxy health monitor so a stop/restart doesn't
     // race the monitor's reclaim+respawn.
     this.disarmHealthMonitor();
@@ -439,12 +502,19 @@ export class ProxyService implements vscode.Disposable {
     // "proxy restarted" instead of looking like a provider cut. We do NOT
     // drain (pie does not track per-session routing through the proxy); the
     // notice is the loud, structured fix and the kill is unchanged.
+    //
+    // The message is chosen from `reason` so a health-monitor recovery (the
+    // proxy became unresponsive, NOT a config edit) is NOT mislabeled as
+    // "config changed" — the most common false alarm under parallel subagent
+    // load, where a busy single-worker uvicorn stalls the /health/liveness
+    // probe and the monitor reclaims+respawns a proxy that was merely slow.
     if (typeof pid === 'number' && this.onInFlightInterrupted) {
       try {
         this.onInFlightInterrupted({
           code: 'PROXY_RESTART_IN_FLIGHT',
-          message: 'The pie proxy is restarting (config changed). An in-flight proxied turn may have been interrupted.',
+          message: PROXY_STOP_REASON_MESSAGES[reason],
           pid,
+          reason,
         });
       } catch {
         /* a buggy listener must not block the kill */
@@ -467,6 +537,6 @@ export class ProxyService implements vscode.Disposable {
   }
 
   dispose(): void {
-    void this.stop();
+    void this.stop('dispose');
   }
 }

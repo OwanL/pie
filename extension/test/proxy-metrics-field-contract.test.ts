@@ -31,8 +31,8 @@ function extractHostFields(filePath: string): string[] {
   const body = iface![1];
   const fields: string[] = [];
   for (const line of body.split('\n')) {
-    // matches `  fieldName: type;`
-    const m = line.match(/^\s*([A-Za-z][A-Za-z0-9_]*)\s*:/);
+    // matches `  fieldName: type;` or `  fieldName?: type;` (optional fields)
+    const m = line.match(/^\s*([A-Za-z][A-Za-z0-9_]*)\??\s*:/);
     if (m) fields.push(m[1]);
   }
   return fields;
@@ -69,6 +69,7 @@ const EXPECTED = [
   'activeRequests',
   'queuedRequests',
   'maxConcurrentRequests',
+  'afterburnSeconds',
 ];
 
 test('host ProxyProviderMetrics exposes exactly the expected field set', () => {
@@ -102,14 +103,19 @@ test('each key uses identical camelCase spelling in both files (no snake_case dr
     assert.ok(inHost, `expected camelCase key '${field}' missing from host interface`);
     assert.ok(inPython, `expected camelCase key '${field}' missing from python route dict`);
     // Guard against snake_case leakage (e.g. model_info_id) in either file.
+    // Only meaningful when the field actually has uppercase letters: for an
+    // all-lowercase field (e.g. `provider`) the snake form equals the field,
+    // so the `!includes` check would always false-alarms.
     const snake = field.replace(/[A-Z]/g, (ch) => `_${ch.toLowerCase()}`);
-    assert.ok(
-      !HOST_FIELDS.includes(snake),
-      `host unexpectedly used snake_case '${snake}' instead of '${field}'`,
-    );
-    assert.ok(
-      !PYTHON_KEYS.includes(snake),
-      `python unexpectedly used snake_case '${snake}' instead of '${field}'`,
-    );
+    if (snake !== field) {
+      assert.ok(
+        !HOST_FIELDS.includes(snake),
+        `host unexpectedly used snake_case '${snake}' instead of '${field}'`,
+      );
+      assert.ok(
+        !PYTHON_KEYS.includes(snake),
+        `python unexpectedly used snake_case '${snake}' instead of '${field}'`,
+      );
+    }
   }
 });

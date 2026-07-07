@@ -24,7 +24,8 @@ const PIE_LOG_PATH = path.join(PIE_LOG_DIR, 'pie.log');
  *  sessions. */
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
-let pieLogChannel: vscode.OutputChannel | undefined;
+let pieLogChannel: vscode.LogOutputChannel | undefined;
+let pieBackendChannel: vscode.LogOutputChannel | undefined;
 let minLevel: LogLevel = 'info';
 let devMode = false;
 /** User-facing log level options, ordered from most to least verbose. */
@@ -88,25 +89,62 @@ function isAuditEnabled(): boolean {
   return devMode || runtimeAuditLogEnabled;
 }
 
-function getPieLogChannel(): vscode.OutputChannel | undefined {
+/** Create both Output channels on first use. Both are backed by VS Code's
+ *  {@link vscode.LogOutputChannel} (created via `{ log: true }`) so the native
+ *  severity colors and per-channel level dropdown (Clear / Trace / Debug /
+ *  Info / Warning / Error) work. The `pie (backend)` channel keeps the chatty
+ *  backend stderr stream out of the main `pie` channel so the main log stays
+ *  readable. */
+function ensureLogChannels(): void {
   if (pieLogChannel) {
-    return pieLogChannel;
+    return;
   }
-
   try {
     // `vscode` is only available inside the extension host. Import it lazily
     // so the logger module loads safely in tests and other non-VS Code runtimes.
     const vscodeMod = require('vscode') as typeof vscode;
     const createOutputChannel = vscodeMod.window?.createOutputChannel;
     if (!createOutputChannel) {
-      return undefined;
+      return;
     }
-    pieLogChannel = createOutputChannel('pie');
+    pieLogChannel = createOutputChannel('pie', { log: true });
+    pieBackendChannel = createOutputChannel('pie (backend)', { log: true });
   } catch {
     // vscode not available; log output will fall back to console and file.
   }
+}
 
+function getPieLogChannel(): vscode.LogOutputChannel | undefined {
+  ensureLogChannels();
   return pieLogChannel;
+}
+
+function getPieBackendChannel(): vscode.LogOutputChannel | undefined {
+  ensureLogChannels();
+  return pieBackendChannel;
+}
+
+/** Map a {@link LogLevel} to the corresponding `LogOutputChannel` severity
+ *  method and emit. The channel's own `logLevel` (set via the native Output
+ *  panel level dropdown) gates emission — this is intentionally decoupled from
+ *  the global `minLevel` (which gates only the persistent file + console), so
+ *  the user can widen a single channel's view (e.g. show Debug on `pie
+ *  (backend)` only) without changing `pie.logLevel` or restarting. */
+function emitToChannel(level: LogLevel, scope: string, line: string): void {
+  // Backend stderr lives in its own channel so the main `pie` stream stays
+  // readable; pass the raw line without a redundant scope prefix (the channel
+  // name already signals the source).
+  const channel = scope === 'backend-stderr' ? getPieBackendChannel() : getPieLogChannel();
+  if (!channel) {
+    return;
+  }
+  switch (level) {
+    case 'trace': channel.trace(line); break;
+    case 'debug': channel.debug(line); break;
+    case 'info': channel.info(line); break;
+    case 'warn': channel.warn(line); break;
+    case 'error': channel.error(line); break;
+  }
 }
 
 function stringifyLogData(data: unknown): string {
@@ -183,18 +221,30 @@ export function pieLog(
   message: string,
   data?: Record<string, unknown>,
 ): void {
+  const ts = new Date().toISOString();
+  const suffix = stringifyLogData(data);
+  const fullLine = suffix
+    ? `[${ts}] [${level}] [${scope}] ${message} ${suffix}`
+    : `[${ts}] [${level}] [${scope}] ${message}`;
+
+  // The Output channel is a `LogOutputChannel` — it prepends its own
+  // `[timestamp] [level]` prefix and colorizes by severity, so we hand it the
+  // message WITHOUT our timestamp/level prefix. Emission is gated by the
+  // channel's own logLevel (native dropdown), independent of `minLevel` —
+  // see `emitToChannel`. Backend stderr lines are passed through raw.
+  const channelLine = scope === 'backend-stderr'
+    ? message
+    : (suffix ? `[${scope}] ${message} ${suffix}` : `[${scope}] ${message}`);
+  emitToChannel(level, scope, channelLine);
+
+  // Persistent file + dev console are gated by the global `pie.logLevel`
+  // setting (`minLevel`). The channel above may show more (when the user
+  // widens its dropdown), but the durable record respects configured verbosity.
   if (LEVEL_RANK[level] < LEVEL_RANK[minLevel]) {
     return;
   }
 
-  const ts = new Date().toISOString();
-  const suffix = stringifyLogData(data);
-  const line = suffix
-    ? `[${ts}] [${level}] [${scope}] ${message} ${suffix}`
-    : `[${ts}] [${level}] [${scope}] ${message}`;
-
-  getPieLogChannel()?.appendLine(line);
-  appendToPersistentLog(line);
+  appendToPersistentLog(fullLine);
   appendToConsole(level, scope, message, data);
 }
 
