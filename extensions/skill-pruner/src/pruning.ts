@@ -37,6 +37,9 @@ export {
 	resolvePrepassBudgets,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
+	proxyOriginFromModel,
+	fetchProxySaturation,
+	saturationCheckEnabled,
 } from "./prepass.js";
 
 /** Re-exported so tests can drive the shared AsyncLocalStorage signal that
@@ -251,6 +254,7 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 			maxTransportRetries: input.prepass.maxTransportRetries,
 			transportBackoffBaseMs: input.prepass.transportBackoffBaseMs,
 			oauthRaceBackoffMs: input.prepass.oauthRaceBackoffMs,
+			...(input.prepass.saturationCheck !== undefined ? { saturationCheck: input.prepass.saturationCheck } : {}),
 		} : undefined,
 	};
 }
