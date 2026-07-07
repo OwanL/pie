@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "test proxy-service-notice",
+			"type": "shell",
+			"command": "npx tsx --test test/proxy-service-notice.test.ts",
+			"args": [],
+			"problemMatcher": [
+				"$tsc"
+			],
+			"group": "test"
+		}
+	]
+}
