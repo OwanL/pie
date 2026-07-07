@@ -31,6 +31,13 @@ export interface ActiveRequest {
    * for the current assistant message. Reset on each assistant `message_start`.
    */
   providerFirstDeltaAt?: number;
+  /**
+   * Most recent provider/retry error observed during this request. Used to
+   * enrich generic terminal stream errors so the UI can show a root cause
+   * (for example upstream 429/account suspension) instead of only a parser
+   * symptom.
+   */
+  lastRetryErrorMessage?: string;
   aborted: boolean;
   /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
    *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared

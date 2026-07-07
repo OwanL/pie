@@ -113,6 +113,45 @@ function summarizePayload(value: unknown): string | undefined {
   }
 }
 
+function nonEmptyTrimmed(value: string | undefined): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function isGenericTerminalStreamError(detail: string): boolean {
+  const normalized = detail.toLowerCase();
+  return (
+    normalized.includes('stream ended without finish_reason')
+    || normalized.includes('stream ended before a terminal response event')
+    || normalized.includes('stream ended before message_stop')
+  );
+}
+
+function mergeAssistantErrorDetail(
+  messageError: string | undefined,
+  retryError: string | undefined,
+): string | undefined {
+  const direct = nonEmptyTrimmed(messageError);
+  const upstream = nonEmptyTrimmed(retryError);
+
+  if (!upstream) {
+    return direct;
+  }
+  if (!direct) {
+    return `Upstream error: ${upstream}`;
+  }
+  if (!isGenericTerminalStreamError(direct)) {
+    return direct;
+  }
+  if (direct.includes(upstream)) {
+    return direct;
+  }
+  return `${direct}\n\nUpstream error: ${upstream}`;
+}
+
 /** Best-effort extraction of plain text from an injected queued user message's
  *  content. The host promotes 'queued' transcript messages by FIFO order (the
  *  SDK drains the follow-up queue one at a time in enqueue order), so this text
@@ -194,6 +233,7 @@ export function handleSdkSessionEvent(
       context.activeRequest.currentMessageId = `${context.activeRequest.id}:${context.activeRequest.messageIndex}`;
       context.activeRequest.lastAssistantMessageId = context.activeRequest.currentMessageId;
       context.activeRequest.currentMessageStartedAt = Date.now();
+      context.activeRequest.lastRetryErrorMessage = undefined;
       // Reset the per-message first-content marker so each assistant message
       // measures its own provider TTFT.
       context.activeRequest.providerFirstDeltaAt = undefined;
@@ -415,13 +455,26 @@ export function handleSdkSessionEvent(
           ? Math.max(0, providerFirstDeltaAt - turnStartedAt)
           : undefined;
       context.activeRequest.currentMessageStartedAt = undefined;
-      const message = mapAssistantMessage(messageId, event.message as any, durationMs, {
+      const mergedErrorMessage = mergeAssistantErrorDetail(
+        event.message.errorMessage,
+        context.activeRequest.lastRetryErrorMessage,
+      );
+      const assistantEventMessage = mergedErrorMessage === event.message.errorMessage
+        ? event.message
+        : { ...event.message, errorMessage: mergedErrorMessage };
+
+      const message = mapAssistantMessage(messageId, assistantEventMessage as any, durationMs, {
         modelId: context.activeRequest.modelId,
         thinkingLevel: context.activeRequest.thinkingLevel,
         turnLatencyMs,
         overheadMs,
         providerLatencyMs,
       });
+
+      if (message.status !== 'error') {
+        context.activeRequest.lastRetryErrorMessage = undefined;
+      }
+
       deps.emit('message.finished', {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
@@ -518,6 +571,10 @@ export function handleSdkSessionEvent(
     }
 
     case 'auto_retry_start': {
+      if (context.activeRequest) {
+        context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.errorMessage)
+          ?? context.activeRequest.lastRetryErrorMessage;
+      }
       // Bug 6 watchdog: re-arm with the SDK's reported backoff delayMs so the
       // window matches the real retry cadence (not the conservative 0 from
       // agent_end willRetry). The grace is added on top.
@@ -535,6 +592,14 @@ export function handleSdkSessionEvent(
     }
 
     case 'auto_retry_end': {
+      if (context.activeRequest) {
+        if (event.success === true) {
+          context.activeRequest.lastRetryErrorMessage = undefined;
+        } else {
+          context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.finalError)
+            ?? context.activeRequest.lastRetryErrorMessage;
+        }
+      }
       // Bug 6 watchdog: clear on retry completion (success or final failure).
       // The subsequent agent_end willRetry:false will re-clear (idempotent).
       if (context.willRetryWatchdogClear) {

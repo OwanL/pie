@@ -504,7 +504,18 @@ export function mergePruningSettings(
 }
 
 export interface ProxyGatewaySettings {
-  routerSettings: { numRetries: number; retryAfter: boolean; timeout: number };
+  routerSettings: {
+    numRetries: number;
+    retryAfter: boolean;
+    timeout: number;
+    /** Per-exception retry overrides, emitted verbatim to LiteLLM's
+     *  `router_settings.retry_policy`. Keys are LiteLLM's PascalCase field
+     *  names (e.g. `RateLimitErrorRetries`). `RateLimitErrorRetries: 0`
+     *  stops LiteLLM from retrying upstream 429/account-suspended responses —
+     *  retrying a suspended account deepens the pause (see the account-pause
+     *  circuit-breaker in proxy/pie_proxy_runtime.py). */
+    retryPolicy?: Record<string, number>;
+  };
   litellmSettings: { dropParams: boolean };
   generalSettings: { masterKeyEnv: string };
 }
@@ -514,6 +525,16 @@ export interface ProxyProviderUpstream {
   apiKeyEnv: string;
   litellmProvider: string;
   maxConcurrentRequests: number;
+  /** Per-session sticky-slot afterburn window in seconds (0 = disabled). When
+   *  a session's LLM call finishes, the concurrency slot it held stays reserved
+   *  for THAT session for this many seconds before being released to queued
+   *  sessions — a follow-up from the same session (e.g. a sub-agent right after
+   *  a short tool call) reuses its reserved slot, so a bursty session keeps its
+   *  turn instead of interleaving with waiting sessions. Per-slot, so it
+   *  generalises to maxConcurrentRequests > 1. Optional: absent/0 = disabled.
+   *  The proxy reads this from settings.json directly (see proxy/.env.example
+   *  PIE_PROXY_AFTERBURN_S for the global env default). */
+  afterburnSeconds?: number;
   litellmModelInfoId: string;
   modelListOrder: string[];
   alias: Record<string, string>;
@@ -612,7 +633,15 @@ export type ProxySettingsUpdate = {
 
 export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
   gateway: {
-    routerSettings: { numRetries: 2, retryAfter: true, timeout: 600 },
+    routerSettings: {
+      numRetries: 2,
+      retryAfter: true,
+      timeout: 600,
+      // Stop LiteLLM retrying upstream 429 / account-suspended responses.
+      // Retrying a paused account deepens the pause; the proxy-level
+      // circuit-breaker short-circuits subsequent requests instead.
+      retryPolicy: { RateLimitErrorRetries: 0 },
+    },
     litellmSettings: { dropParams: true },
     // Pie-managed local proxy gate (auto-generated + persisted, see
     // proxy-master-key.ts). NOT a provider key — decoupled so any number of
@@ -656,7 +685,7 @@ export function mergeProxySettings(
       if (!base) {
         // New provider entry: keep only valid fields, fall back to defaults
         // for any missing required field so ArchState stays well-typed.
-        providers[name] = {
+        const entry: ProxyProviderUpstream = {
           apiBase: partial.apiBase ?? '',
           apiKeyEnv: partial.apiKeyEnv ?? '',
           litellmProvider: partial.litellmProvider ?? '',
@@ -665,9 +694,16 @@ export function mergeProxySettings(
           modelListOrder: partial.modelListOrder ? [...partial.modelListOrder] : [],
           alias: partial.alias ? { ...partial.alias } : {},
         };
+        // afterburnSeconds is optional — only surface the key when the update
+        // actually carries it, so a present-undefined key never diverges from
+        // an absent one under deepStrictEqual (matches coerceProvider).
+        if (partial.afterburnSeconds !== undefined) {
+          entry.afterburnSeconds = partial.afterburnSeconds;
+        }
+        providers[name] = entry;
         continue;
       }
-      providers[name] = {
+      const merged: ProxyProviderUpstream = {
         apiBase: partial.apiBase !== undefined ? partial.apiBase : base.apiBase,
         apiKeyEnv: partial.apiKeyEnv !== undefined ? partial.apiKeyEnv : base.apiKeyEnv,
         litellmProvider: partial.litellmProvider !== undefined ? partial.litellmProvider : base.litellmProvider,
@@ -676,6 +712,9 @@ export function mergeProxySettings(
         modelListOrder: partial.modelListOrder !== undefined ? [...partial.modelListOrder] : base.modelListOrder,
         alias: partial.alias !== undefined ? { ...partial.alias } : base.alias,
       };
+      const afterburn = partial.afterburnSeconds !== undefined ? partial.afterburnSeconds : base.afterburnSeconds;
+      if (afterburn !== undefined) merged.afterburnSeconds = afterburn;
+      providers[name] = merged;
     }
   }
 

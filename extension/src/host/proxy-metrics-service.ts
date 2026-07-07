@@ -9,6 +9,10 @@ export interface ProxyProviderMetrics {
   activeRequests: number;
   queuedRequests: number;
   maxConcurrentRequests: number;
+  /** Per-provider afterburn window in seconds (0 = disabled). Emitted by the
+   *  proxy metrics route for observability; the status strip does not depend on
+   *  it. Optional for backward compatibility with proxies that don't emit it. */
+  afterburnSeconds?: number;
 }
 
 export interface ProxyMetricsServiceDeps {

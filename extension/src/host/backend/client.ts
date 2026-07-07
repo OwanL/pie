@@ -8,7 +8,7 @@ import { RequestTracker, type RequestOptions } from '../../shared/request-tracke
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
-import { appendPieLog } from '../util/pie-log';
+import { appendPieLog, type PieLogLevel } from '../util/pie-log';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import {
   assertProtocolVersion,
@@ -402,11 +402,28 @@ export class BackendClient implements vscode.Disposable {
       return;
     }
 
-    appendPieLog(
-      /\b(error|failed|exception|unexpectedly)\b/i.test(trimmed) ? 'warn' : 'info',
-      'backend-stderr',
-      trimmed,
-    );
+    // Classify backend stderr so the `pie (backend)` channel stays quiet at
+    // the default Info level. Genuine errors surface at `warn`; the poll / RPC
+    // / tool-execution chatter that floods the stream (warm_bash.stats polls
+    // every ~2s, backend-request received/handled, backend-timing, tool
+    // execution start/end) is demoted to `debug` so it's hidden at default but
+    // visible when the channel is widened to Debug. Unknown lines stay `info`.
+    let level: PieLogLevel;
+    if (/\b(error|failed|exception|unexpectedly)\b/i.test(trimmed)) {
+      level = 'warn';
+    } else if (
+      trimmed.includes('warm_bash.stats')
+      || trimmed.includes('backend-request')
+      || trimmed.includes('backend-timing')
+      || trimmed.includes('tool_execution_start')
+      || trimmed.includes('tool_execution_end')
+    ) {
+      level = 'debug';
+    } else {
+      level = 'info';
+    }
+
+    appendPieLog(level, 'backend-stderr', trimmed);
   }
 
   dispose(): void {

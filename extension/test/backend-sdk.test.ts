@@ -34,7 +34,35 @@ test('loadSdk rejects disallowed paths before attempting to import', async () =>
   );
 });
 
-test('applySdkRetryHotPatch extends old retry classifier for Responses terminal-event cuts', async () => {
+test('applySdkRetryHotPatch extends the current pi-ai retry.js array shape for terminal-event cuts + proxy stalls', async () => {
+  // Current SDK shape: the retryable pattern is a string array in
+  // pi-ai/dist/utils/retry.js (joined into a RegExp). The needle is the
+  // quoted array entry with trailing comma so it does not match the comment
+  // line that also mentions `stream ended before message_stop`.
+  await withSdkDir({
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const RETRYABLE = [
+        "ended without",
+        "stream ended before message_stop",
+        "http2 request did not get a response",
+      ];
+      // Comment mentioning "stream ended before message_stop" without a trailing comma — must NOT be matched.
+      export function isRetryableAssistantError(message) { return RETRYABLE.some(p => new RegExp(p, "i").test(message.errorMessage)); }
+    `,
+  }, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    const patched = await fs.readFile(path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js'), 'utf8');
+
+    assert.equal(result, 'patched');
+    // New array entries appended after the matched one.
+    assert.match(patched, /"stream ended before message_stop", "stream ended before a terminal response event", "upstream stream stalled", "upstream header phase stalled",/);
+    // The comment line must be untouched (no trailing-comma needle injected there).
+    assert.match(patched, /Comment mentioning "stream ended before message_stop" without/);
+  });
+});
+
+test('applySdkRetryHotPatch extends the legacy inline agent-session.js classifier shape', async () => {
+  // Legacy SDK shape: an inline regex in dist/core/agent-session.js.
   await withSdkDir({
     'dist/core/agent-session.js': `
       return /ended without|stream ended before message_stop|timeout/i.test(err);
@@ -44,18 +72,70 @@ test('applySdkRetryHotPatch extends old retry classifier for Responses terminal-
     const patched = await fs.readFile(path.join(sdkDir, 'dist', 'core', 'agent-session.js'), 'utf8');
 
     assert.equal(result, 'patched');
-    assert.match(patched, /stream ended before message_stop\|stream ended before a terminal response event/);
+    assert.match(patched, /stream ended before message_stop\|stream ended before a terminal response event\|upstream stream stalled\|upstream header phase stalled/);
+  });
+});
+
+test('applySdkRetryHotPatch prefers the current pi-ai shape when both files exist', async () => {
+  // Both shapes present (e.g. a transitional install): the current pi-ai
+  // retry.js array shape is patched, the legacy agent-session.js untouched.
+  await withSdkDir({
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const R = ["ended without", "stream ended before message_stop", "timeout"];
+    `,
+    'dist/core/agent-session.js': `
+      return /stream ended before message_stop|timeout/i.test(err);
+    `,
+  }, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    assert.equal(result, 'patched');
+    const retryJs = await fs.readFile(path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js'), 'utf8');
+    const agentSession = await fs.readFile(path.join(sdkDir, 'dist', 'core', 'agent-session.js'), 'utf8');
+    assert.match(retryJs, /stream ended before a terminal response event/);
+    // Legacy file was NOT touched (no marker injected there).
+    assert.doesNotMatch(agentSession, /stream ended before a terminal response event/);
   });
 });
 
 test('applySdkRetryHotPatch is a no-op when upstream already supports terminal-event cuts', async () => {
   await withSdkDir({
-    'dist/core/agent-session.js': `
-      return /stream ended before message_stop|stream ended before a terminal response event/i.test(err);
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const R = ["stream ended before message_stop", "stream ended before a terminal response event", "timeout"];
     `,
   }, async (sdkDir) => {
     const result = await applySdkRetryHotPatch(sdkDir);
     assert.equal(result, 'already-present');
+  });
+});
+
+test('applySdkRetryHotPatch falls back to legacy shape when the pi-ai file is absent', async () => {
+  // An older global npm install may only have the inline classifier.
+  await withSdkDir({
+    'dist/core/agent-session.js': `
+      return /stream ended before message_stop|timeout/i.test(err);
+    `,
+  }, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    assert.equal(result, 'patched');
+  });
+});
+
+test('applySdkRetryHotPatch reports missing-target when no candidate file exists', async () => {
+  await withSdkDir({}, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    assert.equal(result, 'missing-target');
+  });
+});
+
+test('applySdkRetryHotPatch reports unsupported-shape when a candidate file exists but the needle is gone', async () => {
+  // The classifier was restructured again (needle absent in both shapes).
+  await withSdkDir({
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const R = ["totally different pattern"];
+    `,
+  }, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    assert.equal(result, 'unsupported-shape');
   });
 });
 

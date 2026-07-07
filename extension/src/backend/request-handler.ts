@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, type ErrorPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { toErrorMessage } from '../shared/error-message';
+import { enrichConnectionError } from '../shared/error-message';
 import {
   validateLoadTranscriptPage,
   validateMessageSend,
@@ -405,7 +406,10 @@ function reportPromptFailure(
 ): void {
   deps.emit('error', {
     code: 'MESSAGE_SEND_FAILED',
-    message: error.message,
+    // Enrich connection-level errors (bare "Connection error.") with the real
+    // transport cause + a proxy-health pointer; clean 429/5xx with a body pass
+    // through unchanged so the upstream reason (e.g. account_suspended) shows.
+    message: enrichConnectionError(error),
     requestId,
   } satisfies ErrorPayload);
   clearActiveRequest(context, requestId);
@@ -554,7 +558,7 @@ async function handleMessageSend(
           return;
         }
         preflightFailed = true;
-        emitPreflightFailed(deps, context, requestId, error.message || 'Prompt failed before streaming started.');
+        emitPreflightFailed(deps, context, requestId, enrichConnectionError(error) || 'Prompt failed before streaming started.');
       })
       .finally(() => {
         // Defensive clear: the commit-point clear in `session-event-handler.ts`

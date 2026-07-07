@@ -1,6 +1,5 @@
 import * as fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import * as path from 'node:path';
 
 import {
   DEFAULT_PROXY_SETTINGS,
@@ -42,6 +41,20 @@ function asStringRecord(value: unknown): Record<string, string> | undefined {
   return out;
 }
 
+/** Coerce a stored `retryPolicy` (LiteLLM per-exception retry overrides) into
+ *  a valid `Record<string, number>` of non-negative integers, or undefined if
+ *  the stored value is absent/invalid. Keys are LiteLLM's PascalCase field
+ *  names (e.g. `RateLimitErrorRetries`) — preserved verbatim. */
+function coerceRetryPolicy(value: unknown): Record<string, number> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || !Number.isInteger(v)) return undefined;
+    out[k] = v;
+  }
+  return out;
+}
+
 /** Coerce an unknown stored provider entry into a valid `ProxyProviderUpstream`, */
 function coerceProvider(name: string, raw: unknown): ProxyProviderUpstream | null {
   if (!isPlainObject(raw)) return null;
@@ -56,7 +69,19 @@ function coerceProvider(name: string, raw: unknown): ProxyProviderUpstream | nul
   const modelListOrder = asStringArray(raw.modelListOrder) ?? [];
   const alias = asStringRecord(raw.alias) ?? {};
   void name;
-  return { apiBase, apiKeyEnv, litellmProvider, maxConcurrentRequests, litellmModelInfoId, modelListOrder, alias };
+  const out: ProxyProviderUpstream = { apiBase, apiKeyEnv, litellmProvider, maxConcurrentRequests, litellmModelInfoId, modelListOrder, alias };
+  // afterburnSeconds is optional (absent/0 = disabled). Only surface it when the
+  // stored value is a finite non-negative number, so providers that never set it
+  // don't get a spurious `afterburnSeconds: 0` written back to settings.json and
+  // so existing deepEqual assertions on the 7 base fields stay green.
+  if (
+    typeof raw.afterburnSeconds === 'number' &&
+    Number.isFinite(raw.afterburnSeconds) &&
+    raw.afterburnSeconds >= 0
+  ) {
+    out.afterburnSeconds = raw.afterburnSeconds;
+  }
+  return out;
 }
 
 /**
@@ -85,6 +110,7 @@ export async function readProxySettings(): Promise<ProxySettings> {
                 numRetries: typeof gatewayRaw.routerSettings.numRetries === 'number' ? gatewayRaw.routerSettings.numRetries : DEFAULT_PROXY_SETTINGS.gateway.routerSettings.numRetries,
                 retryAfter: typeof gatewayRaw.routerSettings.retryAfter === 'boolean' ? gatewayRaw.routerSettings.retryAfter : DEFAULT_PROXY_SETTINGS.gateway.routerSettings.retryAfter,
                 timeout: typeof gatewayRaw.routerSettings.timeout === 'number' ? gatewayRaw.routerSettings.timeout : DEFAULT_PROXY_SETTINGS.gateway.routerSettings.timeout,
+                retryPolicy: coerceRetryPolicy(gatewayRaw.routerSettings.retryPolicy) ?? DEFAULT_PROXY_SETTINGS.gateway.routerSettings.retryPolicy,
               }
             : DEFAULT_PROXY_SETTINGS.gateway.routerSettings,
           litellmSettings: isPlainObject(gatewayRaw.litellmSettings)
@@ -129,7 +155,10 @@ function isValidProvider(p: ProxyProviderUpstream): boolean {
     typeof p.maxConcurrentRequests === 'number' && p.maxConcurrentRequests >= 1 &&
     typeof p.litellmModelInfoId === 'string' && p.litellmModelInfoId.length > 0 &&
     Array.isArray(p.modelListOrder) &&
-    isPlainObject(p.alias)
+    isPlainObject(p.alias) &&
+    // afterburnSeconds is optional; when present it must be a finite non-negative number.
+    (p.afterburnSeconds === undefined ||
+      (typeof p.afterburnSeconds === 'number' && Number.isFinite(p.afterburnSeconds) && p.afterburnSeconds >= 0))
   );
 }
 

@@ -24,6 +24,7 @@ export interface SdkSessionEvent {
     role?: 'user' | 'assistant' | 'custom';
     content?: unknown;
     stopReason?: string;
+    errorMessage?: string;
     usage?: {
       input?: number;
       output?: number;
@@ -246,9 +247,65 @@ function assertAllowedSdkPath(sdkPath: string): void {
   }
 }
 
-const RETRY_HOT_PATCH_FILE = path.join('dist', 'core', 'agent-session.js');
-const RETRY_HOT_PATCH_NEEDLE = 'stream ended before message_stop';
-const RETRY_HOT_PATCH_INSERT = 'stream ended before a terminal response event';
+// The SDK's transient-error retry classifier has moved between versions:
+//  - Legacy: an inline regex in `dist/core/agent-session.js`
+//    (`/...|stream ended before message_stop|.../i.test(err)`).
+//  - Current: a pattern array in
+//    `node_modules/@earendil-works/pi-ai/dist/utils/retry.js`
+//    (`"stream ended before message_stop",`), joined into a RegExp by
+//    `buildProviderErrorPattern`. The host prefers the local extension
+//    `node_modules` SDK (runtime-resolution priority 3), which ships this
+//    current shape — so the hot-patch MUST handle the array shape, not just
+//    the legacy inline one, or it silently no-ops (`unsupported-shape`) and
+//    stream cuts/stalls are never retried.
+//
+// The patterns added cover two saturation-induced failure modes that pi-ai
+// surfaces as `stopReason=error` but the upstream classifier does NOT match:
+//  - `stream ended before a terminal response event`: pi-ai throws this when
+//    an OpenAI Responses SSE stream ends without `response.completed`/
+//    `response.incomplete`/`response.failed`. This is EXACTLY what the proxy's
+//    stream-liveness middleware produces when it terminates a stalled upstream
+//    (it emits `data: {"error":...}` + `[DONE]`, which the Responses parser
+//    does not recognise as a terminal event) — and what an upstream truncation
+//    produces. Without this pattern, a stalled/truncated stream is a silent
+//    interruption (never retried) instead of a retried turn.
+//  - `upstream stream stalled` / `upstream header phase stalled`: the proxy's
+//    own terminal error texts, should they ever surface in an errorMessage.
+//    Belt-and-suspenders — the 504 header-phase path already matches `504`.
+const RETRY_HOT_PATCH_INSERTS = [
+  'stream ended before a terminal response event',
+  'upstream stream stalled',
+  'upstream header phase stalled',
+] as const;
+// Idempotency marker: the primary insert. If present, the file is already patched.
+const RETRY_HOT_PATCH_MARKER = RETRY_HOT_PATCH_INSERTS[0];
+
+type RetryHotPatchShape = 'array' | 'inline';
+interface RetryHotPatchCandidate {
+  /** Path segments relative to the SDK root. */
+  rel: readonly string[];
+  /** Literal substring unique to this file's shape. The replacement appends the
+   *  missing patterns in the shape-appropriate syntax at this location. */
+  needle: string;
+  shape: RetryHotPatchShape;
+}
+// Current shape first (the host-preferred local SDK ships it), then the legacy
+// inline shape so a global npm install that still has the inline classifier is
+// also covered.
+const RETRY_HOT_PATCH_CANDIDATES: readonly RetryHotPatchCandidate[] = [
+  {
+    // Quoted array entry WITH trailing comma so it does NOT match the comment
+    // line above that also mentions `stream ended before message_stop`.
+    rel: ['node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js'],
+    needle: '"stream ended before message_stop",',
+    shape: 'array',
+  },
+  {
+    rel: ['dist', 'core', 'agent-session.js'],
+    needle: 'stream ended before message_stop',
+    shape: 'inline',
+  },
+];
 
 function logRetryHotPatchResult(sdkPath: string, result: SdkRetryHotPatchResult): void {
   console.warn(`[pie:backend] ${JSON.stringify({
@@ -267,27 +324,48 @@ export type SdkRetryHotPatchResult =
   | 'missing-target'
   | 'unsupported-shape';
 
+/** Build the replacement text for `needle` in the given shape, appending the
+ *  missing retryable patterns in the shape-appropriate syntax.
+ *  - `array`: `"stream ended before message_stop", "pat1", "pat2", ...,`
+ *    (new array entries after the matched one).
+ *  - `inline`: `stream ended before message_stop|pat1|pat2|...` (new regex
+ *    alternatives after the matched alternative). */
+function buildRetryHotPatchReplacement(needle: string, shape: RetryHotPatchShape): string {
+  if (shape === 'array') {
+    return `${needle} ${RETRY_HOT_PATCH_INSERTS.map((p) => `"${p}"`).join(', ')},`;
+  }
+  return `${needle}|${RETRY_HOT_PATCH_INSERTS.join('|')}`;
+}
+
 export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHotPatchResult> {
   assertAllowedSdkPath(sdkPath);
 
-  const filePath = path.join(sdkPath, RETRY_HOT_PATCH_FILE);
-  let source: string;
-  try {
-    source = await fs.readFile(filePath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing-target';
-    throw error;
+  let foundAnyFile = false;
+  for (const candidate of RETRY_HOT_PATCH_CANDIDATES) {
+    const filePath = path.join(sdkPath, ...candidate.rel);
+    let source: string;
+    try {
+      source = await fs.readFile(filePath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    foundAnyFile = true;
+
+    // Idempotent: the primary insert is already present in this file.
+    if (source.includes(RETRY_HOT_PATCH_MARKER)) return 'already-present';
+
+    if (!source.includes(candidate.needle)) continue; // wrong shape — try next candidate
+
+    await fs.writeFile(
+      filePath,
+      source.replace(candidate.needle, buildRetryHotPatchReplacement(candidate.needle, candidate.shape)),
+      'utf8',
+    );
+    return 'patched';
   }
 
-  if (source.includes(RETRY_HOT_PATCH_INSERT)) return 'already-present';
-  if (!source.includes(RETRY_HOT_PATCH_NEEDLE)) return 'unsupported-shape';
-
-  await fs.writeFile(
-    filePath,
-    source.replace(RETRY_HOT_PATCH_NEEDLE, `${RETRY_HOT_PATCH_NEEDLE}|${RETRY_HOT_PATCH_INSERT}`),
-    'utf8',
-  );
-  return 'patched';
+  return foundAnyFile ? 'unsupported-shape' : 'missing-target';
 }
 
 export async function loadSdk(sdkPath: string): Promise<SdkModule> {

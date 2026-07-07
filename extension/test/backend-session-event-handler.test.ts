@@ -495,6 +495,50 @@ test('auto_retry_end emits retry.ended with success/finalError', () => {
   }]);
 });
 
+test('message_end enriches generic stream-end error with the latest upstream retry error', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-stream-err',
+      messageIndex: 1,
+      currentMessageId: 'req-stream-err:1',
+      aborted: false,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'auto_retry_start',
+    attempt: 2,
+    maxAttempts: 3,
+    delayMs: 500,
+    errorMessage: '429 Too Many Requests: account_suspended (cap_abuse)',
+  });
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'Stream ended without finish_reason',
+    },
+  } as SdkSessionEvent);
+
+  const finished = emitted.find((entry) => entry.event === 'message.finished')?.payload as {
+    message: { status: string; errorDetail?: string };
+  };
+
+  assert.equal(finished.message.status, 'error');
+  assert.ok(
+    finished.message.errorDetail?.includes('Stream ended without finish_reason'),
+    'keeps the original stream-end symptom',
+  );
+  assert.ok(
+    finished.message.errorDetail?.includes('429 Too Many Requests: account_suspended (cap_abuse)'),
+    'surfaces upstream retry/provider root cause',
+  );
+});
+
 test('agent_end reports unexpected interruptions when the run ends without any assistant message', () => {
   const { deps, emitted } = createDeps();
   const context = createContext({
