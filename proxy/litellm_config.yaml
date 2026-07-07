@@ -31,7 +31,7 @@ model_list:
       model: openai/umans-coder
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-coder
@@ -39,7 +39,7 @@ model_list:
       model: openai/umans-coder
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-flash
@@ -47,7 +47,7 @@ model_list:
       model: openai/umans-flash
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-kimi-k2.7
@@ -55,7 +55,7 @@ model_list:
       model: openai/umans-kimi-k2.7
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-kimi-k2.6
@@ -63,7 +63,7 @@ model_list:
       model: openai/umans-kimi-k2.6
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-glm-5.2
@@ -71,7 +71,7 @@ model_list:
       model: openai/umans-glm-5.2
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-glm-5.1
@@ -79,7 +79,7 @@ model_list:
       model: openai/umans-glm-5.1
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
   - model_name: umans-qwen3.6-35b-a3b
@@ -87,14 +87,16 @@ model_list:
       model: openai/umans-qwen3.6-35b-a3b
       api_base: https://api.code.umans.ai/v1
       api_key: os.environ/UMANS_API_KEY
-      max_parallel_requests: 3
+      max_parallel_requests: 2
     model_info:
       id: umans-shared
 router_settings:
   num_retries: 2
-  retry_after: true
+  retry_after: True
   timeout: 600
+  retry_policy:
+    RateLimitErrorRetries: 0
 litellm_settings:
-  drop_params: true
+  drop_params: True
 general_settings:
   master_key: os.environ/PIE_PROXY_MASTER_KEY

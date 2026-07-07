@@ -81,6 +81,38 @@ pi --provider umans --model umans-glm-5.2 "hello"
   account-wide, not per-model). See `litellm_config.yaml` for details.
 - To add a future API-key provider: add an `upstream` block to that provider in [`models.yaml`](../models.yaml) (api key from env, real base URL, `maxConcurrentRequests`), then run `npm run sync-models` — it regenerates both the `model_list` entry here and the matching `baseUrl` block in `models.json` from that one source.
 
+## Afterburn (per-session sticky concurrency slots)
+
+A provider can rate-limit a bursty session (especially a nested sub-agent fan-out)
+*even when the proxy respects the concurrency cap* — the session keeps grabbing
+and releasing the one slot, so a waiting session's calls interleave with the
+burst and the account sees a dense request rate. Afterburn makes each
+concurrency slot **sticky to the session that last used it**: when a session's
+LLM call finishes, the slot it held stays reserved for THAT session for
+`afterburn` seconds. A follow-up from the same session (a sub-agent right after
+a short tool call) reuses its reserved slot immediately — no re-acquire, no
+interleaving. If the holder stays idle past the window, queued sessions take
+over (``A gets queued, B turns active``). It is per-slot, so it generalises to
+`maxConcurrentRequests > 1`.
+
+This is a proxy middleware (not a LiteLLM semaphore hook — LiteLLM releases the
+permit at stream *start*, which would arm the hold at the wrong moment); it
+arms a slot's hold only when the response actually completes. Session identity
+comes from the `x-session-affinity` header pi sends (the umans provider in
+`models.yaml` sets `compat.sendSessionAffinityHeaders: true`). When afterburn is
+disabled (the default) the middleware is a zero-cost pass-through.
+
+**Enable** (either, per-provider overrides the global env default):
+
+- `PIE_PROXY_AFTERBURN_S=15` (env, seconds; see [`.env.example`](.env.example)) —
+  global default for every provider.
+- `proxy.providers.<name>.afterburnSeconds` in `settings.json` (non-negative
+  number) — per-provider override. `0` disables for that provider.
+
+`0` / unset = disabled (sticky slots off, existing behaviour). The acquire wait
+is bounded by `afterburn + PIE_PROXY_QUEUE_WAIT_S`; on exceed the proxy returns
+a retryable 503 + `Retry-After` (same shape as the queue-wait-bound 503).
+
 ## The master key
 
 `master_key` in `litellm_config.yaml` is a **localhost-only gate** — it stops arbitrary
