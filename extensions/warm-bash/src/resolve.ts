@@ -22,6 +22,11 @@ export function resolveBinary(program: string): string | null {
 }
 
 function resolveUncached(program: string): string | null {
+  // An empty or whitespace-only program name is meaningless and must not be
+  // resolved. Without this guard, scanning PATH with program="" returns the
+  // first directory itself, because join(dir, "" + "") === dir and
+  // existsSync(dir) is true on every PATH entry.
+  if (program.trim() === "") return null;
   // Absolute or relative path: use as-is if it exists.
   if (program.includes("/") || (process.platform === "win32" && program.includes("\\"))) {
     return existsSync(program) ? program : null;
