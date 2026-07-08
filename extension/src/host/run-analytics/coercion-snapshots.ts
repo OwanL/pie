@@ -1,6 +1,6 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
 import { RUN_ANALYTICS_SCHEMA_VERSION } from './types';
-import type { OutcomeHistoryLogEntry, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
+import type { AgentReviewEntry, OutcomeHistoryLogEntry, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
 import { coerceFunctionalSettings } from './coercion-functional-settings';
 import {
@@ -254,6 +254,47 @@ export function coerceOutcomeHistoryLogEntry(value: unknown): OutcomeHistoryLogE
     runId: value.runId,
     taskGroupId: value.taskGroupId,
     outcome: value.outcome,
+  };
+}
+
+export function coerceAgentReviewEntry(value: unknown): AgentReviewEntry | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+  if (
+    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION
+    || value.kind !== 'agent_review'
+    || typeof value.recordedAt !== 'string'
+    || typeof value.sessionPath !== 'string'
+    || typeof value.runId !== 'string'
+    || typeof value.taskGroupId !== 'string'
+    || typeof value.done !== 'boolean'
+    || typeof value.rating !== 'number'
+    || !Number.isFinite(value.rating)
+    || (value.completion !== 'fully' && value.completion !== 'partial' && value.completion !== 'setback')
+    || typeof value.reason !== 'string'
+    || typeof value.evaluatedAt !== 'string'
+    || !Array.isArray(value.reviewerBuckets)
+    || !value.reviewerBuckets.every((v) => typeof v === 'string')
+    || typeof value.reviewerCount !== 'number'
+    || !Number.isFinite(value.reviewerCount)
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+    kind: 'agent_review',
+    recordedAt: value.recordedAt,
+    sessionPath: value.sessionPath,
+    runId: value.runId,
+    taskGroupId: value.taskGroupId,
+    done: value.done,
+    rating: value.rating,
+    completion: value.completion,
+    reason: value.reason,
+    evaluatedAt: value.evaluatedAt,
+    reviewerBuckets: value.reviewerBuckets as string[],
+    reviewerCount: Math.trunc(value.reviewerCount),
   };
 }
 

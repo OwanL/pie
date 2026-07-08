@@ -35,6 +35,15 @@ interface RunAnalyticsStorageOptions {
   now: () => Date;
   serializeSessions: () => Record<string, PersistedSessionRunState>;
   onPersistError?: (error: { message: string; at: string }) => void;
+  /** Max lines retained per JSONL history file (`run-snapshots` /
+   *  `outcome-history` / `agent-reviews`). When a file exceeds
+   *  {@link pruneByteThreshold} it is trimmed to the most recent N lines.
+   *  `<= 0` disables pruning (unbounded growth). */
+  maxRunHistoryEntries?: number;
+  /** File size (bytes) at which a JSONL history file is read and considered for
+   *  trimming to {@link maxRunHistoryEntries}. Gates the read+rewrite cost so
+   *  steady-state persists stay a single `stat`. */
+  pruneByteThreshold?: number;
 }
 
 export class RunAnalyticsStorage {
@@ -44,6 +53,8 @@ export class RunAnalyticsStorage {
   private readonly now: () => Date;
   private readonly serializeSessions: () => Record<string, PersistedSessionRunState>;
   private readonly onPersistError?: (error: { message: string; at: string }) => void;
+  private readonly maxRunHistoryEntries: number;
+  private readonly pruneByteThreshold: number;
 
   private persistenceQueue: Promise<void> = Promise.resolve();
   private seq = 0;
@@ -98,11 +109,14 @@ export class RunAnalyticsStorage {
     this.now = options.now;
     this.serializeSessions = options.serializeSessions;
     this.onPersistError = options.onPersistError;
+    this.maxRunHistoryEntries = options.maxRunHistoryEntries ?? 2000;
+    this.pruneByteThreshold = options.pruneByteThreshold ?? 5_000_000;
   }
 
   async start(): Promise<RunCheckpoint | null> {
     await this.migrateLegacyStorage();
     await fs.mkdir(this.storageDir, { recursive: true });
+    await this.sweepStaleTempFiles();
     const checkpoint = await this.readCheckpoint();
     this.seq = checkpoint?.seq ?? 0;
     await this.writeAutoExportSafely();
@@ -238,6 +252,7 @@ export class RunAnalyticsStorage {
       const checkpoint = this.buildCheckpoint(++this.seq);
       await this.writeCheckpoint(checkpoint);
     }
+    await this.pruneHistoryIfNeeded();
     await this.writeAutoExportSafely();
   }
 
@@ -543,6 +558,96 @@ export class RunAnalyticsStorage {
       key: `line:${normalizedLine}`,
       recency: '',
     };
+  }
+
+  private async sweepStaleTempFiles(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(this.storageDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
+    // Match the atomic-write temp naming convention `.<name>.<pid>-<ts>-<rand>.tmp`
+    // used by exportRunAnalyticsStore / mergeJsonlLogFiles / pruneJsonlFile, so
+    // an unrelated dot-tmp file (if one ever appeared in this pie-managed dir)
+    // is never swept. These are normally renamed into place or unlinked on
+    // caught errors, but a hard kill can leave them behind.
+    const staleTemp = /^\..+\.\d+-\d+-[a-z0-9]+\.tmp$/;
+    await Promise.all(
+      entries
+        .filter((name) => staleTemp.test(name))
+        .map(async (name) => {
+          try {
+            await fs.unlink(path.join(this.storageDir, name));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+              appendPieLog('warn', 'run-analytics', 'failed to remove stale temp file', {
+                file: name,
+                error: toErrorMessage(error),
+              });
+            }
+          }
+        }),
+    );
+  }
+
+  /** Bound on-disk growth of the append-only JSONL history files. When a file
+   *  exceeds {@link pruneByteThreshold} it is read and, if it holds more than
+   *  {@link maxRunHistoryEntries} lines, rewritten to keep only the most recent
+   *  N (atomic temp+rename). Pruning is rare (gated on byte size) so the steady
+   *  per-persist cost stays a single `stat`; a failed prune is non-fatal (the
+   *  file stays oversized and the next persist retries). */
+  private async pruneHistoryIfNeeded(): Promise<void> {
+    if (this.maxRunHistoryEntries <= 0) {
+      return;
+    }
+    await Promise.all(
+      ['run-snapshots.jsonl', 'outcome-history.jsonl', 'agent-reviews.jsonl'].map(
+        (fileName) => this.pruneJsonlFile(fileName, this.maxRunHistoryEntries),
+      ),
+    );
+  }
+
+  private async pruneJsonlFile(fileName: string, maxEntries: number): Promise<void> {
+    const filePath = path.join(this.storageDir, fileName);
+    let size: number;
+    try {
+      size = (await fs.stat(filePath)).size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return;
+      }
+      throw error;
+    }
+    if (size < this.pruneByteThreshold) {
+      return;
+    }
+    const raw = await readOptionalText(filePath);
+    if (!raw) {
+      return;
+    }
+    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    if (lines.length <= maxEntries) {
+      return;
+    }
+    const kept = lines.slice(lines.length - maxEntries);
+    const tmpPath = path.join(
+      this.storageDir,
+      `.${fileName}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`,
+    );
+    try {
+      await fs.writeFile(tmpPath, `${kept.join('\n')}\n`, 'utf8');
+      await fs.rename(tmpPath, filePath);
+    } catch (error) {
+      await fs.unlink(tmpPath).catch(() => undefined);
+      appendPieLog('warn', 'run-analytics', 'failed to prune history file', {
+        file: fileName,
+        error: toErrorMessage(error),
+      });
+    }
   }
 
   private async writeAutoExport(): Promise<void> {

@@ -71,7 +71,9 @@ function createHarness() {
       experimentAssignment = value;
     },
     setAnalyticsFactors(sessionPath: string, factors: SessionAnalyticsFactors) {
-      dispatchArchEvent({ kind: 'AnalyticsFactorsChanged', sessionPath, factors });
+      archState = produce(archState, (draft) => {
+        draft.sessions.analyticsFactorsBySession[sessionPath] = factors;
+      });
     },
     mutateSettings(mutator: (settings: SettingsState) => void) {
       archState = produce(archState, (draft) => mutator(draft.settings));
@@ -307,7 +309,6 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   harness.tracker.onBackendError(undefined, 'MISSING_SESSION');
   harness.tracker.onContextUsageChanged(harness.sessionPath, 10, 100);
   harness.tracker.onBusyChanged(harness.sessionPath, false);
-  harness.tracker.onSessionAnalyticsFactorsChanged(harness.sessionPath, sampleFactors);
   assert.equal(harness.persistCalls.length, 0, 'no current run means no persistence side effects');
 
   harness.setAnalyticsFactors(harness.sessionPath, sampleFactors);
@@ -319,12 +320,6 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   harness.tracker.onTruncatedAfter(harness.sessionPath);
   harness.tracker.onModelConfigChanged(harness.sessionPath, 'claude-test', 'medium');
   harness.tracker.onModelConfigChanged(harness.sessionPath, 'model-b', 'high');
-  harness.tracker.onSessionAnalyticsFactorsChanged(harness.sessionPath, sampleFactors);
-  harness.tracker.onSessionAnalyticsFactorsChanged(harness.sessionPath, {
-    ...sampleFactors,
-    toolSetHash: 'tool-set-hash-2',
-    activeExtensions: ['subagent', 'skill-pruner'],
-  });
 
   const currentRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
   assert.equal(currentRun?.runId, runId);
@@ -335,7 +330,7 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   assert.equal(currentRun?.messageEditCount, 1);
   assert.equal(currentRun?.truncatedAfterCount, 1);
   assert.equal(currentRun?.mixedModelConfig, true);
-  assert.deepEqual(currentRun?.treatmentChangeKinds, ['model', 'thinking', 'toolSelection', 'extensions']);
+  assert.deepEqual(currentRun?.treatmentChangeKinds, ['model', 'thinking']);
 });
 
 test('onSessionClosed and finalizeOpenRunsForShutdown close active runs and clear summaries', () => {

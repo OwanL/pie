@@ -3,8 +3,10 @@ import * as path from 'node:path';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
+  coerceAgentReviewEntry,
   coerceOutcomeHistoryLogEntry,
   coerceRunSnapshot,
+  type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
   type RunCheckpoint,
   type RunSnapshot,
@@ -17,6 +19,11 @@ export interface RunAnalyticsQueryResult {
   completedRuns: RunSnapshot[];
   openRuns: RunSnapshot[];
   outcomes: OutcomeHistoryLogEntry[];
+  /** Agent-authored session reviews (one per scored review), persisted to
+   *  `agent-reviews.jsonl`. Joined to runs by `runId` / `sessionPath` on the
+   *  read side. Empty when no reviews have been recorded (or for stores
+   *  predating the field — the file is simply absent). */
+  agentReviews: AgentReviewEntry[];
 }
 
 export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult {
@@ -81,9 +88,10 @@ async function readCheckpoint(storageDir: string): Promise<RunCheckpoint | null>
 }
 
 export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAnalyticsQueryResult> {
-  const [snapshotLines, outcomeLines, checkpoint] = await Promise.all([
+  const [snapshotLines, outcomeLines, reviewLines, checkpoint] = await Promise.all([
     readJsonlObjects(path.join(storageDir, 'run-snapshots.jsonl')),
     readJsonlObjects(path.join(storageDir, 'outcome-history.jsonl')),
+    readJsonlObjects(path.join(storageDir, 'agent-reviews.jsonl')),
     readCheckpoint(storageDir),
   ]);
 
@@ -121,6 +129,14 @@ export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAna
     }
   }
 
+  const agentReviews: AgentReviewEntry[] = [];
+  for (const line of reviewLines) {
+    const entry = coerceAgentReviewEntry(line);
+    if (entry) {
+      agentReviews.push(entry);
+    }
+  }
+
   const openRuns = Object.values(checkpoint?.sessions ?? {})
     .map((sessionState) => sessionState.currentRun)
     .filter((run): run is RunSnapshot => run !== null);
@@ -129,6 +145,7 @@ export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAna
     completedRuns: [...latestCompletedRuns.values()],
     openRuns,
     outcomes,
+    agentReviews,
   };
 }
 

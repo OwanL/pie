@@ -175,41 +175,6 @@
   font-size: inherit;
 }
 
-.aggregate-strip-proxy {
-  color: var(--panel-warning);
-  font-variant-numeric: tabular-nums;
-}
-
-.aggregate-strip-proxy-label {
-  color: color-mix(in srgb, var(--panel-warning) 82%, var(--panel-muted));
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 9px;
-}
-
-.aggregate-strip-proxy-value {
-  color: color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-warning));
-  font-weight: 600;
-}
-
-/* Idle (no active/queued requests on any provider): drop the warning tone so
-   the always-present status reads as "no load" rather than an alert. Keeps the
-   segment from flickering in/out between turns while signaling nothing is
-   running. */
-.aggregate-strip-proxy--idle {
-  color: var(--panel-muted);
-}
-
-.aggregate-strip-proxy--idle .aggregate-strip-proxy-label {
-  color: color-mix(in srgb, var(--panel-muted) 85%, var(--panel-foreground));
-}
-
-.aggregate-strip-proxy--idle .aggregate-strip-proxy-value {
-  color: var(--panel-muted);
-  font-weight: 500;
-}
-
 .aggregate-strip-sep {
   color: color-mix(in srgb, var(--panel-muted) 50%, transparent);
   flex-shrink: 0;

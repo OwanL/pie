@@ -249,14 +249,81 @@ test('exportRunAnalyticsStore writes a supported JSON export payload', async () 
       completedRuns: Array<{ runId: string }>;
       openRuns: unknown[];
       outcomes: Array<{ runId: string }>;
+      agentReviews: Array<{ runId: string }>;
     };
 
     assert.equal(payload.completedRuns.length, 1);
     assert.equal(payload.openRuns.length, 0);
+    assert.equal(payload.agentReviews.length, 0);
     assert.equal(written.schemaVersion, 1);
     assert.equal(written.exportedAt, '2026-01-01T00:00:00.000Z');
     assert.equal(written.completedRuns[0]?.runId, 'id-1');
     assert.equal(written.outcomes[0]?.runId, 'id-1');
+    assert.equal(written.agentReviews.length, 0);
+
+    await stats.shutdown();
+  });
+});
+
+test('agent reviews are surfaced in query and export payloads', async () => {
+  await withTempDir(async (tempDir) => {
+    let archState: ArchState = createInitialArchState();
+    const sessionPath = '/workspace/session-reviews.jsonl';
+    let idCounter = 0;
+
+    archState = produce(archState, draft => {
+      draft.sessions.sessions.push({
+        path: sessionPath,
+        name: 'Review Session',
+        cwd: '/workspace',
+        modifiedAt: new Date().toISOString(),
+        messageCount: 0,
+        modelId: 'claude',
+      });
+      draft.settings.modelSettings = {
+        defaultModel: 'claude',
+        defaultThinkingLevel: 'medium',
+      };
+      draft.sessions.analyticsFactorsBySession[sessionPath] = ANALYTICS_FACTORS;
+    });
+
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      legacyUsageDataRootPath: tempDir,
+      workspaceId: 'workspace-reviews',
+      getArchState: () => archState,
+      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
+      createId: () => `id-${++idCounter}`,
+      getExperimentAssignment: () => null,
+    });
+
+    await stats.start();
+    stats.prepareForSend(sessionPath, []);
+    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
+    stats.recordAgentReview(sessionPath, {
+      done: true,
+      rating: 5,
+      completion: 'fully',
+      reason: 'all green',
+      evaluatedAt: '2026-07-08T12:00:00.000Z',
+      reviewerBuckets: ['medium', 'small'],
+      reviewerCount: 2,
+    });
+    await stats.flush();
+
+    const storageDir = await getRunStorageDir(tempDir);
+    const result = await queryRunAnalyticsStore(storageDir);
+    assert.equal(result.completedRuns.length, 1);
+    assert.equal(result.agentReviews.length, 1);
+    assert.equal(result.agentReviews[0]?.runId, 'id-1');
+    assert.equal(result.agentReviews[0]?.rating, 5);
+    assert.equal(result.agentReviews[0]?.completion, 'fully');
+    assert.deepEqual(result.agentReviews[0]?.reviewerBuckets, ['medium', 'small']);
+
+    const targetPath = path.join(tempDir, 'analytics-export-reviews.json');
+    const payload = await exportRunAnalyticsStore(storageDir, targetPath, () => new Date('2026-07-08T00:00:00.000Z'));
+    assert.equal(payload.agentReviews.length, 1);
+    assert.equal(payload.agentReviews[0]?.runId, 'id-1');
 
     await stats.shutdown();
   });

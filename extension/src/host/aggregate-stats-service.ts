@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 import { loadModelPricing } from '../backend/pricing';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
-import { EMPTY_AGGREGATE_STATS, type AggregateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
+import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import type { StatsService } from './stats-service';
@@ -52,6 +52,11 @@ export interface AggregateStatsServiceDeps {
    *  via the `warm_bash.stats` RPC). Resolves to {@link EMPTY_WARM_BASH_STATS}
    *  on any failure so the strip hides the segment rather than freezing. */
   fetchWarmBashStats: () => Promise<WarmBashStats>;
+  /** Poll live provider-gate concurrency metrics from the backend
+   *  (in-memory `ProviderGate` read via the `provider_gate.metrics` RPC).
+   *  Resolves to {@link EMPTY_PROVIDER_GATE_STATS} on any failure so the
+   *  strip hides the segment rather than freezing. */
+  fetchProviderGateStats: () => Promise<ProviderGateStats>;
   /** Called when the posted aggregate changed, so the host can schedule a
    *  debounced snapshot post to the webview. */
   onChanged: () => void;
@@ -155,6 +160,18 @@ export class AggregateStatsService {
       });
     }
 
+    // Live provider-gate metrics from the backend (in-memory ProviderGate
+    // singleton read via RPC). Cheap; polled every tick so active/queued
+    // counts + pause state stay current. Failures retain the cached value.
+    let providerGate = this.cached.providerGate;
+    try {
+      providerGate = await this.deps.fetchProviderGateStats();
+    } catch (error) {
+      appendPieLog('warn', 'aggregate-stats', 'provider_gate.metrics poll failed; retaining cached', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     let next: AggregateStats;
     if (dataUnchanged) {
       // Only refresh the live/current fields cheaply from in-memory state.
@@ -164,6 +181,7 @@ export class AggregateStatsService {
         runningSessionCount: runningSessionPaths.length,
         openTabCount,
         warmBash,
+        providerGate,
       };
     } else {
       const pricingMap = this.loadPricingCached();
@@ -176,6 +194,7 @@ export class AggregateStatsService {
       }
       next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession, openTabCount);
       next.warmBash = warmBash;
+      next.providerGate = providerGate;
       this.lastDataSignature = signature;
     }
 
@@ -325,8 +344,29 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
     || a.warmBash.totalWarm !== b.warmBash.totalWarm
     || a.warmBash.totalFallback !== b.warmBash.totalFallback
     || a.warmBash.totalWarmupFailures !== b.warmBash.totalWarmupFailures
+    // Provider-gate live metrics (active/queued flaps + pause state changes
+    // are perceptible changes worth a post).
+    || a.providerGate.enabled !== b.providerGate.enabled
+    || a.providerGate.providers.length !== b.providerGate.providers.length
   ) {
     return false;
+  }
+  // Provider-gate per-provider metrics (active/queued/max + afterburn + pause).
+  for (let i = 0; i < a.providerGate.providers.length; i += 1) {
+    const x = a.providerGate.providers[i]!;
+    const y = b.providerGate.providers[i]!;
+    if (
+      x.provider !== y.provider
+      || x.activeRequests !== y.activeRequests
+      || x.queuedRequests !== y.queuedRequests
+      || x.maxConcurrentRequests !== y.maxConcurrentRequests
+      || x.afterburnSeconds !== y.afterburnSeconds
+      || x.paused !== y.paused
+      || x.pausedUntilMs !== y.pausedUntilMs
+      || x.strikeCount !== y.strikeCount
+    ) {
+      return false;
+    }
   }
   // Per-provider cost lists (today + all-time) by length + first entries.
   if (a.costByProvider.length !== b.costByProvider.length) return false;

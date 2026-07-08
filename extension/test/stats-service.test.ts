@@ -1002,22 +1002,6 @@ test('StatsService tracks busy durations and mixed treatment changes', async () 
     currentMs = 4200;
     stats.onBusyChanged(sessionPath, false);
 
-    stats.onSessionAnalyticsFactorsChanged(sessionPath, {
-      promptFamily: 'harness+customPrompt',
-      promptHash: 'prompt-b',
-        promptCapturedAt: '2025-06-16T10:30:00.000Z',
-      harnessPromptHash: 'harness-a',
-      customPromptHash: 'custom-b',
-      appendSystemPromptHash: null,
-      promptGuidelineHashes: [],
-      contextFiles: [],
-      selectedToolIds: ['bash'],
-      toolSnippetHashes: [],
-      toolSetHash: 'tools-a',
-      skills: [],
-      skillSetHash: null,
-      activeExtensions: [],
-    });
     stats.onExperimentAssignmentChanged('exp-b');
     stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
@@ -1036,7 +1020,7 @@ test('StatsService tracks busy durations and mixed treatment changes', async () 
     assert.equal(snapshotEntries[0].run.busyDurationMs, 2700);
     assert.equal(snapshotEntries[0].run.busyPeriodCount, 2);
     assert.equal(snapshotEntries[0].run.mixedTreatmentConfig, true);
-    assert.deepEqual(snapshotEntries[0].run.treatmentChangeKinds, ['prompt', 'experimentAssignment']);
+    assert.deepEqual(snapshotEntries[0].run.treatmentChangeKinds, ['experimentAssignment']);
   });
 });
 

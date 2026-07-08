@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 
-import type { AggregateStats, AggregateLastRun, DeferredTriggerView, ProxyProviderMetrics, WarmBashStats } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun, DeferredTriggerView, WarmBashStats } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 import { Tooltip } from '../components/tooltip';
@@ -26,7 +26,6 @@ import { Tooltip } from '../components/tooltip';
 
 interface AggregateStatsStripProps {
   stats: AggregateStats;
-  proxyMetrics?: ProxyProviderMetrics[];
   /** Currently-active deferred triggers (all sessions). When non-empty, the
    *  strip shows a clickable waiting-trigger segment that opens the cancel
    *  popup. */
@@ -35,39 +34,7 @@ interface AggregateStatsStripProps {
   onOpenDeferredMenu: (x: number, y: number) => void;
 }
 
-export interface ProxyStripProviderSummary {
-  provider: string;
-  activeRequests: number;
-  queuedRequests: number;
-  maxConcurrentRequests: number;
-  maxedOut: boolean;
-}
-
-export function summarizeProxyStrip(proxyMetrics?: ProxyProviderMetrics[]): ProxyStripProviderSummary[] {
-  if (!proxyMetrics || proxyMetrics.length === 0) return [];
-  return [...proxyMetrics]
-    .map((metric) => ({
-      provider: metric.provider,
-      activeRequests: metric.activeRequests,
-      queuedRequests: metric.queuedRequests,
-      maxConcurrentRequests: metric.maxConcurrentRequests,
-      maxedOut: metric.activeRequests >= metric.maxConcurrentRequests,
-    }))
-    .sort((left, right) => {
-      if (right.queuedRequests !== left.queuedRequests) return right.queuedRequests - left.queuedRequests;
-      if (right.activeRequests !== left.activeRequests) return right.activeRequests - left.activeRequests;
-      return left.provider.localeCompare(right.provider);
-    });
-}
-
-export function formatProxyStripSummary(summaries: readonly ProxyStripProviderSummary[]): string | null {
-  if (summaries.length === 0) return null;
-  return summaries
-    .map((summary) => `${summary.provider} ${summary.activeRequests}/${summary.maxConcurrentRequests}${summary.queuedRequests > 0 ? ` +${summary.queuedRequests}q` : summary.maxedOut ? '!' : ''}`)
-    .join(', ');
-}
-
-function AggregateStatsStripView({ stats, proxyMetrics, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
+function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }: AggregateStatsStripProps) {
   const {
     ready,
     todayCost,
@@ -85,10 +52,6 @@ function AggregateStatsStripView({ stats, proxyMetrics, deferredTriggers, onOpen
   // Throughput headline: live when running, else today's mean, else all-time
   // mean (label-agnostic inline; the tooltip distinguishes the source).
   const running = runningSessionCount > 0;
-  const proxySummaries = summarizeProxyStrip(proxyMetrics);
-  const proxyHeadline = formatProxyStripSummary(proxySummaries);
-  const proxyIdle = proxySummaries.length > 0
-    && proxySummaries.every((summary) => summary.activeRequests === 0 && summary.queuedRequests === 0);
   const headlineRate = running
     ? liveTokensPerSecond
     : (todayTokensPerSecond > 0 ? todayTokensPerSecond : tokensPerSecond);
@@ -155,17 +118,6 @@ function AggregateStatsStripView({ stats, proxyMetrics, deferredTriggers, onOpen
           </Tooltip>
         </>
       )}
-      {proxyHeadline && (
-        <>
-          <Sep />
-          <Tooltip content={proxyTooltip(proxySummaries)} placement="top" freezeWhileVisible>
-            <span class={cx('aggregate-strip-seg', 'aggregate-strip-proxy', proxyIdle && 'aggregate-strip-proxy--idle')}>
-              <span class="aggregate-strip-proxy-label">proxy</span>
-              <span class="aggregate-strip-proxy-value">{proxyHeadline}</span>
-            </span>
-          </Tooltip>
-        </>
-      )}
       {deferredTriggers.length > 0 && (
         <>
           <Sep />
@@ -217,8 +169,7 @@ function arePropsEqual(
   next: AggregateStatsStripProps,
 ): boolean {
   return (prev.stats === next.stats || statsSignature(prev.stats) === statsSignature(next.stats))
-    && deferredSignature(prev.deferredTriggers) === deferredSignature(next.deferredTriggers)
-    && proxyMetricsSignature(prev.proxyMetrics) === proxyMetricsSignature(next.proxyMetrics);
+    && deferredSignature(prev.deferredTriggers) === deferredSignature(next.deferredTriggers);
 }
 
 /** Compact membership signature of the active deferred-trigger set, so the
@@ -226,13 +177,6 @@ function arePropsEqual(
  *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
 function deferredSignature(t: DeferredTriggerView[]): string {
   return t.map((x) => `${x.id}:${x.sessionPath}`).sort().join(',');
-}
-
-function proxyMetricsSignature(proxyMetrics?: ProxyProviderMetrics[]): string {
-  if (!proxyMetrics) return '';
-  return proxyMetrics
-    .map((metric) => `${metric.provider}:${metric.modelInfoId}:${metric.activeRequests}:${metric.queuedRequests}:${metric.maxConcurrentRequests}`)
-    .join('|');
 }
 
 function statsSignature(s: AggregateStats): string {
@@ -404,16 +348,6 @@ function warmBashTooltip(w: WarmBashStats): string {
   }
   lines.push('');
   lines.push('Tune in Settings → Bash (pool size, fast path, timeouts).');
-  return lines.join('\n');
-}
-
-function proxyTooltip(summaries: readonly ProxyStripProviderSummary[]): string {
-  const lines: string[] = ['Proxy concurrency:', ''];
-  for (const summary of summaries) {
-    lines.push(`  ${pad(summary.provider, 14)}${summary.activeRequests}/${summary.maxConcurrentRequests}${summary.queuedRequests > 0 ? `  ·  ${summary.queuedRequests} queued` : summary.maxedOut ? '  ·  maxed' : ''}`);
-  }
-  lines.push('');
-  lines.push('Queued sessions are parked waiting for a provider slot.');
   return lines.join('\n');
 }
 

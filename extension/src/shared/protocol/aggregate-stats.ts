@@ -99,6 +99,8 @@ export interface AggregateLastRun {
 export interface WarmBashStats {
   /** Warm bash is active for at least one session (pool size > 0, not disposed). */
   enabled: boolean;
+  /** Count of sessions with warm bash active (each enabled session contributes 1). */
+  activeSessions: number;
   /** Configured warm pool size (sum across active sessions). */
   poolSize: number;
   /** Idle warm workers ready to serve a command immediately. */
@@ -121,6 +123,7 @@ export interface WarmBashStats {
  *  first host poll lands and as the registry-empty fallback. Stable reference. */
 export const EMPTY_WARM_BASH_STATS: WarmBashStats = {
   enabled: false,
+  activeSessions: 0,
   poolSize: 0,
   ready: 0,
   warming: 0,
@@ -129,6 +132,37 @@ export const EMPTY_WARM_BASH_STATS: WarmBashStats = {
   totalWarm: 0,
   totalFallback: 0,
   totalWarmupFailures: 0,
+};
+
+/** Live per-provider concurrency-gate metrics, reported by the backend's
+ *  host-side `ProviderGate` (wraps `globalThis.fetch`) via the
+ *  `provider_gate.metrics` RPC. `enabled` is false (and `providers` empty) when
+ *  the gate is not installed (no provider has a concurrency config) — the
+ *  status strip hides the segment in that case. Mirrors the warm-bash pattern. */
+export interface ProviderGateStats {
+  /** The provider gate is installed (≥1 provider has a concurrency config). */
+  enabled: boolean;
+  /** Per-provider live metrics (active/queued/max + afterburn + pause state). */
+  providers: ProviderGateProviderMetrics[];
+}
+
+/** Per-provider metrics within a {@link ProviderGateStats} snapshot. */
+export interface ProviderGateProviderMetrics {
+  provider: string;
+  activeRequests: number;
+  queuedRequests: number;
+  maxConcurrentRequests: number;
+  afterburnSeconds: number;
+  paused: boolean;
+  pausedUntilMs: number;
+  strikeCount: number;
+}
+
+/** Empty provider-gate stats (disabled, empty providers) — pre-poll default and
+ *  not-installed fallback. Stable reference. */
+export const EMPTY_PROVIDER_GATE_STATS: ProviderGateStats = {
+  enabled: false,
+  providers: [],
 };
 
 /**
@@ -180,6 +214,10 @@ export interface AggregateStats {
   /** Live warm-bash pool metrics (ready/warming counts + execution breakdown),
    *  polled from the backend. See {@link WarmBashStats}. */
   warmBash: WarmBashStats;
+  /** Live provider-gate concurrency metrics (active/queued + pause state),
+   *  polled from the backend's host-side `ProviderGate`. See
+   *  {@link ProviderGateStats}. */
+  providerGate: ProviderGateStats;
 
   // ── All-time (tooltip context only) ──
   /** Total cost across all runs (sum of {@link costByProvider}). */
@@ -226,6 +264,7 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   runningSessionCount: 0,
   openTabCount: 0,
   warmBash: EMPTY_WARM_BASH_STATS,
+  providerGate: EMPTY_PROVIDER_GATE_STATS,
   totalCost: 0,
   costByProvider: [],
   tokensPerSecond: 0,

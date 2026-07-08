@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import { computeAggregateStats, providerForModel, pricingForModel } from '../src/host/stats-service/aggregate-stats';
 import { sumLiveRate } from '../src/host/aggregate-stats-service';
-import { formatProxyStripSummary, summarizeProxyStrip } from '../src/webview/panel/aggregate-stats-strip';
 import type { RunSnapshot } from '../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../shared/pricing-core';
 import type { TokenRateIndicatorState } from '../src/shared/token-rate';
@@ -283,35 +282,6 @@ test('computeAggregateStats: resuming after a tool call restores the session\'s 
   };
   const generatingStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], generatingRates, 1);
   assert.equal(generatingStats.liveTokensPerSecond, 200);
-});
-
-test('summarizeProxyStrip formats exact proxy provider metrics', () => {
-  const summary = summarizeProxyStrip([
-    { provider: 'umans', modelInfoId: 'umans-shared', activeRequests: 3, queuedRequests: 2, maxConcurrentRequests: 3 },
-    { provider: 'openrouter', modelInfoId: 'openrouter-shared', activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 2 },
-  ]);
-  assert.deepEqual(summary, [
-    { provider: 'umans', activeRequests: 3, queuedRequests: 2, maxConcurrentRequests: 3, maxedOut: true },
-    { provider: 'openrouter', activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 2, maxedOut: false },
-  ]);
-  assert.equal(formatProxyStripSummary(summary), 'umans 3/3 +2q, openrouter 1/2');
-});
-
-test('summarizeProxyStrip keeps idle providers so the strip stays present between turns', () => {
-  // Idle providers (0 active, 0 queued) must be retained — not dropped — so
-  // the proxy status strip does not flicker appear/disappear as models
-  // complete turns. The headline renders an idle `0/N` per provider.
-  const summary = summarizeProxyStrip([
-    { provider: 'openrouter', modelInfoId: 'openrouter-shared', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 4 },
-  ]);
-  assert.deepEqual(summary, [
-    { provider: 'openrouter', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 4, maxedOut: false },
-  ]);
-  assert.equal(formatProxyStripSummary(summary), 'openrouter 0/4');
-});
-
-test('formatProxyStripSummary returns null only when there are no providers at all', () => {
-  assert.equal(formatProxyStripSummary([]), null);
 });
 
 test('sumLiveRate: a paused entry (held rate) contributes 0 (widened predicate)', () => {

@@ -11,7 +11,6 @@ import type {
   AssistantUsage,
   ComposerInput,
   RunOutcome,
-  SessionAnalyticsFactors,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -492,22 +491,6 @@ export class SessionRunTracker {
     }
 
     run.mixedModelConfig = true;
-    this.runState.markTreatmentChanges(run, changedKinds);
-    run.updatedAt = this.runState.isoNow();
-    this.runState.persist();
-  }
-
-  onSessionAnalyticsFactorsChanged(sessionPath: string, factors: SessionAnalyticsFactors | null): void {
-    const run = this.runState.sessions.get(sessionPath)?.currentRun;
-    if (!run || !run.analyticsFactors || !factors) {
-      return;
-    }
-
-    const changedKinds = this.runState.diffAnalyticsFactors(run.analyticsFactors, factors);
-    if (changedKinds.length === 0) {
-      return;
-    }
-
     this.runState.markTreatmentChanges(run, changedKinds);
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();

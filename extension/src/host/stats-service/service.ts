@@ -6,7 +6,6 @@ import type {
   AssistantUsage,
   ComposerInput,
   RunOutcome,
-  SessionAnalyticsFactors,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -142,10 +141,6 @@ export class StatsService implements RunObserver {
     thinkingLevel: ThinkingLevel | undefined,
   ): void {
     this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel);
-  }
-
-  onSessionAnalyticsFactorsChanged(sessionPath: string, factors: SessionAnalyticsFactors | null): void {
-    this.tracker.onSessionAnalyticsFactorsChanged(sessionPath, factors);
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {

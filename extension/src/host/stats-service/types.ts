@@ -1,7 +1,6 @@
 import type {
   AssistantUsage,
   ComposerInput,
-  SessionAnalyticsFactors,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -47,7 +46,6 @@ export interface RunObserver {
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void;
   onBusyChanged(sessionPath: string, busy: boolean): void;
   onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined): void;
-  onSessionAnalyticsFactorsChanged(sessionPath: string, factors: SessionAnalyticsFactors | null): void;
   onUnsupportedInputAttempt(sessionPath: string): void;
   onSessionClosed(sessionPath: string): void;
   replaceSessionPath(oldPath: string, newPath: string): void;
@@ -78,7 +76,6 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onContextUsageChanged: () => undefined,
   onBusyChanged: () => undefined,
   onModelConfigChanged: () => undefined,
-  onSessionAnalyticsFactorsChanged: () => undefined,
   onUnsupportedInputAttempt: () => undefined,
   onSessionClosed: () => undefined,
   replaceSessionPath: () => undefined,
