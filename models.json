@@ -732,12 +732,17 @@
       ]
     },
     "umans": {
-      "baseUrl": "http://localhost:4000/v1",
+      "baseUrl": "https://api.code.umans.ai/v1",
       "api": "openai-completions",
-      "apiKey": "$PIE_PROXY_MASTER_KEY",
+      "apiKey": "$UMANS_API_KEY",
       "compat": {
         "supportsReasoningEffort": true,
         "sendSessionAffinityHeaders": true
+      },
+      "concurrency": {
+        "maxConcurrentRequests": 2,
+        "afterburnSeconds": 15,
+        "queueWaitSeconds": 30
       },
       "models": [
         {

@@ -17,14 +17,9 @@
 #                           defaultModel/Provider/ThinkingLevel when absent;
 #                           retry + pruning.{model,provider,thinkingLevel} are
 #                           re-derived on every sync)
-#   proxy.* (settings.json)-> proxy/litellm_config.yaml (proxy SSoT = settings.json)
-#
-# Proxy settings (the LiteLLM gateway + per-provider upstream routing) live in
-# settings.json `proxy` — that is the user-editable source of truth, surfaced in
-# the pie UI. sync-models reads it from settings.json and injects it into
-# proxy/litellm_config.yaml. models.yaml only owns the model CATALOG.
-#
-# profileOrder lists the order of entries in generated model-profiles.yaml.
+#   concurrency:{...}      -> models.json providers.<p>.concurrency (host-side
+#                           provider gate reads this at runtime to enforce
+#                           per-provider concurrency + afterburn sticky slots)
 
 defaults:
   model: glm-5.2:cloud
@@ -1077,16 +1072,22 @@ providers:
         disabledReason: null
         costRank: 10
   umans:
-    baseUrl: http://localhost:4000/v1
+    baseUrl: https://api.code.umans.ai/v1
     api: openai-completions
-    apiKey: $PIE_PROXY_MASTER_KEY
+    apiKey: $UMANS_API_KEY
+    # Host-side provider-gate concurrency config (replaces the LiteLLM proxy's
+    # per-provider semaphore + AfterburnPool). The provider gate reads this from
+    # models.json at backend startup and wraps globalThis.fetch accordingly.
+    concurrency:
+      maxConcurrentRequests: 2
+      afterburnSeconds: 15
+      queueWaitSeconds: 30
     compat:
       supportsReasoningEffort: true
       # Send `x-session-affinity` (from the session id) on every umans request so
-      # the pie proxy can implement afterburn (per-session sticky concurrency
-      # slots). pi-ai sends `session_id`, `x-client-request-id`, and
-      # `x-session-affinity` whenever this is true (the proxy reads
-      # `x-session-affinity`). No-op when the proxy's afterburn is disabled.
+      # the host-side provider gate can implement afterburn (per-session sticky
+      # concurrency slots). pi-ai sends `session_id`, `x-client-request-id`, and
+      # `x-session-affinity` whenever this is true.
       sendSessionAffinityHeaders: true
     models:
       - id: umans-coder

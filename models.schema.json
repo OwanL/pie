@@ -81,6 +81,16 @@
         "apiKey": { "type": "string" },
         "compat": { "type": "object" },
         "headers": { "type": "object" },
+        "concurrency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxConcurrentRequests"],
+          "properties": {
+            "maxConcurrentRequests": { "type": "integer", "minimum": 1 },
+            "afterburnSeconds": { "type": "number", "minimum": 0 },
+            "queueWaitSeconds": { "type": "number", "minimum": 0 }
+          }
+        },
         "models": {
           "type": "array",
           "items": { "$ref": "#/definitions/model" }
