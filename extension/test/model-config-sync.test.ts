@@ -24,16 +24,12 @@ interface SyncModule {
   generate: (source: unknown, existingSettings: unknown) => {
     modelsJson: unknown;
     modelProfilesYaml: string;
-    litellmConfigYaml: string;
     settingsJson: unknown;
   };
-  generateLitellmConfigYaml: (source: unknown, proxy: unknown) => string;
-  validateProxyConfig: (proxy: unknown, source: unknown, opts?: { toleratePending?: boolean }) => void;
   loadSource: (root?: string) => unknown;
   loadAndGenerate: (root?: string) => {
     modelsJson: unknown;
     modelProfilesYaml: string;
-    litellmConfigYaml: string;
     settingsJson: unknown;
   };
 }
@@ -74,19 +70,11 @@ test('generated model-profiles.yaml matches the committed file', async () => {
   assert.deepStrictEqual(generated, committed, 'model-profiles.yaml drift');
 });
 
-test('generated proxy/litellm_config.yaml matches the committed file', async () => {
-  const mod = await loadSyncModule();
-  const out = await mod.loadAndGenerate(repoRoot);
-  const committed = parseCommitted(path.join('proxy', 'litellm_config.yaml'));
-  const generated = YAML.parse(out.litellmConfigYaml);
-  assert.deepStrictEqual(generated, committed, 'litellm_config.yaml drift');
-});
-
 test('generated settings.json matches the committed settings.json (merge preserves non-model fields)', async () => {
   const mod = await loadSyncModule();
   const out = await mod.loadAndGenerate(repoRoot);
   const committed = parseCommitted('settings.json');
-  // Full deep-equal: proves the merge overwrote exactly the 7 model keys and
+  // Full deep-equal: proves the merge overwrote exactly the model keys and
   // left everything else (httpIdleTimeoutMs, packages, lastChangelogVersion,
   // subagent, sessionDir, pruning.tools) untouched.
   assert.deepStrictEqual(out.settingsJson, committed, 'settings.json drift');
@@ -105,9 +93,6 @@ test('settings.json merge preserves the user model choice and overwrites only re
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);
   // Synthesize a settings base with extra fields that must survive the merge.
-  // The `proxy` block is the user-editable proxy SSoT (read from settings.json
-  // by generate()); it must be preserved untouched by the model-key merge.
-  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
   const base = {
     defaultModel: 'OLD',
     defaultProvider: 'OLD',
@@ -121,7 +106,6 @@ test('settings.json merge preserves the user model choice and overwrites only re
       thinkingLevel: 'OLD',
       tools: { alwaysKeep: ['read', 'bash'] },
     },
-    proxy: committedSettings.proxy,
     lastChangelogVersion: '9.9.9',
     subagent: { confirmProjectAgents: true },
     sessionDir: 'data/outcomes/sessions',
@@ -145,8 +129,8 @@ test('settings.json merge preserves the user model choice and overwrites only re
   assert.deepEqual(merged.subagent, { confirmProjectAgents: true });
   assert.equal(merged.sessionDir, 'data/outcomes/sessions');
   assert.deepEqual(pruning.tools, { alwaysKeep: ['read', 'bash'] });
-  // The user-editable proxy block must be preserved verbatim by the merge.
-  assert.deepEqual(merged.proxy, committedSettings.proxy);
+  // The legacy `proxy` block (if present in an old settings.json) is stripped.
+  assert.equal(merged.proxy, undefined);
 });
 
 test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.yaml only when absent', async () => {
@@ -157,65 +141,9 @@ test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.
   const base = {
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0, provider: { maxRetries: 0, maxRetryDelayMs: 0 } },
     pruning: { model: 'x', provider: 'x', thinkingLevel: 'low' },
-    proxy: (parseCommitted('settings.json') as Record<string, unknown>).proxy,
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
   assert.equal(merged.defaultModel, (source as { defaults: { model: string } }).defaults.model);
   assert.equal(merged.defaultProvider, (source as { defaults: { provider: string } }).defaults.provider);
   assert.equal(merged.defaultThinkingLevel, (source as { defaults: { thinkingLevel: string } }).defaults.thinkingLevel);
-});
-
-test('validateProxyConfig throws on a provider in proxy.providers but absent from models.yaml (strict default)', async () => {
-  const mod = await loadSyncModule();
-  const source = mod.loadSource(repoRoot) as { providers: Record<string, unknown> };
-  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
-  const proxy = JSON.parse(JSON.stringify(committedSettings.proxy)) as {
-    gateway: unknown;
-    providers: Record<string, unknown>;
-  };
-  // Inject a pending provider that has no models.yaml catalog entry.
-  proxy.providers['pending-only'] = {
-    apiBase: 'https://api.example.com/v1',
-    apiKeyEnv: 'PENDING_ONLY_API_KEY',
-    litellmProvider: 'openai',
-    maxConcurrentRequests: 2,
-    litellmModelInfoId: 'pending-only-shared',
-    modelListOrder: [],
-    alias: {},
-  };
-  assert.throws(() => mod.validateProxyConfig(proxy, source), /unknown provider 'pending-only'/);
-});
-
-test('generate() tolerates a pending provider (in proxy.providers, absent from models.yaml) and emits no routes for it', async () => {
-  const mod = await loadSyncModule();
-  const source = mod.loadSource(repoRoot) as { providers: Record<string, unknown> };
-  const committedSettings = parseCommitted('settings.json') as Record<string, unknown>;
-  const base = JSON.parse(JSON.stringify(committedSettings)) as Record<string, unknown>;
-  const proxy = JSON.parse(JSON.stringify(base.proxy)) as {
-    gateway: unknown;
-    providers: Record<string, unknown>;
-  };
-  proxy.providers['pending-only'] = {
-    apiBase: 'https://api.example.com/v1',
-    apiKeyEnv: 'PENDING_ONLY_API_KEY',
-    litellmProvider: 'openai',
-    maxConcurrentRequests: 2,
-    litellmModelInfoId: 'pending-only-shared',
-    modelListOrder: [],
-    alias: {},
-  };
-  base.proxy = proxy;
-  // generate() must NOT throw on the pending provider.
-  const out = mod.generate(source, base);
-  // The litellm config has a model_list entry per route. The pending provider
-  // contributes zero routes, so no entry should reference pending-only.
-  const generated = YAML.parse(out.litellmConfigYaml) as {
-    model_list: Array<{ model_name: string; litellm_params: { model: string } }>;
-  };
-  const pendingRoutes = generated.model_list.filter((m) => m.litellm_params.model.includes('pending-only'));
-  assert.equal(pendingRoutes.length, 0, 'pending provider must contribute no litellm routes');
-  // The strict validator still rejects it (toleratePending is opt-in).
-  assert.throws(() => mod.validateProxyConfig(proxy, source), /unknown provider 'pending-only'/);
-  // ...but tolerates it when opted in.
-  assert.doesNotThrow(() => mod.validateProxyConfig(proxy, source, { toleratePending: true }));
 });

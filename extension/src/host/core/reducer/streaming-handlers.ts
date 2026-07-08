@@ -125,6 +125,15 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
 }
 
 export function handleMessageDelta(state: ArchState, event: Extract<Event, { kind: 'MessageDelta' }>): ReducerResult {
+  // Defense-in-depth: while a user-initiated Stop's abort is in flight
+  // (`interruptInFlightBySession`), drop late deltas as a pure no-op. The
+  // optimistic `interrupted` mark on streaming messages (handleInterrupt)
+  // already gates appending via `status !== 'interrupted'`; this catches the
+  // race where a stray `MessageStarted` created a fresh `streaming` message
+  // after the optimistic mark so its content does not grow during the window.
+  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
+    return { state, effects: [] };
+  }
   const messageId = resolveAlias(state, event.messageId);
   const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
   const nextState = produce(state, (draft) => {
@@ -147,6 +156,11 @@ export function handleMessageDelta(state: ArchState, event: Extract<Event, { kin
 }
 
 export function handleMessageThinking(state: ArchState, event: Extract<Event, { kind: 'MessageThinking' }>): ReducerResult {
+  // Defense-in-depth: mirror handleMessageDelta's in-flight-abort gate so
+  // late thinking deltas are dropped while a Stop's abort is settling.
+  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
+    return { state, effects: [] };
+  }
   const messageId = resolveAlias(state, event.messageId);
   const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
   const nextState = produce(state, (draft) => {
@@ -295,11 +309,11 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
   }
 }
 
-/** Steering (FollowUp): the agent loop injected a queued follow-up user
- *  message into a turn. Promote the EARLIEST optimistic 'queued' user message
- *  to 'completed' (FIFO — the SDK drains the follow-up queue one message at a
- *  time in enqueue order, so the first remaining 'queued' message is the one
- *  now running). Drop its `pending.promoted` rollback snapshot (by localId) —
+/** Steering: the agent loop injected a queued steering user message into the
+ *  current turn. Promote the EARLIEST optimistic 'queued' user message to
+ *  'completed' (FIFO — the SDK drains the queue one message at a time in
+ *  enqueue order, so the first remaining 'queued' message is the one now
+ *  running). Drop its `pending.promoted` rollback snapshot (by localId) —
  *  the message has committed to a turn, so a later failure is an in-turn
  *  error, never a rollback. The subsequent assistant `MessageStarted` appends
  *  the reply under the in-progress request's id via the existing path. */

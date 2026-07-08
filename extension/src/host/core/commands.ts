@@ -59,9 +59,16 @@ export interface EditCommand extends CommandBase {
   kind: 'Edit';
   sessionPath: string;
   messageId: string;
+  /** Raw user text (sent to backend). */
   text: string;
+  /** Materialized composer inputs to send with the edited message. */
+  inputs: ComposerInput[];
+  /** Composed text (text + input annotations) for the optimistic transcript entry. */
+  composedText: string;
   /** Pre-generated local ID for the optimistic replacement message. */
   localId: string;
+  /** User content parts for rich rendering of the optimistic replacement message. */
+  userParts?: UserContentPart[];
   /** Explicit timestamp for deterministic optimistic message ordering. */
   timestamp: number;
 }
@@ -244,22 +251,6 @@ export interface SetToolResultPruningSettingsCommand extends CommandBase {
   settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
 }
 
-export interface SetProxySettingsCommand extends CommandBase {
-  kind: 'SetProxySettings';
-  settings: import('../../shared/protocol').ProxySettingsUpdate;
-}
-
-/** Add a new proxied provider from the proxy settings "Add Provider" form. The
- *  reducer validates + applies optimistically (merging a fresh
- *  `proxy.providers.<name>` entry into proxySettings); the service persists the
- *  key to `proxy/.env`, writes the `proxy.providers.<name>` entry to
- *  settings.json, runs sync-models, and restarts the proxy. The model catalog
- *  (`models.yaml`) is added separately via the add-provider skill. */
-export interface AddProxyProviderCommand extends CommandBase {
-  kind: 'AddProxyProvider';
-  input: import('../../shared/protocol').ProxyProviderAddInput;
-}
-
 export interface SetFileChangesExpandedCommand extends CommandBase {
   kind: 'SetFileChangesExpanded';
   sessionPath: string;
@@ -326,8 +317,6 @@ export type Command =
   | OpenFileCommand
   | SetPruningSettingsCommand
   | SetToolResultPruningSettingsCommand
-  | SetProxySettingsCommand
-  | AddProxyProviderCommand
   | DuplicateSessionCommand
   | MoveSessionTabCommand
   | TogglePinTabCommand

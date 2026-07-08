@@ -318,14 +318,15 @@ export interface PreflightFailedPayload {
   error: string;
 }
 
-/** Steering (FollowUp) delivery signal. Emitted by the backend when the agent
- *  loop injects a queued follow-up user message into a turn (the SDK emits
- *  `message_start` with `role: 'user'` for each injected queued message). The
- *  host uses this to promote its optimistic 'queued' transcript message to
+/** Steering delivery signal. Emitted by the backend when the agent loop
+ *  injects a queued steering user message into the current turn (the SDK emits
+ *  `message_start` with `role: 'user'` for each injected queued message —
+ *  delivered after the in-flight tool calls finish, before the next LLM call).
+ *  The host uses this to promote its optimistic 'queued' transcript message to
  *  'completed'. Carries the user-visible text for observability; the host
  *  promotes the EARLIEST 'queued' message (FIFO order — the SDK drains the
- *  follow-up queue one message at a time in enqueue order), so text is not
- *  used for matching (the SDK may have expanded skill/template commands). */
+ *  queue one message at a time in enqueue order), so text is not used for
+ *  matching (the SDK may have expanded skill/template commands). */
 export interface QueuedDeliveredPayload {
   sessionPath: string;
   text: string;

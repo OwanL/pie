@@ -34,7 +34,7 @@ test('loadSdk rejects disallowed paths before attempting to import', async () =>
   );
 });
 
-test('applySdkRetryHotPatch extends the current pi-ai retry.js array shape for terminal-event cuts + proxy stalls', async () => {
+test('applySdkRetryHotPatch extends the current pi-ai retry.js array shape for terminal-event cuts + provider-gate stalls', async () => {
   // Current SDK shape: the retryable pattern is a string array in
   // pi-ai/dist/utils/retry.js (joined into a RegExp). The needle is the
   // quoted array entry with trailing comma so it does not match the comment
@@ -46,7 +46,7 @@ test('applySdkRetryHotPatch extends the current pi-ai retry.js array shape for t
         "stream ended before message_stop",
         "http2 request did not get a response",
       ];
-      // Comment mentioning "stream ended before message_stop" without a trailing comma — must NOT be matched.
+      // Comment mentioning "stream ended before message_stop" without a trailing comma - must NOT be matched.
       export function isRetryableAssistantError(message) { return RETRYABLE.some(p => new RegExp(p, "i").test(message.errorMessage)); }
     `,
   }, async (sdkDir) => {

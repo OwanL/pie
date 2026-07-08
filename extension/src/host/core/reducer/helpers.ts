@@ -7,6 +7,9 @@ import {
   withIncrementedWindowCounts,
   withDecrementedWindowCounts,
 } from '../transcript-window.js';
+
+export { withIncrementedWindowCounts };
+
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../../shared/transcript-window.js';
 import type { Effect } from '../effects.js';
 
@@ -314,7 +317,7 @@ export function appendLocalUserMessage(
   createdAt: string,
   /** Optimistic message status. Defaults to 'completed' (a normal send). The
    *  steering busy branch passes 'queued' so the message renders as a pending
-   *  follow-up until `QueuedDelivered` promotes it. */
+   *  steering injection until `QueuedDelivered` promotes it. */
   status: ChatMessage['status'] = 'completed',
   /** Host-side synthetic-send tag (e.g. `'deferred-trigger'` for the wake-up
    *  message). Set on the optimistic message so the webview can differentiate
@@ -380,6 +383,96 @@ export function removeMessage(draft: ArchState, sessionPath: string, messageId: 
       nextWindow.hasUserMessages = false;
     }
 
+    draft.transcript.windowBySession[sessionPath] = nextWindow;
+  }
+}
+
+/**
+ * Optimistically truncate the local transcript at `messageId`, removing the
+ * message and everything after it. Decrements the transcript window counts once
+ * per removed message and mirrors `removeMessage`'s `hasUserMessages` cleanup.
+ *
+ * Returns the removed tail so callers can restore it on rollback. This is the
+ * local half of the Copilot-style edit behavior: the old user message, agent
+ * reply, and any continuation turns vanish instantly when the user confirms an
+ * edit, without waiting for the backend truncate snapshot.
+ */
+export function truncateLocalTranscriptAfter(
+  draft: ArchState,
+  sessionPath: string,
+  messageId: string,
+): ChatMessage[] {
+  const list = draft.transcript.bySession[sessionPath];
+  if (!list) return [];
+
+  const index = list.findIndex((m: ChatMessage) => m.id === messageId);
+  if (index === -1) return [];
+
+  const removedTail = list.slice(index);
+  const keptPrefix = list.slice(0, index);
+  draft.transcript.bySession[sessionPath] = keptPrefix;
+
+  let nextWindow = draft.transcript.windowBySession[sessionPath];
+  for (const _ of removedTail) {
+    const decremented = withDecrementedWindowCounts(nextWindow);
+    if (!decremented) break;
+    nextWindow = decremented;
+  }
+
+  if (nextWindow) {
+    const removedUser = removedTail.some((m: ChatMessage) => m.role === 'user');
+    const isFullyLoaded =
+      !nextWindow.hasOlder
+      && !nextWindow.hasNewer
+      && nextWindow.loadedStart === 0
+      && nextWindow.loadedEnd === nextWindow.totalCount;
+
+    if (
+      removedUser
+      && isFullyLoaded
+      && !keptPrefix.some((m: ChatMessage) => m.role === 'user')
+    ) {
+      nextWindow.hasUserMessages = false;
+    }
+
+    draft.transcript.windowBySession[sessionPath] = nextWindow;
+  }
+
+  return removedTail;
+}
+
+/**
+ * Restore a transcript tail removed by {@link truncateLocalTranscriptAfter}
+ * back onto the transcript, appending the messages in order and re-incrementing
+ * the window counts once per message. Mirrors `truncateLocalTranscriptAfter`
+ * in reverse: each restored message re-increments the window counts, and
+ * `hasUserMessages` is set true if any restored message is a user message.
+ *
+ * Used by the edit-rollback handlers (`handleEditResult` `!ok` branch and the
+ * `handlePreflightFailed` edit branch) to undo an optimistic edit truncate when
+ * the edit fails pre- or post-ack.
+ */
+export function restoreRemovedTail(
+  draft: ArchState,
+  sessionPath: string,
+  removedTail: ChatMessage[],
+) {
+  if (removedTail.length === 0) return;
+
+  const list = draft.transcript.bySession[sessionPath] ?? [];
+  for (const message of removedTail) {
+    list.push(message);
+  }
+  draft.transcript.bySession[sessionPath] = list;
+
+  let nextWindow = draft.transcript.windowBySession[sessionPath];
+  for (const _ of removedTail) {
+    nextWindow = withIncrementedWindowCounts(nextWindow);
+  }
+  if (nextWindow) {
+    if (removedTail.some((m: ChatMessage) => m.role === 'user')) {
+      nextWindow.hasUserMessages = true;
+    }
     draft.transcript.windowBySession[sessionPath] = nextWindow;
   }
 }

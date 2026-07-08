@@ -2,8 +2,7 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, ToolResultPruningSettings, PruningMode, ProxySettingsUpdate } from '../../shared/protocol';
-import { deriveApiKeyEnv } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, ToolResultPruningSettings, PruningMode } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
@@ -31,8 +30,6 @@ export interface SessionServiceLike {
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
-  setProxySettings(updates: ProxySettingsUpdate): Promise<void>;
-  addProxyProvider(input: import('../../shared/protocol').ProxyProviderAddInput): Promise<void>;
   /** Notify deferred triggers that the user sent a message in `sessionPath`. */
   notifyUserInput(sessionPath: string): void;
   /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
@@ -182,12 +179,6 @@ export class MessageRouter {
       case 'setToolResultPruningSettings':
         return await this.onSetToolResultPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setToolResultPruningSettings' }>);
 
-      case 'setProxySettings':
-        return await this.onSetProxySettings(msg as Extract<WebviewToHostMessage, { type: 'setProxySettings' }>);
-
-      case 'addProxyProvider':
-        return await this.onAddProxyProvider(msg as Extract<WebviewToHostMessage, { type: 'addProxyProvider' }>);
-
       case 'startEdit':
         return this.onStartEdit(msg as Extract<WebviewToHostMessage, { type: 'startEdit' }>);
 
@@ -326,7 +317,8 @@ export class MessageRouter {
       this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: editMessage arrived without a sessionPath.' });
       return;
     }
-    if (!text.trim() || !messageId) return;
+    const inputs = Array.isArray(msg.inputs) ? msg.inputs : [];
+    if ((!text.trim() && inputs.length === 0) || !messageId) return;
 
     // Pre-flight validation.
     if (this.isPendingTabPathFn(sessionPath)) {
@@ -338,6 +330,9 @@ export class MessageRouter {
       return;
     }
 
+    const composedText = buildPromptText(text, inputs);
+    const userParts = buildOptimisticUserParts(text, inputs);
+
     const webviewLocalId = msg.localId;
     const localId = webviewLocalId ?? `local:edit:${crypto.randomUUID()}`;
 
@@ -345,7 +340,7 @@ export class MessageRouter {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'Edit', corrId, sessionPath, messageId, text, localId, timestamp: Date.now() },
+      cmd: { kind: 'Edit', corrId, sessionPath, messageId, text, inputs, composedText, userParts, localId, timestamp: Date.now() },
     });
   }
 
@@ -661,78 +656,6 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'SetToolResultPruningSettings', corrId, settings: msg.settings },
-    });
-    this.scheduleRender();
-  }
-
-  private async onSetProxySettings(msg: Extract<WebviewToHostMessage, { type: 'setProxySettings' }>): Promise<void> {
-    const corrId = crypto.randomUUID();
-    this.dispatchEvent({
-      kind: 'Command',
-      cmd: { kind: 'SetProxySettings', corrId, settings: msg.settings },
-    });
-    this.scheduleRender();
-  }
-
-  private async onAddProxyProvider(msg: Extract<WebviewToHostMessage, { type: 'addProxyProvider' }>): Promise<void> {
-    const input = msg.input;
-    // Validate input before dispatching — invalid adds never reach the reducer
-    // (so no phantom provider entry appears in the UI). On success the reducer
-    // applies optimistically + the service persists/syncs/restarts; on failure
-    // the service reloads from disk to revert.
-    const name = (input?.name ?? '').trim().toLowerCase();
-    const apiBase = (input?.apiBase ?? '').trim();
-    const apiKey = input?.apiKey ?? '';
-    const litellmProvider = (input?.litellmProvider ?? '').trim();
-    if (!/^[a-z][a-z0-9_-]{0,62}$/.test(name)) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: name must be 1–63 chars, start with a lowercase letter, and only contain lowercase letters, digits, “_” or “-”.' });
-      this.scheduleRender();
-      return;
-    }
-    const existing = Object.keys(this.getArchState().settings.proxySettings.providers)
-      .map((n) => n.toLowerCase());
-    if (existing.includes(name)) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: a provider named “${name}” already exists in the proxy config.` });
-      this.scheduleRender();
-      return;
-    }
-    // Also guard the derived apiKeyEnv: deriveApiKeyEnv is non-injective
-    // (foo / foo- / foo_ all -> FOO_API_KEY), so a colliding name would silently
-    // overwrite another provider's key in proxy/.env + share one env var.
-    const apiKeyEnv = deriveApiKeyEnv(name);
-    if (!apiKeyEnv) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: could not derive an API key env var for “${name}”.` });
-      this.scheduleRender();
-      return;
-    }
-    const envCollide = Object.entries(this.getArchState().settings.proxySettings.providers)
-      .filter(([, p]) => p.apiKeyEnv === apiKeyEnv);
-    if (envCollide.length > 0) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: `Add provider: the name “${name}” would share the env var ${apiKeyEnv} with an existing provider (${envCollide.map(([n]) => n).join(', ')}). Pick a more distinct name.` });
-      this.scheduleRender();
-      return;
-    }
-    let baseUrl: URL | null = null;
-    try { baseUrl = apiBase ? new URL(apiBase) : null; } catch { baseUrl = null; }
-    if (!baseUrl || (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:')) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: API base must be a valid http(s) URL (e.g. https://api.example.com/v1).' });
-      this.scheduleRender();
-      return;
-    }
-    if (!apiKey) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: an API key is required. It is stored safely in proxy/.env (gitignored), referenced by an env var — never written to settings.json or models.yaml.' });
-      this.scheduleRender();
-      return;
-    }
-    if (!litellmProvider) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Add provider: a LiteLLM provider type is required (e.g. “openai” for OpenAI-compatible endpoints, “anthropic”, “azure”).' });
-      this.scheduleRender();
-      return;
-    }
-    const corrId = crypto.randomUUID();
-    this.dispatchEvent({
-      kind: 'Command',
-      cmd: { kind: 'AddProxyProvider', corrId, input: { name, apiBase, apiKey, litellmProvider, maxConcurrentRequests: input.maxConcurrentRequests } },
     });
     this.scheduleRender();
   }

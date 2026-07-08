@@ -1,11 +1,8 @@
-import * as cp from 'node:child_process';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
-import { ProxyService, type ProxyStartOptions } from '../backend/proxy-service';
-import { resolveChatPrefs, buildProxyProviderEntry, deriveApiKeyEnv } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, ProxyProviderAddInput, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
+import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
+import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -16,13 +13,6 @@ import {
   saveToolResultPruningSettings,
   type ToolResultPruningSettingsStorage,
 } from './tool-result-pruning-settings-persistence';
-import {
-  loadPersistedProxySettings,
-  saveProxySettings,
-  type ProxySettingsStorage,
-} from './proxy-settings-persistence';
-import { readProxySettings, writeProxySettings } from './proxy-settings';
-import { writeProxyEnvKey } from './proxy-env';
 import { NOOP_RUN_OBSERVER, type RunObserver } from '../stats-service';
 import { SessionServiceEvents } from './events';
 import { SessionMessageActions } from './message-actions';
@@ -40,7 +30,6 @@ import type { ArchState } from '../core/arch-state';
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
 const TOOL_RESULT_PRUNING_STORAGE_KEY = 'toolResultPruningSettings';
-const PROXY_STORAGE_KEY = 'proxySettings';
 
 /**
  * Owns the PI backend process lifecycle and wires backend events to the
@@ -58,19 +47,6 @@ export class SessionService implements vscode.Disposable {
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
-  /** The running LiteLLM proxy + the options it was started with, set by
-   *  startup once `proxy.start()` succeeds so later edits can restart it. */
-  private proxyService?: ProxyService;
-  private proxyStartOptions?: ProxyStartOptions;
-  /** Serializes `regenerateProxyConfigAndRestart` calls. Multiple settings
-   *  edits in quick succession (e.g. rapid stepper clicks before the settings
-   *  menu batching landed, or a settings edit racing `addProxyProvider`) used
-   *  to fire overlapping `restart()` calls — each one's `stop()` could kill
-   *  the OTHER call's freshly-spawned (and already-ready) proxy, surfacing a
-   *  spurious "LiteLLM proxy exited before becoming ready (code 1)" even though
-   *  the log tail shows a clean startup. Chaining onto this promise ensures
-   *  restarts run one at a time. */
-  private proxyRestartChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -289,24 +265,7 @@ export class SessionService implements vscode.Disposable {
     void Promise.resolve(this.context.globalState.update(PREFS_STORAGE_KEY, merged)).catch((error) => {
       appendPieLog('warn', 'prefs', 'globalState.update failed for prefs', { error: toErrorMessage(error) });
     });
-    void this.backend.request('runtimePrefs.set', {
-      providerToggles: merged.providerToggles,
-      extensionToggles: merged.extensionToggles,
-      subagentAlwaysParentModel: merged.subagentAlwaysParentModel,
-      subagentMaxDepth: merged.subagentMaxDepth,
-      subagentMaxTreeSessions: merged.subagentMaxTreeSessions,
-      subagentMaxInflight: merged.subagentMaxInflight,
-      subagentMaxConcurrency: merged.subagentMaxConcurrency,
-      subagentMaxParallelTasks: merged.subagentMaxParallelTasks,
-      bashWarmPoolSize: merged.bashWarmPoolSize,
-      bashFastPath: merged.bashFastPath,
-      bashShellPath: merged.bashShellPath,
-      bashWarmupTimeoutMs: merged.bashWarmupTimeoutMs,
-      bashAcquireTimeoutMs: merged.bashAcquireTimeoutMs,
-      bashDefaultTimeout: merged.bashDefaultTimeout,
-      subagentBuckets: merged.subagentBuckets,
-      subagentNestedAllowedBuckets: merged.subagentNestedAllowedBuckets,
-    }).catch((error) => {
+    void this.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(merged)).catch((error) => {
       appendPieLog('warn', 'prefs', 'runtimePrefs.set failed', { error: toErrorMessage(error) });
     });
   }
@@ -380,210 +339,6 @@ export class SessionService implements vscode.Disposable {
     return {
       get: () => this.context.globalState.get<ToolResultPruningSettings>(TOOL_RESULT_PRUNING_STORAGE_KEY),
       update: (value) => this.context.globalState.update(TOOL_RESULT_PRUNING_STORAGE_KEY, value),
-    };
-  }
-
-  /** Record the running proxy + its start options so later edits can restart it. */
-  setProxyRuntime(proxy: ProxyService, options: ProxyStartOptions): void {
-    this.proxyService = proxy;
-    this.proxyStartOptions = options;
-    // Bug 5 observability: when a config restart kills an in-flight proxied
-    // stream, surface a structured NoticeShown so the user can tell "proxy
-    // restarted under me" vs "provider cut" vs "proxy throttled". The hook
-    // fires synchronously from ProxyService.stop() BEFORE the kill.
-    //
-    // `payload.reason` distinguishes a deliberate config restart from a
-    // health-monitor recovery (the proxy became unresponsive under parallel
-    // load). The message is already accurate per-reason; the log tag carries
-    // it so a grep can separate the two failure classes without parsing text.
-    proxy.onInFlightInterrupted = (payload) => {
-      this.dispatchArch({
-        kind: 'NoticeShown',
-        notice: `${payload.message} (pid ${payload.pid}). The next turn will use the restarted proxy.`,
-      });
-      appendPieLog('warn', 'proxy-restart', 'in-flight proxied stream interrupted by proxy restart', {
-        code: payload.code,
-        pid: payload.pid,
-        reason: payload.reason,
-      });
-    };
-    // Dedicated telemetry for the health-monitor reclaim path. stop() with
-    // reason 'health-monitor' already fired the accurate NoticeShown above;
-    // this hook fires AFTER the reclaim+respawn so the log confirms recovery
-    // (not just the interruption). Previously this callback was declared on
-    // ProxyService but NEVER wired — the reclaim was invisible.
-    proxy.onProxyHungReclaimed = (payload) => {
-      appendPieLog('warn', 'proxy-restart', 'health monitor reclaimed + respawned unresponsive proxy', {
-        port: payload.port,
-        reason: payload.reason,
-      });
-    };
-  }
-
-  /** Persist a partial proxy-settings update to settings.json, regenerate the
-   *  litellm_config.yaml via sync-models, and restart the proxy so the new
-   *  config takes effect. Mirrors `setPruningSettings` (optimistic — the
-   *  reducer already applied the update; do NOT re-dispatch
-   *  ProxySettingsChanged on the SET path). */
-  async setProxySettings(updates: ProxySettingsUpdate): Promise<void> {
-    const storage = this.createProxySettingsStorage();
-    await saveProxySettings(
-      storage,
-      // SET path: the reducer already applied the update optimistically, so
-      // do not re-dispatch ProxySettingsChanged (avoids a lost-update flicker
-      // under rapid sequential changes). Persistence still writes-or-mirrors
-      // and notifies on disk failure.
-      undefined,
-      () => this.getArchState().settings.proxySettings,
-      updates,
-      (message) => this.dispatchArch({ kind: 'NoticeShown', notice: message }),
-    );
-    await this.regenerateProxyConfigAndRestart();
-  }
-
-  /** Add a new proxied provider from the proxy settings "Add Provider" form.
-   *  The reducer already applied the provider entry optimistically; this method
-   *  does the deterministic wiring the host owns:
-   *    1. derive `apiKeyEnv` + store the key safely in `proxy/.env` + `process.env`
-   *    2. write `proxy.providers.<name>` to settings.json (empty modelListOrder,
-   *       `<name>-shared` model-info id — "pending" until the add-provider skill
-   *       adds the models.yaml catalog)
-   *    3. run sync-models (tolerant of pending providers) + restart the proxy
-   *  On any failure, reload proxy settings from disk + dispatch
-   *  ProxySettingsChanged to revert the optimistic entry (no phantom provider).
-   *  The model CATALOG (models.yaml) is added separately via the add-provider skill. */
-  async addProxyProvider(input: ProxyProviderAddInput): Promise<void> {
-    const name = input.name.trim().toLowerCase();
-    const entry = buildProxyProviderEntry(input);
-    if (!entry) {
-      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: could not build a config entry for "${name}".` });
-      await this.revertProxySettingsFromDisk();
-      return;
-    }
-    const apiKeyEnv = deriveApiKeyEnv(name);
-    if (!apiKeyEnv) {
-      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: could not derive an API key env var for "${name}".` });
-      await this.revertProxySettingsFromDisk();
-      return;
-    }
-
-    // 1. Store the key safely (proxy/.env is gitignored; never written to
-    //    settings.json/models.yaml) + set process.env so the proxy child
-    //    inherits it on the restart below.
-    try {
-      await writeProxyEnvKey(apiKeyEnv, input.apiKey);
-    } catch (err) {
-      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: failed to store the API key for "${name}" in proxy/.env: ${toErrorMessage(err)}` });
-      await this.revertProxySettingsFromDisk();
-      return;
-    }
-
-    // 2. Write the proxy.providers.<name> entry to settings.json.
-    try {
-      await writeProxySettings({ providers: { [name]: entry } });
-    } catch (err) {
-      this.dispatchArch({ kind: 'NoticeShown', notice: `Add provider: failed to write the proxy config for "${name}": ${toErrorMessage(err)}` });
-      await this.revertProxySettingsFromDisk();
-      return;
-    }
-
-    // 3. Regenerate litellm_config.yaml (sync-models tolerates the pending
-    //    provider — it has no models.yaml catalog entry yet, so it contributes
-    //    no routes) + restart the proxy so the new env + config take effect.
-    await this.regenerateProxyConfigAndRestart();
-
-    this.dispatchArch({
-      kind: 'NoticeShown',
-      notice:
-        `Provider "${name}" added to the proxy config. Models aren't wired yet — ` +
-        `run the add-provider skill (or /skill:add-provider) to add the models.yaml ` +
-        `catalog + populate its model list so the provider routes traffic.`,
-    });
-  }
-
-  /** Reload proxy settings from disk and dispatch ProxySettingsChanged to
-   *  revert the reducer's optimistic state to disk truth. Used by
-   *  addProxyProvider on failure so a failed add leaves no phantom provider. */
-  private async revertProxySettingsFromDisk(): Promise<void> {
-    try {
-      const disk = await readProxySettings();
-      this.dispatchArch({ kind: 'ProxySettingsChanged', proxySettings: disk });
-    } catch (err) {
-      appendPieLog('warn', 'proxy-settings', 'failed to revert proxy settings from disk after add failure', { error: toErrorMessage(err) });
-    }
-  }
-
-  /** Regenerate proxy/litellm_config.yaml from settings.json via sync-models
-   *  and restart the LiteLLM proxy so the new config takes effect. Shared by
-   *  setProxySettings (field edits) + addProxyProvider (new provider). Queued
-   *  onto `proxyRestartChain` so overlapping calls never race each other's
-   *  stop()/spawn(); each call still runs to completion (including its own
-   *  error handling) even if an earlier queued call failed. */
-  private async regenerateProxyConfigAndRestart(): Promise<void> {
-    const run = this.proxyRestartChain.then(() => this.doRegenerateProxyConfigAndRestart());
-    // Swallow so a failed run doesn't poison the chain for subsequent callers
-    // (each run already reports its own failure via NoticeShown).
-    this.proxyRestartChain = run.catch(() => undefined);
-    return run;
-  }
-
-  private async doRegenerateProxyConfigAndRestart(): Promise<void> {
-    const agentDir = process.env.PI_CODING_AGENT_DIR;
-    if (!agentDir) {
-      // No agent dir = no proxy config to regenerate; nothing to restart.
-      return;
-    }
-
-    // Regenerate litellm_config.yaml from the updated settings.json proxy block.
-    const nodePath = vscode.workspace.getConfiguration('pie').get<string>('nodePath', '') || 'node';
-    const syncScript = path.join(agentDir, 'scripts', 'sync-models.mjs');
-    const result = cp.spawnSync(nodePath, [syncScript], { encoding: 'utf8', windowsHide: true });
-    if (result.status !== 0) {
-      const stderr = (result.stderr || result.stdout || '').trim().slice(-800);
-      this.dispatchArch({
-        kind: 'NoticeShown',
-        notice: `Failed to regenerate the proxy config (sync-models): ${stderr || 'exited non-zero'}. The proxy was not restarted.`,
-      });
-      return;
-    }
-
-    // Restart the proxy so the new config is loaded. LiteLLM has no /reload
-    // endpoint, so a full stop+start is required. A transient failure here
-    // (e.g. the old process's port hadn't fully released yet) is retried once
-    // before giving up — otherwise a single flaky restart left the proxy dead
-    // until a full window reload. Only the second failure surfaces a notice;
-    // the persisted config is left intact either way (the user can fix it and
-    // retry, or reload the window).
-    if (this.proxyService && this.proxyStartOptions) {
-      try {
-        await this.proxyService.restart(this.proxyStartOptions);
-      } catch (firstErr) {
-        appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update, retrying once', { error: toErrorMessage(firstErr) });
-        try {
-          await this.proxyService.restart(this.proxyStartOptions);
-        } catch (err) {
-          this.dispatchArch({
-            kind: 'NoticeShown',
-            notice: `Proxy config regenerated, but the LiteLLM proxy failed to restart: ${toErrorMessage(err)}. Reload the window to retry.`,
-          });
-          appendPieLog('warn', 'proxy-settings', 'proxy restart failed after settings update (retry also failed)', { error: toErrorMessage(err) });
-        }
-      }
-    }
-  }
-
-  async loadProxySettings(): Promise<void> {
-    const storage = this.createProxySettingsStorage();
-    await loadPersistedProxySettings(
-      storage,
-      (settings) => this.dispatchArch({ kind: 'ProxySettingsChanged', proxySettings: settings }),
-    );
-  }
-
-  private createProxySettingsStorage(): ProxySettingsStorage {
-    return {
-      get: () => this.context.globalState.get<ProxySettings>(PROXY_STORAGE_KEY),
-      update: (value) => this.context.globalState.update(PROXY_STORAGE_KEY, value),
     };
   }
 }

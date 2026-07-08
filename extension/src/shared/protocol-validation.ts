@@ -269,7 +269,7 @@ function validateToolResultPruningSettingsPatch(value: unknown): value is Partia
       if (v !== undefined && !isObject(v)) return false;
       const rules = v as Record<string, unknown>;
       for (const ruleKey of Object.keys(rules)) {
-        if (!['ansi', 'whitespace', 'blankRun', 'jsonMinify', 'lsLong', 'gitLog'].includes(ruleKey)) return false;
+        if (!['ansi', 'whitespace', 'blankRun', 'jsonMinify', 'lsLong', 'gitLog', 'grepGroup'].includes(ruleKey)) return false;
         const ruleValue = rules[ruleKey];
         if (ruleValue !== undefined && typeof ruleValue !== 'boolean') return false;
       }
@@ -346,6 +346,7 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('editMessage: missing `sessionPath`');
       if (!isString(value.messageId)) return fail('editMessage: missing `messageId`');
       if (!isString(value.text)) return fail('editMessage: missing `text`');
+      if (value.inputs !== undefined && !Array.isArray(value.inputs)) return fail('editMessage: `inputs` must be an array when provided');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'interrupt':

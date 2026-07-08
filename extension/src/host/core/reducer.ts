@@ -52,7 +52,6 @@ import {
   handleSessionSummariesReplaced,
   handleSessionScopeCleared,
   handlePendingPathReplaced,
-  handleAnalyticsFactorsChanged,
   handleTabOpened,
   handleOpenTabsChanged,
   handleSessionsInterrupted,
@@ -62,7 +61,6 @@ import {
   handleBackendReadyWatchdogFired,
   handlePruningSettingsChanged,
   handleToolResultPruningSettingsChanged,
-  handleProxySettingsChanged,
   handleWorkspaceCwdChanged,
   handleTranscriptPageLoaded,
   handleTranscriptTrimmed,
@@ -124,8 +122,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
     case 'SetToolResultPruningSettingsResult':
-    case 'SetProxySettingsResult':
-    case 'AddProxyProviderResult':
     case 'ExtensionUiResponseResult': {
       return handleEffectResult(state, event);
     }
@@ -197,10 +193,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleToolResultPruningSettingsChanged(state, event);
     }
 
-    case 'ProxySettingsChanged': {
-      return handleProxySettingsChanged(state, event);
-    }
-
     case 'WorkspaceCwdChanged': {
       return handleWorkspaceCwdChanged(state, event);
     }
@@ -231,10 +223,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'PendingExtensionUIRequestsCleared': {
       return handlePendingExtensionUIRequestsCleared(state, event);
-    }
-
-    case 'AnalyticsFactorsChanged': {
-      return handleAnalyticsFactorsChanged(state, event);
     }
 
     case 'AvailableExtensionsChanged': {

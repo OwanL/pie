@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 
-import type { ActiveRunSummary, ProxySessionStatus, SessionSummary } from '../../../shared/protocol';
+import type { ActiveRunSummary, SessionSummary } from '../../../shared/protocol';
 import { getSessionTabRunBadge } from './run-state';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 
@@ -21,7 +21,6 @@ export interface SessionTabProps {
    *  this component's `memo()` and re-rendered every tab each snapshot). */
   activePath: string | null;
   hasPendingExtensionUIRequest: boolean;
-  proxySessionStatus?: ProxySessionStatus | null;
   activeRunSummary: ActiveRunSummary | null;
   isPinned: boolean;
   /** True when this session owns a pending deferred trigger — greys out the
@@ -48,7 +47,6 @@ export const SessionTab = memo(function SessionTab({
   unreadFinishedPathSet,
   activePath,
   hasPendingExtensionUIRequest,
-  proxySessionStatus,
   activeRunSummary,
   isPinned,
   hasDeferredTriggers,
@@ -63,7 +61,6 @@ export const SessionTab = memo(function SessionTab({
   const isActive = activePath === tabPath;
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
-  const isParked = proxySessionStatus?.state === 'queued';
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
   const review = session
@@ -83,16 +80,11 @@ export const SessionTab = memo(function SessionTab({
   const reviewTitle = review
     ? `Reviewed: done=${review.done ?? false}, rating=${review.rating ?? '—'}/5, completion=${review.completion ?? '—'}${review.reason ? ` — ${review.reason}` : ''}`
     : '';
-  const parkedTitle = isParked && proxySessionStatus
-    ? `${label} (waiting for proxy slot: ${proxySessionStatus.provider} ${proxySessionStatus.activeSessions}/${proxySessionStatus.maxConcurrentRequests}${proxySessionStatus.queuedSessions > 0 ? `, ${proxySessionStatus.queuedSessions} queued` : ''})`
-    : null;
   const title = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
-    : parkedTitle
-      ? parkedTitle
-      : isUnreadFinished
-        ? `${label} (finished, unread)`
-        : label;
+    : isUnreadFinished
+      ? `${label} (finished, unread)`
+      : label;
 
   // A pending deferred trigger blocks closing the tab and marking it done —
   // the trigger must be cancelled first (from the status strip) so it is not
@@ -106,7 +98,6 @@ export const SessionTab = memo(function SessionTab({
   if (isUnreadFinished) classBits.push('unread-finished');
   if (isPinned) classBits.push('pinned');
   if (isRunning) classBits.push('running');
-  if (isParked) classBits.push('parked');
 
   return (
     <div
@@ -137,13 +128,11 @@ export const SessionTab = memo(function SessionTab({
           </span>
         ) : (
           <>
-            {isParked
-              ? <span class="session-tab-parked" aria-hidden="true">⏸</span>
-              : isRunning
-                ? <span class="session-tab-running" aria-hidden="true" />
-                : isUnreadFinished
-                  ? <span class="session-tab-finished" aria-hidden="true" />
-                  : null}
+            {isRunning
+              ? <span class="session-tab-running" aria-hidden="true" />
+              : isUnreadFinished
+                ? <span class="session-tab-finished" aria-hidden="true" />
+                : null}
             <span class="session-tab-label">{label}</span>
             {hasReview ? (
               <span

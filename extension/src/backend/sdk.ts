@@ -1,5 +1,5 @@
-import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { SessionEntryLike } from './transcript';
@@ -106,12 +106,38 @@ export interface SdkSession {
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
   abort: () => Promise<void>;
   /** Queue a follow-up message to run as a fresh turn after the current turn
-   *  completes. Used by `message.send` when a turn is already running (steering).
-   *  Throws synchronously if the text is an extension command. */
+   *  completes. Used by `message.send` when a turn is already running (steering)
+   *  on an older SDK without `steer`. Throws synchronously if the text is an
+   *  extension command. */
   followUp: (text: string, images?: SdkImageContent[]) => Promise<void>;
+  /** Inject a steering message into the CURRENT turn (delivered after in-flight
+   *  tool calls finish, before the next LLM call), preferred over `followUp`
+   *  by `message.send` when a turn is already running. The agent loop emits
+   *  `message_start` (role 'user') when it injects the message, which the
+   *  backend forwards as `message.queuedDelivered` so the host promotes its
+   *  optimistic 'queued' message to 'completed'. Optional: older SDKs only
+   *  expose `followUp`. */
+  steer?: (text: string, images?: SdkImageContent[]) => Promise<void>;
   /** Clear all queued steering + follow-up messages and return what was cleared.
    *  Synchronous. Used by `message.clearQueue` and on interrupt. */
   clearQueue: () => { steering: string[]; followUp: string[] };
+  /** Billable windows that may still be running after `agent_end` (the backend
+   *  already cleared `activeRequest` + emitted busy=false). `message.interrupt`
+   *  treats any of these as "running" so a Stop hard-stops the spend instead of
+   *  being rejected as SESSION_NOT_RUNNING. Optional: an older SDK that doesn't
+   *  expose a predicate is `undefined` → falsy → the legacy guard behaviour. */
+  isCompacting?: boolean;
+  isRetrying?: boolean;
+  isBashRunning?: boolean;
+  /** Hard-stop the corresponding billable window. `session.abort()` alone does
+   *  NOT stop these post-agent_end LLM/tool calls, so `message.interrupt` calls
+   *  them synchronously before the un-awaited `abort()` runs. Each is a no-op
+   *  when its window isn't running. Optional: older SDKs that don't expose them
+   *  are unaffected (optional-chained at the call site). */
+  abortCompaction?: () => void;
+  abortBranchSummary?: () => void;
+  abortBash?: () => void;
+  abortRetry?: () => void;
   setModel?: (model: unknown) => Promise<void>;
   setThinkingLevel?: (level: string) => void;
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
@@ -247,6 +273,7 @@ function assertAllowedSdkPath(sdkPath: string): void {
   }
 }
 
+// ─── SDK retry-classifier hot-patch ──────────────────────────────────────────
 // The SDK's transient-error retry classifier has moved between versions:
 //  - Legacy: an inline regex in `dist/core/agent-session.js`
 //    (`/...|stream ended before message_stop|.../i.test(err)`).
@@ -255,23 +282,23 @@ function assertAllowedSdkPath(sdkPath: string): void {
 //    (`"stream ended before message_stop",`), joined into a RegExp by
 //    `buildProviderErrorPattern`. The host prefers the local extension
 //    `node_modules` SDK (runtime-resolution priority 3), which ships this
-//    current shape — so the hot-patch MUST handle the array shape, not just
-//    the legacy inline one, or it silently no-ops (`unsupported-shape`) and
-//    stream cuts/stalls are never retried.
+//    current shape. The hot-patch MUST handle the array shape or it silently
+//    no-ops (`unsupported-shape`) and stream cuts/stalls are never retried.
 //
-// The patterns added cover two saturation-induced failure modes that pi-ai
+// The patterns added cover saturation-induced failure modes that pi-ai
 // surfaces as `stopReason=error` but the upstream classifier does NOT match:
 //  - `stream ended before a terminal response event`: pi-ai throws this when
 //    an OpenAI Responses SSE stream ends without `response.completed`/
-//    `response.incomplete`/`response.failed`. This is EXACTLY what the proxy's
-//    stream-liveness middleware produces when it terminates a stalled upstream
-//    (it emits `data: {"error":...}` + `[DONE]`, which the Responses parser
-//    does not recognise as a terminal event) — and what an upstream truncation
-//    produces. Without this pattern, a stalled/truncated stream is a silent
-//    interruption (never retried) instead of a retried turn.
-//  - `upstream stream stalled` / `upstream header phase stalled`: the proxy's
-//    own terminal error texts, should they ever surface in an errorMessage.
-//    Belt-and-suspenders — the 504 header-phase path already matches `504`.
+//    `response.incomplete`/`response.failed`. This is EXACTLY what the
+//    host-side ProviderGate's stream-liveness watchdog produces when it
+//    terminates a stalled upstream (it errors the stream, which the Responses
+//    parser does not recognise as a terminal event) — and what an upstream
+//    truncation produces. Without this pattern, a stalled/truncated stream is
+//    a silent interruption (never retried) instead of a retried turn.
+//  - `upstream stream stalled` / `upstream header phase stalled`: the
+//    ProviderGate's own terminal error texts, should they ever surface in an
+//    errorMessage. Belt-and-suspenders — the 504 header-phase path already
+//    matches `504`.
 const RETRY_HOT_PATCH_INSERTS = [
   'stream ended before a terminal response event',
   'upstream stream stalled',

@@ -52,9 +52,10 @@ import type {
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
+import { appendPieLog } from '../util/pie-logger';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
@@ -120,8 +121,6 @@ export interface SessionServiceLike {
   closeSession(sessionPath: string, nextPath: string | null): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
-  setProxySettings(updates: ProxySettingsUpdate): Promise<void>;
-  addProxyProvider(input: import('../../shared/protocol').ProxyProviderAddInput): Promise<void>;
   /** Recover from a failed/timed-out selection: finish the request and
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
@@ -339,8 +338,6 @@ export class EffectRunner {
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
-      SetProxySettings: this.templateRow({ resultKind: 'SetProxySettingsResult', withSessionPath: false, call: (e, d) => d.service.setProxySettings(e.settings) }),
-      AddProxyProvider: this.templateRow({ resultKind: 'AddProxyProviderResult', withSessionPath: false, call: (e, d) => d.service.addProxyProvider(e.input) }),
       CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath) }),
       PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths) }),
     };
@@ -390,12 +387,6 @@ export class EffectRunner {
       case 'SetPruningSettings':
       case 'SetToolResultPruningSettings':
         payload.settingKeys = Object.keys(effect.settings);
-        break;
-      case 'SetProxySettings':
-        payload.settingKeys = Object.keys(effect.settings);
-        break;
-      case 'AddProxyProvider':
-        payload.providerName = effect.input.name;
         break;
     }
 
@@ -964,7 +955,7 @@ export class EffectRunner {
         // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
         // post-ack, pre-commit phase; the abort controller covers the whole
         // truncate-then-send operation (Brief E cancels it on interrupt).
-        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, undefined);
+        const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'edit', effect.localId, effect.composedText ?? effect.text, effect.userParts);
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
@@ -981,6 +972,7 @@ export class EffectRunner {
           const response = await backend.request<{ requestId?: string }>('message.send', {
             sessionPath: effect.sessionPath,
             text: effect.text,
+            inputs: effect.inputs,
             localId: effect.localId,
           }, { signal: send.abort.signal });
           send.requestId = response.requestId;

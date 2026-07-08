@@ -64,10 +64,9 @@ function assistantMessage(id: string, markdown: string): ChatMessage {
   };
 }
 
-/** Mid-edit host state: the original user message + reply are still present
- *  (the reducer's optimistic edit APPENDS the edited text as a `local:` message
- *  rather than removing the original in place), and the host marks the session
- *  running optimistically. */
+/** Mid-edit host state: after confirming the edit, the reducer optimistically
+ *  truncated the original user message + reply and appended the edited text as a
+ *  `local:` message. The host marks the session running optimistically. */
 function midEditState(): ArchState {
   return {
     ...initialArchState,
@@ -82,16 +81,14 @@ function midEditState(): ArchState {
       ...initialArchState.transcript,
       bySession: {
         '/s': [
-          userMessage('user-1', 'original question'),
-          assistantMessage('assistant-1', 'original answer'),
           userMessage('local:edit:abc', 'edited question'),
         ],
       },
       windowBySession: {
         '/s': {
-          totalCount: 3,
+          totalCount: 1,
           loadedStart: 0,
-          loadedEnd: 3,
+          loadedEnd: 1,
           hasOlder: false,
           hasNewer: false,
           isPartial: false,

@@ -616,22 +616,6 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
   return { state: nextState, effects };
 }
 
-export function handleAnalyticsFactorsChanged(state: ArchState, event: Extract<Event, { kind: 'AnalyticsFactorsChanged' }>): ReducerResult {
-  return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        analyticsFactorsBySession: {
-          ...state.sessions.analyticsFactorsBySession,
-          [event.sessionPath]: event.factors,
-        },
-      },
-    },
-    effects: [],
-  };
-}
-
 export function handleTabOpened(state: ArchState, event: Extract<Event, { kind: 'TabOpened' }>): ReducerResult {
   if (state.sessions.openTabPaths.includes(event.sessionPath)) {
     return { state, effects: [] };

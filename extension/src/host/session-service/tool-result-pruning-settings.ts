@@ -37,6 +37,7 @@ function parseRuleToggles(value: unknown): ToolResultPruningRuleToggles {
     jsonMinify: typeof v.jsonMinify === 'boolean' ? v.jsonMinify : DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules.jsonMinify,
     lsLong: typeof v.lsLong === 'boolean' ? v.lsLong : DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules.lsLong,
     gitLog: typeof v.gitLog === 'boolean' ? v.gitLog : DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules.gitLog,
+    grepGroup: typeof v.grepGroup === 'boolean' ? v.grepGroup : DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules.grepGroup,
   };
 }
 
@@ -130,6 +131,7 @@ export async function writeToolResultPruningSettings(
       jsonMinify: updates.rules.jsonMinify !== undefined ? incoming.jsonMinify : mergedRules.jsonMinify,
       lsLong: updates.rules.lsLong !== undefined ? incoming.lsLong : mergedRules.lsLong,
       gitLog: updates.rules.gitLog !== undefined ? incoming.gitLog : mergedRules.gitLog,
+      grepGroup: updates.rules.grepGroup !== undefined ? incoming.grepGroup : mergedRules.grepGroup,
     };
   }
 

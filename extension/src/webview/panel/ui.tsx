@@ -17,10 +17,8 @@ import type {
   PruningCatalog,
   PruningResult,
   PruningSettings,
+  ProviderGateStats,
   RetryStatus,
-  ProxyProviderAddInput,
-  ProxySettings,
-  ProxySettingsUpdate,
   SystemPromptEntry,
   ThinkingLevel,
   ToolResultPruningSettings,
@@ -68,7 +66,7 @@ interface ComposerProps {
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
-  proxySettings: ProxySettings;
+  providerGateStats: ProviderGateStats;
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
@@ -94,8 +92,6 @@ interface ComposerProps {
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
-  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
-  onAddProxyProvider: (input: ProxyProviderAddInput) => void;
   onMarkComplete?: () => void;
   /** True when the active session owns a pending deferred trigger — greys out
    *  the mark-done button with an explanatory tooltip (the trigger must be
@@ -127,7 +123,7 @@ function ComposerView({
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
-  proxySettings,
+  providerGateStats,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -147,8 +143,6 @@ function ComposerView({
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
-  onSetProxySettings,
-  onAddProxyProvider,
   onMarkComplete,
   activeSessionHasDeferredTriggers,
   sendRetryDraftRef,
@@ -286,14 +280,12 @@ function ComposerView({
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
         toolResultPruningSettings={toolResultPruningSettings}
-        proxySettings={proxySettings}
+        providerGateStats={providerGateStats}
         onSetPrefs={onSetPrefs}
         onSetSystemPromptToggles={onSetSystemPromptToggles}
         systemPrompts={systemPrompts}
         onSetPruningSettings={onSetPruningSettings}
         onSetToolResultPruningSettings={onSetToolResultPruningSettings}
-        onSetProxySettings={onSetProxySettings}
-        onAddProxyProvider={onAddProxyProvider}
         availableExtensions={availableExtensions}
         availableModels={availableModels}
         selectedModel={selectedModel}

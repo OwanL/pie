@@ -14,7 +14,6 @@ import {
   EMPTY_AGGREGATE_STATS,
   DEFAULT_CHAT_PREFS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-  DEFAULT_PROXY_SETTINGS,
 } from '../src/shared/protocol';
 
 // ---------------------------------------------------------------------------
@@ -86,7 +85,6 @@ function emptyViewState(): ViewState {
       ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
       rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules },
     },
-    proxySettings: DEFAULT_PROXY_SETTINGS,
     pruningCatalog: {
       skills: [],
       tools: [],

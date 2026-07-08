@@ -19,7 +19,7 @@ import type {
   ViewState,
   WebviewToHostMessage,
 } from '../../../shared/protocol';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_TRANSCRIPT_WINDOW, WEBVIEW_PROTOCOL_VERSION } from '../../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
@@ -60,7 +60,6 @@ export const EMPTY_VIEW_STATE: ViewState = {
   pruningResult: null,
   pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
   toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
-  proxySettings: DEFAULT_PROXY_SETTINGS,
   pruningCatalog: {
     skills: [],
     tools: [],

@@ -152,7 +152,6 @@ export function AppBody({ adapter }: AppBodyProps) {
           hideConnectingWheel={derived.transcriptHydrating || derived.needsSessionRecovery}
           pendingExtensionUIRequestsBySession={viewState.pendingExtensionUIRequestsBySession}
           runSummariesBySession={viewState.runSummariesBySession}
-          proxyStatusBySession={viewState.proxyStatusBySession}
           onSelect={handlers.handleSelectTab}
           onClose={handlers.handleCloseTab}
           onMove={handlers.handleMoveTab}
@@ -186,7 +185,6 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningSettings={viewState.pruningSettings}
         systemPrompts={viewState.systemPrompts}
         pruningResult={viewState.pruningResult}
-        proxySessionStatus={derived.activeSessionPath ? (viewState.proxyStatusBySession?.[derived.activeSessionPath] ?? null) : null}
         pendingAssistantModelId={derived.pendingAssistantModelId}
         pendingAssistantThinkingLevel={derived.pendingAssistantThinkingLevel}
         editingMessageId={viewState.editingMessageId}
@@ -215,7 +213,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pruningCatalog={viewState.pruningCatalog}
         pruningResult={viewState.pruningResult}
         toolResultPruningSettings={viewState.toolResultPruningSettings}
-        proxySettings={viewState.proxySettings}
+        providerGateStats={viewState.aggregateStats.providerGate}
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
         transcriptWindow={viewState.transcriptWindow}
@@ -232,7 +230,6 @@ export function AppBody({ adapter }: AppBodyProps) {
       {derived.showSessionChrome && !viewState.prefs.hideStatusStrip && (
         <AggregateStatsStrip
           stats={viewState.aggregateStats}
-          proxyMetrics={viewState.proxyMetrics}
           deferredTriggers={viewState.deferredTriggers}
           onOpenDeferredMenu={(x, y) => setDeferredMenu({ x, y })}
         />

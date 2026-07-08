@@ -82,6 +82,14 @@ export interface SessionContext {
 export interface SessionPromptState {
   _baseSystemPrompt?: string;
   _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
+  /** Unfiltered snapshot of the SDK's `_baseSystemPromptOptions`, captured
+   *  before `applySystemPromptTogglesToBasePrompt` filters them for the model
+   *  prompt. The display entry list (picker + transcript) is rebuilt from this
+   *  so disabled option-driven entries (context files, skills, append) stay
+   *  present and re-toggleable instead of disappearing once filtered out of the
+   *  live options. Refreshed only when the live options are at least as
+   *  complete as the snapshot. */
+  _originalSystemPromptOptions?: SdkBuildSystemPromptOptions;
 }
 
 export type SessionContextCreationReason = 'new' | 'resume';

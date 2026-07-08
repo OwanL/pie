@@ -24,10 +24,8 @@ import type {
   SessionOpenedPayload,
   PruningSettings,
   ToolResultPruningSettings,
-  ProxySettings,
   FileChangeEntry,
   ActiveRunSummary,
-  SessionAnalyticsFactors,
   ExtensionInfo,
   ModelInfo,
   ComposerInput,
@@ -247,20 +245,6 @@ export interface SetToolResultPruningSettingsResultEvent {
   error?: string;
 }
 
-export interface SetProxySettingsResultEvent {
-  kind: 'SetProxySettingsResult';
-  corrId: string;
-  ok: boolean;
-  error?: string;
-}
-
-export interface AddProxyProviderResultEvent {
-  kind: 'AddProxyProviderResult';
-  corrId: string;
-  ok: boolean;
-  error?: string;
-}
-
 export interface CloseSessionResultEvent {
   kind: 'CloseSessionResult';
   corrId: string;
@@ -304,8 +288,6 @@ export type EffectResultEvent =
   | OpenFileResultEvent
   | SetPruningSettingsResultEvent
   | SetToolResultPruningSettingsResultEvent
-  | SetProxySettingsResultEvent
-  | AddProxyProviderResultEvent
   | CloseSessionResultEvent
   | DuplicateSessionResultEvent;
 
@@ -483,12 +465,6 @@ export interface ToolResultPruningSettingsChangedEvent {
   toolResultPruningSettings: ToolResultPruningSettings;
 }
 
-/** Emitted when proxy settings change. */
-export interface ProxySettingsChangedEvent {
-  kind: 'ProxySettingsChanged';
-  proxySettings: ProxySettings;
-}
-
 /** Emitted when the workspace cwd changes. */
 export interface WorkspaceCwdChangedEvent {
   kind: 'WorkspaceCwdChanged';
@@ -550,13 +526,6 @@ export interface AvailableModelsChangedEvent {
 export interface PendingExtensionUIRequestsClearedEvent {
   kind: 'PendingExtensionUIRequestsCleared';
   sessionPath: string;
-}
-
-/** Emitted when analytics factors for a session change. */
-export interface AnalyticsFactorsChangedEvent {
-  kind: 'AnalyticsFactorsChanged';
-  sessionPath: string;
-  factors: SessionAnalyticsFactors | null;
 }
 
 /** Emitted when available extensions change. */
@@ -779,7 +748,6 @@ export type HostEvent =
   | BackendReadyWatchdogFiredEvent
   | PruningSettingsChangedEvent
   | ToolResultPruningSettingsChangedEvent
-  | ProxySettingsChangedEvent
   | WorkspaceCwdChangedEvent
   | TranscriptPageLoadedEvent
   | FileChangesUpdatedEvent
@@ -788,7 +756,6 @@ export type HostEvent =
   | AvailableModelsChangedEvent
   | ModelSettingsHydratedEvent
   | PendingExtensionUIRequestsClearedEvent
-  | AnalyticsFactorsChangedEvent
   | AvailableExtensionsChangedEvent
   | AssistantMessageErrorStampedEvent
   | ComposerInputsReplacedEvent

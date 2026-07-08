@@ -357,6 +357,16 @@ export interface RuntimePrefsSetParams {
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
   subagentDropTools?: string[];
+  /** Per-provider concurrency overrides. Keys are provider names; values are
+   *  objects with optional `maxConcurrentRequests`, `afterburnSeconds`,
+   *  `queueWaitSeconds`, `headerWaitSeconds`. Mirrored to the live
+   *  `ProviderGate` via `ProviderGate.reconfigure()`. */
+  providerConcurrency?: Record<string, {
+    maxConcurrentRequests?: number;
+    afterburnSeconds?: number;
+    queueWaitSeconds?: number;
+    headerWaitSeconds?: number;
+  }>;
 }
 
 export interface SettingsSetParams extends Partial<ModelSettings> {
@@ -458,6 +468,61 @@ function validateBooleanMap(
   return out;
 }
 
+/** Validate an optional `providerConcurrency` payload. Accepts `undefined`
+ *  (omitted) or an object whose keys are provider names and values are objects
+ *  with optional numeric fields (`maxConcurrentRequests`, `afterburnSeconds`,
+ *  `queueWaitSeconds`, `headerWaitSeconds`). Returns a normalized copy, or
+ *  `undefined` when omitted so the host can skip the reconfigure. */
+function validateOptionalProviderConcurrency(
+  method: string,
+  raw: unknown,
+): RuntimePrefsSetParams['providerConcurrency'] {
+  if (raw === undefined) return undefined;
+  if (!isObj(raw) || Array.isArray(raw)) {
+    fail(method, 'providerConcurrency must be an object when provided');
+  }
+  const src = raw as Record<string, unknown>;
+  const out: NonNullable<RuntimePrefsSetParams['providerConcurrency']> = {};
+  for (const [provider, overrides] of Object.entries(src)) {
+    if (overrides === undefined || overrides === null) continue;
+    if (!isObj(overrides) || Array.isArray(overrides)) {
+      fail(method, `providerConcurrency.${provider} must be an object when provided`);
+    }
+    const o = overrides as Record<string, unknown>;
+    const cleaned: NonNullable<RuntimePrefsSetParams['providerConcurrency']>[string] = {};
+    const maxConcurrent = o['maxConcurrentRequests'];
+    if (maxConcurrent !== undefined) {
+      if (typeof maxConcurrent !== 'number' || !Number.isFinite(maxConcurrent) || maxConcurrent < 1 || Math.floor(maxConcurrent) !== maxConcurrent) {
+        fail(method, `providerConcurrency.${provider}.maxConcurrentRequests must be a positive integer when provided`);
+      }
+      cleaned.maxConcurrentRequests = maxConcurrent;
+    }
+    const afterburn = o['afterburnSeconds'];
+    if (afterburn !== undefined) {
+      if (typeof afterburn !== 'number' || !Number.isFinite(afterburn) || afterburn < 0) {
+        fail(method, `providerConcurrency.${provider}.afterburnSeconds must be a non-negative number when provided`);
+      }
+      cleaned.afterburnSeconds = afterburn;
+    }
+    const queueWait = o['queueWaitSeconds'];
+    if (queueWait !== undefined) {
+      if (typeof queueWait !== 'number' || !Number.isFinite(queueWait) || queueWait < 0) {
+        fail(method, `providerConcurrency.${provider}.queueWaitSeconds must be a non-negative number when provided`);
+      }
+      cleaned.queueWaitSeconds = queueWait;
+    }
+    const headerWait = o['headerWaitSeconds'];
+    if (headerWait !== undefined) {
+      if (typeof headerWait !== 'number' || !Number.isFinite(headerWait) || headerWait < 0) {
+        fail(method, `providerConcurrency.${provider}.headerWaitSeconds must be a non-negative number when provided`);
+      }
+      cleaned.headerWaitSeconds = headerWait;
+    }
+    out[provider] = cleaned;
+  }
+  return out;
+}
+
 export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams {
   if (!isObj(params)) fail('runtimePrefs.set', 'expected an object');
   const providerToggles = validateBooleanMap(
@@ -490,7 +555,8 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashWarmupTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashWarmupTimeoutMs', (params as Record<string, unknown>)['bashWarmupTimeoutMs'], 0, 60000);
   const bashAcquireTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashAcquireTimeoutMs', (params as Record<string, unknown>)['bashAcquireTimeoutMs'], 0, 60000);
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashAcquireTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools };
+  const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
+  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashAcquireTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
 }
 
 export interface OpenTabsSetParams {

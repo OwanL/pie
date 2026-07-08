@@ -413,6 +413,7 @@ export class BackendClient implements vscode.Disposable {
       level = 'warn';
     } else if (
       trimmed.includes('warm_bash.stats')
+      || trimmed.includes('provider_gate.metrics')
       || trimmed.includes('backend-request')
       || trimmed.includes('backend-timing')
       || trimmed.includes('tool_execution_start')

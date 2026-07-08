@@ -192,6 +192,32 @@ test('setPrefs notifies the backend of toggle changes', async () => {
   assert.deepEqual((runtimePrefsSet.params as any).extensionToggles, { 'some-extension': true });
 });
 
+test('setPrefs mirrors providerConcurrency and subagentDropTools to the backend (no startup-restore drift)', async () => {
+  // Regression: the live setPrefs path previously hand-built its own
+  // runtimePrefs.set literal and was missing `subagentDropTools`, while the
+  // startup restore path was missing `providerConcurrency`. Both now share
+  // buildRuntimePrefsPayload, so a change to either field must reach the backend
+  // on the very first setPrefs after the user edits it (no restart needed).
+  const { service, backend } = makeHarness();
+
+  const requests: { method: string; params: unknown }[] = [];
+  const originalRequest = backend.request.bind(backend);
+  backend.request = async (method: string, params?: unknown) => {
+    requests.push({ method, params });
+    return originalRequest(method, params);
+  };
+
+  const providerConcurrency = { ollama: { maxConcurrentRequests: 7, afterburnSeconds: 12 } };
+  const subagentDropTools = ['ask_user', 'web_search'];
+  service.setPrefs({ providerConcurrency, subagentDropTools });
+  await flushMicrotasks();
+
+  const runtimePrefsSet = requests.find((r) => r.method === 'runtimePrefs.set');
+  assert.ok(runtimePrefsSet, 'expected runtimePrefs.set request');
+  assert.deepEqual((runtimePrefsSet.params as any).providerConcurrency, providerConcurrency);
+  assert.deepEqual((runtimePrefsSet.params as any).subagentDropTools, subagentDropTools);
+});
+
 // Restore the real module loader after all tests so later tests are unaffected.
 test.after(() => {
   uninstallVscodeMock?.();

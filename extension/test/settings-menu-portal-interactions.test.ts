@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../src/webview/panel/composer/settings-menu';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../src/shared/protocol';
 import type { ExtensionInfo, ModelInfo } from '../src/shared/protocol';
 
 let container: HTMLElement;
@@ -51,14 +51,12 @@ function mount() {
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
         toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-        proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: extensions,
         availableModels: models,
+        providerGateStats: EMPTY_PROVIDER_GATE_STATS,
         onSetPrefs: (p) => setPrefsCalls.push(p),
         onSetPruningSettings: (s) => setPruningCalls.push(s),
         onSetToolResultPruningSettings: () => undefined,
-        onSetProxySettings: () => undefined,
-        onAddProxyProvider: () => undefined,
       }),
       container,
     );

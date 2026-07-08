@@ -3,36 +3,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxySettings, ProxySettingsUpdate, ToolResultPruningSettings } from '../../../shared/protocol';
-import { mergeProxySettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker } from './model-list';
-
-/** Merge two partial proxy-settings updates into one, last-write-wins per
- *  gateway sub-object and per-provider-field. Used to coalesce every click in
- *  the Proxy tab (steppers, toggles, text commits) into a single update that
- *  is sent once the settings menu closes, instead of one restart-triggering
- *  RPC per click. */
-function mergeProxyUpdates(a: ProxySettingsUpdate, b: ProxySettingsUpdate): ProxySettingsUpdate {
-  const gateway = (a.gateway || b.gateway)
-    ? {
-        routerSettings: b.gateway?.routerSettings ?? a.gateway?.routerSettings,
-        litellmSettings: b.gateway?.litellmSettings ?? a.gateway?.litellmSettings,
-        generalSettings: b.gateway?.generalSettings ?? a.gateway?.generalSettings,
-      }
-    : undefined;
-  const providers = (a.providers || b.providers)
-    ? {
-        ...a.providers,
-        ...Object.fromEntries(
-          Object.entries(b.providers ?? {}).map(([name, partial]) => [
-            name,
-            { ...(a.providers?.[name] ?? {}), ...partial },
-          ]),
-        ),
-      }
-    : undefined;
-  return { gateway, providers };
-}
 
 import {
   computeKeepCatalog,
@@ -44,7 +16,6 @@ import {
   ChatPrefSections,
   ExtensionsSection,
   ProvidersSection,
-  ProxySection,
   SoundSection,
 } from './settings-menu-subcomponents';
 
@@ -74,26 +45,23 @@ export interface ComposerSettingsMenuProps {
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
-  proxySettings: ProxySettings;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
+  providerGateStats: ProviderGateStats;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
-  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
-  onAddProxyProvider: (input: import('../../../shared/protocol').ProxyProviderAddInput) => void;
 }
 
 /** The six settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'appearance' | 'extensions' | 'providers' | 'proxy';
+type SettingsTab = 'chat' | 'appearance' | 'extensions' | 'providers';
 
 const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'chat', label: 'Chat' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'extensions', label: 'Extensions' },
   { id: 'providers', label: 'Providers' },
-  { id: 'proxy', label: 'Proxy' },
 ];
 
 const TAB_LABEL: Record<SettingsTab, string> = {
@@ -101,7 +69,6 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   appearance: 'Appearance',
   extensions: 'Extensions',
   providers: 'Providers',
-  proxy: 'Proxy',
 };
 
 /** Fixed height for the settings menu, capped to the available vertical space
@@ -159,14 +126,6 @@ function TabIcon({ id }: { id: SettingsTab }) {
           <circle cx="5" cy="11" r="0.6" fill="currentColor" stroke="none" />
         </svg>
       );
-    case 'proxy':
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="6" />
-          <path d="M2 8h12" />
-          <path d="M8 2c2.2 2.2 2.2 9.8 0 12M8 2c-2.2 2.2-2.2 9.8 0 12" />
-        </svg>
-      );
   }
 }
 
@@ -191,6 +150,9 @@ const APPEARANCE_SETTING_LABELS = [
   'Sans-serif font', 'Monospace font',
 ];
 const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Acquire timeout', 'Fast path'];
+const PROVIDER_CONCURRENCY_LABELS = [
+  'Max concurrent', 'Afterburn', 'Queue wait', 'Header wait',
+];
 const SKILL_PRUNER_SETTING_LABELS = [
   'Pruning mode', 'Pruning prepass model', 'Pruning thinking level',
   'Pruning skill limit', 'Pruning tool limit', 'Omitted skills (never pruned)',
@@ -228,7 +190,7 @@ interface SearchToggleEntry {
 
 type SearchEntry = SearchJumpEntry | SearchToggleEntry;
 
-export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, proxySettings, availableExtensions, availableModels, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings, onSetProxySettings, onAddProxyProvider }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -263,31 +225,11 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const tablistRef = useRef<HTMLDivElement>(null);
 
-  // Proxy settings edits (steppers, toggles, text commits) are batched
-  // locally instead of firing one restart-triggering RPC per click: each edit
-  // in the Proxy tab is optimistically merged into `pendingProxyUpdate` (and
-  // reflected in `draftProxySettings` for display), and the single coalesced
-  // update is only sent to the host — which regenerates the LiteLLM config and
-  // restarts the proxy once — when the settings menu closes.
-  const [pendingProxyUpdate, setPendingProxyUpdate] = useState<ProxySettingsUpdate | null>(null);
-  const draftProxySettings = useMemo(
-    () => (pendingProxyUpdate ? mergeProxySettings(proxySettings, pendingProxyUpdate) : proxySettings),
-    [proxySettings, pendingProxyUpdate],
-  );
-  const queueProxySettings = useCallback((update: ProxySettingsUpdate) => {
-    setPendingProxyUpdate((prev) => (prev ? mergeProxyUpdates(prev, update) : update));
-  }, []);
-  const flushProxyUpdate = useCallback(() => {
-    setPendingProxyUpdate((prev) => {
-      if (prev) onSetProxySettings(prev);
-      return null;
-    });
-  }, [onSetProxySettings]);
+  // Close the menu and refocus the trigger button.
   const closeMenu = useCallback((refocus?: boolean) => {
-    flushProxyUpdate();
     setOpen(false);
     if (refocus) triggerRef.current?.focus();
-  }, [flushProxyUpdate]);
+  }, []);
 
   // Extract unique providers from available models, sorted alphabetically.
   const providers = useMemo(
@@ -354,22 +296,11 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       }
     };
     if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
+    if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
     if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
     if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
     if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
     if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'extensions', 'tool-result-pruner');
-    if (visibleTabs.some((t) => t.id === 'proxy')) {
-      pushSettings(['Proxy retries', 'Proxy timeout'], 'proxy');
-      for (const name of Object.keys(proxySettings.providers)) {
-        entries.push({
-          type: 'jump',
-          id: `set:proxy:upstream:${name}`,
-          label: `Proxy ${name} upstream`,
-          haystack: `proxy ${name} upstream api base api key litellm provider concurrent`.toLowerCase(),
-          tab: 'proxy',
-        });
-      }
-    }
 
     // Chat prefs (transcript / alerts / diagnostics).
     for (const section of CHAT_PREF_MENU_SECTIONS) {
@@ -459,27 +390,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
       });
     }
 
-    // Proxy boolean toggles.
-    const { gateway } = draftProxySettings;
-    entries.push({
-      type: 'toggle',
-      id: 'proxy:retryAfter',
-      label: 'Retry after header',
-      haystack: 'proxy retry after header'.toLowerCase(),
-      checked: !!gateway.routerSettings.retryAfter,
-      apply: () => queueProxySettings({ gateway: { routerSettings: { ...gateway.routerSettings, retryAfter: !gateway.routerSettings.retryAfter } } }),
-    });
-    entries.push({
-      type: 'toggle',
-      id: 'proxy:dropParams',
-      label: 'Drop unknown params',
-      haystack: 'proxy drop unknown params'.toLowerCase(),
-      checked: !!gateway.litellmSettings.dropParams,
-      apply: () => queueProxySettings({ gateway: { litellmSettings: { dropParams: !gateway.litellmSettings.dropParams } } }),
-    });
-
     return entries;
-  }, [visibleTabs, availableExtensions, providers, prefs, draftProxySettings, onSetPrefs, queueProxySettings]);
+  }, [visibleTabs, availableExtensions, providers, prefs, onSetPrefs]);
 
   const q = query.trim().toLowerCase();
   const searchResults = useMemo(() => {
@@ -754,10 +666,7 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                   />
                 )}
                 {effectiveTab === 'providers' && (
-                  <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} />
-                )}
-                {effectiveTab === 'proxy' && (
-                  <ProxySection proxySettings={draftProxySettings} onSetProxySettings={queueProxySettings} onAddProxyProvider={onAddProxyProvider} />
+                  <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
                 )}
               </>
             )}

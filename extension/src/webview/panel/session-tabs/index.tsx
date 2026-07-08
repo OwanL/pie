@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ActiveRunSummary, ExtensionUIRequestPayload, ProxySessionStatus, SessionSummary } from '../../../shared/protocol';
+import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionSummary } from '../../../shared/protocol';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
 import { SessionTab } from './session-tab';
@@ -23,7 +23,6 @@ interface SessionTabsProps {
   hideConnectingWheel?: boolean;
   pendingExtensionUIRequestsBySession: Record<string, Record<string, import('../../../shared/protocol').ExtensionUIRequestPayload>>;
   runSummariesBySession: Record<string, ActiveRunSummary | null>;
-  proxyStatusBySession?: Record<string, ProxySessionStatus>;
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
   onMove: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
@@ -58,7 +57,6 @@ export function SessionTabs({
   hideConnectingWheel,
   pendingExtensionUIRequestsBySession,
   runSummariesBySession,
-  proxyStatusBySession,
   onSelect,
   onClose,
   onMove,
@@ -317,7 +315,6 @@ export function SessionTabs({
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
-            proxySessionStatus={proxyStatusBySession?.[tabPath] ?? null}
             activeRunSummary={tabPath === effectiveActivePath ? activeRunSummary : null}
             isPinned={pinnedPathSet.has(tabPath)}
             hasDeferredTriggers={deferredPathSet.has(tabPath)}

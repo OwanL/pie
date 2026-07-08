@@ -51,12 +51,16 @@ export interface EditRpcEffect extends EffectBase {
   sessionPath: string;
   messageId: string;
   text: string;
+  /** Composer inputs (file refs, images) sent alongside the edited message. */
+  inputs: ComposerInput[];
   /** Pre-generated local ID for optimistic message reconciliation. */
   localId: string;
   /** Composed text for the optimistic replacement message. Carried through to the
    *  EffectRunner so a late `PreflightSuperseded` retraction can re-insert the exact
    *  optimistic user message that `handleEdit` inserted. */
   composedText?: string;
+  /** User content parts for rich rendering of the optimistic replacement message. */
+  userParts?: UserContentPart[];
 }
 
 export interface InterruptRpcEffect extends EffectBase {
@@ -242,16 +246,6 @@ export interface SetToolResultPruningSettingsEffect extends EffectBase {
   settings: Partial<import('../../shared/protocol').ToolResultPruningSettings>;
 }
 
-export interface SetProxySettingsEffect extends EffectBase {
-  kind: 'SetProxySettings';
-  settings: import('../../shared/protocol').ProxySettingsUpdate;
-}
-
-export interface AddProxyProviderEffect extends EffectBase {
-  kind: 'AddProxyProvider';
-  input: import('../../shared/protocol').ProxyProviderAddInput;
-}
-
 export interface CloseSessionEffect extends EffectBase {
   kind: 'CloseSession';
   sessionPath: string;
@@ -309,8 +303,6 @@ export type Effect =
   | OpenFileEffect
   | SetPruningSettingsEffect
   | SetToolResultPruningSettingsEffect
-  | SetProxySettingsEffect
-  | AddProxyProviderEffect
   | CloseSessionEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect

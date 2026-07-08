@@ -176,21 +176,21 @@ test('Brief E (b): interrupt on a streaming (post-commit) turn does not roll bac
 });
 
 // ─── (c) Rapid multi-prompt: a second send while a turn is in-flight is now
-//        QUEUED as a follow-up (steering) — the backend acks { queued: true }
+//        QUEUED as a steering injection — the backend acks { queued: true }
 //        instead of rejecting with REQUEST_IN_PROGRESS. The effect-runner
 //        surfaces it as SendResult{ok:true, queued:true}, clears the send-timer
 //        (a queued send has no commit point), and emits no requestId.
 //        STATE_CONTRACT "Execution Ordering" still holds (serialization, not
 //        deferral — the second send runs after the first settles in the
 //        per-session queue). ────────────────────────────────────────────────
-test('Brief E (c): a second send while a turn is in-flight is queued as a follow-up (steering)', async () => {
+test('Brief E (c): a second send while a turn is in-flight is queued as a steering injection', async () => {
   const timers = new FakeTimerSink();
   let sendCount = 0;
   const { deps, events } = makeEffectRunnerDeps({
     timer: timers,
     queues: makeSerializingQueues(),
     // First message.send early-acks with a requestId; the second acks
-    // { queued: true } (the backend queued it as a follow-up).
+    // { queued: true } (the backend queued it as a steering injection).
     requestImpl: async (method: string) => {
       if (method === 'message.send') {
         sendCount += 1;

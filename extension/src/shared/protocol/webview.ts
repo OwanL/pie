@@ -1,7 +1,7 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
 import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
-import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, ProxySettings, ProxySettingsUpdate, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
+import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
@@ -42,22 +42,6 @@ export interface StateAppliedPayload {
   systemPromptCount: number;
   domTranscriptLoaderPresent: boolean;
   domTabsConnectingPresent: boolean;
-}
-
-export interface ProxySessionStatus {
-  provider: string;
-  state: 'active' | 'queued';
-  activeSessions: number;
-  queuedSessions: number;
-  maxConcurrentRequests: number;
-}
-
-export interface ProxyProviderMetrics {
-  provider: string;
-  modelInfoId: string;
-  activeRequests: number;
-  queuedRequests: number;
-  maxConcurrentRequests: number;
 }
 
 /** The full view state sent from the extension host to the webview. */
@@ -149,17 +133,6 @@ export interface ViewState {
   pruningSettings: PruningSettings;
   /** Current tool-result pruning configuration from settings.json. */
   toolResultPruningSettings: ToolResultPruningSettings;
-  /** Current LiteLLM proxy configuration from settings.json (`proxy` block). */
-  proxySettings: ProxySettings;
-  /** Exact live proxy-side concurrency metrics, polled from the local proxy's
-   *  metrics endpoint. One entry per provider currently using or waiting on
-   *  slots. */
-  proxyMetrics?: ProxyProviderMetrics[];
-  /** Host-derived per-session proxy activity/queueing status for running
-   *  sessions on proxied providers. A session is `queued` when it appears to
-   *  be parked waiting for a provider concurrency slot rather than actively
-   *  occupying one. */
-  proxyStatusBySession?: Record<string, ProxySessionStatus>;
   /** Active pruning choices surfaced to the composer/settings UI. */
   pruningCatalog: PruningCatalog;
   /** Pruning prepass phase for the active session (Brief F). Driven host-side
@@ -267,7 +240,7 @@ export type WebviewToHostMessage =
        * host-confirmed message. */
       localId?: string;
     }
-  | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; localId?: string }
+  | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; inputs?: ComposerInput[]; localId?: string }
   | { type: 'interrupt'; sessionPath: string }
   | { type: 'clearQueue'; sessionPath: string }
   | { type: 'newSession' }
@@ -291,8 +264,6 @@ export type WebviewToHostMessage =
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
   | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }
-  | { type: 'setProxySettings'; settings: ProxySettingsUpdate }
-  | { type: 'addProxyProvider'; input: import('./settings').ProxyProviderAddInput }
   | { type: 'startEdit'; sessionPath: string; messageId: string }
   | { type: 'cancelEdit'; sessionPath: string }
   | { type: 'dismissNotice' }

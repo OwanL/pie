@@ -132,6 +132,25 @@ export interface NestedAllowedBuckets {
 /** All buckets allowed for nested subagents — the default before the user restricts any tier. */
 export const ALL_NESTED_BUCKETS_ALLOWED: NestedAllowedBuckets = { small: true, medium: true, frontier: true };
 
+/** Per-provider concurrency overrides, user-configurable in the Providers tab.
+ *  Each field is optional — `undefined` means "use the models.json default".
+ *  When the user changes any field, the host reconfigures the live
+ *  `ProviderGate` pool for that provider (no restart needed). */
+export interface ProviderConcurrencyOverrides {
+  /** Max concurrent in-flight LLM requests to this provider. */
+  maxConcurrentRequests?: number;
+  /** Per-session sticky-slot window in seconds (0 = disabled). */
+  afterburnSeconds?: number;
+  /** Max seconds a queued request waits for a slot before failing. 0 = unbounded. */
+  queueWaitSeconds?: number;
+  /** Max seconds to wait for upstream response headers before aborting. 0 = gate default. */
+  headerWaitSeconds?: number;
+}
+
+/** Per-provider concurrency overrides keyed by provider name. A provider absent
+ *  from this map uses its models.json `concurrency` defaults. */
+export type ProviderConcurrencyMap = Record<string, ProviderConcurrencyOverrides>;
+
 export interface ChatPrefs {
   autoExpandReasoning: boolean;
   autoExpandToolCalls: boolean;
@@ -262,6 +281,11 @@ export interface ChatPrefs {
   extensionToggles: Record<string, boolean>;
   /** Per-provider enabled/disabled toggles. Keys are provider names. */
   providerToggles: Record<string, boolean>;
+  /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
+   *  queueWaitSeconds, headerWaitSeconds). A provider absent from this map uses
+   *  its models.json `concurrency` defaults. Mirrored to the backend via
+   *  `runtimePrefs.set` → `ProviderGate.reconfigure()`. */
+  providerConcurrency: ProviderConcurrencyMap;
   /** Content rows reserved in the live activity-tail preview (the streaming
    *  reasoning/reply text or a running tool/subagent's output shown at the
    *  bottom of a turn). Tools/subagents add one header row on top. Default 2
@@ -368,6 +392,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   uiDensity: 'comfortable',
   extensionToggles: {},
   providerToggles: {},
+  providerConcurrency: {},
   activityTailLines: 2,
   uiMessageRailSize: 20,
   hideStatusStrip: false,
@@ -399,6 +424,7 @@ export interface ToolResultPruningRuleToggles {
   /** Lossy-recoverable rules (only run under the `default` profile). */
   lsLong: boolean;
   gitLog: boolean;
+  grepGroup: boolean;
 }
 
 export interface ToolResultPruningSettings {
@@ -415,7 +441,7 @@ export interface ToolResultPruningSettings {
 export const DEFAULT_TOOL_RESULT_PRUNING_SETTINGS: ToolResultPruningSettings = {
   enabled: true,
   profile: 'default',
-  rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true },
+  rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true },
   tools: null,
 };
 
@@ -452,6 +478,7 @@ export function mergeToolResultPruningSettings(
         jsonMinify: updates.rules.jsonMinify !== undefined ? updates.rules.jsonMinify : current.rules.jsonMinify,
         lsLong: updates.rules.lsLong !== undefined ? updates.rules.lsLong : current.rules.lsLong,
         gitLog: updates.rules.gitLog !== undefined ? updates.rules.gitLog : current.rules.gitLog,
+        grepGroup: updates.rules.grepGroup !== undefined ? updates.rules.grepGroup : current.rules.grepGroup,
       };
   // `tools`: preserve the current value/reference when omitted; copy arrays so
   // the reducer never aliases the caller's array; pass `null` through as a real
@@ -503,223 +530,6 @@ export function mergePruningSettings(
   };
 }
 
-export interface ProxyGatewaySettings {
-  routerSettings: {
-    numRetries: number;
-    retryAfter: boolean;
-    timeout: number;
-    /** Per-exception retry overrides, emitted verbatim to LiteLLM's
-     *  `router_settings.retry_policy`. Keys are LiteLLM's PascalCase field
-     *  names (e.g. `RateLimitErrorRetries`). `RateLimitErrorRetries: 0`
-     *  stops LiteLLM from retrying upstream 429/account-suspended responses —
-     *  retrying a suspended account deepens the pause (see the account-pause
-     *  circuit-breaker in proxy/pie_proxy_runtime.py). */
-    retryPolicy?: Record<string, number>;
-  };
-  litellmSettings: { dropParams: boolean };
-  generalSettings: { masterKeyEnv: string };
-}
-
-export interface ProxyProviderUpstream {
-  apiBase: string;
-  apiKeyEnv: string;
-  litellmProvider: string;
-  maxConcurrentRequests: number;
-  /** Per-session sticky-slot afterburn window in seconds (0 = disabled). When
-   *  a session's LLM call finishes, the concurrency slot it held stays reserved
-   *  for THAT session for this many seconds before being released to queued
-   *  sessions — a follow-up from the same session (e.g. a sub-agent right after
-   *  a short tool call) reuses its reserved slot, so a bursty session keeps its
-   *  turn instead of interleaving with waiting sessions. Per-slot, so it
-   *  generalises to maxConcurrentRequests > 1. Optional: absent/0 = disabled.
-   *  The proxy reads this from settings.json directly (see proxy/.env.example
-   *  PIE_PROXY_AFTERBURN_S for the global env default). */
-  afterburnSeconds?: number;
-  litellmModelInfoId: string;
-  modelListOrder: string[];
-  alias: Record<string, string>;
-}
-
-/** Input for the "Add Provider" form in the proxy settings UI. The host owns
- *  the deterministic wiring: it derives `apiKeyEnv` from `name` (`<NAME>_API_KEY`),
- *  stores the `apiKey` safely in `proxy/.env` (gitignored) + `process.env`,
- *  writes a `proxy.providers.<name>` entry to settings.json (with an empty
- *  `modelListOrder` and a `<name>-shared` model-info id), runs `sync-models`,
- *  and restarts the proxy. The provider's model CATALOG (`models.yaml`
- *  `providers.<name>` + `profileOrder` + populating `modelListOrder`) is added
- *  separately by the `add-provider` skill — until then the provider is
- *  "pending" (routes nothing, sync-models tolerates it).
- *
- *  `apiKey` is the actual secret (never persisted to settings.json/models.yaml);
- *  `name` is the provider key used across proxy.providers + models.yaml. */
-export interface ProxyProviderAddInput {
-  /** Provider key (lowercase, no spaces; e.g. `openrouter`). Used as the
-   *  `proxy.providers.<name>` + `models.yaml providers.<name>` key. */
-  name: string;
-  /** Upstream API base URL (e.g. `https://openrouter.ai/api/v1`). */
-  apiBase: string;
-  /** Upstream API key (the secret). Stored to `proxy/.env` as `<NAME>_API_KEY`,
-   *  never written to settings.json/models.yaml. */
-  apiKey: string;
-  /** LiteLLM provider type for routing (e.g. `openai` for OpenAI-compatible
-   *  endpoints, `anthropic`, `azure`, ...). */
-  litellmProvider: string;
-  /** Per-provider concurrency cap (LiteLLM `max_parallel_requests`). Default 4. */
-  maxConcurrentRequests?: number;
-}
-
-/** Default per-provider concurrency cap when none is supplied. Matches the
- *  umans upstream (4 concurrent active sessions). */
-export const DEFAULT_PROXY_PROVIDER_MAX_CONCURRENT = 4;
-
-/** Derive an `apiKeyEnv` var name from a provider name: uppercase, non-
- *  alphanumerics → `_`, suffixed with `_API_KEY` (e.g. `openrouter` →
- *  `OPENROUTER_API_KEY`, `my-provider` → `MY_PROVIDER_API_KEY`). Returns null
- *  when the name has no usable alphanumerics. Pure (no side effects) so the
- *  reducer and the host service can share it and stay in sync. */
-export function deriveApiKeyEnv(providerName: string): string | null {
-  const cleaned = providerName
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!cleaned) return null;
-  return `${cleaned}_API_KEY`;
-}
-
-/** Build the full `ProxyProviderUpstream` entry for a newly-added provider.
- *  Used by BOTH the reducer (optimistic apply) and the host service (persist),
- *  so optimistic state always matches persisted state — mirroring the
- *  `mergeProxySettings` contract for `SetProxySettings`. The entry starts
- *  "pending": `modelListOrder` is empty and `litellmModelInfoId` is
- *  `<name>-shared` (account-wide semaphore, like umans). The add-provider skill
- *  populates `modelListOrder` + the models.yaml catalog separately. */
-export function buildProxyProviderEntry(input: ProxyProviderAddInput): ProxyProviderUpstream | null {
-  const name = input.name.trim().toLowerCase();
-  if (!name) return null;
-  const apiKeyEnv = deriveApiKeyEnv(name);
-  if (!apiKeyEnv) return null;
-  return {
-    apiBase: input.apiBase.trim(),
-    apiKeyEnv,
-    litellmProvider: input.litellmProvider.trim(),
-    maxConcurrentRequests: input.maxConcurrentRequests && input.maxConcurrentRequests >= 1
-      ? Math.floor(input.maxConcurrentRequests)
-      : DEFAULT_PROXY_PROVIDER_MAX_CONCURRENT,
-    litellmModelInfoId: `${name}-shared`,
-    modelListOrder: [],
-    alias: {},
-  };
-}
-
-export interface ProxySettings {
-  gateway: ProxyGatewaySettings;
-  providers: Record<string, ProxyProviderUpstream>;
-}
-
-/** Partial-update shape for proxy settings. Gateway sub-objects are replaced
- *  wholesale when present (each is a small flat object); provider entries are
- *  merged per-provider, so a single provider field can be patched without
- *  resending the whole entry. Used by {@link mergeProxySettings}, the
- *  SetProxySettings command/effect, the webview message, and the host service. */
-export type ProxySettingsUpdate = {
-  gateway?: {
-    routerSettings?: ProxyGatewaySettings['routerSettings'];
-    litellmSettings?: ProxyGatewaySettings['litellmSettings'];
-    generalSettings?: ProxyGatewaySettings['generalSettings'];
-  };
-  providers?: Record<string, Partial<ProxyProviderUpstream>>;
-};
-
-export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
-  gateway: {
-    routerSettings: {
-      numRetries: 2,
-      retryAfter: true,
-      timeout: 600,
-      // Stop LiteLLM retrying upstream 429 / account-suspended responses.
-      // Retrying a paused account deepens the pause; the proxy-level
-      // circuit-breaker short-circuits subsequent requests instead.
-      retryPolicy: { RateLimitErrorRetries: 0 },
-    },
-    litellmSettings: { dropParams: true },
-    // Pie-managed local proxy gate (auto-generated + persisted, see
-    // proxy-master-key.ts). NOT a provider key — decoupled so any number of
-    // proxied providers each with their own upstream key auth to the proxy.
-    generalSettings: { masterKeyEnv: 'PIE_PROXY_MASTER_KEY' },
-  },
-  // No providers are hardcoded — providers are user-configured in settings.json
-  // `proxy.providers` (one entry per proxied provider). Adding a provider is a
-  // config-only operation (settings.json + models.yaml), no code change.
-  providers: {},
-};
-
-/** Deep-merge a partial proxy-settings update into the current settings.
- *
- *  Gateway sub-fields (`routerSettings` / `litellmSettings` /
- *  `generalSettings`) are replaced wholesale when present in `updates` (each
- *  is a small flat object edited field-by-field from the UI, so a partial
- *  gateway update is itself a complete sub-object). Per-provider entries are
- *  merged individually: a partial provider update deep-merges into the
- *  existing provider entry; `modelListOrder` (replaced + copied) and `alias`
- *  (replaced + shallow-copied) are replaced when present. This must produce
- *  the same shape as the disk-write merge in `writeProxySettings` so the
- *  reducer's optimistic state matches the persisted state. */
-export function mergeProxySettings(
-  current: ProxySettings,
-  updates: ProxySettingsUpdate,
-): ProxySettings {
-  const gateway: ProxyGatewaySettings = updates.gateway
-    ? {
-        routerSettings: updates.gateway.routerSettings ?? current.gateway.routerSettings,
-        litellmSettings: updates.gateway.litellmSettings ?? current.gateway.litellmSettings,
-        generalSettings: updates.gateway.generalSettings ?? current.gateway.generalSettings,
-      }
-    : current.gateway;
-
-  const providers: Record<string, ProxyProviderUpstream> = { ...current.providers };
-  if (updates.providers) {
-    for (const [name, partial] of Object.entries(updates.providers)) {
-      if (!partial) continue;
-      const base = providers[name];
-      if (!base) {
-        // New provider entry: keep only valid fields, fall back to defaults
-        // for any missing required field so ArchState stays well-typed.
-        const entry: ProxyProviderUpstream = {
-          apiBase: partial.apiBase ?? '',
-          apiKeyEnv: partial.apiKeyEnv ?? '',
-          litellmProvider: partial.litellmProvider ?? '',
-          maxConcurrentRequests: partial.maxConcurrentRequests ?? 1,
-          litellmModelInfoId: partial.litellmModelInfoId ?? '',
-          modelListOrder: partial.modelListOrder ? [...partial.modelListOrder] : [],
-          alias: partial.alias ? { ...partial.alias } : {},
-        };
-        // afterburnSeconds is optional — only surface the key when the update
-        // actually carries it, so a present-undefined key never diverges from
-        // an absent one under deepStrictEqual (matches coerceProvider).
-        if (partial.afterburnSeconds !== undefined) {
-          entry.afterburnSeconds = partial.afterburnSeconds;
-        }
-        providers[name] = entry;
-        continue;
-      }
-      const merged: ProxyProviderUpstream = {
-        apiBase: partial.apiBase !== undefined ? partial.apiBase : base.apiBase,
-        apiKeyEnv: partial.apiKeyEnv !== undefined ? partial.apiKeyEnv : base.apiKeyEnv,
-        litellmProvider: partial.litellmProvider !== undefined ? partial.litellmProvider : base.litellmProvider,
-        maxConcurrentRequests: partial.maxConcurrentRequests !== undefined ? partial.maxConcurrentRequests : base.maxConcurrentRequests,
-        litellmModelInfoId: partial.litellmModelInfoId !== undefined ? partial.litellmModelInfoId : base.litellmModelInfoId,
-        modelListOrder: partial.modelListOrder !== undefined ? [...partial.modelListOrder] : base.modelListOrder,
-        alias: partial.alias !== undefined ? { ...partial.alias } : base.alias,
-      };
-      const afterburn = partial.afterburnSeconds !== undefined ? partial.afterburnSeconds : base.afterburnSeconds;
-      if (afterburn !== undefined) merged.afterburnSeconds = afterburn;
-      providers[name] = merged;
-    }
-  }
-
-  return { gateway, providers };
-}
 
 export const EMPTY_TRANSCRIPT_WINDOW: TranscriptWindow = {
   totalCount: 0,
@@ -782,6 +592,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
       ...DEFAULT_CHAT_PREFS.providerToggles,
       ...(prefs?.providerToggles ?? {}),
     },
+    providerConcurrency: normalizeProviderConcurrency(prefs?.providerConcurrency),
     subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
     subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
     subagentDropTools: normalizeStringArray(prefs?.subagentDropTools),
@@ -790,6 +601,77 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
       ?? prefs?.autoExpandToolCalls
       ?? DEFAULT_CHAT_PREFS.autoExpandSubagentCalls,
   };
+}
+
+/**
+ * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
+ * Shared between the live `setPrefs` path and startup restore so a pref field
+ * is never mirrored on one path but missing on the other.
+ */
+export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
+  providerToggles: Record<string, boolean>;
+  extensionToggles: Record<string, boolean>;
+  subagentAlwaysParentModel?: boolean;
+  subagentMaxDepth?: number;
+  subagentMaxTreeSessions?: number;
+  subagentMaxInflight?: number;
+  subagentMaxConcurrency?: number;
+  subagentMaxParallelTasks?: number;
+  bashWarmPoolSize?: number;
+  bashFastPath?: boolean;
+  bashShellPath?: string;
+  bashWarmupTimeoutMs?: number;
+  bashAcquireTimeoutMs?: number;
+  bashDefaultTimeout?: number;
+  subagentBuckets?: SubagentBuckets;
+  subagentNestedAllowedBuckets?: NestedAllowedBuckets;
+  subagentDropTools?: string[];
+  providerConcurrency?: ProviderConcurrencyMap;
+} {
+  return {
+    providerToggles: prefs.providerToggles,
+    extensionToggles: prefs.extensionToggles,
+    subagentAlwaysParentModel: prefs.subagentAlwaysParentModel,
+    subagentMaxDepth: prefs.subagentMaxDepth,
+    subagentMaxTreeSessions: prefs.subagentMaxTreeSessions,
+    subagentMaxInflight: prefs.subagentMaxInflight,
+    subagentMaxConcurrency: prefs.subagentMaxConcurrency,
+    subagentMaxParallelTasks: prefs.subagentMaxParallelTasks,
+    bashWarmPoolSize: prefs.bashWarmPoolSize,
+    bashFastPath: prefs.bashFastPath,
+    bashShellPath: prefs.bashShellPath,
+    bashWarmupTimeoutMs: prefs.bashWarmupTimeoutMs,
+    bashAcquireTimeoutMs: prefs.bashAcquireTimeoutMs,
+    bashDefaultTimeout: prefs.bashDefaultTimeout,
+    subagentBuckets: prefs.subagentBuckets,
+    subagentNestedAllowedBuckets: prefs.subagentNestedAllowedBuckets,
+    subagentDropTools: prefs.subagentDropTools,
+    providerConcurrency: prefs.providerConcurrency,
+  };
+}
+
+/** Normalize a `providerConcurrency` map: accept undefined or an object whose
+ *  values are objects with optional numeric fields. Drops non-finite values
+ *  and non-object entries. Returns a fresh map. */
+export function normalizeProviderConcurrency(value: unknown): ProviderConcurrencyMap {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const src = value as Record<string, unknown>;
+  const out: ProviderConcurrencyMap = {};
+  for (const [provider, overrides] of Object.entries(src)) {
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) continue;
+    const o = overrides as Record<string, unknown>;
+    const cleaned: ProviderConcurrencyOverrides = {};
+    let hasAny = false;
+    for (const key of ['maxConcurrentRequests', 'afterburnSeconds', 'queueWaitSeconds', 'headerWaitSeconds'] as const) {
+      const v = o[key];
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
+        cleaned[key] = v;
+        hasAny = true;
+      }
+    }
+    if (hasAny) out[provider] = cleaned;
+  }
+  return out;
 }
 
 /** Normalize a user-configured string-array pref: accept undefined/arrays of
@@ -801,4 +683,3 @@ export function normalizeStringArray(value: unknown): string[] {
 }
 
 // ─── Extension UI types ──────────────────────────────────────────────────────
-

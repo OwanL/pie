@@ -154,7 +154,7 @@ function mergeAssistantErrorDetail(
 
 /** Best-effort extraction of plain text from an injected queued user message's
  *  content. The host promotes 'queued' transcript messages by FIFO order (the
- *  SDK drains the follow-up queue one at a time in enqueue order), so this text
+ *  SDK drains the steering queue one at a time in enqueue order), so this text
  *  is for observability only — not matching — and may differ from what the user
  *  typed if the SDK expanded skill/template commands. */
 function extractUserMessageText(message: { content?: unknown }): string {
@@ -208,17 +208,17 @@ export function handleSdkSessionEvent(
     }
 
     case 'message_start': {
-      // Steering (FollowUp): the agent loop emits `message_start` with
-      // role 'user' when it injects a queued follow-up message into a turn.
-      // Forward it as `message.queuedDelivered` so the host promotes its
+      // Steering: the agent loop emits `message_start` with role 'user'
+      // when it injects a queued steering message into the current turn
+      // (delivered after the in-flight tool calls finish, before the next LLM
+      // call). Forward it as `message.queuedDelivered` so the host promotes its
       // optimistic 'queued' transcript message to 'completed'. This fires
       // within the same agent run (context.activeRequest is still the original
-      // send's request); the subsequent assistant `message_start` for this
-      // follow-up turn appends a new assistant message under the same
-      // requestId, reusing the existing streaming path. The normal (non-queued)
-      // user prompt does NOT emit a user-role message_start — the host inserts
-      // that optimistically — so this branch only fires for injected queued
-      // messages.
+      // send's request); the subsequent assistant `message_start` for this turn
+      // appends a new assistant message under the same requestId, reusing the
+      // existing streaming path. The normal (non-queued) user prompt does NOT
+      // emit a user-role message_start — the host inserts that optimistically
+      // — so this branch only fires for injected queued messages.
       if (event.message?.role === 'user') {
         deps.emit('message.queuedDelivered', {
           sessionPath: context.sessionPath,
@@ -570,6 +570,32 @@ export function handleSdkSessionEvent(
       return;
     }
 
+    case 'compaction_start': {
+      // Auto/manual compaction is a billable LLM call the SDK runs AFTER
+      // `agent_end` (in `_handlePostAgentRun`) — by which point `agent_end`
+      // already emitted busy=false (Stop button gone) and cleared
+      // `activeRequest`. Without re-arming busy here, the session reads idle
+      // while compaction still bills ("appears stopped but burning money") and
+      // cannot be interrupted. Re-arm running so the Stop button stays
+      // available; `activeRequest` is intentionally NOT re-armed (compaction
+      // emits no message_start/message_end, which require it). `compaction_end`
+      // (or a continuation turn's `agent_start`) restores idle.
+      //
+      // `session_finished` deferred triggers are unaffected: they already
+      // fired at `agent_end`'s busy=false; the `compaction_end` re-fire is a
+      // no-op (`DeferredTriggerRegistry.fire` is idempotent once consumed).
+      deps.emitBusyChanged(context, true);
+      return;
+    }
+    case 'compaction_end': {
+      // Compaction finished (normally, or aborted by an interrupt). If the SDK
+      // continues with another turn (overflow → retry), `agent_start` re-arms
+      // busy=true; otherwise the run is done and this leaves the session idle.
+      // Idempotent with the `agent_end` busy=false clear and the interrupt
+      // handler's `.finally`.
+      deps.emitBusyChanged(context, false);
+      return;
+    }
     case 'auto_retry_start': {
       if (context.activeRequest) {
         context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.errorMessage)

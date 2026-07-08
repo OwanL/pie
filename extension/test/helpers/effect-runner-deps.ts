@@ -160,8 +160,6 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async closeSession() {},
     async setPruningSettings() {},
     async setToolResultPruningSettings() {},
-    async setProxySettings() {},
-    async addProxyProvider() {},
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },

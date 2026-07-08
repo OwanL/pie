@@ -1,5 +1,5 @@
 /**
- * Steering (FollowUp) — send a message while a turn is running.
+ * Steering — send a message while a turn is running.
  *
  * The reducer's `handleSend` busy branch (`runningSessionPaths` already includes
  * the session) inserts an optimistic user message with status 'queued', records
@@ -7,12 +7,13 @@
  * session to `runningSessionPaths` (it is already running its original turn).
  * `SendResult{ok:true, queued:true}` promotes the op to `pending.promoted`
  * (retained for rollback-until-delivery) and keeps the message 'queued' — no
- * prepass chip, no `requestIdToLocalId` (a followUp has no requestId). When the
- * agent loop injects the queued message, `QueuedDelivered` promotes the earliest
- * 'queued' message to 'completed' and drops the promoted snapshot. `ClearQueue`
- * and `InterruptResult{ok:true}` both remove 'queued' messages + drop the
- * snapshots. A pre-ack `SendResult{ok:false}` rolls back the 'queued' message
- * WITHOUT clearing `runningSessionPaths` (the original turn is still running).
+ * prepass chip, no `requestIdToLocalId` (a steering injection has no requestId).
+ * When the agent loop injects the queued message into the current turn, `QueuedDelivered`
+ * promotes the earliest 'queued' message to 'completed' and drops the promoted
+ * snapshot. `ClearQueue` and `InterruptResult{ok:true}` both remove 'queued'
+ * messages + drop the snapshots. A pre-ack `SendResult{ok:false}` rolls back the
+ * 'queued' message WITHOUT clearing `runningSessionPaths` (the original turn is
+ * still running).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,7 +88,7 @@ test('Send while busy: inserts an optimistic queued message, flags the PendingOp
 
   // Already running — the busy branch must not re-add or remove the session.
   assert.deepEqual(out.state.sessions.runningSessionPaths, [SESSION]);
-  // No prepass chip for a followUp.
+  // No prepass chip for a steering injection.
   assert.equal(out.state.pending.prepassBySession[SESSION], undefined);
 });
 
@@ -102,7 +103,7 @@ test('SendResult{ok:true, queued:true}: moves op to pending.promoted, keeps mess
   assert.equal(out.state.pending.promoted['c1']?.queued, true);
 
   assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.status, 'queued', 'message stays queued');
-  assert.equal(out.state.pending.prepassBySession[SESSION], undefined, 'no prepass for a followUp');
+  assert.equal(out.state.pending.prepassBySession[SESSION], undefined, 'no prepass for a steering injection');
   assert.equal(Object.keys(out.state.pending.requestIdToLocalId).length, 0, 'no requestId binding');
 });
 

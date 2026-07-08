@@ -3,7 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, appendLocalUserMessage, removeFromArray, removeMessage } from './helpers.js';
+import { addToArray, appendLocalUserMessage, removeFromArray, removeMessage, restoreRemovedTail } from './helpers.js';
 import type { Event, EffectResultEvent } from '../events.js';
 import { applySetModelOptimistic, dropSetModelPending, revertSetModel } from './set-model-handlers.js';
 import { mapSendOrEditError, mapPreflightError } from '../../../shared/error-mapping.js';
@@ -268,6 +268,11 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     draft.pending.promoted = restPromoted;
     // Remove optimistic user message from transcript
     removeMessage(draft, snapshot.sessionPath, snapshot.localId);
+    // Edit rollback (post-ack prepass failure): restore the messages truncated
+    // by the optimistic Edit command. Send ops have no removedTail.
+    if (snapshot.kind === 'edit' && snapshot.removedTail && snapshot.removedTail.length > 0) {
+      restoreRemovedTail(draft, snapshot.sessionPath, snapshot.removedTail);
+    }
     // Clear the host-side optimistic running state set at Send time
     draft.sessions.runningSessionPaths = removeFromArray(
       draft.sessions.runningSessionPaths,
@@ -379,6 +384,11 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
   const nextState = produce(state, (draft) => {
     draft.pending.ops = restOps;
     removeMessage(draft, pending.sessionPath, pending.localId);
+    // Edit rollback: restore the messages truncated by the optimistic Edit
+    // command so the pre-edit conversation reappears on a pre-ack failure.
+    if (pending.removedTail && pending.removedTail.length > 0) {
+      restoreRemovedTail(draft, pending.sessionPath, pending.removedTail);
+    }
     draft.sessions.runningSessionPaths = removeFromArray(
       draft.sessions.runningSessionPaths,
       pending.sessionPath,
@@ -498,8 +508,6 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
     case 'SetToolResultPruningSettingsResult':
-    case 'SetProxySettingsResult':
-    case 'AddProxyProviderResult':
     case 'ExtensionUiResponseResult': {
       if (!event.ok) {
         return {

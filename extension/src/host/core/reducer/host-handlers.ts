@@ -6,7 +6,6 @@ import type {
   BackendReadyWatchdogFiredEvent,
   PruningSettingsChangedEvent,
   ToolResultPruningSettingsChangedEvent,
-  ProxySettingsChangedEvent,
   WorkspaceCwdChangedEvent,
   TranscriptPageLoadedEvent,
   TranscriptTrimmedEvent,
@@ -126,22 +125,6 @@ export function handleToolResultPruningSettingsChanged(
       settings: {
         ...state.settings,
         toolResultPruningSettings: event.toolResultPruningSettings,
-      },
-    },
-    effects: [],
-  };
-}
-
-export function handleProxySettingsChanged(
-  state: ArchState,
-  event: ProxySettingsChangedEvent,
-): ReducerResult {
-  return {
-    state: {
-      ...state,
-      settings: {
-        ...state.settings,
-        proxySettings: event.proxySettings,
       },
     },
     effects: [],

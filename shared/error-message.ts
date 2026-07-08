@@ -27,12 +27,7 @@ export function toErrorMessage(err: unknown): string {
 /** Connection-level error signature. The OpenAI SDK raises
  *  `APIConnectionError` (message "Connection error.", `status` undefined) when
  *  NO HTTP response was received — ECONNREFUSED, ECONNRESET, socket hang-up,
- *  fetch failure, or a pre-headers timeout. This is exactly the case where a
- *  real upstream rejection (e.g. umans account suspended) gets hidden behind a
- *  generic "Connection error.": the proxy was unreachable/wedged instead of
- *  returning a clean HTTP error. When the proxy DOES return a clean 429/5xx,
- *  the SDK raises a typed error carrying the body, so the real reason surfaces;
- *  this helper only matches the no-response case. */
+ *  fetch failure, or a pre-headers timeout. */
 const CONNECTION_ERROR_RE =
   /connection error|connection refused|socket hang up|econnreset|econnrefused|enotfound|fetch failed|network error|etimedout/i;
 
@@ -53,18 +48,18 @@ export function isConnectionError(err: unknown): boolean {
 }
 
 /** Normalize a thrown value into a user-facing message, ENRICHING
- *  connection-level errors with the real transport `cause` + a pointer to the
- *  pie proxy so the user sees something actionable instead of a bare
- *  "Connection error." Non-connection errors (including clean 429/5xx with a
- *  body) pass through `toErrorMessage` unchanged so the real upstream reason
- *  (e.g. "account_suspended") is preserved. */
+ *  connection-level errors with the real transport `cause` so the user sees
+ *  something actionable instead of a bare "Connection error." Non-connection
+ *  errors (including clean 429/5xx with a body) pass through `toErrorMessage`
+ *  unchanged so the real upstream reason (e.g. "account_suspended") is
+ *  preserved. */
 export function enrichConnectionError(err: unknown): string {
   const base = toErrorMessage(err);
   if (!isConnectionError(err)) return base;
   const cause = (err as { cause?: unknown }).cause;
   const causeMsg = cause ? toErrorMessage(cause) : '';
   const detail = causeMsg && !/connection error/i.test(causeMsg) ? ` (${causeMsg})` : '';
-  return `Connection error${detail} — the pie proxy (localhost:4000) may be down or wedged, or the upstream dropped the connection. Run \`npm run proxy:health\` or reload the window; if umans is rate-limited the proxy circuit-breaker will surface that as a clear 429 once it recovers.`;
+  return `Connection error${detail} — the upstream provider may be unreachable or the connection was dropped. Reload the window to retry; if the provider is rate-limited, the concurrency gate will surface that as a clear 429 once it recovers.`;
 }
 
 /** Parse JSON, throwing a contextual Error that names what was being parsed

@@ -5,11 +5,12 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../src/backend/request-handler';
-import { handleSdkSessionEvent } from '../src/backend/session-event-handler';
+import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../src/backend/session-event-handler';
 import { BackendError } from '../src/backend/server-io';
 import type { ModelSettings } from '../src/shared/protocol';
 import type { SessionContext } from '../src/backend/server-types';
 import type { SdkSessionEvent } from '../src/backend/sdk';
+import { ProviderGate } from '../src/backend/provider-gate';
 
 interface Harness {
   deps: BackendRequestHandlerDeps;
@@ -48,6 +49,7 @@ function createHarness(overrides: {
     },
     abort: async () => undefined,
     followUp: async (_text: string, _images?: unknown) => undefined,
+    steer: async (_text: string, _images?: unknown) => undefined,
     clearQueue: () => ({ steering: [] as string[], followUp: [] as string[] }),
     setModel: async (model: { id: string }) => {
       (session.model as { id: string }).id = model.id;
@@ -246,10 +248,10 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(acceptedHarness.busyEvents.at(-1), true);
   assert.ok(acceptedHarness.context.activeRequest?.id);
 
-  // Steering (FollowUp): a second send while a turn is already in-flight is
-  // now QUEUED as a follow-up (SDK `followUp()`) instead of rejected. The
-  // backend acks `{ queued: true }` with no new `activeRequest` (no turn is
-  // started by the enqueue) and no `requestId`.
+  // Steering: a second send while a turn is already in-flight is now QUEUED
+  // as a steering injection (SDK `steer()`) instead of rejected. The backend
+  // acks `{ queued: true }` with no new `activeRequest` (no turn is started by
+  // the enqueue) and no `requestId`.
   const queued = await handleBackendRequest(acceptedHarness.deps, {
     id: '2',
     method: 'message.send',
@@ -480,6 +482,87 @@ test('message.interrupt defensive clear does not clobber a still-streaming turn 
 
   // activeRequest is preserved (turn_end will clear it later).
   assert.equal(harness.context.activeRequest?.id, 'req-streaming');
+});
+
+test('message.interrupt hard-stops compaction when interrupted during the post-agent_end window', async () => {
+  // Reproduces the "appears stopped but still burning money" bug: after
+  // agent_end the backend already cleared activeRequest + emitted busy=false,
+  // but the SDK is still running a billable compaction LLM call (isCompacting).
+  // The interrupt must NOT be rejected as SESSION_NOT_RUNNING, and must call
+  // the public abortCompaction/abortBranchSummary/abortBash/abortRetry methods
+  // (which abort() alone does NOT) so spend stops instantly — before the
+  // un-awaited abort() even runs.
+  const aborted: Record<string, boolean> = {};
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: false,      // agent_end already fired
+      isCompacting: true,      // compaction LLM call in flight
+      isRetrying: false,
+      isBashRunning: false,
+      abortCompaction: () => { aborted.compaction = true; },
+      abortBranchSummary: () => { aborted.branchSummary = true; },
+      abortBash: () => { aborted.bash = true; },
+      abortRetry: () => { aborted.retry = true; },
+      abort: async () => undefined,
+    },
+  });
+  // No activeRequest (cleared on agent_end) — the legacy guard would throw
+  // SESSION_NOT_RUNNING here. The relaxed guard must see isCompacting and pass.
+  assert.equal(harness.context.activeRequest, undefined);
+
+  const interrupted = await handleBackendRequest(harness.deps, {
+    id: '1',
+    method: 'message.interrupt',
+    params: { sessionPath: '/repo/session.jsonl' },
+  });
+  assert.deepEqual(interrupted, { interrupted: true });
+
+  // Every billable window was hard-stopped synchronously (before abort()).
+  assert.equal(aborted.compaction, true);
+  assert.equal(aborted.branchSummary, true);
+  assert.equal(aborted.bash, true);
+  assert.equal(aborted.retry, true);
+});
+
+test('message.interrupt is still rejected as SESSION_NOT_RUNNING when truly idle', async () => {
+  // The relaxed guard must still reject when nothing at all is running. This
+  // also covers an older SDK that doesn't expose the predicates (undefined →
+  // falsy → nothingRunning stays true, i.e. the legacy behaviour).
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: false,
+      isCompacting: false,
+      isRetrying: false,
+      isBashRunning: false,
+    },
+  });
+  await assert.rejects(
+    async () => await handleBackendRequest(harness.deps, {
+      id: '1',
+      method: 'message.interrupt',
+      params: { sessionPath: '/repo/session.jsonl' },
+    }),
+    /Cannot interrupt a session that is not running/,
+  );
+});
+
+test('compaction_start/compaction_end re-arm busy so a compaction call stays interruptable', async () => {
+  // agent_end already emitted busy=false (Stop button gone) before the SDK
+  // runs its post-agent_end compaction. compaction_start must re-arm busy so
+  // the Stop button stays visible (and the session stays interruptable) while
+  // compaction bills; compaction_end restores idle. session_finished deferred
+  // triggers already fired at agent_end — the compaction_end re-fire is a
+  // no-op (DeferredTriggerRegistry.fire is idempotent once consumed).
+  const harness = createHarness();
+
+  // The compaction handlers only call emitBusyChanged (which the harness deps
+  // provide); cast across the narrower event-handler deps shape for the test.
+  const eventDeps = harness.deps as unknown as BackendSessionEventHandlerDeps;
+  handleSdkSessionEvent(eventDeps, harness.context, { type: 'compaction_start' });
+  assert.deepEqual(harness.busyEvents, [true]);
+
+  handleSdkSessionEvent(eventDeps, harness.context, { type: 'compaction_end' });
+  assert.deepEqual(harness.busyEvents, [true, false]);
 });
 
 test('session.truncateAfter rewrites the file and recreates the session context', async () => {
@@ -722,12 +805,12 @@ test('handleBackendRequest unknown method throws BackendError with UNKNOWN_METHO
   }
 });
 
-test('message.send while busy queues as a follow-up (steering) and acks { queued: true }', async () => {
-  const followUpCalls: string[] = [];
+test('message.send while busy queues as a steering injection and acks { queued: true }', async () => {
+  const steerCalls: string[] = [];
   const harness = createHarness({
     sessionOverrides: {
       isStreaming: true,
-      followUp: async (text: string) => { followUpCalls.push(text); },
+      steer: async (text: string) => { steerCalls.push(text); },
     },
   });
   const result = await handleBackendRequest(harness.deps, {
@@ -737,8 +820,8 @@ test('message.send while busy queues as a follow-up (steering) and acks { queued
   });
   assert.equal((result as { queued?: boolean }).queued, true);
   assert.ok(!(result as { requestId?: string }).requestId, 'queued send must not start a turn / mint a requestId');
-  assert.equal(followUpCalls.length, 1);
-  assert.equal(followUpCalls[0], 'Hi');
+  assert.equal(steerCalls.length, 1);
+  assert.equal(steerCalls[0], 'Hi');
   // No activeRequest is created for a queued send (the turn is not started).
   assert.equal(harness.context.activeRequest, undefined);
 });
@@ -893,5 +976,51 @@ test('session.truncateAfter leaves the model untouched when the new context alre
 
     assert.deepEqual(setModelCalls, [], 'setModel must not be called when the model already matches');
     assert.deepEqual(setThinkingLevelCalls, [], 'setThinkingLevel must not be called when the level already matches');
+  });
+});
+
+test('provider_gate.metrics reports disabled shape when the ProviderGate is not installed', async (t) => {
+  ProviderGate.uninstall();
+  t.after(() => ProviderGate.uninstall());
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-provider-gate-metrics-empty',
+    method: 'provider_gate.metrics',
+    params: undefined,
+  });
+
+  assert.deepEqual(result, { enabled: false, providers: [] });
+});
+
+test('provider_gate.metrics returns live ProviderGate metrics when installed', async (t) => {
+  ProviderGate.uninstall();
+  t.after(() => ProviderGate.uninstall());
+  ProviderGate.install([{
+    provider: 'openai',
+    baseUrl: 'https://api.openai.test/v1',
+    maxConcurrentRequests: 2,
+    afterburnSeconds: 5,
+    queueWaitSeconds: 30,
+    headerWaitSeconds: 120,
+  }]);
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-provider-gate-metrics-live',
+    method: 'provider_gate.metrics',
+    params: undefined,
+  });
+
+  assert.deepEqual(result, {
+    enabled: true,
+    providers: [{
+      provider: 'openai',
+      activeRequests: 0,
+      queuedRequests: 0,
+      maxConcurrentRequests: 2,
+      afterburnSeconds: 5,
+      paused: false,
+      pausedUntilMs: 0,
+      strikeCount: 0,
+    }],
   });
 });

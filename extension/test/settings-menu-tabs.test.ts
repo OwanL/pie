@@ -8,7 +8,7 @@ import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 
 import { ComposerSettingsMenu } from '../src/webview/panel/composer/settings-menu';
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_PROXY_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS } from '../src/shared/protocol';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, EMPTY_PROVIDER_GATE_STATS } from '../src/shared/protocol';
 import type { ExtensionInfo, ModelInfo } from '../src/shared/protocol';
 
 let container: HTMLElement;
@@ -36,14 +36,12 @@ function mount(extensions: ExtensionInfo[] = [], models: ModelInfo[] = []) {
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
         toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-        proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: extensions,
         availableModels: models,
+        providerGateStats: EMPTY_PROVIDER_GATE_STATS,
         onSetPrefs: () => undefined,
         onSetPruningSettings: () => undefined,
         onSetToolResultPruningSettings: () => undefined,
-        onSetProxySettings: () => undefined,
-        onAddProxyProvider: () => undefined,
       }),
       container,
     );
@@ -69,7 +67,7 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   // Tab strip present with the always-on categories (Extensions/Providers are
   // hidden because no extensions/models were passed).
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance', 'proxy']);
+  assert.deepEqual(tabIds, ['chat', 'appearance']);
 
   // Chat is active by default and renders its Transcript section.
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="chat"].active'), 'Chat tab should be active by default');
@@ -92,7 +90,7 @@ test('Extensions and Providers tabs appear only when their content exists', () =
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance', 'extensions', 'providers', 'proxy']);
+  assert.deepEqual(tabIds, ['chat', 'appearance', 'extensions', 'providers']);
 });
 
 // Bash settings now live under the Warm Bash extension in the Extensions tab
@@ -128,14 +126,12 @@ test('ask-user settings render inline with an "Include for subagents" toggle', (
         pruningCatalog: { skills: [], tools: [] },
         pruningResult: null,
         toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-        proxySettings: DEFAULT_PROXY_SETTINGS,
         availableExtensions: extensions,
         availableModels: [],
+        providerGateStats: EMPTY_PROVIDER_GATE_STATS,
         onSetPrefs: (p) => setPrefsCalls.push(p),
         onSetPruningSettings: () => undefined,
         onSetToolResultPruningSettings: () => undefined,
-        onSetProxySettings: () => undefined,
-        onAddProxyProvider: () => undefined,
       }),
       container,
     );
@@ -171,7 +167,7 @@ test('search replaces the tab body with a flat filtered result list across categ
   assert.ok(input, 'search input should render');
 
   act(() => {
-    input!.value = 'proxy';
+    input!.value = 'chat';
     input!.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
@@ -181,11 +177,9 @@ test('search replaces the tab body with a flat filtered result list across categ
   const results = menu.querySelectorAll('.toolbar-settings-search-result');
   assert.ok(results.length > 0, 'search should produce results');
 
-  // "proxy" matches the Proxy category jump and the two proxy toggles.
+  // "chat" matches the Chat category jump and its toggles.
   const jumpResults = menu.querySelectorAll('.toolbar-settings-search-result-jump');
-  assert.ok(jumpResults.length >= 1, 'Proxy category jump should be a search result');
-  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Retry after header/);
-  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Drop unknown params/);
+  assert.ok(jumpResults.length >= 1, 'Chat category jump should be a search result');
 
   // Clearing the query restores the tab strip + Chat body.
   act(() => { click(menu.querySelector('.toolbar-settings-search-clear')); });
@@ -207,9 +201,9 @@ test('a search with no matches shows an empty-state message', () => {
   assert.equal(menu.querySelectorAll('.toolbar-settings-search-result').length, 0);
 });
 
-// Continuous (non-boolean) settings like font size, corner radius, and proxy
-// timeout are surfaced as search jump entries so they're never reported as
-// "no matches" — a regression here would reintroduce the original search gap.
+// Continuous (non-boolean) settings like font size, corner radius, and other
+// appearance settings are surfaced as search jump entries so they're never
+// reported as "no matches" — a regression here would reintroduce the original search gap.
 test('search finds continuous settings by name and offers a jump to their tab', () => {
   mount();
   const menu = openMenu();

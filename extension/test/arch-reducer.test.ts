@@ -404,7 +404,7 @@ test('reducer: SendResult for unknown corrId is a no-op', () => {
 test('reducer: Edit command records pending, inserts optimistic message, produces EditRpc', () => {
   const event: Event = {
     kind: 'Command',
-    cmd: { kind: 'Edit', corrId: 'c-edit', sessionPath: '/s', messageId: 'msg-1', text: 'new text', localId: 'loc-e1', timestamp: 1 },
+    cmd: { kind: 'Edit', corrId: 'c-edit', sessionPath: '/s', messageId: 'msg-1', text: 'new text', inputs: [], composedText: 'new text', userParts: undefined, localId: 'loc-e1', timestamp: 1 },
   };
 
   const result = reducer(initialArchState, event);
@@ -415,6 +415,7 @@ test('reducer: Edit command records pending, inserts optimistic message, produce
     localId: 'loc-e1',
     previousSummary: null,
     startedAt: 1,
+    removedTail: [],
   });
 
   // Optimistic user message in transcript.
@@ -1593,7 +1594,7 @@ test('reducer: Edit command does not clear the persisted draft', () => {
 
   const event: Event = {
     kind: 'Command',
-    cmd: { kind: 'Edit', corrId: 'c-edit', sessionPath: '/s', messageId: 'msg-1', text: 'edited', localId: 'loc-e1', timestamp: 1 },
+    cmd: { kind: 'Edit', corrId: 'c-edit', sessionPath: '/s', messageId: 'msg-1', text: 'edited', inputs: [], composedText: 'edited', userParts: undefined, localId: 'loc-e1', timestamp: 1 },
   };
 
   const result = reducer(state, event);

@@ -149,6 +149,21 @@ export function ToolResultPrunerSettings({ settings, onSetToolResultPruningSetti
         </span>
         <span class="toolbar-settings-item-label">git log → oneline</span>
       </button>
+      <button
+        class={`toolbar-settings-item${settings.rules.grepGroup ? ' checked' : ''}`}
+        type="button"
+        role="checkbox"
+        aria-checked={settings.rules.grepGroup}
+        disabled={settings.profile !== 'default'}
+        onClick={() => onSetToolResultPruningSettings({ rules: { ...settings.rules, grepGroup: !settings.rules.grepGroup } })}
+      >
+        <span class="toolbar-settings-item-check" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={settings.rules.grepGroup ? '' : 'opacity:0'}>
+            <polyline points="2.5,6.5 5,9 10.5,3.5" />
+          </svg>
+        </span>
+        <span class="toolbar-settings-item-label">grep/rg → group by path</span>
+      </button>
     </div>
   );
 }

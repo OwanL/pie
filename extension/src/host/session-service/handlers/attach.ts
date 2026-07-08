@@ -11,6 +11,7 @@ import { deriveAvailableExtensions } from './session.js';
 import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
 import { backendExitEvents } from '../backend-exit-events.js';
+import { appendPieLog } from '../../util/pie-log.js';
 
 interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;
@@ -26,6 +27,17 @@ export function applySessionOpenedPayload(
   deps: ApplySessionOpenedDeps,
 ): void {
   const { session, selectionToken } = payload;
+  appendPieLog('info', 'event-trace', 'session.opened.received', {
+    sessionPath: session.path,
+    selectionToken: selectionToken ?? null,
+    transcriptLength: payload.transcript?.length ?? 0,
+    transcriptWindow: payload.transcriptWindow ? {
+      totalCount: payload.transcriptWindow.totalCount,
+      loadedStart: payload.transcriptWindow.loadedStart,
+      loadedEnd: payload.transcriptWindow.loadedEnd,
+    } : null,
+    transcriptSkipped: payload.transcriptSkipped ?? false,
+  });
   const flags = computeOpeningFlags(payload, deps);
 
   logSessionOpened(payload, deps, flags);

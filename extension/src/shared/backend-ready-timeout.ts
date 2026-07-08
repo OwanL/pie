@@ -8,12 +8,15 @@
  *
  * Sized to absorb a cold SDK load. The backend's `start.loadSdk` step
  * dynamically imports the upstream `@earendil-works/pi-coding-agent` bundle,
- * which on Windows routinely takes ~30s on a first/cold import (observed
- * 30,033ms in pie-logs, finishing ~270ms AFTER a 30s budget). A 30s budget
- * rejects the backend *just* as it finishes coming up — orphaning a healthy
- * backend. 60s gives comfortable headroom while still surfacing genuinely
- * hung backends.
+ * which on Windows routinely takes ~30s on a first/cold import. After proxy
+ * removal, the backend also installs the host-side ProviderGate and performs
+ * auth setup, bringing cold-start total to ~59-66s (observed in pie-logs:
+ * spawn at 10:13:24, ready at 10:14:30 = 66s). The previous 60s budget
+ * rejected a healthy backend *just* as it finished coming up — orphaning it
+ * and leaving the UI stuck at "loading sessions" since
+ * `listAndOpenFirstSession()` was never reached. 120s gives comfortable
+ * headroom while still surfacing genuinely hung backends.
  *
  * Keep this single source of truth; do not redeclare the timeout elsewhere.
  */
-export const BACKEND_READY_TIMEOUT_MS = 60_000;
+export const BACKEND_READY_TIMEOUT_MS = 120_000;

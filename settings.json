@@ -1,6 +1,6 @@
 {
   "defaultModel": "umans-glm-5.2",
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "high",
   "defaultProvider": "umans",
   "retry": {
     "enabled": true,
@@ -9,47 +9,6 @@
     "provider": {
       "maxRetries": 2,
       "maxRetryDelayMs": 60000
-    }
-  },
-  "proxy": {
-    "gateway": {
-      "routerSettings": {
-        "numRetries": 2,
-        "retryAfter": true,
-        "timeout": 600,
-        "retryPolicy": {
-          "RateLimitErrorRetries": 0
-        }
-      },
-      "litellmSettings": {
-        "dropParams": true
-      },
-      "generalSettings": {
-        "masterKeyEnv": "PIE_PROXY_MASTER_KEY"
-      }
-    },
-    "providers": {
-      "umans": {
-        "apiBase": "https://api.code.umans.ai/v1",
-        "apiKeyEnv": "UMANS_API_KEY",
-        "litellmProvider": "openai",
-        "maxConcurrentRequests": 2,
-        "litellmModelInfoId": "umans-shared",
-        "modelListOrder": [
-          "umans",
-          "umans-coder",
-          "umans-flash",
-          "umans-kimi-k2.7",
-          "umans-kimi-k2.6",
-          "umans-glm-5.2",
-          "umans-glm-5.1",
-          "umans-qwen3.6-35b-a3b"
-        ],
-        "alias": {
-          "umans": "umans-coder"
-        },
-        "afterburnSeconds": 15
-      }
     }
   },
   "httpIdleTimeoutMs": 0,

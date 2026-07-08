@@ -4,19 +4,16 @@ import { readFileSync } from 'node:fs';
 import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
-import { ProxyService, type ProxyStartOptions } from '../backend/proxy-service';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
 import { normalizeStoredTabPaths } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
 
 import { resolveNodePath, resolveSdkPath } from '../../shared/runtime-resolution';
 import { resolveAgentDir } from '../../shared/agent-dir-resolution';
+import { buildRuntimePrefsPayload } from '../../shared/protocol';
 import type { ChatPrefs, SessionSummary } from '../../shared/protocol';
 import { SessionService } from './service';
 import { SessionServiceEvents } from './events';
-import { readProxySettings } from './proxy-settings';
-import { ensureProxyMasterKey, PROXY_MASTER_KEY_ENV } from './proxy-master-key';
-import { loadProxyEnvIntoProcess } from './proxy-env';
 import { SessionServiceState } from './state';
 import { buildRestoredSessionSummaries } from '../core/restored-session-summaries';
 import { bootLog } from '../util/audit';
@@ -39,10 +36,6 @@ interface StartSessionBackendOptions {
   openSession: (sessionPath: string) => void;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
-  /** Test seam: override the ProxyService constructor so startup-parallelism tests
-   *  can inject a fake proxy without spawning a real `uv run litellm` child.
-   *  Production leaves it unset → `new ProxyService()`. */
-  createProxyService?: () => ProxyService;
 }
 
 function resolveWorkspaceCwd(): string {
@@ -323,6 +316,10 @@ async function startBackendWithLogging(
     });
     return true;
   } catch (err) {
+    // Dispatch BackendReadyChanged{ready:false} so the UI reflects the failed
+    // state — without this, the sidebar can stay stuck at "loading sessions"
+    // because no ready/false signal is ever sent when spawn fails.
+    options.dispatchArch({ kind: 'BackendReadyChanged', ready: false });
     options.dispatchArch({ kind: 'NoticeShown', notice: `Failed to start PI backend: ${toErrorMessage(err)}` });
     bootLog('session-startup', 'backend.startFailed', {
       message: toErrorMessage(err),
@@ -331,135 +328,14 @@ async function startBackendWithLogging(
   }
 }
 
-/**
- * Start the local LiteLLM proxy (pie/proxy/) before the PI backend, so any
- * provider whose `baseUrl` in models.json points at 127.0.0.1:proxyPort is
- * already reachable when the backend issues its first request. This enforces
- * per-provider concurrency limits centrally — see
- * docs/AGENT-HARNESS-IMPROVEMENTS.md §1–§3 and proxy/README.md.
- *
- * FAILED-LOUD policy: if `pie.useProxy` is on and the proxy can't become
- * ready, dispatch a `NoticeShown` and return false so the caller skips the
- * backend start. There is NO silent fallback to direct routing — by design —
- * because models.json would point at a dead port and every proxied request
- * would hang/429 opaquely. The user fixes the proxy (UI notice explains how)
- * and reloads the window; direct providers (Copilot/Ollama) remain usable
- * only if the user turns `pie.useProxy` off.
- *
- * Skipped entirely (returns true) when `pie.useProxy` is false, so users who
- * opt out of the proxy are unaffected.
- */
-async function prepareProxyWithLogging(options: StartSessionBackendOptions): Promise<{ ok: true; startOptions?: ProxyStartOptions } | { ok: false }> {
-  const config = vscode.workspace.getConfiguration('pie');
-  const useProxy = config.get<boolean>('useProxy', true);
-  if (!useProxy) {
-    bootLog('session-startup', 'proxy.skipped', { reason: 'pie.useProxy=false' });
-    return { ok: true };
-  }
-
-  // The proxy lives in `proxy/` under the resolved agentDir (the pie repo root
-  // that setupAgentDirEnv just wrote to process.env.PI_CODING_AGENT_DIR).
-  const agentDir = process.env.PI_CODING_AGENT_DIR;
-  if (!agentDir) {
-    options.dispatchArch({
-      kind: 'NoticeShown',
-      notice:
-        'pie.useProxy is on but no agent dir is resolved (PI_CODING_AGENT_DIR unset). ' +
-        'The LiteLLM proxy at pie/proxy/ cannot be located. Set pie.agentDir, or turn pie.useProxy off to bypass.',
-    });
-    return { ok: false };
-  }
-
-  const proxyDir = path.join(agentDir, 'proxy');
-  const configPath = path.join(proxyDir, 'litellm_config.yaml');
-  const port = config.get<number>('proxyPort', 4000);
-  const host = '127.0.0.1';
-
-  // LiteLLM is DB-less, so the backend's Authorization MUST match the proxy
-  // `master_key`. The master key is a pie-owned LOCAL gate (the proxy binds
-  // 127.0.0.1) — auto-generated + persisted on first run, and DECOUPLED from
-  // any provider's upstream key, so multiple proxied providers each with their
-  // own upstream key all auth to the proxy with this one value. Set it in
-  // process.env before spawning the proxy + backend (both inherit it).
-  const masterKey = await ensureProxyMasterKey(options.context.secrets);
-  process.env[PROXY_MASTER_KEY_ENV] = masterKey;
-
-  // Each configured proxied provider needs its upstream key env var set (litellm
-  // sends `os.environ/<apiKeyEnv>` to the upstream). Fail loud listing any that
-  // are missing rather than boot a proxy that will 401 every request to them.
-  // First load any keys the user/agent/UI wrote to proxy/.env (gitignored) into
-  // process.env (without overriding OS-installed keys), so providers added via
-  // the "Add Provider" form or the add-provider skill satisfy this check.
-  await loadProxyEnvIntoProcess();
-  const proxySettings = await readProxySettings();
-  const missingProviderEnvs = Object.entries(proxySettings.providers)
-    .map(([name, p]) => ({ name, env: p.apiKeyEnv, set: !!process.env[p.apiKeyEnv] }))
-    .filter((p) => !p.set);
-  if (missingProviderEnvs.length > 0) {
-    const listing = missingProviderEnvs.map((p) => `${p.env} (provider "${p.name}")`).join(', ');
-    options.dispatchArch({
-      kind: 'NoticeShown',
-      notice:
-        `pie.useProxy is on but these provider API key env vars are not set: ${listing}. ` +
-        'The LiteLLM proxy needs each proxied provider\'s upstream key to route to it. ' +
-        'Set them and reload, remove the providers from the proxy config, ' +
-        'or turn pie.useProxy off to route providers direct (no concurrency limit).',
-    });
-    return { ok: false };
-  }
-
-  return { ok: true, startOptions: { proxyDir, configPath, port, host } };
-}
-
-/** Spawn the LiteLLM proxy + await /health/liveness. Runs CONCURRENTLY with the
- *  backend spawn (see startSessionBackend): the proxy env was already loaded
- *  into process.env by prepareProxyWithLogging, so the backend inherits it at
- *  spawn and the two readiness waits overlap. The proxy only needs to be ready
- *  before the first user LLM request (well after backend.ready), not before the
- *  backend spawns. Returns false (with a notice) on spawn/readiness failure. */
-async function spawnProxyWithLogging(
+/** Spawn the backend and await readiness. Concurrency limiting is now
+ *  handled by the host-side ProviderGate (provider-gate.ts), which wraps
+ *  globalThis.fetch at BackendServer.start() time. */
+export async function spawnBackend(
   options: StartSessionBackendOptions,
-  startOptions: ProxyStartOptions,
-): Promise<boolean> {
-  try {
-    bootLog('session-startup', 'proxy.starting', { ...startOptions });
-    const proxy = options.createProxyService?.() ?? new ProxyService();
-    // Owned by the extension context so the proxy child is killed on shutdown.
-    options.context.subscriptions.push(proxy);
-    const spawnStart = Date.now();
-    await proxy.start(startOptions);
-    // Record the running proxy + its start options so later edits can restart it.
-    options.service.setProxyRuntime(proxy, startOptions);
-    bootLog('session-startup', 'proxy.started', { port: startOptions.port, durationMs: Date.now() - spawnStart });
-    return true;
-  } catch (err) {
-    options.dispatchArch({
-      kind: 'NoticeShown',
-      notice:
-        `Failed to start the LiteLLM proxy: ${toErrorMessage(err)}. ` +
-        'Proxied providers will be unavailable until this is fixed. Run `npm run proxy` in a terminal to see the error, ' +
-        'or turn off pie.useProxy in settings to route providers direct (no concurrency limit).',
-    });
-    bootLog('session-startup', 'proxy.startFailed', { message: toErrorMessage(err) });
-    return false;
-  }
-}
-
-/** Spawn the proxy (when `proxyStartOptions` is set) and the backend
- *  CONCURRENTLY, awaiting both. Both must succeed before the backend is
- *  published as ready. If only one succeeds, the winner is stopped so no child
- *  process is leaked in a not-ready state (the serial flow never started the
- *  backend when the proxy failed). Extracted so startup-parallelism tests can
- *  drive it with fakes — see session-startup-overlap.test.ts. */
-export async function spawnProxyAndBackendConcurrently(
-  options: StartSessionBackendOptions,
-  proxyStartOptions: ProxyStartOptions | undefined,
   backendArgs: { nodePath: string; sdkPath: string; backendPath: string; cwd: string; restoredStartupPath: string | null },
-): Promise<{ proxyReady: boolean; started: boolean }> {
-  const proxyPromise = proxyStartOptions
-    ? spawnProxyWithLogging(options, proxyStartOptions)
-    : Promise.resolve(true);
-  const backendPromise = startBackendWithLogging(
+): Promise<{ started: boolean }> {
+  const started = await startBackendWithLogging(
     options,
     backendArgs.nodePath,
     backendArgs.sdkPath,
@@ -467,13 +343,10 @@ export async function spawnProxyAndBackendConcurrently(
     backendArgs.cwd,
     backendArgs.restoredStartupPath,
   );
-  const [proxyReady, started] = await Promise.all([proxyPromise, backendPromise]);
-  if (started && !proxyReady) {
-    // Backend came up but the proxy failed — stop the backend so it isn't left
-    // running against a not-ready proxy (the serial flow never started it).
+  if (!started) {
     await options.backend.stop().catch(() => undefined);
   }
-  return { proxyReady, started };
+  return { started };
 }
 
 async function sendRuntimePrefsWithLogging(
@@ -486,25 +359,7 @@ async function sendRuntimePrefsWithLogging(
       backendReady: archState.settings.backendReady,
       restoredStartupPath,
     });
-    await options.backend.request('runtimePrefs.set', {
-      providerToggles: archState.settings.prefs.providerToggles,
-      extensionToggles: archState.settings.prefs.extensionToggles,
-      subagentAlwaysParentModel: archState.settings.prefs.subagentAlwaysParentModel,
-      subagentMaxDepth: archState.settings.prefs.subagentMaxDepth,
-      subagentMaxTreeSessions: archState.settings.prefs.subagentMaxTreeSessions,
-      subagentMaxInflight: archState.settings.prefs.subagentMaxInflight,
-      subagentMaxConcurrency: archState.settings.prefs.subagentMaxConcurrency,
-      subagentMaxParallelTasks: archState.settings.prefs.subagentMaxParallelTasks,
-      bashWarmPoolSize: archState.settings.prefs.bashWarmPoolSize,
-      bashFastPath: archState.settings.prefs.bashFastPath,
-      bashShellPath: archState.settings.prefs.bashShellPath,
-      bashWarmupTimeoutMs: archState.settings.prefs.bashWarmupTimeoutMs,
-      bashAcquireTimeoutMs: archState.settings.prefs.bashAcquireTimeoutMs,
-      bashDefaultTimeout: archState.settings.prefs.bashDefaultTimeout,
-      subagentBuckets: archState.settings.prefs.subagentBuckets,
-      subagentNestedAllowedBuckets: archState.settings.prefs.subagentNestedAllowedBuckets,
-      subagentDropTools: archState.settings.prefs.subagentDropTools,
-    });
+    await options.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(archState.settings.prefs));
     bootLog('session-startup', 'runtimePrefs.set.completed', {
       backendReady: options.getArchState().settings.backendReady,
       restoredStartupPath,
@@ -557,7 +412,6 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   applyStoredPrefs(options);
   await loadPruningSettingsFromService(options);
   await loadToolResultPruningSettingsFromService(options);
-  await options.service.loadProxySettings();
 
   const {
     storedRawTabs,
@@ -596,28 +450,21 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
 
-  // Prepare the proxy env (master key + provider keys) BEFORE spawning the
-  // backend so the backend inherits it. The proxy PROCESS spawn + readiness
-  // (up to 60s on a first `uv run`) then runs CONCURRENTLY with the backend
-  // spawn — the proxy only needs to be ready before the first user LLM request,
-  // not before the backend spawns. Fails loud — see prepareProxyWithLogging.
-  const proxyPrep = await prepareProxyWithLogging(options);
-  if (!proxyPrep.ok) {
-    options.scheduleRender();
-    return;
-  }
-
+  // Attach the backend event handlers BEFORE spawning so that events emitted
+  // immediately after backend.ready (e.g. session.opened) are not lost. This
+  // was lost during proxy removal and caused all backend events to be silently
+  // dropped — sessions could be created on the backend but the host never
+  // received session.opened, leaving tabs stuck at "Loading conversation".
   options.events.attach(options.backend);
 
-  // Overlap the proxy spawn/readiness with the backend spawn/readiness (both
-  // must succeed before publishBackendReady). Extracted so startup-parallelism
-  // tests can drive it with fakes — see session-startup-overlap.test.ts.
-  const { proxyReady, started } = await spawnProxyAndBackendConcurrently(
+  // Spawn the backend and await readiness. Concurrency limiting is handled
+  // by the host-side ProviderGate (provider-gate.ts) installed at
+  // BackendServer.start() time — no separate proxy process needed.
+  const { started } = await spawnBackend(
     options,
-    proxyPrep.startOptions,
     { nodePath, sdkPath, backendPath, cwd: workspaceCwd, restoredStartupPath },
   );
-  if (!proxyReady || !started) {
+  if (!started) {
     options.events.detach();
     options.scheduleRender();
     return;
@@ -625,6 +472,10 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   await sendRuntimePrefsWithLogging(options, restoredStartupPath);
 
+  bootLog('session-startup', 'publishBackendReady.calling', {
+    restoredStartupPath,
+    preloadPathsCount: preloadPaths.length,
+  });
   const restoreError = publishBackendReady({
     dispatchArch,
     scheduleRender: options.scheduleRender,
@@ -632,6 +483,10 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     preloadSessions: (sessionPaths) => options.state.preloadSessions(sessionPaths),
     restoredStartupPath,
     preloadPaths,
+  });
+
+  bootLog('session-startup', 'publishBackendReady.done', {
+    restoreError: restoreError?.message ?? null,
   });
 
   bootLogBackendReadyDispatched(options);

@@ -88,6 +88,16 @@ test('validateWebviewToHostMessage validates editMessage payloads', () => {
     validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited' }).ok,
     true,
   );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited', inputs: [] }).ok,
+    true,
+    'editMessage with inputs array should validate',
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited', inputs: 'bad' }).ok,
+    false,
+    'editMessage with non-array inputs should fail',
+  );
   assert.equal(validateWebviewToHostMessage({ type: 'editMessage', messageId: 'm1', text: 'edited' }).ok, false);
   assert.equal(validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1' }).ok, false);
   assert.equal(validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', text: 'x' }).ok, false);

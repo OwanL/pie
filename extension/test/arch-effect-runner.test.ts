@@ -582,7 +582,7 @@ test('EffectRunner EditRpc send-timer dispatches PreflightFailed on timeout (edi
   });
   const runner = new EffectRunner(deps);
 
-  runner.run({ kind: 'EditRpc', corrId: 'c-pf-edit', sessionPath: '/a', messageId: 'msg-1', text: 'edited', localId: 'loc-e1' });
+  runner.run({ kind: 'EditRpc', corrId: 'c-pf-edit', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-e1' });
   await settle();
   // Early-ack happened (EditResult{ok:true}); the send-timer is armed.
   assert.equal(events.length, 1);

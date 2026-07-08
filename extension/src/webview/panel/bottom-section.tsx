@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   WebviewToHostMessage,
   ThinkingLevel,
+  ProviderGateStats,
 } from '../../shared/protocol';
 import { ExtensionUIPrompt } from './extension-ui-prompt';
 import { Composer } from './ui';
@@ -34,7 +35,7 @@ export interface BottomSectionProps {
   pruningCatalog: ViewState['pruningCatalog'];
   pruningResult: ViewState['pruningResult'];
   toolResultPruningSettings: ViewState['toolResultPruningSettings'];
-  proxySettings: ViewState['proxySettings'];
+  providerGateStats: ProviderGateStats;
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
@@ -49,7 +50,7 @@ export interface BottomSectionProps {
   /** True when the active session owns a pending deferred trigger — greys out
    *  the composer's mark-done button with an explanatory tooltip. */
   activeSessionHasDeferredTriggers: boolean;
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetProxySettings' | 'handleAddProxyProvider' | 'handleMarkComplete'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleMarkComplete'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -72,7 +73,7 @@ export const BottomSection = memo(function BottomSection({
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
-  proxySettings,
+  providerGateStats,
   systemPrompts,
   transcript,
   transcriptWindow,
@@ -110,7 +111,7 @@ export const BottomSection = memo(function BottomSection({
         pruningCatalog={pruningCatalog}
         pruningResult={pruningResult}
         toolResultPruningSettings={toolResultPruningSettings}
-        proxySettings={proxySettings}
+        providerGateStats={providerGateStats}
         systemPrompts={systemPrompts}
         transcript={transcript}
         transcriptWindow={transcriptWindow}
@@ -132,8 +133,6 @@ export const BottomSection = memo(function BottomSection({
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
-        onSetProxySettings={handlers.handleSetProxySettings}
-        onAddProxyProvider={handlers.handleAddProxyProvider}
         onMarkComplete={handlers.handleMarkComplete}
       />
     </>

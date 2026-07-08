@@ -20,6 +20,7 @@ import {
   validateOpenTabsSet,
 } from './rpc';
 import { collectWarmBashStats } from './warm-bash-stats';
+import { ProviderGate } from './provider-gate';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { SessionContext, SessionContextCreationReason } from './server-types';
@@ -171,6 +172,15 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentDropTools !== undefined) {
     process.env['PIE_SUBAGENT_DROP_TOOLS_JSON'] = JSON.stringify(params.subagentDropTools);
+  }
+  // Reconfigure the live ProviderGate with user overrides. The gate merges
+  // the overrides onto the models.json base configs and rebuilds the pools
+  // in-place — no restart needed. Skipped when no overrides are provided.
+  if (params.providerConcurrency !== undefined) {
+    const gate = ProviderGate.getInstance();
+    if (gate) {
+      gate.applyUserOverrides(params.providerConcurrency);
+    }
   }
   return params;
 }
@@ -407,8 +417,8 @@ function reportPromptFailure(
   deps.emit('error', {
     code: 'MESSAGE_SEND_FAILED',
     // Enrich connection-level errors (bare "Connection error.") with the real
-    // transport cause + a proxy-health pointer; clean 429/5xx with a body pass
-    // through unchanged so the upstream reason (e.g. account_suspended) shows.
+    // transport cause; clean 429/5xx with a body pass through unchanged so
+    // the upstream reason (e.g. account_suspended) shows.
     message: enrichConnectionError(error),
     requestId,
   } satisfies ErrorPayload);
@@ -447,24 +457,28 @@ async function handleMessageSend(
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
   const context = await deps.ensureSessionContext(params.sessionPath);
-  // Steering (FollowUp): if a turn is already running, queue this message to
-  // run as a fresh turn after the current one completes via the SDK's
-  // `AgentSession.followUp()`. The agent loop polls the followUp queue between
-  // turns and runs each queued message as its own turn (default
-  // "one-at-a-time" drain). No `activeRequest` is created here (this call
-  // starts no turn) and no pre-commit safety-net timer is armed (followUp has
-  // no pruning prepass). We `await followUp()` so a queuing failure (e.g. the
-  // text is an extension command, or a skill/template expansion error) rejects
-  // the RPC — the host then reverts its optimistic 'queued' message via the
-  // pre-ack `SendResult{ok:false}` path, exactly like a normal send pre-ack
-  // failure. The SDK emits `message_start` (role 'user') when the loop injects
-  // the queued message; the backend forwards that as `message.queuedDelivered`
-  // so the host promotes the message from 'queued' to 'completed'.
+  // Steering: if a turn is already running, inject this message into the
+  // current turn via the SDK's `steer()` (delivered after in-flight tool calls
+  // finish, before the next LLM call). Falls back to `followUp()` (queue for the
+  // next fresh turn) on an older SDK that doesn't expose `steer`. No
+  // `activeRequest` is created here (this call starts no turn) and no
+  // pre-commit safety-net timer is armed (steering has no pruning prepass). We
+  // `await` the call so a queuing failure (e.g. the text is an extension
+  // command, or a skill/template expansion error) rejects the RPC — the host
+  // then reverts its optimistic 'queued' message via the pre-ack
+  // `SendResult{ok:false}` path, exactly like a normal send pre-ack failure.
+  // The SDK emits `message_start` (role 'user') when the loop injects the
+  // queued message; the backend forwards that as `message.queuedDelivered` so
+  // the host promotes the message from 'queued' to 'completed'.
   if (context.activeRequest || context.session.isStreaming) {
     const queuedImages = lowerImageInputs(params.inputs);
     const queuedImagePayload = queuedImages.length > 0 ? queuedImages : undefined;
     const queuedPromptText = buildPromptText(params.text, params.inputs);
-    await context.session.followUp(queuedPromptText, queuedImagePayload);
+    if (context.session.steer) {
+      await context.session.steer(queuedPromptText, queuedImagePayload);
+    } else {
+      await context.session.followUp(queuedPromptText, queuedImagePayload);
+    }
     return { queued: true };
   }
 
@@ -594,7 +608,23 @@ async function handleMessageInterrupt(
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot interrupt an unopened session: ${params.sessionPath}`);
   }
-  if (!context.activeRequest && !context.session.isStreaming) {
+  // Relaxed guard: an interrupt is valid whenever ANY billable window is
+  // running — a streaming turn (activeRequest / isStreaming) OR one of the
+  // post-agent_end billable LLM/tool windows the SDK exposes (compaction,
+  // branch summary, retry, bash). After agent_end the backend already cleared
+  // activeRequest + emitted busy=false, but the SDK may still be running a
+  // billable compaction/retry/bash call (isCompacting/isRetrying/isBashRunning)
+  // — the legacy `!activeRequest && !isStreaming` guard would wrongly reject
+  // that as SESSION_NOT_RUNNING (the "appears stopped but still burning money"
+  // bug). An older SDK that doesn't expose the predicates (undefined → falsy)
+  // keeps the legacy behaviour: only an activeRequest or isStreaming passes.
+  const nothingRunning =
+    !context.activeRequest
+    && !context.session.isStreaming
+    && !context.session.isCompacting
+    && !context.session.isRetrying
+    && !context.session.isBashRunning;
+  if (nothingRunning) {
     throw new BackendError('SESSION_NOT_RUNNING', `Cannot interrupt a session that is not running: ${params.sessionPath}`);
   }
   if (context.activeRequest) {
@@ -608,6 +638,16 @@ async function handleMessageInterrupt(
   // of an unrelated future send. The host also removes 'queued' transcript
   // messages on `InterruptResult{ok:true}` to stay in sync.
   context.session.clearQueue();
+  // Hard-stop every billable window the SDK exposes BEFORE the un-awaited
+  // `session.abort()` runs. `abort()` alone does NOT stop the post-agent_end
+  // compaction / branch-summary / retry / bash LLM calls, so spend would keep
+  // accumulating until abort() settles (and if it never settles, forever).
+  // Each is a no-op when its window isn't running; optional-chained so an
+  // older SDK that doesn't expose them is unaffected.
+  context.session.abortCompaction?.();
+  context.session.abortBranchSummary?.();
+  context.session.abortBash?.();
+  context.session.abortRetry?.();
   // Bug 4 watchdog: `session.abort()` is un-awaited and un-bounded today. If it
   // NEVER settles (a hung provider connection teardown), the `.finally` below
   // never runs → `activeRequest` stays set forever → the session is permanently
@@ -817,6 +857,19 @@ async function handleWarmBashStats(
   return collectWarmBashStats();
 }
 
+async function handleProviderGateMetrics(
+  _deps: BackendRequestHandlerDeps,
+  _request: RequestEnvelope,
+): Promise<unknown> {
+  // In-memory read of the host-side provider gate (wraps globalThis.fetch in
+  // the backend process). Returns {enabled:false, providers:[]} when the gate
+  // is not installed (no provider has a concurrency config) — the host strip
+  // hides the segment.
+  const gate = ProviderGate.getInstance();
+  if (!gate) return { enabled: false, providers: [] };
+  return { enabled: true, providers: gate.getMetrics() };
+}
+
 const handlers: Record<string, RequestHandler> = {
   'app.ping': handleAppPing,
   'runtimePrefs.set': handleRuntimePrefsSet,
@@ -837,6 +890,7 @@ const handlers: Record<string, RequestHandler> = {
   'settings.set': handleSettingsSet,
   'systemPromptToggles.set': handleSystemPromptTogglesSet,
   'warm_bash.stats': handleWarmBashStats,
+  'provider_gate.metrics': handleProviderGateMetrics,
 };
 
 export async function handleBackendRequest(

@@ -178,12 +178,13 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
+      providerConcurrency: undefined,
     },
   );
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -209,6 +210,7 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
+      providerConcurrency: undefined,
     },
   );
 });
@@ -234,6 +236,7 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: undefined,
+      providerConcurrency: undefined,
     },
   );
 });
@@ -275,6 +278,7 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
       subagentDropTools: undefined,
+      providerConcurrency: undefined,
     },
   );
 });
@@ -300,6 +304,7 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
       subagentDropTools: undefined,
+      providerConcurrency: undefined,
     },
   );
 });
@@ -339,6 +344,7 @@ test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
       subagentDropTools: ['ask_user', 'web_search'],
+      providerConcurrency: undefined,
     },
   );
 });

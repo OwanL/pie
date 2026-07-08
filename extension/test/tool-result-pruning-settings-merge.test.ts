@@ -18,7 +18,7 @@ const base: ToolResultPruningSettings = {
   ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   enabled: true,
   profile: 'security',
-  rules: { ansi: false, whitespace: true, blankRun: false, jsonMinify: true, lsLong: true, gitLog: false },
+  rules: { ansi: false, whitespace: true, blankRun: false, jsonMinify: true, lsLong: true, gitLog: false, grepGroup: true },
   tools: ['bash', 'ls'],
 };
 

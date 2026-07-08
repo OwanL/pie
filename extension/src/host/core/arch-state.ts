@@ -36,15 +36,12 @@ import type {
   ComposerInput,
   ActiveRunSummary,
   UserContentPart,
-  ProxySettings,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
-  DEFAULT_PROXY_SETTINGS,
-  mergeProxySettings,
 } from '../../shared/protocol';
 
 // ---------------------------------------------------------------------------
@@ -124,8 +121,6 @@ export interface SettingsState {
   pruningSettings: PruningSettings;
   /** Tool-result pruning configuration (settings.json `toolResultPruning` block). */
   toolResultPruningSettings: ToolResultPruningSettings;
-  /** LiteLLM proxy configuration (settings.json `proxy` block — the SSoT). */
-  proxySettings: ProxySettings;
   /** Available models per session. */
   availableModelsBySession: Record<string, ModelInfo[]>;
   /** Context window usage per session. */
@@ -239,6 +234,9 @@ export interface PendingOp {
    *  `SendResult.queued` (authoritative backend ack) to reconcile the
    *  optimistic message status. */
   queued?: boolean;
+  /** Transcript messages removed by an optimistic edit so rollback handlers can
+   *  restore the pre-edit tail if preflight or commit fails. */
+  removedTail?: ChatMessage[];
 }
 
 /** The pruning prepass phase for a session, surfaced as the live/cancelable
@@ -443,7 +441,6 @@ export function createInitialArchState(): ArchState {
       modelSettings: null,
       pruningSettings: { ...DEFAULT_PRUNING_SETTINGS },
       toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
-      proxySettings: mergeProxySettings(DEFAULT_PROXY_SETTINGS, {}),
       availableModelsBySession: {},
       contextUsageBySession: {},
       backendReady: false,
@@ -478,4 +475,3 @@ export function createInitialArchState(): ArchState {
     },
   };
 }
-

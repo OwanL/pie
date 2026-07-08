@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { handleBackendRequest } from '../src/backend/request-handler';
 import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV } from '../src/shared/protocol';
 import { validateRuntimePrefsSet } from '../src/backend/rpc';
+import { ProviderGate } from '../src/backend/provider-gate';
 
 const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL';
 const SUBAGENT_MAX_DEPTH_ENV = 'PIE_SUBAGENT_MAX_DEPTH';
@@ -48,7 +49,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -73,7 +74,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 
@@ -172,6 +173,85 @@ test('runtimePrefs.set rejects out-of-range nesting values', () => {
   assert.throws(() =>
     validateRuntimePrefsSet({ providerToggles: {}, extensionToggles: {}, subagentMaxDepth: 4.5 }),
   );
+});
+
+test('runtimePrefs.set validates providerConcurrency override bounds', () => {
+  const valid = validateRuntimePrefsSet({
+    providerConcurrency: {
+      openai: {
+        maxConcurrentRequests: 2,
+        afterburnSeconds: 0,
+        queueWaitSeconds: 1.5,
+        headerWaitSeconds: 120,
+      },
+      omitted: undefined,
+      disabled: null,
+    },
+  });
+
+  assert.deepEqual(valid.providerConcurrency, {
+    openai: {
+      maxConcurrentRequests: 2,
+      afterburnSeconds: 0,
+      queueWaitSeconds: 1.5,
+      headerWaitSeconds: 120,
+    },
+  });
+
+  const invalidCases: Array<{ params: unknown; message: RegExp }> = [
+    { params: { providerConcurrency: [] }, message: /providerConcurrency must be an object/ },
+    { params: { providerConcurrency: { openai: [] } }, message: /providerConcurrency\.openai must be an object/ },
+    { params: { providerConcurrency: { openai: { maxConcurrentRequests: 0 } } }, message: /maxConcurrentRequests must be a positive integer/ },
+    { params: { providerConcurrency: { openai: { maxConcurrentRequests: -1 } } }, message: /maxConcurrentRequests must be a positive integer/ },
+    { params: { providerConcurrency: { openai: { maxConcurrentRequests: 1.5 } } }, message: /maxConcurrentRequests must be a positive integer/ },
+    { params: { providerConcurrency: { openai: { maxConcurrentRequests: '3' } } }, message: /maxConcurrentRequests must be a positive integer/ },
+    { params: { providerConcurrency: { openai: { afterburnSeconds: -1 } } }, message: /afterburnSeconds must be a non-negative number/ },
+    { params: { providerConcurrency: { openai: { queueWaitSeconds: -1 } } }, message: /queueWaitSeconds must be a non-negative number/ },
+    { params: { providerConcurrency: { openai: { headerWaitSeconds: -1 } } }, message: /headerWaitSeconds must be a non-negative number/ },
+  ];
+
+  for (const { params, message } of invalidCases) {
+    assert.throws(() => validateRuntimePrefsSet(params), message);
+  }
+});
+
+test('runtimePrefs.set applies providerConcurrency overrides to the live ProviderGate', async (t) => {
+  ProviderGate.uninstall();
+  t.after(() => ProviderGate.uninstall());
+  const gate = ProviderGate.install([{
+    provider: 'openai',
+    baseUrl: 'https://api.openai.test/v1',
+    maxConcurrentRequests: 1,
+    afterburnSeconds: 0,
+    queueWaitSeconds: 30,
+    headerWaitSeconds: 120,
+  }]);
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-provider-concurrency',
+    method: 'runtimePrefs.set',
+    params: {
+      providerToggles: {},
+      extensionToggles: {},
+      providerConcurrency: {
+        openai: { maxConcurrentRequests: 3, afterburnSeconds: 7, queueWaitSeconds: 9, headerWaitSeconds: 11 },
+      },
+    },
+  }) as { providerConcurrency?: unknown };
+
+  assert.deepEqual(result.providerConcurrency, {
+    openai: { maxConcurrentRequests: 3, afterburnSeconds: 7, queueWaitSeconds: 9, headerWaitSeconds: 11 },
+  });
+  assert.deepEqual(gate.getMetrics(), [{
+    provider: 'openai',
+    activeRequests: 0,
+    queuedRequests: 0,
+    maxConcurrentRequests: 3,
+    afterburnSeconds: 7,
+    paused: false,
+    pausedUntilMs: 0,
+    strikeCount: 0,
+  }]);
 });
 
 test('runtimePrefs.set mirrors subagentBuckets into the backend environment', async (t) => {

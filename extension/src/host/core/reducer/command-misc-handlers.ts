@@ -1,25 +1,50 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, mergeToolResultPruningSettings, mergeProxySettings, buildProxyProviderEntry, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeToolResultPruningSettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, appendLocalUserMessage } from './helpers.js';
+import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
+  // Copilot/Codex-style immediate stop: take effect INSTANTLY in the reducer,
+  // without waiting for the async `session.abort()` to settle. The optimistic
+  // writes mirror what `InterruptResult{ok:true}` will confirm a moment later,
+  // so the user SEES the interrupt immediately:
+  //  - `interruptInFlightBySession` is set: the in-flight-abort gate in
+  //    `handleMessageDelta` / `handleMessageThinking` drops late deltas as
+  //    pure no-ops during the abort window.
+  //  - `runningSessionPaths` is cleared: the session shows idle (no Stop button)
+  //    before the backend abort resolves.
+  //  - Streaming assistant messages are marked `interrupted`: this gates
+  //    appending via the `status !== 'interrupted'` check in the delta/thinking
+  //    handlers (defense-in-depth alongside the flag gate) and renders the
+  //    partial reply as cancelled.
+  //  - An in-flight prepass chip is cleared (idle): a Stop cancels the prepass
+  //    too, not only the streaming turn.
+  // `InterruptResult{ok}` later clears the flag (idempotent with these writes);
+  // a late `MessageFinished` is intentionally NOT gated and self-corrects the
+  // optimistic `interrupted` to `completed` (race: the turn finished between
+  // the click and the abort).
+  const nextState = produce(state, (draft) => {
+    draft.sessions.interruptInFlightBySession[cmd.sessionPath] = true;
+    draft.sessions.runningSessionPaths = draft.sessions.runningSessionPaths.filter(
+      (p: string) => p !== cmd.sessionPath,
+    );
+    delete draft.pending.prepassBySession[cmd.sessionPath];
+    const list = draft.transcript.bySession[cmd.sessionPath];
+    if (list) {
+      for (const message of list) {
+        if (message.role === 'assistant' && message.status === 'streaming') {
+          message.status = 'interrupted';
+        }
+      }
+    }
+  });
   return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        interruptInFlightBySession: {
-          ...state.sessions.interruptInFlightBySession,
-          [cmd.sessionPath]: true,
-        },
-      },
-    },
+    state: nextState,
     effects: [{ kind: 'InterruptRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
   };
 }
@@ -243,7 +268,13 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   const nextState = produce(state, (draft) => {
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
-    appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.text, undefined, new Date(cmd.timestamp).toISOString());
+    // Optimistically truncate the edited message + everything after it (the
+    // old user message, agent reply, and any continuation turns) so the UI
+    // reflects the edit instantly. The removed tail is captured on the pending
+    // op so the failure handlers (`EditResult{ok:false}`, `PreflightFailed`)
+    // can restore it on rollback.
+    const removedTail = truncateLocalTranscriptAfter(draft, cmd.sessionPath, cmd.messageId);
+    appendLocalUserMessage(draft, cmd.sessionPath, cmd.localId, cmd.composedText, cmd.userParts, new Date(cmd.timestamp).toISOString());
     draft.pending.ops[cmd.corrId] = {
       kind: 'edit',
       sessionPath: cmd.sessionPath,
@@ -253,6 +284,7 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
       // edit also runs the prepass (before_agent_start), so it gets a startedAt
       // and a 'running' chip on promote, mirroring send (Brief F).
       startedAt: cmd.timestamp,
+      removedTail,
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
     // Retry clears a stale prepass 'failed' chip from a previous turn.
@@ -269,7 +301,9 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
         messageId: cmd.messageId,
         text: cmd.text,
         localId: cmd.localId,
-        composedText: cmd.text,
+        composedText: cmd.composedText,
+        inputs: cmd.inputs,
+        userParts: cmd.userParts,
       },
     ],
   };
@@ -457,66 +491,6 @@ export function handleSetToolResultPruningSettings(state: ArchState, cmd: Extrac
         kind: 'SetToolResultPruningSettings',
         corrId: cmd.corrId,
         settings: cmd.settings,
-      },
-    ],
-  };
-}
-
-export function handleSetProxySettings(state: ArchState, cmd: Extract<Command, { kind: 'SetProxySettings' }>): ReducerResult {
-  // Optimistic apply for instant UI, mirroring handleSetPruningSettings. The
-  // service persists + regenerates litellm_config.yaml + restarts the proxy;
-  // on a config/restart failure it dispatches a NoticeShown rather than
-  // reverting (the new settings are already on disk). mergeProxySettings
-  // matches the disk-write merge in writeProxySettings so optimistic state ==
-  // persisted state.
-  return {
-    state: {
-      ...state,
-      settings: {
-        ...state.settings,
-        proxySettings: mergeProxySettings(state.settings.proxySettings, cmd.settings),
-      },
-    },
-    effects: [
-      {
-        kind: 'SetProxySettings',
-        corrId: cmd.corrId,
-        settings: cmd.settings,
-      },
-    ],
-  };
-}
-
-export function handleAddProxyProvider(state: ArchState, cmd: Extract<Command, { kind: 'AddProxyProvider' }>): ReducerResult {
-  // The message-router validates input + dedupes before dispatching, so by the
-  // time we get here the entry is buildable + the name is free. Guard anyway:
-  // if somehow unbuildable, no-op (the router already showed a notice).
-  const entry = buildProxyProviderEntry(cmd.input);
-  if (!entry) {
-    return { state, effects: [] };
-  }
-  const name = cmd.input.name.trim().toLowerCase();
-  // Optimistic apply: merge a fresh pending `proxy.providers.<name>` entry
-  // (empty modelListOrder, <name>-shared model-info id). The service then
-  // persists the key to proxy/.env + writes settings.json + runs sync-models +
-  // restarts the proxy; on failure it reloads proxy settings from disk
-  // (ProxySettingsChanged) to revert this optimistic entry. buildProxyProviderEntry
-  // is shared with the service so optimistic state == persisted state.
-  return {
-    state: {
-      ...state,
-      settings: {
-        ...state.settings,
-        proxySettings: mergeProxySettings(state.settings.proxySettings, {
-          providers: { [name]: entry },
-        }),
-      },
-    },
-    effects: [
-      {
-        kind: 'AddProxyProvider',
-        corrId: cmd.corrId,
-        input: cmd.input,
       },
     ],
   };

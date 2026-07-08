@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProxyProviderAddInput, ProxySettings, ProxySettingsUpdate, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
+import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS } from '../../../shared/thinking-level.js';
 
 import { useMemo } from 'preact/hooks';
@@ -25,13 +25,11 @@ interface ComposerToolbarProps {
   pruningCatalog: PruningCatalog;
   pruningResult: PruningResult | null;
   toolResultPruningSettings: ToolResultPruningSettings;
-  proxySettings: ProxySettings;
+  providerGateStats: ProviderGateStats;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
-  onSetProxySettings: (settings: ProxySettingsUpdate) => void;
-  onAddProxyProvider: (input: ProxyProviderAddInput) => void;
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   systemPrompts: SystemPromptEntry[];
@@ -53,13 +51,11 @@ export function ComposerToolbar({
   pruningCatalog,
   pruningResult,
   toolResultPruningSettings,
-  proxySettings,
+  providerGateStats,
   onSetPrefs,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
-  onSetProxySettings,
-  onAddProxyProvider,
   availableExtensions,
   availableModels,
   systemPrompts,
@@ -87,7 +83,7 @@ export function ComposerToolbar({
   return (
     <div class="flex w-full flex-nowrap items-center gap-1.5 [container-name:toolbar] [container-type:inline-size]">
       <div class="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5">
-        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} proxySettings={proxySettings} availableExtensions={availableExtensions} availableModels={availableModels} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} onSetProxySettings={onSetProxySettings} onAddProxyProvider={onAddProxyProvider} />
+        <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
 
         {filteredModels.length > 0 ? (
           <ModelPicker
