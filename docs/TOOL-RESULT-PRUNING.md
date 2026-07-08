@@ -353,6 +353,7 @@ restate or re-own it.
 | Pretty JSON/XML | lossless | minify | validate-then-minify; 40-60% off typical |
 | `ls -l`/`-la` | lossy+recall | names + dir/file | `toolName==="ls"` structured input; bash `ls` parse command |
 | `git log` verbose | lossy+recall | oneline + short hash | |
+| grep/rg `path:line:content` | lossy+recall | group by path (path once, matches indented) | args-gate on grep-family + shape-confirm (≥60% pathy lines); pipelines allowed; ~26% off grep output |
 | Tabular (`ps`, `docker ps`, `kubectl`, `df`) | lossy+recall | drop low-value columns | detect by whitespace alignment |
 | Stack traces | lossy+recall | dedupe frames, strip timestamps | fiddly; conservative |
 
@@ -366,7 +367,7 @@ restate or re-own it.
 2. **MVP scope -- RESOLVED & SHIPPED (lossless + lossy tiers):** the
    lossless tier (ANSI strip, trailing-whitespace trim, blank-run collapse,
    JSON minify) and the lossy-recoverable tier (`ls -l` → names, `git log` →
-   oneline) are both implemented in `extensions/tool-result-pruner/`.
+   oneline, grep/rg → path-grouped) are all implemented in `extensions/tool-result-pruner/`.
    `RuleResult` gained its `marker` field; the pipeline gained lossy
    orchestration (profile-gated, per-rule-toggled, lossless-before-lossy) and
    returns `meta.recallRules`/`meta.markers`/`meta.losslessText`; `index.ts`
@@ -396,7 +397,7 @@ restate or re-own it.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
 5. **Config — RESOLVED & SHIPPED:** `toolResultPruning: { enabled, profile,
-   rules: { ansi, whitespace, blankRun, jsonMinify } }` block in `settings.json`,
+   rules: { ansi, whitespace, blankRun, jsonMinify, lsLong, gitLog, grepGroup } }` block in `settings.json`,
    sibling to `pruning` (do not overload that flag). Tier-1 (lossless) always on
    by default; each rule independently toggleable. Tier-2 will be
    profile-selectable (`default` runs lossy; `security` keeps
@@ -430,8 +431,9 @@ restate or re-own it.
   (`RuleToggles` incl. `lsLong`/`gitLog`, `RULE_KEY_BY_NAME`, `PruningRecall`,
   `PruningMeta` with `recallRules`/`markers`/`losslessText`), `rules.ts`
   (4 lossless rules; `collapse-blank-runs` keeps a terminal newline),
-  `lossy-rules.ts` (`ls-long`, `git-log`; args-as-signal detection, diff-option
-  exclusions for `git log`), `pipeline.ts` (guards + lossless-then-lossy
+  `lossy-rules.ts` (`ls-long`, `git-log`, `grep-group`; args-as-signal detection, diff-option
+  exclusions for `git log`; `grep-group` is the hybrid exception — args-gate
+  on a grep-family invocation AND shape-confirm of `path:line:content`), `pipeline.ts` (guards + lossless-then-lossy
   orchestration, profile-gated), `tokenize.ts`, `types-global.d.ts`, `test/`
   (rules, lossy-rules, pipeline, config, index, logger).
 - Wired into `extension/package.json` (`typecheck:tool-result-pruner`),

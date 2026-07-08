@@ -2,6 +2,30 @@
 
 Scope: `extension/src/host/{session-service,stats-service,run-analytics,sidebar,backend,shared,webview,util}`, `extension-host.ts`, `token-rate-service.ts`. Reviewer stance: skeptical senior engineer. Read-only recon; no fixes proposed.
 
+## Amendments (post-review)
+
+> Findings below were captured at a point in time. The following have since been
+> resolved and the original text is kept for history:
+
+- **Finding #4 (parseCheckpoint / readOptionalText duplication)** — Resolved.
+  The duplicated I/O helpers were consolidated into `shared/checkpoint-io.ts`
+  (`parseCheckpoint`, `readOptionalText`, `parsePersistedSessionRunState`) and
+  `run-analytics/coercion-utils.ts` (`isObjectRecord`). `stats-service/helpers.ts`
+  and `run-analytics/query.ts` no longer define their own `parseCheckpoint` /
+  `readOptionalText`; both import from `shared/checkpoint-io.ts`.
+- **Finding #13 (schema versioning is exact-match-or-drop with no migration)** —
+  Resolved. A versioned migration registry now exists at
+  `shared/checkpoint-migrations.ts` (`CHECKPOINT_MIGRATIONS` + `migrateCheckpoint`
+  walker with contiguity checks). `parseCheckpoint` (`shared/checkpoint-io.ts`)
+  walks the registry for older files and **drops + warns** (via `appendPieLog`)
+  on a missing step, a throwing `up`, or a newer-than-code file — no longer
+  silent. The registry is empty only because v1 is the first schema version;
+  the next bump appends a `1 → 2` entry per the documented append-only rules.
+
+> Note: line counts in "## Files reviewed" and inline `:NNN` references are
+> frozen at review time and may have drifted; trust the file paths, not the
+> numbers.
+
 ## Files reviewed
 
 | Path | Lines |

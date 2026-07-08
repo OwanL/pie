@@ -63,14 +63,14 @@ The macOS/Linux script (`install.sh`) is intentionally lighter: it covers steps 
 
 ## Model Configuration
 
-Model configuration (providers, pricing, eligibility flags, LiteLLM proxy routing, and the default model/provider/retry/pruning settings) has a single source of truth: [`models.yaml`](models.yaml). After editing it, regenerate the derived files:
+Model configuration (providers, pricing, eligibility flags, provider concurrency, and the default model/provider/retry/pruning settings) has a single source of truth: [`models.yaml`](models.yaml). After editing it, regenerate the derived files:
 
 ```bash
-npm run sync-models            # regenerate models.json, model-profiles.yaml, proxy/litellm_config.yaml, settings.json model fields
+npm run sync-models            # regenerate models.json, model-profiles.yaml, settings.json model fields
 npm run sync-models -- --check  # dry-run: exit 1 if any derived file is out of sync
 ```
 
-Do not edit `models.json`, `model-profiles.yaml`, `proxy/litellm_config.yaml`, or the model fields of `settings.json` directly — the `model-config-sync` test fails on drift.
+Do not edit `models.json`, `model-profiles.yaml`, or the model fields of `settings.json` directly — the `model-config-sync` test fails on drift.
 
 ## Authentication
 

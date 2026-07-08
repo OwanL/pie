@@ -318,6 +318,12 @@ Deferred (intentionally NOT done in this pass):
   non-coding queries, or trust the prepass when reasoning explicitly justifies
   a full prune) could let correct full-prunes through. Tools stay fail-open
   regardless (zero tools is fatal).
+  **Updated 2026-07-08**: the *skill* safeguard now only fires when no tools
+  remain either — an agent with zero skills but its tools is fully functional,
+  so a legitimate full skill-prune is allowed through whenever >=1 tool survives.
+  The tool safeguard is unchanged (zero tools is fatal). Subagent inheritance
+  still treats an empty parent kept-set as keep-all (an independent safety net,
+  no longer a mirror of the pruner's safeguard).
 
 ---
 
