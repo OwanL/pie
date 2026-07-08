@@ -32,6 +32,7 @@ describe('warm-bash stats aggregation', () => {
     const sessionA = 'session-a';
     const providerA = () => ({
       enabled: true,
+      activeSessions: 1,
       poolSize: 3,
       ready: 2,
       warming: 1,
@@ -45,6 +46,7 @@ describe('warm-bash stats aggregation', () => {
     const unregisterA = module.registerWarmBashStats(sessionA, providerA);
     const collectedA = module.collectWarmBashStats();
     assert.equal(collectedA.enabled, true);
+    assert.equal(collectedA.activeSessions, 1);
     assert.equal(collectedA.poolSize, 3);
     assert.equal(collectedA.ready, 2);
     assert.equal(collectedA.warming, 1);
@@ -57,6 +59,7 @@ describe('warm-bash stats aggregation', () => {
     // Override the same session with a different provider.
     const providerA2 = () => ({
       enabled: false,
+      activeSessions: 0,
       poolSize: 1,
       ready: 1,
       warming: 0,
@@ -69,6 +72,7 @@ describe('warm-bash stats aggregation', () => {
     const unregisterA2 = module.registerWarmBashStats(sessionA, providerA2);
     const collectedA2 = module.collectWarmBashStats();
     assert.equal(collectedA2.enabled, false);
+    assert.equal(collectedA2.activeSessions, 0);
     assert.equal(collectedA2.poolSize, 1);
     assert.equal(collectedA2.totalWarm, 1);
 
@@ -88,6 +92,7 @@ describe('warm-bash stats aggregation', () => {
 
     const unregisterA = module.registerWarmBashStats(sessionA, () => ({
       enabled: true,
+      activeSessions: 1,
       poolSize: 2,
       ready: 1,
       warming: 1,
@@ -100,6 +105,7 @@ describe('warm-bash stats aggregation', () => {
 
     const unregisterB = module.registerWarmBashStats(sessionB, () => ({
       enabled: false,
+      activeSessions: 0,
       poolSize: 3,
       ready: 2,
       warming: 1,
@@ -114,7 +120,8 @@ describe('warm-bash stats aggregation', () => {
     // enabled and fastPathEnabled are ORed across sessions.
     assert.equal(collected.enabled, true);
     assert.equal(collected.fastPathEnabled, true);
-    // Numeric fields are summed.
+    // Numeric fields are summed; activeSessions only counts enabled sessions.
+    assert.equal(collected.activeSessions, 1);
     assert.equal(collected.poolSize, 5);
     assert.equal(collected.ready, 3);
     assert.equal(collected.warming, 2);
@@ -126,6 +133,7 @@ describe('warm-bash stats aggregation', () => {
     unregisterA();
     const afterA = module.collectWarmBashStats();
     assert.equal(afterA.enabled, false);
+    assert.equal(afterA.activeSessions, 0);
     assert.equal(afterA.fastPathEnabled, false);
     assert.equal(afterA.poolSize, 3);
     assert.equal(afterA.ready, 2);
@@ -138,6 +146,7 @@ describe('warm-bash stats aggregation', () => {
   test('EMPTY_WARM_BASH_STATS has the exact zeroed shape shown to users', () => {
     assert.deepEqual(module.EMPTY_WARM_BASH_STATS, {
       enabled: false,
+      activeSessions: 0,
       poolSize: 0,
       ready: 0,
       warming: 0,

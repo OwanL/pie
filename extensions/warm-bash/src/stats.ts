@@ -15,6 +15,8 @@
 export interface WarmBashStats {
   /** Warm bash is active for at least one session (pool size > 0, not disposed). */
   enabled: boolean;
+  /** Count of sessions with warm bash active (each enabled session contributes 1). */
+  activeSessions: number;
   /** Configured warm pool size (sum across active sessions). */
   poolSize: number;
   /** Idle warm workers ready to serve a command immediately. */
@@ -35,6 +37,7 @@ export interface WarmBashStats {
 
 export const EMPTY_WARM_BASH_STATS: WarmBashStats = {
   enabled: false,
+  activeSessions: 0,
   poolSize: 0,
   ready: 0,
   warming: 0,
@@ -74,6 +77,7 @@ export function collectWarmBashStats(): WarmBashStats {
   const reg = getRegistry();
   if (reg.providers.size === 0) return EMPTY_WARM_BASH_STATS;
   let poolSize = 0;
+  let activeSessions = 0;
   let ready = 0;
   let warming = 0;
   let totalFastPath = 0;
@@ -87,6 +91,7 @@ export function collectWarmBashStats(): WarmBashStats {
     if (s.enabled) enabled = true;
     if (s.fastPathEnabled) fastPathEnabled = true;
     poolSize += s.poolSize;
+    activeSessions += s.activeSessions;
     ready += s.ready;
     warming += s.warming;
     totalFastPath += s.totalFastPath;
@@ -96,6 +101,7 @@ export function collectWarmBashStats(): WarmBashStats {
   }
   return {
     enabled,
+    activeSessions,
     poolSize,
     ready,
     warming,

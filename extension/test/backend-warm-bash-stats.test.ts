@@ -23,7 +23,15 @@ function clearRegistry(): void {
 }
 
 function fakeStats(overrides: Partial<WarmBashStats> = {}): WarmBashStats {
-  return { ...EMPTY_WARM_BASH_STATS, enabled: true, poolSize: 2, ready: 2, ...overrides };
+  const enabled = overrides.enabled ?? true;
+  return {
+    ...EMPTY_WARM_BASH_STATS,
+    enabled,
+    activeSessions: enabled ? 1 : 0,
+    poolSize: enabled ? 2 : 0,
+    ready: enabled ? 2 : 0,
+    ...overrides,
+  };
 }
 
 test('warm_bash.stats RPC returns EMPTY when no session has registered', async () => {
@@ -52,6 +60,7 @@ test('warm_bash.stats RPC aggregates metrics across registered sessions', async 
   }) as WarmBashStats;
 
   assert.equal(result.enabled, true);
+  assert.equal(result.activeSessions, 2); // session-a + session-b both enabled
   assert.equal(result.poolSize, 3); // 2 + 1
   assert.equal(result.ready, 3); // 2 + 1
   assert.equal(result.warming, 1);
@@ -64,7 +73,7 @@ test('warm_bash.stats RPC aggregates metrics across registered sessions', async 
 test('warm_bash.stats RPC is disabled when all registered sessions are disabled', async (t) => {
   clearRegistry();
   const reg = getRegistry();
-  reg.providers.set('session-a', () => ({ ...EMPTY_WARM_BASH_STATS, enabled: false }));
+  reg.providers.set('session-a', () => fakeStats({ enabled: false }));
   t.after(() => clearRegistry());
 
   const result = (await handleBackendRequest({} as any, {
@@ -74,6 +83,7 @@ test('warm_bash.stats RPC is disabled when all registered sessions are disabled'
   })) as WarmBashStats;
 
   assert.equal(result.enabled, false);
+  assert.equal(result.activeSessions, 0);
   assert.equal(result.poolSize, 0);
 });
 
@@ -84,6 +94,7 @@ test('collectWarmBashStats reads the same Symbol.for registry as the extension',
   t.after(() => clearRegistry());
 
   const stats = collectWarmBashStats();
+  assert.equal(stats.activeSessions, 1);
   assert.equal(stats.poolSize, 4);
   assert.equal(stats.ready, 4);
   assert.equal(stats.totalWarmupFailures, 2);

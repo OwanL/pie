@@ -166,8 +166,10 @@ export default function (pi: ExtensionAPI) {
       // ready/warming counts + execution breakdown for this session.
       const unregister = registerWarmBashStats(sessionId, (): WarmBashStats => {
         const ps = pool?.getStats() ?? null;
+        const enabled = !!ps && !ps.disposed && cfg.size > 0;
         return {
-          enabled: !!ps && !ps.disposed && cfg.size > 0,
+          enabled,
+          activeSessions: enabled ? 1 : 0,
           poolSize: ps ? ps.poolSize : 0,
           ready: ps ? ps.ready : 0,
           warming: ps ? ps.warming : 0,

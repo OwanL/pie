@@ -26,6 +26,7 @@ export function collectWarmBashStats(): WarmBashStats {
   const reg = (globalThis as unknown as { [REGISTRY_KEY]?: Registry })[REGISTRY_KEY];
   if (!reg || reg.providers.size === 0) return EMPTY_WARM_BASH_STATS;
   let poolSize = 0;
+  let activeSessions = 0;
   let ready = 0;
   let warming = 0;
   let totalFastPath = 0;
@@ -39,6 +40,7 @@ export function collectWarmBashStats(): WarmBashStats {
     if (s.enabled) enabled = true;
     if (s.fastPathEnabled) fastPathEnabled = true;
     poolSize += s.poolSize;
+    activeSessions += s.activeSessions;
     ready += s.ready;
     warming += s.warming;
     totalFastPath += s.totalFastPath;
@@ -48,6 +50,7 @@ export function collectWarmBashStats(): WarmBashStats {
   }
   return {
     enabled,
+    activeSessions,
     poolSize,
     ready,
     warming,
