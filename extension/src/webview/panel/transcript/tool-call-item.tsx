@@ -350,7 +350,7 @@ function SubagentSingleBlock({
   );
 
   // Source attribution for nested ask_user prompts: carry this subagent's
-  // call id (matching the proxy's subagentCallId stamping), agent name, and
+  // call id (matching the SDK's subagentCallId stamping), agent name, and
   // nesting depth (parent depth + 1; top-level subagent = 1) down to the
   // nested transcript so ask_user prompts can label who is asking.
   const parentSubagentCtx = useContext(SubagentCallContext);

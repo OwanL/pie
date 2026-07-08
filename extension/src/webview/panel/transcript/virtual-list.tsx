@@ -5,7 +5,7 @@ import { VirtualItem, Virtualizer, elementScroll, observeElementOffset, observeE
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 
-import { type ChatMessage, type ChatPrefs, type PruningResult, type PruningSettings, type SystemPromptEntry, type ThinkingLevel, type ToolCall, type TranscriptWindow, type ProxySessionStatus } from '../../../shared/protocol';
+import { type ChatMessage, type ChatPrefs, type ComposerInput, type PruningResult, type PruningSettings, type SystemPromptEntry, type ThinkingLevel, type ToolCall, type TranscriptWindow } from '../../../shared/protocol';
 import { deriveTurnActivityState } from './activity';
 import { MessageRail } from './message-rail';
 import { ToolCallItem } from './tool-call-item';
@@ -28,11 +28,10 @@ interface TranscriptVirtualListProps {
   pruningResult: PruningResult | null;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ThinkingLevel;
-  proxySessionStatus?: ProxySessionStatus | null;
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -62,7 +61,6 @@ function useTranscriptRows({
   pruningSettings,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
-  proxySessionStatus,
 }: {
   transcript: ChatMessage[];
   systemPrompts: SystemPromptEntry[];
@@ -73,7 +71,6 @@ function useTranscriptRows({
   pruningSettings: PruningSettings;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ThinkingLevel;
-  proxySessionStatus?: ProxySessionStatus | null;
 }) {
   const activityState = useMemo(() => deriveTurnActivityState({
     busy,
@@ -82,8 +79,7 @@ function useTranscriptRows({
     pruningSettings,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-    proxySessionStatus,
-  }), [busy, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel, proxySessionStatus]);
+  }), [busy, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel]);
 
   const rows = useMemo(() => buildTranscriptRows({
     transcript,
@@ -211,7 +207,7 @@ interface VirtualRowProps {
   isLoadingOlder: boolean;
   isLoadingNewer: boolean;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -310,7 +306,6 @@ export function TranscriptVirtualList({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
-  proxySessionStatus,
   workingDirectory,
   editingId,
   onEditRequest,
@@ -333,7 +328,6 @@ export function TranscriptVirtualList({
     pruningSettings,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-    proxySessionStatus,
   });
 
   // Owned here (not inside useTranscriptScroll) so the virtualizer can be

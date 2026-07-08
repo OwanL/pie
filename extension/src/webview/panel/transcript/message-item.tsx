@@ -2,15 +2,16 @@
 /** @jsxImportSource preact */
 
 import { memo } from 'preact/compat';
-import { useState } from 'preact/hooks';
+import { useMemo, useState } from 'preact/hooks';
 
-import type { ChatMessage, ChatPrefs } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput } from '../../../shared/protocol';
 import type { PruningHeaderState } from './pruning';
 import type { TurnActivityState } from './activity';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { chatMessageEqual } from './message-equal';
 import { useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessageParts } from './message-item/hooks';
 import { MessageItemInner, MessageItemShell } from './message-item/inner';
+import { userImagePartsToInputs } from './parts';
 
 export { ReasoningBlock } from './message-item/reasoning-block';
 
@@ -22,7 +23,7 @@ export interface MessageItemProps {
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -71,7 +72,6 @@ export function MessageItemView({
     combinedParts,
     combinedMarkdown,
     renderableUserParts,
-    hasUserImages,
     combinedThinking,
     combinedToolCalls,
   } = useMessageParts(message);
@@ -85,6 +85,8 @@ export function MessageItemView({
   // so virtualized remounts don't replay it.
   const entered = useMessageEntrance(message.id, sessionKey);
 
+  const initialInputs = useMemo(() => userImagePartsToInputs(message), [message]);
+
   const derived = useMessageItemDerived({
     message,
     isStreaming,
@@ -92,7 +94,6 @@ export function MessageItemView({
     activityState,
     editingId,
     readonly,
-    hasUserImages,
     recovery,
     combinedParts,
     combinedMarkdown,
@@ -118,6 +119,7 @@ export function MessageItemView({
         isEditing={derived.isEditing}
         isCurrentlyStreaming={derived.isCurrentlyStreaming}
         capturedHeight={capturedHeight}
+        initialInputs={initialInputs}
         pruningHeaderState={pruningHeaderState}
         pruningExpanded={pruningExpanded}
         setPruningExpanded={setPruningExpanded}

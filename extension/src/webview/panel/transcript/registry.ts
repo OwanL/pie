@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
-import type { ChatMessage, ChatPrefs, PruningResult, SystemPromptEntry, ToolCall } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput, PruningResult, SystemPromptEntry, ToolCall } from '../../../shared/protocol';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import type { TranscriptRow } from './virtual-list-rows';
 
@@ -20,7 +20,7 @@ export interface RowRendererProps {
   isLoadingNewer: boolean;
   isLastRow: boolean;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;

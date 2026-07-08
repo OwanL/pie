@@ -10,6 +10,7 @@
 
 import type {
   ChatPrefs,
+  ComposerInput,
   PruningResult,
   PruningSettings,
   SystemPromptEntry,
@@ -39,7 +40,6 @@ function TranscriptSurface({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
-  proxySessionStatus,
   workingDirectory,
   editingId,
   onEditRequest,
@@ -76,7 +76,6 @@ function TranscriptSurface({
         pruningResult={pruningResult}
         pendingAssistantModelId={pendingAssistantModelId}
         pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
-        proxySessionStatus={proxySessionStatus}
         workingDirectory={workingDirectory}
         editingId={editingId}
         onEditRequest={onEditRequest}
@@ -109,11 +108,10 @@ export interface TranscriptHostProps {
   pruningResult: PruningResult | null;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ThinkingLevel;
-  proxySessionStatus?: import('../../../shared/protocol').ProxySessionStatus | null;
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -136,7 +134,6 @@ export function TranscriptHost({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
-  proxySessionStatus,
   workingDirectory,
   editingId,
   onEditRequest,
@@ -164,7 +161,6 @@ export function TranscriptHost({
           pruningResult={pruningResult}
           pendingAssistantModelId={pendingAssistantModelId}
           pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
-          proxySessionStatus={proxySessionStatus}
           workingDirectory={workingDirectory}
           editingId={editingId}
           onEditRequest={onEditRequest}

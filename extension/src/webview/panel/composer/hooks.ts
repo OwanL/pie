@@ -241,8 +241,8 @@ export function useComposerInput({
     if (trimmed.length === 0 && pendingComposerInputsLength === 0) return;
     submitting.current = true;
     onSend(trimmed);
-    // Steering (FollowUp): when sending while already busy (a queued
-    // follow-up), `busy` is already true so the [busy] effect that normally
+    // Steering: when sending while already busy (a queued steering
+    // injection), `busy` is already true so the [busy] effect that normally
     // clears the submit latch won't fire — clear it now so the user can queue
     // another message. The text is cleared by `resetComposer` below, so the
     // trimmed-length guard + disabled Send button prevent an accidental

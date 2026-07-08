@@ -3,7 +3,7 @@
 
 import type { ComponentChildren, RefObject } from 'preact';
 
-import type { ChatMessage, ChatPrefs } from '../../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput } from '../../../../shared/protocol';
 import { cx } from '../../utils/cx';
 import { InlineEditor } from '../inline-editor';
 import type { PruningHeaderState } from '../pruning';
@@ -100,6 +100,7 @@ interface MessageItemInnerProps {
   isEditing: boolean;
   isCurrentlyStreaming: boolean;
   capturedHeight: number | null;
+  initialInputs: ComposerInput[];
   pruningHeaderState: PruningHeaderState | undefined;
   pruningExpanded: boolean;
   setPruningExpanded: (fn: (v: boolean) => boolean) => void;
@@ -121,7 +122,7 @@ interface MessageItemInnerProps {
   footerActivityState: TurnActivityState | null;
   recovery: { kind: 'available'; userId: string } | { kind: 'unloaded' } | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   onEditCancel: () => void;
   onCancelPrepass?: () => void;
 }
@@ -131,6 +132,7 @@ export function MessageItemInner({
   isEditing,
   isCurrentlyStreaming,
   capturedHeight,
+  initialInputs,
   pruningHeaderState,
   pruningExpanded,
   setPruningExpanded,
@@ -195,8 +197,9 @@ export function MessageItemInner({
       {isEditing ? (
         <InlineEditor
           initialText={message.markdown}
+          initialInputs={initialInputs}
           capturedHeight={capturedHeight}
-          onConfirm={(text) => onEditConfirm(message.id, text)}
+          onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs)}
           onCancel={onEditCancel}
         />
       ) : (

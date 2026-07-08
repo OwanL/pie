@@ -49,7 +49,6 @@ export function TranscriptView({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
-  proxySessionStatus,
   workingDirectory,
   editingId,
   onEditRequest,
@@ -86,7 +85,6 @@ export function TranscriptView({
       pruningResult={pruningResult}
       pendingAssistantModelId={pendingAssistantModelId}
       pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
-      proxySessionStatus={proxySessionStatus}
       workingDirectory={workingDirectory}
       editingId={editingId}
       onEditRequest={onEditRequest}

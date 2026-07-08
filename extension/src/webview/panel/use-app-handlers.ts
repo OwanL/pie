@@ -1,10 +1,9 @@
 import { useCallback, useMemo } from 'preact/hooks';
 import type {
   ChatPrefs,
+  ComposerInput,
   ComposerInputDraft,
   PruningSettings,
-  ProxyProviderAddInput,
-  ProxySettingsUpdate,
   RunOutcome,
   ThinkingLevel,
   ToolResultPruningSettings,
@@ -39,8 +38,6 @@ export interface AppHandlers {
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
-  handleSetProxySettings: (partial: ProxySettingsUpdate) => void;
-  handleAddProxyProvider: (input: ProxyProviderAddInput) => void;
   handleEditRequest: (messageId: string) => void;
   handleAddComposerInput: (input: ComposerInputDraft) => void;
   handleRemoveComposerInput: (inputId: string) => void;
@@ -49,7 +46,7 @@ export interface AppHandlers {
   handleRecordOutcome: (outcome: RunOutcome) => void;
   handleTabRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   handleModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
-  handleEditSend: (messageId: string, text: string) => void;
+  handleEditSend: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   handleOpenFileDiff: (filePath: string) => void;
   handleOpenFileInEditor: (filePath: string) => void;
   handleRevertFile: (filePath: string) => void;
@@ -147,8 +144,6 @@ export function useAppHandlers(
   }, [postMessage, activeSessionPathRef]);
   const handleSetPruningSettings = useCallback((partial: Partial<PruningSettings>) => postMessage({ type: 'setPruningSettings', settings: partial }), [postMessage]);
   const handleSetToolResultPruningSettings = useCallback((partial: Partial<ToolResultPruningSettings>) => postMessage({ type: 'setToolResultPruningSettings', settings: partial }), [postMessage]);
-  const handleSetProxySettings = useCallback((partial: ProxySettingsUpdate) => postMessage({ type: 'setProxySettings', settings: partial }), [postMessage]);
-  const handleAddProxyProvider = useCallback((input: ProxyProviderAddInput) => postMessage({ type: 'addProxyProvider', input }), [postMessage]);
   const handleEditRequest = useCallback((messageId: string) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -209,11 +204,11 @@ export function useAppHandlers(
     postMessage({ type: 'setModel', sessionPath, defaultModel: model, defaultThinkingLevel: thinkingLevel });
   }, [postMessage, activeSessionPathRef]);
 
-  const handleEditSend = useCallback((messageId: string, text: string) => {
+  const handleEditSend = useCallback((messageId: string, text: string, inputs?: ComposerInput[]) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
     const localId = createLocalMessageId('edit');
-    postMessage({ type: 'editMessage', sessionPath, messageId, text, localId });
+    postMessage({ type: 'editMessage', sessionPath, messageId, text, inputs, localId });
   }, [postMessage, activeSessionPathRef]);
 
   const handleOpenFileDiff = useCallback((filePath: string) => {
@@ -289,7 +284,6 @@ export function useAppHandlers(
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,
-      handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,
@@ -305,7 +299,7 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
-      handleAddProxyProvider,
+
     }),
     [
       handleSend,
@@ -325,7 +319,6 @@ export function useAppHandlers(
       handleSetSystemPromptToggles,
       handleSetPruningSettings,
       handleSetToolResultPruningSettings,
-      handleSetProxySettings,
       handleEditRequest,
       handleAddComposerInput,
       handleRemoveComposerInput,
@@ -341,7 +334,6 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
-      handleAddProxyProvider,
     ],
   );
 }

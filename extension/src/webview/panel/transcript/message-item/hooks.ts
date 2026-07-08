@@ -6,7 +6,6 @@ import { assistantReplyMeta, formatAssistantMetaTooltip } from '../header';
 import {
   assistantPartsFromMessage,
   getRenderableUserParts,
-  messageHasUserImages,
   reasoningFromMessageParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
@@ -48,7 +47,6 @@ export function useMessageParts(message: ChatMessage) {
       : message.markdown
   ), [combinedParts, message.markdown, message.role]);
   const renderableUserParts = useMemo(() => getRenderableUserParts(message), [message]);
-  const hasUserImages = useMemo(() => messageHasUserImages(message), [message]);
   const combinedThinking = useMemo(() => (
     message.role === 'assistant'
       ? reasoningFromMessageParts(combinedParts) ?? ''
@@ -64,7 +62,6 @@ export function useMessageParts(message: ChatMessage) {
     combinedParts,
     combinedMarkdown,
     renderableUserParts,
-    hasUserImages,
     combinedThinking,
     combinedToolCalls,
   };
@@ -92,7 +89,6 @@ export function useMessageItemDerived({
   activityState,
   editingId,
   readonly,
-  hasUserImages,
   recovery,
   combinedParts,
   combinedMarkdown,
@@ -106,7 +102,6 @@ export function useMessageItemDerived({
   activityState?: TurnActivityState | null;
   editingId: string | null;
   readonly?: boolean;
-  hasUserImages: boolean;
   /** Precomputed recovery affordance for assistant error/interrupted messages.
    *  Computed by the row builder (pure useRecovery) and passed in so the
    *  transcript array never reaches this memoized component. */
@@ -159,7 +154,6 @@ export function useMessageItemDerived({
   );
 
   const isClickableUserMsg = message.role === 'user'
-    && !hasUserImages
     && !isEditing
     && !isCurrentlyStreaming
     && !readonly;
