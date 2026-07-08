@@ -33,6 +33,7 @@ Lossless ⇒ semantically identical, fewer bytes ⇒ **no recall stash needed**.
 |------|--------------|
 | `ls-long` | `ls -l`/`-la` → names + `/` dir marker (drops perms/owner/size/time; keeps ` -> target` for symlinks) |
 | `git-log` | verbose `git log` → oneline + 7-char hash (drops author/date/body) |
+| `grep-group` | grep/rg `path:line:content` → group by path (each path printed once, matches indented); drops the repeated path prefix on every match line |
 
 Lossy ⇒ information is dropped, so a **recall stash is required** before the
 rewrite may enter history (§7.3): the pre-pruning text is written to a temp
@@ -45,7 +46,11 @@ pipeline skips `read`, so recall is faithful).
 tool-call args (`input.command` for bash), not output shape, so they never
 mis-fire on other tabular output. `git log -p`/`--stat`/`--name-only`/… are
 **not** pruned — the agent explicitly requested diff content there, and
-dropping it would be tier-3 (silently lossy) territory.
+dropping it would be tier-3 (silently lossy) territory. `grep-group` is the
+one hybrid rule: it args-gates on a grep-family invocation (rg/grep/git grep)
+**and** shape-confirms a strong majority of lines are `path:line:content` with
+a pathy first field (so arbitrary `word:number:text` tables are never grouped);
+unlike ls/git it allows pipelines (grep's shape survives `| head`, `| sort`).
 
 **Net-savings gate:** the fidelity marker has a real token cost (the recall
 path — ~15 tokens on Linux, ~30+ on Windows long-temp-path platforms). A lossy
@@ -56,8 +61,10 @@ marker, no stash). This prevents pruning a tiny `ls -l` (2 entries) from
 abandoned and the lossless result is used instead — never silently drop (§7.3).
 
 **Real-world impact** (measured on this repo): `ls -la` 536→77 tokens (85% off),
-`git log -8` 2343→180 (92% off), `git log -20` 6323→396 (94% off) — vs the
-lossless tier alone which saved ~0.5% on production telemetry.
+`git log -8` 2343→180 (92% off), `git log -20` 6323→396 (94% off), `grep-group`
+~26% off grep/rg output (~102K tokens across the measured corpus — grep is 48%
+of bash tool tokens) — vs the lossless tier alone which saved ~0.5% on
+production telemetry.
 
 **Measurement is wired now** (§9.3): `logger.ts` writes a `tool_result_pruned`
 JSONL event per pruned result (rules fired + before/after token counts) to
@@ -117,7 +124,7 @@ The extension can also be turned off via the global toggle env var
 - `types.ts` — `ToolResultPruningConfig`, `Rule`, `RuleContext`, `Profile`,
   `PruningRecall`, `PruningMeta`.
 - `rules.ts` — the lossless rule implementations (ordered, §7.2).
-- `lossy-rules.ts` — the lossy-recoverable rules (`ls-long`, `git-log`).
+- `lossy-rules.ts` — the lossy-recoverable rules (`ls-long`, `git-log`, `grep-group`).
 - `pipeline.ts` — guards + lossless/lossy orchestration (lossy gated on profile
   + toggles; stash/marker delegated to `index.ts`).
 - `tokenize.ts` — BPE token counter (gpt-tokenizer cl100k_base, chars/4 fallback).

@@ -10,7 +10,7 @@ const indexUrl = pathToFileURL(path.resolve(__dirname, '../index.ts')).href;
 const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
 const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 
-type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean };
+type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean };
 type Config = { enabled: boolean; profile: string; rules: RuleToggles };
 type ToolContent = { type: 'text'; text: string };
 type Event = {
@@ -40,7 +40,7 @@ type LoggerModule = {
   flushLog: () => Promise<void>;
 };
 
-const ALL_ON: RuleToggles = { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true };
+const ALL_ON: RuleToggles = { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true };
 const ENABLED: Config = { enabled: true, profile: 'default', rules: { ...ALL_ON } };
 
 function ev(over: Partial<Event>): Event {
@@ -152,7 +152,7 @@ describe('index handler (visibility badge + analytics)', () => {
     configMod.setConfigOverrideForTesting({
       enabled: true,
       profile: 'default',
-      rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false },
+      rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false },
     });
     const out = await handler(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), {});
     assert.ok(out);
@@ -216,6 +216,25 @@ describe('index handler (visibility badge + analytics)', () => {
     'commit a1b2c3d4e5f6789012345678901234567890abcf',
     'Author: X <x@x>', 'Date:   Wed Jul 2 09:00:00 2025', '', '    Initial widget', '',
   ].join('\n');
+
+  const RG_GROUP_BIG = [
+    'extension/src/webview/panel/session-tabs.tsx:6:import { Foo } from foo',
+    'extension/src/webview/panel/session-tabs.tsx:14:export type Bar',
+    'extension/src/webview/panel/session-tabs.tsx:22:const x = 1',
+    'extension/src/webview/panel/session-tabs.tsx:30:const y = 2',
+    'extension/src/webview/panel/session-tabs.tsx:38:const z = 3',
+    'extension/src/webview/panel/session-tabs.tsx:46:const w = 4',
+    'extension/src/webview/panel/session-tabs.tsx:54:const v = 5',
+    'extension/src/webview/panel/session-tabs.tsx:62:const u = 6',
+    'extension/src/webview/panel/session-tabs.tsx:70:const t = 7',
+    'extension/src/webview/panel/session-tabs.tsx:78:const s = 8',
+    'extension/src/webview/panel/session-tabs.tsx:86:const r = 9',
+    'extension/src/webview/panel/session-tabs.tsx:94:const q = 10',
+    'extension/src/host/core/arch-state.ts:10:import { Foo }',
+    'extension/src/host/core/arch-state.ts:20:const a = 1',
+    'extension/src/host/core/arch-state.ts:30:const b = 2',
+    'extension/src/host/core/arch-state.ts:40:const c = 3',
+  ].join('\n') + '\n';
 
   test('ls -l lossy: fidelity marker + recall stash + details.pruning', async () => {
     const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }), {});
@@ -309,5 +328,18 @@ describe('index handler (visibility badge + analytics)', () => {
     const pruning = (out!.details as { pruning?: { rules: string[]; rawPath: string } }).pruning!;
     assert.deepEqual(pruning.rules, ['git-log']);
     assert.equal(readFileSync(pruning.rawPath, 'utf-8'), GIT_LOG_3);
+  });
+
+  test('grep/rg lossy: path-grouped + marker + stash', async () => {
+    const out = await handler(ev({ input: { command: 'rg foo' }, content: [{ type: 'text', text: RG_GROUP_BIG }] }), {});
+    assert.ok(out, 'grep-group should fire (RG_GROUP_BIG clears LOSSY_MIN_NET_SAVED after the marker)');
+    const text = out!.content![0]!.text;
+    assert.ok(text.startsWith('[pruned: grep-group (16 matches in 2 files'), 'fidelity marker present');
+    assert.ok(text.includes('extension/src/webview/panel/session-tabs.tsx'), 'path printed as a group header');
+    assert.ok(text.includes('import { Foo } from foo'), 'match content preserved');
+    assert.ok(text.includes('  40: const c = 3'), 'last grouped match present');
+    const pruning = (out!.details as { pruning?: { rules: string[]; rawPath: string } }).pruning!;
+    assert.deepEqual(pruning.rules, ['grep-group']);
+    assert.equal(readFileSync(pruning.rawPath, 'utf-8'), RG_GROUP_BIG);
   });
 });

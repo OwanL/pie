@@ -188,6 +188,147 @@ function parseGitLog(text: string): GitCommit[] {
 }
 
 // ---------------------------------------------------------------------------
+// 3. grep / rg `path:line:content` → grouped by path.
+//
+//   path/to/file.ts:6:import { Foo } from './foo'
+//   path/to/file.ts:14:export type Bar = ...
+//   path/other.ts:22:const x = 1
+//  →
+//   path/to/file.ts
+//     6: import { Foo } from './foo'
+//     14: export type Bar = ...
+//   path/other.ts
+//     22: const x = 1
+//
+// Repeated path prefixes dominate grep/rg output tokens — every match line
+// re-emits the full path. Grouping prints each path once and indents its
+// matches beneath. Information-preserving (path + line + content all
+// present), lossy only in *layout*: the agent can no longer copy `path:line:`
+// verbatim for a follow-up command, so the recall stash covers that (§7.3).
+//
+// Detection is hybrid (§5 principle 2): args-as-signal gates on a grep-family
+// invocation (rg/ripgrep/rga/grep/egrep/fgrep, incl. `git grep`) so we never
+// group arbitrary `word:number:text` tables; shape confirms a strong majority
+// of lines are `path:line:content` with a pathy first field. Unlike ls-long /
+// git-log we do NOT skip pipelines — grep's `path:line:` shape survives
+// `| head`, `| sort`, etc. (common rg idioms), and mixed output is rejected by
+// the 60% shape threshold. Multi-line scripts are still skipped (output is
+// ambiguous). Only applied when a path *repeats* — otherwise grouping adds
+// newlines/indents for zero savings; a shrink guard backstops that.
+// ---------------------------------------------------------------------------
+
+/** Commands whose output is grep-family `path:line:content`. Matches the
+ *  invocation as a word anywhere in the command (handles `git grep`, `time rg`,
+ *  `sudo rg`, `rg foo | head`). `git grep` is covered by the bare `grep` token. */
+const GREP_TOKEN_RE = /\b(?:rg|ripgrep|rga|grep|egrep|fgrep)\b/;
+
+function isGrepCommand(command: string): boolean {
+  const cmd = command.trim();
+  if (!GREP_TOKEN_RE.test(cmd)) return false;
+  // A real newline (post-trim) means a multi-line script — the output could
+  // be several commands' and isn't safely attributable to grep. (Pipes and
+  // `;`/`&&` are fine: grep's path:line: shape survives them.)
+  if (/\n/.test(cmd)) return false;
+  return true;
+}
+
+/** Does `path` look like a real file path rather than a bare token? grep/rg
+ *  emit paths with a separator and/or a file extension. A bare `host` in
+ *  `host:42:msg` is almost certainly not grep output (e.g. a config table) —
+ *  rejecting it upholds the "zero false positives" discipline (§4.4). The
+ *  cost is missing bare-extensionless filenames (rare in multi-file output). */
+function looksPathy(p: string): boolean {
+  if (p.length < 2) return false;
+  return /[/\\]/.test(p) || /\.[A-Za-z0-9]{1,8}$/.test(p);
+}
+
+interface GrepMatch {
+  path: string;
+  /** Line number as-is (preserve original width / zero-padding). */
+  line: string;
+  content: string;
+}
+
+/** Non-greedy up to the first `:digits:` so Windows drive letters (`C:\foo`)
+ *  — which contain a colon — parse correctly: the line-number separator is
+ *  the first `:digits:`, never the drive colon. */
+const GREP_MATCH_RE = /^(.+?):(\d+):(.*)$/;
+
+function parseGrepMatch(line: string): GrepMatch | null {
+  const m = GREP_MATCH_RE.exec(line);
+  if (!m) return null;
+  const path = m[1]!;
+  if (!looksPathy(path)) return null;
+  return { path, line: m[2]!, content: m[3]! };
+}
+
+function grepGroup(text: string, ctx: RuleContext): RuleResult | null {
+  if (ctx.toolName !== "bash") return null;
+  const command = ctx.input?.command;
+  if (typeof command !== "string" || !isGrepCommand(command)) return null;
+
+  // Split without the trailing-"" artifact so we can rebuild the exact
+  // trailing-newline shape. Internal blank lines are preserved verbatim.
+  const hadTrailingNewline = text.endsWith("\n");
+  const body = hadTrailingNewline ? text.slice(0, -1) : text;
+  const lines = body.split("\n");
+
+  const parsed: { match: GrepMatch | null; raw: string }[] = [];
+  let matched = 0;
+  let nonBlank = 0;
+  for (const line of lines) {
+    if (line.trim() === "") {
+      parsed.push({ match: null, raw: line }); // blank line — pass through
+      continue;
+    }
+    nonBlank++;
+    const m = parseGrepMatch(line);
+    parsed.push({ match: m, raw: line });
+    if (m) matched++;
+  }
+  if (matched === 0) return null; // not grep-shaped → uncertain → keep
+  // Require a strong majority to be grep-shaped (guards mixed output).
+  if (matched < Math.ceil(nonBlank * 0.6)) return null;
+
+  // Only worth grouping when a path repeats — otherwise grouping adds
+  // newlines/indents for zero savings (unique paths would grow the output).
+  const counts = new Map<string, number>();
+  for (const { match } of parsed) {
+    if (match) counts.set(match.path, (counts.get(match.path) ?? 0) + 1);
+  }
+  let repeats = false;
+  for (const n of counts.values()) {
+    if (n >= 2) { repeats = true; break; }
+  }
+  if (!repeats) return null;
+
+  // Build grouped output: each path printed once, matches indented beneath.
+  // Non-match / blank lines pass through unchanged and reset the current path
+  // (we've left the group) so the next match re-prints its path.
+  const out: string[] = [];
+  let currentPath: string | null = null;
+  for (const { match, raw } of parsed) {
+    if (!match) {
+      out.push(raw);
+      currentPath = null;
+      continue;
+    }
+    if (match.path !== currentPath) {
+      out.push(match.path);
+      currentPath = match.path;
+    }
+    out.push(`  ${match.line}: ${match.content}`);
+  }
+  let rewritten = out.join("\n");
+  if (hadTrailingNewline) rewritten += "\n";
+  // Shrink guard: if grouping didn't actually reduce bytes (e.g. heavily
+  // interleaved paths that each repeat only once across a break), don't claim
+  // a win — the net-savings gate would reject it anyway, but skip the stash.
+  if (rewritten.length >= text.length) return null;
+  return { text: rewritten, changed: true, marker: `${matched} matches in ${counts.size} files → path-grouped` };
+}
+
+// ---------------------------------------------------------------------------
 // Ordered lossy pipeline (§7.2). Runs after LOSSLESS_RULES, only under the
 // `default` profile (security keeps columns/permissions). Each rule is gated
 // by its toggle in the pipeline; the stash requirement is enforced there too.
@@ -195,4 +336,5 @@ function parseGitLog(text: string): GitCommit[] {
 export const LOSSY_RULES: Rule[] = [
   { name: "ls-long", tier: "lossy", run: lsLong },
   { name: "git-log", tier: "lossy", run: gitLog },
+  { name: "grep-group", tier: "lossy", run: grepGroup },
 ];

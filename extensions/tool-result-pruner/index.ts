@@ -14,7 +14,9 @@
  *     trim, blank-run collapse, JSON minify. Semantically identical ⇒ no
  *     recall stash needed.
  *   - LOSSY-recoverable (only under the `default` profile; per-rule-toggled):
- *     `ls -l` → names + dir marker, `git log` → oneline. Lossy ⇒ a recall
+ *     `ls -l` → names + dir marker, `git log` → oneline, grep/rg → path-grouped
+ *     (drops repeated path prefixes by printing each path once and indenting
+ *     its matches). Lossy ⇒ a recall
  *     stash is REQUIRED before the rewrite may enter history (§7.3): the
  *     post-truncation, pre-pruning text is written to a temp file, a fidelity
  *     marker `[pruned: <rules> — raw: <path>]` is prepended so the agent sees
@@ -28,7 +30,8 @@
  *   "toolResultPruning": { "enabled": true, "profile": "default",
  *                           "rules": { "ansi": true, "whitespace": true,
  *                                      "blankRun": true, "jsonMinify": true,
- *                                      "lsLong": true, "gitLog": true } }
+ *                                      "lsLong": true, "gitLog": true,
+ *                                      "grepGroup": true } }
  *
  *   - enabled: master switch (default true)
  *   - profile: "default" | "security" — security keeps columns/permissions

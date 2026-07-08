@@ -198,3 +198,122 @@ describe('git-log rule', () => {
     assert.match(out!.text, /^a1b2c3d /);
   });
 });
+
+describe('grep-group rule', () => {
+  let mod: LossyModule;
+  test.before(async () => {
+    mod = (await import(lossyUrl)) as LossyModule;
+  });
+
+  const RG_OUTPUT = `extension/src/a.ts:6:import { Foo } from './foo'
+extension/src/a.ts:14:export type Bar = string
+extension/src/b.ts:22:const x = 1
+extension/src/b.ts:30:const y = 2
+`;
+
+  test('groups multi-file rg output: each path printed once, matches indented', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, bash('rg Foo'));
+    assert.equal(
+      out?.text,
+      'extension/src/a.ts\n' +
+        '  6: import { Foo } from \'./foo\'\n' +
+        '  14: export type Bar = string\n' +
+        'extension/src/b.ts\n' +
+        '  22: const x = 1\n' +
+        '  30: const y = 2\n',
+    );
+    assert.equal(out?.changed, true);
+  });
+
+  test('marker reports match + file counts', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, bash('rg Foo'));
+    assert.match(out?.marker ?? '', /4 matches in 2 files/);
+  });
+
+  test('preserves line numbers and content verbatim', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, bash('rg Foo'));
+    assert.ok(out);
+    assert.match(out!.text, /  6: import \{ Foo \}/);
+    assert.match(out!.text, /  30: const y = 2/);
+  });
+
+  test('handles Windows backslash paths', () => {
+    const win = `.\\extension\\src\\a.ts:6:foo\n.\\extension\\src\\a.ts:14:bar\n`;
+    const out = rule('grep-group', mod).run(win, bash('rg foo'));
+    assert.equal(out?.text, '.\\extension\\src\\a.ts\n  6: foo\n  14: bar\n');
+  });
+
+  test('handles Windows drive-letter paths (colon in the path)', () => {
+    // C:\src\a.ts:6:foo — the drive colon must not be mistaken for the
+    // line-number separator; the first :digits: anchors the parse.
+    const drive = `C:\\src\\a.ts:6:foo\nC:\\src\\a.ts:14:bar\n`;
+    const out = rule('grep-group', mod).run(drive, bash('rg foo'));
+    assert.equal(out?.text, 'C:\\src\\a.ts\n  6: foo\n  14: bar\n');
+  });
+
+  test('works through a pipe (rg foo | head) — grep shape survives pipes', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, bash('rg Foo | head -20'));
+    assert.ok(out, 'piped rg should still be grouped');
+    assert.match(out!.marker ?? '', /4 matches in 2 files/);
+  });
+
+  test('detects git grep, plain grep, egrep, rga', () => {
+    for (const cmd of ['git grep foo', 'grep -rn foo .', 'egrep foo .', 'rga foo']) {
+      const out = rule('grep-group', mod).run(RG_OUTPUT, bash(cmd));
+      assert.ok(out, `${cmd} should be detected as grep-family`);
+    }
+  });
+
+  test('no-op for non-bash tools (pi grep tool not handled here)', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, { toolName: 'grep', input: { pattern: 'foo' }, profile: 'default' });
+    assert.equal(out, null);
+  });
+
+  test('no-op when command is not grep-family (avoids grouping arbitrary word:number:text)', () => {
+    assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash('cat file.txt')), null);
+    assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash('ls -l')), null);
+  });
+
+  test('no-op for multi-line scripts (output is ambiguous)', () => {
+    assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash('rg foo\necho done')), null);
+  });
+
+  test('no-op for single-file rg output (no path prefix to factor)', () => {
+    // rg searching one file prints `line:content`, not `path:line:content`.
+    const single = `6:foo bar\n14:baz qux\n`;
+    assert.equal(rule('grep-group', mod).run(single, bash('rg foo file.ts')), null);
+  });
+
+  test('no-op when no path repeats (grouping unique paths would grow output)', () => {
+    const unique = `a/b.ts:1:x\nc/d.ts:2:y\ne/f.ts:3:z\n`;
+    assert.equal(rule('grep-group', mod).run(unique, bash('rg foo')), null);
+  });
+
+  test('no-op when too few lines are grep-shaped (<60% threshold)', () => {
+    const mixed = `a/b.ts:1:match\nnot a grep line at all\nalso not a match\nanother non-match\n`;
+    assert.equal(rule('grep-group', mod).run(mixed, bash('rg foo')), null);
+  });
+
+  test('no-op when a blank line splits a 2-match group (re-printing path would grow it)', () => {
+    // The shrink guard kicks in: grouping can't beat the original here.
+    const blank = `a/b.ts:1:x\n\na/b.ts:2:y\n`;
+    assert.equal(rule('grep-group', mod).run(blank, bash('rg foo')), null);
+  });
+
+  test('no-op when already compact would not shrink (single match)', () => {
+    assert.equal(rule('grep-group', mod).run('a/b.ts:6:only\n', bash('rg foo')), null);
+  });
+
+  test('passes through non-match lines (e.g. rg stderr) and groups the rest', () => {
+    // A non-grep-shaped line (here rg's "file not found" stderr mixed into
+    // stdout) is preserved verbatim and resets the current path; the matches
+    // around it still group. Mirrors real rg output observed in session logs.
+    const withErr = `rg: docs: The system cannot find the file specified. (os error 2)\nextension/src/a.ts:6:foo\nextension/src/a.ts:14:bar\n`;
+    const out = rule('grep-group', mod).run(withErr, bash('rg foo docs'));
+    assert.equal(
+      out?.text,
+      'rg: docs: The system cannot find the file specified. (os error 2)\n' +
+        'extension/src/a.ts\n  6: foo\n  14: bar\n',
+    );
+  });
+});

@@ -11,7 +11,7 @@ export type Profile = "default" | "security";
 
 /** Per-rule enable toggles. Each maps 1:1 to a rule name via `RULE_KEY_BY_NAME`.
  *  A disabled rule is skipped entirely — it never fires, even when its transform
- *  would apply. The first 4 are lossless (§7.2, tier 1, always safe); the last 2
+ *  would apply. The first 4 are lossless (§7.2, tier 1, always safe); the last 3
  *  are lossy-recoverable (§7.2 tier 2 — gated on profile + recall stash). */
 export interface RuleToggles {
   ansi: boolean;
@@ -20,6 +20,7 @@ export interface RuleToggles {
   jsonMinify: boolean;
   lsLong: boolean;
   gitLog: boolean;
+  grepGroup: boolean;
 }
 
 /** Rule name → `RuleToggles` key. The pipeline uses this to look up a rule's
@@ -31,6 +32,7 @@ export const RULE_KEY_BY_NAME: Record<string, keyof RuleToggles> = {
   "minify-json": "jsonMinify",
   "ls-long": "lsLong",
   "git-log": "gitLog",
+  "grep-group": "grepGroup",
 };
 
 export const DEFAULT_RULE_TOGGLES: RuleToggles = {
@@ -40,6 +42,7 @@ export const DEFAULT_RULE_TOGGLES: RuleToggles = {
   jsonMinify: true,
   lsLong: true,
   gitLog: true,
+  grepGroup: true,
 };
 
 export interface ToolResultPruningConfig {
