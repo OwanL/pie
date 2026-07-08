@@ -145,6 +145,71 @@ export function filterDisplayEntries(
   return entries.filter((e) => !e.id || !disabled.has(e.id)) as SystemPromptEntry[];
 }
 
+/** A shallow clone of `options` sufficient to snapshot it: nested arrays are
+ *  never mutated in place by `applySystemPromptTogglesToOptions` (it spreads
+ *  the object and reassigns `contextFiles` / `skills` / `appendSystemPrompt` to
+ *  fresh arrays), so a shallow copy keeps the snapshot independent of later
+ *  filtering applied to the live options. */
+function cloneSystemPromptOptions(options: SdkBuildSystemPromptOptions): SdkBuildSystemPromptOptions {
+  return { ...options };
+}
+
+/** Whether `current` carries at least every option-driven entry `cached` does
+ *  (context files by path, skills by name, appended prompt). True means
+ *  `current` is the SDK's fresh, unfiltered snapshot — a superset of what we
+ *  had — so it's safe to adopt as the display source of truth. False means
+ *  `current` was already filtered by `applySystemPromptTogglesToOptions`
+ *  (some entries stripped) and must not overwrite the cached original.
+ *  Non-option-driven sections (harness, tools, runtime, project-context,
+ *  provider) are stripped from the prompt string, not the options, so they are
+ *  not compared. */
+export function isSupersetSystemPromptOptions(
+  current: SdkBuildSystemPromptOptions,
+  cached: SdkBuildSystemPromptOptions,
+): boolean {
+  if (cached.contextFiles) {
+    const currentPaths = new Set(current.contextFiles?.map((cf) => cf.path));
+    for (const cf of cached.contextFiles) {
+      if (!currentPaths.has(cf.path)) return false;
+    }
+  }
+  if (cached.skills) {
+    const currentNames = new Set(current.skills?.map((s) => s.name));
+    for (const s of cached.skills) {
+      if (!currentNames.has(s.name)) return false;
+    }
+  }
+  if (cached.appendSystemPrompt && !current.appendSystemPrompt) return false;
+  return true;
+}
+
+/** Minimal view of {@link SessionPromptState} so this pure-logic module stays
+ *  decoupled from the server's type graph and unit-testable in isolation. */
+interface PromptStateLike {
+  _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
+  _originalSystemPromptOptions?: SdkBuildSystemPromptOptions;
+}
+
+/** Maintain `_originalSystemPromptOptions`: an unfiltered snapshot of the
+ *  SDK's `_baseSystemPromptOptions`, used to rebuild the display entry list
+ *  (picker + transcript) with disabled entries still present even after
+ *  `applySystemPromptTogglesToBasePrompt` filters the live options for the
+ *  model prompt. Refreshes only when the live options are at least as complete
+ *  as the cached snapshot, so a filtered set never clobbers it — this is what
+ *  keeps a de-selected row from disappearing: the row is rebuilt from the
+ *  unfiltered snapshot and marked `disabled`, instead of being dropped because
+ *  the live options no longer carry it. */
+export function captureOriginalSystemPromptOptions(
+  promptState: PromptStateLike,
+): void {
+  const current = promptState._baseSystemPromptOptions;
+  if (!current) return;
+  const cached = promptState._originalSystemPromptOptions;
+  if (!cached || isSupersetSystemPromptOptions(current, cached)) {
+    promptState._originalSystemPromptOptions = cloneSystemPromptOptions(current);
+  }
+}
+
 /** Mark each entry with `disabled: true/false` based on the session's disabled
  *  set, so the webview can render toggle state without a separate channel.
  *  Display-only entries (`toggleable === false`) are never marked disabled —

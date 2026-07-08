@@ -12,8 +12,10 @@ import {
   applySystemPromptTogglesToOptions,
   buildProviderSystemPrompt,
   buildSessionSystemPrompts,
+  captureOriginalSystemPromptOptions,
   contextFileEntryId,
   filterDisplayEntries,
+  isSupersetSystemPromptOptions,
   markDisabledEntries,
   stripDisabledSectionsFromPrompt,
 } from '../src/backend/system-prompts';
@@ -374,3 +376,143 @@ test('markDisabledEntries sets disabled only on matching ids', () => {
   // The non-toggleable provider card is never marked disabled.
   assert.equal(marked.find((p) => p.id === 'provider')?.disabled, undefined);
 });
+
+// ─── Display snapshot for disabled option-driven entries ───────────────────
+// Regression: `applySystemPromptTogglesToBasePrompt` filters the live
+// `_baseSystemPromptOptions` (removing disabled context files / skills /
+// append) for the model prompt. The display entry list is built from a
+// separate unfiltered snapshot so a de-selected row stays present (and
+// re-toggleable) instead of disappearing.
+
+function fullOptions(): SdkBuildSystemPromptOptions {
+  return {
+    cwd: '/repo',
+    appendSystemPrompt: '# Appended',
+    contextFiles: [
+      { path: '/repo/AGENTS.md', content: 'rules' },
+      { path: '/repo/other.md', content: 'more' },
+    ],
+    skills: [makeSkill('frontend-design')],
+  };
+}
+
+test('isSupersetSystemPromptOptions is true when current has every cached entry', () => {
+  const cached = fullOptions();
+  // Identical -> superset.
+  assert.equal(isSupersetSystemPromptOptions(fullOptions(), cached), true);
+  // Current adds a file -> still a superset.
+  const withExtra = fullOptions();
+  withExtra.contextFiles = [
+    ...(withExtra.contextFiles ?? []),
+    { path: '/repo/extra.md', content: 'x' },
+  ];
+  assert.equal(isSupersetSystemPromptOptions(withExtra, cached), true);
+});
+
+test('isSupersetSystemPromptOptions is false when current dropped a cached entry (filtered)', () => {
+  const cached = fullOptions();
+  // Simulate `applySystemPromptTogglesToOptions` removing one context file.
+  const filtered = applySystemPromptTogglesToOptions(
+    fullOptions(),
+    new Set([contextFileEntryId('/repo/AGENTS.md')]),
+  );
+  assert.equal(isSupersetSystemPromptOptions(filtered, cached), false);
+  // Skills removed too.
+  const filteredSkills = applySystemPromptTogglesToOptions(
+    fullOptions(),
+    new Set([SKILLS_ENTRY_ID]),
+  );
+  assert.equal(isSupersetSystemPromptOptions(filteredSkills, cached), false);
+  // Append removed.
+  const filteredAppend = applySystemPromptTogglesToOptions(
+    fullOptions(),
+    new Set([APPEND_ENTRY_ID]),
+  );
+  assert.equal(isSupersetSystemPromptOptions(filteredAppend, cached), false);
+});
+
+test('captureOriginalSystemPromptOptions snapshots the live options on first call', () => {
+  const state: { _baseSystemPromptOptions?: SdkBuildSystemPromptOptions; _originalSystemPromptOptions?: SdkBuildSystemPromptOptions } = {
+    _baseSystemPromptOptions: fullOptions(),
+  };
+  captureOriginalSystemPromptOptions(state);
+  assert.deepEqual(
+    state._originalSystemPromptOptions?.contextFiles?.map((c) => c.path),
+    ['/repo/AGENTS.md', '/repo/other.md'],
+  );
+});
+
+test('captureOriginalSystemPromptOptions does NOT clobber the snapshot with filtered options', () => {
+  // The core regression guard: after a toggle filters the live options, the
+  // snapshot must retain the full entry set so the disabled row is still built.
+  const state: { _baseSystemPromptOptions?: SdkBuildSystemPromptOptions; _originalSystemPromptOptions?: SdkBuildSystemPromptOptions } = {
+    _baseSystemPromptOptions: fullOptions(),
+  };
+  captureOriginalSystemPromptOptions(state); // captures full set
+
+  // Simulate a toggle removing AGENTS.md from the live options.
+  state._baseSystemPromptOptions = applySystemPromptTogglesToOptions(
+    fullOptions(),
+    new Set([contextFileEntryId('/repo/AGENTS.md')]),
+  );
+  captureOriginalSystemPromptOptions(state); // must NOT overwrite the snapshot
+
+  assert.deepEqual(
+    state._originalSystemPromptOptions?.contextFiles?.map((c) => c.path),
+    ['/repo/AGENTS.md', '/repo/other.md'],
+    'snapshot keeps the disabled file so its row stays in the picker',
+  );
+});
+
+test('captureOriginalSystemPromptOptions refreshes when the SDK rebuilds a fuller set', () => {
+  const state: { _baseSystemPromptOptions?: SdkBuildSystemPromptOptions; _originalSystemPromptOptions?: SdkBuildSystemPromptOptions } = {
+    _baseSystemPromptOptions: fullOptions(),
+  };
+  captureOriginalSystemPromptOptions(state);
+
+  // SDK rebuild adds a new context file (e.g. an extension contributed one).
+  const rebuilt = fullOptions();
+  rebuilt.contextFiles = [
+    ...(rebuilt.contextFiles ?? []),
+    { path: '/repo/new.md', content: 'new' },
+  ];
+  state._baseSystemPromptOptions = rebuilt;
+  captureOriginalSystemPromptOptions(state); // superset -> refresh
+
+  assert.deepEqual(
+    state._originalSystemPromptOptions?.contextFiles?.map((c) => c.path),
+    ['/repo/AGENTS.md', '/repo/other.md', '/repo/new.md'],
+    'snapshot picks up newly-added entries',
+  );
+});
+
+test('building display entries from the snapshot keeps a disabled context-file row present', () => {
+  // End-to-end of the fix at the system-prompts layer: build entries from the
+  // unfiltered snapshot and mark the disabled entry, instead of from filtered
+  // options where it would be absent.
+  const snapshot = fullOptions();
+  const disabledFileId = contextFileEntryId('/repo/AGENTS.md');
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions: snapshot,
+    disabledEntries: [disabledFileId],
+  });
+  const file = prompts.find((p) => p.id === disabledFileId)!;
+  assert.ok(file, 'disabled context-file row is still built from the snapshot');
+  assert.equal(file.disabled, true, 'and marked disabled so the picker shows it unchecked');
+});
+
+test('building display entries from filtered options drops the disabled row (the bug this fixes)', () => {
+  // Demonstrates the failure mode the snapshot guards against: if the display
+  // were built from the filtered live options, the disabled row would vanish.
+  const filtered = applySystemPromptTogglesToOptions(
+    fullOptions(),
+    new Set([contextFileEntryId('/repo/AGENTS.md')]),
+  );
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions: filtered,
+  });
+  assert.ok(!prompts.some((p) => p.id === contextFileEntryId('/repo/AGENTS.md')));
+});
+
