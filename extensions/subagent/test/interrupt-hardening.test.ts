@@ -49,7 +49,7 @@ const MOCK_SDK_SOURCE = [
 	"export function getAgentDir(){ return '.'; }",
 	"export async function createAgentSession(args){",
 	"  const listeners = [];",
-	"  const state = (globalThis.__MOCK_SDK_STATE__ = globalThis.__MOCK_SDK_STATE__ || { createSessionCalls: 0, promptStarted: 0, promptSettled: 0, abortCalls: 0, abortSettled: 0 });",
+	"  const state = (globalThis.__MOCK_SDK_STATE__ = globalThis.__MOCK_SDK_STATE__ || { createSessionCalls: 0, promptStarted: 0, promptSettled: 0, abortCalls: 0, abortSettled: 0, abortCompactionCalls: 0, abortBranchSummaryCalls: 0, abortBashCalls: 0, abortRetryCalls: 0 });",
 	"  state.createSessionCalls++;",
 	"  let promptRelease;          // set by prompt(); awaited until abort/behaviour releases it",
 	"  let abortRelease;           // set by abort(); awaited until behaviour releases it (Bug 2: hangs forever by default)",
@@ -74,6 +74,10 @@ const MOCK_SDK_SOURCE = [
 	"      // unreachable in the default branch; kept for clarity.",
 	"      state.abortSettled++;",
 	"    },",
+	"    abortCompaction(){ state.abortCompactionCalls++; },",
+	"    abortBranchSummary(){ state.abortBranchSummaryCalls++; },",
+	"    abortBash(){ state.abortBashCalls++; },",
+	"    abortRetry(){ state.abortRetryCalls++; },",
 	"    dispose(){}",
 	"  };",
 	"  return { session: session };",
@@ -172,6 +176,10 @@ function resetMockState(): void {
 		s.promptSettled = 0;
 		s.abortCalls = 0;
 		s.abortSettled = 0;
+		s.abortCompactionCalls = 0;
+		s.abortBranchSummaryCalls = 0;
+		s.abortBashCalls = 0;
+		s.abortRetryCalls = 0;
 	} else {
 		(globalThis as { __MOCK_SDK_STATE__?: Record<string, number> }).__MOCK_SDK_STATE__ = {
 			createSessionCalls: 0,
@@ -179,6 +187,10 @@ function resetMockState(): void {
 			promptSettled: 0,
 			abortCalls: 0,
 			abortSettled: 0,
+			abortCompactionCalls: 0,
+			abortBranchSummaryCalls: 0,
+			abortBashCalls: 0,
+			abortRetryCalls: 0,
 		};
 	}
 }
@@ -272,6 +284,44 @@ test("Bug 1: aborting AFTER the child prompt() has started streaming settles the
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
 	assert.equal(mockState().abortCalls, 1, "child session.abort() must have been invoked");
+});
+
+test("Nested hard-stop: a parent abort invokes the child's billable-window abort methods (compaction/branch-summary/bash/retry) instantly", async () => {
+	// Closes the gap before teardownSession's dispose() runs in the finally:
+	// onAbort must call the child's public abortCompaction/abortBranchSummary/
+	// abortBash/abortRetry (which abort() alone does NOT) so a nested
+	// subagent's post-agent_end compaction LLM call stops the INSTANT the
+	// parent is interrupted, not after the try/catch/finally unwinds.
+	setMockBehavior({
+		onAbort: (release: (v?: unknown) => void) => {
+			release();
+			return Promise.resolve();
+		},
+	});
+
+	const controller = new AbortController();
+	const responseP = execute(
+		"tool-nested-hardstop",
+		{ agent: "worker", task: "do work" } as never,
+		controller.signal,
+		() => undefined,
+		makeCtx() as never,
+		{ getAllTools: () => [] } as never,
+		() => false,
+	);
+	await waitForCounter("promptStarted", 1);
+	controller.abort();
+
+	const response = await within(2000, responseP);
+	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
+	assert.match(text, /abort/i, "tool call must surface an abort result, not hang");
+
+	// Every billable window was hard-stopped on the child synchronously in
+	// onAbort (before dispose() in the finally, which is a no-op mock here).
+	assert.equal(mockState().abortCompactionCalls, 1, "child abortCompaction() must be invoked on parent abort");
+	assert.equal(mockState().abortBranchSummaryCalls, 1, "child abortBranchSummary() must be invoked on parent abort");
+	assert.equal(mockState().abortBashCalls, 1, "child abortBash() must be invoked on parent abort");
+	assert.equal(mockState().abortRetryCalls, 1, "child abortRetry() must be invoked on parent abort");
 });
 
 test("Bug 1 (gap): with the settlement net OFF, a child whose abort() does NOT release prompt() is bounded by the per-prompt timeout (Phase 2 fix: default per-prompt timeout now ON)", async () => {

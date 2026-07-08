@@ -574,6 +574,26 @@ function raceTimeout<T>(stage: string, ms: number, promise: Promise<T>): Promise
 	});
 }
 
+/** Immediately stop the child session's billable windows — compaction LLM
+ *  call, branch-summary, bash, retry — that `session.abort()` alone does NOT
+ *  cover. These run in the narrow window between agent_end and teardownSession:
+ *  without calling them here, a nested subagent's post-agent_end compaction
+ *  call would keep billing until the try/catch/finally unwinds to dispose().
+ *  Each is optional (defensive: no-op when the session doesn't expose it),
+ *  and each is fire-and-forget synchronous — they stop the window instantly,
+ *  we don't wait for the underlying provider call to settle. */
+function hardAbortBillable(session: unknown): void {
+	const s = session as Record<string, () => void> | null;
+	if (!s || typeof s !== "object") return;
+	for (const method of ["abortCompaction", "abortBranchSummary", "abortBash", "abortRetry"]) {
+		try {
+			s[method]?.();
+		} catch {
+			/* a stuck billable-window abort must not prevent the others — swallow */
+		}
+	}
+}
+
 /** Emit a structured, machine-readable error log for a subagent hardening
  *  event (abort, force-settle, pre-spawn failure). Pinned to `[pie:subagent]`
  *  via a `source` field so it's grep-able in the host log stream. Loud, not
@@ -593,6 +613,10 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 	 *  hang the parent even after the timeout fires. */
 	combinedSignal: AbortSignal | undefined;
 	onAbort: (handler: () => void) => () => void;
+	/** Clear the refed timeout timer. MUST be called when the run settles
+	 *  (success, abort, or timeout) so the timer doesn't keep the event loop
+	 *  alive after the result is ready. No-op when no timeout is configured. */
+	cleanup: () => void;
 } {
 	// No timeout configured (timeoutMs <= 0): only the parent signal can
 	// interrupt the run. If there is no parent signal either, the prompt runs
@@ -603,10 +627,29 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 			parentSignal.addEventListener("abort", handler, { once: true });
 			return () => parentSignal.removeEventListener("abort", handler);
 		};
-		return { timeoutSignal: undefined, combinedSignal: parentSignal, onAbort };
+		return { timeoutSignal: undefined, combinedSignal: parentSignal, onAbort, cleanup: () => {} };
 	}
 
-	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	// Create a REfed timeout timer. AbortSignal.timeout(timeoutMs) uses an
+	// internally unref'd timer (Node: "we also don't want the timer to keep the
+	// Node.js process open on its own"), which means a subagent run whose only
+	// pending work is that unref'd timer + a never-resolving promise (a hung
+	// provider stream, or a hanging test mock) will see the event loop drain
+	// and `beforeExit` fire BEFORE the timeout can trigger — the timeout never
+	// fires, the run never settles, and node:test cancels the test
+	// ("Promise resolution is still pending but the event loop has already
+	// resolved"). This was the root cause of the execution-paths.test.ts
+	// 12-test cascade: tests #3-#14 were cancelled because the timeout signal
+	// never fired under node:test. A refed setTimeout guarantees the timer
+	// fires; the `cleanup` return clears it when the run settles so it doesn't
+	// linger after the result is ready.
+	const timeoutController = new AbortController();
+	const timeoutTimer = setTimeout(() => {
+		timeoutController.abort(new Error(`Subagent timed out after ${timeoutMs}ms`));
+	}, timeoutMs);
+	const timeoutSignal = timeoutController.signal;
+	const cleanupTimeout = () => clearTimeout(timeoutTimer);
+
 	let signal: AbortSignal;
 	if (parentSignal) {
 		if (typeof AbortSignal.any === 'function') {
@@ -640,7 +683,7 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 		signal.addEventListener("abort", handler, { once: true });
 		return () => signal.removeEventListener("abort", handler);
 	};
-	return { timeoutSignal, combinedSignal: signal, onAbort };
+	return { timeoutSignal, combinedSignal: signal, onAbort, cleanup: cleanupTimeout };
 }
 
 /** Apply a timeout-failure to a result. */
@@ -870,10 +913,11 @@ export async function runSingleAgent(
 	if (parentSessionId) {
 		const kept = readKeptSkills(parentSessionId);
 		// A non-empty kept set filters the subagent's skills to exactly those the
-		// main turn kept. An empty array is treated as keep-all (no filter) — matching
-		// the pruner's own keep-all safeguard ("never strip the lot"), so a subagent
-		// can never end up with zero skills via inheritance. "keep-all" / undefined
-		// also fall through to no filter (today's behavior).
+		// main turn kept. An empty array is treated as keep-all (no filter): the
+		// main turn may now legitimately prune every skill when tools remain, but a
+		// subagent works on an isolated sub-task with no mid-turn skill recovery, so
+		// it never inherits zero skills via this path. "keep-all" / undefined also
+		// fall through to no filter (today's behavior).
 		if (Array.isArray(kept) && kept.length > 0) {
 			const keptSet = new Set(kept);
 			skillsOverride = (base) => ({
@@ -1046,13 +1090,19 @@ export async function runSingleAgent(
 			return currentResult;
 		}
 
-		const { timeoutSignal, combinedSignal, onAbort } = buildCombinedAbortSignal(signal, promptTimeoutMs);
+		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(signal, promptTimeoutMs);
 		let timedOut = false;
 		const removeAbortListener = onAbort(() => {
 			// If the prompt timeout has fired (even if the parent signal also fired
 			// simultaneously), flag it as a timeout so callers can distinguish the cause.
 			// When the timeout is disabled, timeoutSignal is undefined and this never fires.
 			if (timeoutSignal?.aborted) timedOut = true;
+			// Immediately stop the child's billable windows (compaction,
+			// branch-summary, bash, retry) — these run in the gap between
+			// agent_end and teardownSession and are NOT covered by abort().
+			// Calling them here (synchronously, before abort()'s observability
+			// race below) stops billing the instant the parent is interrupted.
+			hardAbortBillable(session);
 			// Observability: the un-awaited `void session.abort()` was previously
 			// silent — a dangling child (abort() that never settles) was invisible.
 			// Emit child.abort.invoked on entry, then race the abort for a short
@@ -1064,11 +1114,19 @@ export async function runSingleAgent(
 				stage: stageRef.value,
 				cause: timedOut ? "timeout" : "parent-abort",
 			});
+			// The 5s dangling-grace timer MUST be clearable: when abort() settles
+			// promptly (the common case) the raw `setTimeout` reference would
+			// otherwise linger for the full 5s, keeping the event loop alive and
+			// tripping node:test's "Promise resolution is still pending" guard on
+			// every abort/timeout path (which cascaded into cancelling every later
+			// test in execution-paths.test.ts). `clearTimeout` on settle removes it.
+			let danglingTimer: ReturnType<typeof setTimeout> | undefined;
 			void Promise.race([
 				session.abort(),
-				new Promise<"__dangling__">((r) => setTimeout(() => r("__dangling__"), 5_000)),
+				new Promise<"__dangling__">((r) => { danglingTimer = setTimeout(() => r("__dangling__"), 5_000); }),
 			])
 				.then((outcome) => {
+					if (danglingTimer) clearTimeout(danglingTimer);
 					if (outcome === "__dangling__") {
 						logLoud("child.dangling-detected", {
 							toolCallId: _toolCallId,
@@ -1088,6 +1146,7 @@ export async function runSingleAgent(
 					}
 				})
 				.catch(() => {
+					if (danglingTimer) clearTimeout(danglingTimer);
 					// abort() rejected — still log so a dangling child is diagnosable.
 					logLoud("child.abort.rejected", {
 						toolCallId: _toolCallId,
@@ -1101,27 +1160,43 @@ export async function runSingleAgent(
 		});
 
 		stageRef.value = "waiting for model response";
+		// Race the prompt against the combined abort signal. A hung provider
+		// stream / hung SDK that ignores `session.abort()` would otherwise
+		// hang the parent even after the timeout fires — racing the prompt
+		// against the signal guarantees the parent tool-call settles promptly
+		// once the abort/timeout is observable. `combinedSignal` is undefined
+		// only when there is no parent signal AND the timeout is disabled
+		// (the pre-fix default); in that case the prompt runs uninterrupted
+		// (today's behavior — the settlement net is the only escape).
 		try {
-			// Race the prompt against the combined abort signal. A hung provider
-			// stream / hung SDK that ignores `session.abort()` would otherwise
-			// hang the parent even after the timeout fires — racing the prompt
-			// against the signal guarantees the parent tool-call settles promptly
-			// once the abort/timeout is observable. `combinedSignal` is undefined
-			// only when there is no parent signal AND the timeout is disabled
-			// (the pre-fix default); in that case the prompt runs uninterrupted
-			// (today's behavior — the settlement net is the only escape).
 			if (combinedSignal) {
 				await raceAbort(combinedSignal, runPrompt(), "waiting for model response");
 			} else {
 				await runPrompt();
 			}
+		} catch (err) {
+			// The prompt race rejects when the combined abort signal fires
+			// (parent abort OR timeout). When the timeout was the cause —
+			// recorded by the onAbort listener setting `timedOut` — stamp a
+			// timeout failure so callers can distinguish a hung model response
+			// from a user-initiated stop. This must be checked HERE, before the
+			// prompt-rejection propagates to the outer catch: the outer catch
+			// applies the generic `applyThrownError` (which leaves stopReason
+			// undefined and stamps a bare "Request was aborted" message),
+			// losing the timeout cause. Returning here short-circuits the outer
+			// catch for the timeout case; non-timeout aborts fall through to the
+			// outer catch to preserve their enriched stage/cause message.
+			if (timedOut) {
+				applyTimeoutFailure(currentResult, promptTimeoutMs, stageRef.value);
+				return currentResult;
+			}
+			throw err;
 		} finally {
 			removeAbortListener();
-		}
-
-		if (timedOut) {
-			applyTimeoutFailure(currentResult, promptTimeoutMs, stageRef.value);
-			return currentResult;
+			// Clear the refed timeout timer now that the race has settled —
+			// without this the timer would linger for the remaining timeout
+			// window and keep the event loop alive after the result is ready.
+			cleanup();
 		}
 
 		applyStopReason(currentResult, signal?.aborted === true, stageRef.value);
