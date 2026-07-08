@@ -295,6 +295,16 @@ test("applySkillSelection: pruning every visible skill -> fail-open keeps all", 
 	assert.match(r.safeguardReason!, /safeguard/i);
 });
 
+test("applySkillSelection: full skill-prune with toolsRemain=true -> prunes all (no safeguard)", () => {
+	// When tools survive, zero skills leaves the agent fully functional (unlike
+	// zero tools), so a legitimate full skill-prune is allowed through instead of
+	// being overridden by the keep-all safeguard.
+	const r = applySkillSelection(visibleSkills, ["alpha", "beta", "gamma"], [], config(), true);
+	assert.deepEqual(r.includedSkillNames, []);
+	assert.deepEqual(r.excludedSkillNames, ["alpha", "beta", "gamma"]);
+	assert.equal(r.safeguardReason, undefined);
+});
+
 test("applySkillSelection: pinned survive even when LLM prunes everything else (no fail-open)", () => {
 	const skills = [skill("a"), skill("b"), skill("c")];
 	const r = applySkillSelection(skills, ["a", "b", "c"], ["a"], config());
@@ -768,197 +778,4 @@ test("resolveAuth: positive oauthRaceBackoffMs re-resolves once (two calls)", as
 	assert.equal(auth.authFailed, true, "still-stale key after re-resolve fails open");
 });
 
-// ---------------------------------------------------------------------------
-// Proxy-saturation pre-check: when the prepass model routes through the pie
-// proxy (localhost base URL) and the provider's concurrency pool is full, the
-// prepass skips immediately with a clear saturation message instead of
-// queuing behind in-flight turns and aborting at the timeout budget every turn.
-// ---------------------------------------------------------------------------
 
-const {
-	proxyOriginFromModel,
-	fetchProxySaturation,
-	saturationCheckEnabled,
-} = require("../src/pruning.ts") as typeof import("../src/pruning.js");
-
-/** Stub global fetch for the saturation tests; restores the original on cleanup. */
-function withFetchStub(responder: (url: string) => { status: number; body: unknown } | Error, run: () => Promise<void>): Promise<void> {
-	const original = globalThis.fetch;
-	const fetchCalls: string[] = [];
-	(globalThis.fetch as unknown) = async (input: string | URL | Request, _init?: unknown) => {
-		const url = typeof input === "string" ? input : String(input);
-		fetchCalls.push(url);
-		const out = responder(url);
-		if (out instanceof Error) throw out;
-		return {
-			ok: out.status >= 200 && out.status < 300,
-			status: out.status,
-			json: async () => out.body,
-		} as Response;
-	};
-	return run().finally(() => {
-		(globalThis.fetch as unknown) = original;
-		// expose calls for assertions via a side channel
-		(lastFetchCalls as unknown) = fetchCalls;
-	});
-}
-let lastFetchCalls: string[] = [];
-
-const proxiedModel = { id: "umans-coder", provider: "umans", baseUrl: "http://127.0.0.1:4000/v1" };
-const remoteModel = { id: "gpt-5", provider: "github-copilot", baseUrl: "https://api.githubcopilot.com/v1" };
-
-function proxyRegistryStub(apiKey: string | undefined, model: unknown) {
-	return {
-		find: () => model,
-		getApiKeyAndHeaders: async () => ({ ok: true, apiKey }),
-	};
-}
-
-function saturatedMetrics(provider = "umans") {
-	return {
-		status: 200,
-		body: { providers: [{ provider, modelInfoId: "umans-shared", activeRequests: 3, queuedRequests: 2, maxConcurrentRequests: 3 }] },
-	};
-}
-
-function idleMetrics(provider = "umans") {
-	return {
-		status: 200,
-		body: { providers: [{ provider, modelInfoId: "umans-shared", activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 3 }] },
-	};
-}
-
-test("proxyOriginFromModel: localhost base -> origin; remote/absent -> null", () => {
-	assert.equal(proxyOriginFromModel(proxiedModel), "http://127.0.0.1:4000");
-	assert.equal(proxyOriginFromModel({ baseUrl: "http://localhost:4000/v1" }), "http://localhost:4000");
-	assert.equal(proxyOriginFromModel(remoteModel), null, "remote base must not be treated as the pie proxy");
-	assert.equal(proxyOriginFromModel({ id: "x" }), null, "no base URL -> null");
-	assert.equal(proxyOriginFromModel({ baseUrl: "not-a-url" }), null, "unparseable base -> null");
-});
-
-test("fetchProxySaturation: saturated pool -> saturated=true; non-localhost model -> null (no fetch)", async () => {
-	await withFetchStub(() => saturatedMetrics(), async () => {
-		const sat = await fetchProxySaturation(proxiedModel, { apiKey: "k" }, "umans");
-		assert.equal(sat?.saturated, true);
-		assert.equal(sat?.activeRequests, 3);
-		assert.equal(sat?.queuedRequests, 2);
-		assert.equal(sat?.maxConcurrentRequests, 3);
-	});
-	assert.ok(lastFetchCalls[0]?.endsWith("/health/proxy_metrics"));
-
-	// Remote model must not trigger any fetch.
-	await withFetchStub(() => saturatedMetrics(), async () => {
-		const sat = await fetchProxySaturation(remoteModel, { apiKey: "k" }, "github-copilot");
-		assert.equal(sat, null);
-	});
-	assert.equal(lastFetchCalls.length, 0, "remote model must not hit the metrics endpoint");
-});
-
-test("fetchProxySaturation: idle pool -> saturated=false; missing provider -> null", async () => {
-	await withFetchStub(() => idleMetrics(), async () => {
-		const sat = await fetchProxySaturation(proxiedModel, { apiKey: "k" }, "umans");
-		assert.equal(sat?.saturated, false);
-		assert.equal(sat?.activeRequests, 1);
-	});
-	await withFetchStub(() => ({ status: 200, body: { providers: [{ provider: "other", activeRequests: 9, queuedRequests: 9, maxConcurrentRequests: 3 }] } }), async () => {
-		const sat = await fetchProxySaturation(proxiedModel, { apiKey: "k" }, "umans");
-		assert.equal(sat, null, "provider not in metrics -> null (fail open, don't block)");
-	});
-});
-
-test("fetchProxySaturation: no bearer / fetch error / non-200 -> null (never blocks)", async () => {
-	assert.equal(await fetchProxySaturation(proxiedModel, { apiKey: undefined }, "umans"), null, "no bearer -> null");
-	assert.equal(await fetchProxySaturation(proxiedModel, {}, "umans"), null, "no auth at all -> null");
-	await withFetchStub(() => new Error("ECONNREFUSED"), async () => {
-		const sat = await fetchProxySaturation(proxiedModel, { apiKey: "k" }, "umans");
-		assert.equal(sat, null, "fetch error -> null (fail open)");
-	});
-	await withFetchStub(() => ({ status: 401, body: {} }), async () => {
-		const sat = await fetchProxySaturation(proxiedModel, { apiKey: "k" }, "umans");
-		assert.equal(sat, null, "non-200 -> null");
-	});
-});
-
-test("saturationCheckEnabled: default true; false via config; false via env override", () => {
-	assert.equal(saturationCheckEnabled(config()), true, "default enabled");
-	assert.equal(saturationCheckEnabled(config({ prepass: { saturationCheck: false } })), false, "config disables");
-	const prev = process.env.PIE_PREPASS_SATURATION_CHECK;
-	process.env.PIE_PREPASS_SATURATION_CHECK = "0";
-	try {
-		assert.equal(saturationCheckEnabled(config()), false, "env override disables");
-		assert.equal(saturationCheckEnabled(config({ prepass: { saturationCheck: true } })), false, "env override wins over config");
-	} finally {
-		if (prev === undefined) delete process.env.PIE_PREPASS_SATURATION_CHECK;
-		else process.env.PIE_PREPASS_SATURATION_CHECK = prev;
-	}
-});
-
-test("runPruningPrepass: saturated proxy -> skips with saturation message, completeFn NOT called", async () => {
-	const cfg = config({ provider: "umans" });
-	let completeCalls = 0;
-	const completeFn = async () => { completeCalls++; return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" }; };
-	await withFetchStub(() => saturatedMetrics(), async () => {
-		const result = await runPruningPrepass(
-			{ modelRegistry: proxyRegistryStub("master-key", proxiedModel) },
-			{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
-			cfg,
-			completeFn as any,
-		);
-		assert.equal(completeCalls, 0, "must NOT call the model when the proxy is saturated");
-		assert.equal(result.prunedSkills, null, "kept all skills");
-		assert.equal(result.prunedTools, null, "kept all tools");
-		assert.ok(result.error, "saturation skip surfaces a visible message");
-		assert.match(result.error!, /proxy saturated/i);
-		assert.match(result.error!, /3 active, 2 queued of 3/);
-	});
-});
-
-test("runPruningPrepass: idle proxy -> proceeds with the normal prepass call", async () => {
-	const cfg = config({ provider: "umans" });
-	let completeCalls = 0;
-	const completeFn = async () => { completeCalls++; return { text: '{"pruneSkills":["alpha"],"pruneTools":[]}', stopReason: "stop" }; };
-	await withFetchStub(() => idleMetrics(), async () => {
-		const result = await runPruningPrepass(
-			{ modelRegistry: proxyRegistryStub("master-key", proxiedModel) },
-			{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
-			cfg,
-			completeFn as any,
-		);
-		assert.equal(completeCalls, 1, "idle proxy -> normal prepass runs");
-		assert.deepEqual(result.prunedSkills, ["alpha"]);
-		assert.equal(result.error, null);
-	});
-});
-
-test("runPruningPrepass: saturationCheck:false proceeds even when the proxy is saturated", async () => {
-	const cfg = config({ provider: "umans", prepass: { saturationCheck: false } });
-	let completeCalls = 0;
-	const completeFn = async () => { completeCalls++; return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" }; };
-	await withFetchStub(() => saturatedMetrics(), async () => {
-		const result = await runPruningPrepass(
-			{ modelRegistry: proxyRegistryStub("master-key", proxiedModel) },
-			{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
-			cfg,
-			completeFn as any,
-		);
-		assert.equal(completeCalls, 1, "disabled check -> normal prepass runs despite saturation");
-		assert.equal(result.error, null);
-	});
-});
-
-test("runPruningPrepass: non-proxied (remote) model -> no saturation check, proceeds", async () => {
-	const cfg = config({ provider: "github-copilot" });
-	let completeCalls = 0;
-	const completeFn = async () => { completeCalls++; return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" }; };
-	await withFetchStub(() => saturatedMetrics(), async () => {
-		const result = await runPruningPrepass(
-			{ modelRegistry: proxyRegistryStub("bearer-token", remoteModel) },
-			{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
-			cfg,
-			completeFn as any,
-		);
-		assert.equal(completeCalls, 1, "remote model -> normal prepass runs (no proxy in path)");
-		assert.equal(lastFetchCalls.length, 0, "no metrics fetch for a remote model");
-		assert.equal(result.error, null);
-	});
-});

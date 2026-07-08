@@ -47,11 +47,13 @@ export const pruningResultRenderer = {
 			if (details.prepassLatencyMs) lines.push(theme.fg("dim", `  Latency: ${details.prepassLatencyMs}ms`));
 		}
 		if (details.excludedSkills.length > 0) {
-			lines.push(theme.fg("success", `  Skills kept: ${details.includedSkills.join(", ")}`));
+			const skillsKept = details.includedSkills.length > 0 ? details.includedSkills.join(", ") : "None";
+			lines.push(theme.fg("success", `  Skills kept: ${skillsKept}`));
 			lines.push(theme.fg("dim", `  Skills pruned: ${details.excludedSkills.join(", ")}`));
 		}
 		if (details.excludedTools.length > 0) {
-			lines.push(theme.fg("success", `  Tools kept: ${details.includedTools.join(", ")}`));
+			const toolsKept = details.includedTools.length > 0 ? details.includedTools.join(", ") : "None";
+			lines.push(theme.fg("success", `  Tools kept: ${toolsKept}`));
 			lines.push(theme.fg("dim", `  Tools pruned: ${details.excludedTools.join(", ")}`));
 		}
 		if (tokenNote) {

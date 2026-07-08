@@ -54,20 +54,6 @@ export interface PrepassConfig {
 	 * bridges that window. `0` skips the re-resolve.
 	 */
 	oauthRaceBackoffMs?: number;
-	/**
-	 * When true (default), the prepass queries the pie proxy's
-	 * `/health/proxy_metrics` before its model call and, if the target
-	 * provider's concurrency pool is fully saturated (active + queued >= max),
-	 * skips immediately with a clear "proxy saturated - kept all skills"
-	 * message instead of queueing behind in-flight turns and aborting at the
-	 * `timeoutMs` budget every turn. Pruning is best-effort, so failing open
-	 * under saturation is correct; this avoids the noisy
-	 * `returned no text response (stopReason=aborted; Request was aborted.)`
-	 * and the ~75s/turn burn. Set `false` (or `PIE_PREPASS_SATURATION_CHECK=0`)
-	 * to disable. Only fires when the model routes through the pie proxy
-	 * (localhost base URL); direct providers are untouched.
-	 */
-	saturationCheck?: boolean;
 }
 
 export interface PruningConfig {

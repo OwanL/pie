@@ -14,6 +14,7 @@ import {
 } from "./copilot-headers.js";
 import type { PrepassRunResult } from "./pruning-types.js";
 import { toErrorMessage, enrichConnectionError } from "../../../shared/error-message.js";
+import { PROVIDER_GATE_REQUEST_CLASS_HEADER, PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER } from "../../../shared/provider-gate-request-class.js";
 
 // Per-thinking-level timeout ceiling for ONE prepass model call. These are
 // ceilings, not waits: a call that completes early returns immediately.
@@ -282,121 +283,6 @@ function hasUsableApiKey(result: { ok?: boolean; apiKey?: string }): boolean {
 	return typeof result.apiKey === "string" && result.apiKey.trim().length > 0;
 }
 
-// -----------------------------------------------------------------------------
-// Proxy-saturation pre-check
-// -----------------------------------------------------------------------------
-//
-// When the prepass model routes through the pie litellm proxy (a localhost
-// base URL), the proxy gates the upstream account with a per-provider
-// `asyncio.Semaphore` (max_concurrent_requests, e.g. 3 for umans). While the
-// main agent + subagents + this prepass all share that pool, a prepass call
-// issued when the pool is full QUEUES at the proxy semaphore. The prepass's
-// own `AbortSignal.timeout(timeoutMs)` (45s for `low`) then fires WHILE THE
-// REQUEST IS STILL QUEUED — before a single byte — so pi-ai sets
-// `stopReason=aborted` + `errorMessage="Request was aborted."`. `aborted` is
-// intentionally NOT classified as a transport error (it is usually a
-// self-inflicted reasoning-too-slow timeout), so the loop downgrades to
-// `minimal` (30s) and aborts AGAIN (the pool is still saturated). Net: every
-// turn under saturation burns ~75s and surfaces the noisy
-// `LLM pruning failed: returned no text response (stopReason=aborted; Request
-// was aborted.)` — even though pruning is best-effort and keeping all skills is
-// always safe.
-//
-// The fix: before the call, query the proxy's `/health/proxy_metrics` (the
-// same endpoint the status-bar indicator uses) and, if the target provider's
-// pool is fully saturated (active + queued >= max), fail open immediately with
-// a clear "proxy saturated — kept all skills" message. The main turn proceeds
-// at once instead of burning 75s. Decoupled from the host: the proxy origin is
-// derived from the model's own `baseUrl` and the bearer is the proxied
-// provider's resolved `apiKey` (the pie master key), so no cross-process env
-// plumbing is required. Direct providers (copilot / ollama / a remote gateway)
-// have a non-localhost base URL and are skipped — they don't expose our metrics
-// endpoint and aren't gated by the pie semaphore.
-
-/** Environment key to force-disable the saturation pre-check (rare; for tests
- *  / air-gapped setups where the metrics endpoint is unreachable but the
- *  caller still wants the full prepass attempt). Set to `0` to disable. */
-const PREPASS_SATURATION_CHECK_ENV = "PIE_PREPASS_SATURATION_CHECK";
-
-export interface ProxySaturation {
-	saturated: boolean;
-	activeRequests: number;
-	queuedRequests: number;
-	maxConcurrentRequests: number;
-	provider: string;
-}
-
-/** Extract the pie proxy origin (`http://127.0.0.1:4000`) from a model's base
- *  URL, or `null` when the model does not route through the pie proxy. Only
- *  localhost base URLs are treated as the pie-managed proxy; direct providers
- *  (copilot, ollama, a remote gateway) return `null` and skip the check. */
-export function proxyOriginFromModel(model: unknown): string | null {
-	const m = model as Record<string, unknown> | null;
-	const base = m?.baseUrl ?? m?.apiBase ?? m?.url;
-	if (typeof base !== "string" || base === "") return null;
-	try {
-		const u = new URL(base);
-		if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null;
-		return `${u.protocol}//${u.host}`;
-	} catch {
-		return null;
-	}
-}
-
-/** Query the pie proxy's `/health/proxy_metrics` for the target provider's
- *  concurrency state. Returns `null` when the model isn't proxied, the bearer
- *  is unavailable, the endpoint is unreachable, or the provider isn't found in
- *  the metrics — in every `null` case the prepass proceeds with its normal
- *  attempt loop (fail-open, never block on the check). */
-export async function fetchProxySaturation(
-	model: unknown,
-	auth: ResolvedAuth,
-	provider: string,
-	timeoutMs = 1500,
-): Promise<ProxySaturation | null> {
-	const origin = proxyOriginFromModel(model);
-	if (!origin) return null;
-	const bearer = auth.apiKey?.trim();
-	if (!bearer) return null;
-	try {
-		const res = await fetch(`${origin}/health/proxy_metrics`, {
-			headers: { Authorization: `Bearer ${bearer}` },
-			signal: AbortSignal.timeout(timeoutMs),
-		});
-		if (!res.ok) return null;
-		const body = (await res.json()) as {
-			providers?: Array<{
-				provider: string;
-				activeRequests: number;
-				queuedRequests: number;
-				maxConcurrentRequests: number;
-			}>;
-		};
-		const entry = (body?.providers ?? []).find((p) => p.provider === provider);
-		if (!entry) return null;
-		const max = Math.max(0, Math.floor(entry.maxConcurrentRequests));
-		const active = Math.max(0, Math.floor(entry.activeRequests));
-		const queued = Math.max(0, Math.floor(entry.queuedRequests));
-		return {
-			saturated: active + queued >= max && max > 0,
-			activeRequests: active,
-			queuedRequests: queued,
-			maxConcurrentRequests: max,
-			provider: entry.provider,
-		};
-	} catch {
-		return null;
-	}
-}
-
-/** Resolve whether the saturation pre-check should run. Disabled when config
- *  explicitly sets `saturationCheck: false` OR the env override is `0`. */
-export function saturationCheckEnabled(config: PruningConfig): boolean {
-	if (process.env[PREPASS_SATURATION_CHECK_ENV] === "0") return false;
-	const flag = config.prepass?.saturationCheck;
-	return flag !== false;
-}
-
 export function prepassTimeoutMs(thinkingLevel: string, attemptIndex: number = 0, timeoutOverrides?: Record<string, number>): number {
 	// Overrides replace specific levels of the built-in map; an unknown level
 	// falls back to the EFFECTIVE minimal (so a user who lowers `minimal` also
@@ -423,10 +309,6 @@ export function formatEmptyPrepassError(result: Awaited<ReturnType<typeof runLlm
 		diagnostics.push(`stopReason=${result.stopReason}`);
 	}
 	if (result.errorMessage) {
-		// Enrich a bare "Connection error." (no HTTP response — proxy
-		// unreachable/wedged) with a proxy-health pointer; a clean 429/5xx with
-		// a body (e.g. umans account_suspended) passes through unchanged so the
-		// real upstream reason shows in the pruning-error notice.
 		diagnostics.push(enrichConnectionError(result.errorMessage));
 	}
 	if (diagnostics.length === 0) {
@@ -528,6 +410,18 @@ export async function runPruningPrepass(
 		return emptyResult(activeConfig.thinkingLevel, `LLM pruning failed: ${enrichConnectionError(error)}`);
 	}
 
+	// Tag every prepass request as a skill-pruner call so the host-side provider
+	// gate grants it queue priority over main-session calls when the pruner
+	// provider is saturated. This unblocks the prepass (and thus the session it
+	// is preflighting) as fast as possible without interrupting in-flight
+	// requests. The header is merged onto the resolved auth headers so every
+	// runLlmPruning attempt — initial + transport-retry + thinking-downgrade —
+	// carries it. Non-gated providers (no `concurrency` block) ignore it.
+	auth = {
+		...auth,
+		headers: { ...(auth.headers ?? {}), [PROVIDER_GATE_REQUEST_CLASS_HEADER]: PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER },
+	};
+
 	// Fail open when auth was explicitly attempted and produced no usable key
 	// (e.g. a github-copilot OAuth token expired and the lazy refresh hadn't
 	// landed by `before_agent_start`). Making the call without a Bearer would
@@ -541,25 +435,6 @@ export async function runPruningPrepass(
 			activeConfig.thinkingLevel,
 			`Pruning skipped: ${activeConfig.provider} auth unavailable (token expired/refresh pending); run /login ${activeConfig.provider} if it persists`,
 		);
-	}
-
-	// Proxy-saturation pre-check: when the model routes through the pie proxy,
-	// query its /health/proxy_metrics before the call. If the target provider's
-	// concurrency pool is fully saturated (active + queued >= max), the prepass
-	// request would queue behind the in-flight turns and abort at the
-	// AbortSignal.timeout budget (45s low + 30s minimal = ~75s wasted) EVERY
-	// turn - surfacing as the noisy `returned no text response (stopReason=
-	// aborted; Request was aborted.)`. Pruning is best-effort: fail open with a
-	// clear saturation message and keep all skills so the main turn proceeds
-	// immediately. Never blocks: an unreachable/unparseable metrics endpoint
-	// returns null and falls through to the normal attempt loop.
-	if (saturationCheckEnabled(activeConfig)) {
-		const saturation = await fetchProxySaturation(model, auth, activeConfig.provider);
-		if (saturation?.saturated) {
-			const msg = `Pruning skipped: ${saturation.provider} proxy saturated (${saturation.activeRequests} active, ${saturation.queuedRequests} queued of ${saturation.maxConcurrentRequests}); kept all skills`;
-			console.warn(`[skill-pruner] ${msg}`);
-			return emptyResult(activeConfig.thinkingLevel, msg);
-		}
 	}
 
 	// Resolve effective timeout/retry budgets: `pruning.prepass` overrides

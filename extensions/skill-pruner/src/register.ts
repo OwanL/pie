@@ -151,11 +151,16 @@ export default function register(pi: ExtensionAPI) {
 			}
 
 			if (!pruningError || pruningError.startsWith("Model") || pruningError.startsWith("LLM pruning failed")) {
-				const skillSelection = applySkillSelection(visibleSkills, prunedSkills, effectivePinned, activeConfig);
-				skillSafeguardReason = skillSelection.safeguardReason ?? skillSafeguardReason;
-
+				// Tool selection runs first so the skill keep-all safeguard can tell
+				// whether any tools survive: a legitimate full skill-prune is allowed
+				// through whenever tools remain (zero skills leaves the agent
+				// functional, unlike zero tools).
 				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
+
+				const toolsRemain = toolSelection.includedToolNames.length > 0;
+				const skillSelection = applySkillSelection(visibleSkills, prunedSkills, effectivePinned, activeConfig, toolsRemain);
+				skillSafeguardReason = skillSelection.safeguardReason ?? skillSafeguardReason;
 
 				// --- Skill pruning: rewrite the skills block in the system prompt ---
 				const match = event.systemPrompt.match(SKILLS_BLOCK_RE);

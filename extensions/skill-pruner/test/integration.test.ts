@@ -1131,6 +1131,11 @@ test("github-copilot model without headers: copilot headers injected via model r
 		const authHeaders = capturedOptions.headers as Record<string, string> | undefined;
 		assert.ok(authHeaders, "auth headers should be defined");
 		assert.ok(authHeaders["Editor-Version"], "Editor-Version should be present in auth headers");
+
+		// The prepass must tag itself as a skill-pruner request so the host-side
+		// provider gate grants it queue priority over main-session calls when
+		// the pruner provider is saturated.
+		assert.equal(authHeaders?.["x-pi-request-class"], "skill-pruner", "prepass should set x-pi-request-class: skill-pruner");
 	} finally {
 		__setCompleteFn(null);
 	}

@@ -12,7 +12,7 @@ Before each agent turn, `skill-pruner` sends the user prompt + available skill/t
 4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
 5. Logs the decision — including tool pruning — to `data/pruning.jsonl`.
 
-The model is **keep-biased**: an empty prune list (or an unreadable response) keeps everything, so "return nothing" always means "prune nothing". Pruning 100% of a category triggers a **keep-all safeguard**: everything is kept (with a recorded reason) rather than leaving the agent with nothing. This can also fire for a legitimate full prune — e.g. a non-coding query where no skill is relevant to the arc of work — since the prepass can't reliably distinguish that from an over-prune.
+The model is **keep-biased**: an empty prune list (or an unreadable response) keeps everything, so "return nothing" always means "prune nothing". Pruning 100% of a category triggers a **keep-all safeguard**: everything is kept (with a recorded reason) rather than leaving the agent with nothing. The tool safeguard always fires on a 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune (e.g. a simple text edit where none of the specialized skills are relevant) is allowed through whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
 
 A `request_tool` recovery tool lets the agent re-enable a pruned tool mid-session; each recovery is logged to `data/pruning.jsonl` as the over-pruning quality signal.
 

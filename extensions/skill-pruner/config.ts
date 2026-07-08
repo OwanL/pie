@@ -352,14 +352,6 @@ export function loadConfig(
 			"invalid pruning.prepass.oauthRaceBackoffMs; must be a non-negative integer; using default",
 		);
 
-		if (rawPrepass.saturationCheck !== undefined) {
-			if (typeof rawPrepass.saturationCheck === "boolean") {
-				prepass.saturationCheck = rawPrepass.saturationCheck;
-			} else {
-				warn("invalid pruning.prepass.saturationCheck; must be a boolean; using default (true)");
-			}
-		}
-
 		// Only attach when at least one override was set, so the default path
 		// (empty block or all-invalid) stays `undefined` → pure built-in defaults.
 		if (Object.keys(prepass).length > 0) {

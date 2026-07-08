@@ -37,9 +37,6 @@ export {
 	resolvePrepassBudgets,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
-	proxyOriginFromModel,
-	fetchProxySaturation,
-	saturationCheckEnabled,
 } from "./prepass.js";
 
 /** Re-exported so tests can drive the shared AsyncLocalStorage signal that
@@ -120,6 +117,12 @@ export function applySkillSelection(
 	prunedSkills: string[] | null,
 	effectivePinned: string[],
 	_activeConfig: PruningConfig,
+	// True when at least one tool survives tool-pruning. With tools available the
+	// agent is still fully capable (zero skills leaves it functional, unlike zero
+	// tools), so a legitimate full skill-prune is allowed through. Defaults to
+	// false so callers that don't track tool state keep the historical
+	// keep-all-on-full-prune behaviour.
+	toolsRemain = false,
 ): { includedSkillNames: string[]; excludedSkillNames: string[]; safeguardReason?: string } {
 	// No usable prepass signal → keep everything.
 	if (prunedSkills === null) {
@@ -138,13 +141,14 @@ export function applySkillSelection(
 	const excludedSkillNames = visibleSkills.filter((s) => pruneSet.has(s.name)).map((s) => s.name);
 	const includedSkillNames = visibleSkills.filter((s) => !pruneSet.has(s.name)).map((s) => s.name);
 
-	// Keep-all safeguard: when the prepass prunes every visible skill we keep all
-	// rather than strip the lot. This can fire for a legitimate full prune (e.g.
-	// a non-coding query where no skill is relevant to the arc of work), since the
-	// prepass can't reliably distinguish that from an over-prune and the cost of a
-	// wrong keep is only tokens. Pinned skills already survive, so this only fires
-	// when nothing at all would remain.
-	if (includedSkillNames.length === 0 && visibleSkills.length > 0) {
+	// Keep-all safeguard: when the prepass prunes every visible skill AND no tools
+	// remain, we keep all skills rather than strip the lot. With tools still
+	// available a full skill-prune is legitimate (none of the specialized skills
+	// are relevant to the arc of work, e.g. a simple text edit), since zero skills
+	// leaves the agent fully functional. Only when there are also no tools would
+	// stripping every skill leave the agent with nothing. Pinned skills already
+	// survive, so this only triggers when nothing at all would remain.
+	if (includedSkillNames.length === 0 && visibleSkills.length > 0 && !toolsRemain) {
 		return {
 			includedSkillNames: visibleSkills.map((s) => s.name),
 			excludedSkillNames: [],
@@ -254,7 +258,6 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 			maxTransportRetries: input.prepass.maxTransportRetries,
 			transportBackoffBaseMs: input.prepass.transportBackoffBaseMs,
 			oauthRaceBackoffMs: input.prepass.oauthRaceBackoffMs,
-			...(input.prepass.saturationCheck !== undefined ? { saturationCheck: input.prepass.saturationCheck } : {}),
 		} : undefined,
 	};
 }
