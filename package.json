@@ -20,11 +20,6 @@
     "extension:typecheck": "npm --prefix extension run typecheck --",
     "extensions:test": "node ./scripts/run-tests.mjs --package cwd-skills --package safeguard --package skill-pruner --package subagent --package web-access-compat --package warm-bash --package tool-result-pruner --package session-reviewer --package deferred-triggers",
     "extensions:typecheck": "npm --prefix extension run typecheck:skill-pruner -- && npm --prefix extension run typecheck:web-access-compat -- && npm --prefix extension run typecheck:warm-bash -- && npm --prefix extension run typecheck:tool-result-pruner -- && npm --prefix extension run typecheck:session-reviewer -- && npm --prefix extension run typecheck:deferred-triggers --",
-    "proxy": "node ./scripts/proxy.mjs run",
-    "proxy:bg": "node ./scripts/proxy.mjs start",
-    "proxy:down": "node ./scripts/proxy.mjs stop",
-    "proxy:health": "node ./scripts/proxy.mjs health",
-    "proxy:test": "cd proxy && uv run python test/test_config.py",
     "sync-models": "node ./scripts/sync-models.mjs"
   },
   "devDependencies": {
