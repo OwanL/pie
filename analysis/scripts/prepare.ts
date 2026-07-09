@@ -562,6 +562,12 @@ function preparePruningEvents(
       prunedSkillNames: d.excluded,
       keptToolNames: d.toolIncluded ?? [],
       prunedToolNames: d.toolExcluded ?? [],
+      prepassInputTokens: d.prepassInputTokens,
+      prepassOutputTokens: d.prepassOutputTokens,
+      prepassCacheReadTokens: d.prepassCacheReadTokens,
+      prepassCacheWriteTokens: d.prepassCacheWriteTokens,
+      prepassInputEstimateTokens: d.prepassInputEstimateTokens,
+      codeVersion: d.codeVersion,
     };
   });
 }

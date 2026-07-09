@@ -322,6 +322,11 @@ export interface SourceAnalyticsPayload {
   pruningEvents: PruningSourceEvent[];
   /** Raw tool-result-pruning events read from data/tool-result-pruning.jsonl. */
   toolResultPruningEvents: ToolResultPruningSourceEvent[];
+  /** Raw warm-bash auto-prune rewrite events read from data/warm-bash.jsonl. Optional
+   *  (absent on older exports / fresh checkouts with no warm-bash activity). */
+  warmBashRewrites?: WarmBashRewriteSourceEvent[];
+  /** Raw warm-bash per-session routing-counter summaries read from data/warm-bash.jsonl. */
+  warmBashSummaries?: WarmBashSessionSummarySourceEvent[];
 }
 
 export interface LoadedSourceAnalytics {
@@ -593,6 +598,12 @@ export interface PruningSourceDecision {
   toolExcluded?: string[];
   toolBlockTokens?: number;
   originalToolBlockTokens?: number;
+  prepassInputTokens?: number;
+  prepassOutputTokens?: number;
+  prepassCacheReadTokens?: number;
+  prepassCacheWriteTokens?: number;
+  prepassInputEstimateTokens?: number;
+  codeVersion?: string;
 }
 
 /** Raw pruning quality-signal event read from data/pruning.jsonl.
@@ -623,6 +634,35 @@ export interface ToolResultPruningSourceEvent {
   timestamp: string;
 }
 
+/** Raw warm-bash auto-prune rewrite event read from data/warm-bash.jsonl.
+ *  Emitted by extensions/warm-bash for every transparent command rewrite
+ *  (recursive grep / bare-path find). Point-in-time, joinable to a run by
+ *  sessionPathHash + timestamp (same mechanism as pruning signals). */
+export interface WarmBashRewriteSourceEvent {
+  event: 'auto_prune_rewrite';
+  sessionId: string;
+  timestamp: string;
+  before: string;
+  after: string;
+}
+
+/** Raw warm-bash per-session routing-counter summary read from data/warm-bash.jsonl.
+ *  Emitted once at session_shutdown; counters are session-cumulative (warm-bash has
+ *  no run-boundary signal), so these are per-session, not per-run. */
+export interface WarmBashSessionSummarySourceEvent {
+  event: 'session_summary';
+  sessionId: string;
+  timestamp: string;
+  fastPath: number;
+  warm: number;
+  fallback: number;
+  poolSize: number;
+  warmupFailures: number;
+  autoPruneEnabled: boolean;
+  fastPathEnabled: boolean;
+  gnuGrep: boolean;
+}
+
 /** Prepared pruning quality-signal row for DuckDB (joined to a run by sessionPathHash). */
 export interface PreparedPruningSignalRow {
   runId: string;
@@ -632,6 +672,34 @@ export interface PreparedPruningSignalRow {
   event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'tool_recovered';
   skillName: string | null;
   toolName: string | null;
+}
+
+/** Prepared warm-bash rewrite row for DuckDB (joined to a run by sessionPathHash).
+ *  One row per transparent command rewrite. */
+export interface PreparedWarmBashRewriteRow {
+  runId: string;
+  sessionPathHash: string;
+  timestamp: string;
+  startedDay: string;
+  before: string;
+  after: string;
+}
+
+/** Prepared warm-bash per-session summary row for DuckDB (joined to a run by
+ *  sessionPathHash). One row per session that used the bash tool. */
+export interface PreparedWarmBashSummaryRow {
+  runId: string;
+  sessionPathHash: string;
+  timestamp: string;
+  startedDay: string;
+  fastPath: number;
+  warm: number;
+  fallback: number;
+  poolSize: number;
+  warmupFailures: number;
+  autoPruneEnabled: boolean;
+  fastPathEnabled: boolean;
+  gnuGrep: boolean;
 }
 
 /** Prepared tool-result-pruning row for DuckDB (joined to a run by sessionPathHash).
@@ -694,6 +762,12 @@ export interface PreparedPruningEventRow {
   prunedSkillNames: string[];
   keptToolNames: string[];
   prunedToolNames: string[];
+  prepassInputTokens?: number;
+  prepassOutputTokens?: number;
+  prepassCacheReadTokens?: number;
+  prepassCacheWriteTokens?: number;
+  prepassInputEstimateTokens?: number;
+  codeVersion?: string;
 }
 
 export interface PreparedAnalyticsData {
@@ -710,6 +784,8 @@ export interface PreparedAnalyticsData {
   pruningEvents: PreparedPruningEventRow[];
   pruningSignals: PreparedPruningSignalRow[];
   toolResultPruning: PreparedToolResultPruningRow[];
+  warmBashRewrites: PreparedWarmBashRewriteRow[];
+  warmBashSummaries: PreparedWarmBashSummaryRow[];
   agentReviews: PreparedAgentReviewRow[];
 }
 

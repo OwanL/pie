@@ -9,6 +9,7 @@ import {
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
 import { requestToolDefinition } from "./tools.js";
+import { getCodeVersion } from "./version.js";
 import { pruningResultRenderer } from "./render.js";
 import {
 	shouldSkipPruning,
@@ -228,6 +229,10 @@ export default function register(pi: ExtensionAPI) {
 						toolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, toolSelection.includedToolNames) : undefined,
 						originalToolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, allTools.map((t) => t.name)) : undefined,
 						keptAllDueToParseFailure,
+						prepassUsage,
+						prepassSystemPrompt: rawSystemPrompt,
+						prepassUserMessage: rawUserMessage,
+						codeVersion: getCodeVersion(),
 					}));
 				}
 			}

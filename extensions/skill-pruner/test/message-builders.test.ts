@@ -223,6 +223,38 @@ test("buildDecision: tool fields stay undefined when tool pruning did not run", 
 	assert.equal(decision.originalToolBlockTokens, undefined);
 });
 
+test("buildDecision: captures prepass usage, input estimate, and code version", () => {
+	const decision = buildDecision({
+		sessionId: "s", sessionPath: "p", mode: "auto", query: "q",
+		llmModel: "m", llmThinkingLevel: "minimal", llmResponse: "", llmLatencyMs: 0,
+		included: ["a"], excluded: ["b"], pinned: [], newBlock: "x", originalBlock: "xx",
+		prepassUsage: { input: 8000, output: 200, cacheRead: 1000, cacheWrite: 50 },
+		prepassSystemPrompt: "You are a relevance curator for a coding agent.",
+		prepassUserMessage: 'User request: "q"',
+		codeVersion: "abc1234",
+	});
+	assert.equal(decision.prepassInputTokens, 8000);
+	assert.equal(decision.prepassOutputTokens, 200);
+	assert.equal(decision.prepassCacheReadTokens, 1000);
+	assert.equal(decision.prepassCacheWriteTokens, 50);
+	assert.ok((decision.prepassInputEstimateTokens ?? 0) > 0, "estimate is computed from system + user message");
+	assert.equal(decision.codeVersion, "abc1234");
+});
+
+test("buildDecision: prepass fields undefined when no prepass ran", () => {
+	const decision = buildDecision({
+		sessionId: "s", sessionPath: "p", mode: "auto", query: "q",
+		llmModel: "m", llmThinkingLevel: "minimal", llmResponse: "", llmLatencyMs: 0,
+		included: [], excluded: [], pinned: [], newBlock: "x", originalBlock: "xx",
+	});
+	assert.equal(decision.prepassInputTokens, undefined);
+	assert.equal(decision.prepassOutputTokens, undefined);
+	assert.equal(decision.prepassCacheReadTokens, undefined);
+	assert.equal(decision.prepassCacheWriteTokens, undefined);
+	assert.equal(decision.prepassInputEstimateTokens, undefined);
+	assert.equal(decision.codeVersion, undefined);
+});
+
 // ---------------------------------------------------------------------------
 // estimateToolTokens
 // ---------------------------------------------------------------------------

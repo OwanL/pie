@@ -159,6 +159,14 @@ export function buildDecision(input: {
 	originalToolBlockTokens?: number;
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;
+	/** Provider-reported token usage for the prepass call (when available). */
+	prepassUsage?: PrepassUsage;
+	/** System prompt sent to the prepass LLM (for the local input-size estimate). */
+	prepassSystemPrompt?: string;
+	/** User message sent to the prepass LLM (for the local input-size estimate). */
+	prepassUserMessage?: string;
+	/** Short git SHA tagging the pruning-code version that produced this decision. */
+	codeVersion?: string;
 }): PruningDecision {
 	return {
 		timestamp: new Date().toISOString(),
@@ -181,6 +189,19 @@ export function buildDecision(input: {
 		toolBlockTokens: input.toolBlockTokens,
 		originalToolBlockTokens: input.originalToolBlockTokens,
 		keptAllDueToParseFailure: input.keptAllDueToParseFailure,
+		prepassInputTokens: input.prepassUsage?.input,
+		prepassOutputTokens: input.prepassUsage?.output,
+		prepassCacheReadTokens: input.prepassUsage?.cacheRead,
+		prepassCacheWriteTokens: input.prepassUsage?.cacheWrite,
+		// Locally-computed prepass INPUT size (system prompt + user message). Always
+		// available when a prepass ran, unlike the provider-reported usage above
+		// (which github-copilot often omits). Doubles as the cohort signal: it drops
+		// when the pruning prompt/descriptions are compacted.
+		prepassInputEstimateTokens:
+			input.prepassSystemPrompt || input.prepassUserMessage
+				? estimateTokens(input.prepassSystemPrompt ?? "") + estimateTokens(input.prepassUserMessage ?? "")
+				: undefined,
+		codeVersion: input.codeVersion,
 	};
 }
 

@@ -29,6 +29,7 @@ export const QUERY_FILE_BY_NAME = {
   tool_failures: path.resolve(SCRIPT_DIR, '../queries/tool_failures.sql'),
   treatment_comparison: path.resolve(SCRIPT_DIR, '../queries/treatment_comparison.sql'),
   timeline: path.resolve(SCRIPT_DIR, '../queries/timeline.sql'),
+  pruning_prepass_cost: path.resolve(SCRIPT_DIR, '../queries/pruning_prepass_cost.sql'),
 } as const;
 
 export type NamedQuery = keyof typeof QUERY_FILE_BY_NAME;
@@ -239,6 +240,12 @@ interface DuckDbPruningEventRow {
   pruned_skill_names: string[];
   kept_tool_names: string[];
   pruned_tool_names: string[];
+  prepass_input_tokens: number | null;
+  prepass_output_tokens: number | null;
+  prepass_cache_read_tokens: number | null;
+  prepass_cache_write_tokens: number | null;
+  prepass_input_estimate_tokens: number | null;
+  code_version: string | null;
 }
 
 interface DuckDbPruningSignalRow {
@@ -515,6 +522,12 @@ function toDuckDbPruningEventRow(row: PreparedPruningEventRow): DuckDbPruningEve
     pruned_skill_names: row.prunedSkillNames,
     kept_tool_names: row.keptToolNames,
     pruned_tool_names: row.prunedToolNames,
+    prepass_input_tokens: row.prepassInputTokens ?? null,
+    prepass_output_tokens: row.prepassOutputTokens ?? null,
+    prepass_cache_read_tokens: row.prepassCacheReadTokens ?? null,
+    prepass_cache_write_tokens: row.prepassCacheWriteTokens ?? null,
+    prepass_input_estimate_tokens: row.prepassInputEstimateTokens ?? null,
+    code_version: row.codeVersion ?? null,
   };
 }
 
@@ -875,7 +888,13 @@ CREATE TABLE pruning_events (
   kept_skill_names VARCHAR[],
   pruned_skill_names VARCHAR[],
   kept_tool_names VARCHAR[],
-  pruned_tool_names VARCHAR[]
+  pruned_tool_names VARCHAR[],
+  prepass_input_tokens INTEGER,
+  prepass_output_tokens INTEGER,
+  prepass_cache_read_tokens INTEGER,
+  prepass_cache_write_tokens INTEGER,
+  prepass_input_estimate_tokens INTEGER,
+  code_version VARCHAR
 );
 `.trim();
 }
