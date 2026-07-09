@@ -7,6 +7,11 @@ import path from 'node:path';
 // dedicated delete tool. The bash input is `{ command: "..." }` with no `path`
 // field, so `extractFilePath` cannot see them. These helpers scan the command
 // string for deletion commands and recover the targeted paths.
+//
+// Lifted from host/core/shell-deletion-parsing.ts into shared/ so both the
+// host's in-memory derivation and the session-changes extension's JSONL
+// re-derivation call one implementation. Pure (only node builtins) — host- and
+// vscode-agnostic.
 
 function looksLikeGlob(p: string): boolean {
   return /[*?[\]]/.test(p);

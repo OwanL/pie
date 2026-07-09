@@ -57,7 +57,7 @@ function subagentToolCall(id: string, streamingText: string): ToolCall {
     result: {
       mode: 'single',
       results: [
-        { agent: 'a', task: 't', exitCode: -1, messages: [], streamingText },
+        { agent: 'a', task: 't', exitCode: -1, messages: [], streamingText, streaming: true },
       ],
     },
   };
@@ -334,7 +334,7 @@ function nestedSubagentToolCall(topId: string, nestedStreamingText: string): Too
                     details: {
                       mode: 'single',
                       results: [
-                        { agent: 'scout', task: 't', exitCode: -1, messages: [], streamingText: nestedStreamingText },
+                        { agent: 'scout', task: 't', exitCode: -1, messages: [], streamingText: nestedStreamingText, streaming: true },
                       ],
                     },
                   },
@@ -343,6 +343,7 @@ function nestedSubagentToolCall(topId: string, nestedStreamingText: string): Too
             },
           ],
           streamingText: '',
+          streaming: false,
         },
       ],
     },
@@ -363,4 +364,77 @@ test('computeSubagentDelta (via tickTokenRate) counts nested depth-2 streaming t
   assert.ok(acc.cumTokens > 0, 'nested tokens banked into cumTokens');
   // The nested result has its own composite-keyed snapshot, distinct from the parent's.
   assert.ok(acc.subagentTokens.has('top#0>nested-tc#0'), 'nested snapshot tracked under a composite key');
+});
+
+// --- Sticky-clock regression: a subagent's OWN tool call must pause the clock ---
+
+test('a subagent in its own tool call pauses the generation clock (rate holds, state paused)', () => {
+  // Regression for the sticky `subagentProducedOutput` predicate: it stayed true
+  // forever after the first token, so the clock kept advancing with zero new
+  // tokens while a nested scout sat in read/grep/bash calls, collapsing the
+  // chip to 0 tok/s. The runner's `streaming` flag (false during a tool call)
+  // must pause the clock so the rate holds as `⏸ N tok/s` instead.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const t1 = estimateTextTokens(tokenText(50));
+  const t2 = estimateTextTokens(tokenText(100));
+  // Establish a rate across two streaming ticks.
+  tickTokenRate(acc, [{ ...m, toolCalls: [subagentToolCall('sub1', tokenText(50))] }], BASE_NOW + 1000);
+  tickTokenRate(acc, [{ ...m, toolCalls: [subagentToolCall('sub1', tokenText(100))] }], BASE_NOW + 2000);
+  const establishedGenMs = acc.genMs;
+  assert.equal(acc.samples.length, 2);
+  // Subagent now runs a bash tool: its output is committed to messages, it is
+  // NOT streaming (streamingText cleared, streaming flag false, runningTools set).
+  const inToolCall = (text: string): ToolCall => ({
+    id: 'sub1', name: 'subagent', input: {}, status: 'running',
+    result: { mode: 'single', results: [{ agent: 'a', task: 't', exitCode: -1,
+      messages: [{ role: 'assistant', content: [{ type: 'text', text }] }],
+      runningTools: ['bash'], streamingText: undefined, streaming: false }] },
+  });
+  let state = tickTokenRate(acc, [{ ...m, toolCalls: [inToolCall(tokenText(100))] }], BASE_NOW + 3000);
+  for (let i = 4; i <= 7; i += 1) {
+    state = tickTokenRate(acc, [{ ...m, toolCalls: [inToolCall(tokenText(100))] }], BASE_NOW + i * 1000);
+  }
+  // Clock must NOT have advanced during the tool call.
+  assert.equal(acc.genMs, establishedGenMs, 'generation clock paused during subagent tool call');
+  assert.equal(state.state, 'paused');
+  assert.match(state.label!, /⏸/);
+  const held = Number.parseFloat(state.label!.replace(/[^\d.]/g, ''));
+  const expectedRate = (t2 - t1) / 1.0;
+  assert.ok(held >= expectedRate - 3 && held <= expectedRate + 3, `expected held ~${expectedRate} tok/s, got ${held}`);
+});
+
+test('a subagent mid-stream stall (streaming, no token growth) still advances the clock', () => {
+  // The `streaming` flag is true through a provider slow-down (the runner only
+  // clears it on message_end), so stalls still count against the rate — the
+  // same contract as the main session. Without this a stall would freeze the
+  // clock and bias the rate high.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  tickTokenRate(acc, [{ ...m, toolCalls: [subagentToolCall('sub1', tokenText(100))] }], BASE_NOW + 1000);
+  // Stalled: same output, streaming flag still true -> clock advances, rate 0.
+  const state = tickTokenRate(acc, [{ ...m, toolCalls: [subagentToolCall('sub1', tokenText(100))] }], BASE_NOW + 2000);
+  assert.equal(state.state, 'generating');
+  assert.equal(state.label, '0 tok/s');
+  assert.ok(acc.genMs > 1000, 'clock advanced through the stall');
+});
+
+test('a reasoning-only subagent stream (streaming flag, no streamingText) advances the clock', () => {
+  // thinking_delta sets `streaming` without populating `streamingText`. The
+  // clock must advance through the reasoning phase (matching the main session,
+  // which counts the streaming message's `thinking` live) so the eventual
+  // message_end token bank doesn't spike the rate against ~zero generation time.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const thinkingOnly = (): ToolCall => ({
+    id: 'sub1', name: 'subagent', input: {}, status: 'running',
+    result: { mode: 'single', results: [{ agent: 'a', task: 't', exitCode: -1,
+      messages: [], streamingText: undefined, streaming: true }] },
+  });
+  tickTokenRate(acc, [{ ...m, toolCalls: [thinkingOnly()] }], BASE_NOW + 1000);
+  tickTokenRate(acc, [{ ...m, toolCalls: [thinkingOnly()] }], BASE_NOW + 2000);
+  // No tokens counted yet (thinking lands at message_end), but the clock ran.
+  assert.ok(acc.genMs > 0, 'clock advanced during reasoning-only stream');
+  // cumTokens is 0 (nothing counted yet) -> totalDelta 0, but generating via the flag.
+  assert.equal(acc.cumTokens, 0);
 });

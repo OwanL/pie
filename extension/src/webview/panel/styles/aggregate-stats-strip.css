@@ -143,6 +143,44 @@
   font-weight: 600;
 }
 
+.aggregate-strip-providers {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--panel-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.aggregate-strip-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.aggregate-strip-provider-name {
+  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
+}
+
+.aggregate-strip-provider-counts {
+  color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted));
+}
+
+.aggregate-strip-provider--queued .aggregate-strip-provider-counts {
+  color: var(--panel-accent);
+  font-weight: 600;
+}
+
+.aggregate-strip-provider-queued {
+  color: var(--panel-accent);
+  font-weight: 600;
+  margin-left: 1px;
+}
+
+.aggregate-strip-provider--paused .aggregate-strip-provider-name,
+.aggregate-strip-provider--paused .aggregate-strip-provider-counts {
+  color: var(--panel-danger);
+}
+
 /* Waiting deferred-trigger segment. A button (not a span) so it can open the
    cancel popup; inherits the strip's help-cursor feel via pointer. */
 .aggregate-strip-deferred {

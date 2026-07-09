@@ -110,6 +110,19 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 80, branches: 70 },
   },
   {
+    id: 'session-changes',
+    cwd: repoRoot,
+    testGlobs: ['extensions/session-changes/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/session-changes/**/*.ts'],
+    // session-jsonl.ts (the JSONL reader + toolCall↔toolResult join), render.ts
+    // (TSV/minified-diff renderers), and diff.ts's pure minify/synthetic paths
+    // are the unit-testable core; index.ts is env-glue (registers the
+    // `session_changes` tool) and diff.ts's git exec is integration-only.
+    // types-global.d.ts is ambient only. The shared derivation core + git-baseline
+    // live in extension/src/shared/ and are covered by the extension suite.
+    thresholds: { lines: 80, branches: 70 },
+  },
+  {
     id: 'deferred-triggers',
     cwd: repoRoot,
     testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],

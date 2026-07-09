@@ -1,0 +1,10 @@
+{
+  "name": "session-changes",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

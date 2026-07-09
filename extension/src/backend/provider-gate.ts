@@ -428,12 +428,26 @@ export class ProviderGate {
 	private static instance: ProviderGate | null = null;
 	private originalFetch: typeof globalThis.fetch | null = null;
 	private pools = new Map<string, { pool: ProviderPool; baseUrl: string; headerWaitMs: number }>();
+	/** Effective configs (base configs with any live user overrides applied). */
 	private configs: ProviderConcurrencyConfig[] = [];
+	/** Immutable base configs derived from models.json — the starting point that
+	 *  `applyUserOverrides` recomputes from each time (so removing an override
+	 *  reverts to base rather than sticking). */
+	private baseConfigs: ProviderConcurrencyConfig[] = [];
+	/** provider → baseUrl for EVERY known provider (not just gated ones), so a
+	 *  user override can gate a provider that had no base concurrency block. */
+	private knownBaseUrls = new Map<string, string>();
 	private idleTimeoutMs: number;
 	private defaultHeaderWaitMs: number;
 
-	private constructor(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds: number) {
+	private constructor(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds: number,
+		knownBaseUrls?: Map<string, string>,
+	) {
 		this.configs = configs;
+		this.baseConfigs = configs;
+		this.knownBaseUrls = knownBaseUrls ?? new Map(configs.map((c) => [c.provider, c.baseUrl]));
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
 		// Gate-wide default for the header-phase bound (replaces the proxy's
 		// raw-ASGI middleware header-phase bound). Individual providers may
@@ -442,13 +456,20 @@ export class ProviderGate {
 		this.rebuildPools();
 	}
 
-	/** Install (or reconfigure) the provider gate. Wraps `globalThis.fetch`. */
-	static install(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds = 120): ProviderGate {
+	/** Install (or reconfigure) the provider gate. Wraps `globalThis.fetch`.
+	 *  `knownBaseUrls` maps EVERY provider to its baseUrl (from models.json) so
+	 *  a user override can gate a provider that shipped no base concurrency
+	 *  block; when omitted it is derived from the gated configs. */
+	static install(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds = 120,
+		knownBaseUrls?: Map<string, string>,
+	): ProviderGate {
 		if (ProviderGate.instance) {
-			ProviderGate.instance.reconfigure(configs, idleTimeoutSeconds);
+			ProviderGate.instance.reconfigure(configs, idleTimeoutSeconds, knownBaseUrls);
 			return ProviderGate.instance;
 		}
-		ProviderGate.instance = new ProviderGate(configs, idleTimeoutSeconds);
+		ProviderGate.instance = new ProviderGate(configs, idleTimeoutSeconds, knownBaseUrls);
 		ProviderGate.instance.wrapFetch();
 		return ProviderGate.instance;
 	}
@@ -468,8 +489,15 @@ export class ProviderGate {
 	}
 
 	/** Reconfigure the pools without re-wrapping fetch (idempotent re-install). */
-	reconfigure(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds: number): void {
+	reconfigure(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds: number,
+		knownBaseUrls?: Map<string, string>,
+	): void {
 		this.configs = configs;
+		this.baseConfigs = configs;
+		if (knownBaseUrls) this.knownBaseUrls = knownBaseUrls;
+		else this.knownBaseUrls = new Map(configs.map((c) => [c.provider, c.baseUrl]));
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
 		this.rebuildPools();
 	}
@@ -486,18 +514,43 @@ export class ProviderGate {
 		queueWaitSeconds?: number;
 		headerWaitSeconds?: number;
 	}>): void {
-		// Merge overrides onto the base configs (shallow per-provider merge).
-		this.configs = this.configs.map((cfg) => {
-			const ov = overrides[cfg.provider];
-			if (!ov) return cfg;
-			return {
-				...cfg,
-				...(ov.maxConcurrentRequests !== undefined && { maxConcurrentRequests: ov.maxConcurrentRequests }),
-				...(ov.afterburnSeconds !== undefined && { afterburnSeconds: ov.afterburnSeconds }),
-				...(ov.queueWaitSeconds !== undefined && { queueWaitSeconds: ov.queueWaitSeconds }),
-				...(ov.headerWaitSeconds !== undefined && { headerWaitSeconds: ov.headerWaitSeconds }),
-			};
-		});
+		// Recompute effective configs from the immutable base each time so that
+		// clearing an override reverts to base instead of sticking. Keyed by
+		// provider for O(1) merge + insertion of newly-gated providers.
+		const byProvider = new Map<string, ProviderConcurrencyConfig>(
+			this.baseConfigs.map((cfg) => [cfg.provider, { ...cfg }]),
+		);
+		for (const [provider, ov] of Object.entries(overrides)) {
+			if (!ov) continue;
+			const existing = byProvider.get(provider);
+			if (existing) {
+				// Merge onto the provider's base config (shallow per-field).
+				byProvider.set(provider, {
+					...existing,
+					...(ov.maxConcurrentRequests !== undefined && { maxConcurrentRequests: ov.maxConcurrentRequests }),
+					...(ov.afterburnSeconds !== undefined && { afterburnSeconds: ov.afterburnSeconds }),
+					...(ov.queueWaitSeconds !== undefined && { queueWaitSeconds: ov.queueWaitSeconds }),
+					...(ov.headerWaitSeconds !== undefined && { headerWaitSeconds: ov.headerWaitSeconds }),
+				});
+				continue;
+			}
+			// Provider had no base concurrency block. Gate it from the override
+			// alone — provided we know its baseUrl (to match outbound requests)
+			// and the override sets a positive concurrency cap. This is what makes
+			// the gate provider-agnostic: any provider can be capped from the UI.
+			const baseUrl = this.knownBaseUrls.get(provider);
+			if (!baseUrl) continue;
+			if (typeof ov.maxConcurrentRequests !== 'number' || ov.maxConcurrentRequests <= 0) continue;
+			byProvider.set(provider, {
+				provider,
+				baseUrl,
+				maxConcurrentRequests: ov.maxConcurrentRequests,
+				afterburnSeconds: ov.afterburnSeconds,
+				queueWaitSeconds: ov.queueWaitSeconds,
+				headerWaitSeconds: ov.headerWaitSeconds,
+			});
+		}
+		this.configs = [...byProvider.values()];
 		this.rebuildPools();
 	}
 
@@ -937,5 +990,19 @@ export class ProviderGate {
 			});
 		}
 		return configs;
+	}
+
+	/** Map EVERY provider that has a `baseUrl` to that baseUrl (regardless of
+	 *  whether it ships a `concurrency` block). Passed to `install` so a user
+	 *  override can gate an otherwise-ungated provider — the gate needs the
+	 *  baseUrl to match that provider's outbound requests. */
+	static resolveBaseUrls(
+		modelsJson: { providers?: Record<string, { baseUrl?: string }> },
+	): Map<string, string> {
+		const map = new Map<string, string>();
+		for (const [name, entry] of Object.entries(modelsJson.providers ?? {})) {
+			if (entry.baseUrl) map.set(name, entry.baseUrl);
+		}
+		return map;
 	}
 }

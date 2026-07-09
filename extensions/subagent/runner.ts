@@ -21,7 +21,7 @@ import type { AgentConfig } from "./agents.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
-import type { OnUpdateCallback, SingleResult, SubagentDetails } from "./types.js";
+import type { OnUpdateCallback, SingleResult, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -338,6 +338,8 @@ function createInitialResult(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: actualModelId,
 		step,
+		streaming: false,
+		turnThroughputSamples: [],
 	};
 	if (modelResolutionDiagnostic) {
 		result.modelResolutionDiagnostic = modelResolutionDiagnostic;
@@ -445,8 +447,13 @@ function subscribeToSession(
 	emitUpdate: () => void,
 	streamingTextRef: { value: string },
 	stageRef: { value: string },
+	turnStartRef: { value: number | null },
 ): () => void {
 	return session.subscribe((event) => {
+		if (event.type === "message_start" && event.message?.role === "assistant") {
+			turnStartRef.value = Date.now();
+			return;
+		}
 		if (event.type === "message_update") {
 			handleMessageUpdate(event, result, emitUpdate, streamingTextRef, stageRef);
 			return;
@@ -466,7 +473,7 @@ function subscribeToSession(
 			return;
 		}
 		if (event.type === "message_end" && event.message) {
-			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef);
+			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef, turnStartRef);
 		}
 	});
 }
@@ -483,15 +490,43 @@ function handleMessageUpdate(
 	// The SDK delivers events in order per message: message_start → message_update* → message_end.
 	// A single `streamingText` buffer is sufficient because only one assistant
 	// message streams at a time in the subagent's single-prompt session.
-	if (event.assistantMessageEvent?.type === "text_delta" && event.assistantMessageEvent.delta) {
+	const ae = event.assistantMessageEvent;
+	if (!ae) return;
+	if (ae.type === "text_delta" && ae.delta) {
 		// First delta ⇒ the model has started streaming; tracked so abort/timeout
 		// diagnostics can distinguish prefill ("waiting for model response") from
 		// a mid-stream interrupt ("streaming").
 		stageRef.value = "streaming";
-		streamingTextRef.value += event.assistantMessageEvent.delta;
+		streamingTextRef.value += ae.delta;
 		result.streamingText = streamingTextRef.value;
+		result.streaming = true;
+		emitUpdate();
+	} else if (ae.type === "thinking_delta" && ae.thinking) {
+		// Reasoning deltas don't accumulate into `streamingText` (a complete
+		// thinking block is committed to `messages` at `message_end`), but they
+		// DO signal the model is actively generating. Set the `streaming` flag so
+		// the host's token-rate clock keeps advancing through a reasoning-only
+		// stream — matching the main session, which counts the streaming
+		// message's `thinking` live. Without this, a thinking-heavy subagent's
+		// clock would pause mid-reasoning and spike when the message landed.
+		stageRef.value = "streaming";
+		result.streaming = true;
 		emitUpdate();
 	}
+}
+
+/**
+ * Map a finished assistant message's stop reason onto a throughput-sample
+ * status. Mirrors the host's `toTurnThroughputStatus` semantics.
+ */
+function toSubagentThroughputStatus(rawMessage: SubagentEventMessage): SubagentTurnThroughputSample['status'] {
+	if (rawMessage.errorMessage || rawMessage.stopReason === 'error') {
+		return 'error';
+	}
+	if (rawMessage.stopReason === 'aborted' || rawMessage.stopReason === 'interrupted') {
+		return 'interrupted';
+	}
+	return 'completed';
 }
 
 /** Handle a completed message, recording usage and resetting streaming buffers. */
@@ -500,6 +535,7 @@ function handleMessageEnd(
 	result: SingleResult,
 	emitUpdate: () => void,
 	streamingTextRef: { value: string },
+	turnStartRef: { value: number | null },
 ): void {
 	const msg = rawMessage as Message;
 	if (msg.role === "assistant" || msg.role === "toolResult") {
@@ -511,6 +547,32 @@ function handleMessageEnd(
 		// (Only assistant messages produce text_delta events, so only reset on those.)
 		streamingTextRef.value = "";
 		result.streamingText = undefined;
+		// The model finished generating this turn — clear the streaming flag so
+		// the host's token-rate clock pauses during the subsequent tool call /
+		// between turns, until the next turn's first delta re-sets it.
+		result.streaming = false;
+
+		// Record a per-turn throughput observation for this assistant turn so
+		// the parent run's historical tok/s includes subagent generation work,
+		// attributed to the model the subagent actually ran on.
+		const nowMs = Date.now();
+		const startedAt = turnStartRef.value;
+		const generationDurationMs = Math.max(0, nowMs - (startedAt ?? nowMs));
+		const outputTokens = rawMessage.usage?.output ?? 0;
+		const status = toSubagentThroughputStatus(rawMessage);
+		// Match the host tracker's guard: keep the sample when there is
+		// measurable generation time, output tokens, or a non-completed status.
+		if (generationDurationMs > 0 || outputTokens > 0 || status !== 'completed') {
+			const samples = result.turnThroughputSamples ?? (result.turnThroughputSamples = []);
+			samples.push({
+				endedAt: new Date().toISOString(),
+				outputTokens,
+				generationDurationMs,
+				status,
+				modelId: result.model ?? rawMessage.model,
+			});
+		}
+		turnStartRef.value = null;
 	}
 	emitUpdate();
 }
@@ -1051,9 +1113,12 @@ export async function runSingleAgent(
 	// "waiting for model response" covers prefill (the common abort window, and
 	// the one that produced the bare "Request was aborted" symptom).
 	const stageRef = { value: "preparing" };
+	// Wall-clock start time of the current assistant turn (message_start →
+	// message_end). Used to record per-turn throughput for historical tok/s.
+	const turnStartRef: { value: number | null } = { value: null };
 
 	// 5. Subscribe to session events.
-	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef);
+	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef, turnStartRef);
 
 	// Wrap the prompt in the shared subagent context (A) so extensions whose
 	// before_agent_start hooks fire during session.prompt() — notably the

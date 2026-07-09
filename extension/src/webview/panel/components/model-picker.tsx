@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import type { ModelPickerEntry } from '../composer/model-list';
@@ -70,7 +70,6 @@ function resolveListKeyAction(key: string): ListKeyAction | null {
     case 'End':
       return 'last';
     case 'Enter':
-    case ' ':
       return 'select';
     case 'Tab':
       return 'close';
@@ -87,13 +86,17 @@ function useFocusOnOpen(
   open: boolean,
   selectedIndex: number,
   setActiveIndex: (index: number) => void,
-  listRef: { current: HTMLDivElement | null },
+  inputRef: { current: HTMLInputElement | null },
+  setQuery: (value: string) => void,
 ) {
   useEffect(() => {
     if (!open) return;
+    // Start each open with a fresh filter and the current selection highlighted,
+    // so Enter on an untouched dropdown re-selects the active model (no-op).
+    setQuery('');
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
     requestAnimationFrame(() => {
-      listRef.current?.focus();
+      inputRef.current?.focus();
     });
   }, [open]);
 }
@@ -240,7 +243,7 @@ function useListKeyDown(
   setActiveIndex: (updater: (prev: number) => number) => void,
 ) {
   return useCallback(
-    (e: JSX.TargetedKeyboardEvent<HTMLDivElement>) => {
+    (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
       if (entries.length === 0) return;
       const action = resolveListKeyAction(e.key);
       if (!action) return;
@@ -286,23 +289,47 @@ function useModelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [query, setQuery] = useState('');
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
   const idBase = useId();
   const listId = `${idBase}-list`;
   const selectedIndex = entries.findIndex((e) => e.model.id === value);
 
-  useFocusOnOpen(open, selectedIndex, setActiveIndex, listRef);
+  const filteredEntries = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((e) =>
+      `${e.label} ${e.model.id} ${e.model.provider}`.toLowerCase().includes(q),
+    );
+  }, [entries, query]);
+
+  useFocusOnOpen(open, selectedIndex, setActiveIndex, inputRef, setQuery);
   useClickOutside(open, setOpen, triggerRef, listRef);
   useDropdownPosition(open, dropdownDirection, listRef, triggerRef);
   useScrollActiveItem(open, activeIndex, itemRefs);
 
+  // Keep activeIndex within the filtered list if the underlying entries change
+  // while the dropdown is open (e.g. a provider toggle). Never reduces a valid
+  // index, so it can't clobber the selectedIndex set on open.
+  useEffect(() => {
+    if (activeIndex >= 0 && activeIndex >= filteredEntries.length) {
+      setActiveIndex(Math.max(0, filteredEntries.length - 1));
+    }
+  }, [filteredEntries.length]);
+
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
-  const onListKeyDown = useListKeyDown(entries, activeIndex, handleSelect, setOpen, setActiveIndex);
+  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex);
+  const onSearchInput = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
+    setQuery(e.currentTarget.value);
+    setActiveIndex(0);
+  }, []);
 
-  const activeDescendant = activeIndex >= 0 ? `${idBase}-option-${entries[activeIndex]?.model.id}` : undefined;
+  const activeDescendant =
+    activeIndex >= 0 ? `${idBase}-option-${filteredEntries[activeIndex]?.model.id}` : undefined;
 
   return {
     open,
@@ -311,6 +338,7 @@ function useModelPicker({
     setActiveIndex,
     triggerRef,
     listRef,
+    inputRef,
     itemRefs,
     idBase,
     listId,
@@ -318,6 +346,9 @@ function useModelPicker({
     handleSelect,
     onTriggerKeyDown,
     onListKeyDown,
+    onSearchInput,
+    query,
+    filteredEntries,
     activeDescendant,
   };
 }
@@ -419,7 +450,7 @@ interface ModelPickerDropdownProps {
   compact?: boolean;
   ariaLabel: string;
   activeDescendant: string | undefined;
-  onKeyDown: (e: JSX.TargetedKeyboardEvent<HTMLDivElement>) => void;
+  onKeyDown: (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => void;
   entries: ModelPickerEntry[];
   value: string;
   activeIndex: number;
@@ -427,6 +458,9 @@ interface ModelPickerDropdownProps {
   handleSelect: (modelId: string) => void;
   setActiveIndex: (index: number) => void;
   itemRefs: { current: (HTMLDivElement | null)[] };
+  query: string;
+  onSearchInput: (e: JSX.TargetedEvent<HTMLInputElement>) => void;
+  inputRef: { current: HTMLInputElement | null };
 }
 
 function ModelPickerDropdown({
@@ -444,46 +478,64 @@ function ModelPickerDropdown({
   handleSelect,
   setActiveIndex,
   itemRefs,
+  query,
+  onSearchInput,
+  inputRef,
 }: ModelPickerDropdownProps) {
   return (
-    <div
-      ref={listRef}
-      id={listId}
-      class={getDropdownClass(dropdownDirection, compact)}
-      role="listbox"
-      tabIndex={0}
-      aria-label={ariaLabel}
-      aria-activedescendant={activeDescendant}
-      onKeyDown={onKeyDown}
-    >
-      <div class="model-picker-header" aria-hidden="true">
-        <span class="model-picker-col model-picker-col-name">Model</span>
-        <span class="model-picker-col model-picker-col-price">In</span>
-        <span class="model-picker-col model-picker-col-price">Out</span>
-        <span class="model-picker-col model-picker-col-images">Img</span>
+    <div ref={listRef} class={getDropdownClass(dropdownDirection, compact)}>
+      <div class="model-picker-searchbar">
+        <input
+          ref={inputRef}
+          class="model-picker-search"
+          type="text"
+          placeholder="Search models…"
+          value={query}
+          aria-label={ariaLabel}
+          role="combobox"
+          aria-haspopup="listbox"
+          aria-expanded={true}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={activeDescendant}
+          autocomplete="off"
+          spellcheck={false}
+          onInput={onSearchInput}
+          onKeyDown={onKeyDown}
+        />
+        <div class="model-picker-header" aria-hidden="true">
+          <span class="model-picker-col model-picker-col-name">Model</span>
+          <span class="model-picker-col model-picker-col-price">In</span>
+          <span class="model-picker-col model-picker-col-price">Out</span>
+          <span class="model-picker-col model-picker-col-images">Img</span>
+        </div>
       </div>
-      <div class="model-picker-rows">
-        {entries.map((entry, i) => {
-          const isSelected = entry.model.id === value;
-          const isActive = i === activeIndex;
-          const optionId = `${idBase}-option-${entry.model.id}`;
-          return (
-            <ModelPickerRow
-              key={entry.model.id}
-              entry={entry}
-              isSelected={isSelected}
-              isActive={isActive}
-              optionId={optionId}
-              setItemRef={(el) => { itemRefs.current[i] = el; }}
-              onMouseEnter={() => setActiveIndex(i)}
-              onMouseDown={(e) => {
-                // prevent focus loss so the item is clicked properly
-                e.preventDefault();
-                handleSelect(entry.model.id);
-              }}
-            />
-          );
-        })}
+      <div id={listId} class="model-picker-rows" role="listbox" aria-label={ariaLabel}>
+        {entries.length === 0 ? (
+          <div class="model-picker-empty">{`No models match "${query}"`}</div>
+        ) : (
+          entries.map((entry, i) => {
+            const isSelected = entry.model.id === value;
+            const isActive = i === activeIndex;
+            const optionId = `${idBase}-option-${entry.model.id}`;
+            return (
+              <ModelPickerRow
+                key={entry.model.id}
+                entry={entry}
+                isSelected={isSelected}
+                isActive={isActive}
+                optionId={optionId}
+                setItemRef={(el) => { itemRefs.current[i] = el; }}
+                onMouseEnter={() => setActiveIndex(i)}
+                onMouseDown={(e) => {
+                  // prevent focus loss so the item is clicked properly
+                  e.preventDefault();
+                  handleSelect(entry.model.id);
+                }}
+              />
+            );
+          })
+        )}
       </div>
     </div>
   );
@@ -521,13 +573,16 @@ export function ModelPicker({
       ariaLabel={ariaLabel}
       activeDescendant={state.activeDescendant}
       onKeyDown={state.onListKeyDown}
-      entries={entries}
+      entries={state.filteredEntries}
       value={value}
       activeIndex={state.activeIndex}
       idBase={state.idBase}
       handleSelect={state.handleSelect}
       setActiveIndex={state.setActiveIndex}
       itemRefs={state.itemRefs}
+      query={state.query}
+      onSearchInput={state.onSearchInput}
+      inputRef={state.inputRef}
     />
   );
 

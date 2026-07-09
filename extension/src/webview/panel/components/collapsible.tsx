@@ -59,11 +59,10 @@ const COLLAPSIBLE_CLOSE_MS = 200;
  *
  * Closing animates: the body stays mounted with `data-closing` while a
  * grid-track `1fr→0fr` transition collapses it, then unmounts (with a timer
- * fallback for environments where `transitionend` doesn't fire, e.g.
- * prefers-reduced-motion). Opening mounts instantly — animating `0fr→1fr`
- * against freshly-laid-out content stuttered (the 1fr reference shifts
- * mid-animation), so open stays a plain mount, matching the tool-call card's
- * manual-open behaviour.
+ * fallback for environments where `transitionend` doesn't fire). Opening
+ * mounts instantly — animating `0fr→1fr` against freshly-laid-out content
+ * stuttered (the 1fr reference shifts mid-animation), so open stays a plain
+ * mount, matching the tool-call card's manual-open behaviour.
  *
  * Controlled only — callers own the open state so streaming/auto-show sites
  * (tool calls, subagents) can keep their own open/close logic and still reuse
@@ -114,8 +113,8 @@ export function Collapsible({
     if (closeFallbackRef.current) clearTimeout(closeFallbackRef.current);
     setClosing(true);
     onToggle(false);
-    // Fallback: if transitionend doesn't fire (prefers-reduced-motion disables
-    // the transition, the tab is backgrounded, etc.) the body must still unmount.
+    // Fallback: if transitionend doesn't fire (the tab is backgrounded, etc.)
+    // the body must still unmount.
     closeFallbackRef.current = setTimeout(() => {
       closeFallbackRef.current = null;
       setClosing(false);

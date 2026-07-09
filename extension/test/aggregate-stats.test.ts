@@ -350,3 +350,37 @@ test('providerForModel / pricingForModel: first priced provider wins', () => {
   assert.equal(providerForModel(undefined, pricingMap), 'unknown');
   assert.equal(pricingForModel('nope', pricingMap), null);
 });
+
+test('computeAggregateStats: throughput samples attribute to their own model with run-model fallback', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['openai/gpt', [pricing('openai', 0, 0)]],
+    ['anthropic/claude', [pricing('anthropic', 0, 0)]],
+  ]);
+  const runs = [
+    makeRun({
+      runId: 'r1', modelId: 'openai/gpt',
+      turnThroughputSamples: [
+        // Sample with its own model on a different provider.
+        { endedAt: '2026-07-04T10:00:00.000Z', outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', modelId: 'anthropic/claude', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        // Sample without modelId falls back to the run's model.
+        { endedAt: '2026-07-04T10:01:00.000Z', outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      ],
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // Total throughput: (3000 + 1000) / 20s = 200 tok/s
+  assert.equal(stats.tokensPerSecond, 200);
+  assert.equal(stats.tokensPerSecondByProvider.length, 2);
+  const anthropic = stats.tokensPerSecondByProvider.find((p) => p.provider === 'anthropic');
+  const openai = stats.tokensPerSecondByProvider.find((p) => p.provider === 'openai');
+  assert.ok(anthropic, 'anthropic provider should be present');
+  assert.ok(openai, 'openai provider should be present');
+  // anthropic: 3000 / 10s = 300 tok/s
+  assert.equal(anthropic!.tokensPerSecond, 300);
+  assert.equal(anthropic!.outputTokens, 3000);
+  assert.equal(anthropic!.sampleCount, 1);
+  // openai: 1000 / 10s = 100 tok/s
+  assert.equal(openai!.tokensPerSecond, 100);
+  assert.equal(openai!.outputTokens, 1000);
+  assert.equal(openai!.sampleCount, 1);
+});

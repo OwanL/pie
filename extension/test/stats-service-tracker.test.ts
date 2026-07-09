@@ -483,3 +483,82 @@ test('assistant turn usage with NaN or negative values does not corrupt counters
   assert.equal(sample?.overheadMs, null);
   assert.equal(sample?.providerLatencyMs, null);
 });
+
+test('subagent tool call forwards turnThroughputSamples into the parent run', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const subagentToolCall: ToolCall = {
+    id: 'subagent-1',
+    name: 'subagent',
+    input: { agent: 'worker', task: 'do work' },
+    status: 'completed',
+    durationMs: 100,
+    result: {
+      details: {
+        mode: 'single',
+        results: [
+          {
+            agent: 'worker',
+            task: 'do work',
+            exitCode: 0,
+            messages: [],
+            model: 'openai/gpt-sub',
+            turnThroughputSamples: [
+              { endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 100, generationDurationMs: 1000, status: 'completed', modelId: 'openai/gpt-sub' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  harness.tracker.onToolStarted(harness.sessionPath, subagentToolCall);
+  harness.tracker.onToolFinished(harness.sessionPath, subagentToolCall);
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.toolUsage.subagentCallCount, 1);
+  assert.equal(run?.turnThroughputSamples.length, 1);
+  const sample = run?.turnThroughputSamples[0];
+  assert.equal(sample?.outputTokens, 100);
+  assert.equal(sample?.generationDurationMs, 1000);
+  assert.equal(sample?.status, 'completed');
+  assert.equal(sample?.modelId, 'openai/gpt-sub');
+});
+
+test('subagent tool call stamps modelId from result.model when sample lacks modelId', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const subagentToolCall: ToolCall = {
+    id: 'subagent-2',
+    name: 'subagent',
+    input: { agent: 'worker', task: 'do work' },
+    status: 'completed',
+    durationMs: 100,
+    result: {
+      details: {
+        mode: 'single',
+        results: [
+          {
+            agent: 'worker',
+            task: 'do work',
+            exitCode: 0,
+            messages: [],
+            model: 'anthropic/claude-sub',
+            turnThroughputSamples: [
+              { endedAt: '2026-01-01T00:00:01.000Z', outputTokens: 50, generationDurationMs: 500, status: 'completed' },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  harness.tracker.onToolStarted(harness.sessionPath, subagentToolCall);
+  harness.tracker.onToolFinished(harness.sessionPath, subagentToolCall);
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.turnThroughputSamples.length, 1);
+  assert.equal(run?.turnThroughputSamples[0]?.modelId, 'anthropic/claude-sub');
+});

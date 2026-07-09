@@ -44,6 +44,7 @@ through to the fallback. Worst case = today's behaviour.
 |---|---|---|
 | `PIE_BASH_WARM_POOL` | `2` | Warm pool size per session. `0` = disabled (today's behaviour). |
 | `PIE_BASH_FAST_PATH` | `1` | `1`/`0` — enable the execFile fast path. |
+| `PIE_BASH_AUTO_PRUNE` | `1` | `1`/`0` — transparently inject `--exclude-dir` / `-prune` into recursive `grep` / bare-path `find` so bash-embedded search skips node_modules/.git (approximates rg; gated by a runtime GNU-grep probe). `0` = skip the rewrite entirely. |
 | `PIE_SHELL` | auto | Explicit bash path (default: auto-detect Git Bash / bash). |
 
 The pool is **per-session** (keyed by `ctx.sessionManager.getSessionId()`),

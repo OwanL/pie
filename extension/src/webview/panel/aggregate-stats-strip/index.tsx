@@ -3,7 +3,7 @@
 
 import { memo } from 'preact/compat';
 
-import type { AggregateStats, AggregateLastRun, DeferredTriggerView, WarmBashStats } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun, DeferredTriggerView, WarmBashStats, ProviderGateStats } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 import { Tooltip } from '../components/tooltip';
@@ -104,6 +104,30 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
           </Tooltip>
         </>
       )}
+      {stats.providerGate.enabled && stats.providerGate.providers.length > 0 && (
+        <>
+          <Sep />
+          <Tooltip content={providerGateTooltip(stats.providerGate)} placement="top" freezeWhileVisible>
+            <span class="aggregate-strip-seg aggregate-strip-providers">
+              {stats.providerGate.providers.map((p, i) => (
+                <span
+                  key={p.provider}
+                  class={cx(
+                    'aggregate-strip-provider',
+                    p.paused && 'aggregate-strip-provider--paused',
+                    !p.paused && p.queuedRequests > 0 && 'aggregate-strip-provider--queued',
+                  )}
+                >
+                  {i > 0 && ' '}
+                  <span class="aggregate-strip-provider-name">{p.provider}</span>{' '}
+                  <span class="aggregate-strip-provider-counts">{p.activeRequests}/{p.maxConcurrentRequests}</span>
+                  {p.queuedRequests > 0 && <span class="aggregate-strip-provider-queued">+{p.queuedRequests}</span>}
+                </span>
+              ))}
+            </span>
+          </Tooltip>
+        </>
+      )}
       {stats.warmBash.enabled && (
         <>
           <Sep />
@@ -200,6 +224,8 @@ function statsSignature(s: AggregateStats): string {
     s.warmBash.enabled, s.warmBash.poolSize, s.warmBash.ready, s.warmBash.warming,
     s.warmBash.fastPathEnabled, s.warmBash.totalFastPath, s.warmBash.totalWarm,
     s.warmBash.totalFallback, s.warmBash.totalWarmupFailures,
+    s.providerGate.enabled,
+    s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.paused}`).join(','),
   ].join('|');
 }
 
@@ -348,6 +374,22 @@ function warmBashTooltip(w: WarmBashStats): string {
   }
   lines.push('');
   lines.push('Tune in Settings → Bash (pool size, fast path, timeouts).');
+  return lines.join('\n');
+}
+
+function providerGateTooltip(g: ProviderGateStats): string {
+  const lines: string[] = ['Provider concurrency:'];
+  for (const p of g.providers) {
+    let line = `  ${pad(p.provider, 14)}${p.activeRequests}/${p.maxConcurrentRequests} active`;
+    if (p.queuedRequests > 0) line += `  · ${p.queuedRequests} queued`;
+    if (p.paused) {
+      const seconds = Math.max(0, Math.ceil((p.pausedUntilMs - Date.now()) / 1000));
+      line += `  · PAUSED (~${seconds}s, ${p.strikeCount} strike${p.strikeCount === 1 ? '' : 's'})`;
+    } else if (p.afterburnSeconds > 0) {
+      line += `  · afterburn ${p.afterburnSeconds}s`;
+    }
+    lines.push(line);
+  }
   return lines.join('\n');
 }
 

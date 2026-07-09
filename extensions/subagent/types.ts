@@ -30,6 +30,19 @@ export interface UsageStats {
 	turns: number;
 }
 
+export interface SubagentTurnThroughputSample {
+	/** ISO timestamp when the assistant turn ended (`message_end`). */
+	endedAt: string;
+	/** Output tokens reported for this turn. */
+	outputTokens: number;
+	/** Wall-clock generation time for this turn in ms (tool-execution excluded). */
+	generationDurationMs: number;
+	/** Terminal status of the turn. */
+	status: 'completed' | 'error' | 'interrupted';
+	/** The model this turn ran on. */
+	modelId?: string;
+}
+
 export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
@@ -44,6 +57,22 @@ export interface SingleResult {
 	errorMessage?: string;
 	/** Streaming text accumulated from in-progress assistant turn, available while running. */
 	streamingText?: string;
+	/** True while the subagent's model is actively generating output for the
+	 *  in-progress assistant turn (set on the first text/thinking delta, cleared
+	 *  on `message_end`). The host's token-rate clock reads this to keep
+	 *  advancing through mid-stream stalls AND reasoning-only streams while
+	 *  PAUSING during the subagent's own tool calls, between turns, and before
+	 *  the first token — mirroring the main session's clock semantics. Without
+	 *  it the clock used a sticky "has ever produced" predicate that kept
+	 *  advancing (collapsing the rate to 0) while a nested scout sat in
+	 *  read/grep/bash calls. */
+	streaming?: boolean;
+	/**
+	 * Per-turn throughput observations recorded from this subagent session.
+	 * Forwarded into the parent run's snapshot so historical tok/s includes
+	 * subagent work, attributed to the model the subagent actually ran on.
+	 */
+	turnThroughputSamples?: SubagentTurnThroughputSample[];
 	step?: number;
 	/** Tool names currently executing in this subagent (cleared when tool finishes). */
 	runningTools?: string[];

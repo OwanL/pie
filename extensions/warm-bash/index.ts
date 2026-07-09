@@ -23,6 +23,7 @@
 
 import { createBashTool, createLocalBashOperations, getShellConfig, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createWarmBashOperations, createWarmBashMetrics } from "./src/operations.js";
+import { probeGnuGrep } from "./src/auto-prune.js";
 import { WarmBashPool } from "./src/warm-pool.js";
 import { registerWarmBashStats, type WarmBashStats } from "./src/stats.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
@@ -35,6 +36,15 @@ function poolSize(): number {
 
 function fastPathEnabled(): boolean {
   const v = (process.env.PIE_BASH_FAST_PATH ?? "1").toLowerCase();
+  return v !== "0" && v !== "false" && v !== "off";
+}
+
+/** Transparent search-pruning guard (inject --exclude-dir / -prune into recursive
+ *  grep / bare-path find). Default on; "0" skips the rewrite entirely, preserving
+ *  the "never worse than status quo" guarantee. Read fresh on every tool build so
+ *  a settings change hot-reloads without a restart (same pattern as fastPathEnabled). */
+function autoPruneEnabled(): boolean {
+  const v = (process.env.PIE_BASH_AUTO_PRUNE ?? "1").toLowerCase();
   return v !== "0" && v !== "false" && v !== "off";
 }
 
@@ -53,6 +63,18 @@ function warmupTimeoutMs(): number {
 function acquireTimeoutMs(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_ACQUIRE_TIMEOUT_MS ?? "", 10);
   return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+}
+
+/** Cached GNU-grep capability probe (keyed by shell so a PIE_SHELL change
+ *  re-probes). grep injection is gated on this so a non-GNU environment never
+ *  gets a broken `--exclude-dir` grep. */
+let gnuGrepCache: { shell: string; gnu: boolean } | null = null;
+function gnuGrepProbe(): boolean {
+  const shell = shellPath();
+  if (gnuGrepCache && gnuGrepCache.shell === shell) return gnuGrepCache.gnu;
+  const gnu = probeGnuGrep(shell);
+  gnuGrepCache = { shell, gnu };
+  return gnu;
 }
 
 /** Default timeout (seconds) for bash commands that don't specify one.
@@ -99,10 +121,10 @@ export default function (pi: ExtensionAPI) {
   /** Snapshot of the env-derived config used to build each session's tool, so a
    *  live settings change (writes new env via runtimePrefs.set) is detected and
    *  the pool/tool rebuilt on the next bash call — no restart needed. */
-  const toolConfig = new Map<string, { size: number; fastPath: boolean; shell: string; warmup: number; acquire: number }>();
+  const toolConfig = new Map<string, { size: number; fastPath: boolean; shell: string; warmup: number; acquire: number; autoPrune: boolean }>();
 
   function currentConfig() {
-    return { size: poolSize(), fastPath: fastPathEnabled(), shell: shellPath(), warmup: warmupTimeoutMs(), acquire: acquireTimeoutMs() };
+    return { size: poolSize(), fastPath: fastPathEnabled(), shell: shellPath(), warmup: warmupTimeoutMs(), acquire: acquireTimeoutMs(), autoPrune: autoPruneEnabled() };
   }
 
   function getPool(sessionId: string, size: number, shell: string, warmup: number, acquire: number): WarmBashPool | null {
@@ -128,7 +150,7 @@ export default function (pi: ExtensionAPI) {
     // If a setting changed since we built this session's tool, tear it down and
     // rebuild so the new pool size / fast-path / shell / timeouts takes effect
     // immediately.
-    if (prev && (prev.size !== cfg.size || prev.fastPath !== cfg.fastPath || prev.shell !== cfg.shell || prev.warmup !== cfg.warmup || prev.acquire !== cfg.acquire)) {
+    if (prev && (prev.size !== cfg.size || prev.fastPath !== cfg.fastPath || prev.shell !== cfg.shell || prev.warmup !== cfg.warmup || prev.acquire !== cfg.acquire || prev.autoPrune !== cfg.autoPrune)) {
       pools.get(sessionId)?.dispose();
       pools.delete(sessionId);
       tools.delete(sessionId);
@@ -152,6 +174,9 @@ export default function (pi: ExtensionAPI) {
       const operations = createWarmBashOperations({
         pool,
         fastPathEnabled: cfg.fastPath,
+        autoPruneEnabled: cfg.autoPrune,
+        gnuGrepProbe,
+        log: (payload) => console.error(JSON.stringify(payload)),
         fallbackOps,
         metrics: m,
       });

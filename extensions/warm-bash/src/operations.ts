@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { classify } from "./classifier.js";
 import { execFastPath, FastPathError } from "./fast-path.js";
 import { WarmBashPool, WarmExecError } from "./warm-pool.js";
+import { rewriteForPrune } from "./auto-prune.js";
 import type { BashOperations } from "./types.js";
 
 /** Mutable counters shared with the per-session stats provider (index.ts).
@@ -26,6 +27,17 @@ export interface WarmBashOpsOpts {
   /** Per-session warm pool, or null when warm mode is disabled. */
   pool: WarmBashPool | null;
   fastPathEnabled: boolean;
+  /** Transparent search-pruning guard (inject --exclude-dir / -prune into recursive
+   *  grep / bare-path find). Off by default; index.ts reads PIE_BASH_AUTO_PRUNE
+   *  fresh on every tool build (live-toggleable, like fastPathEnabled). */
+  autoPruneEnabled?: boolean;
+  /** Lazy GNU-grep capability probe (cached per process by index.ts). grep
+   *  injection is gated on it so non-GNU environments never get a broken grep. */
+  gnuGrepProbe?: () => boolean;
+  /** Structured log sink for each rewrite (host OutputChannel, NOT the tool
+   *  result). Logs full before/after command text — same sensitive-data trade-off
+   *  existing logging accepts elsewhere, not a new category of risk. */
+  log?: (payload: Record<string, unknown>) => void;
   /** Today's exact execution path, injected by index.ts (createLocalBashOperations).
    *  Used as the final fallback so this layer can never be worse than the status quo. */
   fallbackOps: BashOperations;
@@ -50,8 +62,23 @@ function isTerminal(message: string): boolean {
 export function createWarmBashOperations(opts: WarmBashOpsOpts): BashOperations {
   const fallback = opts.fallbackOps;
 
+  const autoPruneEnabled = opts.autoPruneEnabled === true;
+  const gnuGrepProbe = opts.gnuGrepProbe ?? (() => false);
+
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
+      // Transparent search-pruning rewrite — runs BEFORE classify so all three
+      // layers (fast/warm/fallback) see the rewritten string and cd-peel + the
+      // marker protocol proceed on it. No-op (returns the same reference) when
+      // the gate is off or nothing matches, so this is never worse than status quo.
+      if (autoPruneEnabled) {
+        const rewritten = rewriteForPrune(command, { gnuGrepProbe });
+        if (rewritten !== command) {
+          opts.log?.({ source: "pie:warm-bash:auto-prune", event: "rewrite", before: command, after: rewritten });
+          command = rewritten;
+        }
+      }
+
       const c = classify(command);
       const effCwd = c.cwd ? resolve(cwd, c.cwd) : cwd;
 

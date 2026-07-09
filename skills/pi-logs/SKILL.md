@@ -1,6 +1,6 @@
 ---
 name: pi-logs
-description: Read and interface with pie (pi coding agent) logs — the /debug snapshot, session JSONL history, and truncated tool-output temp logs. Groups identical log lines Unity-style (collapsing repeats into counts) for compact agent review, with optional volatile-token normalization. Use when the user asks to inspect pi logs, review what a session did, debug the TUI, find a truncated command's full output, see what was sent to the LLM, or read any large/repetitive log file.
+description: For reading and interfacing with pie logs. Use when debugging pie, or when you want to see what the model actually received, or what a session did. Provides useful grouping for logs as to make them agent native.
 ---
 
 # Pi Logs

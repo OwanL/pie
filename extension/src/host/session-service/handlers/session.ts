@@ -177,6 +177,7 @@ const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'ask-user', label: 'Ask User', description: 'Ask the user a clarifying question with preset answers' },
   { id: 'deferred-triggers', label: 'Deferred Triggers', description: 'Defer a task and auto-resume the session when a trigger fires' },
   { id: 'session-reviewer', label: 'Session Reviewer', description: 'List, read, and review the currently-open session transcripts' },
+  { id: 'session-changes', label: 'Session Changes', description: 'Inspect the files a session changed (manifest + diffs)' },
   { id: 'warm-bash', label: 'Warm Bash', description: 'Speed up the bash tool with a pre-warmed shell pool' },
 ];
 
@@ -185,6 +186,7 @@ const TOOL_TO_EXTENSION: Record<string, string> = {
   ask_user: 'ask-user',
   defer_trigger: 'deferred-triggers',
   session_review: 'session-reviewer',
+  session_changes: 'session-changes',
 };
 
 // Hook-only extensions (or tool overrides like warm-bash that shadow a core

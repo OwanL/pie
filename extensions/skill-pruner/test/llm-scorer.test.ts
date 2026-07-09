@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPruningSystemPrompt, buildPruningUserMessage, parseLlmResponse, runLlmPruning, __setPromptTemplate } from "../llm-scorer.js";
+import { buildPruningSystemPrompt, buildPruningUserMessage, compactDescription, parseLlmResponse, runLlmPruning, __setPromptTemplate } from "../llm-scorer.js";
 import type { PruningConfig } from "../types.js";
 
 function makeConfig(overrides: Partial<PruningConfig> = {}): PruningConfig {
@@ -133,6 +133,62 @@ test("buildPruningUserMessage lists only the provided candidates and emits no pr
 	assert.ok(!msg.includes("Protected skills"), "builder must not emit protected-skill framing");
 	assert.ok(!msg.includes("Protected tools"), "builder must not emit protected-tool framing");
 	assert.ok(!/never removed/.test(msg), "builder must not reference protection in the prompt");
+});
+
+// ---------------------------------------------------------------------------
+// compactDescription tests
+// ---------------------------------------------------------------------------
+
+test("compactDescription passes short descriptions through unchanged", () => {
+	assert.equal(compactDescription("Read file contents"), "Read file contents");
+	assert.equal(compactDescription(""), "");
+});
+
+test("compactDescription collapses internal whitespace/newlines to single spaces", () => {
+	assert.equal(compactDescription("Read   a\n\nfile"), "Read a file");
+});
+
+test("compactDescription truncates a long multi-sentence tool description to its gist", () => {
+	const long = "Delegate tasks to specialized subagents with isolated context. Modes: single (agent + task), parallel (tasks array), chain (sequential). Bucket hint for model selection: small, medium, or frontier. Available agents: reviewer, scout, worker.";
+	const compact = compactDescription(long);
+	assert.ok(compact.length < long.length, "should be shorter than the original");
+	assert.ok(compact.length <= 180, "should respect the char cap");
+	assert.ok(compact.startsWith("Delegate tasks to specialized subagents"), "keeps the leading summary");
+	assert.ok(compact.endsWith(".") || compact.endsWith("\u2026"), "ends cleanly on a sentence or ellipsis");
+});
+
+test("compactDescription cuts on a word boundary with an ellipsis when no early sentence break exists", () => {
+	const long = `${"word ".repeat(60)}end`;
+	const compact = compactDescription(long);
+	assert.ok(compact.length <= 181, "cap plus the single ellipsis char");
+	assert.ok(compact.endsWith("\u2026"));
+	assert.ok(!compact.includes("  "), "no dangling double space before the ellipsis");
+});
+
+test("buildPruningUserMessage compacts long candidate descriptions inline", () => {
+	const long = "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to the last 2000 lines or 50KB, whichever is hit first, and the full output is saved to a temp file when truncated.";
+	const msg = buildPruningUserMessage({
+		userPrompt: "run the tests",
+		skills: [],
+		tools: [{ name: "bash", description: long }],
+		config: makeConfig(),
+	});
+	assert.ok(!msg.includes(long), "full verbose description must not reach the prompt");
+	assert.ok(msg.includes("- bash: Execute a bash command in the current working directory."));
+});
+
+test("buildPruningUserMessage keeps a skill's 'Use when' trigger (no early sentence cut for skills)", () => {
+	// The trigger sits in a LATER sentence than the summary. Tools would be cut
+	// at the first sentence boundary, but skills must preserve the trigger since
+	// it is the actual relevance signal.
+	const skillDesc = "Disciplined diagnosis loop for hard bugs and performance regressions. Reproduce, minimise, hypothesise, instrument, fix, regression-test. Use when the user says debug this or reports a bug.";
+	const msg = buildPruningUserMessage({
+		userPrompt: "debug this",
+		skills: [{ name: "diagnose", description: skillDesc }],
+		tools: [],
+		config: makeConfig(),
+	});
+	assert.ok(msg.includes("Use when the user says debug this"), "skill trigger must survive compaction");
 });
 
 // ---------------------------------------------------------------------------

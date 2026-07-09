@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import type { ArchState } from './reducer';
+import { resolveBaselineRef, isTrackedByGit } from '../../shared/git-baseline';
 
 export const EMPTY_DIFF_SCHEME = 'pie-empty-diff';
 
@@ -110,73 +111,11 @@ export class FileDiffService {
    * (no regression) when the file is untracked, git is unavailable, or the
    * walk finds no differing commit.
    */
+  /** Delegate to the shared pure-node baseline resolver (shared/git-baseline).
+   *  Kept as a method so host callers + the existing test (svc.resolveBaselineRef)
+   *  are unchanged after the extraction. */
   async resolveBaselineRef(resolvedPath: string): Promise<string> {
-    const dir = path.dirname(resolvedPath);
-    try {
-      const { stdout, code } = await this.execGit(dir, [
-        'log',
-        '--format=%H',
-        '-n',
-        '50',
-        '--',
-        resolvedPath,
-      ]);
-      if (code !== 0) return 'HEAD';
-      const shas = stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean);
-      for (const sha of shas) {
-        if (await this.differsFromCommit(dir, sha, resolvedPath)) return sha;
-      }
-      return 'HEAD';
-    } catch {
-      return 'HEAD';
-    }
-  }
-
-  /** Whether the working-tree version of `absPath` differs from its content
-   * at `sha`. `git diff --quiet` exits 0 when identical, 1 when different, and
-   *  — unlike `--exit-code` — emits no patch to stdout, so it can't overflow
-   *  the exec buffer on large changes. */
-  private async differsFromCommit(
-    dir: string,
-    sha: string,
-    absPath: string,
-  ): Promise<boolean> {
-    const { code } = await this.execGit(dir, ['diff', '--quiet', sha, '--', absPath]);
-    if (code === 0) return false;
-    if (code === 1) return true;
-    throw new Error(`git diff --quiet ${sha} exited ${code}`);
-  }
-
-  /** Run `git` in `dir`; resolve `{ stdout, code }`. Non-zero exit codes (e.g.
-   *  `git diff --exit-code` → 1 on differences, 128 for a bad ref) resolve with
-   *  their code for callers to inspect; only non-numeric failures (git not
-   *  installed) reject. */
-  private execGit(
-    dir: string,
-    args: string[],
-  ): Promise<{ stdout: string; code: number }> {
-    return new Promise((resolve, reject) => {
-      cp.execFile(
-        'git',
-        args,
-        { cwd: dir, maxBuffer: 1024 * 1024 },
-        (err, stdout) => {
-          if (err) {
-            const code = (err as { code?: number }).code;
-            if (typeof code === 'number') {
-              resolve({ stdout: typeof stdout === 'string' ? stdout : '', code });
-              return;
-            }
-            reject(err);
-            return;
-          }
-          resolve({ stdout: typeof stdout === 'string' ? stdout : '', code: 0 });
-        },
-      );
-    });
+    return resolveBaselineRef(resolvedPath);
   }
 
   async openFileInEditor(sessionPath: string, filePath: string): Promise<void> {
@@ -189,14 +128,7 @@ export class FileDiffService {
 
     try {
       // Check whether the file is known to git (tracked or staged).
-      const tracked = await new Promise<boolean>((resolve) => {
-        cp.execFile(
-          'git',
-          ['ls-files', '--error-unmatch', resolvedPath],
-          { cwd: path.dirname(resolvedPath) },
-          (err) => resolve(!err),
-        );
-      });
+      const tracked = await isTrackedByGit(resolvedPath);
 
       if (tracked) {
         // Restore to last committed version.

@@ -359,8 +359,8 @@ export interface RuntimePrefsSetParams {
   subagentDropTools?: string[];
   /** Per-provider concurrency overrides. Keys are provider names; values are
    *  objects with optional `maxConcurrentRequests`, `afterburnSeconds`,
-   *  `queueWaitSeconds`, `headerWaitSeconds`. Mirrored to the live
-   *  `ProviderGate` via `ProviderGate.reconfigure()`. */
+   *  `queueWaitSeconds`, `headerWaitSeconds`. Applied to the live
+   *  `ProviderGate` via `ProviderGate.applyUserOverrides()`. */
   providerConcurrency?: Record<string, {
     maxConcurrentRequests?: number;
     afterburnSeconds?: number;

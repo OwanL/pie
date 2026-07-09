@@ -97,6 +97,50 @@ export function buildPruningSystemPrompt(config: PruningConfig): string {
 		.replace(/\{\{STRATEGY_INSTRUCTION\}\}/g, buildStrategyInstruction(config));
 }
 
+/**
+ * Char cap for a single candidate description in the prepass prompt. A
+ * relevance decision only needs the *gist* of what a skill/tool does — not its
+ * full usage guidance, truncation notes, or examples. Tool descriptions in
+ * particular run to hundreds of words (e.g. `subagent` enumerates every agent,
+ * bucket, and thinking level); keeping only the leading summary sentence(s)
+ * strips the bulk of the prepass input tokens with no loss of signal.
+ *
+ * Tools and skills get different treatment. A tool's later sentences are usage
+ * caveats (output-truncation notes, examples) that don't change relevance, so
+ * tools are cut aggressively at the first sentence boundary. A *skill's* later
+ * sentences frequently carry its "Use when …" TRIGGER — the actual relevance
+ * signal — so skills keep a more generous cap and are never cut mid-list at an
+ * early sentence break; they only get whitespace collapsed and truly verbose
+ * outliers trimmed at a word boundary.
+ */
+const TOOL_DESCRIPTION_CHAR_CAP = 180;
+const SKILL_DESCRIPTION_CHAR_CAP = 320;
+
+/**
+ * Reduce a skill/tool description to a compact relevance summary. Whitespace is
+ * always collapsed to single spaces (multi-paragraph tool docs become one
+ * line). When `sentenceAware` (tools), anything past a clean sentence boundary
+ * within the cap is dropped; otherwise (skills) the text is only hard-capped at
+ * a word boundary. Short descriptions pass through unchanged.
+ */
+export function compactDescription(
+	description: string,
+	maxChars = TOOL_DESCRIPTION_CHAR_CAP,
+	sentenceAware = true,
+): string {
+	const normalized = (description ?? "").replace(/\s+/g, " ").trim();
+	if (normalized.length <= maxChars) return normalized;
+	const capped = normalized.slice(0, maxChars);
+	// Tools: prefer ending on a sentence boundary within the cap, but not so
+	// early that we lose the gist (>= 60 chars keeps the leading summary).
+	if (sentenceAware) {
+		const lastSentence = capped.lastIndexOf(". ");
+		if (lastSentence >= 60) return capped.slice(0, lastSentence + 1);
+	}
+	const lastSpace = capped.lastIndexOf(" ");
+	return `${capped.slice(0, lastSpace > 0 ? lastSpace : maxChars).trimEnd()}…`;
+}
+
 /** Build the user message for the pruning LLM call. */
 export function buildPruningUserMessage(input: LlmPruningInput): string {
 	const lines = [`User request: "${input.userPrompt}"`];
@@ -114,12 +158,13 @@ export function buildPruningUserMessage(input: LlmPruningInput): string {
 
 	lines.push("", "Available skills (list any to REMOVE):");
 	for (const s of input.skills) {
-		lines.push(`- ${s.name}: ${s.description}`);
+		// Skills: generous cap, no early sentence cut — preserve "Use when …" triggers.
+		lines.push(`- ${s.name}: ${compactDescription(s.description, SKILL_DESCRIPTION_CHAR_CAP, false)}`);
 	}
 
 	lines.push("", "Available tools (list any to REMOVE):");
 	for (const t of input.tools) {
-		lines.push(`- ${t.name}: ${t.description}`);
+		lines.push(`- ${t.name}: ${compactDescription(t.description)}`);
 	}
 
 	return lines.join("\n");

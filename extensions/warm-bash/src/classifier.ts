@@ -18,9 +18,10 @@
  */
 
 const CD_PREFIX = /^cd\s+("(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s&|;()<>]+)\s*&&\s*([\s\S]+)$/;
-const QUOTED = /"(?:\\.|[^"])*"|'(?:\\.|[^'])*'/g;
-const TOKEN = /"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+/g;
-const HEREDOC = /<<-?\s*['"]?\w/;
+// Exported for reuse by auto-prune.ts (segment tokenizing / quote stripping).
+export const QUOTED = /"(?:\\.|[^"])*"|'(?:\\.|[^'])*'/g;
+export const TOKEN = /"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+/g;
+export const HEREDOC = /<<-?\s*['"]?\w/;
 const OPERATORS = /[\n|;&]|\|\||&&|>>|<|>|`|\$\(|\$\{/;
 
 // Shell builtins have no binary to execFile; routing them to the shell avoids a
@@ -80,7 +81,8 @@ export function classify(command: string): Classification {
   return { kind: "simple", rest, cwd, hasHeredoc, program, args: tokens.slice(1) };
 }
 
-function unquote(token: string): string {
+/** Strip one layer of surrounding single/double quotes. Exported for auto-prune.ts. */
+export function unquote(token: string): string {
   if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
     return token.slice(1, -1);
   }

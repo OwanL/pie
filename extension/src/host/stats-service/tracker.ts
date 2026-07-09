@@ -15,6 +15,7 @@ import type {
   ToolCall,
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
+import { getRenderableSubagentResult } from '../../shared/subagent-result';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   normalizeExperimentAssignment,
@@ -189,6 +190,7 @@ export class SessionRunTracker {
         generationDurationMs,
         concurrentBusySessions: this.busySessionPaths.size,
         status,
+        modelId: run.modelId ?? undefined,
         turnLatencyMs: finiteOrNull(latency?.turnLatencyMs),
         overheadMs: finiteOrNull(latency?.overheadMs),
         providerLatencyMs: finiteOrNull(latency?.providerLatencyMs),
@@ -249,6 +251,7 @@ export class SessionRunTracker {
 
     if (analysis.subagentCallCount > 0) {
       this.recordSubagentUsage(run, analysis);
+      this.recordSubagentThroughput(run, toolCall);
     }
 
     if (analysis.verificationKinds.length > 0) {
@@ -344,6 +347,40 @@ export class SessionRunTracker {
       dst.sum   += src.sum;
       dst.count += src.count;
       dst.max   = Math.max(dst.max, src.max);
+    }
+  }
+
+  /** Forward nested subagent per-turn throughput into the parent run snapshot. */
+  private recordSubagentThroughput(run: RunSnapshot, toolCall: ToolCall): void {
+    const renderable = getRenderableSubagentResult(toolCall.result);
+    if (!renderable) {
+      return;
+    }
+    for (const result of renderable.results) {
+      if (!Array.isArray(result.turnThroughputSamples) || result.turnThroughputSamples.length === 0) {
+        continue;
+      }
+      for (const sample of result.turnThroughputSamples) {
+        if (!sample || typeof sample !== 'object') {
+          continue;
+        }
+        const endedAt = typeof sample.endedAt === 'string' ? sample.endedAt : this.runState.isoNow();
+        const outputTokens = toNonNegativeInt(sample.outputTokens);
+        const generationDurationMs = toNonNegativeInt(sample.generationDurationMs);
+        const status = typeof sample.status === 'string' ? sample.status : 'completed';
+        const modelId = typeof result.model === 'string' ? result.model : sample.modelId;
+        run.turnThroughputSamples.push({
+          endedAt,
+          outputTokens,
+          generationDurationMs,
+          concurrentBusySessions: this.busySessionPaths.size,
+          status: status as TurnThroughputStatus,
+          modelId: modelId ?? undefined,
+          turnLatencyMs: null,
+          overheadMs: null,
+          providerLatencyMs: null,
+        });
+      }
     }
   }
 

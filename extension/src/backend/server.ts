@@ -140,8 +140,13 @@ export class BackendServer {
         const raw = await fs.readFile(modelsJsonPath, 'utf8');
         const modelsJson = JSON.parse(raw);
         const configs = ProviderGate.resolveConfigs(modelsJson);
-        if (configs.length > 0) {
-          ProviderGate.install(configs);
+        const baseUrls = ProviderGate.resolveBaseUrls(modelsJson);
+        // Install whenever we know any provider baseUrl — not only when a
+        // provider ships a base concurrency block. With zero gated configs the
+        // wrapped fetch is a passthrough, but the gate can then gate ANY
+        // provider the moment a user override arrives via runtimePrefs.set.
+        if (baseUrls.size > 0) {
+          ProviderGate.install(configs, 120, baseUrls);
         }
       } catch (error) {
         // Non-fatal: if models.json is missing or unreadable, the gate is

@@ -144,6 +144,7 @@
     "typecheck:warm-bash": "tsc --noEmit -p ../extensions/warm-bash/tsconfig.json",
     "typecheck:tool-result-pruner": "tsc --noEmit -p ../extensions/tool-result-pruner/tsconfig.json",
     "typecheck:session-reviewer": "tsc --noEmit -p ../extensions/session-reviewer/tsconfig.json",
+    "typecheck:session-changes": "tsc --noEmit -p ../extensions/session-changes/tsconfig.json",
     "typecheck:deferred-triggers": "tsc --noEmit -p ../extensions/deferred-triggers/tsconfig.json",
     "test": "tsx --test ./test/**/*.test.ts",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",

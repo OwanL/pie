@@ -814,3 +814,63 @@
     border-color: ButtonText;
   }
 }
+
+/* ── Subagent lifecycle state (idle → running → completed) ─────────────── */
+/* The subagent card root carries a `status` class (`idle` | `running` |
+   `failed` | `completed`) computed in tool-call-item.tsx. Completed keeps the
+   default styling; failed is signalled by the StatusChip. The two
+   non-terminal states get a subtle, distinct treatment so queued vs. active
+   agents are legible at a glance — especially inside a parallel batch where
+   some members start before others. */
+
+/* Idle (dispatched but not yet started): drop the accent-tinted surface for a
+   neutral one and dim the header text, so waiting agents recede behind
+   active siblings. */
+.tool-call.tool-call-subagent.idle .subagent-header[aria-expanded="false"] {
+  background: var(--panel-control-surface);
+  box-shadow: inset 0 0 0 1px var(--panel-border-subtle);
+}
+
+.tool-call.tool-call-subagent.idle:hover .subagent-header[aria-expanded="false"] {
+  background: var(--panel-control-hover);
+}
+
+.tool-call.tool-call-subagent.idle .subagent-agent-name,
+.tool-call.tool-call-subagent.idle .subagent-header-summary,
+.tool-call.tool-call-subagent.idle .subagent-primary-meta {
+  opacity: 0.5;
+}
+
+/* Running (started, actively working): a slow accent-tinted sheen sweeps
+   across the header. `::before` is used (the pending-ask_user pulse owns
+   `::after`); the band is translated via `transform` only so the sweep stays
+   compositor-friendly. `overflow: clip` on the running header keeps the band
+   within the rounded corners without establishing a scroll container. */
+@keyframes subagent-running-sheen {
+  0%   { transform: translateX(-150%); }
+  100% { transform: translateX(350%); }
+}
+
+.tool-call.tool-call-subagent.running .subagent-header {
+  overflow: clip;
+}
+
+.tool-call.tool-call-subagent.running .subagent-header::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 45%;
+  height: 100%;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    color-mix(in srgb, var(--panel-accent) 18%, transparent),
+    transparent
+  );
+  transform: translateX(-150%);
+  animation: subagent-running-sheen 2.6s var(--panel-ease-in-out) infinite;
+  will-change: transform;
+}

@@ -65,9 +65,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Max recent turns (user+assistant) surfaced to the prepass for follow-up interpretation. */
-const RECENT_CONVERSATION_MAX = 6;
+const RECENT_CONVERSATION_MAX = 4;
 /** Per-message text cap so the prepass prompt stays modest. */
-const RECENT_MESSAGE_TEXT_LIMIT = 400;
+const RECENT_MESSAGE_TEXT_LIMIT = 240;
 /** Hard ceiling on the backward walk to bound work on long sessions. */
 const RECENT_CONVERSATION_WALK_LIMIT = 200;
 

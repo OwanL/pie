@@ -56,6 +56,18 @@ function isRunning(result: SubagentSingleResult): boolean {
   return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
 }
 
+/** A subagent that has been dispatched but hasn't started executing yet — the
+ *  synthesized placeholder before any messages, streaming text, or nested
+ *  tool calls have arrived. Renders with a muted "waiting" treatment so queued
+ *  agents (e.g. not-yet-started parallel members) recede behind active ones. */
+function isIdle(result: SubagentSingleResult): boolean {
+  if (result.exitCode !== -1) return false;
+  const hasMessages = Array.isArray(result.messages) && result.messages.length > 0;
+  const hasStreamingText = !!result.streamingText?.trim();
+  const hasRunningTools = (result.runningTools?.length ?? 0) > 0;
+  return !hasMessages && !hasStreamingText && !hasRunningTools;
+}
+
 function isFailed(result: SubagentSingleResult): boolean {
   if (isRunning(result)) return false;
   return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted';
@@ -130,7 +142,7 @@ function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
 }
 
 /** Status indicator chip at the right side of the header. */
-function StatusIndicator({ status, errorDetail }: { status: 'running' | 'failed' | 'completed'; errorDetail?: string }) {
+function StatusIndicator({ status, errorDetail }: { status: 'idle' | 'running' | 'failed' | 'completed'; errorDetail?: string }) {
   if (status !== 'failed') return null;
 
   return (
@@ -148,9 +160,14 @@ function singleResultStatus(
   result: SubagentSingleResult,
   toolCallStatus: ToolCall['status'],
   multipleResults: boolean,
-): 'running' | 'failed' | 'completed' {
+): 'idle' | 'running' | 'failed' | 'completed' {
   if (isFailed(result)) return 'failed';
-  if (isRunning(result)) return toolCallStatus === 'failed' ? 'failed' : 'running';
+  if (isRunning(result)) {
+    // A running call that has produced no activity yet is "idle" (queued /
+    // not started), unless the tool call itself has already failed.
+    if (isIdle(result) && toolCallStatus !== 'failed') return 'idle';
+    return toolCallStatus === 'failed' ? 'failed' : 'running';
+  }
   if (!multipleResults && toolCallStatus === 'running') return 'running';
   if (!multipleResults && toolCallStatus === 'failed') return 'failed';
   return 'completed';

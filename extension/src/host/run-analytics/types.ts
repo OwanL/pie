@@ -73,6 +73,8 @@ export interface TurnThroughputSample {
   concurrentBusySessions: number;
   /** Terminal status of the turn. */
   status: TurnThroughputStatus;
+  /** The model this turn ran on. Used for per-sample provider attribution; absent ⇒ fall back to the run's model. */
+  modelId?: string;
   /**
    * Total turn latency: previous tool end (or prompt send) → first reply
    * token, in ms. Null when not measurable for this turn.

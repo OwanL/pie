@@ -195,7 +195,7 @@
 
    Keep the `transition` duration in sync with COLLAPSIBLE_CLOSE_MS in
    components/collapsible.tsx (the JS fallback timer that unmounts the body
-   when `transitionend` doesn't fire, e.g. under prefers-reduced-motion). */
+   when `transitionend` doesn't fire). */
 
 .collapsible-body-wrap {
   display: grid;
@@ -210,12 +210,6 @@
 .collapsible-body-clip {
   min-height: 0;
   overflow: hidden;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .collapsible-body-wrap {
-    transition: none;
-  }
 }
 
 /* ── Close footer (bottom close affordance) ────────────────────────────── */

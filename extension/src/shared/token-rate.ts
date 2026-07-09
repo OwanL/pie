@@ -462,16 +462,22 @@ export function tickTokenRate(
   // so tokens are always accompanied by generation time (without the
   // `totalDelta` term, tokens arriving while a tool call runs would be banked
   // into `cumTokens` without `genMs` advancing and spike the rate on resume).
-  // "Has produced output" is derived from the current token counts, not a
-  // sticky wall-clock stamp: a streaming message (or running subagent) that
-  // currently holds output has begun producing, so its mid-stream stalls count
-  // against the rate; one with none yet is still in time-to-first-token, so the
-  // clock stays paused. Deriving per-message/per-result (rather than a single
-  // aggregate stamp) means a LATER subagent's own first-token wait stays excluded
-  // even after an earlier subagent in the same run has produced.
+  //
+  // `mainProducedOutput` / `subagentProducedOutput` are derived from CURRENT
+  // activity (not a sticky aggregate stamp) so the predicate tracks each
+  // message/result independently: a LATER subagent's own first-token wait stays
+  // excluded even after an earlier subagent in the same run has produced, and a
+  // subagent sitting in a read/grep/bash call does NOT keep the clock running.
+  // The subagent signal is the runner's `streaming` flag (set on the first
+  // text/thinking delta, cleared on `message_end`), which is true through
+  // mid-stream stalls AND reasoning-only streams but false during the
+  // subagent's tool calls, between turns, and pre-first-token — mirroring the
+  // main session. The previous sticky "has ever produced" predicate kept the
+  // clock advancing for the whole tool call, collapsing the rate to 0 tok/s
+  // while a nested scout was plainly active (its own tool calls excluded it).
   const mainProducedOutput = currentTokens > 0;
   const subagentProducedOutput = runningSubagents.some(
-    ({ key }) => (acc.subagentTokens.get(key) ?? 0) > 0,
+    ({ result }) => result.streaming === true,
   );
   const generating =
     totalDelta > 0

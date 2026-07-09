@@ -251,12 +251,6 @@
   50% { opacity: 0.5; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .file-changes-rail.has-new-changes:not(.is-pinned) .file-changes-sliver-count {
-    animation: none;
-  }
-}
-
 /* ── Drawer (peek overlay + pin in-flow) ─────────────────────────────────── */
 /* One content surface (D4): the same header + file list renders in both
    modes — only the positioning differs. */

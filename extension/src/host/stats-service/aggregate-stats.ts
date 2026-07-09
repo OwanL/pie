@@ -299,21 +299,25 @@ export function computeAggregateStats(
     // Throughput: completed turns with measurable generation time only.
     // Interrupted/error turns are excluded so a rate-limited/failed turn doesn't
     // drag the average (their tokens are near-zero and durations unreliable).
+    // Attribution is per-sample by the sample's own model (falling back to the
+    // run's model), so subagent work is credited to the model it actually ran on.
     if (run.turnThroughputSamples.length > 0) {
       for (const sample of run.turnThroughputSamples) {
         if (sample.status !== 'completed') continue;
         if (sample.generationDurationMs <= 0) continue;
+        const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+        const sampleAcc = providerAcc(sampleProvider);
         // All-time per-provider throughput.
-        acc.throughputOutputTokens += sample.outputTokens;
-        acc.throughputGenerationMs += sample.generationDurationMs;
-        acc.sampleCount += 1;
+        sampleAcc.throughputOutputTokens += sample.outputTokens;
+        sampleAcc.throughputGenerationMs += sample.generationDurationMs;
+        sampleAcc.sampleCount += 1;
         totalThroughputOutputTokens += sample.outputTokens;
         totalThroughputGenerationMs += sample.generationDurationMs;
         // Per-day throughput (by sample end-date) for "today's throughput".
         const sampleMs = Date.parse(sample.endedAt);
         if (!Number.isNaN(sampleMs)) {
           const sampleDate = utcDateString(sampleMs);
-          const tAcc = dayThroughput(sampleDate, provider);
+          const tAcc = dayThroughput(sampleDate, sampleProvider);
           tAcc.outputTokens += sample.outputTokens;
           tAcc.generationDurationMs += sample.generationDurationMs;
           tAcc.sampleCount += 1;

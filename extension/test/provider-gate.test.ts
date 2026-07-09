@@ -685,3 +685,69 @@ describe('ProviderGate — resolveConfigs from models.json', () => {
 		assert.equal(configs[0].headerWaitSeconds, undefined);
 	});
 });
+
+describe('ProviderGate — resolveBaseUrls from models.json', () => {
+	test('maps every provider that has a baseUrl (gated or not)', () => {
+		const modelsJson = {
+			providers: {
+				umans: {
+					baseUrl: 'https://api.code.umans.ai/v1',
+					concurrency: { maxConcurrentRequests: 4 },
+				},
+				openai: { baseUrl: 'https://api.openai.com/v1' },
+				nourl: {},
+			},
+		};
+		const map = ProviderGate.resolveBaseUrls(modelsJson);
+		assert.equal(map.size, 2);
+		assert.equal(map.get('umans'), 'https://api.code.umans.ai/v1');
+		assert.equal(map.get('openai'), 'https://api.openai.com/v1');
+		assert.equal(map.has('nourl'), false);
+	});
+});
+
+describe('ProviderGate — provider-agnostic user overrides', () => {
+	test('gates a provider that had no base concurrency block', () => {
+		const knownBaseUrls = new Map([['openai', 'https://api.openai.com/v1']]);
+		// Install with ZERO base configs — gate is a passthrough until an override.
+		const gate = ProviderGate.install([], 0, knownBaseUrls);
+		assert.deepEqual(gate.getMetrics(), []);
+
+		gate.applyUserOverrides({ openai: { maxConcurrentRequests: 3, afterburnSeconds: 5 } });
+		const metrics = gate.getMetrics();
+		assert.equal(metrics.length, 1);
+		assert.equal(metrics[0].provider, 'openai');
+		assert.equal(metrics[0].maxConcurrentRequests, 3);
+		assert.equal(metrics[0].afterburnSeconds, 5);
+	});
+
+	test('ignores an override for a provider whose baseUrl is unknown', () => {
+		const gate = ProviderGate.install([], 0, new Map());
+		gate.applyUserOverrides({ mystery: { maxConcurrentRequests: 3 } });
+		assert.deepEqual(gate.getMetrics(), []);
+	});
+
+	test('does not gate a new provider from a non-positive cap', () => {
+		const knownBaseUrls = new Map([['openai', 'https://api.openai.com/v1']]);
+		const gate = ProviderGate.install([], 0, knownBaseUrls);
+		// afterburn-only override, no maxConcurrentRequests — nothing to gate on.
+		gate.applyUserOverrides({ openai: { afterburnSeconds: 5 } });
+		assert.deepEqual(gate.getMetrics(), []);
+	});
+
+	test('clearing an override reverts a base provider to its base config', () => {
+		const base: ProviderConcurrencyConfig = {
+			provider: 'test-provider',
+			baseUrl: TEST_BASE,
+			maxConcurrentRequests: 2,
+			afterburnSeconds: 0,
+			queueWaitSeconds: 30,
+		};
+		const gate = ProviderGate.install([base], 0);
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 6 } });
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 6);
+		// Removing the override should recompute from base (back to 2), not stick.
+		gate.applyUserOverrides({});
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 2);
+	});
+});

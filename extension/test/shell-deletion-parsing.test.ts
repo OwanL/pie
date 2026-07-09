@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 
-import { parseDeletedPathsFromCommand } from '../src/host/core/shell-deletion-parsing';
+import { parseDeletedPathsFromCommand } from '../src/shared/shell-deletion-parsing';
 
 // `parseDeletedPathsFromCommand` recovers literal file paths targeted by a
 // deletion command embedded in a raw bash/shell command string. Globs are

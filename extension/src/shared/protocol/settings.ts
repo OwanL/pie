@@ -283,8 +283,9 @@ export interface ChatPrefs {
   providerToggles: Record<string, boolean>;
   /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
    *  queueWaitSeconds, headerWaitSeconds). A provider absent from this map uses
-   *  its models.json `concurrency` defaults. Mirrored to the backend via
-   *  `runtimePrefs.set` → `ProviderGate.reconfigure()`. */
+   *  its models.json `concurrency` defaults, or — for a provider with no base
+   *  concurrency block — is left ungated. Applied to the backend via
+   *  `runtimePrefs.set` → `ProviderGate.applyUserOverrides()`. */
   providerConcurrency: ProviderConcurrencyMap;
   /** Content rows reserved in the live activity-tail preview (the streaming
    *  reasoning/reply text or a running tool/subagent's output shown at the

@@ -66,6 +66,14 @@ export interface SubagentSingleResult {
   retryCount?: number;
   /** Streaming text from the current in-progress assistant turn. */
   streamingText?: string;
+  /** True while the subagent's model is actively generating the in-progress
+   *  assistant turn (first delta received, message not yet ended). Drives the
+   *  host token-rate clock so it advances through stalls + reasoning streams but
+   *  pauses during the subagent's tool calls / between turns / pre-first-token. */
+  streaming?: boolean;
+  /** Per-turn throughput observations from this subagent session, forwarded to
+   *  the parent run snapshot for historical tok/s attribution. */
+  turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string }[];
 }
 
 export interface SubagentResult {

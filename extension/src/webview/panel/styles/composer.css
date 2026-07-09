@@ -1373,12 +1373,6 @@
   max-width: min(40ch, 100%);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .composer-retry-spinner {
-    animation: none;
-  }
-}
-
 @media (forced-colors: active) {
   .composer-retry-row {
     color: ButtonText;

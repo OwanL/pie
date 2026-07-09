@@ -9,7 +9,68 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mapWithConcurrencyLimit } from "../runner.js";
+import { mapWithConcurrencyLimit, runSingleAgent } from "../runner.js";
+import type { AgentConfig } from "../agents.js";
+
+function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
+	return {
+		name: "worker",
+		description: "test agent",
+		systemPrompt: "",
+		source: "user",
+		filePath: "worker.md",
+		...overrides,
+	};
+}
+
+function makeModelRegistry() {
+	const model = { id: "model-a", provider: "test" } as any;
+	return {
+		getAvailable: () => [model],
+		getAll: () => [model],
+		find: (_provider: string, id: string) => (id === model.id ? model : undefined),
+	} as any;
+}
+
+function createFakeSdk(options?: {
+	onPrompt?: (emit: (event: any) => void) => Promise<void>;
+}) {
+	const listeners: Array<(event: any) => void> = [];
+	let releasePrompt: (() => void) | undefined;
+
+	const session = {
+		agent: { state: { model: { id: "session-model" } } },
+		extensionRunner: { setUIContext: () => undefined },
+		subscribe: (cb: (event: any) => void) => {
+			listeners.push(cb);
+			return () => undefined;
+		},
+		prompt: async (_prompt: string) => {
+			if (options?.onPrompt) {
+				await options.onPrompt((event) => {
+					for (const listener of listeners) listener(event);
+				});
+				return;
+			}
+			await new Promise<void>((resolve) => {
+				releasePrompt = resolve;
+			});
+		},
+		abort: async () => {
+			releasePrompt?.();
+		},
+		dispose: () => undefined,
+	};
+
+	const sdk = {
+		createSession: async () => ({ session }),
+		createResourceLoader: () => ({ reload: async () => undefined }),
+		createSessionManager: () => ({}),
+		getAgentDir: () => ".",
+	};
+
+	return { sdk };
+}
 
 // ============================================================
 // HAPPY PATHS (preserved from original)
@@ -335,4 +396,144 @@ test("mapWithConcurrencyLimit: array with null values", async () => {
 test("mapWithConcurrencyLimit: single item with single concurrency", async () => {
 	const result = await mapWithConcurrencyLimit([99], 1, async (x) => x * 10);
 	assert.deepEqual(result, [990]);
+});
+
+// ============================================================
+// SUBAGENT THROUGHPUT SAMPLES (Layer B)
+// ============================================================
+
+test("runSingleAgent records a turnThroughputSample on message_start → message_end", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_start", message: { role: "assistant" } });
+			await new Promise((r) => setTimeout(r, 5));
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 10, output: 42, cacheRead: 0, cacheWrite: 0, totalTokens: 52, cost: { total: 0 } },
+					model: "assistant-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.turnThroughputSamples?.length, 1);
+	const sample = result.turnThroughputSamples![0];
+	assert.equal(sample.outputTokens, 42);
+	assert.ok(sample.generationDurationMs >= 0, "generationDurationMs must be non-negative");
+	assert.equal(sample.status, "completed");
+	assert.equal(sample.modelId, "assistant-model");
+	assert.equal(typeof sample.endedAt, "string");
+});
+
+test("runSingleAgent maps errorMessage to throughput status error", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_start", message: { role: "assistant" } });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [],
+					usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { total: 0 } },
+					model: "m",
+					stopReason: "aborted",
+					errorMessage: "provider aborted",
+				},
+			});
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.turnThroughputSamples?.length, 1);
+	assert.equal(result.turnThroughputSamples![0].status, "error");
+});
+
+test("runSingleAgent maps aborted stopReason without errorMessage to interrupted", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_start", message: { role: "assistant" } });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [],
+					usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { total: 0 } },
+					model: "m",
+					stopReason: "aborted",
+				},
+			});
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.turnThroughputSamples?.length, 1);
+	assert.equal(result.turnThroughputSamples![0].status, "interrupted");
 });
