@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { JSX } from 'preact';
+import { memo } from 'preact/compat';
 
 import type { ContextWindowBreakdown, ContextWindowBreakdownEntry } from './breakdown';
 import { formatCompactTokens } from '../utils/format-tokens';
@@ -39,14 +40,21 @@ const FALLBACK_PALETTE = [
   '#f85149', // red
 ];
 
-function segmentColor(label: string): string {
+/** Stable colour for a contributor label. Known categories map to fixed
+ *  semantic colours; anything else is hashed to a stable palette entry so the
+ *  same label always renders the same colour. Exported for unit testing. */
+export function segmentColor(label: string): string {
   const fixed = SEGMENT_COLORS[label];
   if (fixed) return fixed;
   let h = 0;
   for (let i = 0; i < label.length; i += 1) {
     h = (h * 31 + label.charCodeAt(i)) | 0;
   }
-  return FALLBACK_PALETTE[Math.abs(h) % FALLBACK_PALETTE.length]!;
+  // `>>> 0` coerces to an unsigned 32-bit int. `| 0` above can yield
+  // -2147483648 (INT_MIN), for which `Math.abs` is still negative, producing a
+  // negative modulo index and an `undefined` colour. The unsigned shift keeps
+  // the index in range.
+  return FALLBACK_PALETTE[(h >>> 0) % FALLBACK_PALETTE.length]!;
 }
 
 /** Minimum visible width (% of the bar) for a non-zero segment so tiny
@@ -68,14 +76,55 @@ interface Segment {
   title: string;
 }
 
-function kindSuffixFor(entry: ContextWindowBreakdownEntry): string | undefined {
+export function kindSuffixFor(entry: ContextWindowBreakdownEntry): string | undefined {
   if (entry.kind === 'estimated') return 'est';
   if (entry.kind === 'derived') return 'derived';
   if (entry.kind === 'unknown') return '?';
   return undefined;
 }
 
-export function ContextWindowBreakdownChart({
+export interface BarLayout {
+  /** Per-used-segment width (% of the bar), after min-width bumping and
+   *  saturation scaling. Length matches the input `usedSegments`. */
+  widths: number[];
+  /** Remaining-tail width (% of the bar); 0 when there is no tail or the used
+   *  segments saturate/overflow the window. */
+  remainingPct: number;
+}
+
+/**
+ * Pure layout math for the stacked context bar, extracted so it can be unit
+ * tested without rendering. Each used segment's width is its true share of
+ * `total`, bumped to `MIN_SEGMENT_PCT` so tiny non-zero contributors stay
+ * hoverable; the extra is taken from the remaining tail. If the bumped used
+ * segments exceed 100% (a saturated window), they are scaled back
+ * proportionally and the tail is dropped so the bar never overflows.
+ */
+export function computeBarLayout(
+  usedSegments: readonly { tokens: number }[],
+  remainingSegment: { tokens: number } | null,
+  total: number,
+): BarLayout {
+  if (total <= 0) {
+    return { widths: usedSegments.map(() => 0), remainingPct: 0 };
+  }
+  const rawPcts = usedSegments.map((s) => (s.tokens > 0 ? (s.tokens / total) * 100 : 0));
+  const bumpedPcts = rawPcts.map((p) => (p > 0 ? Math.max(p, MIN_SEGMENT_PCT) : 0));
+  const usedPct = bumpedPcts.reduce((a, b) => a + b, 0);
+  let remainingPct = remainingSegment ? Math.max(100 - usedPct, 0) : 0;
+  // If the bumped used segments alone exceed 100% (saturated window), scale
+  // the used segments back proportionally and drop the tail.
+  if (usedPct > 100) {
+    const scale = 100 / usedPct;
+    for (let i = 0; i < bumpedPcts.length; i += 1) {
+      bumpedPcts[i] = (bumpedPcts[i] ?? 0) * scale;
+    }
+    remainingPct = 0;
+  }
+  return { widths: bumpedPcts, remainingPct };
+}
+
+function ContextWindowBreakdownChartBase({
   breakdown,
 }: {
   breakdown: ContextWindowBreakdown;
@@ -158,6 +207,7 @@ export function ContextWindowBreakdownChart({
       <ContextBar
         usedSegments={displayUsedSegments}
         remainingSegment={remainingSegment}
+        used={used}
         total={total}
       />
 
@@ -172,39 +222,32 @@ export function ContextWindowBreakdownChart({
   );
 }
 
+export const ContextWindowBreakdownChart = memo(ContextWindowBreakdownChartBase);
+
 function ContextBar({
   usedSegments,
   remainingSegment,
+  used,
   total,
 }: {
   usedSegments: Segment[];
   remainingSegment: Segment | null;
+  used: number;
   total: number;
 }): JSX.Element {
-  // The bar spans the whole context window (100%). Each used contributor's
-  // width is its true share of the total. Non-zero segments are bumped to a
-  // minimum visible width so tiny contributors remain hoverable; the extra is
-  // taken from the remaining tail (the muted remainder), and the total is
-  // clamped to 100% so a saturated window never overflows.
-  const rawPcts = usedSegments.map((s) => (s.tokens > 0 ? (s.tokens / total) * 100 : 0));
-  const bumpedPcts = rawPcts.map((p) => (p > 0 ? Math.max(p, MIN_SEGMENT_PCT) : 0));
-  const usedPct = bumpedPcts.reduce((a, b) => a + b, 0);
-  let remainingPct = remainingSegment ? Math.max(100 - usedPct, 0) : 0;
-  // If the bumped used segments alone exceed 100% (saturated window), scale
-  // the used segments back proportionally and drop the tail.
-  if (usedPct > 100) {
-    const scale = 100 / usedPct;
-    for (let i = 0; i < bumpedPcts.length; i += 1) {
-      bumpedPcts[i] = (bumpedPcts[i] ?? 0) * scale;
-    }
-    remainingPct = 0;
-  }
+  const { widths, remainingPct } = computeBarLayout(usedSegments, remainingSegment, total);
+  // The bar is a visual summary; the legend below carries the full per-segment
+  // data as text. The aria-label gives screen-reader users the headline
+  // used/total figure without repeating every segment.
+  const ariaLabel = used > 0
+    ? `Context window: ${formatCompactTokens(used)} of ${formatCompactTokens(total)} tokens used`
+    : `Context window usage (total ${formatCompactTokens(total)} tokens)`;
 
   return (
     <div
       class="ctx-bar"
       role="img"
-      aria-label="Context window usage breakdown"
+      aria-label={ariaLabel}
       style={`height:${BAR_HEIGHT_PX}px`}
     >
       {usedSegments.map((s, i) => (
@@ -212,7 +255,7 @@ function ContextBar({
           key={s.key}
           class="ctx-bar-seg"
           title={s.title}
-          style={`width:${bumpedPcts[i] ?? 0}%;background:${s.color}`}
+          style={`width:${widths[i] ?? 0}%;background:${s.color}`}
         />
       ))}
       {remainingSegment && remainingPct > 0 && (
@@ -238,6 +281,11 @@ function ContextLegend({
     <div class="rich-tooltip-legend ctx-legend">
       {segments.map((s) => {
         const pct = total > 0 ? (s.tokens / total) * 100 : 0;
+        // Sub-0.1% contributors would otherwise round to "0.0%"; surface them
+        // as "<0.1%" so a non-zero segment never reads as zero.
+        const pctLabel = pct > 0 && pct < 0.1
+          ? '<0.1%'
+          : `${pct.toFixed(pct < 1 ? 1 : 0)}%`;
         return (
           <span class="rich-tooltip-legend-item ctx-legend-item" key={s.key}>
             <span
@@ -249,7 +297,7 @@ function ContextLegend({
               {s.kindSuffix && <span class="ctx-legend-kind">{` ${s.kindSuffix}`}</span>}
             </span>
             <span class="rich-tooltip-legend-val">{formatCompactTokens(s.tokens)}</span>
-            <span class="ctx-legend-pct">{pct.toFixed(pct < 1 ? 1 : 0)}%</span>
+            <span class="ctx-legend-pct">{pctLabel}</span>
           </span>
         );
       })}

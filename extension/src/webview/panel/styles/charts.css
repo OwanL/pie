@@ -117,6 +117,24 @@
   margin-top: 2px;
 }
 
+/* In forced-colors / high-contrast mode the segment fills collapse toward a
+   single system colour, flattening the stacked bar. Add thin dividers between
+   segments and drop the muted opacity so the remaining tail still reads as a
+   real segment rather than a faded gap. */
+@media (forced-colors: active) {
+  .ctx-bar {
+    border: 1px solid CanvasText;
+  }
+
+  .ctx-bar-seg {
+    border-inline-end: 1px solid CanvasText;
+  }
+
+  .ctx-bar-seg--muted {
+    opacity: 1;
+  }
+}
+
 /* ── StackedAreaChart ─────────────────────────────────────────────────────── */
 
 .chart-wrap {
