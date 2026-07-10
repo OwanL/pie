@@ -128,6 +128,22 @@ interface DuckDbRunRow {
   cache_hit_ratio: number | null;
   first_attempt_success: boolean;
   estimated_cost_usd: number | null;
+  // ── Fields below were added after the initial DuckDB export layer and must be
+  //    kept in sync with `PreparedRunRow` (contracts.ts) + `toDuckDbRunRow` +
+  //    `runsTableSchema()`. They are appended here (and in the mapper/schema) so
+  //    the positional `INSERT ... SELECT * FROM read_json_auto` column order is
+  //    preserved — see `populateTableFromJson`.
+  subagent_input_tokens: number;
+  subagent_output_tokens: number;
+  subagent_cache_read_tokens: number;
+  subagent_cache_write_tokens: number;
+  subagent_estimated_cost_usd: number | null;
+  total_estimated_cost_usd: number | null;
+  compaction_count: number;
+  auto_retry_count: number;
+  edit_revisit_rate: number | null;
+  files_reviewed_count: number;
+  read_revisit_rate: number | null;
 }
 
 interface DuckDbToolUsageRow {
@@ -422,6 +438,17 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     cache_hit_ratio: row.cacheHitRatio,
     first_attempt_success: row.firstAttemptSuccess,
     estimated_cost_usd: row.estimatedCostUsd,
+    subagent_input_tokens: row.subagentInputTokens,
+    subagent_output_tokens: row.subagentOutputTokens,
+    subagent_cache_read_tokens: row.subagentCacheReadTokens,
+    subagent_cache_write_tokens: row.subagentCacheWriteTokens,
+    subagent_estimated_cost_usd: row.subagentEstimatedCostUsd,
+    total_estimated_cost_usd: row.totalEstimatedCostUsd,
+    compaction_count: row.compactionCount,
+    auto_retry_count: row.autoRetryCount,
+    edit_revisit_rate: row.editRevisitRate,
+    files_reviewed_count: row.filesReviewedCount,
+    read_revisit_rate: row.readRevisitRate,
   };
 }
 
@@ -810,7 +837,18 @@ CREATE TABLE runs (
   context_utilization DOUBLE,
   cache_hit_ratio DOUBLE,
   first_attempt_success BOOLEAN,
-  estimated_cost_usd DOUBLE
+  estimated_cost_usd DOUBLE,
+  subagent_input_tokens BIGINT,
+  subagent_output_tokens BIGINT,
+  subagent_cache_read_tokens BIGINT,
+  subagent_cache_write_tokens BIGINT,
+  subagent_estimated_cost_usd DOUBLE,
+  total_estimated_cost_usd DOUBLE,
+  compaction_count INTEGER,
+  auto_retry_count INTEGER,
+  edit_revisit_rate DOUBLE,
+  files_reviewed_count INTEGER,
+  read_revisit_rate DOUBLE
 );
 `.trim();
 }

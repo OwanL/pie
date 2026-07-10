@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test, { after } from 'node:test';
 
-import { buildDuckDbDatabase, runNamedDuckDbQuery } from '../scripts/duckdb.ts';
+import { buildDuckDbDatabase, runNamedDuckDbQuery, runDuckDbQuery } from '../scripts/duckdb.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { loadFixture } from './helpers.ts';
 
@@ -16,10 +16,11 @@ import { loadFixture } from './helpers.ts';
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-test-'));
 const sharedDbPath = path.join(tempDir, 'usage.duckdb');
 const exportsDir = path.join(tempDir, 'exports');
+const prepared = prepareSourceAnalytics(await loadFixture());
 await buildDuckDbDatabase({
   dbPath: sharedDbPath,
   exportsDir,
-  prepared: prepareSourceAnalytics(await loadFixture()),
+  prepared,
 });
 
 after(async () => {
@@ -79,4 +80,60 @@ test('verification_impact buckets per-kind counts instead of the run total', asy
     rows.some((row) => row['verification_kind'] === 'none' && row['count_bucket'] === '0'),
     'none kind should map missing usage to bucket 0',
   );
+});
+
+test('runs table maps every scalar PreparedRunRow field (no silent drops)', async () => {
+  // Structural regression: commits 07613de / 11bd5d1 / 245f351 added fields to
+  // PreparedRunRow (prepare.ts) but the duckdb.ts mapper + runsTableSchema() were
+  // never updated, so the fields were silently dropped from runs.json and the
+  // DuckDB `runs` table. SQL queries and runs.json consumers saw nothing for
+  // compaction, auto-retry, subagent cost, or file-churn signals even though the
+  // producer captured them. This test enumerates PreparedRunRow fields and
+  // asserts each (except an explicit excluded set of nested/complex fields) has
+  // a matching runs-table column, so the gap cannot recur for a future field.
+  const rows = await runDuckDbQuery(sharedDbPath, 'SELECT * FROM runs LIMIT 1');
+  assert.equal(rows.length, 1, 'fixture should produce at least one run row');
+  const toCamel = (s: string): string => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  const duckColumns = new Set(Object.keys(rows[0]).map(toCamel));
+
+  // PreparedRunRow fields intentionally NOT mapped to the flat runs table:
+  // nested objects/arrays whose sub-fields ARE extracted (verification_test_count
+  // etc. come from verificationCountsByKind) or that are only consumed by the
+  // dashboard path (skillEntries, the fs* functional-settings fields).
+  const excluded = new Set([
+    'skillEntries',
+    'fsSubagentAlwaysParentModel',
+    'fsPruningMode',
+    'fsPruningEnabled',
+    'fsExtensionToggles',
+    'fsToolResultPruningEnabled',
+    'fsToolResultPruningProfile',
+    'verificationCountsByKind',
+  ]);
+
+  const sampleRun = prepared.runs[0];
+  const missing = Object.keys(sampleRun).filter(
+    (field) => !duckColumns.has(field) && !excluded.has(field),
+  );
+  assert.deepEqual(
+    missing,
+    [],
+    `PreparedRunRow fields missing from the DuckDB runs table — add them to toDuckDbRunRow + runsTableSchema + DuckDbRunRow: ${missing.join(', ')}`,
+  );
+
+  // Spot-check the previously-dropped fields are present and correctly valued.
+  // total cost = parent + subagent; fixture runs have no subagent usage, so
+  // total == parent and the friction counters coerce to 0. This also guards
+  // against positional misalignment between the mapper and the schema.
+  const priced = await runDuckDbQuery(
+    sharedDbPath,
+    'SELECT estimated_cost_usd, total_estimated_cost_usd, subagent_estimated_cost_usd, compaction_count, auto_retry_count FROM runs WHERE estimated_cost_usd IS NOT NULL LIMIT 1',
+  );
+  if (priced.length > 0) {
+    const row = priced[0];
+    assert.equal(row['subagent_estimated_cost_usd'], 0, 'fixture runs have no subagent usage → subagent cost is 0');
+    assert.equal(row['total_estimated_cost_usd'], row['estimated_cost_usd'], 'total cost = parent + subagent (0)');
+    assert.equal(row['compaction_count'], 0, 'legacy fixture runs coerce compaction_count to 0');
+    assert.equal(row['auto_retry_count'], 0, 'legacy fixture runs coerce auto_retry_count to 0');
+  }
 });
