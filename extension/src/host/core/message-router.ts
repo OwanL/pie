@@ -6,7 +6,7 @@ import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, 
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
-import { showPieLogs } from '../util/pie-log';
+import { appendPieError, showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
 import { resolveSettingsPath } from '../util/settings-path';
 
@@ -60,6 +60,18 @@ export class MessageRouter {
   }
 
   async handle(msg: WebviewToHostMessage): Promise<void> {
+    try {
+      await this.routeMessage(msg);
+    } catch (err) {
+      appendPieError('message-router', 'handle failed', err, { messageType: msg?.type });
+      // User-initiated send/edit: surface a notice so the failure isn't silent.
+      if (msg?.type === 'send' || msg?.type === 'editMessage') {
+        this.dispatchEvent({ kind: 'NoticeShown', notice: 'Failed to process your message. See the pie log for details.' });
+      }
+    }
+  }
+
+  private async routeMessage(msg: WebviewToHostMessage): Promise<void> {
     if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
       // Read ArchState fields directly instead of running a full O(transcript)
       // `selectViewState` projection purely to log five fields. These inbound

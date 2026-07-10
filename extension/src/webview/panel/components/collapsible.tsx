@@ -8,6 +8,7 @@ import { cx } from '../utils/cx';
 import { toMouseEvent } from '../utils/preact-events';
 import { CollapsibleChevron } from './chevron';
 import { CollapsibleCloseFooter } from './collapsible-close-footer';
+import { CollapsibleGutter } from './collapsible-gutter';
 
 export interface CollapsibleProps {
   /** Controlled open state. Callers own this (useCollapsibleOpen or useState). */
@@ -170,6 +171,11 @@ export function Collapsible({
                 <CollapsibleCloseFooter onCollapse={beginClose} />
               )}
             </div>
+            {/* Side collapse hitbox: the left border/indentation gutter. Only
+                while actually open (not during the close animation), so it
+                vanishes with the body instead of lingering on a collapsing
+                track. */}
+            {open && <CollapsibleGutter onCollapse={beginClose} />}
           </div>
         </div>
       )}

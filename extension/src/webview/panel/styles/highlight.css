@@ -210,6 +210,66 @@
 .collapsible-body-clip {
   min-height: 0;
   overflow: hidden;
+  /* Containing block for the `.collapsible-gutter` collapse hitbox (an
+     absolutely-positioned left strip spanning the body's full height). See
+     components/collapsible-gutter.tsx. */
+  position: relative;
+}
+
+/* ── Left gutter (side collapse affordance) ─────────────────────────────── */
+/* A vertical collapse hitbox pinned to the left gutter (border / indentation
+   area) of an expanded section, anchored to the body clip so it stays put
+   while the inner region scrolls. Paired with the header (top) + the
+   `CollapsibleCloseFooter` (bottom), this gives every expanded section a
+   reachable close target mid-scroll — no need to scroll to either edge.
+
+   The strip lives in the body's left padding / inset gutter (empty space),
+   so it never overlaps selectable content. Transparent by default to keep
+   the indentation visually clean; hover/focus washes a subtle accent and
+   reveals a chevron-up (matching the bottom footer's ▲ collapse cue). */
+
+.collapsible-gutter {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--panel-muted);
+  cursor: pointer;
+  z-index: 1;
+  transition:
+    background var(--panel-transition-fast),
+    color var(--panel-transition-fast);
+}
+
+.collapsible-gutter:hover {
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.collapsible-gutter:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: -1px;
+}
+
+/* Chevron is hidden until the gutter is approached, so the indentation reads
+   as plain whitespace at rest and only signals interactivity on hover/focus. */
+.collapsible-gutter svg {
+  opacity: 0;
+  transition: opacity var(--panel-transition-fast);
+}
+
+.collapsible-gutter:hover svg,
+.collapsible-gutter:focus-visible svg {
+  opacity: 1;
 }
 
 /* ── Close footer (bottom close affordance) ────────────────────────────── */

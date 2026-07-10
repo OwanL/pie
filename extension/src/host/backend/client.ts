@@ -29,6 +29,10 @@ export interface BackendStartOptions {
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
 const STDERR_BUFFER_LIMIT = 64 * 1024;
 
+/** Time to wait for the backend process to exit after SIGTERM before escalating
+ *  to SIGKILL. */
+const STOP_KILL_TIMEOUT_MS = 5_000;
+
 /** Default timeout for backend RPC calls if no per-method override is set. */
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
@@ -78,6 +82,7 @@ export class BackendClient implements vscode.Disposable {
   private stderrBuffer = '';
   private stderrLineBuffer = '';
   private detachReader?: () => void;
+  private killEscalationTimer?: ReturnType<typeof setTimeout>;
 
   readonly onEvent = this.events.event;
   readonly onExit = this.exits.event;
@@ -154,6 +159,10 @@ export class BackendClient implements vscode.Disposable {
     });
 
     proc.on('exit', (code) => {
+      if (this.killEscalationTimer) {
+        clearTimeout(this.killEscalationTimer);
+        this.killEscalationTimer = undefined;
+      }
       this.flushStderrLines(true);
       this.detachReader?.();
       this.detachReader = undefined;
@@ -297,11 +306,22 @@ export class BackendClient implements vscode.Disposable {
   async stop(): Promise<void> {
     this.detachReader?.();
     this.detachReader = undefined;
-    if (this.proc) {
-      this.proc.kill();
-      this.proc = undefined;
-    }
+    this.stopProcess();
     this.requests.rejectAll(new Error('Backend stopped.'));
+  }
+
+  private stopProcess(): void {
+    if (!this.proc) {
+      return;
+    }
+    const proc = this.proc;
+    this.proc = undefined;
+    proc.kill();
+    this.killEscalationTimer = setTimeout(() => {
+      this.killEscalationTimer = undefined;
+      appendPieLog('warn', 'backend', 'backend did not exit on SIGTERM, escalating to SIGKILL');
+      proc.kill('SIGKILL');
+    }, STOP_KILL_TIMEOUT_MS);
   }
 
   private handleLine(line: string): void {
@@ -430,12 +450,7 @@ export class BackendClient implements vscode.Disposable {
   dispose(): void {
     this.detachReader?.();
     this.detachReader = undefined;
-
-    if (this.proc) {
-      this.proc.kill();
-      this.proc = undefined;
-    }
-
+    this.stopProcess();
     this.requests.rejectAll(new Error('Backend client disposed.'));
     this.events.dispose();
     this.exits.dispose();

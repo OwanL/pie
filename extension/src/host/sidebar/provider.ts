@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 import { assertInvariant, auditLog, bootLog, isBootLogEnabled } from '../util/audit';
 import { recordSnapshotPost } from '../util/stream-telemetry';
 import { toErrorMessage } from '../util/error-message';
-import { appendPieLog } from '../util/pie-log';
+import { appendPieError, appendPieLog } from '../util/pie-log';
 import {
   buildStateEnvelope,
   canPostSnapshotToWebview,
@@ -165,67 +165,81 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
 
     this.messageDisposable?.dispose();
     this.messageDisposable = webviewView.webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
-      const incomingAssetVersion = this.hotReloader.getIncomingAssetVersion(msg);
-      if (this.hotReloader.shouldReloadForAssetMismatch(msg, incomingAssetVersion)) {
-        bootLog('sidebar-provider', 'assetVersion.mismatch', {
-          actualAssetVersion: incomingAssetVersion ?? null,
-          expectedAssetVersion: this.hotReloader.getCurrentAssetVersion(),
-          hostInstanceId: this.hostInstanceId,
-          type: msg.type,
-          visible: this.view?.visible ?? false,
-        });
-        void this.hotReloader.reloadForAssetMismatch();
-        return;
-      }
-
-      if (msg.type === 'stateApplied') {
-        const payload = msg.payload as any;
-        if (payload.renderError) {
-          bootLog('sidebar-provider', 'webview.renderError', { error: payload.renderError });
+      try {
+        const incomingAssetVersion = this.hotReloader.getIncomingAssetVersion(msg);
+        if (this.hotReloader.shouldReloadForAssetMismatch(msg, incomingAssetVersion)) {
+          bootLog('sidebar-provider', 'assetVersion.mismatch', {
+            actualAssetVersion: incomingAssetVersion ?? null,
+            expectedAssetVersion: this.hotReloader.getCurrentAssetVersion(),
+            hostInstanceId: this.hostInstanceId,
+            type: msg.type,
+            visible: this.view?.visible ?? false,
+          });
+          void this.hotReloader.reloadForAssetMismatch();
+          return;
         }
-        this.watchdog.recordStateApplied(msg.payload.revision);
-      }
 
-      if (!this.webviewReady) {
-        this.webviewReady = true;
-        this.watchdog.resetResnapshotFlag();
-        this.readinessProbe.clear();
-        this.hotReloader.clearReloading();
-        bootLog('sidebar-provider', 'message.bridgeReady', {
-          hostInstanceId: this.hostInstanceId,
-          type: msg.type,
-          visible: this.view?.visible ?? false,
-        });
-        // Deliver imperatives buffered during the (re)load BEFORE the inbound
-        // message routes to postState() — imperatives first, then the
-        // confirming snapshot. Covers the "sendRejected fired while the webview
-        // was reloading" case (draft/overlay restore would otherwise be lost).
-        this.flushPendingImperatives();
-      }
+        if (msg.type === 'stateApplied') {
+          const payload = msg.payload as any;
+          if (payload.renderError) {
+            bootLog('sidebar-provider', 'webview.renderError', { error: payload.renderError });
+          }
+          this.watchdog.recordStateApplied(msg.payload.revision);
+        }
 
-      // Audit-only validation: log invalid envelopes but still pass through so
-      // unrecognised future additions don't break older host builds. Promote
-      // to rejection once the audit log is clean.
-      const validation = validateWebviewToHostMessage(msg);
-      if (!validation.ok) {
-        auditLog('sidebar-provider', 'message.invalid', {
-          reason: validation.reason,
-          type: (msg as { type?: unknown })?.type ?? null,
-        });
+        if (!this.webviewReady) {
+          this.webviewReady = true;
+          this.watchdog.resetResnapshotFlag();
+          this.readinessProbe.clear();
+          this.hotReloader.clearReloading();
+          bootLog('sidebar-provider', 'message.bridgeReady', {
+            hostInstanceId: this.hostInstanceId,
+            type: msg.type,
+            visible: this.view?.visible ?? false,
+          });
+          // Deliver imperatives buffered during the (re)load BEFORE the inbound
+          // message routes to postState() — imperatives first, then the
+          // confirming snapshot. Covers the "sendRejected fired while the webview
+          // was reloading" case (draft/overlay restore would otherwise be lost).
+          this.flushPendingImperatives();
+        }
+
+        // Audit-only validation: log invalid envelopes but still pass through so
+        // unrecognised future additions don't break older host builds. Promote
+        // to rejection once the audit log is clean.
+        const validation = validateWebviewToHostMessage(msg);
+        if (!validation.ok) {
+          auditLog('sidebar-provider', 'message.invalid', {
+            reason: validation.reason,
+            type: (msg as { type?: unknown })?.type ?? null,
+          });
+        }
+        if (msg.type === 'ready') {
+          bootLog('sidebar-provider', 'message.ready', {
+            hostInstanceId: this.hostInstanceId,
+            visible: this.view?.visible ?? false,
+          });
+        } else if (msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
+          bootLog('sidebar-provider', `message.${msg.type}`, {
+            hostInstanceId: this.hostInstanceId,
+            visible: this.view?.visible ?? false,
+            webviewReady: this.webviewReady,
+          });
+        }
+        this.onMessage(msg);
+      } catch (err) {
+        appendPieError('webview', 'onDidReceiveMessage prelude failed', err);
+        // If the failed message was a stateApplied ack, record its revision so
+        // the StateAppliedWatchdog doesn't hang waiting for an ack we failed
+        // to process (it would otherwise resnapshot/reload after a timeout).
+        if (msg.type === 'stateApplied') {
+          const payload = msg.payload as any;
+          const revision = payload?.revision;
+          if (typeof revision === 'number') {
+            this.watchdog.recordStateApplied(revision);
+          }
+        }
       }
-      if (msg.type === 'ready') {
-        bootLog('sidebar-provider', 'message.ready', {
-          hostInstanceId: this.hostInstanceId,
-          visible: this.view?.visible ?? false,
-        });
-      } else if (msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
-        bootLog('sidebar-provider', `message.${msg.type}`, {
-          hostInstanceId: this.hostInstanceId,
-          visible: this.view?.visible ?? false,
-          webviewReady: this.webviewReady,
-        });
-      }
-      this.onMessage(msg);
     });
 
     this.visibilityDisposable?.dispose();

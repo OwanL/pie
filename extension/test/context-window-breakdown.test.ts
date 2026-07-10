@@ -90,7 +90,7 @@ test('buildContextWindowBreakdown sorts top contributors first, uses derived Oth
   assert.match(breakdown.title, /System prompt: 4 estimated/m);
 });
 
-test('buildContextWindowBreakdown classifies read_file tool calls individually', () => {
+test('buildContextWindowBreakdown aggregates read_file tool calls into one total row', () => {
   const breakdown = buildContextWindowBreakdown({
     contextUsage: null,
     effectiveContextWindow: 200000,
@@ -128,9 +128,12 @@ test('buildContextWindowBreakdown classifies read_file tool calls individually',
     isPartial: false,
   });
 
-  const readFileEntry = breakdown.entries.find((entry) => (entry.label ?? entry.key) === 'Read file');
-  assert.ok(readFileEntry);
-  assert.match(readFileEntry.note ?? '', /src\/backend\/index\.ts/);
+  // read_file calls with non-skill paths are aggregated into a single row:
+  // one total token count, with the file count as the note (no per-file rows).
+  const readFileEntries = breakdown.entries.filter((entry) => (entry.label ?? entry.key) === 'Read file');
+  assert.equal(readFileEntries.length, 1);
+  const readFileEntry = readFileEntries[0]!;
+  assert.equal(readFileEntry.note, '1 file');
 
   const skillEntry = breakdown.entries.find((entry) => (entry.label ?? entry.key) === 'Skill');
   assert.ok(skillEntry);

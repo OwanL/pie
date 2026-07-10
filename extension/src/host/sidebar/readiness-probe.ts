@@ -1,4 +1,5 @@
 import { bootLog } from '../util/audit';
+import { appendPieLog } from '../util/pie-log';
 
 /** Grace period before the first probe and interval between retries. Long
  *  enough that a normal `ready` handshake restores readiness first (so the
@@ -134,18 +135,18 @@ export class WebviewReadinessProbe {
       }
       this.deps.onForceClearReloading();
       this.reloadingSkips = 0;
-      bootLog('sidebar-provider', 'readinessProbe.forceClearedReloading', {
-        attempts: this.attempts,
-      });
+      const forceClearContext = { attempts: this.attempts };
+      appendPieLog('warn', 'sidebar-provider', 'readiness probe force-cleared stale reloading flag', forceClearContext);
+      bootLog('sidebar-provider', 'readinessProbe.forceClearedReloading', forceClearContext);
       // fall through — post and adopt readiness as normal.
     } else {
       this.reloadingSkips = 0;
     }
 
     if (this.attempts >= READINESS_PROBE_MAX_ATTEMPTS) {
-      bootLog('sidebar-provider', 'readinessProbe.exhausted', {
-        attempts: this.attempts,
-      });
+      const exhaustedContext = { attempts: this.attempts };
+      appendPieLog('warn', 'sidebar-provider', 'readiness probe exhausted; webview may be unresponsive', exhaustedContext);
+      bootLog('sidebar-provider', 'readinessProbe.exhausted', exhaustedContext);
       return;
     }
 

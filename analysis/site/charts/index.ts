@@ -12,6 +12,7 @@ import { inputCharts } from './inputs.ts';
 import { questionCharts } from './questions.ts';
 import { settingsCharts } from './settings.ts';
 import { throughputCharts } from './throughput.ts';
+import { promptSizeCharts } from './promptsize.ts';
 
 /**
  * Registry of all analytics charts added in the gap-analysis pass.
@@ -36,4 +37,5 @@ export const newCharts: ChartEntry[] = [
   ...inputCharts,
   ...questionCharts,
   ...settingsCharts,
+  ...promptSizeCharts,
 ];

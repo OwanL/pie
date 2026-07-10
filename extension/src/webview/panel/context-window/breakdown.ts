@@ -202,6 +202,8 @@ function buildContributors(
 ): { items: ContributorItem[]; otherEstimated: number } {
   const items: ContributorItem[] = [];
   let otherEstimated = 0;
+  let readFileTokens = 0;
+  let readFileCount = 0;
   let index = 0;
 
   // System prompts — combine all available prompt cards into one entry.
@@ -239,12 +241,12 @@ function buildContributors(
             if (skillName) {
               items.push({ label: 'Skill', note: skillName, tokens: estimateToolCallTokens(toolCall), originalIndex: index++ });
             } else {
-              items.push({
-                label: 'Read file',
-                note: truncateText(path.replace(/\\/g, '/'), 72),
-                tokens: estimateToolCallTokens(toolCall),
-                originalIndex: index++,
-              });
+              // Aggregate every read_file call into a single contributor row
+              // (one total) instead of one row per file — a long session can
+              // read dozens of files, and a per-file breakdown bloats the
+              // tooltip without aiding the at-a-glance context picture.
+              readFileTokens += estimateToolCallTokens(toolCall);
+              readFileCount += 1;
             }
           } else {
             otherEstimated += estimateToolCallTokens(toolCall);
@@ -256,6 +258,15 @@ function buildContributors(
     } else {
       otherEstimated += estimateTextTokens(message.markdown);
     }
+  }
+
+  if (readFileCount > 0) {
+    items.push({
+      label: 'Read file',
+      note: `${readFileCount} file${readFileCount === 1 ? '' : 's'}`,
+      tokens: readFileTokens,
+      originalIndex: index++,
+    });
   }
 
   // Sort largest first, using insertion order as a stable tiebreaker.

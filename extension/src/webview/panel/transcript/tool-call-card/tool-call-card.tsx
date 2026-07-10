@@ -7,6 +7,7 @@ import { toMouseEvent } from '../../utils/preact-events';
 import { getToolCallPresentation } from '../../tool-call-summary';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { CollapsibleCloseFooter } from '../../components/collapsible-close-footer';
+import { CollapsibleGutter } from '../../components/collapsible-gutter';
 import { textFromToolResult } from '../highlight';
 import { useCollapsibleOpen } from '../use-collapsible-open';
 
@@ -307,6 +308,10 @@ export function ToolCallCard({
               can't engage while `showBody` is true — so don't offer a close
               target there. */}
             {open && <CollapsibleCloseFooter onCollapse={close} />}
+            {/* Left gutter collapse hitbox (border / indentation area). Only
+              for a manually opened body — the auto-shown shell body is
+              transient and shouldn't offer a manual collapse target. */}
+            {open && <CollapsibleGutter onCollapse={close} />}
           </div>
         </div>
       )}

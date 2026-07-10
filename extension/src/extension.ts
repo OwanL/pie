@@ -3,10 +3,12 @@ import * as vscode from 'vscode';
 import { BackendClient } from './host/backend/client';
 import { PieExtension } from './host/extension-host';
 import { bootTraceSync } from './host/util/audit';
-import { initPieLogger, parseLogLevel, pieLog, setLogLevel } from './host/util/pie-logger';
+import { toErrorMessage } from './host/util/error-message';
+import { appendPieError, initPieLogger, parseLogLevel, pieLog, setLogLevel } from './host/util/pie-logger';
 import { reapTempLogs } from './host/util/temp-log-reaper';
 
 let extensionInstance: PieExtension | null = null;
+let processErrorHandlersRegistered = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   initPieLogger({ devMode: context.extensionMode === 1 });
@@ -44,7 +46,22 @@ export function activate(context: vscode.ExtensionContext): void {
   extensionInstance = extension;
   extension.register();
   context.subscriptions.push(extension);
-  void extension.start();
+
+  if (!processErrorHandlersRegistered) {
+    processErrorHandlersRegistered = true;
+    process.on('unhandledRejection', (reason) => {
+      appendPieError('process', 'unhandledRejection', reason);
+    });
+    process.on('uncaughtException', (err) => {
+      appendPieError('process', 'uncaughtException', err);
+      void vscode.window.showErrorMessage('pie: uncaught exception: ' + toErrorMessage(err));
+    });
+  }
+
+  void extension.start().catch((err) => {
+    appendPieError('extension', 'start() failed', err);
+    void vscode.window.showErrorMessage('pie failed to start: ' + toErrorMessage(err));
+  });
 }
 
 export async function deactivate(): Promise<void> {

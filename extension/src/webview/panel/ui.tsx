@@ -156,7 +156,6 @@ function ComposerView({
     supportsImageInputs,
     contextBreakdown,
     contextIndicator,
-    sessionTokenIndicator,
     sessionCostIndicator,
     tokenRateIndicator,
   } = useComposerIndicators({
@@ -224,7 +223,7 @@ function ComposerView({
 
   // Memoize the indicator prop objects passed to `ComposerToolbar` so they keep
   // a stable reference across renders. The indicator values themselves
-  // (`contextIndicator` / `sessionTokenIndicator`) are already memoized inside
+  // (`contextIndicator`) is already memoized inside
   // `useComposerIndicators`, and `availableModels` is now reference-stabilised
   // upstream (`use-host-sync`), so `memo(ComposerView)` actually holds and
   // these `useMemo`s only recompute when the underlying indicator changes —
@@ -239,15 +238,6 @@ function ComposerView({
       : null,
     [contextIndicator],
   );
-  const sessionTokenIndicatorProp = useMemo(
-    () => ({
-      label: sessionTokenIndicator.label,
-      ariaLabel: sessionTokenIndicator.ariaLabel,
-      tooltip: sessionTokenIndicator.tooltip,
-    }),
-    [sessionTokenIndicator],
-  );
-
   const runControls = getComposerRunControls(activeRunSummary ?? null);
   const hasUserMessages = transcriptWindow.hasUserMessages;
   const completionAction = runControls.action;
@@ -293,7 +283,6 @@ function ComposerView({
         supportsReasoning={supportsReasoning}
         contextIndicator={contextIndicatorProp}
         contextBreakdown={contextBreakdown}
-        sessionTokenIndicator={sessionTokenIndicatorProp}
         sessionCostIndicator={sessionCostIndicator}
         tokenRateIndicator={tokenRateIndicator}
         runStatus={runControls.status}

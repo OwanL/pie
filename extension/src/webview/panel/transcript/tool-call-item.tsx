@@ -13,6 +13,7 @@ import { cx } from '../utils/cx';
 import { toMouseEvent } from '../utils/preact-events';
 import { CollapsibleChevron } from '../components/chevron';
 import { CollapsibleCloseFooter } from '../components/collapsible-close-footer';
+import { CollapsibleGutter } from '../components/collapsible-gutter';
 import { ResizeHandle } from '../components/resize-handle';
 import { useResizableHeight } from '../components/use-resizable-height';
 import {
@@ -468,6 +469,9 @@ function SubagentSingleBlock({
                 onClose={close}
               />
             </SubagentCallContext.Provider>
+            {/* Left gutter collapse hitbox (border / indentation area). Only
+              while actually open (not during the close animation). */}
+            {open && <CollapsibleGutter onCollapse={close} />}
           </div>
         </div>
       )}

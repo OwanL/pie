@@ -113,23 +113,19 @@
   color: var(--panel-danger);
 }
 
-/* Progressive hide as toolbar narrows:
-   1st hidden: token in/out counts
-   2nd hidden: cost estimate
-   3rd hidden: context window indicator (most important, kept longest) */
+/* Progressive hide as toolbar narrows. Indicator DOM order (left→right):
+   cost · speed · run-status · context — hide priority keeps the most
+   important (context window) visible longest, dropping cost first.
+   1st hidden (340px): cost estimate
+   2nd hidden (300px): context window indicator (rightmost, kept longest)
+   Never hidden: token-rate (speed) and run-status — live stats. */
 @container toolbar (max-width: 340px) {
-  .session-token-indicator {
-    display: none;
-  }
-}
-
-@container toolbar (max-width: 300px) {
   .session-cost-indicator {
     display: none;
   }
 }
 
-@container toolbar (max-width: 260px) {
+@container toolbar (max-width: 300px) {
   .context-window-indicator {
     display: none;
   }
@@ -510,7 +506,7 @@
 
 .toolbar-settings-item {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--panel-gap-md);
   width: 100%;

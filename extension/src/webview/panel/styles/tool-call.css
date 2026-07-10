@@ -685,6 +685,9 @@
 .tool-call-body-wrap > .tool-call-body-inner {
   overflow: hidden;
   min-height: 0;
+  /* Containing block for the `.collapsible-gutter` left collapse hitbox
+     (see components/collapsible-gutter.tsx). */
+  position: relative;
 }
 
 /* ── web_search tool ─────────────────────────────────────────────────────── */

@@ -13,8 +13,7 @@ import { cx } from '../utils/cx';
  * stacked bar of the full context window: the used portion is split into its
  * contributor segments (system prompt, read files, skills, user messages,
  * other) and the remainder is shown as a muted tail. A legend below the bar
- * lists every segment with its colour swatch, label, and compact token count,
- * followed by the attribution notes.
+ * lists every segment with its colour swatch, label, and compact token count.
  *
  * Replaces the former plain-text `title` tooltip. Rendered into the
  * `Tooltip` component's out-of-tree host via `contentNode`, so it survives
@@ -129,7 +128,7 @@ function ContextWindowBreakdownChartBase({
 }: {
   breakdown: ContextWindowBreakdown;
 }): JSX.Element {
-  const { summary, entries, notes } = breakdown;
+  const { summary, entries } = breakdown;
   const total = summary.totalWindow;
 
   // No usable window → nothing to draw; fall back to a compact textual view.
@@ -212,12 +211,6 @@ function ContextWindowBreakdownChartBase({
       />
 
       <ContextLegend segments={allSegments} total={total} />
-
-      {notes.length > 0 && (
-        <div class="rich-tooltip-sub rich-tooltip-ctx-notes">
-          {notes.join('\n')}
-        </div>
-      )}
     </div>
   );
 }

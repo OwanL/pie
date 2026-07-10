@@ -1,5 +1,6 @@
 import { recordAckLatency, recordWatchdog } from '../util/stream-telemetry';
 import { bootLog } from '../util/audit';
+import { appendPieLog } from '../util/pie-log';
 
 /** Max wait for the webview to acknowledge a posted state revision. */
 const STATE_APPLIED_TIMEOUT_MS = 2_500;
@@ -183,7 +184,7 @@ export class StateAppliedWatchdog {
     const now = Date.now();
     if (this.shouldThrottleStateAppliedReload(now)) {
       recordWatchdog('throttled');
-      bootLog('sidebar-provider', 'stateApplied.timeout.throttled', {
+      const throttleContext = {
         hostInstanceId: this.deps.getHostInstanceId(),
         lastStateAppliedRevision: this.lastStateAppliedRevision,
         pendingRevision: revision,
@@ -191,12 +192,14 @@ export class StateAppliedWatchdog {
         runningCount,
         visible: this.deps.getViewVisible(),
         webviewReady: this.deps.getWebviewReady(),
-      });
+      };
+      appendPieLog('warn', 'sidebar-provider', 'state-applied watchdog throttled force-reload (reload storm)', throttleContext);
+      bootLog('sidebar-provider', 'stateApplied.timeout.throttled', throttleContext);
       return;
     }
 
     recordWatchdog('reload');
-    bootLog('sidebar-provider', runningCount > 0 ? 'stateApplied.timeout.streaming.escalated' : 'stateApplied.timeout', {
+    const reloadContext = {
       hostInstanceId: this.deps.getHostInstanceId(),
       lastStateAppliedAt: this.lastStateAppliedAt || null,
       lastStateAppliedRevision: this.lastStateAppliedRevision,
@@ -205,7 +208,12 @@ export class StateAppliedWatchdog {
       runningCount,
       visible: this.deps.getViewVisible(),
       webviewReady: this.deps.getWebviewReady(),
-    });
+    };
+    const reloadMessage = runningCount > 0
+      ? 'state-applied watchdog force-reloading webview while session streaming'
+      : 'state-applied watchdog force-reloading webview';
+    appendPieLog('warn', 'sidebar-provider', reloadMessage, reloadContext);
+    bootLog('sidebar-provider', runningCount > 0 ? 'stateApplied.timeout.streaming.escalated' : 'stateApplied.timeout', reloadContext);
 
     this.clear();
     await this.deps.onForceReload(revision);

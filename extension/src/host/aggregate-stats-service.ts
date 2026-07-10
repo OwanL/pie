@@ -11,6 +11,7 @@ import { computeAggregateStats } from './stats-service/aggregate-stats';
 import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
 import { appendPieLog } from './util/pie-log';
+import { toErrorMessage } from './util/error-message';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
@@ -122,7 +123,7 @@ export class AggregateStatsService {
       // good cached value (assigned only after a successful compute) so the
       // strip keeps showing stale-but-valid data and self-heals next tick.
       appendPieLog('warn', 'aggregate-stats', 'recompute failed; retaining cached stats', {
-        error: error instanceof Error ? error.message : String(error),
+        error: toErrorMessage(error),
       });
     } finally {
       this.inFlight = false;
@@ -222,7 +223,10 @@ export class AggregateStatsService {
       // Both absent → treat as an empty store with a stable signature so the
       // fast-path engages (no point re-reading nothing).
       return { snapshotsMtimeMs, checkpointMtimeMs };
-    } catch {
+    } catch (error) {
+      appendPieLog('debug', 'aggregate-stats', 'data signature read failed; retaining cached signature', {
+        error: toErrorMessage(error),
+      });
       return null;
     }
   }
@@ -240,8 +244,11 @@ export class AggregateStatsService {
     let mtimeMs = -1;
     try {
       mtimeMs = fs.statSync(modelsJsonPath).mtimeMs;
-    } catch {
+    } catch (error) {
       // Missing models.json → no pricing (cost falls back to 0).
+      appendPieLog('debug', 'aggregate-stats', 'models.json stat failed; no pricing available', {
+        error: toErrorMessage(error),
+      });
       this.pricingCache = null;
       return new Map();
     }

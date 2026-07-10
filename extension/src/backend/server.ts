@@ -105,6 +105,41 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
   }
 }
 
+/** Module-level guard: install the fatal handlers at most once even if
+ *  `start()` is invoked more than once. */
+let backendFatalHandlersInstalled = false;
+
+/** Surface swallowed promise rejections and uncaught exceptions on stderr (the
+ *  host captures backend stderr) instead of letting them die invisibly. We
+ *  deliberately do NOT `process.exit` — the host's backend-exit detection
+ *  owns crash handling; this only prevents silent invisibility. */
+function installBackendFatalHandlers(): void {
+  if (backendFatalHandlersInstalled) return;
+  backendFatalHandlersInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? String(reason.stack ?? reason) : String(reason);
+    process.stderr.write(`[pie:backend] ${JSON.stringify({
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      scope: 'backend',
+      level: 'error',
+      event: 'unhandledRejection',
+      error,
+    })}\n`);
+  });
+  process.on('uncaughtException', (err) => {
+    const error = err instanceof Error ? String(err.stack ?? err) : String(err);
+    process.stderr.write(`[pie:backend] ${JSON.stringify({
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      scope: 'backend',
+      level: 'error',
+      event: 'uncaughtException',
+      error,
+    })}\n`);
+  });
+}
+
 export class BackendServer {
   private sdk!: SdkModule;
   private readonly sdkPath: string;
@@ -123,6 +158,9 @@ export class BackendServer {
   }
 
   async start(): Promise<void> {
+    // Install fatal handlers first so even an early spawn-time rejection is
+    // surfaced. Idempotent (module-level guard).
+    installBackendFatalHandlers();
     await timed('start.loadSdk', async () => {
       this.sdk = await loadSdk(this.sdkPath);
       this.agentDir = this.sdk.getAgentDir();
@@ -376,8 +414,9 @@ export class BackendServer {
       ) {
         return Math.trunc(model.contextWindow);
       }
-    } catch {
+    } catch (error) {
       // Ignore model registry issues and fall back to undefined.
+      backendTrace('modelRegistry', 'contextWindowLookup.failed', { level: 'warn', error: toErrorMessage(error) });
     }
 
     return undefined;
@@ -457,7 +496,8 @@ export class BackendServer {
         toolSnippets: options.toolSnippets,
         promptGuidelines: options.promptGuidelines,
       }));
-    } catch {
+    } catch (error) {
+      backendTrace('systemPrompt', 'harnessRead.failed', { level: 'debug', error: toErrorMessage(error) });
       return normalizePromptText(promptState._baseSystemPrompt);
     }
   }
@@ -499,7 +539,8 @@ export class BackendServer {
         defaultModel: parsed.defaultModel ?? defaults.defaultModel,
         defaultThinkingLevel: (parsed.defaultThinkingLevel as ThinkingLevel) ?? defaults.defaultThinkingLevel,
       };
-    } catch {
+    } catch (error) {
+      backendTrace('modelSettings', 'read.failed', { level: 'warn', error: toErrorMessage(error) });
       return defaults;
     }
   }
@@ -521,7 +562,8 @@ export class BackendServer {
         toolSnippets: options.toolSnippets,
         promptGuidelines: options.promptGuidelines,
       }));
-    } catch {
+    } catch (error) {
+      backendTrace('systemPrompt', 'harnessPrefixCompute.failed', { level: 'debug', error: toErrorMessage(error) });
       return undefined;
     }
   }
@@ -565,8 +607,9 @@ export class BackendServer {
         const { buildSystemPrompt } = await this.getSystemPromptModule();
         const restored = normalizePromptText(buildSystemPrompt(source));
         if (restored) promptState._baseSystemPrompt = restored;
-      } catch {
+      } catch (error) {
         // leave the existing base prompt untouched
+        backendTrace('systemPrompt', 'harnessRestore.failed', { level: 'debug', error: toErrorMessage(error) });
       }
       promptState._baseSystemPromptOptions = source;
       return;
@@ -577,7 +620,8 @@ export class BackendServer {
     try {
       const { buildSystemPrompt } = await this.getSystemPromptModule();
       base = normalizePromptText(buildSystemPrompt(filteredOptions));
-    } catch {
+    } catch (error) {
+      backendTrace('systemPrompt', 'harnessRebuild.failed', { level: 'debug', error: toErrorMessage(error) });
       base = promptState._baseSystemPrompt;
     }
     if (base) {
@@ -613,8 +657,9 @@ export class BackendServer {
     try {
       const raw = await fs.readFile(settingsPath, 'utf8');
       existing = parseJsonOrThrow<Record<string, unknown>>(raw, settingsPath);
-    } catch {
+    } catch (error) {
       // may not exist yet
+      backendTrace('modelSettings', 'readExisting.failed', { level: 'warn', error: toErrorMessage(error) });
     }
     const merged = { ...existing, ...updates };
     await fs.writeFile(settingsPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
