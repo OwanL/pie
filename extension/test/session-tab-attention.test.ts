@@ -43,6 +43,7 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     sessionByPath: new Map([[tabPath, makeSession(tabPath, 'Alpha')]]),
     openIndexByPath: new Map([[tabPath, 0]]),
     runningPathSet: new Set(),
+    startingModelPathSet: new Set(),
     unreadFinishedPathSet: new Set(),
     // `activePath` (a stable string) replaces the previous `activeSession`
     // object prop — SessionTab now derives `isActive` from this path, and the
@@ -162,4 +163,37 @@ test('pending request wins title precedence over unread-finished', () => {
 
   const main = tab.querySelector('.session-tab-main') as HTMLElement;
   assert.equal(main.getAttribute('title'), 'Alpha (waiting for your answer)');
+});
+
+test('a running tab in the starting-model phase renders the muted starting-model dot', () => {
+  // Pruning already succeeded but the model has not yet started streaming (the
+  // post-pruning, pre-commit window — includes concurrency-limit waits). The
+  // running dot gets the `starting-model` modifier so the wait is visually
+  // distinct from active streaming.
+  const alpha = makeSession('/sessions/alpha', 'Alpha');
+  const tab = renderTab({
+    tabPath: '/sessions/alpha',
+    activePath: alpha.path,
+    runningPathSet: new Set(['/sessions/alpha']),
+    startingModelPathSet: new Set(['/sessions/alpha']),
+  });
+
+  assert.ok(classList(tab).includes('running'), 'running tab keeps the running class');
+  const dot = tab.querySelector('.session-tab-running') as HTMLElement;
+  assert.ok(dot, 'running dot renders');
+  assert.ok(classList(dot).includes('starting-model'), 'starting-model phase renders the muted dot modifier');
+});
+
+test('a running tab that is streaming (not in starting-model) renders the plain running dot', () => {
+  const alpha = makeSession('/sessions/alpha', 'Alpha');
+  const tab = renderTab({
+    tabPath: '/sessions/alpha',
+    activePath: alpha.path,
+    runningPathSet: new Set(['/sessions/alpha']),
+    startingModelPathSet: new Set(),
+  });
+
+  const dot = tab.querySelector('.session-tab-running') as HTMLElement;
+  assert.ok(dot, 'running dot renders');
+  assert.ok(!classList(dot).includes('starting-model'), 'streaming tab does not get the muted modifier');
 });

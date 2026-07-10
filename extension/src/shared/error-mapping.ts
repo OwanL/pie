@@ -24,7 +24,10 @@
  *  - `BackendClient` exit rejection: `"Backend exited unexpectedly with code
  *    N."` / `"Backend stopped."` / `"Backend is not running"`.
  *  - `EffectRunner` send-timer fire (`PreflightFailed`): `"Timed out waiting
- *    for the turn to start streaming (Ns)"`.
+ *    for the turn to start streaming (Ns)"` (prepass still running → genuine pruning
+ *    timeout) OR `"Timed out waiting for the model to start streaming (Ns)"`
+ *    (prepass already succeeded → re-armed with the model-start budget; the
+ *    delay is model-start/concurrency, not pruning).
  *
  * Recovery ACTIONS are webview-side: the host surfaces the failure `kind`;
  * the webview maps `kind → action buttons` via {@link noticeActionsFor} and
@@ -38,6 +41,7 @@
 export type NoticeKind =
   | 'send-timeout'
   | 'prepass-timeout'
+  | 'model-start-timeout'
   | 'prepass-failed'
   | 'dropped-line'
   | 'backend-exit'
@@ -82,13 +86,24 @@ const DROPPED_LINE_PATTERN = /^Backend sent an unparseable response for req-\d+:
  *  `"Backend stopped."`, `"Backend is not running"`, `"Backend client disposed."`. */
 const BACKEND_EXIT_PATTERN = /^Backend (exited unexpectedly|stopped|is not running|client disposed)/;
 
-/** `EffectRunner` send-timer fire (`PreflightFailed`): `"Timed out waiting for the turn to start streaming (Ns)"`.
- *  The budget is a whole-or-decimal second count (e.g. `120s` or `12.5s`) — the
- *  send-timer budget derives from `prepassTimeoutSec` + first-token headroom and
- *  may be fractional, so the capture group accepts an optional decimal. Without
- *  it a decimal budget (e.g. `12.5s`) would fail to match and the error would
- *  misclassify as a generic `prepass-failed` (Brief H follow-up). */
+/** `EffectRunner` send-timer fire while the prepass was still running
+ *  (`PreflightFailed`): `"Timed out waiting for the turn to start streaming
+ *  (Ns)"`. The budget is a whole-or-decimal second count (e.g. `120s` or
+ *  `12.5s`) — the send-timer budget derives from `prepassTimeoutSec` +
+ *  first-token headroom and may be fractional, so the capture group accepts an
+ *  optional decimal. Without it a decimal budget (e.g. `12.5s`) would fail to
+ *  match and the error would misclassify as a generic `prepass-failed` (Brief H
+ *  follow-up). This is a GENUINE pruning/prepass timeout (pruning had not yet
+ *  completed when the budget elapsed). */
 const PREPASS_TIMEOUT_PATTERN = /^Timed out waiting for the turn to start streaming \((\d+(?:\.\d+)?)s\)$/;
+
+/** `EffectRunner` send-timer fire AFTER the prepass already succeeded
+ *  (`PreflightFailed`, re-armed with the model-start budget): `"Timed out waiting
+ *  for the model to start streaming (Ns)"`. Distinct from the prepass-timeout
+ *  string so the mapper can blame model-start (concurrency/rate-limit/first-
+ *  token latency) instead of pruning — pruning already finished. Captures the
+ *  (possibly fractional) budget for the surfaced message. */
+const MODEL_START_TIMEOUT_PATTERN = /^Timed out waiting for the model to start streaming \((\d+(?:\.\d+)?)s\)$/;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -185,9 +200,15 @@ export function mapSendOrEditError(
  * plain-language notice. The `message.send` RPC already succeeded (the prompt
  * was queued); the pruning prepass then failed.
  *
- * Two sub-categories:
- *  - **timeout** (send-timer fire): `"Timed out waiting for the turn to start
- *    streaming (Ns)"` → `prepass-timeout` (send) / `edit-failed` (edit).
+ * Three sub-categories:
+ *  - **model-start timeout** (send-timer fire AFTER pruning succeeded):
+ *    `"Timed out waiting for the model to start streaming (Ns)"` →
+ *    `model-start-timeout` (send) / `edit-failed` (edit). The prepass already
+ *    finished, so the elapsed budget was the (generous) model-start budget —
+ *    the delay is model-start (concurrency/rate-limit/first-token), NOT pruning.
+ *  - **prepass timeout** (send-timer fire while pruning still running):
+ *    `"Timed out waiting for the turn to start streaming (Ns)"` →
+ *    `prepass-timeout` (send) / `edit-failed` (edit).
  *  - **backend-reported failure**: any other error → `prepass-failed` (send) /
  *    `edit-failed` (edit). The backend's error detail is included SANITIZED
  *    (any `req-NN` stripped) since it is not an internal id the host minted —
@@ -201,6 +222,27 @@ export function mapPreflightError(
   opKind: OpKind,
 ): MappedNotice {
   const err = error ?? '';
+
+  // Model-start timeout: the prepass already succeeded, so the elapsed budget
+  // was the (generous) model-start budget, not the prepass budget. Blame
+  // model-start (concurrency/rate-limit/first-token), NOT pruning — pruning
+  // finished. Checked before the prepass-timeout branch since both strings
+  // begin "Timed out waiting for … to start streaming".
+  const modelStartMatch = MODEL_START_TIMEOUT_PATTERN.exec(err);
+  if (modelStartMatch) {
+    const budget = modelStartMatch[1];
+    if (opKind === 'edit') {
+      return {
+        kind: 'edit-failed',
+        message: "Couldn't edit the message: the model took too long to start streaming. Try editing it again.",
+      };
+    }
+    return {
+      kind: 'model-start-timeout',
+      message: `The model took too long to start this turn${budget ? ` (it exceeded the ${budget}s budget)` : ''} — it may be waiting for an available concurrency slot or rate limit. You can retry, or show the logs for details.`,
+    };
+  }
+
   const timeoutMatch = PREPASS_TIMEOUT_PATTERN.exec(err);
   if (timeoutMatch) {
     const budget = timeoutMatch[1];
@@ -242,6 +284,10 @@ export function noticeActionsFor(kind: NoticeKind): NoticeAction[] {
       return ['retry', 'open-settings'];
     case 'prepass-timeout':
       return ['retry', 'retry-without-pruning', 'open-settings'];
+    case 'model-start-timeout':
+      // Pruning already succeeded, so 'retry-without-pruning' / pruning
+      // 'open-settings' are not the remedy — retry the send, or inspect logs.
+      return ['retry', 'show-logs'];
     case 'prepass-failed':
       return ['retry', 'retry-without-pruning'];
     case 'dropped-line':

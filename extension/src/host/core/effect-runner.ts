@@ -52,7 +52,6 @@ import type {
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
-import { appendPieLog } from '../util/pie-logger';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
 import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
@@ -206,6 +205,18 @@ export interface EffectRunnerDeps {
    */
   getSendTimerTimeoutMs?: () => number;
   /**
+   * Override the model-start send-timer budget (default 600s / 10min). The
+   *  send-timer is RE-ARMED with this budget once the pruning prepass succeeds
+   *  (see `ReArmSendTimer`): the remaining wait is model-start (concurrency /
+   *  rate-limit / first-token), which can legitimately be long, so it gets a
+   *  far more generous budget than the prepass window. A fire after re-arm
+   *  carries the model-start error string so the notice blames model-start,
+   *  not pruning. Sized to bound a genuinely-stuck turn without tripping a
+   *  false positive on an intended concurrency wait. Used by tests to avoid
+   *  waiting the full 10min.
+   */
+  modelStartTimerTimeoutMs?: number;
+  /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
    * advance timers synchronously without wall-clock waits.
@@ -241,6 +252,12 @@ interface InFlightSend {
   /** The budget this send's timer was armed with (prepass-aware when
    *  `getSendTimerTimeoutMs` is wired); surfaces in the fire error message. */
   budgetMs: number;
+  /** Which budget the timer is currently armed with: `prepass` (the tight
+   *  `prepassTimeoutSec` + headroom budget armed at send-dispatch) or
+   *  `modelStart` (the generous model-start budget set by `ReArmSendTimer`
+   *  once pruning succeeds). Determines the fire error string so the notice
+   *  blames the right cause (pruning vs model-start). */
+  phase: 'prepass' | 'modelStart';
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
@@ -283,7 +300,19 @@ export class EffectRunner {
    *  so the reducer reverts via `pending.promoted[corrId]`. */
   private static readonly SEND_TIMER_TIMEOUT_MS = 120_000;
 
+  /** The model-start budget the send-timer is RE-ARMED with once the pruning
+   *  prepass succeeds (`ReArmSendTimer`). The remaining wait is model-start
+   *  (concurrency/rate-limit/first-token), which can legitimately be long, so
+   *  this is far more generous than the prepass budget. Sized to bound a
+   *  genuinely-stuck turn (a silent hang after pruning) without tripping a
+   *  false positive on an intended concurrency wait. A fire after re-arm
+   *  carries the model-start error string so the notice blames model-start,
+   *  not pruning. */
+  private static readonly MODEL_START_TIMER_TIMEOUT_MS = 600_000;
+
   private readonly sendTimerTimeoutMs: number;
+
+  private readonly modelStartTimerTimeoutMs: number;
 
   /** Dispatch table: one handler per `Effect['kind']`. The `Record` key type
    *  forces every kind to have an entry (compile-time exhaustiveness). Built
@@ -292,6 +321,7 @@ export class EffectRunner {
 
   constructor(private readonly deps: EffectRunnerDeps) {
     this.sendTimerTimeoutMs = deps.sendTimerTimeoutMs ?? EffectRunner.SEND_TIMER_TIMEOUT_MS;
+    this.modelStartTimerTimeoutMs = deps.modelStartTimerTimeoutMs ?? EffectRunner.MODEL_START_TIMER_TIMEOUT_MS;
     this.timer = deps.timer ?? defaultTimerSink;
     this.handlers = {
       // ── RPC kinds: route through the double-wrap. `runRpc` short-circuits
@@ -325,6 +355,7 @@ export class EffectRunner {
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
       ClearSendTimer: (e) => this.clearInFlightSend(e.corrId),
+      ReArmSendTimer: (e) => this.reArmInFlightSend(e.corrId),
       HydrateModel: (e) => this.handleHydrateModel(e),
       // ── Template rows (pure 1:1 effect → *Result). ──
       FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffService.openFileDiff(e.sessionPath, e.filePath) }),
@@ -691,6 +722,7 @@ export class EffectRunner {
       userParts,
       timer: null,
       budgetMs,
+      phase: 'prepass',
       abort,
       disposed: false,
       fired: false,
@@ -711,7 +743,11 @@ export class EffectRunner {
    *  `pending.promoted[corrId]`, explicit-corrId short-circuiting its scan).
    *  If `requestId` is unknown (early-ack never happened), the pre-ack
    *  `RequestTracker` timeout should have rejected first and cleared this
-   *  timer via the catch — log so the degenerate case is debuggable. */
+   *  timer via the catch — log so the degenerate case is debuggable. The fire
+   *  error string depends on `send.phase`: `prepass` (pruning still running →
+   *  genuine pruning timeout) vs `modelStart` (pruning succeeded → the delay
+   *  is model-start/concurrency, not pruning). The error mapper distinguishes
+   *  the two strings so the notice blames the right cause. */
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
     send.disposed = true;
@@ -727,12 +763,15 @@ export class EffectRunner {
     //  mode for the next turn).
     this.restorePruningMode(send);
     if (send.requestId) {
+      const error = send.phase === 'modelStart'
+        ? `Timed out waiting for the model to start streaming (${send.budgetMs / 1000}s)`
+        : `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`;
       this.deps.dispatchEvent({
         kind: 'PreflightFailed',
         corrId: send.corrId,
         sessionPath: send.sessionPath,
         requestId: send.requestId,
-        error: `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`,
+        error,
       });
       return;
     }
@@ -740,6 +779,25 @@ export class EffectRunner {
       'warn',
       `send-timer fired before early-ack for corrId=${send.corrId} session=${send.sessionPath} (pre-ack RequestTracker timer should have fired first)`,
     );
+  }
+
+  /** Re-arm the post-ack send-timer with the (generous) model-start budget.
+   *  Called when the pruning prepass SUCCEEDS (`ReArmSendTimer` effect, emitted
+   *  by the reducer on the `pruning-result` `CustomMessage`). The send-timer was
+   *  armed at send-dispatch with the tight prepass budget; once pruning is done
+   *  the remaining wait is model-start (concurrency/rate-limit/first-token),
+   *  which can legitimately be long, so the budget switches to
+   *  `modelStartTimerTimeoutMs`. Cancels the in-flight prepass timer and starts
+   *  a fresh one (the model-start window gets its own budget from this moment).
+   *  No-op if the send already committed/cleared/fired (entry gone or disposed)
+   *  — a late `ReArmSendTimer` after a fire/commit is harmless. */
+  private reArmInFlightSend(corrId: string): void {
+    const send = this.inFlightSends.get(corrId);
+    if (!send || send.disposed) return;
+    if (send.timer) this.timer.cancel(send.timer);
+    send.budgetMs = this.modelStartTimerTimeoutMs;
+    send.phase = 'modelStart';
+    send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
   }
 
   /** Clear the send-timer + abort context for a corrId. Called on pre-ack

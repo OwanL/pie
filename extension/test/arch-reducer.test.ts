@@ -1991,6 +1991,48 @@ test('reducer: PreflightSuperseded retracts a false-positive prepass-timeout (re
   assert.equal((result2.state.transcript.bySession['/s'] ?? []).length, 1);
 });
 
+test('reducer: PreflightSuperseded also retracts a false-positive model-start-timeout (clears the notice)', () => {
+  // Mirror of the prepass-timeout retraction, but for a model-start fire:
+  // pruning already succeeded, the model-start budget then fired a false-
+  // positive PreflightFailed (concurrency wait, not a real failure). When the
+  // turn later starts streaming, PreflightSuperseded must clear the
+  // model-start-timeout notice too (the gate was extended beyond prepass-timeout).
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, runningSessionPaths: [] },
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: { '/s': [] },
+      windowBySession: { '/s': { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false } },
+    },
+    settings: {
+      ...initialArchState.settings,
+      notice: 'The model took too long to start this turn (it exceeded the 600s budget) — it may be waiting for an available concurrency slot or rate limit. You can retry, or show the logs for details.',
+      noticeKind: 'model-start-timeout',
+      noticeRaw: 'Timed out waiting for the model to start streaming (600s)',
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'PreflightSuperseded',
+    corrId: 'c-ms',
+    requestId: 'req-ms',
+    sessionPath: '/s',
+    localId: 'loc-ms',
+    composedText: 'hi',
+    timestamp: 1000,
+  });
+
+  // False-positive model-start-timeout notice cleared (the gate was extended
+  // to model-start-timeout, not just prepass-timeout).
+  assert.equal(result.state.settings.notice, null);
+  assert.equal(result.state.settings.noticeKind, null);
+  // Optimistic user message re-inserted + running restored (same restore as
+  // the prepass-timeout case).
+  assert.equal((result.state.transcript.bySession['/s'] ?? []).length, 1);
+  assert.ok(result.state.sessions.runningSessionPaths.includes('/s'));
+});
+
 test('reducer: post-ack PreflightFailed rolls back an EDIT via promoted (no sendRejected; kind-aware notice)', () => {
   // Post-ack edit failure: the edit was promoted (EditResult{ok:true}), so the
   // rollback snapshot lives in `promoted`. PreflightFailed rolls it back — but,
@@ -2101,7 +2143,16 @@ test('reducer: prepass phase running→succeeded on a pruning-result CustomMessa
   });
   assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
   assert.equal(result.state.pending.prepassBySession['/s']?.latencyMs, 250);
-  let view = selectViewState(result.state);
+  // Pruning succeeded → the reducer re-arms the post-ack send-timer with the
+  // (generous) model-start budget (ReArmSendTimer) so an intended concurrency
+  // wait doesn't trip a spurious prepass-timeout false positive ("Pruning took
+  // too long") after pruning already finished. Carries the promoted op's corrId
+  // (the in-flight send that owns the timer).
+  assert.ok(
+    result.effects.some((e) => e.kind === 'ReArmSendTimer' && e.corrId === 'c-pp'),
+    'pruning-result emits ReArmSendTimer for the promoted corrId',
+  );
+  const view = selectViewState(result.state);
   assert.equal(view.prepassPhase, 'succeeded', 'projected prepassPhase succeeded (promoted op still exists)');
   assert.equal(view.prepassStartedAt, 1000, 'startedAt still projected from the promoted op');
   assert.equal(view.prepassLatencyMs, 250, 'latencyMs projected from the tracked entry');
@@ -2115,6 +2166,10 @@ test('reducer: prepass phase running→succeeded on a pruning-result CustomMessa
     message: { id: 'cm-prune2', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const, customType: 'pruning-result' as const, customDetails: { prepassLatencyMs: 999 } } as ChatMessage,
   });
   assert.equal(noOp.state.pending.prepassBySession['/s'], undefined, 'no fabricated chip for a background / already-committed pruning-result');
+  assert.ok(
+    !noOp.effects.some((e) => e.kind === 'ReArmSendTimer'),
+    'no ReArmSendTimer for a session with no active (running) prepass',
+  );
 });
 
 test('reducer: prepass phase running→idle at the commit point (first MessageStarted clears prepassBySession) (Brief F host-side)', () => {

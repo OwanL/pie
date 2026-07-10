@@ -13,6 +13,7 @@ export interface SessionTabProps {
   sessionByPath: Map<string, SessionSummary>;
   openIndexByPath: Map<string, number>;
   runningPathSet: Set<string>;
+  startingModelPathSet: Set<string>;
   unreadFinishedPathSet: Set<string>;
   /** Effective active path (host `activeSession.path`, or an optimistic
    *  override while a tab click is awaiting the host round-trip). Replaces the
@@ -44,6 +45,7 @@ export const SessionTab = memo(function SessionTab({
   sessionByPath,
   openIndexByPath,
   runningPathSet,
+  startingModelPathSet,
   unreadFinishedPathSet,
   activePath,
   hasPendingExtensionUIRequest,
@@ -61,6 +63,7 @@ export const SessionTab = memo(function SessionTab({
   const isActive = activePath === tabPath;
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
+  const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
   const review = session
@@ -129,7 +132,7 @@ export const SessionTab = memo(function SessionTab({
         ) : (
           <>
             {isRunning
-              ? <span class="session-tab-running" aria-hidden="true" />
+              ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
               : isUnreadFinished
                 ? <span class="session-tab-finished" aria-hidden="true" />
                 : null}

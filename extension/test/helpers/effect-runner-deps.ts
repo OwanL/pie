@@ -51,6 +51,11 @@ export interface MakeEffectRunnerDepsOpts {
   /** Dynamic send-timer budget (prepass-aware production wiring); takes
    *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. */
   getSendTimerTimeoutMs?: () => number;
+  /** Override the model-start send-timer budget (default 600s). The send-timer
+   *  is re-armed with this budget once the pruning prepass succeeds
+   *  (`ReArmSendTimer`); a fire after re-arm carries the model-start error
+   *  string. Used by tests to avoid waiting the full 10min. */
+  modelStartTimerTimeoutMs?: number;
   /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
   timer?: TimerSink;
   /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
@@ -209,6 +214,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     dispatchEvent: opts.dispatchEvent ?? (() => {}),
     sendTimerTimeoutMs: opts.sendTimerTimeoutMs,
     getSendTimerTimeoutMs: opts.getSendTimerTimeoutMs,
+    modelStartTimerTimeoutMs: opts.modelStartTimerTimeoutMs,
     timer: opts.timer,
   };
 

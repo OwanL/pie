@@ -16,6 +16,7 @@ interface SessionTabsProps {
   openTabPaths: string[];
   pinnedTabPaths: string[];
   runningSessionPaths: string[];
+  startingModelSessionPaths: string[];
   unreadFinishedSessionPaths: string[];
   activeSession: SessionSummary | null;
   activeRunSummary: ActiveRunSummary | null;
@@ -50,6 +51,7 @@ export function SessionTabs({
   openTabPaths,
   pinnedTabPaths,
   runningSessionPaths,
+  startingModelSessionPaths,
   unreadFinishedSessionPaths,
   activeSession,
   activeRunSummary,
@@ -152,6 +154,7 @@ export function SessionTabs({
   const sessionByPath = useMemo(() => new Map(sessions.map((session) => [session.path, session])), [sessions]);
   const openIndexByPath = useMemo(() => new Map(openTabPaths.map((path, index) => [path, index])), [openTabPaths]);
   const runningPathSet = useMemo(() => new Set(runningSessionPaths), [runningSessionPaths]);
+  const startingModelPathSet = useMemo(() => new Set(startingModelSessionPaths), [startingModelSessionPaths]);
   const unreadFinishedPathSet = useMemo(() => new Set(unreadFinishedSessionPaths), [unreadFinishedSessionPaths]);
   const pinnedPathSet = useMemo(() => new Set(pinnedTabPaths), [pinnedTabPaths]);
   const deferredPathSet = useMemo(() => new Set(deferredSessionPaths), [deferredSessionPaths]);
@@ -312,6 +315,7 @@ export function SessionTabs({
             sessionByPath={sessionByPath}
             openIndexByPath={openIndexByPath}
             runningPathSet={runningPathSet}
+            startingModelPathSet={startingModelPathSet}
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}

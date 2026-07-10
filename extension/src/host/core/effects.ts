@@ -309,7 +309,8 @@ export type Effect =
   | DrainBackendReadyQueueEffect
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
-  | ClearSendTimerEffect;
+  | ClearSendTimerEffect
+  | ReArmSendTimerEffect;
 
 /**
  * Drain queued sends when a pending session path resolves to a real path.
@@ -367,24 +368,21 @@ export interface ClearSendTimerEffect extends EffectBase {
   kind: 'ClearSendTimer';
 }
 
-// ─── Type guards ────────────────────────────────────────────────────────────────
-
-/** True for any effect whose `kind` ends in `Rpc` and routes through the double-wrap. */
-export function isRpcEffect(
-  e: Effect,
-): e is SendRpcEffect | EditRpcEffect | InterruptRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect {
-  return (
-    e.kind === 'SendRpc' ||
-    e.kind === 'EditRpc' ||
-    e.kind === 'InterruptRpc' ||
-    e.kind === 'TruncateRpc' ||
-    e.kind === 'ExtensionUiResponseRpc'
-  );
+/**
+ * Re-arm the post-ack send-timer with the (generous) model-start budget.
+ * Emitted by the reducer when the pruning prepass SUCCEEDS (the
+ * `pruning-result` `CustomMessage` lands while `prepassBySession[session]` is
+ * `running`). The send-timer was armed at send-dispatch with the tight prepass
+ * budget (`prepassTimeoutSec` + first-token headroom); once pruning is done the
+ * remaining wait is model-start (concurrency/rate-limit/first-token), which
+ * can legitimately be long. Re-arming prevents a spurious `prepass-timeout`
+ * false positive for an intended concurrency wait, while still bounding a
+ * genuinely-stuck turn (a later fire carries the model-start error string so
+ * the notice blames model-start, not pruning). Carries only `corrId`; the
+ * budget source lives in `EffectRunner` (mirroring `ClearSendTimer`). See
+ * `docs/STATE_CONTRACT.md` § Optimistic Reconciliation "Timer ownership".
+ */
+export interface ReArmSendTimerEffect extends EffectBase {
+  kind: 'ReArmSendTimer';
 }
 
-/** True for lifecycle effects routed through `enqueueLifecycle` directly. */
-export function isLifecycleEffect(
-  e: Effect,
-): e is OpenSessionEffect | CreateSessionEffect | DuplicateSessionEffect {
-  return e.kind === 'OpenSession' || e.kind === 'CreateSession' || e.kind === 'DuplicateSession';
-}

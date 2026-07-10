@@ -571,6 +571,90 @@ test('EffectRunner SendRpc send-timer budget honors getSendTimerTimeoutMs (prepa
   runner.dispose();
 });
 
+test('EffectRunner ReArmSendTimer re-arms the send-timer with the model-start budget (fire blames model-start, not pruning)', async () => {
+  // Pruning succeeds → the reducer emits ReArmSendTimer. The send-timer (armed
+  // with the tight prepass budget at send-dispatch) is cancelled and re-armed
+  // with the generous model-start budget. A later fire carries the model-start
+  // error string so the notice blames model-start (concurrency/rate-limit),
+  // NOT pruning — pruning already finished.
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-ms' }),
+    sendTimerTimeoutMs: 50_000, // tight prepass budget (50s)
+    modelStartTimerTimeoutMs: 90_000, // generous model-start budget (90s; small for test)
+    timer: timers,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SendRpc', corrId: 'c-ms', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-ms' });
+  await settle();
+  assert.equal(timers.size, 1, 'prepass send-timer armed after early-ack');
+
+  // Pruning succeeds → reducer would emit ReArmSendTimer; drive it directly.
+  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-ms' });
+  assert.equal(timers.size, 1, 're-armed: old prepass timer cancelled, new model-start timer scheduled');
+
+  // Fire the (re-armed) model-start timer.
+  timers.runAll();
+  const pf = dispatchedEvents[0];
+  assert.equal(pf?.kind, 'PreflightFailed');
+  if (pf?.kind === 'PreflightFailed') {
+    // model-start error string (NOT the prepass/turn string) → notice blames
+    // model-start, not pruning.
+    assert.match(pf.error, /Timed out waiting for the model to start streaming/);
+    assert.ok(!/Timed out waiting for the turn to start streaming/.test(pf.error), 'not the prepass-timeout string');
+    assert.match(pf.error, /90s/, 'model-start budget (90s), not the 50s prepass budget');
+  }
+  runner.dispose();
+});
+
+test('EffectRunner ReArmSendTimer is a no-op when no in-flight send exists (late re-arm after commit/fire)', () => {
+  const timers = new FakeTimerSink();
+  const { deps } = makeEffectRunnerDeps({ timer: timers });
+  const runner = new EffectRunner(deps);
+  // No send was dispatched → no in-flight entry. ReArmSendTimer must not throw
+  // and must not schedule a timer.
+  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-none' });
+  assert.equal(timers.size, 0);
+  runner.dispose();
+});
+
+test('EffectRunner ReArmSendTimer also covers the EDIT path (edit waiting for a slot does not false-positive as pruning)', async () => {
+  // An edit arms the same post-ack send-timer (phase 'prepass'). When pruning
+  // succeeds the reducer re-arms it with the model-start budget, so an edit
+  // waiting for a concurrency slot does not trip a spurious prepass-timeout
+  // ("Pruning took too long") either. The fire carries the model-start string;
+  // the mapper then classifies it as edit-failed (opKind 'edit').
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-edit-ms' }),
+    sendTimerTimeoutMs: 50_000,
+    modelStartTimerTimeoutMs: 90_000,
+    timer: timers,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'EditRpc', corrId: 'c-edit-ms', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-edit-ms' });
+  await settle();
+  assert.equal(timers.size, 1, 'edit send-timer armed after early-ack');
+
+  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-edit-ms' });
+  assert.equal(timers.size, 1, 'edit re-armed with the model-start budget');
+
+  timers.runAll();
+  const pf = dispatchedEvents[0];
+  assert.equal(pf?.kind, 'PreflightFailed');
+  if (pf?.kind === 'PreflightFailed') {
+    assert.match(pf.error, /Timed out waiting for the model to start streaming/);
+    assert.match(pf.error, /90s/);
+  }
+  runner.dispose();
+});
+
 test('EffectRunner EditRpc send-timer dispatches PreflightFailed on timeout (edit follows the same phase-scoped shape)', async () => {
   const timers = new FakeTimerSink();
   const dispatchedEvents: Event[] = [];

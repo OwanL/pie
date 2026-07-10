@@ -560,6 +560,16 @@ body.session-tab-dragging {
   will-change: opacity;
 }
 
+/* 'Starting model' phase: pruning already succeeded but the model has not yet
+   started streaming (the post-pruning, pre-commit window — includes
+   concurrency-limit / rate-limit waits). A muted, less-saturated dot with a
+   slower, calmer pulse distinguishes an intended wait from active streaming. */
+.session-tab-running.starting-model {
+  background: color-mix(in srgb, var(--panel-accent) 50%, var(--panel-muted));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--panel-accent) 8%, transparent);
+  animation: pulse 2.6s ease-in-out infinite;
+}
+
 .session-tab-parked {
   width: auto;
   min-width: 10px;
