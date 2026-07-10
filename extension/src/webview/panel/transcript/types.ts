@@ -54,3 +54,8 @@ export interface TranscriptCommonProps {
   /** Cancel the in-flight pruning prepass from within the agent reply. */
   onCancelPrepass?: () => void;
 }
+
+/** Shared by {@link TranscriptView} and {@link TranscriptVirtualList}. */
+export interface TranscriptVirtualListProps extends TranscriptCommonProps {
+  sessionKey: string | null;
+}

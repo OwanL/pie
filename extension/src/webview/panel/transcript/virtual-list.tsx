@@ -13,33 +13,15 @@ import { useTranscriptScroll } from './use-transcript-scroll';
 import { useTranscriptScrollAnchor } from './use-transcript-scroll-anchor';
 import { handleTranscriptClick } from './transcript-click-handler';
 import { cx } from '../utils/cx';
-import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
+import type {
+  RenderToolCall,
+  TranscriptContextMenuHandler,
+  TranscriptVirtualListProps,
+} from './types';
 import { TranscriptVirtualRow } from './virtual-list-row';
 import { buildTranscriptRows, estimateTranscriptRowSize, type TranscriptRow } from './virtual-list-rows';
 
-interface TranscriptVirtualListProps {
-  sessionKey: string | null;
-  transcript: ChatMessage[];
-  transcriptWindow: TranscriptWindow;
-  busy: boolean;
-  prefs: ChatPrefs;
-  pruningSettings: PruningSettings;
-  systemPrompts: SystemPromptEntry[];
-  pruningResult: PruningResult | null;
-  pendingAssistantModelId?: string;
-  pendingAssistantThinkingLevel?: ThinkingLevel;
-  workingDirectory: string | null;
-  editingId: string | null;
-  onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
-  onEditCancel: () => void;
-  onOpenFile: (path: string) => void;
-  onContextMenu: TranscriptContextMenuHandler;
-  onLoadOlder: () => void;
-  onLoadNewer: () => void;
-  onJumpToLatest: () => void;
-  onCancelPrepass?: () => void;
-}
+
 
 function fallbackTranscriptRow(rows: readonly TranscriptRow[]): TranscriptRow {
   return rows[rows.length - 1] ?? { kind: 'bottomGap', key: 'fallback-gap' };

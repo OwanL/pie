@@ -9,6 +9,7 @@
  */
 
 import type {
+  ChatMessage,
   ChatPrefs,
   ComposerInput,
   PruningResult,
@@ -16,12 +17,11 @@ import type {
   SystemPromptEntry,
   ThinkingLevel,
   TranscriptWindow,
-  ChatMessage,
 } from '../../../shared/protocol';
-import type { TranscriptCommonProps, TranscriptContextMenuHandler } from './types';
+import type { TranscriptContextMenuHandler, TranscriptVirtualListProps } from './types';
 import { TranscriptView } from '.';
 
-interface TranscriptSurfaceProps extends TranscriptCommonProps {
+interface TranscriptSurfaceProps extends TranscriptVirtualListProps {
   sessionPath: string;
   isActive: boolean;
 }
@@ -29,6 +29,7 @@ interface TranscriptSurfaceProps extends TranscriptCommonProps {
 function TranscriptSurface({
   sessionPath,
   isActive,
+  sessionKey,
   transcript,
   transcriptWindow,
   transcriptLoaded,
@@ -64,7 +65,7 @@ function TranscriptSurface({
       data-session-path={sessionPath}
     >
       <TranscriptView
-        sessionKey={sessionPath}
+        sessionKey={sessionKey}
         transcript={transcript}
         transcriptWindow={transcriptWindow}
         transcriptLoaded={transcriptLoaded}
@@ -118,11 +119,14 @@ export interface TranscriptHostProps {
   postMessage: (msg: any) => void;
   /** Cancel the in-flight pruning prepass from within the agent reply. */
   onCancelPrepass?: () => void;
+  /** Optional session key; falls back to activeSessionPath when omitted. */
+  sessionKey?: string | null;
 }
 
 export function TranscriptHost({
   openTabPaths,
   activeSessionPath,
+  sessionKey,
   transcript,
   transcriptWindow,
   transcriptLoaded,
@@ -141,15 +145,31 @@ export function TranscriptHost({
   onEditCancel,
   onOpenFile,
   onContextMenu,
-  postMessage,
   onCancelPrepass,
+  postMessage,
 }: TranscriptHostProps) {
+  // Wrap the callbacks from the parent with postMessage so they carry
+  // the active session path as part of the control message.
+  const loadOlder = () => postMessage({
+    type: 'loadOlderTranscript',
+    sessionPath: activeSessionPath,
+  });
+  const loadNewer = () => postMessage({
+    type: 'loadNewerTranscript',
+    sessionPath: activeSessionPath,
+  });
+  const jumpToLatest = () => postMessage({
+    type: 'jumpToLatestTranscript',
+    sessionPath: activeSessionPath,
+  });
+
   return (
     <div class="transcript-host" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column">
       {activeSessionPath && openTabPaths.includes(activeSessionPath) && (
         <TranscriptSurface
           sessionPath={activeSessionPath}
           isActive
+          sessionKey={sessionKey ?? activeSessionPath}
           transcript={transcript}
           transcriptWindow={transcriptWindow}
           transcriptLoaded={transcriptLoaded}
@@ -168,18 +188,9 @@ export function TranscriptHost({
           onEditCancel={onEditCancel}
           onOpenFile={onOpenFile}
           onContextMenu={onContextMenu}
-          onLoadOlder={() => postMessage({
-            type: 'loadOlderTranscript',
-            sessionPath: activeSessionPath,
-          })}
-          onLoadNewer={() => postMessage({
-            type: 'loadNewerTranscript',
-            sessionPath: activeSessionPath,
-          })}
-          onJumpToLatest={() => postMessage({
-            type: 'jumpToLatestTranscript',
-            sessionPath: activeSessionPath,
-          })}
+          onLoadOlder={loadOlder}
+          onLoadNewer={loadNewer}
+          onJumpToLatest={jumpToLatest}
           onCancelPrepass={onCancelPrepass}
         />
       )}
