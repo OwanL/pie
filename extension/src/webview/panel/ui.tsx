@@ -292,7 +292,7 @@ function ComposerView({
         selectedLevel={selectedLevel}
         supportsReasoning={supportsReasoning}
         contextIndicator={contextIndicatorProp}
-        contextBreakdownTitle={contextBreakdown?.title ?? null}
+        contextBreakdown={contextBreakdown}
         sessionTokenIndicator={sessionTokenIndicatorProp}
         sessionCostIndicator={sessionCostIndicator}
         tokenRateIndicator={tokenRateIndicator}

@@ -25,6 +25,11 @@ interface PanelChipBaseProps {
   title?: string;
   /** Custom tooltip text; when present it replaces the native title. */
   tooltip?: string;
+  /** Rich tooltip content (JSX). When provided, the tooltip renders this
+   *  subtree into the host via an imperative Preact root (instead of setting
+   *  textContent), and becomes hoverable. Takes precedence over {@link tooltip}.
+   *  See `Tooltip.contentNode`. */
+  tooltipNode?: ComponentChildren;
   /**
    * When true, freeze the tooltip text at show time for the duration of the
    * hover (see `Tooltip.freezeWhileVisible`). Use for live-updating indicator
@@ -68,7 +73,10 @@ function chipContent({ label, children, leading, trailing }: Pick<PanelChipBaseP
   );
 }
 
-function wrapTooltip(node: JSX.Element, tooltip: string | undefined, freezeWhileVisible?: boolean): JSX.Element {
+function wrapTooltip(node: JSX.Element, tooltip: string | undefined, tooltipNode: ComponentChildren | undefined, freezeWhileVisible?: boolean): JSX.Element {
+  if (tooltipNode !== undefined && tooltipNode !== null && tooltipNode !== '') {
+    return <Tooltip contentNode={tooltipNode} freezeWhileVisible={freezeWhileVisible}>{node}</Tooltip>;
+  }
   if (!tooltip) return node;
   return <Tooltip content={tooltip} freezeWhileVisible={freezeWhileVisible}>{node}</Tooltip>;
 }
@@ -76,7 +84,7 @@ function wrapTooltip(node: JSX.Element, tooltip: string | undefined, freezeWhile
 export function PanelChip(props: PanelChipProps) {
   const className = chipClassName(props);
   const content = chipContent(props);
-  const title = props.tooltip ? undefined : props.title;
+  const title = props.tooltip || props.tooltipNode ? undefined : props.title;
 
   if (props.as === 'button') {
     return wrapTooltip(
@@ -91,6 +99,7 @@ export function PanelChip(props: PanelChipProps) {
         {content}
       </button>,
       props.tooltip,
+      props.tooltipNode,
       props.freezeWhileVisible,
     );
   }
@@ -108,6 +117,7 @@ export function PanelChip(props: PanelChipProps) {
         {content}
       </div>,
       props.tooltip,
+      props.tooltipNode,
       props.freezeWhileVisible,
     );
   }
@@ -124,6 +134,7 @@ export function PanelChip(props: PanelChipProps) {
       {content}
     </span>,
     props.tooltip,
+    props.tooltipNode,
     props.freezeWhileVisible,
   );
 }
@@ -133,12 +144,14 @@ interface ToolbarChipProps {
   title?: string;
   /** Custom tooltip text; when present it replaces the native title. */
   tooltip?: string;
+  /** Rich tooltip content (JSX); takes precedence over {@link tooltip}. */
+  tooltipNode?: ComponentChildren;
   ariaLabel?: string;
   tone?: PanelChipTone;
 }
 
-export function ToolbarChip({ label, title, tooltip, ariaLabel, tone = 'muted' }: ToolbarChipProps) {
-  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} ariaLabel={ariaLabel} />;
+export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted' }: ToolbarChipProps) {
+  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} />;
 }
 
 export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed';
@@ -164,7 +177,7 @@ function indicatorClassName(kind: ToolbarIndicatorKind, severity?: string | null
   ].filter(Boolean).join(' ');
 }
 
-export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, ariaLabel, freezeWhileVisible }: ToolbarIndicatorChipProps) {
+export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, tooltipNode, ariaLabel, freezeWhileVisible }: ToolbarIndicatorChipProps) {
   return (
     <PanelChip
       as="div"
@@ -176,6 +189,7 @@ export function ToolbarIndicatorChip({ kind, severity, state, label, title, tool
       ariaLabel={ariaLabel}
       title={title}
       tooltip={tooltip}
+      tooltipNode={tooltipNode}
       freezeWhileVisible={freezeWhileVisible}
       label={label}
     />

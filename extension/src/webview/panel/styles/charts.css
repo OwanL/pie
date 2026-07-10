@@ -60,6 +60,63 @@
   flex-shrink: 0;
 }
 
+/* ── Context window breakdown bar ────────────────────────────────────────── */
+
+.rich-tooltip--ctx {
+  min-width: 240px;
+  max-width: 320px;
+}
+
+.ctx-bar {
+  display: flex;
+  width: 100%;
+  border-radius: var(--panel-radius-sm);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel-border-subtle) 50%, transparent);
+}
+
+.ctx-bar-seg {
+  height: 100%;
+  min-width: 0;
+  transition: width 0.15s ease;
+}
+
+.ctx-bar-seg--muted {
+  opacity: 0.55;
+}
+
+.ctx-legend {
+  margin-top: 2px;
+}
+
+.ctx-legend-item {
+  align-items: baseline;
+  gap: 4px;
+}
+
+.ctx-legend-label {
+  color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted));
+}
+
+.ctx-legend-kind {
+  font-size: 9px;
+  color: var(--panel-muted);
+}
+
+.ctx-legend-pct {
+  font-size: 9px;
+  color: var(--panel-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-legend-swatch--muted {
+  opacity: 0.55;
+}
+
+.rich-tooltip-ctx-notes {
+  margin-top: 2px;
+}
+
 /* ── StackedAreaChart ─────────────────────────────────────────────────────── */
 
 .chart-wrap {

@@ -10,6 +10,8 @@ import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarSelectC
 import { ModelPicker } from '../components/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
 import { orderModelsForPicker } from './model-list';
+import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
+import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
 import { ComposerSettingsMenu } from './settings-menu';
 
@@ -37,7 +39,7 @@ interface ComposerToolbarProps {
   selectedLevel: ThinkingLevel;
   supportsReasoning: boolean;
   contextIndicator: { label: string | null; ariaLabel: string; severity: string | null } | null;
-  contextBreakdownTitle: string | null;
+  contextBreakdown: ContextWindowBreakdown | null;
   sessionTokenIndicator: { label: string; ariaLabel: string; tooltip: string };
   sessionCostIndicator: { label: string; ariaLabel: string; tooltip: string } | null;
   tokenRateIndicator: TokenRateIndicatorState;
@@ -63,7 +65,7 @@ export function ComposerToolbar({
   selectedLevel,
   supportsReasoning,
   contextIndicator,
-  contextBreakdownTitle,
+  contextBreakdown,
   sessionTokenIndicator,
   sessionCostIndicator,
   tokenRateIndicator,
@@ -120,17 +122,7 @@ export function ComposerToolbar({
       </div>
 
       <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">
-        {tokenRateIndicator.label && !prefs.hideTokenRate && (
-          <ToolbarIndicatorChip
-            kind="speed"
-            state={tokenRateIndicator.paused ? 'paused' : null}
-            ariaLabel={tokenRateIndicator.ariaLabel}
-            tooltip={tokenRateIndicator.tooltip}
-            label={tokenRateIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-
+        {/* Resource metrics — cumulative accounting, then remaining capacity (left of cluster) */}
         {!prefs.hideSessionTokens && (
           <ToolbarIndicatorChip
             kind="tokens"
@@ -151,25 +143,35 @@ export function ComposerToolbar({
           />
         )}
 
-        {contextIndicator?.label && contextBreakdownTitle && !prefs.hideContextIndicator && (
+        {contextIndicator?.label && contextBreakdown && !prefs.hideContextIndicator && (
           <ToolbarIndicatorChip
             kind="context"
             severity={contextIndicator.severity}
             ariaLabel={contextIndicator.ariaLabel}
-            tooltip={contextBreakdownTitle}
+            tooltipNode={<ContextWindowBreakdownChart breakdown={contextBreakdown} />}
             label={contextIndicator.label}
             freezeWhileVisible
           />
         )}
 
+        {/* Live stats — throughput, then run state (pinned right) */}
+        {tokenRateIndicator.label && !prefs.hideTokenRate && (
+          <ToolbarIndicatorChip
+            kind="speed"
+            state={tokenRateIndicator.paused ? 'paused' : null}
+            ariaLabel={tokenRateIndicator.ariaLabel}
+            tooltip={tokenRateIndicator.tooltip}
+            label={tokenRateIndicator.label}
+            freezeWhileVisible
+          />
+        )}
+
         {runStatus && !prefs.hideRunStatus && (
-          <div class="ml-auto mr-0 inline-flex shrink-0 items-center gap-1.5">
-            <ToolbarRunStatusChip
-              tone={runStatus.tone}
-              tooltip={runStatus.title}
-              label={runStatus.text}
-            />
-          </div>
+          <ToolbarRunStatusChip
+            tone={runStatus.tone}
+            tooltip={runStatus.title}
+            label={runStatus.text}
+          />
         )}
       </div>
     </div>

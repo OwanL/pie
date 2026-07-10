@@ -50,6 +50,9 @@ export interface ContextWindowBreakdownEntry {
   label?: string;
   value: string;
   kind: ContextWindowBreakdownKind;
+  /** Raw token count for this entry, used to size bar-chart segments. Null when
+   *  the value is unknown (e.g. partial transcript window). */
+  tokens?: number | null;
   /** Subtitle text (file path, message preview) or explanatory note rendered below the row. */
   note?: string;
 }
@@ -268,18 +271,21 @@ function buildFooterEntries(summary: ContextWindowSummary): ContextWindowBreakdo
       label: 'Used',
       value: formatTokenValue(summary.usedTokens, summary.usedKind),
       kind: summary.usedKind,
+      tokens: summary.usedTokens,
     },
     {
       key: 'window.remaining',
       label: 'Remaining',
       value: formatTokenValue(summary.remainingTokens, summary.remainingKind),
       kind: summary.remainingKind,
+      tokens: summary.remainingTokens,
     },
     {
       key: 'window.total',
       label: 'Total',
       value: summary.totalWindow > 0 ? formatTokenValue(summary.totalWindow, 'exact') : 'unknown',
       kind: summary.totalWindow > 0 ? 'exact' : 'unknown',
+      tokens: summary.totalWindow > 0 ? summary.totalWindow : null,
     },
   ];
 }
@@ -342,6 +348,7 @@ function buildFullEntries(
       label: item.label,
       value: formatTokenValue(item.tokens, 'estimated'),
       kind: 'estimated' as ContextWindowBreakdownKind,
+      tokens: item.tokens,
       note: item.note,
     })),
     {
@@ -349,6 +356,7 @@ function buildFullEntries(
       label: 'Other',
       value: formatTokenValue(otherTokens, otherKind),
       kind: otherKind,
+      tokens: otherTokens,
       note: otherNote,
     },
   ];
