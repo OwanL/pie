@@ -315,6 +315,21 @@ export function check(root = repoRoot()) {
       changed = true;
       diffLines = deepDiff(generated, committed, key);
     }
+    // Trailing-newline check: caught by no parsed-JSON mechanism since both
+    // parsed values are identical. sync-models always appends \\n to derived files,
+    // so a committed file missing the newline would silently diverge.
+    if (
+      !changed &&
+      (rel.endsWith('.json') || rel.endsWith('.yaml'))
+    ) {
+      const committedRaw = readFileSync(path.join(root, rel), 'utf8');
+      if (!committedRaw.endsWith('\n')) {
+        changed = true;
+        diffLines.push(
+          `${key}: missing trailing newline (sync-models appends \\n)`,
+        );
+      }
+    }
     results.push({ file: rel, changed, diffLines });
   }
   return results;

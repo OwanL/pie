@@ -27,13 +27,6 @@ const MAX_TOOLTIP_ENTRIES = 6;
 const TOOL_CALL_TOKEN_CACHE_MAX = 1024;
 const toolCallTokenCache = new LruCache<string, number>(TOOL_CALL_TOKEN_CACHE_MAX);
 
-/** Reset the per-tool-call token cache. Entries are id-keyed and stable for a
- *  completed call's lifetime, so production never needs to clear this — it
- *  exists for tests that need a deterministic cache state. */
-export function clearToolCallTokenCache(): void {
-  toolCallTokenCache.clear();
-}
-
 /** Cache capacity, exported so tests can drive the eviction boundary. */
 export const TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES = TOOL_CALL_TOKEN_CACHE_MAX;
 
@@ -92,7 +85,7 @@ function formatTokenCount(tokens: number): string {
 function formatTokenValue(tokens: number | null, kind: ContextWindowBreakdownKind): string {
   if (tokens === null) return 'unknown';
   const formatted = formatTokenCount(tokens);
-  if (kind === 'estimated') return tokens === 0 ? '0' : `~${formatted}`;
+  if (kind === 'estimated') return formatted;
   return formatted;
 }
 

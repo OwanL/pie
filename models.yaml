@@ -104,6 +104,11 @@ providers:
     baseUrl: http://localhost:11434/v1
     api: openai-completions
     apiKey: ollama
+    # Host-side provider-gate concurrency config (local model; see umans block).
+    concurrency:
+      maxConcurrentRequests: 4
+      afterburnSeconds: 15
+      queueWaitSeconds: 30
     compat:
       supportsDeveloperRole: false
       supportsReasoningEffort: false
@@ -576,6 +581,11 @@ providers:
       Editor-Version: vscode/1.107.0
       Editor-Plugin-Version: copilot-chat/0.35.0
       Copilot-Integration-Id: vscode-chat
+    # Host-side provider-gate concurrency config (see umans block).
+    concurrency:
+      maxConcurrentRequests: 2
+      afterburnSeconds: 15
+      queueWaitSeconds: 30
     models:
       - id: claude-haiku-4.5
         name: "Copilot: Claude Haiku 4.5"

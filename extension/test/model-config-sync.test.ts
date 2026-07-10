@@ -133,6 +133,11 @@ test('settings.json merge preserves the user model choice and overwrites only re
   assert.equal(merged.proxy, undefined);
 });
 
+test('settings.json ends with a trailing newline (sync-models writes one)', async () => {
+  const text = readText('settings.json');
+  assert.ok(text.endsWith('\n'), 'settings.json should end with a trailing newline (sync-models appends \\n to JSON.stringify output)');
+});
+
 test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.yaml only when absent', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);

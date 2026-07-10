@@ -27,14 +27,10 @@ export type {
   SubagentResult,
   SubagentSingleResult,
 } from './subagent';
-import type { TranscriptCommonProps } from './types';
+import type { TranscriptVirtualListProps } from './types';
 import { TranscriptVirtualList } from './virtual-list';
 
 export { MessageItem, ReasoningBlock };
-
-interface TranscriptViewProps extends TranscriptCommonProps {
-  sessionKey: string | null;
-}
 
 export function TranscriptView({
   sessionKey,
@@ -60,7 +56,7 @@ export function TranscriptView({
   onLoadNewer,
   onJumpToLatest,
   onCancelPrepass,
-}: TranscriptViewProps) {
+}: TranscriptVirtualListProps) {
   const transcriptHydrating = isTranscriptHydrating({ transcript, systemPrompts, transcriptLoaded });
 
   if (transcriptHydrating) {
@@ -75,27 +71,7 @@ export function TranscriptView({
 
   return (
     <TranscriptVirtualList
-      sessionKey={sessionKey}
-      transcript={transcript}
-      transcriptWindow={transcriptWindow}
-      busy={busy}
-      prefs={prefs}
-      pruningSettings={pruningSettings}
-      systemPrompts={systemPrompts}
-      pruningResult={pruningResult}
-      pendingAssistantModelId={pendingAssistantModelId}
-      pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
-      workingDirectory={workingDirectory}
-      editingId={editingId}
-      onEditRequest={onEditRequest}
-      onEditConfirm={onEditConfirm}
-      onEditCancel={onEditCancel}
-      onOpenFile={onOpenFile}
-      onContextMenu={onContextMenu}
-      onLoadOlder={onLoadOlder}
-      onLoadNewer={onLoadNewer}
-      onJumpToLatest={onJumpToLatest}
-      onCancelPrepass={onCancelPrepass}
+      {...{ sessionKey, transcript, transcriptWindow, busy, prefs, pruningSettings, systemPrompts, pruningResult, pendingAssistantModelId, pendingAssistantThinkingLevel, workingDirectory, editingId, onEditRequest, onEditConfirm, onEditCancel, onOpenFile, onContextMenu, onLoadOlder, onLoadNewer, onJumpToLatest, onCancelPrepass }}
     />
   );
 }

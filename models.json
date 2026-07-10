@@ -10,6 +10,11 @@
         "supportsUsageInStreaming": true,
         "maxTokensField": "max_tokens"
       },
+      "concurrency": {
+        "maxConcurrentRequests": 4,
+        "afterburnSeconds": 15,
+        "queueWaitSeconds": 30
+      },
       "models": [
         {
           "id": "mistral-7b-pi:latest",
@@ -390,6 +395,11 @@
         "Editor-Version": "vscode/1.107.0",
         "Editor-Plugin-Version": "copilot-chat/0.35.0",
         "Copilot-Integration-Id": "vscode-chat"
+      },
+      "concurrency": {
+        "maxConcurrentRequests": 2,
+        "afterburnSeconds": 15,
+        "queueWaitSeconds": 30
       },
       "modelOverrides": {
         "claude-haiku-4.5": {

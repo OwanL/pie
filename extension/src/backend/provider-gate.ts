@@ -351,20 +351,6 @@ class ProviderPool {
 		}
 		return this.waiters.splice(bestIdx, 1)[0];
 	}
-
-	/** Force-release all slots held by a session (e.g. on abort). */
-	releaseAllForSession(sessionId: string): void {
-		for (const s of this.slots) {
-			if (s.holder === sessionId) {
-				s.inFlight = false;
-				s.holder = null;
-				s.holdUntil = 0;
-			}
-		}
-		// Wake all waiters — they'll re-evaluate.
-		const waiters = this.waiters.splice(0);
-		for (const w of waiters) w.resolve();
-	}
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -580,10 +566,8 @@ export class ProviderGate {
 	private wrapFetch(): void {
 		if (this.originalFetch) return; // already wrapped
 		this.originalFetch = globalThis.fetch;
-		const self = this;
-		globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-			return self.handleFetch(input, init);
-		} as typeof globalThis.fetch;
+		globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+			this.handleFetch(input, init);
 	}
 
 	/** Match a request URL to a configured provider and return its pool. */

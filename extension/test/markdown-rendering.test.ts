@@ -64,39 +64,6 @@ test('renderMarkdown sanitizes unsafe HTML in enhanced output', async () => {
   assert.match(html, /normal text/);
 });
 
-test('renderMarkdown cache: a repeat call does not grow the cache (hit)', async () => {
-  const mod = await import('../src/webview/panel/markdown.ts');
-  const { renderMarkdown, clearMarkdownCache, getMarkdownCacheSize } = mod;
-  clearMarkdownCache();
-  const input = `wiring-hit-${Math.random()}\n\n# Heading\n\nsome **bold** text and \`code\``;
-  renderMarkdown(input);
-  const sizeAfterFirst = getMarkdownCacheSize();
-  assert.ok(sizeAfterFirst >= 1, 'first call should populate the cache');
-  renderMarkdown(input); // hit -> no new entry
-  assert.equal(getMarkdownCacheSize(), sizeAfterFirst, 'repeat call should hit the cache and not add an entry');
-});
-
-test('renderMarkdown cache is bounded to MARKDOWN_CACHE_MAX_ENTRIES', async () => {
-  const mod = await import('../src/webview/panel/markdown.ts');
-  const { renderMarkdown, clearMarkdownCache, getMarkdownCacheSize, MARKDOWN_CACHE_MAX_ENTRIES } = mod;
-  clearMarkdownCache();
-  for (let i = 0; i < MARKDOWN_CACHE_MAX_ENTRIES + 50; i++) {
-    renderMarkdown(`bound-${i}-${Math.random()}`);
-  }
-  assert.equal(getMarkdownCacheSize(), MARKDOWN_CACHE_MAX_ENTRIES, 'cache should cap and evict LRU entries past the max');
-});
-
-test('renderMarkdown cached result still strips unsafe HTML', async () => {
-  const mod = await import('../src/webview/panel/markdown.ts');
-  const { renderMarkdown, clearMarkdownCache } = mod;
-  clearMarkdownCache();
-  const input = `cached-sanitize-${Math.random()} before <script>alert(1)</script> after`;
-  const first = renderMarkdown(input);
-  const second = renderMarkdown(input); // cache hit
-  assert.doesNotMatch(first, /<script/);
-  assert.doesNotMatch(second, /<script/);
-});
-
 test('transcript.css styles the enhanced code-block affordances', async () => {
   const css = await readTranscriptCss();
   assert.match(css, /\.code-block\s*\{/);

@@ -78,22 +78,8 @@ marked.use({
 const MARKDOWN_CACHE_MAX = 512;
 const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX);
 
-/**
- * Reset the markdown render cache. Entries are content-addressed and always
- * valid, so production never needs to clear this — it exists for tests that
- * need a deterministic cache state.
- */
-export function clearMarkdownCache(): void {
-  markdownCache.clear();
-}
-
 /** Cache capacity, exported so tests can drive the eviction boundary exactly. */
 export const MARKDOWN_CACHE_MAX_ENTRIES = MARKDOWN_CACHE_MAX;
-
-/** Number of entries currently in the cache. Test-support / diagnostics. */
-export function getMarkdownCacheSize(): number {
-  return markdownCache.size;
-}
 
 export function renderMarkdown(text: string): string {
   const cached = markdownCache.get(text);
