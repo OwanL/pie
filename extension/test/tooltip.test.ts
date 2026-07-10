@@ -202,3 +202,38 @@ test('without freezeWhileVisible the tooltip text follows live content updates',
     restoreTimers();
   }
 });
+
+test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', async () => {
+  // A rich tooltip renders its JSX subtree into the host via an imperative
+  // Preact root (not textContent), gets the --rich class + pointer events so
+  // interactive content can be hovered, and unmounts the subtree on hide.
+  installFakeTimers();
+  try {
+    const contentNode = h('div', { class: 'rich-body' }, 'graph here');
+    act(() => {
+      render(h(Tooltip, { contentNode, delayShow: 0, delayHide: 0 }, h('span', { class: 'trigger' }, 'target')), container);
+    });
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+
+    await act(async () => {
+      trigger().dispatchEvent(new MouseEvent('mouseenter'));
+      flushTimers();
+    });
+    assert.ok(host().classList.contains('pie-tooltip-host--rich'), 'host should get the rich class');
+    assert.equal(host().style.pointerEvents, 'auto', 'rich tooltip should be hoverable');
+    const body = host().querySelector('.rich-body');
+    assert.ok(body, 'rich JSX subtree should be mounted in the host');
+    assert.equal(body?.textContent, 'graph here');
+
+    // Hide unmounts the subtree (not just cleared text).
+    await act(async () => {
+      trigger().dispatchEvent(new MouseEvent('mouseleave'));
+      flushTimers();
+    });
+    assert.equal(host().style.display, 'none');
+    assert.equal(host().querySelector('.rich-body'), null, 'subtree should unmount on hide');
+  } finally {
+    restoreTimers();
+  }
+});

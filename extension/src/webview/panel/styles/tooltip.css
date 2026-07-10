@@ -26,6 +26,18 @@
   user-select: none;
 }
 
+/* Rich (JSX) tooltip variant: wider so charts fit, normal wrapping (not
+   pre-line), and pointer events enabled so interactive content (a chart
+   crosshair) can be hovered. The Tooltip component toggles this class and the
+   inline `pointer-events` style per-show. */
+.pie-tooltip-host--rich {
+  max-width: min(420px, calc(100vw - 16px));
+  padding: 8px 10px;
+  white-space: normal;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .pie-tooltip-trigger {
   display: inline-flex;
   max-width: 100%;

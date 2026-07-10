@@ -61,12 +61,60 @@ export interface AggregateProviderThroughput {
   sampleCount: number;
 }
 
-/** One day's per-provider cost (UTC `YYYY-MM-DD`). */
+/** One day's per-provider cost (local `YYYY-MM-DD`). */
 export interface AggregateDailyCost {
-  /** UTC calendar date (`YYYY-MM-DD`). */
+  /** Local calendar date (`YYYY-MM-DD`); resets at local midnight. */
   date: string;
   totalCost: number;
   byProvider: AggregateProviderCost[];
+  /** Per-model cost for this day (hover detail for the weekly chart). */
+  byModel: AggregateDailyModelCost[];
+}
+
+/** Per-model cost within a single day (local). */
+export interface AggregateDailyModelCost {
+  model: string;
+  cost: number;
+}
+
+/** One day's run count (local `YYYY-MM-DD`) for the sessions-tooltip sparkline. */
+export interface AggregateDailyRunCount {
+  /** Local calendar date (`YYYY-MM-DD`). */
+  date: string;
+  runCount: number;
+}
+
+/** A single segment (provider or model) of a series point's breakdown. */
+export interface AggregateSeriesSegment {
+  /** Provider or model id. */
+  key: string;
+  value: number;
+}
+
+/** One point in an intraday timeseries (e.g. today's cumulative cost). The
+ *  point carries per-provider and per-model breakdowns so a stacked-area chart
+ *  can render provider bands and a hover crosshair can show the per-model
+ *  composition at that point.
+ *
+ *  - **Cumulative series** (cost, tokens): `byProvider`/`byModel` are cumulative
+ *    up to and including this point; the chart steps up at each point.
+ *  - **Rate series** (throughput): `byProvider`/`byModel` are the bucket's
+ *    per-provider/per-model rate (tok/s); the chart draws per-bucket bands. */
+export interface AggregateSeriesPoint {
+  /** ms epoch the point is anchored at (turn-end time, or bucket start). */
+  ms: number;
+  /** Per-provider breakdown at this point, sorted descending by value. */
+  byProvider: AggregateSeriesSegment[];
+  /** Per-model breakdown at this point (hover detail), sorted descending. */
+  byModel: AggregateSeriesSegment[];
+}
+
+/** One turn of the most-recent run, for the last-run sparkline. */
+export interface AggregateLastRunTurn {
+  /** ms epoch the turn ended. */
+  ms: number;
+  /** Output tokens reported for this turn. */
+  outputTokens: number;
 }
 
 /** Summary of the most recently finalized run across all sessions. */
@@ -89,6 +137,8 @@ export interface AggregateLastRun {
   inputTokens: number;
   /** Output tokens reported across the run's assistant turns. */
   outputTokens: number;
+  /** Per-turn output tokens for the run (sparkline), ascending by time. */
+  turnSeries: AggregateLastRunTurn[];
 }
 
 /** Live warm-bash pool metrics, aggregated across all open sessions.
@@ -171,11 +221,11 @@ export const EMPTY_PROVIDER_GATE_STATS: ProviderGateStats = {
  */
 export interface AggregateStats {
   // ── Recent: today ──
-  /** Total spend for the current UTC day. */
+  /** Total spend for the current local day (resets at local midnight). */
   todayCost: number;
   /** Today's spend per provider, sorted descending by cost. */
   todayCostByProvider: AggregateProviderCost[];
-  /** Mean output tok/s across completed turns whose sample ended today (UTC). */
+  /** Mean output tok/s across completed turns whose sample ended today (local). */
   todayTokensPerSecond: number;
   /** Per-provider throughput for today, sorted descending by output tokens. */
   todayTokensPerSecondByProvider: AggregateProviderThroughput[];
@@ -190,9 +240,18 @@ export interface AggregateStats {
   /** Approximate distinct files touched across today's runs (sum of per-run
    *  touched-file counts; may double-count a file edited across runs). */
   todayTouchedFileCount: number;
+  /** Intraday cumulative cost series for today (local), one point per turn,
+   *  pruned to [first spend, now]. Stacked by provider; per-model on hover. */
+  todayCostSeries: AggregateSeriesPoint[];
+  /** Intraday cumulative output-token series for today (local), one point per
+   *  turn. Stacked by provider; per-model on hover. */
+  todayTokenSeries: AggregateSeriesPoint[];
+  /** Intraday per-hour throughput series for today (local), one point per hour
+   *  with data. Stacked by provider (tok/s); per-model on hover. */
+  todayThroughputSeries: AggregateSeriesPoint[];
 
   // ── Recent: this week (last 7 days, inclusive of today) ──
-  /** Total spend over the last 7 UTC days (inclusive of today). */
+  /** Total spend over the last 7 local days (inclusive of today). */
   weekCost: number;
   /** Last-7-days spend per provider, sorted descending by cost. */
   weekCostByProvider: AggregateProviderCost[];
@@ -200,6 +259,8 @@ export interface AggregateStats {
   weekRunCount: number;
   /** Per-day cost for the last 14 days (ascending date) — tooltip context. */
   dailyCost: AggregateDailyCost[];
+  /** Per-day run count for the last 14 days (ascending date) — sessions tooltip. */
+  dailyRunCount: AggregateDailyRunCount[];
 
   // ── Current: live / open ──
   /**
@@ -256,10 +317,14 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   todayOutputTokens: 0,
   todayToolCallCount: 0,
   todayTouchedFileCount: 0,
+  todayCostSeries: [],
+  todayTokenSeries: [],
+  todayThroughputSeries: [],
   weekCost: 0,
   weekCostByProvider: [],
   weekRunCount: 0,
   dailyCost: [],
+  dailyRunCount: [],
   liveTokensPerSecond: 0,
   runningSessionCount: 0,
   openTabCount: 0,

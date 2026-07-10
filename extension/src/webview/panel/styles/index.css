@@ -15,6 +15,7 @@
 @import './extension-ui-prompt.css';
 @import './ask-user-prompt.css';
 @import './tooltip.css';
+@import './charts.css';
 
 @source "../**/*.tsx";
 @source "../**/*.ts";

@@ -15,9 +15,14 @@
 import type { ModelPricingRecord, ModelTokenPricing } from '../../backend/pricing';
 import type {
   AggregateDailyCost,
+  AggregateDailyModelCost,
+  AggregateDailyRunCount,
   AggregateLastRun,
+  AggregateLastRunTurn,
   AggregateProviderCost,
   AggregateProviderThroughput,
+  AggregateSeriesPoint,
+  AggregateSeriesSegment,
   AggregateStats,
 } from '../../shared/protocol';
 import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../shared/protocol/aggregate-stats';
@@ -45,6 +50,33 @@ interface ProviderAccumulator {
 interface DayAccumulator {
   date: string;
   byProvider: Map<string, ProviderAccumulator>;
+  /** Per-model cost within this day (for the weekly chart's per-model hover). */
+  byModel: Map<string, number>;
+  /** Number of runs bucketed to this day. */
+  runCount: number;
+}
+
+/** A per-turn sample for today's intraday cost series (cost distributed across
+ *  the run's today-samples proportional to output tokens). */
+interface TodayCostSample {
+  ms: number;
+  provider: string;
+  model: string;
+  cost: number;
+}
+
+/** A per-turn sample for today's intraday output-token series. */
+interface TodayTokenSample {
+  ms: number;
+  provider: string;
+  model: string;
+  tokens: number;
+}
+
+/** Per-hour throughput accumulator for today's intraday throughput chart. */
+interface HourThroughput {
+  byProvider: Map<string, { out: number; genMs: number }>;
+  byModel: Map<string, { out: number; genMs: number }>;
 }
 
 /** Minimal throughput accumulator for a (date, provider) bucket. */
@@ -81,6 +113,10 @@ interface RunAccumulations {
   todayOutputTokens: number;
   todayToolCallCount: number;
   todayTouchedFileCount: number;
+  todayCostSamples: TodayCostSample[];
+  todayTokenSamples: TodayTokenSample[];
+  todayThroughputByHour: Map<number, HourThroughput>;
+  lastRunTurnSeries: AggregateLastRunTurn[];
   lastRun: AggregateLastRun | null;
 }
 
@@ -159,12 +195,15 @@ function costFromTokens(
   );
 }
 
-/** UTC calendar date (`YYYY-MM-DD`) for a millisecond epoch timestamp. */
-function utcDateString(ms: number): string {
+/** Local calendar date (`YYYY-MM-DD`) for a millisecond epoch timestamp.
+ *  Uses the host's local timezone so "today" / "this week" reset at local
+ *  midnight (not UTC midnight) — matching the user's wall-clock expectation
+ *  of when a daily spend budget rolls over. */
+function localDateString(ms: number): string {
   const d = new Date(ms);
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(d.getUTCDate()).padStart(2, '0');
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
 
@@ -224,11 +263,11 @@ function sortThroughputDesc(a: AggregateProviderThroughput, b: AggregateProvider
 
 /** Build the set of dates in the rolling week window plus the week start timestamp. */
 function buildDateWindows(nowMs: number): DateWindow {
-  const todayDate = utcDateString(nowMs);
+  const todayDate = localDateString(nowMs);
   const weekStartMs = nowMs - (WEEK_WINDOW_DAYS - 1) * 86_400_000;
   const weekDates = new Set<string>();
   for (let i = 0; i < WEEK_WINDOW_DAYS; i += 1) {
-    weekDates.add(utcDateString(weekStartMs + i * 86_400_000));
+    weekDates.add(localDateString(weekStartMs + i * 86_400_000));
   }
   return { todayDate, weekStartMs, weekDates };
 }
@@ -252,6 +291,11 @@ function accumulateRuns(
   // throughput" reflects today's generation, not today's runs).
   const throughputByDay = new Map<string, Map<string, ThroughputAcc>>();
   const sessionPaths = new Set<string>();
+  // Intraday series collections (today only, local day).
+  const todayCostSamples: TodayCostSample[] = [];
+  const todayTokenSamples: TodayTokenSample[] = [];
+  const todayThroughputByHour = new Map<number, HourThroughput>();
+  let lastRunTurnSeries: AggregateLastRunTurn[] = [];
 
   let totalCost = 0;
   let totalInputTokens = 0;
@@ -341,7 +385,7 @@ function accumulateRuns(
         // Per-day throughput (by sample end-date) for "today's throughput".
         const sampleMs = Date.parse(sample.endedAt);
         if (!Number.isNaN(sampleMs)) {
-          const sampleDate = utcDateString(sampleMs);
+          const sampleDate = localDateString(sampleMs);
           const tAcc = dayThroughput(sampleDate, sampleProvider);
           tAcc.outputTokens += sample.outputTokens;
           tAcc.generationDurationMs += sample.generationDurationMs;
@@ -350,13 +394,13 @@ function accumulateRuns(
       }
     }
 
-    // Day cost bucket (UTC, by run day).
+    // Day cost bucket (local, by run day).
     const dayMs = runDayMs(run);
     if (!Number.isNaN(dayMs)) {
-      const date = utcDateString(dayMs);
+      const date = localDateString(dayMs);
       let day = byDay.get(date);
       if (!day) {
-        day = { date, byProvider: new Map() };
+        day = { date, byProvider: new Map(), byModel: new Map(), runCount: 0 };
         byDay.set(date, day);
       }
       let dayAcc = day.byProvider.get(provider);
@@ -369,6 +413,9 @@ function accumulateRuns(
       dayAcc.outputTokens += run.outputTokens;
       dayAcc.cacheReadTokens += run.cacheReadTokens;
       dayAcc.cacheWriteTokens += run.cacheWriteTokens;
+      day.runCount += 1;
+      const runModel = run.modelId ?? 'unknown';
+      day.byModel.set(runModel, (day.byModel.get(runModel) ?? 0) + cost);
 
       // Run-count buckets (by run day).
       if (date === todayDate) {
@@ -377,6 +424,54 @@ function accumulateRuns(
         todayOutputTokens += run.outputTokens;
         todayToolCallCount += run.toolUsage?.totalCount ?? 0;
         todayTouchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
+
+        // Intraday series: collect per-turn samples that ended today (local)
+        // for the today cost/token/throughput charts. Cost is distributed across
+        // the run's today-samples proportional to output tokens so the series
+        // sums to the run's cost (reconciles with todayCost).
+        const runTodaySamples: { ms: number; provider: string; model: string; out: number }[] = [];
+        for (const sample of run.turnThroughputSamples) {
+          const sMs = Date.parse(sample.endedAt);
+          if (Number.isNaN(sMs)) continue;
+          if (localDateString(sMs) !== todayDate) continue;
+          const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+          const sModel = sample.modelId ?? run.modelId ?? 'unknown';
+          runTodaySamples.push({ ms: sMs, provider: sProvider, model: sModel, out: sample.outputTokens });
+          todayTokenSamples.push({ ms: sMs, provider: sProvider, model: sModel, tokens: sample.outputTokens });
+          if (sample.status === 'completed' && sample.generationDurationMs > 0) {
+            // Bucket by LOCAL hour (not UTC hour) so fractional timezones
+            // (UTC+5:30, +9:30, …) align to local-hour boundaries.
+            const hourDate = new Date(sMs);
+            hourDate.setMinutes(0, 0, 0);
+            const hourMs = hourDate.getTime();
+            let hour = todayThroughputByHour.get(hourMs);
+            if (!hour) {
+              hour = { byProvider: new Map(), byModel: new Map() };
+              todayThroughputByHour.set(hourMs, hour);
+            }
+            let p = hour.byProvider.get(sProvider);
+            if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
+            p.out += sample.outputTokens;
+            p.genMs += sample.generationDurationMs;
+            let m = hour.byModel.get(sModel);
+            if (!m) { m = { out: 0, genMs: 0 }; hour.byModel.set(sModel, m); }
+            m.out += sample.outputTokens;
+            m.genMs += sample.generationDurationMs;
+          }
+        }
+        if (runTodaySamples.length > 0) {
+          const totalOut = runTodaySamples.reduce((s, x) => s + x.out, 0);
+          for (const s of runTodaySamples) {
+            const share = totalOut > 0 ? (cost * s.out) / totalOut : cost / runTodaySamples.length;
+            todayCostSamples.push({ ms: s.ms, provider: s.provider, model: s.model, cost: share });
+          }
+        } else if (cost > 0) {
+          // No today-samples (unsampled run, or all samples pre-midnight):
+          // place the full run cost at the run's end time so it still appears.
+          // Zero-cost runs are skipped so an open free-model run doesn't churn
+          // the series signature with a shifting updatedAt timestamp.
+          todayCostSamples.push({ ms: dayMs, provider, model: run.modelId ?? 'unknown', cost });
+        }
       }
       if (weekDates.has(date)) weekRunCount += 1;
     }
@@ -387,6 +482,10 @@ function accumulateRuns(
     const endedMs = runDayMs(run);
     if (!Number.isNaN(endedMs) && endedMs > lastRunEndedMs) {
       lastRunEndedMs = endedMs;
+      lastRunTurnSeries = run.turnThroughputSamples
+        .map((s) => ({ ms: Date.parse(s.endedAt), outputTokens: s.outputTokens }))
+        .filter((t) => !Number.isNaN(t.ms))
+        .sort((a, b) => a.ms - b.ms);
       lastRun = {
         cost,
         durationMs: run.busyDurationMs ?? 0,
@@ -397,6 +496,7 @@ function accumulateRuns(
         endedAt: run.finalizedAt ?? run.updatedAt,
         inputTokens: run.inputTokens,
         outputTokens: run.outputTokens,
+        turnSeries: lastRunTurnSeries,
       };
     }
   }
@@ -419,6 +519,10 @@ function accumulateRuns(
     todayOutputTokens,
     todayToolCallCount,
     todayTouchedFileCount,
+    todayCostSamples,
+    todayTokenSamples,
+    todayThroughputByHour,
+    lastRunTurnSeries,
     lastRun,
   };
 }
@@ -492,13 +596,14 @@ function buildWeekStats(
 ): WeekStats {
   const weekDays: AggregateDailyCost[] = [];
   for (let i = 0; i < WEEK_WINDOW_DAYS; i += 1) {
-    const date = utcDateString(weekStartMs + i * 86_400_000);
+    const date = localDateString(weekStartMs + i * 86_400_000);
     const dayAcc = byDay.get(date);
     if (!dayAcc) continue;
     weekDays.push({
       date,
       totalCost: [...dayAcc.byProvider.values()].reduce((s, a) => s + a.cost, 0),
       byProvider: [...dayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc),
+      byModel: dayModelCosts(dayAcc.byModel),
     });
   }
   const weekCostByProvider = mergeDayProviders(weekDays);
@@ -514,16 +619,84 @@ function buildDailyCostSeries(
   const dailyCost: AggregateDailyCost[] = [];
   for (let i = DAILY_COST_WINDOW_DAYS - 1; i >= 0; i -= 1) {
     const dayMs = nowMs - i * 86_400_000;
-    const date = utcDateString(dayMs);
+    const date = localDateString(dayMs);
     const dayAcc = byDay.get(date);
     if (!dayAcc) continue;
     dailyCost.push({
       date,
       totalCost: [...dayAcc.byProvider.values()].reduce((s, a) => s + a.cost, 0),
       byProvider: [...dayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc),
+      byModel: dayModelCosts(dayAcc.byModel),
     });
   }
   return dailyCost;
+}
+
+/** Convert a day's per-model cost map to a sorted list (desc by cost). */
+function dayModelCosts(byModel: Map<string, number>): AggregateDailyModelCost[] {
+  return [...byModel.entries()]
+    .map(([model, cost]) => ({ model, cost }))
+    .sort((a, b) => b.cost - a.cost);
+}
+
+/** Build a cumulative stacked series (cost or tokens) from per-turn samples,
+ *  pruned to [first sample, now] with a trailing "now" point so the area
+ *  extends to the current moment. Each point carries cumulative per-provider
+ *  and per-model breakdowns (the chart steps up at each point). */
+function buildCumulativeSeries(
+  samples: { ms: number; provider: string; model: string; value: number }[],
+  nowMs: number,
+): AggregateSeriesPoint[] {
+  if (samples.length === 0) return [];
+  const sorted = [...samples].sort((a, b) => a.ms - b.ms);
+  const byProvider = new Map<string, number>();
+  const byModel = new Map<string, number>();
+  const seg = (m: Map<string, number>): AggregateSeriesSegment[] =>
+    [...m.entries()].map(([key, value]) => ({ key, value })).sort((a, b) => b.value - a.value);
+  const points: AggregateSeriesPoint[] = [];
+  for (const s of sorted) {
+    byProvider.set(s.provider, (byProvider.get(s.provider) ?? 0) + s.value);
+    byModel.set(s.model, (byModel.get(s.model) ?? 0) + s.value);
+    points.push({ ms: s.ms, byProvider: seg(byProvider), byModel: seg(byModel) });
+  }
+  // Trailing "now" point (current cumulative) so the chart extends to now.
+  const last = points[points.length - 1]!;
+  if (last.ms < nowMs) {
+    points.push({ ms: nowMs, byProvider: seg(byProvider), byModel: seg(byModel) });
+  }
+  return points;
+}
+
+/** Build today's per-hour throughput series (rate, not cumulative). One point
+ *  per hour with data; ends at the last active hour. */
+function buildThroughputSeries(byHour: Map<number, HourThroughput>): AggregateSeriesPoint[] {
+  if (byHour.size === 0) return [];
+  const hours = [...byHour.keys()].sort((a, b) => a - b);
+  const rate = (out: number, genMs: number) => (genMs > 0 ? out / (genMs / 1000) : 0);
+  const points: AggregateSeriesPoint[] = [];
+  for (const hourMs of hours) {
+    const hour = byHour.get(hourMs)!;
+    points.push({
+      ms: hourMs,
+      byProvider: [...hour.byProvider.entries()].map(([key, v]) => ({ key, value: rate(v.out, v.genMs) })).sort((a, b) => b.value - a.value),
+      byModel: [...hour.byModel.entries()].map(([key, v]) => ({ key, value: rate(v.out, v.genMs) })).sort((a, b) => b.value - a.value),
+    });
+  }
+  return points;
+}
+
+/** Build the 14-day run-count series (ascending date), pruning leading
+ *  zero-run days while keeping the trailing run through today for context. */
+function buildDailyRunCount(byDay: Map<string, DayAccumulator>, nowMs: number): AggregateDailyRunCount[] {
+  const out: AggregateDailyRunCount[] = [];
+  for (let i = DAILY_COST_WINDOW_DAYS - 1; i >= 0; i -= 1) {
+    const dayMs = nowMs - i * 86_400_000;
+    const date = localDateString(dayMs);
+    out.push({ date, runCount: byDay.get(date)?.runCount ?? 0 });
+  }
+  let first = 0;
+  while (first < out.length - 1 && out[first]!.runCount === 0) first += 1;
+  return out.slice(first);
 }
 
 /**
@@ -590,6 +763,16 @@ export function computeAggregateStats(
   const todayStats = buildTodayStats(todayDate, acc.byDay, acc.throughputByDay);
   const weekStats = buildWeekStats(acc.byDay, weekStartMs);
   const dailyCost = buildDailyCostSeries(acc.byDay, nowMs);
+  const todayCostSeries = buildCumulativeSeries(
+    acc.todayCostSamples.map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.cost })),
+    nowMs,
+  );
+  const todayTokenSeries = buildCumulativeSeries(
+    acc.todayTokenSamples.map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.tokens })),
+    nowMs,
+  );
+  const todayThroughputSeries = buildThroughputSeries(acc.todayThroughputByHour);
+  const dailyRunCount = buildDailyRunCount(acc.byDay, nowMs);
 
   // ── Live aggregate tok/s ──
   const liveStats = computeLiveTokensPerSecond(runningSessionPaths, ratesBySession);
@@ -604,10 +787,14 @@ export function computeAggregateStats(
     todayOutputTokens: acc.todayOutputTokens,
     todayToolCallCount: acc.todayToolCallCount,
     todayTouchedFileCount: acc.todayTouchedFileCount,
+    todayCostSeries,
+    todayTokenSeries,
+    todayThroughputSeries,
     weekCost: weekStats.weekCost,
     weekCostByProvider: weekStats.weekCostByProvider,
     weekRunCount: acc.weekRunCount,
     dailyCost,
+    dailyRunCount,
     liveTokensPerSecond: liveStats.liveTokensPerSecond,
     runningSessionCount: liveStats.runningSessionCount,
     openTabCount,

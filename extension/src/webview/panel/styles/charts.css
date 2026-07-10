@@ -1,0 +1,169 @@
+/* ── Status-strip rich tooltip charts ──────────────────────────────────────── */
+/*
+ * Styles for the graph-bearing rich tooltips rendered into `.pie-tooltip-host`
+ * (see tooltip.tsx). The host gets `pie-tooltip-host--rich` (wider, normal
+ * wrapping, pointer events on). These styles are global so the isolated
+ * Preact root rendered into the out-of-tree host can see them.
+ */
+
+.rich-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+
+.rich-tooltip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--panel-foreground);
+}
+
+.rich-tooltip-head-value {
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--panel-foreground) 88%, var(--panel-muted));
+}
+
+.rich-tooltip-sub {
+  color: var(--panel-muted);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-line;
+}
+
+.rich-tooltip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 10px;
+  color: var(--panel-muted);
+}
+
+.rich-tooltip-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rich-tooltip-legend-val {
+  color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted));
+  font-variant-numeric: tabular-nums;
+}
+
+.rich-tooltip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* ── StackedAreaChart ─────────────────────────────────────────────────────── */
+
+.chart-wrap {
+  position: relative;
+  display: block;
+}
+
+.chart-wrap svg {
+  display: block;
+  overflow: visible;
+}
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 84px;
+  color: var(--panel-muted);
+  font-size: 10px;
+  font-style: italic;
+}
+
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 2px;
+  font-size: 9px;
+  color: var(--panel-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-axis-max {
+  color: color-mix(in srgb, var(--panel-foreground) 60%, var(--panel-muted));
+}
+
+.chart-hover {
+  position: absolute;
+  top: 0;
+  min-width: 120px;
+  max-width: 150px;
+  padding: 4px 6px;
+  border-radius: var(--panel-radius-sm);
+  background: color-mix(in srgb, var(--panel-overlay-surface) 92%, transparent);
+  border: 1px solid var(--panel-border-subtle);
+  box-shadow: var(--panel-shadow-overlay);
+  font-size: 10px;
+  line-height: 1.35;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.chart-hover-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.chart-hover-time {
+  color: var(--panel-muted);
+}
+
+.chart-hover-total {
+  font-weight: 600;
+  color: var(--panel-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-hover-models {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chart-hover-model {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.chart-hover-model-name {
+  color: var(--panel-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 95px;
+}
+
+.chart-hover-model-val {
+  color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted));
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Sparkline ────────────────────────────────────────────────────────────── */
+
+.sparkline {
+  display: block;
+}
+
+.sparkline--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--panel-muted);
+  font-size: 10px;
+}

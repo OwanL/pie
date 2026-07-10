@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 import { loadModelPricing } from '../backend/pricing';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
-import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
+import { EMPTY_AGGREGATE_STATS, type AggregateDailyCost, type AggregateDailyRunCount, type AggregateProviderCost, type AggregateProviderThroughput, type AggregateSeriesPoint, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import type { StatsService } from './stats-service';
@@ -273,6 +273,35 @@ function signaturesEqual(a: DataSignature | null, b: DataSignature | null): bool
   return a.snapshotsMtimeMs === b.snapshotsMtimeMs && a.checkpointMtimeMs === b.checkpointMtimeMs;
 }
 
+/** Compact signature for an intraday series so the changed-gate can detect a
+ *  new turn (length + last point ms + cumulative total) without a full O(n)
+ *  comparison each tick. */
+function seriesSignature(s: AggregateSeriesPoint[]): string {
+  if (s.length === 0) return '0';
+  const last = s[s.length - 1]!;
+  const total = last.byProvider.reduce((sum, p) => sum + p.value, 0);
+  return `${s.length}:${last.ms}:${total.toFixed(6)}`;
+}
+
+/** Compact content signatures for the daily/per-provider tooltip-driving arrays,
+ *  so the changed-gate posts when their contents shift even if a derived
+ *  headline total happens to be unchanged. */
+function dailyCostSig(d: AggregateDailyCost[]): string {
+  return d.map((x) => `${x.date}:${x.totalCost.toFixed(6)}`).join(',');
+}
+
+function dailyRunCountSig(d: AggregateDailyRunCount[]): string {
+  return d.map((x) => `${x.date}:${x.runCount}`).join(',');
+}
+
+function providerCostSig(p: AggregateProviderCost[]): string {
+  return p.map((x) => `${x.provider}:${x.cost.toFixed(6)}`).join(',');
+}
+
+function throughputSig(p: AggregateProviderThroughput[]): string {
+  return p.map((x) => `${x.provider}:${x.tokensPerSecond.toFixed(3)}:${x.outputTokens}`).join(',');
+}
+
 /** Sum of live tok/s across currently-running sessions, counting ONLY sessions
  *  that are actively generating. A paused session's held rate is excluded so a
  *  long tool call does not inflate the aggregate — the same predicate as the
@@ -381,6 +410,21 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
     const y = b.todayCostByProvider[i]!;
     if (x.provider !== y.provider || x.cost !== y.cost) return false;
   }
+  // Intraday series (today cost/tokens/throughput) + daily run count. A
+  // zero-cost turn (free model) grows the token/throughput series without
+  // moving todayCost, so compare a compact signature (length + last point).
+  if (seriesSignature(a.todayCostSeries) !== seriesSignature(b.todayCostSeries)) return false;
+  if (seriesSignature(a.todayTokenSeries) !== seriesSignature(b.todayTokenSeries)) return false;
+  if (seriesSignature(a.todayThroughputSeries) !== seriesSignature(b.todayThroughputSeries)) return false;
+  // Daily series + per-provider breakdowns that drive tooltip graphs. Compare
+  // compact content signatures (not just length) so a run landing on an
+  // existing day / a per-provider token shift posts even when the headline
+  // totals they derive from happen to be unchanged.
+  if (dailyCostSig(a.dailyCost) !== dailyCostSig(b.dailyCost)) return false;
+  if (dailyRunCountSig(a.dailyRunCount) !== dailyRunCountSig(b.dailyRunCount)) return false;
+  if (providerCostSig(a.weekCostByProvider) !== providerCostSig(b.weekCostByProvider)) return false;
+  if (throughputSig(a.todayTokensPerSecondByProvider) !== throughputSig(b.todayTokensPerSecondByProvider)) return false;
+  if (throughputSig(a.tokensPerSecondByProvider) !== throughputSig(b.tokensPerSecondByProvider)) return false;
   // Last run: compare by identity + cost + endedAt (a different most-recent run
   // is a perceptible change worth a post).
   const la = a.lastRun;
@@ -391,7 +435,8 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
       || la.durationMs !== lb.durationMs
       || la.modelId !== lb.modelId
       || la.endedAt !== lb.endedAt
-      || la.outcome?.satisfaction !== lb.outcome?.satisfaction) {
+      || la.outcome?.satisfaction !== lb.outcome?.satisfaction
+      || la.turnSeries.length !== lb.turnSeries.length) {
       return false;
     }
   }

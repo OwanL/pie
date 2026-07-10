@@ -75,7 +75,16 @@ function pricing(provider: string, input: number, output: number): ModelPricingR
   return { id: 'm', provider, pricing: { input, output, cacheRead: 0, cacheWrite: 0 } };
 }
 
-const NOW = Date.parse('2026-07-04T12:00:00.000Z');
+/** Local noon on a calendar date — a TZ-independent anchor so date-bucketing
+ *  assertions (local-midnight resets) hold in any timezone. */
+function localNoon(year: number, month: number, day: number): number {
+  return new Date(year, month - 1, day, 12, 0, 0).getTime();
+}
+/** ISO timestamp for a local wall-clock time (TZ-independent test anchor). */
+function isoLocal(year: number, month: number, day: number, h = 12, min = 0): string {
+  return new Date(year, month - 1, day, h, min, 0).toISOString();
+}
+const NOW = localNoon(2026, 7, 4);
 
 test('computeAggregateStats: per-provider cost + token totals', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([
@@ -111,8 +120,8 @@ test('computeAggregateStats: per-provider cost + token totals', () => {
 
 test('computeAggregateStats: today bucketing excludes other-day runs', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
-  const today = '2026-07-04T10:00:00.000Z';
-  const yesterday = '2026-07-03T10:00:00.000Z';
+  const today = isoLocal(2026, 7, 4, 10);
+  const yesterday = isoLocal(2026, 7, 3, 10);
   const runs = [
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 1_000_000, outputTokens: 0, startedAt: today, updatedAt: today, finalizedAt: today }),
     makeRun({ runId: 'r2', modelId: 'm', inputTokens: 2_000_000, outputTokens: 0, startedAt: yesterday, updatedAt: yesterday, finalizedAt: yesterday }),
@@ -140,7 +149,7 @@ test('computeAggregateStats: today bucketing excludes other-day runs', () => {
 
 test('computeAggregateStats: today activity (tokens/tool-calls/files) sums today runs', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
-  const today = '2026-07-04T10:00:00.000Z';
+  const today = isoLocal(2026, 7, 4, 10);
   const runs = [
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 100, outputTokens: 200, startedAt: today, updatedAt: today, finalizedAt: today,
       toolUsage: { totalCount: 5, failureCount: 0, executionFailureCount: 0, verificationProjectFailureCount: 0, probeFailureCount: 0, resultIssueCount: 0, countsByName: {}, failureCountsByName: {}, failureCountsByKind: {}, failureCountsByNameAndKind: {}, failureSamples: [], resultIssueCountsByName: {}, resultIssueCountsByKind: {}, resultIssueCountsByNameAndKind: {}, resultIssueSamples: [], totalDurationMs: 0, timedCallCount: 0, durationMsByName: {}, subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [], subagentScoredTaskCount: 0, subagentTaskScores: { scored: 0, total: 0, byAgent: {}, averageScore: null, scoreHistogram: {} } } as any,
@@ -156,8 +165,8 @@ test('computeAggregateStats: today activity (tokens/tool-calls/files) sums today
 
 test('computeAggregateStats: last run is the most-recently ended run', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 2, 6)]]]);
-  const earlier = '2026-07-03T10:00:00.000Z';
-  const later = '2026-07-04T10:00:00.000Z';
+  const earlier = isoLocal(2026, 7, 3, 10);
+  const later = isoLocal(2026, 7, 4, 10);
   const runs = [
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 500_000, outputTokens: 100_000, startedAt: earlier, updatedAt: earlier, finalizedAt: earlier, busyDurationMs: 30_000, outcome: { resolution: 'resolved', satisfaction: 4 } as any }),
     makeRun({ runId: 'r2', modelId: 'm', inputTokens: 1_000_000, outputTokens: 500_000, startedAt: later, updatedAt: later, finalizedAt: later, busyDurationMs: 90_000 }),
@@ -180,10 +189,10 @@ test('computeAggregateStats: throughput is generation-time-weighted', () => {
     makeRun({
       runId: 'r1', modelId: 'm',
       turnThroughputSamples: [
-        { endedAt: '2026-07-04T10:00:00.000Z', outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-        { endedAt: '2026-07-04T10:01:00.000Z', outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 1), outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
         // interrupted turn is excluded
-        { endedAt: '2026-07-04T10:02:00.000Z', outputTokens: 500, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'interrupted', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 2), outputTokens: 500, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'interrupted', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
       ],
     }),
   ];
@@ -298,8 +307,8 @@ test('sumLiveRate: a paused entry (held rate) contributes 0 (widened predicate)'
 
 test('computeAggregateStats: week window excludes runs older than 7 days', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
-  const today = '2026-07-04T10:00:00.000Z';
-  const tenDaysAgo = '2026-06-24T10:00:00.000Z'; // outside the 7-day window
+  const today = isoLocal(2026, 7, 4, 10);
+  const tenDaysAgo = isoLocal(2026, 6, 24, 10); // outside the 7-day window
   const runs = [
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 1_000_000, outputTokens: 0, startedAt: today, updatedAt: today, finalizedAt: today }),
     makeRun({ runId: 'r2', modelId: 'm', inputTokens: 5_000_000, outputTokens: 0, startedAt: tenDaysAgo, updatedAt: tenDaysAgo, finalizedAt: tenDaysAgo }),
@@ -316,13 +325,13 @@ test('computeAggregateStats: week window excludes runs older than 7 days', () =>
 
 test('computeAggregateStats: today throughput buckets by sample end-date', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
-  const yesterdaySample = '2026-07-03T23:30:00.000Z';
-  const todaySample = '2026-07-04T10:00:00.000Z';
+  const yesterdaySample = isoLocal(2026, 7, 3, 23, 30);
+  const todaySample = isoLocal(2026, 7, 4, 10);
   const runs = [
     makeRun({
       runId: 'r1', modelId: 'm',
-      // Run landed today, but one of its samples ended yesterday (pre-midnight).
-      startedAt: '2026-07-03T23:00:00.000Z', updatedAt: todaySample, finalizedAt: todaySample,
+      // Run landed today, but one of its samples ended yesterday (pre-local-midnight).
+      startedAt: isoLocal(2026, 7, 3, 23, 0), updatedAt: todaySample, finalizedAt: todaySample,
       turnThroughputSamples: [
         { endedAt: yesterdaySample, outputTokens: 2000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
         { endedAt: todaySample, outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
@@ -361,9 +370,9 @@ test('computeAggregateStats: throughput samples attribute to their own model wit
       runId: 'r1', modelId: 'openai/gpt',
       turnThroughputSamples: [
         // Sample with its own model on a different provider.
-        { endedAt: '2026-07-04T10:00:00.000Z', outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', modelId: 'anthropic/claude', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', modelId: 'anthropic/claude', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
         // Sample without modelId falls back to the run's model.
-        { endedAt: '2026-07-04T10:01:00.000Z', outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 1), outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
       ],
     }),
   ];
@@ -383,4 +392,95 @@ test('computeAggregateStats: throughput samples attribute to their own model wit
   assert.equal(openai!.tokensPerSecond, 100);
   assert.equal(openai!.outputTokens, 1000);
   assert.equal(openai!.sampleCount, 1);
+});
+
+test('computeAggregateStats: today cost series is cumulative, pruned, with per-provider/model breakdown', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['openai/gpt', [pricing('openai', 2, 6)]],
+    ['anthropic/claude', [pricing('anthropic', 3, 15)]],
+  ]);
+  const runs = [
+    makeRun({
+      runId: 'r1', modelId: 'openai/gpt',
+      inputTokens: 1_000_000, outputTokens: 1_000_000, // cost = 2 + 6 = 8
+      startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: isoLocal(2026, 7, 4, 10, 0), finalizedAt: isoLocal(2026, 7, 4, 10, 0),
+      turnThroughputSamples: [
+        { endedAt: isoLocal(2026, 7, 4, 9, 30), outputTokens: 400_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 600_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      ],
+    }),
+    makeRun({
+      runId: 'r2', modelId: 'anthropic/claude',
+      inputTokens: 0, outputTokens: 200_000, // cost = 0 + 200k*15/1M = 3
+      startedAt: isoLocal(2026, 7, 4, 11, 0), updatedAt: isoLocal(2026, 7, 4, 11, 30), finalizedAt: isoLocal(2026, 7, 4, 11, 30),
+      turnThroughputSamples: [
+        { endedAt: isoLocal(2026, 7, 4, 11, 30), outputTokens: 200_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      ],
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // todayCost = 8 + 3 = 11. Series: 3 turn points + a trailing now point.
+  assert.equal(stats.todayCost, 11);
+  assert.equal(stats.todayCostSeries.length, 4);
+  // Cost distributed by output tokens within each run:
+  // r1 turn1 = 8 * 400k/1M = 3.2 (openai) ; r1 turn2 = 4.8 (openai) ; r2 = 3 (anthropic)
+  const p0 = stats.todayCostSeries[0]!;
+  assert.equal(p0.byProvider.length, 1);
+  assert.equal(p0.byProvider[0]!.key, 'openai');
+  assert.equal(p0.byProvider[0]!.value, 3.2);
+  assert.equal(p0.byModel[0]!.key, 'openai/gpt');
+  // After the anthropic turn, both providers present, cumulative = 11.
+  const pTurn3 = stats.todayCostSeries[2]!;
+  assert.equal(pTurn3.byProvider.length, 2);
+  assert.equal(pTurn3.byProvider[0]!.key, 'openai');
+  assert.equal(pTurn3.byProvider[0]!.value, 8);
+  assert.equal(pTurn3.byProvider[1]!.key, 'anthropic');
+  assert.equal(pTurn3.byProvider[1]!.value, 3);
+  // Trailing now point extends to NOW and holds the full cumulative.
+  const pNow = stats.todayCostSeries[3]!;
+  assert.equal(pNow.ms, NOW);
+  assert.equal(pNow.byProvider[0]!.value, 8);
+  assert.equal(pNow.byProvider[1]!.value, 3);
+});
+
+test('computeAggregateStats: today token + throughput series, daily run count, last-run turns', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['openai/gpt', [pricing('openai', 0, 0)]]]);
+  const runs = [
+    makeRun({
+      runId: 'r1', modelId: 'openai/gpt',
+      startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: isoLocal(2026, 7, 4, 10, 0), finalizedAt: isoLocal(2026, 7, 4, 10, 0),
+      turnThroughputSamples: [
+        { endedAt: isoLocal(2026, 7, 4, 9, 30), outputTokens: 400_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 600_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      ],
+    }),
+  ];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  // Token series: 400k, 1M, +now(1M).
+  assert.equal(stats.todayTokenSeries.length, 3);
+  assert.equal(stats.todayTokenSeries[0]!.byProvider[0]!.value, 400_000);
+  assert.equal(stats.todayTokenSeries[2]!.byProvider[0]!.value, 1_000_000);
+  // Throughput series: one point per active hour (9 and 10).
+  assert.equal(stats.todayThroughputSeries.length, 2);
+  // hour 9: 400k / 10s = 40000 tok/s
+  assert.equal(stats.todayThroughputSeries[0]!.byProvider[0]!.value, 40_000);
+  // Daily run count: pruned to today only (1 run).
+  assert.equal(stats.dailyRunCount.length, 1);
+  assert.equal(stats.dailyRunCount[0]!.runCount, 1);
+  // Last-run turn sparkline: 2 turns ascending.
+  assert.ok(stats.lastRun);
+  assert.equal(stats.lastRun!.turnSeries.length, 2);
+  assert.equal(stats.lastRun!.turnSeries[0]!.outputTokens, 400_000);
+  assert.equal(stats.lastRun!.turnSeries[1]!.outputTokens, 600_000);
+});
+
+test('computeAggregateStats: empty series when no today runs', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
+  const yesterday = isoLocal(2026, 7, 3, 10);
+  const runs = [makeRun({ runId: 'r1', modelId: 'm', inputTokens: 1_000_000, outputTokens: 0, startedAt: yesterday, updatedAt: yesterday, finalizedAt: yesterday })];
+  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
+  assert.equal(stats.todayCost, 0);
+  assert.equal(stats.todayCostSeries.length, 0);
+  assert.equal(stats.todayTokenSeries.length, 0);
+  assert.equal(stats.todayThroughputSeries.length, 0);
 });
