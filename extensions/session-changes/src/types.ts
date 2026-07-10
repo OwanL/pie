@@ -31,9 +31,10 @@ export interface SessionChangesParams {
    *  needs no param. Compaction appends (never deletes), so parsing the JSONL
    *  is non-lossy even after compaction. */
   sessionPath?: string;
-  /** `diff`: file path (or paths) to diff, relative to the session cwd as the
-   *  `list` manifest reports them. */
-  path?: string | string[];
+  /** `diff`: one or more file paths to diff, as an array. Use `["path"]` for a
+   *  single file. Paths are relative to the session cwd as the `list` manifest
+   *  reports them. */
+  path?: string[];
   /** `diff`: lines of surrounding diff context. Default `0` (changes-only);
    *  git still emits the enclosing function/section label in the `@@` hunk
    *  header, so semantic context is preserved. Raise it when surrounding
@@ -57,9 +58,9 @@ export const sessionChangesSchema = {
         'Absolute path of the session JSONL file. Defaults to the calling session, so reviewing your own changes needs no param.',
     },
     path: {
-      type: ['string', 'array'],
+      type: 'array',
       items: { type: 'string' },
-      description: 'diff: file path (or paths) from the list manifest, relative to the session cwd.',
+      description: 'diff: array of file paths from the list manifest, relative to the session cwd. Pass ["path"] for a single file.',
     },
     context: {
       type: 'integer',
