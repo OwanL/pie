@@ -4,6 +4,7 @@ import {
 	setPiApi,
 	getFormatSkillsForPromptImpl,
 	getPiToolSeams,
+	getRecoveredTools,
 	state,
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
@@ -31,6 +32,7 @@ import {
 	buildDecision,
 	buildFeedbackMessage,
 	estimateToolTokens,
+	RECOVERY_TOOL_NAME,
 } from "./pruning.js";
 
 export default function register(pi: ExtensionAPI) {
@@ -114,7 +116,11 @@ export default function register(pi: ExtensionAPI) {
 			// applySkillSelection / applyToolSelection. Telling the model about
 			// them only to re-protect them afterward is pure waste.
 			const forcedSkillNames = new Set(effectivePinned);
-			const forcedToolNames = new Set(activeConfig.tools?.alwaysKeep ?? []);
+			// Recovered (sticky) tools + the recovery tool itself are never prune
+			// candidates: exclude them from the prepass input entirely so the LLM
+			// never reasons about removing them.
+			const recoveredTools = getRecoveredTools(sessionId);
+			const forcedToolNames = new Set<string>([...(activeConfig.tools?.alwaysKeep ?? []), ...recoveredTools, RECOVERY_TOOL_NAME]);
 
 			const llmInput = {
 				userPrompt: event.prompt,
@@ -156,7 +162,7 @@ export default function register(pi: ExtensionAPI) {
 				// whether any tools survive: a legitimate full skill-prune is allowed
 				// through whenever tools remain (zero skills leaves the agent
 				// functional, unlike zero tools).
-				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig);
+				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig, recoveredTools);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
 				const toolsRemain = toolSelection.includedToolNames.length > 0;

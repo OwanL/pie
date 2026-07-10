@@ -34,6 +34,13 @@ export const state = {
 
 	/** Test seam: override the LLM completion function. Use `false` to simulate unavailable. */
 	completeFnOverride: null as CompleteSimpleFn | null | false,
+
+	/** Per-session set of tools recovered via `request_tool`, so the next
+	 *  `before_agent_start` treats them as alwaysKeep and does not re-prune
+	 *  them. `pi.setActiveTools()` only takes effect on the NEXT turn (by SDK
+	 *  design), so without sticky recovery a recovered tool would be pruned
+	 *  again on the very next turn and the recovery would never take hold. */
+	recoveredTools: new Map<string, Set<string>>(),
 };
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
@@ -70,3 +77,25 @@ export function setSetActiveToolsOverride(value: ((names: string[]) => void) | n
 export function setCompleteFnOverride(value: CompleteSimpleFn | null | false): void { state.completeFnOverride = value; }
 export function setPiApi(value: typeof state.piApi): void { state.piApi = value; }
 export function set_piCompleteSimple(value: typeof state._piCompleteSimple): void { state._piCompleteSimple = value; }
+
+/** Record that `toolName` was recovered via `request_tool` for this session,
+ *  so subsequent turns protect it from re-pruning (sticky recovery). */
+export function recordRecoveredTool(sessionId: string, toolName: string): void {
+	let set = state.recoveredTools.get(sessionId);
+	if (!set) {
+		set = new Set<string>();
+		state.recoveredTools.set(sessionId, set);
+	}
+	set.add(toolName);
+}
+
+/** Recovered (sticky) tool names for a session — protected from re-pruning. */
+export function getRecoveredTools(sessionId: string): Set<string> {
+	return state.recoveredTools.get(sessionId) ?? new Set<string>();
+}
+
+/** Test seam: clear recovered-tool state (one session, or all). */
+export function clearRecoveredToolsForTesting(sessionId?: string): void {
+	if (sessionId) state.recoveredTools.delete(sessionId);
+	else state.recoveredTools.clear();
+}

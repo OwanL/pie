@@ -9,6 +9,8 @@ import {
 	setGetActiveToolsOverride,
 	setSetActiveToolsOverride,
 	setCompleteFnOverride,
+	getRecoveredTools,
+	clearRecoveredToolsForTesting,
 } from "./src/state.js";
 import register from "./src/register.js";
 import {
@@ -21,6 +23,7 @@ import {
 
 export default register;
 export { SKILLS_BLOCK_RE, MIN_PROMPT_LENGTH };
+export { getRecoveredTools, clearRecoveredToolsForTesting };
 
 // Test seams: setters exported from state module
 export function setConfigForTesting(nextConfig: import("./types.js").PruningConfig | null): void {
@@ -34,6 +37,7 @@ export function resetForTesting(): void {
 	setAllToolsOverride(null);
 	setSetActiveToolsOverride(null);
 	setPiApi(null);
+	clearRecoveredToolsForTesting();
 }
 
 export function __setFormatter(fn: ((skills: Skill[]) => string) | null): void {

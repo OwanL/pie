@@ -11,7 +11,7 @@ import type { PruningConfig } from "../types.js";
 
 installSdkResolverForTests();
 const require = createRequire(import.meta.url);
-const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting } = require("../index.ts") as typeof import("../index.js");
+const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting, getRecoveredTools, clearRecoveredToolsForTesting } = require("../index.ts") as typeof import("../index.js");
 
 function installSdkResolverForTests(): void {
 	// Isolate from host extension-toggle state. When tests run inside the
@@ -907,9 +907,14 @@ test("request_tool execute enables a pruned tool and logs the recovery", async (
 		await flushLog();
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 		assert.ok(lines.some((line) => line.event === "tool_recovered" && line.toolName === "web_search"), "tool recovery should be logged");
+
+		// Sticky recovery: the recovered tool is recorded so the next turn's
+		// prepass won't re-prune it (setActiveTools is next-turn by SDK design).
+		assert.ok(getRecoveredTools("session-1").has("web_search"), "recovered tool should be recorded for the session");
 	} finally {
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 		setLogPathForTesting(null);
+		clearRecoveredToolsForTesting();
 	}
 });
 

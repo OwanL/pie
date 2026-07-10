@@ -400,6 +400,25 @@ test("applyToolSelection: empty allTools -> empty included/excluded", () => {
 	assert.deepEqual(r.excludedToolNames, []);
 });
 
+test("applyToolSelection: request_tool is always protected (recovery tool can't be pruned)", () => {
+	// Even with no alwaysKeep config and an explicit prune, the pruner's own
+	// recovery tool must survive — pruning it would strand every other pruned
+	// tool with no recovery path.
+	const tools = [...allTools, { name: "request_tool", description: "recover pruned tools" }] as unknown as ToolInfo[];
+	const r = applyToolSelection(tools, ["request_tool", "web_search"], config({ tools: toolsConfig() }));
+	assert.ok(!r.excludedToolNames.includes("request_tool"), "request_tool must never be pruned");
+	assert.ok(r.includedToolNames.includes("request_tool"));
+	assert.ok(r.excludedToolNames.includes("web_search"), "other named tools are still pruned");
+});
+
+test("applyToolSelection: extraProtected (recovered) tools survive pruning", () => {
+	// A tool recovered via request_tool is passed as extraProtected so the next
+	// turn's prepass can't re-prune it (sticky recovery across turns).
+	const r = applyToolSelection(allTools, ["web_search", "edit"], config({ tools: toolsConfig() }), new Set(["web_search"]));
+	assert.ok(!r.excludedToolNames.includes("web_search"), "recovered web_search must survive");
+	assert.ok(r.excludedToolNames.includes("edit"), "non-recovered named tool is still pruned");
+});
+
 // ---------------------------------------------------------------------------
 // runPruningPrepass: model/auth resolution errors fail open (no rejection)
 // ---------------------------------------------------------------------------

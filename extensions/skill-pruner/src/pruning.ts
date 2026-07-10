@@ -159,10 +159,19 @@ export function applySkillSelection(
 	return { includedSkillNames, excludedSkillNames };
 }
 
+/** The pruner's own recovery tool. Hard-protected from pruning so the agent
+ *  can always recover other pruned tools via `request_tool` — pruning it would
+ *  strand every other pruned tool with no recovery path. */
+export const RECOVERY_TOOL_NAME = "request_tool";
+
 export function applyToolSelection(
 	allTools: ToolInfo[],
 	prunedTools: string[] | null,
 	activeConfig: PruningConfig,
+	/** Extra tools to protect from pruning this turn — typically tools recovered
+	 *  via `request_tool` earlier in the session, so recovery is sticky across
+	 *  turns (the next prepass can't re-prune them). */
+	extraProtected: ReadonlySet<string> = new Set(),
 ): { includedToolNames: string[]; excludedToolNames: string[]; safeguardReason?: string } {
 	// No tools config (tool pruning disabled) or no tools present → keep everything.
 	if (!activeConfig.tools || allTools.length === 0) {
@@ -181,7 +190,8 @@ export function applyToolSelection(
 	}
 
 	const alwaysKeepTools = activeConfig.tools.alwaysKeep ?? [];
-	const protectedBase = new Set(alwaysKeepTools);
+	// alwaysKeep + recovered (sticky) tools + the recovery tool itself are never pruned.
+	const protectedBase = new Set<string>([...alwaysKeepTools, ...extraProtected, RECOVERY_TOOL_NAME]);
 	const allNames = new Set(allTools.map((t) => t.name));
 	const pruneSet = new Set(
 		prunedTools.filter((name) => allNames.has(name) && !protectedBase.has(name)),

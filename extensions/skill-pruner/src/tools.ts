@@ -1,4 +1,4 @@
-import { state, getPiToolSeams } from "./state.js";
+import { state, getPiToolSeams, recordRecoveredTool } from "./state.js";
 import { getSessionId } from "./pruning.js";
 import { recordToolRecovery } from "../logger.js";
 
@@ -40,14 +40,25 @@ export const requestToolDefinition = {
 			getPiToolSeams().setActiveTools(newActiveTools);
 		}
 
+		// Sticky recovery: record this tool so the next `before_agent_start`
+		// protects it from re-pruning. `pi.setActiveTools()` only takes effect on
+		// the NEXT turn (by SDK design), so without this the prepass would prune
+		// the tool again next turn and the recovery would never take hold.
+		const sessionId = getSessionId(ctx);
+		try {
+			recordRecoveredTool(sessionId, toolName);
+		} catch {
+			/* never let state tracking break recovery */
+		}
+
 		// Record that the agent had to recover a pruned tool — the key over-pruning
 		// signal for analytics. Best-effort: never let logging break the recovery.
 		try {
-			recordToolRecovery(getSessionId(ctx), toolName);
+			recordToolRecovery(sessionId, toolName);
 		} catch {
 			/* ignore telemetry failures */
 		}
 
-		return { content: [{ type: "text" as const, text: `Tool '${toolName}' has been enabled and is now available.` }] };
+		return { content: [{ type: "text" as const, text: `Tool '${toolName}' has been re-enabled and protected from re-pruning for this session. It becomes callable on the next turn (active-tool changes apply next turn); a same-turn call will still report not found.` }] };
 	},
 };

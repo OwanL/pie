@@ -1,7 +1,7 @@
 {
-  "defaultModel": "umans-glm-5.2",
+  "defaultModel": "glm-5.2:cloud",
   "defaultThinkingLevel": "high",
-  "defaultProvider": "umans",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -32,7 +32,8 @@
         "request_tool",
         "subagent",
         "write",
-        "code_search"
+        "code_search",
+        "defer_trigger"
       ]
     }
   },
