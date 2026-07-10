@@ -64,7 +64,7 @@ export interface AggregateStatsServiceDeps {
 
 /** Recompute interval. Trades responsiveness vs disk read frequency; the mtime
  *  fast-path makes idle nearly free. */
-const RECOMPUTE_MS = 2000;
+const RECOMPUTE_MS = 1000;
 
 interface PricingCache {
   mtimeMs: number;

@@ -11,6 +11,7 @@ import { Tooltip } from '../components/tooltip';
 import { StackedAreaChart } from '../components/stacked-area-chart';
 import { Sparkline } from '../components/sparkline';
 import { colorFor } from '../components/chart-colors';
+import { Num } from './num';
 
 /**
  * Thin status strip anchored at the bottom of the panel (below the composer).
@@ -70,20 +71,20 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     >
       <Tooltip contentNode={todayCostTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg aggregate-strip-seg--primary">
-          today <span class="aggregate-strip-cost">{formatCostAdaptive(todayCost)}</span>
+          today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
         </span>
       </Tooltip>
       <Sep />
       <Tooltip contentNode={weekCostTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg">
-          wk <span class="aggregate-strip-cost">{formatCostAdaptive(weekCost)}</span>
+          wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
         </span>
       </Tooltip>
       <Sep />
       <Tooltip contentNode={tokensTooltipNode(stats)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg aggregate-strip-tokens">
-          <span class="aggregate-strip-tok-down">↓{formatCompactTokens(todayInputTokens)}</span>
-          {' '}<span class="aggregate-strip-tok-up">↑{formatCompactTokens(todayOutputTokens)}</span>
+          <span class="aggregate-strip-tok-down">↓<Num value={todayInputTokens} format={formatCompactTokens} width={5} /></span>
+          {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
         </span>
       </Tooltip>
       <Sep />
@@ -91,8 +92,8 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span class="aggregate-strip-seg">
           {rateSource === 'live' && <span class="aggregate-strip-live-tag">live</span>}
           {rateSource === 'none'
-            ? <span class="aggregate-strip-rate">—</span>
-            : <span class="aggregate-strip-rate">{formatRate(headlineRate)}</span>}
+            ? <span class="aggregate-strip-rate aggregate-strip-num" style="min-width:4ch">—</span>
+            : <Num value={headlineRate} format={formatRate} width={4} class="aggregate-strip-rate" />}
           <span class="aggregate-strip-unit"> tok/s</span>
         </span>
       </Tooltip>
@@ -101,8 +102,8 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
           <Sep />
           <Tooltip contentNode={lastRunTooltipNode(lastRun)} placement="top" freezeWhileVisible>
             <span class="aggregate-strip-seg">
-              last <span class="aggregate-strip-cost">{formatCostAdaptive(lastRun.cost)}</span>
-              <span class="aggregate-strip-dur">{formatDuration(lastRun.durationMs)}</span>
+              last <Num value={lastRun.cost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
+              <Num value={lastRun.durationMs} format={formatDuration} width={4} class="aggregate-strip-dur" />
             </span>
           </Tooltip>
         </>

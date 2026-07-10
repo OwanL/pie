@@ -44,6 +44,18 @@
   font-weight: 600;
 }
 
+/* Animated, fixed-width numeric cell (see aggregate-stats-strip/num.tsx).
+   Right-aligned within a per-field `min-width` (set inline in `ch`) paired with
+   `tabular-nums` + the strip's mono font, so a value growing from `2` to `20`
+   expands leftward into its own padding instead of pushing neighbouring
+   segments rightward — the strip's horizontal alignment stays constant while
+   `useAnimatedNumber` eases the displayed value toward each new target. */
+.aggregate-strip-num {
+  display: inline-block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .aggregate-strip-cost {
   color: color-mix(in srgb, var(--panel-foreground) 82%, var(--panel-muted));
   font-variant-numeric: tabular-nums;
