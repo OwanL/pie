@@ -16,6 +16,8 @@ type ReaperModule = {
     tmpDir?: string;
     now?: () => number;
   }) => Promise<ReapResult>;
+  reapSessionStashes: (sessionId: string | undefined | null, options?: { tmpDir?: string }) => Promise<ReapResult>;
+  isSafeSessionId: (sessionId: string | undefined | null) => boolean;
 };
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -137,5 +139,100 @@ describe('reapPrunedRawStashes', () => {
     assert.equal(r.scanned, 0);
     assert.equal(r.deleted, 0);
     assert.equal(r.freedBytes, 0);
+  });
+});
+
+describe('isSafeSessionId', () => {
+  let mod: ReaperModule;
+  test.before(async () => {
+    mod = (await import(reaperUrl)) as ReaperModule;
+  });
+
+  test('accepts a UUID-like id', () => {
+    assert.equal(mod.isSafeSessionId('019f115e-08f1-70a8-86f1-7959af060af1'), true);
+    assert.equal(mod.isSafeSessionId('sess-1'), true);
+    assert.equal(mod.isSafeSessionId('abc123'), true);
+  });
+
+  test('rejects the "unknown" fallback, empty, and non-strings', () => {
+    assert.equal(mod.isSafeSessionId('unknown'), false);
+    assert.equal(mod.isSafeSessionId(''), false);
+    assert.equal(mod.isSafeSessionId(undefined), false);
+    assert.equal(mod.isSafeSessionId(null), false);
+  });
+
+  test('rejects ids with path separators / dots (traversal defence)', () => {
+    assert.equal(mod.isSafeSessionId('../escape'), false);
+    assert.equal(mod.isSafeSessionId('a/b'), false);
+    assert.equal(mod.isSafeSessionId('a.b'), false);
+    assert.equal(mod.isSafeSessionId('..'), false);
+  });
+});
+
+describe('reapSessionStashes', () => {
+  let mod: ReaperModule;
+  let dir: string;
+
+  test.before(async () => {
+    mod = (await import(reaperUrl)) as ReaperModule;
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'trp-session-reap-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function remaining(): string[] {
+    return readdirSync(dir).filter(
+      (n) => n.startsWith('pruned-raw-') && n.endsWith('.txt'),
+    );
+  }
+
+  test('deletes only the named session\'s stashes, leaves others untouched', async () => {
+    writeFileSync(path.join(dir, 'pruned-raw-sess-a-aaa1.txt'), 'a1');
+    writeFileSync(path.join(dir, 'pruned-raw-sess-a-aaa2.txt'), 'a2');
+    writeFileSync(path.join(dir, 'pruned-raw-sess-b-bbb1.txt'), 'b1');
+    // pre-namespace stash from an older build (no session id) — must survive
+    // session-scoped cleanup (the load-time reaper owns it).
+    writeFileSync(path.join(dir, 'pruned-raw-legacy.txt'), 'legacy');
+    const r = await mod.reapSessionStashes('sess-a', { tmpDir: dir });
+    assert.equal(r.scanned, 2);
+    assert.equal(r.deleted, 2);
+    assert.equal(r.freedBytes, 4);
+    assert.deepEqual(remaining().sort(), ['pruned-raw-legacy.txt', 'pruned-raw-sess-b-bbb1.txt']);
+  });
+
+  test('is a no-op for the "unknown" session id (left to the load-time reaper)', async () => {
+    writeFileSync(path.join(dir, 'pruned-raw-unknown-xxx.txt'), 'u');
+    writeFileSync(path.join(dir, 'pruned-raw-sess-a-aaa.txt'), 'a');
+    const r = await mod.reapSessionStashes('unknown', { tmpDir: dir });
+    assert.equal(r.scanned, 0);
+    assert.equal(r.deleted, 0);
+    assert.equal(remaining().length, 2);
+  });
+
+  test('is a no-op for an unsafe id (path traversal defence)', async () => {
+    writeFileSync(path.join(dir, 'pruned-raw--escape-xxx.txt'), 'x');
+    const r = await mod.reapSessionStashes('../escape', { tmpDir: dir });
+    assert.equal(r.deleted, 0);
+    assert.equal(remaining().length, 1);
+  });
+
+  test('does not throw when the tmpdir is missing', async () => {
+    const r = await mod.reapSessionStashes('sess-a', { tmpDir: path.join(dir, 'nope') });
+    assert.equal(r.scanned, 0);
+    assert.equal(r.deleted, 0);
+  });
+
+  test('prefix match does not span sessions (sess-a vs sess-aa)', async () => {
+    writeFileSync(path.join(dir, 'pruned-raw-sess-a-1.txt'), '1');
+    writeFileSync(path.join(dir, 'pruned-raw-sess-aa-1.txt'), '2');
+    // The trailing `-` in the prefix `pruned-raw-sess-a-` excludes sess-aa.
+    const r = await mod.reapSessionStashes('sess-a', { tmpDir: dir });
+    assert.equal(r.deleted, 1);
+    assert.deepEqual(remaining(), ['pruned-raw-sess-aa-1.txt']);
   });
 });

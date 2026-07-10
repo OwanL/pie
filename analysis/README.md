@@ -28,11 +28,38 @@ always-keep tool list**. The skill-pruner's live catalog is fed by per-session
 factors (`extension/src/host/core/projection.ts`), not by aggregated run
 analytics.
 
-This is intentional for now: closing the loop (e.g. pruning-prepass token cost
-→ threshold tuning, or model-quality scores → default-model suggestions) is a
-larger architectural change requiring a new read-back path, aggregation, and a
-tuning policy with safety rails. It is tracked as a documented follow-up rather
-than wired in ad hoc.
+This is intentional for now. Closing the loop is a deliberate architectural
+change, not an ad-hoc wire-up, and is tracked here as a follow-up.
+
+### Follow-up: closing the loop (Option A)
+
+To wire one concrete signal back into a runtime default, three pieces must exist
+first — none do today:
+
+1. **A read-back path.** The pruning catalog is fed by *live* per-session
+   factors, not by `run-analytics.json`; no component currently consumes the
+   prepared/stratified analytics at runtime. A new reader + cache is needed.
+2. **Aggregation.** Raw per-run signals are too noisy to act on directly; they
+   need rolling aggregation (e.g. trailing-window failure rates, per-model
+   quality buckets from `analysis/scripts/stratified-ranker.ts`) before tuning.
+3. **A tuning policy with safety rails.** Any auto-tuning must be bounded
+   (min/max clamps), monotone-safe (never worsen a default on sparse data),
+   overrideable by explicit user settings, and observable (log every applied
+   delta). Without these, a noisy signal could silently regress a default.
+
+Candidate signals (pick **one** for a first iteration):
+
+| Signal | Runtime default it could tune |
+|---|---|
+| pruning-prepass token cost | compaction `reserveTokens`/`keepRecentTokens`, or pruning thresholds |
+| model-quality scores (`stratified-ranker.ts`) | default-model suggestion |
+| tool-failure rates | always-keep / drop-tool adjustments |
+
+Caveat: any backfill-derived signal inherits the data-quality gaps noted under
+[Data quality notes](#data-quality-notes) (e.g. historical runs with
+`modelId: "unknown"` have null `provider`/`estimatedCostUsd` and cannot be
+retro-assigned a model from per-turn throughput). A read-back consumer must
+skip or down-weight those runs rather than treat `null` as a real signal value.
 
 ## Local dashboard data
 

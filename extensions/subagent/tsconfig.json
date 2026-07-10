@@ -1,4 +1,5 @@
 {
+  "//paths": "Test-only module aliases. The subagent is the only extension whose `schema.ts` imports RUNTIME values (`StringEnum`, `Type`) from the pi SDK's typebox — at runtime pi's extension loader aliases the legacy `@mariozechner/pi-ai` to the bundled `@earendil-works/pi-ai`, but plain `tsx` (used by scripts/run-tests.mjs) cannot resolve it (the SDK lives nested under pi-coding-agent's node_modules, never hoisted). These paths point tsx at that same bundled copy so the schema test resolves a SINGLE TypeBox/pi-ai instance (no dual-instance symbol split). They do NOT affect production: pi's loader ignores this tsconfig. Passed to tsx via `--tsconfig` in run-tests.mjs (subagent package).",
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
@@ -7,7 +8,13 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@mariozechner/pi-ai": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
+      "typebox": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.mjs"],
+      "typebox/value": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.mjs"]
+    }
   },
   "include": ["./**/*.ts"],
   "exclude": ["node_modules"]

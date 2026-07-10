@@ -39,4 +39,14 @@ declare module "@earendil-works/pi-coding-agent" {
     details?: unknown;
     isError?: boolean;
   }
+
+  // session_shutdown fires on a session's own extension runtime before it is
+  // torn down (quit / reload / new / resume / fork). The event carries no
+  // session id — ctx.sessionManager (bound to the shutting-down session) is the
+  // only identity signal. Verified against dist/core/extensions/types.d.ts.
+  export interface SessionShutdownEvent {
+    type: "session_shutdown";
+    reason: "quit" | "reload" | "new" | "resume" | "fork";
+    targetSessionFile?: string;
+  }
 }

@@ -55,7 +55,7 @@
  * { "tool-result-pruner": false }, the same global toggle skill-pruner honors.
  */
 
-import type { ExtensionAPI, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionShutdownEvent, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -63,7 +63,7 @@ import { dirname, join } from "node:path";
 import { isExtensionDisabledByToggle, loadConfig } from "./config.js";
 import { recordPruning } from "./logger.js";
 import { runPipeline } from "./pipeline.js";
-import { reapPrunedRawStashes } from "./reaper.js";
+import { reapPrunedRawStashes, reapSessionStashes } from "./reaper.js";
 import { countTokens } from "./tokenize.js";
 
 function getSessionId(ctx: unknown): string {
@@ -80,14 +80,17 @@ function getSessionId(ctx: unknown): string {
 // agent reads it back with the existing `read` tool (the pipeline skips `read`,
 // so recall returns the pre-pruning text verbatim).
 //
-// TODO(session-scope cleanup): design §7.3 specifies session-scoped stashes
-// cleaned on session end. We currently reap OLD stashes on extension load
-// via reapPrunedRawStashes (age + size cap; see reaper.ts) but leave
-// within-session stashes in place. Wiring `session_shutdown` to delete a
-// session's stashes needs reliable per-session path tracking (the event
-// carries no id; ctx.sessionManager.getSessionId() is the only join key) —
-// deferred to avoid a cleanup that could delete another live session's
-// recall raw.
+// Session-scoped cleanup (P1-7 follow-up): the session id is embedded in the
+// filename at write time (`pruned-raw-<sessionId>-<hex>.txt`) so that on
+// `session_shutdown` we can delete exactly this session's stashes via
+// reapSessionStashes() (matched by prefix) without ever touching another live
+// session's recall raw. The `session_shutdown` event carries no session id, but
+// ctx.sessionManager is bound to the shutting-down session's own runtime, so
+// getSessionId(ctx) returns that session's id. When the id is "unknown"/
+// unsafe, reapSessionStashes is a no-op and the load-time age/size reaper
+// remains the safety net — never an early eviction of an unresolved session's
+// raw. The load-time reaper (reapPrunedRawStashes, run on extension load) also
+// mops up pre-namespace stashes from older builds and crashed sessions.
 let stashDirOverride: string | null = null;
 
 /** Test seam: redirect the recall stash to a specific dir (null = os.tmpdir()). */
@@ -95,10 +98,13 @@ export function setStashDirForTesting(dir: string | null): void {
   stashDirOverride = dir;
 }
 
-function stashPath(): { id: string; rawPath: string } {
-  const id = `pruned-raw-${randomBytes(8).toString("hex")}`;
-  const dir = stashDirOverride ?? tmpdir();
-  return { id, rawPath: join(dir, `${id}.txt`) };
+function stashDir(): string {
+  return stashDirOverride ?? tmpdir();
+}
+
+function stashPath(sessionId: string): { id: string; rawPath: string } {
+  const id = `pruned-raw-${sessionId}-${randomBytes(8).toString("hex")}`;
+  return { id, rawPath: join(stashDir(), `${id}.txt`) };
 }
 
 /** Write the pre-pruning text to a temp file for recall. Best-effort: the
@@ -133,6 +139,21 @@ export default function (pi: ExtensionAPI) {
   void reapPrunedRawStashes().catch(() => {
     // Best-effort cleanup — never surface a reaper failure.
   });
+
+  // Session-scoped recall-stash cleanup (P1-7 follow-up): on `session_shutdown`
+  // delete the stashes this session wrote. Stashes are namespaced by session id
+  // at write time (pruned-raw-<sessionId>-<hex>.txt), so reapSessionStashes
+  // only ever touches this session's files — a live session with a different
+  // id is never affected. The `session_shutdown` event carries no id, but
+  // ctx.sessionManager is bound to the shutting-down session's own runtime, so
+  // getSessionId(ctx) returns that session's id. When the id is "unknown"/
+  // unsafe, reapSessionStashes is a no-op (load-time reaper remains the safety
+  // net). Best-effort, never-throwing — the .catch keeps a reap failure from breaking teardown.
+  pi.on("session_shutdown", async (_event: SessionShutdownEvent, ctx: unknown): Promise<void> => {
+    await reapSessionStashes(getSessionId(ctx), { tmpDir: stashDir() }).catch(() => {
+      // Best-effort cleanup — never surface a failure during teardown.
+    });
+  });
   pi.on("tool_result", async (event: ToolResultEvent, ctx: unknown): Promise<ToolResultEventResult | undefined> => {
     if (isExtensionDisabledByToggle()) return undefined;
     const config = loadConfig();
@@ -157,7 +178,8 @@ export default function (pi: ExtensionAPI) {
       // fold lossless savings (e.g. ANSI strip) into the gate and let lossy
       // apply when it *increases* context vs the lossless-only result. Measured
       // BEFORE touching disk — avoids orphan stash files for tiny outputs.
-      const { id, rawPath } = stashPath();
+      const sessionId = getSessionId(ctx);
+      const { id, rawPath } = stashPath(sessionId);
       const marker = buildFidelityMarker(result.meta.recallRules, result.meta.markers, rawPath);
       const candidate = `${marker}\n${result.meta.afterText}`;
       const netSaved = countTokens(result.meta.losslessText) - countTokens(candidate);

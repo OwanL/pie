@@ -60,6 +60,13 @@ const PACKAGE_CONFIGS = [
     testGlobs: ['extensions/subagent/test/**/*.test.ts'],
     coverageIncludes: ['extensions/subagent/**/*.ts'],
     thresholds: { lines: 90, branches: 80 },
+    // schema.ts imports runtime values (`StringEnum`, `Type`) from the pi
+    // SDK's typebox via the legacy `@mariozechner/pi-ai` import. pi's loader
+    // aliases that at runtime; plain tsx cannot resolve it (the SDK is nested
+    // under pi-coding-agent's node_modules, never hoisted). This tsconfig's
+    // `paths` alias those to the bundled copy so the schema test resolves a
+    // single TypeBox instance. See extensions/subagent/tsconfig.json.
+    tsxConfig: 'extensions/subagent/tsconfig.json',
   },
   {
     id: 'ask-user',
@@ -303,8 +310,15 @@ function summarizeCoverageFailures(config, coverage) {
 }
 
 function buildTestArgs(config) {
+  // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
+  // resolution / path aliases. Only the subagent package sets this today: its
+  // schema test needs the `paths` aliases in extensions/subagent/tsconfig.json
+  // to resolve the pi SDK's nested typebox/pi-ai to a single instance. Must
+  // precede the positional test globs.
+  const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
   return [
     'tsx',
+    ...tsxConfigArgs,
     '--test',
     '--test-concurrency=1',
     // Some test files leave an unreferenced handle (a lingering timer /

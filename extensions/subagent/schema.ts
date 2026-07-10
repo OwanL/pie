@@ -3,8 +3,15 @@
  * behaviour-preserving.
  */
 
-import { StringEnum } from "@mariozechner/pi-ai";
-import { Type } from "typebox";
+// Both `StringEnum` and `Type` come from `@mariozechner/pi-ai` (pi's loader
+// aliases the legacy `@mariozechner/pi-ai` to the real `@earendil-works/pi-ai`,
+// which re-exports `Type` from its bundled typebox). Importing `Type` from a
+// separate `typebox` would resolve to a different module instance under pi's
+// loader, splitting the TypeBox runtime (symbols/registries) between
+// `StringEnum` and `Type.Object` — so the subagent's parameter schema must
+// source both from the same pi-ai entrypoint. This also keeps the schema on
+// the exact TypeBox instance pi-ai's tool-parameter API expects.
+import { StringEnum, Type } from "@mariozechner/pi-ai";
 
 export const BUCKET_GUIDANCE = "Bucket hint for model selection: 'small' (Haiku-class, busywork), 'medium' (Sonnet-class, main development), or 'frontier' (Opus-class, hardest problems). Prefer 'medium' for almost all tasks — it is the best balance of cost and capability. Reserve 'frontier' for only the absolute hardest problems, as it is far more expensive; use 'small' only for trivial busywork. Defaults to 'medium' when omitted.";
 

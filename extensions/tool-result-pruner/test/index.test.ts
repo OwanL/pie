@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { describe, beforeEach, afterEach } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,9 +25,10 @@ type Event = {
 type Patch = { content?: ToolContent[]; details?: unknown; isError?: boolean };
 type PruningBadge = { rules: string[]; tokensSaved: number };
 
+type AnyHandler = (e: any, ctx: unknown) => Promise<any | undefined> | any | undefined;
 type IndexModule = {
   default: (pi: {
-    on: (event: string, handler: (e: Event, ctx: unknown) => Promise<Patch | undefined>) => void;
+    on: (event: string, handler: AnyHandler) => void;
   }) => void;
   setStashDirForTesting: (dir: string | null) => void;
 };
@@ -63,6 +64,7 @@ function badgeOf(patch: Patch | undefined): PruningBadge | undefined {
 
 describe('index handler (visibility badge + analytics)', () => {
   let handler: (e: Event, ctx: unknown) => Promise<Patch | undefined>;
+  let shutdownHandler: AnyHandler;
   let configMod: ConfigModule;
   let loggerMod: LoggerModule;
   let setStashDir: (dir: string | null) => void;
@@ -75,15 +77,18 @@ describe('index handler (visibility badge + analytics)', () => {
     loggerMod = (await import(loggerUrl)) as LoggerModule;
     const indexMod = (await import(indexUrl)) as IndexModule;
     setStashDir = indexMod.setStashDirForTesting;
-    let captured: ((e: Event, ctx: unknown) => Promise<Patch | undefined>) | undefined;
+    const handlers = new Map<string, AnyHandler>();
     const mockPi = {
-      on: (_event: string, h: (e: Event, ctx: unknown) => Promise<Patch | undefined>) => {
-        captured = h;
+      on: (event: string, h: AnyHandler) => {
+        handlers.set(event, h);
       },
     };
     indexMod.default(mockPi);
-    if (!captured) throw new Error('tool_result handler was not registered');
-    handler = captured;
+    const toolResult = handlers.get('tool_result');
+    if (!toolResult) throw new Error('tool_result handler was not registered');
+    handler = toolResult;
+    shutdownHandler = handlers.get('session_shutdown')!;
+    if (!shutdownHandler) throw new Error('session_shutdown handler was not registered');
   });
 
   beforeEach(() => {
@@ -341,5 +346,60 @@ describe('index handler (visibility badge + analytics)', () => {
     const pruning = (out!.details as { pruning?: { rules: string[]; rawPath: string } }).pruning!;
     assert.deepEqual(pruning.rules, ['grep-group']);
     assert.equal(readFileSync(pruning.rawPath, 'utf-8'), RG_GROUP_BIG);
+  });
+
+  // --- session-scoped stash cleanup (P1-7 follow-up) ---
+  // The tool_result handler namespaces recall stashes by session id
+  // (pruned-raw-<sessionId>-<hex>.txt); the session_shutdown handler deletes a
+  // session's stashes on teardown. These cover the namespacing + the shutdown
+  // delete, including the safety guard ("unknown" id = no-op).
+  function ctxWith(sessionId: string): unknown {
+    return { sessionManager: { getSessionId: () => sessionId } };
+  }
+
+  function stashesIn(dir: string): string[] {
+    return readdirSync(dir).filter((n) => n.startsWith('pruned-raw-') && n.endsWith('.txt'));
+  }
+
+  test('tool_result namespaces the recall stash by session id', async () => {
+    const out = await handler(
+      ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }),
+      ctxWith('019f115e-08f1-70a8-86f1-7959af060af1'),
+    );
+    assert.ok(out);
+    const rawPath = (out!.details as { pruning?: { rawPath: string } }).pruning!.rawPath;
+    assert.match(rawPath, /pruned-raw-019f115e-08f1-70a8-86f1-7959af060af1-[0-9a-f]+\.txt$/);
+  });
+
+  test('session_shutdown deletes the named session\'s stashes only', async () => {
+    // Session A writes a lossy stash; session B writes one too.
+    await handler(
+      ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }),
+      ctxWith('sess-a'),
+    );
+    await handler(
+      ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }),
+      ctxWith('sess-b'),
+    );
+    const before = stashesIn(stashDir).sort();
+    assert.equal(before.length, 2);
+    assert.ok(before.some((n) => n.startsWith('pruned-raw-sess-a-')));
+    assert.ok(before.some((n) => n.startsWith('pruned-raw-sess-b-')));
+
+    // A shuts down → only A's stash is deleted; B's survives.
+    await shutdownHandler({ type: 'session_shutdown', reason: 'quit' }, ctxWith('sess-a'));
+    const after = stashesIn(stashDir);
+    assert.equal(after.length, 1);
+    assert.ok(after[0]!.startsWith('pruned-raw-sess-b-'), 'the other live session\'s stash must survive');
+  });
+
+  test('session_shutdown is a no-op for an "unknown" session id', async () => {
+    await handler(
+      ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }),
+      {}, // no sessionManager → getSessionId returns "unknown"
+    );
+    assert.equal(stashesIn(stashDir).length, 1);
+    await shutdownHandler({ type: 'session_shutdown', reason: 'new' }, {});
+    assert.equal(stashesIn(stashDir).length, 1, 'unknown-id shutdown must not delete the stash');
   });
 });
