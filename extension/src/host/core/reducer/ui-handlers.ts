@@ -94,6 +94,13 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
         // `noticeRaw` so the webview can reveal it via 'show more', and is still
         // logged host-side.
         notice: stripReqIds(event.error),
+        // Brief H: classify the generic backend error so the webview renders a
+        // fitting recovery action (`operational-error` → show-logs) instead of
+        // leaking the prior notice's kind. Reset to null when there is no error
+        // text (a clear), matching the clear pattern used elsewhere (NoticeShown,
+        // host-handlers). STATE_CONTRACT § Notice Surfacing: `noticeRaw` is
+        // non-null only when `notice` is an error notice.
+        noticeKind: event.error ? 'operational-error' : null,
         noticeRaw: event.error ?? null,
       },
     },

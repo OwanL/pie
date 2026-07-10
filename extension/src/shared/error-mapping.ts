@@ -105,6 +105,19 @@ const PREPASS_TIMEOUT_PATTERN = /^Timed out waiting for the turn to start stream
  *  (possibly fractional) budget for the surfaced message. */
 const MODEL_START_TIMEOUT_PATTERN = /^Timed out waiting for the model to start streaming \((\d+(?:\.\d+)?)s\)$/;
 
+/** Host-side `ProviderGateSaturatedError` (provider concurrency gate): thrown
+ *  when a send legitimately queued waiting for a free provider concurrency slot
+ *  exceeded the `queueWaitSeconds` bound (a retryable 429, `isRetryable`). Its
+ *  message is `Provider "<name>" concurrency cap reached: waited <ms>ms without
+ *  a slot. Retry after a brief delay.` — the stable signature is
+ *  `concurrency cap reached`. The error reaches the host as a `PreflightFailed`
+ *  either verbatim (the gate rejection propagates as the error `.message`) or
+ *  embedded inside an enriched `Connection error (<cause>)` string (if the SDK
+ *  wrapped the fetch rejection); the signature survives both. This is NOT a
+ *  pruning failure — recognize it before the `prepass-failed` fallback so the
+ *  notice blames concurrency saturation, not the pruning prepass. */
+const PROVIDER_SATURATED_PATTERN = /concurrency cap reached/;
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Strip every `req-NN` id from `text` so no internal correlation id reaches
@@ -200,7 +213,7 @@ export function mapSendOrEditError(
  * plain-language notice. The `message.send` RPC already succeeded (the prompt
  * was queued); the pruning prepass then failed.
  *
- * Three sub-categories:
+ * Four sub-categories:
  *  - **model-start timeout** (send-timer fire AFTER pruning succeeded):
  *    `"Timed out waiting for the model to start streaming (Ns)"` →
  *    `model-start-timeout` (send) / `edit-failed` (edit). The prepass already
@@ -209,6 +222,13 @@ export function mapSendOrEditError(
  *  - **prepass timeout** (send-timer fire while pruning still running):
  *    `"Timed out waiting for the turn to start streaming (Ns)"` →
  *    `prepass-timeout` (send) / `edit-failed` (edit).
+ *  - **provider saturation** (host-side `ProviderGate` queue-wait bound
+ *    elapsed): the error message contains `concurrency cap reached` →
+ *    `model-start-timeout` (send) / `edit-failed` (edit). The send legitimately
+ *    queued waiting for a free provider concurrency slot (a retryable 429); the
+ *    prepass is incidental — the real cause is concurrency saturation, NOT
+ *    pruning. Reuses `model-start-timeout` (same remedy: retry — the gate
+ *    re-queues) so no new kind is needed.
  *  - **backend-reported failure**: any other error → `prepass-failed` (send) /
  *    `edit-failed` (edit). The backend's error detail is included SANITIZED
  *    (any `req-NN` stripped) since it is not an internal id the host minted —
@@ -255,6 +275,27 @@ export function mapPreflightError(
     return {
       kind: 'prepass-timeout',
       message: `Pruning took too long to start this turn${budget ? ` (it exceeded the ${budget}s budget)` : ''}. You can retry, retry without pruning, or adjust pruning in settings.`,
+    };
+  }
+
+  // Provider concurrency saturation: the host-side ProviderGate queued the
+  // send waiting for a free provider concurrency slot and the queue-wait
+  // bound elapsed (a retryable 429). This is NOT a pruning failure — the
+  // prepass is incidental; the real cause is concurrency saturation. Reuse
+  // `model-start-timeout` (same domain + remedy: retry — the gate re-queues;
+  // show-logs for detail) instead of blaming pruning. Checked before the
+  // `prepass-failed` fallback so the saturated signature never mislabels as
+  // a pruning-step failure.
+  if (PROVIDER_SATURATED_PATTERN.test(err)) {
+    if (opKind === 'edit') {
+      return {
+        kind: 'edit-failed',
+        message: "Couldn't edit the message: the provider was busy and no concurrency slot freed up in time. Try editing it again in a moment.",
+      };
+    }
+    return {
+      kind: 'model-start-timeout',
+      message: 'The model is busy — your turn waited for a free provider concurrency slot but none opened up in time. You can retry, or show the logs for details.',
     };
   }
 

@@ -94,7 +94,7 @@ export function requestWindowAttention(appName: string, workspaceName?: string):
   execFile(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', script],
-    { windowsHide: true },
+    { windowsHide: true, timeout: 5_000 },
     () => undefined,
   );
 }

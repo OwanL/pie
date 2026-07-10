@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 
 import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../shared/session-name';
-import { parseJsonOrThrow } from '../shared/error-message';
+import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 import type {
   ModelInfo,
   SessionSummary,
@@ -12,6 +12,16 @@ import type { SessionContext } from './server-types';
 import { loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
+
+function backendTrace(scope: string, event: string, payload: Record<string, unknown>): void {
+  process.stderr.write(`[pie:backend] ${JSON.stringify({
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    scope: `backend-${scope}`,
+    event,
+    ...payload,
+  })}\n`);
+}
 
 function textFromSessionMessageContent(content: unknown): string {
   if (typeof content === 'string') {
@@ -47,12 +57,12 @@ export async function deriveNameFromFile(filePath: string): Promise<string> {
             return derived.name;
           }
         }
-      } catch {
-        // skip malformed lines
+      } catch (error) {
+        backendTrace('sessionMetadata', 'deriveName.lineParseFailed', { level: 'warn', error: toErrorMessage(error), line: i + 1 });
       }
     }
-  } catch {
-    // file not readable
+  } catch (error) {
+    backendTrace('sessionMetadata', 'deriveName.readFailed', { level: 'warn', error: toErrorMessage(error), filePath });
   }
   return NEW_SESSION_NAME;
 }
@@ -149,7 +159,8 @@ export function resolveActiveModel(context: SessionContext): ActiveModelInfo {
     return match
       ? { modelId, provider: match.provider, modelName: match.name }
       : { modelId };
-  } catch {
+  } catch (error) {
+    backendTrace('sessionMetadata', 'resolveActiveModel.failed', { level: 'debug', error: toErrorMessage(error), modelId });
     return { modelId };
   }
 }
@@ -177,7 +188,8 @@ export function listAvailableModels(context?: SessionContext, agentDir?: string)
       if (profile) info.subagent = profile;
       return info;
     });
-  } catch {
+  } catch (error) {
+    backendTrace('sessionMetadata', 'listAvailableModels.failed', { level: 'debug', error: toErrorMessage(error) });
     return [];
   }
 }

@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 import { parse as parseYaml } from 'yaml';
 
-import { parseJsonOrThrow } from '../shared/error-message';
+import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 
 import type { ModelSubagentInfo } from '../shared/protocol';
 import { estimateNormalizedCost, loadModelPricing } from './pricing';
@@ -27,6 +27,16 @@ interface CacheEntry {
   mtimeMs: number;
   pricingMtimeMs: number;
   map: Map<string, ModelSubagentInfo>;
+}
+
+function backendTrace(scope: string, event: string, payload: Record<string, unknown>): void {
+  process.stderr.write(`[pie:backend] ${JSON.stringify({
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    scope: `backend-${scope}`,
+    event,
+    ...payload,
+  })}\n`);
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -96,7 +106,8 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
-  } catch {
+  } catch (error) {
+    backendTrace('subagentProfiles', 'statProfiles.failed', { level: 'debug', error: toErrorMessage(error), filePath });
     cache.delete(filePath);
     return new Map();
   }
@@ -106,7 +117,8 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
   let pricingMtimeMs = 0;
   try {
     pricingMtimeMs = fs.statSync(pricingPath).mtimeMs;
-  } catch {
+  } catch (error) {
+    backendTrace('subagentProfiles', 'statPricing.failed', { level: 'debug', error: toErrorMessage(error), pricingPath });
     // models.json is optional — proceed without pricing
   }
 
@@ -136,7 +148,8 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
 
     cache.set(filePath, { mtimeMs: stat.mtimeMs, pricingMtimeMs, map });
     return map;
-  } catch {
+  } catch (error) {
+    backendTrace('subagentProfiles', 'loadProfiles.failed', { level: 'debug', error: toErrorMessage(error), filePath });
     return new Map();
   }
 }

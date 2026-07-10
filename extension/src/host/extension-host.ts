@@ -68,7 +68,12 @@ function getWorkspaceAnalyticsId(context: vscode.ExtensionContext): string {
   const noWorkspaceId = existingNoWorkspaceId || crypto.randomUUID();
 
   if (!existingNoWorkspaceId) {
-    void context.workspaceState.update(NO_WORKSPACE_ANALYTICS_ID_KEY, noWorkspaceId);
+    void context.workspaceState.update(NO_WORKSPACE_ANALYTICS_ID_KEY, noWorkspaceId).then(undefined, (err) =>
+      appendPieLog('warn', 'globalState', 'update failed', {
+        key: NO_WORKSPACE_ANALYTICS_ID_KEY,
+        error: toErrorMessage(err),
+      })
+    );
   }
 
   return buildWorkspaceAnalyticsId({
@@ -193,9 +198,39 @@ export class PieExtension implements vscode.Disposable {
       getSendTimerTimeoutMs: () => {
         const p = this.archState.settings.pruningSettings.prepassTimeoutSec;
         const HEADROOM_SEC = 30;
+        // FP-C3: provider-gate queue-wait headroom. A send whose provider is
+        // saturated spends up to `queueWaitSeconds` (default 30s) queued for a
+        // concurrency slot BEFORE its prepass even begins; that wait is inside
+        // this timer's window (the clock starts at issue, before the slot is
+        // acquired). Add a conservative constant headroom so a legitimately-
+        // queued send does not trip a spurious PreflightFailed mid-queue. The
+        // real configured queueWaitSeconds is not exposed end-to-end today
+        // (lives only on ProviderPool.queueWaitMs in the backend); exposing it
+        // is a follow-up — the default (30s) covers the common case.
+        const QUEUE_WAIT_HEADROOM_MS = 30_000;
         return typeof p === 'number' && Number.isFinite(p) && p > 0
-          ? (p + HEADROOM_SEC) * 1000
-          : 120_000;
+          ? (p + HEADROOM_SEC) * 1000 + QUEUE_WAIT_HEADROOM_MS
+          : 120_000 + QUEUE_WAIT_HEADROOM_MS;
+      },
+      // Metric-gated re-arm for the model-start send-timer: when the in-flight
+      // request's provider is legitimately QUEUED waiting for a concurrency
+      // slot (or PAUSED by the circuit breaker), the model-start timer (whose
+      // clock starts at issue, before the slot is acquired) would otherwise
+      // fire a false-positive PreflightFailed. `getProviderGateMetrics` reads
+      // the live signal (cached in AggregateStats.providerGate, polled from the
+      // backend's ProviderGate); `resolveSessionProvider` resolves the
+      // request's provider via the session's model → available-models table
+      // (mirroring host/core/model-capability.ts). Both optional + fail-open:
+      // the runner fires as today if either is absent or yields no match.
+      getProviderGateMetrics: () => this.aggregateStatsService.getAggregateStats().providerGate,
+      resolveSessionProvider: (sessionPath: string) => {
+        const archState = this.archState;
+        const modelId = archState.sessions.sessions.find((s) => s.path === sessionPath)?.modelId
+          ?? archState.settings.modelSettings?.defaultModel;
+        if (!modelId) return undefined;
+        const directModels = archState.settings.availableModelsBySession[sessionPath] ?? [];
+        const fallbackModels = Object.values(archState.settings.availableModelsBySession).flatMap((models) => models);
+        return [...directModels, ...fallbackModels].find((m) => m.id === modelId)?.provider;
       },
       queues: this.service.queues,
       tabs: {
@@ -223,9 +258,24 @@ export class PieExtension implements vscode.Disposable {
           // to drop any pending path that slipped through (a pending tab can
           // be pinned while it resolves — never persist the transient path).
           const persistedPinnedTabPaths = pinnedTabPaths.filter((p) => !isPendingTabPath(p));
-          void context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects);
-          void context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath);
-          void context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths);
+          void context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects).then(undefined, (err) =>
+            appendPieLog('warn', 'globalState', 'update failed', {
+              key: OPEN_TABS_STORAGE_KEY,
+              error: toErrorMessage(err),
+            })
+          );
+          void context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath).then(undefined, (err) =>
+            appendPieLog('warn', 'globalState', 'update failed', {
+              key: ACTIVE_SESSION_STORAGE_KEY,
+              error: toErrorMessage(err),
+            })
+          );
+          void context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths).then(undefined, (err) =>
+            appendPieLog('warn', 'globalState', 'update failed', {
+              key: PINNED_TABS_STORAGE_KEY,
+              error: toErrorMessage(err),
+            })
+          );
 
           // Push the currently-open tab summaries to the backend so the
           // `session_review` tool can list "currently open" sessions (true
@@ -297,7 +347,11 @@ export class PieExtension implements vscode.Disposable {
         return s ? { ...s, pinned: pinned.includes(p) } : undefined;
       })
       .filter((s): s is SessionSummary & { pinned: boolean } => !!s);
-    void this.backend.request('openTabs.set', { tabs }).catch(() => {});
+    void this.backend
+      .request('openTabs.set', { tabs }, { timeoutMs: 5000 })
+      .catch((err) =>
+        appendPieLog('warn', 'openTabs', 'openTabs.set failed', { error: toErrorMessage(err) })
+      );
   }
 
 

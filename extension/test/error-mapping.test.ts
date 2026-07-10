@@ -142,6 +142,29 @@ test('mapPreflightError accepts DECIMAL-second model-start budgets', () => {
   assert.ok(send.message.includes('12.5s'));
 });
 
+test('mapPreflightError classifies a ProviderGate saturation (queued for a concurrency slot) as model-start-timeout, NOT prepass-failed', () => {
+  // When the send is legitimately QUEUED waiting for a provider concurrency
+  // slot and the queueWait deadline elapses, ProviderGate throws a retryable
+  // 429 whose message contains "concurrency cap reached". This reaches the
+  // host as a PreflightFailed and must NOT be blamed as a pruning
+  // (prepass-failed) failure — the turn was queued, not broken. It reuses the
+  // model-start-timeout kind (same concurrency/rate-limit domain +
+  // retry/show-logs remedy).
+  const raw =
+    'Provider "anthropic" concurrency cap reached: waited 30000ms without a slot. Retry after a brief delay.';
+  const send = mapPreflightError(raw, 'send');
+  assert.equal(send.kind, 'model-start-timeout', 'saturation classified as model-start-timeout, not prepass-failed');
+  assert.ok(send.message.includes('concurrency slot'), 'message names the queued-slot cause');
+  assert.ok(!send.message.toLowerCase().includes('pruning'), 'does not blame pruning');
+  assert.ok(!send.message.includes('req-'), 'no req-NN leaked');
+  assert.ok(!send.message.includes('anthropic'), 'raw provider name not leaked into the user-facing message');
+
+  const edit = mapPreflightError(raw, 'edit');
+  assert.equal(edit.kind, 'edit-failed');
+  assert.ok(!edit.message.toLowerCase().includes('pruning'), 'edit does not blame pruning');
+  assert.ok(!edit.message.includes('req-'));
+});
+
 test('mapPreflightError classifies backend-reported prepass failures (detail sanitized of req-NN)', () => {
   // A backend-reported failure names the real cause (e.g. a model error); the
   // detail is included SANITIZED (any req-NN stripped) since it is not an
@@ -207,6 +230,7 @@ test('Brief H invariant: no mapped message leaks an internal req-NN id', () => {
     'model error for req-99',
     'Request req-12 was cancelled.',
     'unknown req-1 internal',
+    'Provider "anthropic" concurrency cap reached: waited 30000ms without a slot.',
   ];
   for (const err of reqErrors) {
     for (const opKind of ['send', 'edit'] as const) {

@@ -21,6 +21,7 @@ import {
 } from './rpc';
 import { collectWarmBashStats } from './warm-bash-stats';
 import { ProviderGate } from './provider-gate';
+import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { SessionContext, SessionContextCreationReason } from './server-types';
@@ -46,8 +47,27 @@ import { BackendError } from './server-io';
  * is the only phase that can hang without observable SDK events. Distinct from
  * the host-side send-timer (prepass phase) and any streaming watchdog, which
  * own their own windows.
+ *
+ * METRIC-GATED DEFERRAL: the timer's clock starts at prompt dispatch, BEFORE
+ * the request acquires its ProviderGate concurrency slot. When the provider is
+ * saturated (`queuedRequests > 0`) or circuit-broken (`paused`), a fire is a
+ * FALSE POSITIVE — the turn is legitimately QUEUED, not hung. On fire the
+ * handler checks `ProviderGate.getMetrics()` for this request's provider and
+ * re-arms the timer (defer) instead of aborting, bounded by
+ * `PROMPT_TIMEOUT_HARD_CEILING_MS` (a genuinely-stuck backstop). FAIL-OPEN: if
+ * the gate is absent, the provider can't be resolved, or no metric matches, it
+ * aborts as before (never hang on a missing gate).
  */
 const PROMPT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — tunable
+
+/**
+ * Hard ceiling on the CUMULATIVE wall time the pre-commit safety net may
+ * defer (across re-arms). Once exceeded the timer aborts even if the provider
+ * is still saturated/paused — a genuinely-stuck backstop so a queued turn can
+ * never hang forever. 2× the single window: one normal `PROMPT_TIMEOUT_MS`
+ * budget plus one deferred window to ride out a transient saturation/pause.
+ */
+const PROMPT_TIMEOUT_HARD_CEILING_MS = 2 * PROMPT_TIMEOUT_MS; // 20 minutes — tunable
 
 /** Environment key for the interrupt-abort watchdog. */
 const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
@@ -523,20 +543,55 @@ async function handleMessageSend(
   // `activeRequest.promptSafetyTimer` so `session-event-handler.ts` can clear
   // it at the commit point; clearing only on `.finally` would make this a
   // whole-run ceiling that aborts healthy multi-turn runs mid-stream.
-  const promptTimer = setTimeout(() => {
+  //
+  // METRIC-GATED DEFERRAL: on fire, BEFORE aborting, check whether this
+  // request's provider is saturated (`queuedRequests > 0`) or paused. If so
+  // the timer is a FALSE POSITIVE — the turn is legitimately QUEUED waiting
+  // for a ProviderGate slot — so re-arm (defer) instead of aborting, bounded
+  // by `PROMPT_TIMEOUT_HARD_CEILING_MS`. FAIL-OPEN: absent gate / unresolvable
+  // provider / missing metric falls through to abort (never hang). `firstArmedAt`
+  // is a closure local anchoring the cumulative ceiling (no other site reads it).
+  const firstArmedAt = Date.now();
+  const onPromptSafetyTimerFire = () => {
     if (!context.activeRequest || context.activeRequest.id !== requestId) return;
     if (preflightFailed) return;
+
+    const elapsed = Date.now() - firstArmedAt;
+    const gate = ProviderGate.getInstance();
+    const provider = resolveActiveModel(context).provider;
+    // Fail-open chain: `providerMetric` is undefined when the gate is absent,
+    // the provider can't be resolved, or the provider is ungated (no metric) —
+    // in every such case `saturated` is falsy and we fall through to abort.
+    const providerMetric = provider
+      ? gate?.getMetrics()?.find((m) => m.provider === provider)
+      : undefined;
+    const saturated = !!providerMetric
+      && (providerMetric.queuedRequests > 0 || providerMetric.paused);
+
+    if (saturated && elapsed < PROMPT_TIMEOUT_HARD_CEILING_MS) {
+      // DEFER: re-arm for another window. `preflightFailed` is intentionally
+      // NOT set here — the one-shot guard is set ONLY in the FIRE branch
+      // below, so a deferred re-arm can still be superseded by a real
+      // preflight failure from `preflightResult(false)` / `.catch`. The re-
+      // armed handle replaces `promptSafetyTimer` so the commit-point clear in
+      // `session-event-handler.ts` (and `clearActiveRequest`) clears the LIVE
+      // handle, not the already-fired original.
+      context.activeRequest.promptSafetyTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
+      return;
+    }
+
+    // FIRE: genuinely stuck, ceiling exceeded, or fail-open. The
+    // `preflightFailed` one-shot is set ONLY here.
     preflightFailed = true;
     void context.session.abort().catch(() => {
       // Best-effort abort; the failure is surfaced via `preflight.failed` below.
     });
-    emitPreflightFailed(
-      deps,
-      context,
-      requestId,
-      `Prompt timed out after ${PROMPT_TIMEOUT_MS}ms without reaching a commit point.`,
-    );
-  }, PROMPT_TIMEOUT_MS);
+    const reason = saturated
+      ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'saturated'} without reaching a commit point.`
+      : `Prompt timed out after ${PROMPT_TIMEOUT_MS}ms without reaching a commit point.`;
+    emitPreflightFailed(deps, context, requestId, reason);
+  };
+  const promptTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
   context.activeRequest.promptSafetyTimer = promptTimer;
 
   try {

@@ -136,7 +136,7 @@ export class FileDiffService {
           cp.execFile(
             'git',
             ['checkout', 'HEAD', '--', resolvedPath],
-            { cwd: path.dirname(resolvedPath) },
+            { cwd: path.dirname(resolvedPath), timeout: 30_000, maxBuffer: 20 * 1024 * 1024 },
             (err) => (err ? reject(err) : resolve()),
           );
         });

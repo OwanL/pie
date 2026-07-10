@@ -217,6 +217,26 @@ export interface EffectRunnerDeps {
    */
   modelStartTimerTimeoutMs?: number;
   /**
+   * Read the live provider-gate concurrency metrics (cached host-side in
+   * `AggregateStats.providerGate`, polled from the backend's `ProviderGate`).
+   * Used by the model-start send-timer re-arm path to detect when the
+   * in-flight request's provider is legitimately QUEUED (`queuedRequests>0`)
+   * or PAUSED (circuit breaker), so the timer re-arms instead of firing a
+   * false-positive `PreflightFailed`. Optional + FAIL-OPEN: when absent (or
+   * when it returns undefined), the gate is skipped and the timer fires as
+   * today. The shape is the minimal slice the runner reasons over.
+   */
+  getProviderGateMetrics?: () => { providers: Array<{ provider: string; queuedRequests: number; paused: boolean }> } | undefined;
+  /**
+   * Resolve the provider name an in-flight send's request would route to, so
+   * the model-start re-arm path can match it against `getProviderGateMetrics`.
+   * Resolves the session's current model id (else the global default) → the
+   * matching model entry's `provider`. Optional + FAIL-OPEN: when absent (or
+   * when it returns undefined), the provider can't be matched and the timer
+   * fires as today.
+   */
+  resolveSessionProvider?: (sessionPath: string) => string | undefined;
+  /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
    * advance timers synchronously without wall-clock waits.
@@ -258,6 +278,13 @@ interface InFlightSend {
    *  once pruning succeeds). Determines the fire error string so the notice
    *  blames the right cause (pruning vs model-start). */
   phase: 'prepass' | 'modelStart';
+  /** Absolute epoch-ms the model-start phase was FIRST armed (set once in
+   *  `reArmInFlightSend` when the prepass succeeds). Used by the metric-gated
+   *  re-arm path in `onSendTimerFire` to enforce a HARD CEILING on the total
+   *  model-start wall-clock wait, so a genuinely-stuck turn (a queue that
+   *  never drains) still fires. Absent during the prepass phase (only the
+   *  modelStart phase tracks the ceiling). */
+  modelStartFirstArmedAt?: number;
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
@@ -309,6 +336,15 @@ export class EffectRunner {
    *  carries the model-start error string so the notice blames model-start,
    *  not pruning. */
   private static readonly MODEL_START_TIMER_TIMEOUT_MS = 600_000;
+
+  /** Hard ceiling on total model-start wall-clock wait across metric-gated
+   *  re-arms. When the provider-gate re-arm path keeps extending the timer
+   *  because the in-flight request's provider is legitimately queued/paused,
+   *  this guarantees a genuinely-stuck turn (a queue that never drains, a
+   *  deadlocked slot) still fires after a bounded time. ~2× the single
+   *  model-start budget (20 min): long enough to outlast a normal provider-
+   *  saturation drain, short enough to bound a hang. */
+  private static readonly MODEL_START_HARD_CEILING_MS = EffectRunner.MODEL_START_TIMER_TIMEOUT_MS * 2;
 
   private readonly sendTimerTimeoutMs: number;
 
@@ -738,6 +774,33 @@ export class EffectRunner {
     return send;
   }
 
+  /** Decide whether the model-start send-timer should RE-ARM (the in-flight
+   *  request's provider is legitimately queued/paused) instead of firing a
+   *  false-positive `PreflightFailed`. Returns false (→ fire, FAIL-OPEN) when
+   *  either dep is absent, the provider can't be resolved, the metrics carry
+   *  no matching provider, the provider has a free slot (not queued and not
+   *  paused — a genuinely-stuck turn, not a queue wait), or the hard ceiling
+   *  has elapsed. Pure read of `deps` + `send.modelStartFirstArmedAt`; no state
+   *  mutation (the caller schedules the re-arm). */
+  private shouldReArmModelStartTimer(send: InFlightSend): boolean {
+    const metrics = this.deps.getProviderGateMetrics?.();
+    // FAIL-OPEN: no metrics accessor / no metrics → fire as today.
+    if (!metrics) return false;
+    const provider = this.deps.resolveSessionProvider?.(send.sessionPath);
+    // FAIL-OPEN: can't resolve the in-flight request's provider → fire.
+    if (!provider) return false;
+    const entry = metrics.providers.find((p) => p.provider === provider);
+    // FAIL-OPEN: no matching provider in the metrics → fire.
+    if (!entry) return false;
+    // The provider has a free slot and isn't paused — the wait is NOT a queue
+    // wait, so the turn is genuinely stuck → fire (don't mask a real hang).
+    if (!(entry.queuedRequests > 0 || entry.paused === true)) return false;
+    // Hard ceiling: a queue that never drains (deadlock) must still fire.
+    const firstArmed = send.modelStartFirstArmedAt ?? Date.now();
+    if (Date.now() - firstArmed >= EffectRunner.MODEL_START_HARD_CEILING_MS) return false;
+    return true;
+  }
+
   /** Send-timer fire: the post-ack, pre-commit phase elapsed with no commit
    *  point. Dispatch `PreflightFailed` (the reducer rolls back via
    *  `pending.promoted[corrId]`, explicit-corrId short-circuiting its scan).
@@ -747,9 +810,41 @@ export class EffectRunner {
    *  error string depends on `send.phase`: `prepass` (pruning still running →
    *  genuine pruning timeout) vs `modelStart` (pruning succeeded → the delay
    *  is model-start/concurrency, not pruning). The error mapper distinguishes
-   *  the two strings so the notice blames the right cause. */
+   *  the two strings so the notice blames the right cause.
+   *
+   *  Metric-gated re-arm (modelStart phase only): the model-start timer's
+   *  clock started at issue time, BEFORE the request acquired its
+   *  ProviderGate concurrency slot. When the in-flight request's provider is
+   *  legitimately QUEUED (`queuedRequests>0`) or PAUSED (circuit breaker
+   *  armed), firing now would be a FALSE-POSITIVE PreflightFailed that rolls
+   *  back the user's message even though the turn would succeed once a slot
+   *  frees up. Re-arm instead, up to a hard ceiling, so a genuine queue drain
+   *  succeeds and only a truly-stuck turn fires. FAIL-OPEN: any missing
+   *  dep/metric/provider, a non-queued/non-paused provider, or an elapsed
+   *  ceiling falls through to fire (existing behavior). */
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
+    if (send.phase === 'modelStart' && this.shouldReArmModelStartTimer(send)) {
+      const firstArmed = send.modelStartFirstArmedAt ?? Date.now();
+      const elapsed = Date.now() - firstArmed;
+      const remaining = EffectRunner.MODEL_START_HARD_CEILING_MS - elapsed;
+      // Re-arm for the lesser of a full model-start window or the remaining
+      // ceiling (clamped to ≥1s so a near-ceiling re-arm still wakes to fire
+      // rather than scheduling a non-positive timeout).
+      const nextBudget = Math.min(
+        this.modelStartTimerTimeoutMs,
+        Math.max(1000, remaining + 1),
+      );
+      send.timer = this.timer.schedule(() => this.onSendTimerFire(send), nextBudget);
+      this.deps.log.log('debug', 'send-timer.rearmed', {
+        corrId: send.corrId,
+        sessionPath: send.sessionPath,
+        elapsedMs: elapsed,
+        ceilingMs: EffectRunner.MODEL_START_HARD_CEILING_MS,
+        nextBudgetMs: nextBudget,
+      });
+      return;
+    }
     send.disposed = true;
     send.fired = true;
     // Do NOT delete the entry from the in-flight maps yet. A late commit
@@ -797,6 +892,13 @@ export class EffectRunner {
     if (send.timer) this.timer.cancel(send.timer);
     send.budgetMs = this.modelStartTimerTimeoutMs;
     send.phase = 'modelStart';
+    // Record the FIRST arming into the modelStart phase — the absolute start of
+    // the model-start wait. Used by the hard-ceiling backstop in
+    // `onSendTimerFire` so metric-gated re-arms cannot extend a genuinely-
+    // stuck turn indefinitely. Set once (idempotent under repeat re-arm).
+    if (send.modelStartFirstArmedAt === undefined) {
+      send.modelStartFirstArmedAt = Date.now();
+    }
     send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
   }
 

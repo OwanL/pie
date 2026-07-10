@@ -1,6 +1,9 @@
 import * as cp from 'node:child_process';
 import * as path from 'node:path';
 
+import { appendPieLog } from '../host/util/pie-log';
+import { toErrorMessage } from './error-message';
+
 // ─── Git baseline resolution (shared, pure-node) ───────────────────────────
 //
 // Extracted from host/core/file-diff-service.ts so the session-changes
@@ -16,18 +19,18 @@ import * as path from 'node:path';
 export function execGit(
   dir: string,
   args: string[],
-  /** Max stdout bytes before the exec rejects (ENOBUFS). Defaults to 1 MB —
+  /** Max stdout bytes before the exec rejects (ENOBUFS). Defaults to 10 MB —
    *  enough for the small queries the baseline walk / tracker use. The
-   *  session-changes `diff` action passes a larger value (5 MB) so large-but-
+   *  session-changes `diff` action passes a custom value (5 MB) so large-but-
    *  reasonable diffs are captured and then minified/truncated by the renderer,
    *  rather than lost to a buffer overflow → "no git baseline" fallback. */
-  maxBuffer: number = 1024 * 1024,
+  maxBuffer: number = 10 * 1024 * 1024,
 ): Promise<{ stdout: string; code: number }> {
   return new Promise((resolve, reject) => {
     cp.execFile(
       'git',
       args,
-      { cwd: dir, maxBuffer },
+      { cwd: dir, timeout: 15_000, maxBuffer },
       (err, stdout) => {
         if (err) {
           const code = (err as { code?: number }).code;
@@ -97,7 +100,13 @@ export async function resolveBaselineRef(resolvedPath: string): Promise<string> 
       if (await differsFromCommit(dir, sha, resolvedPath)) return sha;
     }
     return 'HEAD';
-  } catch {
+  } catch (err) {
+    appendPieLog(
+      'debug',
+      'git-baseline',
+      'failed to resolve baseline ref; falling back to HEAD',
+      { error: toErrorMessage(err) },
+    );
     return 'HEAD';
   }
 }
@@ -111,7 +120,13 @@ export async function isTrackedByGit(absPath: string): Promise<boolean> {
   try {
     const { code } = await execGit(dir, ['ls-files', '--error-unmatch', absPath]);
     return code === 0;
-  } catch {
+  } catch (err) {
+    appendPieLog(
+      'debug',
+      'git-baseline',
+      'failed to check if file is tracked; assuming untracked',
+      { error: toErrorMessage(err) },
+    );
     return false;
   }
 }
