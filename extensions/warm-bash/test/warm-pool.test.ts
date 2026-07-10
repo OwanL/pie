@@ -303,6 +303,76 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
     }
   });
 
+  /** Poll pool stats until `readyCheck` is satisfied (or `deadlineMs` elapses). */
+  async function settle(pool: any, readyCheck: (s: any) => boolean, deadlineMs = 8000): Promise<any> {
+    const deadline = Date.now() + deadlineMs;
+    let s = pool.getStats();
+    while (!readyCheck(s) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      s = pool.getStats();
+    }
+    return s;
+  }
+
+  test('setTarget(n) kills excess idle workers down to the new (lower) target', async () => {
+    const pool = new Pool({ size: 4, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      // Lower the target to 1; warming workers that land afterwards must be
+      // killed by deliver rather than parked above the target.
+      pool.setTarget(1);
+      const s = await settle(pool, (x) => x.warming === 0 && x.ready <= 1);
+      assert.equal(s.warming, 0, `warming should drain, got ${s.warming}`);
+      assert.ok(s.ready <= 1, `ready<=1 after lowering, got ${s.ready}`);
+      assert.equal(s.poolSize, 1);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('setTarget(n) spawns up to the new (higher) target when raised', async () => {
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      pool.setTarget(3);
+      const s = await settle(pool, (x) => x.ready >= 3);
+      assert.ok(s.ready >= 3, `ready>=3 after raising, got ${s.ready}`);
+      assert.equal(s.poolSize, 3);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('setTarget(0) drains the pool to zero idle without disposing', async () => {
+    const pool = new Pool({ size: 3, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      pool.setTarget(0);
+      const s = await settle(pool, (x) => x.warming === 0 && x.ready === 0);
+      assert.equal(s.ready, 0, `ready should drain to 0, got ${s.ready}`);
+      assert.equal(s.warming, 0);
+      assert.equal(s.disposed, false, 'setTarget(0) must not dispose the pool object');
+      assert.equal(s.poolSize, 0);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('setTarget then exec still serves a command correctly', async () => {
+    const pool = new Pool({ size: 3, shellPath: BASH, env: process.env });
+    try {
+      await pool.ready();
+      pool.setTarget(1);
+      await settle(pool, (x) => x.warming === 0 && x.ready <= 1);
+      const { onData, text } = sink();
+      const res = await pool.exec({ command: 'echo after-shrink', cwd: tmp, env: process.env, onData });
+      assert.equal(res.exitCode, 0);
+      assert.equal(text().trim(), 'after-shrink');
+    } finally {
+      pool.dispose();
+    }
+  });
+
   test('operations: metrics count fast-path, warm, and fallback executions distinctly', async () => {
     // Fast path: simple command, no shell, no pool.
     const fast = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };

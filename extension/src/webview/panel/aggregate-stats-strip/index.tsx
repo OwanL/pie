@@ -441,7 +441,7 @@ function warmBashTooltipNode(w: WarmBashStats): JSX.Element {
     lines.push(`  ${w.totalFastPath} fast path  ·  ${w.totalWarm} warm  ·  ${w.totalFallback} fallback`);
   }
   if (w.totalWarmupFailures > 0) lines.push(`Warmup failures: ${w.totalWarmupFailures}`);
-  lines.push('Tune in Settings → Bash (pool size, fast path, timeouts).');
+  lines.push('Tune in Settings → Bash (idle target, fast path, timeouts).');
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head"><span>Warm bash</span><span class="rich-tooltip-head-value">{w.ready}/{w.poolSize}</span></div>

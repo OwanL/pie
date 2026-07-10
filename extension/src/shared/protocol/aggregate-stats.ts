@@ -147,11 +147,11 @@ export interface AggregateLastRun {
  *  `enabled` is false (and counts zero) when warm bash is disabled or no bash
  *  call has built a pool yet — the status strip hides the segment in that case. */
 export interface WarmBashStats {
-  /** Warm bash is active for at least one session (pool size > 0, not disposed). */
+  /** Warm bash is active (the shared pool exists and is not disposed). */
   enabled: boolean;
-  /** Count of sessions with warm bash active (each enabled session contributes 1). */
+  /** Count of sessions that have built a warm-bash tool (active users of the shared pool). */
   activeSessions: number;
-  /** Configured warm pool size (sum across active sessions). */
+  /** Configured idle target for the single shared warm pool. */
   poolSize: number;
   /** Idle warm workers ready to serve a command immediately. */
   ready: number;

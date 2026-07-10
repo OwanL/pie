@@ -3,9 +3,14 @@
  *
  * Replaces the built-in `bash` tool with one that uses a layered executor:
  *   1. fast-path  — execFile for simple commands (no bash.exe at all)
- *   2. warm-bash  — a per-session pool of pre-warmed bash processes with a
+ *   2. warm-bash  — a SINGLE SHARED pool of pre-warmed bash processes with a
  *                   marker protocol; each worker is used once then killed
- *                   (no cross-call cwd/env leakage) and replaced in the background
+ *                   (no cross-call cwd/env leakage) and replaced in the
+ *                   background. The pool aims for a configurable IDLE TARGET
+ *                   (PIE_BASH_WARM_POOL): it spawns up to the target when idle
+ *                   drops below it and kills excess idle when the target is
+ *                   lowered — so the total idle bash process count is capped
+ *                   process-wide regardless of how many sessions are open.
  *   3. fallback   — the built-in fresh `bash -c` path (today's exact behaviour)
  *
  * Every layer degrades to the next; the fallback is today's path, so this can
@@ -14,7 +19,7 @@
  * and overriding only `execute`.
  *
  * Config (env vars, mirrored from runtimePrefs in the host):
- *   PIE_BASH_WARM_POOL   — warm pool size per session (default 2; 0 = disabled)
+ *   PIE_BASH_WARM_POOL   — idle target for the SHARED pool (default 2; 0 = disabled)
  *   PIE_BASH_FAST_PATH   — "1"/"0" (default 1; 0 disables the execFile fast path)
  *   PIE_SHELL            — explicit bash path (default: auto-detect Git Bash / bash)
  *   PIE_BASH_WARMUP_TIMEOUT_MS — warmup wait ms (default 10000; 0 = default)
@@ -30,7 +35,7 @@ import { registerWarmBashStats, type WarmBashStats } from "./src/stats.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
 import type { BashOperations } from "./src/types.js";
 
-function poolSize(): number {
+function idleTarget(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_WARM_POOL ?? "", 10);
   return Number.isFinite(raw) ? Math.max(0, raw) : 2;
 }
@@ -110,32 +115,139 @@ function isDisabledByToggle(): boolean {
 // Its execute is overridden per call; the throwaway cwd never runs a command.
 const baseBashTool = createBashTool(process.cwd());
 
+interface PoolCfg {
+  target: number;
+  shell: string;
+  warmup: number;
+  acquire: number;
+}
+interface OpsCfg {
+  fastPath: boolean;
+  autoPrune: boolean;
+}
+
 export default function (pi: ExtensionAPI) {
-  // Per-session state, keyed by session id (cwd is stable per pie session).
-  const pools = new Map<string, WarmBashPool>();
+  // SHARED pool — one process-wide warm pool, NOT per-session. Workers are
+  // single-use (used once then killed, re-cd'd per command), so sharing across
+  // sessions never reintroduces cross-call cwd/env state leakage. This caps the
+  // total idle bash process count at the target regardless of session count.
+  let sharedPool: WarmBashPool | null = null;
+  let poolCfg: PoolCfg | null = null;
+  let unregisterStats: (() => void) | null = null;
+
+  // Per-session state. Tools + operations are per-session (operations holds a
+  // per-session log closure keyed by sessionId); the POOL they reference is shared.
   const tools = new Map<string, ReturnType<typeof createBashTool>>();
   const sessionCwd = new Map<string, { cwd: string }>();
-  /** Per-session fast-path/fallback counters, shared with operations. */
+  /** Per-session fast-path/fallback counters (for analytics) + summed into the
+   *  global stats provider. */
   const metrics = new Map<string, ReturnType<typeof createWarmBashMetrics>>();
-  /** Unregister functions for the per-session stats providers (registry). */
-  const unregisterStats = new Map<string, () => void>();
-  /** Snapshot of the env-derived config used to build each session's tool, so a
-   *  live settings change (writes new env via runtimePrefs.set) is detected and
-   *  the pool/tool rebuilt on the next bash call — no restart needed. */
-  const toolConfig = new Map<string, { size: number; fastPath: boolean; shell: string; warmup: number; acquire: number; autoPrune: boolean }>();
+  /** Sessions that have built a warm-bash tool — drives `activeSessions` in stats. */
+  const activeSessions = new Set<string>();
+  /** Last ops config used to build each session's tool, to detect fast-path /
+   *  auto-prune changes and rebuild the tool (cheap; no pool change). */
+  const toolOpsCfg = new Map<string, OpsCfg>();
+  /** Global ops-config snapshot — a change invalidates ALL per-session tools. */
+  let globalOpsCfg: OpsCfg | null = null;
 
-  function currentConfig() {
-    return { size: poolSize(), fastPath: fastPathEnabled(), shell: shellPath(), warmup: warmupTimeoutMs(), acquire: acquireTimeoutMs(), autoPrune: autoPruneEnabled() };
+  function currentPoolCfg(): PoolCfg {
+    return { target: idleTarget(), shell: shellPath(), warmup: warmupTimeoutMs(), acquire: acquireTimeoutMs() };
+  }
+  function currentOpsCfg(): OpsCfg {
+    return { fastPath: fastPathEnabled(), autoPrune: autoPruneEnabled() };
   }
 
-  function getPool(sessionId: string, size: number, shell: string, warmup: number, acquire: number): WarmBashPool | null {
-    if (size <= 0) return null;
-    let p = pools.get(sessionId);
-    if (!p) {
-      p = new WarmBashPool({ size, env: process.env, shellPath: shell, warmupTimeoutMs: warmup, acquireTimeoutMs: acquire });
-      pools.set(sessionId, p);
+  /** Bring the shared pool in line with `cfg`. Creates, disposes, live-tunes the
+   *  target, or rebuilds (on shell/timeout change). When the pool is rebuilt or
+   *  disabled, all per-session tools are invalidated so their operations pick up
+   *  the new pool (an old operations closure would reference a disposed pool). */
+  function reconcilePool(cfg: PoolCfg): void {
+    // Disable path: tear the pool down entirely.
+    if (cfg.target <= 0) {
+      if (sharedPool) {
+        sharedPool.dispose();
+        sharedPool = null;
+        poolCfg = null;
+        invalidateAllTools();
+      }
+      return;
     }
-    return p;
+
+    if (!sharedPool) {
+      sharedPool = new WarmBashPool({
+        size: cfg.target,
+        env: process.env,
+        shellPath: cfg.shell,
+        warmupTimeoutMs: cfg.warmup,
+        acquireTimeoutMs: cfg.acquire,
+      });
+      poolCfg = cfg;
+      registerGlobalStats();
+      // Existing sessions cached tools whose operations captured pool:null
+      // (built while the pool was disabled). Invalidate so they rebuild and
+      // pick up the new shared pool.
+      invalidateAllTools();
+      return;
+    }
+
+    const prev = poolCfg!;
+    // Shell / warmup / acquire changes require a rebuild (workers use the old
+    // shell; timeouts are baked at construction).
+    if (prev.shell !== cfg.shell || prev.warmup !== cfg.warmup || prev.acquire !== cfg.acquire) {
+      sharedPool.dispose();
+      sharedPool = new WarmBashPool({
+        size: cfg.target,
+        env: process.env,
+        shellPath: cfg.shell,
+        warmupTimeoutMs: cfg.warmup,
+        acquireTimeoutMs: cfg.acquire,
+      });
+      poolCfg = cfg;
+      invalidateAllTools();
+      return;
+    }
+
+    // Only the target changed — live-tune without a rebuild (existing operations
+    // keep referencing the same pool object).
+    if (prev.target !== cfg.target) {
+      sharedPool.setTarget(cfg.target);
+      poolCfg = cfg;
+    }
+  }
+
+  function invalidateAllTools(): void {
+    tools.clear();
+    toolOpsCfg.clear();
+  }
+
+  /** One global stats provider (NOT per-session). Sums per-session metrics for
+   *  the routing totals and reads the shared pool for ready/warming/poolSize. */
+  function registerGlobalStats(): void {
+    unregisterStats?.();
+    unregisterStats = registerWarmBashStats('__warm-bash-global__', (): WarmBashStats => {
+      const ps = sharedPool?.getStats() ?? null;
+      const enabled = !!ps && !ps.disposed;
+      let totalFastPath = 0;
+      let totalWarm = 0;
+      let totalFallback = 0;
+      for (const m of metrics.values()) {
+        totalFastPath += m.totalFastPath;
+        totalWarm += m.totalWarm;
+        totalFallback += m.totalFallback;
+      }
+      return {
+        enabled,
+        activeSessions: enabled ? activeSessions.size : 0,
+        poolSize: ps ? ps.poolSize : 0,
+        ready: ps ? ps.ready : 0,
+        warming: ps ? ps.warming : 0,
+        fastPathEnabled: fastPathEnabled(),
+        totalFastPath,
+        totalWarm,
+        totalFallback,
+        totalWarmupFailures: ps ? ps.totalWarmupFailures : 0,
+      };
+    });
   }
 
   function getTool(sessionId: string, cwd: string): ReturnType<typeof createBashTool> {
@@ -146,36 +258,39 @@ export default function (pi: ExtensionAPI) {
     }
     entry.cwd = cwd; // keep current in case a session ever changes cwd
 
-    const cfg = currentConfig();
-    const prev = toolConfig.get(sessionId);
-    // If a setting changed since we built this session's tool, tear it down and
-    // rebuild so the new pool size / fast-path / shell / timeouts takes effect
-    // immediately.
-    if (prev && (prev.size !== cfg.size || prev.fastPath !== cfg.fastPath || prev.shell !== cfg.shell || prev.warmup !== cfg.warmup || prev.acquire !== cfg.acquire || prev.autoPrune !== cfg.autoPrune)) {
-      pools.get(sessionId)?.dispose();
-      pools.delete(sessionId);
+    const poolCfgNow = currentPoolCfg();
+    const opsCfgNow = currentOpsCfg();
+    reconcilePool(poolCfgNow);
+    activeSessions.add(sessionId);
+
+    // Global ops-config change (fastPath / autoPrune) → rebuild every session's
+    // tool so its operations picks up the new flags. Cheap; no pool change.
+    if (globalOpsCfg && (globalOpsCfg.fastPath !== opsCfgNow.fastPath || globalOpsCfg.autoPrune !== opsCfgNow.autoPrune)) {
+      invalidateAllTools();
+    }
+    globalOpsCfg = opsCfgNow;
+
+    // Per-session ops-config drift (e.g. tool built before a global update
+    // landed in the map) → rebuild just this session.
+    const prevOps = toolOpsCfg.get(sessionId);
+    if (prevOps && (prevOps.fastPath !== opsCfgNow.fastPath || prevOps.autoPrune !== opsCfgNow.autoPrune)) {
       tools.delete(sessionId);
-      toolConfig.delete(sessionId);
-      // Re-register the stats provider against the new pool below.
-      unregisterStats.get(sessionId)?.();
-      unregisterStats.delete(sessionId);
-      metrics.delete(sessionId);
     }
 
     let tool = tools.get(sessionId);
     if (!tool) {
-      const pool = getPool(sessionId, cfg.size, cfg.shell, cfg.warmup, cfg.acquire);
+      const pool = sharedPool;
       // Fallback = today's exact path. Pass the same explicit shell so the
       // fallback and warm pool use one bash binary.
       const fallbackOps = createLocalBashOperations({
-        shellPath: cfg.shell || undefined,
+        shellPath: poolCfgNow.shell || undefined,
       }) as BashOperations;
       const m = createWarmBashMetrics();
       metrics.set(sessionId, m);
       const operations = createWarmBashOperations({
         pool,
-        fastPathEnabled: cfg.fastPath,
-        autoPruneEnabled: cfg.autoPrune,
+        fastPathEnabled: opsCfgNow.fastPath,
+        autoPruneEnabled: opsCfgNow.autoPrune,
         gnuGrepProbe,
         log: (payload) => {
           // Live debug line for the pi OutputChannel (pi-logs) + persisted
@@ -192,26 +307,7 @@ export default function (pi: ExtensionAPI) {
         spawnHook: ({ command, cwd: _cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({ command, cwd: entry!.cwd, env }),
       });
       tools.set(sessionId, tool);
-      toolConfig.set(sessionId, cfg);
-      // Register a live stats provider so the host status strip can show
-      // ready/warming counts + execution breakdown for this session.
-      const unregister = registerWarmBashStats(sessionId, (): WarmBashStats => {
-        const ps = pool?.getStats() ?? null;
-        const enabled = !!ps && !ps.disposed && cfg.size > 0;
-        return {
-          enabled,
-          activeSessions: enabled ? 1 : 0,
-          poolSize: ps ? ps.poolSize : 0,
-          ready: ps ? ps.ready : 0,
-          warming: ps ? ps.warming : 0,
-          fastPathEnabled: cfg.fastPath,
-          totalFastPath: m.totalFastPath,
-          totalWarm: m.totalWarm,
-          totalFallback: m.totalFallback,
-          totalWarmupFailures: ps ? ps.totalWarmupFailures : 0,
-        };
-      });
-      unregisterStats.set(sessionId, unregister);
+      toolOpsCfg.set(sessionId, opsCfgNow);
     }
     return tool;
   }
@@ -241,14 +337,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event: unknown, ctx: { sessionManager: { getSessionId: () => string } }) => {
     const id = ctx.sessionManager.getSessionId();
-    const pool = pools.get(id) ?? null;
     const m = metrics.get(id);
-    const cfg = toolConfig.get(id);
+    const cfg = globalOpsCfg;
     // Persist the session's cumulative routing counters + config context BEFORE
-    // disposing the pool (getStats() would read disposed afterwards). Only
-    // sessions that actually invoked bash have metrics (getTool created them).
+    // removing the per-session metrics (the global stats provider sums them).
+    // Only sessions that actually invoked bash have metrics (getTool created them).
     if (m && cfg) {
-      const ps = pool?.getStats() ?? null;
+      const ps = sharedPool?.getStats() ?? null;
       const summary: WarmBashSessionSummary = {
         fastPath: m.totalFastPath,
         warm: m.totalWarm,
@@ -261,13 +356,13 @@ export default function (pi: ExtensionAPI) {
       };
       logSessionSummary(id, summary);
     }
-    pool?.dispose();
-    pools.delete(id);
+    // Per-session teardown. The shared pool is NOT disposed here — it persists
+    // for the process lifetime (or until the idle target is set to 0) so the
+    // configured idle target is maintained across sessions.
+    activeSessions.delete(id);
     tools.delete(id);
     sessionCwd.delete(id);
-    toolConfig.delete(id);
-    unregisterStats.get(id)?.();
-    unregisterStats.delete(id);
+    toolOpsCfg.delete(id);
     metrics.delete(id);
     // Best-effort drain so the summary line lands on disk before the worker exits.
     await flushLog();
@@ -276,7 +371,7 @@ export default function (pi: ExtensionAPI) {
   // Best-effort cleanup if the process exits without per-session shutdown.
   for (const sig of ["exit", "SIGINT", "SIGTERM"] as const) {
     process.once(sig, () => {
-      for (const p of pools.values()) p.dispose();
+      sharedPool?.dispose();
     });
   }
 }

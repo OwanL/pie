@@ -1,12 +1,13 @@
 /**
- * Live warm-bash pool metrics, reported per session to the host status strip.
+ * Live warm-bash pool metrics, reported to the host status strip.
  *
  * The warm-bash extension runs in the pi backend child process; the backend
  * request-handler (`extension/src/backend`) runs in the SAME process but is a
  * separate package and cannot import this module. We bridge the two via a
- * `Symbol.for` globalThis registry: the extension registers a stats getter per
- * session, the backend's `warm_bash.stats` RPC handler aggregates them. Both
- * sides reference the same `Symbol.for('pi.warmBashStatsRegistry')` key.
+ * `Symbol.for` globalThis registry: the extension registers ONE global stats
+ * getter (for the single shared pool), the backend's `warm_bash.stats` RPC
+ * handler aggregates over registered providers. Both sides reference the same
+ * `Symbol.for('pi.warmBashStatsRegistry')` key.
  *
  * The `WarmBashStats` shape is duplicated in `extension/src/shared/protocol/
  * aggregate-stats.ts` (the canonical type the host/webview consume); keep the
@@ -17,7 +18,7 @@ export interface WarmBashStats {
   enabled: boolean;
   /** Count of sessions with warm bash active (each enabled session contributes 1). */
   activeSessions: number;
-  /** Configured warm pool size (sum across active sessions). */
+  /** Configured idle target for the single shared warm pool. */
   poolSize: number;
   /** Idle warm workers ready to serve a command immediately. */
   ready: number;
@@ -62,12 +63,12 @@ function getRegistry(): Registry {
   return g[REGISTRY_KEY]!;
 }
 
-/** Register a per-session stats provider. Returns an unregister function. */
-export function registerWarmBashStats(sessionId: string, provider: WarmBashStatsProvider): () => void {
+/** Register a stats provider under `key`. Returns an unregister function. */
+export function registerWarmBashStats(key: string, provider: WarmBashStatsProvider): () => void {
   const reg = getRegistry();
-  reg.providers.set(sessionId, provider);
+  reg.providers.set(key, provider);
   return () => {
-    reg.providers.delete(sessionId);
+    reg.providers.delete(key);
   };
 }
 

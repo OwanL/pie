@@ -5,7 +5,8 @@ import { WarmBashPool, WarmExecError } from "./warm-pool.js";
 import { rewriteForPrune } from "./auto-prune.js";
 import type { BashOperations } from "./types.js";
 
-/** Mutable counters shared with the per-session stats provider (index.ts).
+/** Mutable counters shared with the global stats provider (index.ts sums
+ *  these across sessions into the single shared-pool stats report).
  *  Each counter increments when a command is ROUTED to that path AND does not
  *  degrade further: fast path counts successful execFile returns (an ENOENT
  *  fall-through is NOT counted — it degraded to the shell paths); warm counts

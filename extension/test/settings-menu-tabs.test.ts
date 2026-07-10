@@ -105,11 +105,11 @@ test('warm-bash settings render inline under the Warm Bash extension row', () =>
   act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="extensions"]')); });
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
   assert.match(body.textContent!, /Warm Bash/);
-  assert.doesNotMatch(body.textContent!, /Warm pool size/, 'warm-pool controls should be hidden until expanded');
+  assert.doesNotMatch(body.textContent!, /Idle target/, 'warm-pool controls should be hidden until expanded');
 
   // Expand the warm-bash row — the inline settings render.
   act(() => { click(body.querySelector('.toolbar-settings-ext-chevron')); });
-  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Warm pool size/);
+  assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Idle target/);
 });
 
 // The ask-user extension exposes a nested "Include for subagents" toggle that

@@ -44,11 +44,18 @@ interface WarmWorker {
 }
 
 /**
- * A per-session pool of pre-warmed bash processes. Each worker is used for
- * exactly one command then killed (no cross-call cwd/env state leakage — the
- * safety model the fresh-spawn design chose) and a replacement is warmed in the
- * background. If no warm worker is ready, the caller falls back to a fresh
- * `bash -c` (today's exact path), so the pool can never make things slower.
+ * A shared pool of pre-warmed bash processes (one per process, NOT per
+ * session). Each worker is used for exactly one command then killed
+ * (no cross-call cwd/env state leakage — the wrapper re-cds per command, so
+ * sharing across sessions is safe) and a replacement is warmed in the
+ * background. The pool aims for a configurable idle target ({@link size}):
+ * {@link refill} spawns up to it and {@link setTarget} kills excess idle when
+ * the target is lowered, so the total idle bash process count is capped
+ * process-wide regardless of how many sessions are open. If no warm worker
+ * is ready, the caller falls back to a fresh `bash -c` (today's exact path),
+ * so the pool can never make things slower. Bursts beyond the target are
+ * served by on-demand warmups (single-use, killed after) — only IDLE is
+ * capped, not concurrent running workers.
  */
 export class WarmBashPool {
   /** Ready warm workers, waiting to be consumed. */
@@ -59,7 +66,7 @@ export class WarmBashPool {
   /** Children still warming — tracked so `dispose` can kill them promptly. */
   private warmingChildren = new Set<ChildProcess>();
   private disabled = false;
-  private readonly size: number;
+  private size: number;
   private readonly shell: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly warmupTimeoutMs: number;
@@ -137,16 +144,24 @@ export class WarmBashPool {
     });
   }
 
-  /** Hand a freshly-warmed worker to a waiting acquire, else park it. */
+  /** Hand a freshly-warmed worker to a waiting acquire, else park it — unless
+   *  we're already at the idle target (e.g. target was lowered while this worker
+   *  was warming), in which case kill it so idle never exceeds the target. */
   private deliver(w: WarmWorker | null): void {
     if (this.disabled) {
       w?.kill();
       return;
     }
     if (w && this.waiters.length > 0) {
+      // Active demand takes precedence over the idle cap — the worker is
+      // consumed immediately, so it never counts as idle.
       this.waiters.shift()!(w);
-    } else if (w) {
+    } else if (w && this.items.length < this.size) {
       this.items.push(w);
+    } else if (w) {
+      // At/above the idle target (target was lowered while this was warming,
+      // or a refill raced). Kill it rather than letting idle exceed the target.
+      w.kill();
     } else if (this.waiters.length > 0) {
       // warmup failed with a waiter present — trigger a replacement, then the
       // waiter re-acquires recursively.
@@ -170,6 +185,26 @@ export class WarmBashPool {
         this.totalWarmupFailures++;
         this.deliver(null);
       });
+  }
+
+  /** Live-tune the idle target. Kills excess idle workers immediately; any
+   *  warming workers that were spawned under the old (higher) target are killed
+   *  by {@link deliver} when they land. If the target rose, spawns up to the new
+   *  target (refill spawns one worker per call, so loop the difference). No-op
+   *  for n < 0. */
+  setTarget(n: number): void {
+    this.size = Math.max(0, n);
+    if (this.disabled) return;
+    // Kill idle workers above the new (lower) target right away.
+    while (this.items.length > this.size) {
+      this.items.pop()!.kill();
+    }
+    // Spawn up to the new target if it rose (or we dipped below). refill()
+    // spawns exactly one worker per call and increments `inflight` synchronously,
+    // so this loop converges in `size - (items + inflight)` iterations.
+    while (this.items.length + this.inflight < this.size) {
+      this.refill();
+    }
   }
 
   dispose(): void {

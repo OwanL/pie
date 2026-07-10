@@ -29,7 +29,7 @@ through to the fallback. Worst case = today's behaviour.
 
 | Case | Behaviour |
 |---|---|
-| Parallel bash calls (one turn) | Pool of N warm workers; up to N run warm concurrently, the rest await warmup (never fail). |
+| Parallel bash calls (one turn) | A single shared pool aims for the idle target; idle+warming are capped at the target, but concurrent running workers are NOT capped (burst workers are single-use, killed after the command) — so bursts spawn on demand and idle settles back to the target. |
 | Backgrounded jobs (`cmd &`) | On normal completion kill **only the bash PID** (children orphan-and-survive, matching today); kill-tree only on timeout/abort. |
 | Heredocs (`<<EOF`) | `</dev/null` is safe (heredoc is a per-command redirect that takes precedence). |
 | `exec`/`exit` replacing the shell | process-close race path uses the real exit code. |
@@ -42,13 +42,17 @@ through to the fallback. Worst case = today's behaviour.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `PIE_BASH_WARM_POOL` | `2` | Warm pool size per session. `0` = disabled (today's behaviour). |
+| `PIE_BASH_WARM_POOL` | `2` | Idle target for the single shared warm pool — the number of bash processes kept warm across ALL sessions. Dynamically spawns up to the target and kills excess idle when lowered. `0` = disabled (today's behaviour). |
 | `PIE_BASH_FAST_PATH` | `1` | `1`/`0` — enable the execFile fast path. |
 | `PIE_BASH_AUTO_PRUNE` | `1` | `1`/`0` — transparently inject `--exclude-dir` / `-prune` into recursive `grep` / bare-path `find` so bash-embedded search skips node_modules/.git (approximates rg; gated by a runtime GNU-grep probe). `0` = skip the rewrite entirely. |
 | `PIE_SHELL` | auto | Explicit bash path (default: auto-detect Git Bash / bash). |
 
-The pool is **per-session** (keyed by `ctx.sessionManager.getSessionId()`),
-pre-warmed at first use, and disposed on `session_shutdown`.
+The pool is a single **shared** pool (one process-wide, NOT per-session) — workers
+are single-use (used once then killed, re-cd'd per command) so sharing across
+sessions never reintroduces cross-call cwd/env leakage. It is created on first
+use, lives for the process lifetime (it is NOT disposed on `session_shutdown` —
+only per-session tool/metrics state is dropped), and is disposed only when the
+idle target is set to 0 or the process exits.
 
 ## Why not just a persistent shell?
 

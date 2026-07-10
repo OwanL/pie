@@ -9,9 +9,10 @@ import type { OnSetPrefs } from './settings-menu-types';
  *
  *  Mirrors `bashWarmPoolSize` / `bashFastPath` / `bashShellPath` prefs →
  *  PIE_BASH_WARM_POOL / PIE_BASH_FAST_PATH / PIE_SHELL env (see
- *  handleRuntimePrefsSet). Changes take effect on the next bash call — the
- *  warm-bash extension rebuilds its per-session pool live when the config
- *  snapshot changes, so no restart is needed. */
+ *  handleRuntimePrefsSet). `bashWarmPoolSize` is the IDLE TARGET for the
+ *  single shared warm pool — the process keeps that many bash processes warm
+ *  across ALL sessions (not per session) and dynamically kills/spawns to hit
+ *  it. Changes take effect on the next bash call (live-tuned, no restart). */
 export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPrefs: OnSetPrefs }) {
   const fastPathChecked = prefs.bashFastPath;
   // Keep a local draft of the shell-path text field and commit on blur / Enter so
@@ -24,10 +25,10 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
   return (
     <div class="toolbar-settings-ext-settings">
       <div class="toolbar-settings-list">
-        {/* Warm pool size */}
+        {/* Idle target (shared warm pool) */}
         <div class="toolbar-settings-ui-control">
           <div class="toolbar-settings-ui-control-head">
-            <span class="toolbar-settings-ui-control-label">Warm pool size</span>
+            <span class="toolbar-settings-ui-control-label">Idle target</span>
             <span class="toolbar-settings-ui-control-value">
               {prefs.bashWarmPoolSize === 0 ? 'Off' : prefs.bashWarmPoolSize}
             </span>
@@ -40,10 +41,10 @@ export function BashSection({ prefs, onSetPrefs }: { prefs: ChatPrefs; onSetPref
             step="1"
             value={prefs.bashWarmPoolSize}
             onInput={(e) => onSetPrefs({ bashWarmPoolSize: Number((e.target as HTMLInputElement).value) })}
-            aria-label="Warm bash pool size"
+            aria-label="Warm bash idle target"
           />
           <div class="toolbar-settings-item-hint">
-            Pre-warmed bash processes that hide shell-spawn latency. 0 = today's fresh-spawn behaviour.
+            Idle bash processes kept warm across ALL sessions (shared pool) to hide shell-spawn latency. Dynamically spawns up to the target and kills excess when lowered. 0 = off (today's fresh-spawn behaviour).
           </div>
         </div>
 
