@@ -305,8 +305,10 @@ interface InFlightSend {
   /** FP-C4: true once the EffectRunner has dispatched `WaitingForSlotShown` for
    *  this send, so a re-arm doesn't re-dispatch on every cycle (the modelStart
    *  timer re-arms ~every 10min while the provider stays saturated). Cleared
-   *  implicitly when the entry is disposed (a `WaitingForSlotCleared` is
-   *  dispatched on commit / fire / dispose). */
+   *  on commit (`clearInFlightSend` → `WaitingForSlotCleared`) and on fire
+   *  (`onSendTimerFire` fire branch). NOT cleared on `dispose()` — dispose is
+   *  extension-shutdown teardown (the ArchState is torn down with the host),
+   *  so no stuck notice is observable; `clearInFlightSend` owns the live clears. */
   waitingForSlotShown?: boolean;
 }
 
