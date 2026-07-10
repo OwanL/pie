@@ -217,6 +217,10 @@ function createEmptyToolUsageRollup(): ToolUsageRollup {
       reasoning:    { sum: 0, count: 0, max: 0 },
       thoroughness: { sum: 0, count: 0, max: 0 },
     },
+    subagentInputTokens: 0,
+    subagentOutputTokens: 0,
+    subagentCacheReadTokens: 0,
+    subagentCacheWriteTokens: 0,
   };
 }
 
@@ -535,6 +539,10 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     subagentAgentNames: coerceStringArray(value.subagentAgentNames),
     subagentScoredTaskCount: toNonNegativeInteger(value.subagentScoredTaskCount),
     subagentTaskScores: coerceSubagentTaskScores(value.subagentTaskScores),
+    subagentInputTokens: toNonNegativeInteger(value.subagentInputTokens),
+    subagentOutputTokens: toNonNegativeInteger(value.subagentOutputTokens),
+    subagentCacheReadTokens: toNonNegativeInteger(value.subagentCacheReadTokens),
+    subagentCacheWriteTokens: toNonNegativeInteger(value.subagentCacheWriteTokens),
   };
 }
 
@@ -667,6 +675,10 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
     samples.push({
       endedAt: entry.endedAt,
       outputTokens: toNonNegativeInteger(entry.outputTokens),
+      inputTokens: toNonNegativeInteger(entry.inputTokens),
+      cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
+      cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      contextTokens: toNullableNonNegativeInteger(entry.contextTokens),
       generationDurationMs: toNonNegativeInteger(entry.generationDurationMs),
       concurrentBusySessions: toNonNegativeInteger(entry.concurrentBusySessions),
       status,
@@ -821,6 +833,8 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     interruptedCount: toNonNegativeInteger(value.interruptedCount),
     messageEditCount: toNonNegativeInteger(value.messageEditCount),
     truncatedAfterCount: toNonNegativeInteger(value.truncatedAfterCount),
+    compactionCount: toNonNegativeInteger(value.compactionCount),
+    autoRetryCount: toNonNegativeInteger(value.autoRetryCount),
     backendErrorCodes: coerceStringArray(value.backendErrorCodes),
     contextTokens: typeof value.contextTokens === 'number' && Number.isFinite(value.contextTokens)
       ? Math.trunc(value.contextTokens)

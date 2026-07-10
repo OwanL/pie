@@ -154,6 +154,8 @@ export class SessionRunStateManager {
       interruptedCount: 0,
       messageEditCount: 0,
       truncatedAfterCount: 0,
+      compactionCount: 0,
+      autoRetryCount: 0,
       backendErrorCodes: [],
       contextTokens: null,
       contextLimit: null,

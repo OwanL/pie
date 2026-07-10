@@ -163,6 +163,9 @@ export class SessionRunTracker {
     const generationDurationMs = Math.max(0, Math.trunc(durationMs));
     run.assistantTurnDurationMs += generationDurationMs;
     const outputTokens = usage ? toNonNegativeInt(usage.outputTokens) : 0;
+    const inputTokens = usage ? toNonNegativeInt(usage.inputTokens) : 0;
+    const cacheReadTokens = usage ? toNonNegativeInt(usage.cacheReadTokens) : 0;
+    const cacheWriteTokens = usage ? toNonNegativeInt(usage.cacheWriteTokens) : 0;
     if (usage) {
       run.inputTokens += toNonNegativeInt(usage.inputTokens);
       run.outputTokens += toNonNegativeInt(usage.outputTokens);
@@ -187,6 +190,10 @@ export class SessionRunTracker {
       const sample: TurnThroughputSample = {
         endedAt: this.runState.isoNow(),
         outputTokens,
+        inputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        contextTokens: run.contextTokens,
         generationDurationMs,
         concurrentBusySessions: this.busySessionPaths.size,
         status,
@@ -348,6 +355,13 @@ export class SessionRunTracker {
       dst.count += src.count;
       dst.max   = Math.max(dst.max, src.max);
     }
+    // Attribute the spawned sub-agent sessions' token usage into the parent
+    // run so inputTokens/outputTokens/estimatedCostUsd no longer under-report
+    // true cost whenever subagents spawn.
+    run.toolUsage.subagentInputTokens += analysis.subagentInputTokens;
+    run.toolUsage.subagentOutputTokens += analysis.subagentOutputTokens;
+    run.toolUsage.subagentCacheReadTokens += analysis.subagentCacheReadTokens;
+    run.toolUsage.subagentCacheWriteTokens += analysis.subagentCacheWriteTokens;
   }
 
   /** Forward nested subagent per-turn throughput into the parent run snapshot. */
@@ -372,6 +386,10 @@ export class SessionRunTracker {
         run.turnThroughputSamples.push({
           endedAt,
           outputTokens,
+          inputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          contextTokens: null,
           generationDurationMs,
           concurrentBusySessions: this.busySessionPaths.size,
           status: status as TurnThroughputStatus,
@@ -417,6 +435,35 @@ export class SessionRunTracker {
     run.interruptedCount += 1;
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();
+  }
+
+  /** Count a history-compaction (`/compact`) LLM call against the relevant run.
+   *  Compaction emits no `message_start`/`message_end`, so its tokens are absent
+   *  from the run totals — this count is the only available compaction signal. */
+  onCompaction(sessionPath: string): void {
+    const state = this.runState.sessions.get(sessionPath);
+    const run = state ? (state.currentRun ?? state.lastRun) : null;
+    if (!run || !state) {
+      return;
+    }
+
+    run.compactionCount = (run.compactionCount ?? 0) + 1;
+    run.updatedAt = this.runState.isoNow();
+    this.runState.persist(state.currentRun ? undefined : run);
+  }
+
+  /** Count an auto-retry attempt (transient provider error retried by the SDK)
+   *  against the relevant run. */
+  onAutoRetry(sessionPath: string): void {
+    const state = this.runState.sessions.get(sessionPath);
+    const run = state ? (state.currentRun ?? state.lastRun) : null;
+    if (!run || !state) {
+      return;
+    }
+
+    run.autoRetryCount = (run.autoRetryCount ?? 0) + 1;
+    run.updatedAt = this.runState.isoNow();
+    this.runState.persist(state.currentRun ? undefined : run);
   }
 
   onMessageEdited(sessionPath: string): void {
@@ -528,6 +575,16 @@ export class SessionRunTracker {
     }
 
     run.mixedModelConfig = true;
+    // Record the latest model/thinking level on the run so downstream analytics
+    // can attribute provider and cost. Without this, a run created before the
+    // model was resolved (modelId placeholder/undefined) stays stuck at that
+    // placeholder even after the real model is known, leaving provider and
+    // estimatedCostUsd unattributable (resolveModelProvider / estimateRunCostUsd
+    // derive both from run.modelId). Only overwrite with a defined value so a
+    // transient undefined never clobbers a known model. For genuinely mixed
+    // runs the latest model is recorded (mixedModelConfig flags the mix).
+    if (modelId) run.modelId = modelId;
+    if (thinkingLevel) run.thinkingLevel = thinkingLevel;
     this.runState.markTreatmentChanges(run, changedKinds);
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();

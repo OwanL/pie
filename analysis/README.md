@@ -18,6 +18,22 @@ analytics source export or analytics store
 
 > **Model ranking:** see `analysis/scripts/stratified-ranker.ts` for the stratified leaderboard — per-model entries ranked within complexity bands (low/medium/high) via a per-run complexity score, and assigned to buckets.
 
+## Feedback loop
+
+Analytics is **observability-only**: the runtime writes runs to the local store
+(`run-snapshots.jsonl` / `run-analytics.json`), and this package reads them for
+human/agent-facing dashboards and queries — but **nothing reads run-analytics
+back to tune model selection, pruning thresholds, thinking defaults, or the
+always-keep tool list**. The skill-pruner's live catalog is fed by per-session
+factors (`extension/src/host/core/projection.ts`), not by aggregated run
+analytics.
+
+This is intentional for now: closing the loop (e.g. pruning-prepass token cost
+→ threshold tuning, or model-quality scores → default-model suggestions) is a
+larger architectural change requiring a new read-back path, aggregation, and a
+tuning policy with safety rails. It is tracked as a documented follow-up rather
+than wired in ad hoc.
+
 ## Local dashboard data
 
 Raw `run-analytics.json` exports and generated `analysis/site/data/*.json` are local analysis inputs/outputs. The dashboard server serves only the expected generated site-data files so accidental extra files in that directory do not affect the UI.
@@ -162,7 +178,9 @@ Do not rely on `file://` loading.
 - **Scoring gap**: Most runs are `closed_unscored` (no satisfaction/resolution data). Model quality and treatment comparison metrics are only meaningful for the scored subset.
 - **Open runs excluded**: Verification impact and timeline metrics exclude open (in-progress) runs since they have no finalized outcome.
 - **Token usage**: `inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens` are available when the provider reports them. Many older runs have zero token data.
-- **Cost**: `estimatedCostUsd` is derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). The `core_runs`, `model_quality`, and `timeline` queries surface it per run, per model, and per day respectively. The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`.
+- **Cost**: `estimatedCostUsd` is the **parent-run** cost derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). `subagentEstimatedCostUsd` is the cost of spawned sub-agent sessions (which bill separately and were historically excluded from run cost), and `totalEstimatedCostUsd` = parent + subagent (the headline spend the overview card and cost-trend now use, falling back to parent-only for legacy runs). The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`. The "Subagent cost attribution" chart stacks parent vs subagent spend by model to expose the hidden sub-agent portion.
+- **Per-turn tokens & context trajectory**: `turnThroughputSamples` now carry per-turn `inputTokens`/`cacheReadTokens`/`cacheWriteTokens`/`contextTokens` (in addition to `outputTokens`/`generationDurationMs`). These enable per-turn cost attribution and the context-growth trajectory chart. Older turns (recorded before this field existed) coerce to `0` (tokens) / `null` (context) and are excluded from those views.
+- **Compaction & retry**: `compactionCount` (history-compaction `/compact` LLM calls — a hidden billable call whose tokens the SDK does not report back, so they remain absent from token totals) and `autoRetryCount` (backend auto-retries of failed turns) are captured per run. Both are `0` for runs recorded before tracking existed. The "Compaction & retry friction" chart surfaces them by model. Note: compaction token usage is not capturable today (no SDK usage hook); only the count and wall-clock (folded into `busyDurationMs`) are tracked.
 - **Task group correlation**: Multiple runs can share the same `taskGroupId`. Per-run sample sizes in model quality and treatment comparison should be treated as upper bounds since runs in the same task group are not independent.
 - **Small samples**: Model quality cells with fewer than 3 scored runs have highly variable satisfaction averages. Notes in `model-quality.json` flag this.
 

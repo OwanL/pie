@@ -4,6 +4,7 @@ import { recordStreamEvent } from '../../util/stream-telemetry';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../core/events';
 import type {
+  CompactionPayload,
   MessageAbortedPayload,
   MessageDeltaPayload,
   MessageFinishedPayload,
@@ -254,6 +255,7 @@ export function onRetryStarted(payload: RetryStartedPayload, deps: HandlerDeps):
   if (!sessionPath) {
     return;
   }
+  deps.runObserver.onAutoRetry(sessionPath);
   deps.dispatchArch({
     kind: 'RetryStarted',
     sessionPath,
@@ -276,6 +278,17 @@ export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): voi
     attempt: payload.attempt,
     finalError: payload.finalError,
   });
+}
+
+/** Count a history-compaction (`/compact`) LLM call against the relevant run.
+ *  Compaction emits no `message_start`/`message_end`, so this backend event is
+ *  the only signal that can drive the run-analytics counter. */
+export function onCompaction(payload: CompactionPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('compaction.ended', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.runObserver.onCompaction(sessionPath);
 }
 
 /** The willRetry watchdog declared a retry stuck (the SDK's backoff did not

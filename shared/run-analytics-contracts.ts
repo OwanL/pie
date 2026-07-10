@@ -186,6 +186,28 @@ export interface TurnThroughputSample {
    * + provider TTFT), in ms. Null when not measurable.
    */
   providerLatencyMs: number | null;
+  /**
+   * Input tokens reported for this turn (0 when the provider did not report
+   * usage). Optional on the wire so older samples (recorded before per-turn
+   * input/cache breakdown existed) coerce cleanly; 0 = unreported.
+   */
+  inputTokens?: number;
+  /**
+   * Cache-read tokens reported for this turn (0 when unreported). Optional on
+   * the wire; 0 = unreported.
+   */
+  cacheReadTokens?: number;
+  /**
+   * Cache-write tokens reported for this turn (0 when unreported). Optional on
+   * the wire; 0 = unreported.
+   */
+  cacheWriteTokens?: number;
+  /**
+   * Context-window token count at the end of this turn (the run's current
+   * `contextTokens`), or null when not tracked for this turn. Optional on the
+   * wire; null = unreported. Backs the context-growth trajectory per turn.
+   */
+  contextTokens?: number | null;
 }
 
 export interface ToolUsageRollup {
@@ -225,6 +247,22 @@ export interface ToolUsageRollup {
   subagentAgentNames: string[];
   subagentScoredTaskCount: number;
   subagentTaskScores: SubagentTaskScoreRollup;
+  /**
+   * Cumulative input tokens consumed by spawned sub-agent sessions (rolled up
+   * from each subagent result's `usage`). Default 0 for runs recorded before
+   * subagent token attribution existed.
+   */
+  subagentInputTokens: number;
+  /**
+   * Cumulative output tokens consumed by spawned sub-agent sessions. Default 0.
+   */
+  subagentOutputTokens: number;
+  /**
+   * Cumulative cache-read tokens consumed by spawned sub-agent sessions. Default 0. */
+  subagentCacheReadTokens: number;
+  /**
+   * Cumulative cache-write tokens consumed by spawned sub-agent sessions. Default 0. */
+  subagentCacheWriteTokens: number;
 }
 
 export interface FileMutationRollup {
@@ -310,6 +348,20 @@ export interface RunSnapshot {
   interruptedCount: number;
   messageEditCount: number;
   truncatedAfterCount: number;
+  /**
+   * Number of history-compaction (`/compact`) LLM calls in this run. Compaction
+   * is a billable LLM call that emits no `message_start`/`message_end`, so its
+   * tokens are absent from the run totals — this count is the only available
+   * compaction signal. Optional on the wire (default 0) for runs recorded before
+   * the counter existed.
+   */
+  compactionCount?: number;
+  /**
+   * Number of auto-retry attempts (transient provider errors retried by the
+   * SDK with backoff) in this run. Optional on the wire (default 0) for runs
+   * recorded before the counter existed.
+   */
+  autoRetryCount?: number;
   backendErrorCodes: string[];
   contextTokens: number | null;
   contextLimit: number | null;

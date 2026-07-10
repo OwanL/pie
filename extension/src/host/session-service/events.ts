@@ -13,7 +13,7 @@ import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
-import { onMessageDelta, onMessageThinking, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryStuck } from './handlers/streaming.js';
+import { onMessageDelta, onMessageThinking, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryStuck, onCompaction } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
@@ -114,6 +114,7 @@ export class SessionServiceEvents {
       onQueuedDelivered: (payload) => onQueuedDelivered(payload, deps),
       onRetryStarted: (payload) => onRetryStarted(payload, deps),
       onRetryEnded: (payload) => onRetryEnded(payload, deps),
+      onCompaction: (payload) => onCompaction(payload, deps),
       onOperationalError: (payload) => onOperationalError(payload, deps),
       onRetryStuck: (payload) => onRetryStuck(payload, deps),
       onBusyChanged: (payload) => this.onBusyChanged(payload),

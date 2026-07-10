@@ -219,6 +219,22 @@ export interface PreparedRunRow {
   subagentMaxReasoning: number | null;
   subagentMaxThoroughness: number | null;
   subagentCompositeMean: number | null;
+  /** Cumulative input tokens consumed by spawned sub-agent sessions (0 when none / untracked). */
+  subagentInputTokens: number;
+  /** Cumulative output tokens consumed by spawned sub-agent sessions (0 when none). */
+  subagentOutputTokens: number;
+  /** Cumulative cache-read tokens consumed by spawned sub-agent sessions (0 when none). */
+  subagentCacheReadTokens: number;
+  /** Cumulative cache-write tokens consumed by spawned sub-agent sessions (0 when none). */
+  subagentCacheWriteTokens: number;
+  /** Estimated USD cost of spawned sub-agent sessions (null when pricing unknown). */
+  subagentEstimatedCostUsd: number | null;
+  /** Total estimated USD cost = parent estimatedCostUsd + subagentEstimatedCostUsd (null when both null). */
+  totalEstimatedCostUsd: number | null;
+  /** Number of history-compaction (`/compact`) LLM calls in this run (0 when untracked). */
+  compactionCount: number;
+  /** Number of auto-retry attempts in this run (0 when untracked). */
+  autoRetryCount: number;
   verificationTotalCount: number;
   verificationFailureCount: number;
   verificationState: VerificationState;
@@ -367,6 +383,14 @@ export interface PreparedTurnThroughputRow {
   turnLatencyMs: number | null;
   overheadMs: number | null;
   providerLatencyMs: number | null;
+  /** Input tokens reported for this turn (0 when unreported). */
+  inputTokens: number;
+  /** Cache-read tokens reported for this turn (0 when unreported). */
+  cacheReadTokens: number;
+  /** Cache-write tokens reported for this turn (0 when unreported). */
+  cacheWriteTokens: number;
+  /** Context-window token count at the end of this turn (null when unreported). */
+  contextTokens: number | null;
 }
 
 /** Raw pruning decision as read from data/pruning.jsonl. */

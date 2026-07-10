@@ -303,17 +303,74 @@ function extractFromSingleTask(
   return { taskCount, agents, scoredTaskCount, taskScores };
 }
 
+function toNonNegativeInt(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+/**
+ * Sum the per-result token usage (input/output/cacheRead/cacheWrite) carried on
+ * the subagent tool call's raw `result`. The subagent extension accumulates
+ * `usage` on each `SingleResult` and emits it on the result object (either
+ * `{ results: [...] }` or `{ details: { results: [...] } }`). Returns zeros when
+ * the result lacks usage (e.g. the subagent failed before producing any, or
+ * predates the field) so the parent run can attribute subagent cost without
+ * crashing on legacy data.
+ */
+function extractResultUsage(result: unknown): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+} {
+  const empty = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  if (!isRecord(result)) {
+    return empty;
+  }
+  const results = Array.isArray(result.results) ? result.results
+    : isRecord(result.details) && Array.isArray(result.details.results) ? result.details.results
+    : null;
+  if (!Array.isArray(results)) {
+    return empty;
+  }
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  for (const entry of results) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const usage = entry.usage;
+    if (!isRecord(usage)) {
+      continue;
+    }
+    inputTokens += toNonNegativeInt(usage.input);
+    outputTokens += toNonNegativeInt(usage.output);
+    cacheReadTokens += toNonNegativeInt(usage.cacheRead);
+    cacheWriteTokens += toNonNegativeInt(usage.cacheWrite);
+  }
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+}
+
 export function extractSubagentUsage(input: unknown, result?: unknown): {
   taskCount: number;
   agents: string[];
   scoredTaskCount: number;
   taskScores: SubagentTaskScoreRollup;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 } {
   const empty = {
     taskCount: 0,
     agents: [] as string[],
     scoredTaskCount: 0,
     taskScores: createEmptySubagentTaskScoreRollup(),
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
   };
 
   if (!isRecord(input)) {
@@ -324,9 +381,9 @@ export function extractSubagentUsage(input: unknown, result?: unknown): {
     : Array.isArray(input.chain) ? input.chain
     : null;
 
-  if (taskEntries) {
-    return extractFromTaskArray(taskEntries, result);
-  }
+  const base = taskEntries
+    ? extractFromTaskArray(taskEntries, result)
+    : extractFromSingleTask(input, result);
 
-  return extractFromSingleTask(input, result);
+  return { ...base, ...extractResultUsage(result) };
 }

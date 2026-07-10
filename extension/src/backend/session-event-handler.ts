@@ -113,6 +113,46 @@ function summarizePayload(value: unknown): string | undefined {
   }
 }
 
+const TOOL_PAYLOAD_LOGGING_ENV = 'PIE_LOG_TOOL_PAYLOAD';
+
+function isToolPayloadLoggingEnabled(): boolean {
+  const raw = process.env[TOOL_PAYLOAD_LOGGING_ENV];
+  return raw === '1' || raw === 'true';
+}
+
+function safeSerializedLength(value: unknown): number {
+  try {
+    return JSON.stringify(value ?? '').length;
+  } catch {
+    return String(value ?? '').length;
+  }
+}
+
+/** Redacted summary of tool arguments for diagnostic logging.
+ *  Only key names and serialized length are emitted; values are never logged. */
+function summarizeToolArgs(args: unknown): { argKeys: string[]; argsLen: number } {
+  const argSource = args !== null && typeof args === 'object' ? args : {};
+  return {
+    argKeys: Object.keys(argSource),
+    argsLen: safeSerializedLength(args),
+  };
+}
+
+/** Redacted summary of a tool result for diagnostic logging.
+ *  By default only the result type and serialized length are emitted.
+ *  The full payload is emitted only when PIE_LOG_TOOL_PAYLOAD is set. */
+function summarizeToolResult(
+  result: unknown,
+): { resultType: string; resultLen: number } | string | undefined {
+  if (isToolPayloadLoggingEnabled()) {
+    return summarizePayload(result);
+  }
+  return {
+    resultType: typeof result,
+    resultLen: safeSerializedLength(result),
+  };
+}
+
 function nonEmptyTrimmed(value: string | undefined): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -316,8 +356,13 @@ export function handleSdkSessionEvent(
         return;
       }
 
-      // Diagnostic: log tool execution start to stderr for debugging file-changes tracking
-      process.stderr.write(`[pie:backend] tool_execution_start: ${event.toolName} args=${JSON.stringify(event.args)?.slice(0, 200)}\n`);
+      // Diagnostic: log tool execution start to stderr for debugging file-changes tracking.
+      // Raw argument values are intentionally omitted to avoid leaking secrets/PII.
+      logBackendDiagnostic('tool_execution_start', {
+        toolName: event.toolName ?? '',
+        toolCallId: event.toolCallId ?? '',
+        args: summarizeToolArgs(event.args),
+      });
 
       const toolCallId = event.toolCallId ?? '';
       const startedAt = Date.now();
@@ -374,7 +419,7 @@ export function handleSdkSessionEvent(
           sessionPath: context.sessionPath,
           toolCallId: event.toolCallId ?? '',
           toolName: event.toolName ?? '',
-          result: summarizePayload(event.result),
+          result: summarizeToolResult(event.result),
         });
       }
 
@@ -594,6 +639,9 @@ export function handleSdkSessionEvent(
       // Idempotent with the `agent_end` busy=false clear and the interrupt
       // handler's `.finally`.
       deps.emitBusyChanged(context, false);
+      // Emit a host-facing signal so run-analytics can count this billable
+      // compaction LLM call against the run.
+      deps.emit('compaction.ended', { sessionPath: context.sessionPath });
       return;
     }
     case 'auto_retry_start': {

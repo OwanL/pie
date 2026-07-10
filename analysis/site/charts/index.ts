@@ -1,6 +1,8 @@
 import type { ChartEntry } from '../lib.ts';
 import { costCharts } from './cost.ts';
 import { efficiencyCharts } from './efficiency.ts';
+import { insightsCharts } from './insights.ts';
+import { attributionCharts } from './attribution.ts';
 import { toolDurationCharts } from './toolduration.ts';
 import { pruningCharts } from './pruning.ts';
 import { errorCharts } from './errors.ts';
@@ -23,6 +25,8 @@ import { throughputCharts } from './throughput.ts';
 export const newCharts: ChartEntry[] = [
   ...costCharts,
   ...efficiencyCharts,
+  ...attributionCharts,
+  ...insightsCharts,
   ...throughputCharts,
   ...toolDurationCharts,
   ...pruningCharts,

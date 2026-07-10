@@ -39,6 +39,17 @@ export interface RawMessage {
   isError?: boolean;
 }
 
+export interface SubagentUsageSummary {
+  /** Cumulative input tokens consumed by this sub-agent session. */
+  input: number;
+  /** Cumulative output tokens consumed by this sub-agent session. */
+  output: number;
+  /** Cumulative cache-read tokens consumed by this sub-agent session. */
+  cacheRead: number;
+  /** Cumulative cache-write tokens consumed by this sub-agent session. */
+  cacheWrite: number;
+}
+
 export interface SubagentSingleResult {
   agent: string;
   task: string;
@@ -74,6 +85,11 @@ export interface SubagentSingleResult {
   /** Per-turn throughput observations from this subagent session, forwarded to
    *  the parent run snapshot for historical tok/s attribution. */
   turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string }[];
+  /** Cumulative token usage consumed by this sub-agent session, surfaced from
+   *  the raw `toolCall.result` so the parent run can attribute subagent cost.
+   *  Absent when the subagent extension did not report usage (e.g. it failed
+   *  before producing any, or predates the field). */
+  usage?: SubagentUsageSummary;
 }
 
 export interface SubagentResult {

@@ -23,6 +23,7 @@
 
 import type {
   BusyChangedPayload,
+  CompactionPayload,
   ContextUsageChangedPayload,
   CustomMessagePayload,
   ErrorPayload,
@@ -336,6 +337,13 @@ export function isRetryEndedPayload(value: unknown): value is RetryEndedPayload 
     && isBoolean(value.success)
     && isFiniteNumber(value.attempt)
     && isOptionalString(value.finalError)
+  );
+}
+
+export function isCompactionPayload(value: unknown): value is CompactionPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
   );
 }
 

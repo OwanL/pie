@@ -1,5 +1,6 @@
 import type {
   BusyChangedPayload,
+  CompactionPayload,
   ContextUsageChangedPayload,
   CustomMessagePayload,
   ErrorPayload,
@@ -24,6 +25,7 @@ import type {
 } from '../../shared/protocol';
 import {
   isBusyChangedPayload,
+  isCompactionPayload,
   isContextUsageChangedPayload,
   isCustomMessagePayload,
   isErrorPayload,
@@ -63,6 +65,7 @@ export interface SessionBackendEventHandlers {
   onQueuedDelivered(payload: QueuedDeliveredPayload): void;
   onRetryStarted(payload: RetryStartedPayload): void;
   onRetryEnded(payload: RetryEndedPayload): void;
+  onCompaction(payload: CompactionPayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
   onRetryStuck(payload: RetryStuckPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
@@ -143,6 +146,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'retry.ended':
       dispatch(event, isRetryEndedPayload, handlers.onRetryEnded);
+      return;
+    case 'compaction.ended':
+      dispatch(event, isCompactionPayload, handlers.onCompaction);
       return;
     case 'operational-error':
       dispatch(event, isOperationalErrorPayload, handlers.onOperationalError);

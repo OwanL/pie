@@ -40,6 +40,8 @@ export interface RunObserver {
   onToolStarted(sessionPath: string, toolCall: ToolCall): void;
   onToolFinished(sessionPath: string, toolCall: ToolCall): void;
   onInterrupted(sessionPath: string): void;
+  onCompaction(sessionPath: string): void;
+  onAutoRetry(sessionPath: string): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onBackendError(sessionPath: string | undefined, code: string): void;
@@ -70,6 +72,8 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onToolStarted: () => undefined,
   onToolFinished: () => undefined,
   onInterrupted: () => undefined,
+  onCompaction: () => undefined,
+  onAutoRetry: () => undefined,
   onMessageEdited: () => undefined,
   onTruncatedAfter: () => undefined,
   onBackendError: () => undefined,

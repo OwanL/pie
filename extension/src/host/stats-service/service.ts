@@ -115,6 +115,14 @@ export class StatsService implements RunObserver {
     this.tracker.onInterrupted(sessionPath);
   }
 
+  onCompaction(sessionPath: string): void {
+    this.tracker.onCompaction(sessionPath);
+  }
+
+  onAutoRetry(sessionPath: string): void {
+    this.tracker.onAutoRetry(sessionPath);
+  }
+
   onMessageEdited(sessionPath: string, _messageId: string): void {
     this.tracker.onMessageEdited(sessionPath);
   }

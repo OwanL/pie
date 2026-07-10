@@ -346,6 +346,13 @@ export interface RetryEndedPayload {
   finalError?: string;
 }
 
+/** Emitted by the backend when a history-compaction (`/compact`) LLM call
+ *  finishes. Compaction emits no `message_start`/`message_end`, so this event is
+ *  the only signal the host has to count it against the run. */
+export interface CompactionPayload {
+  sessionPath: string;
+}
+
 /** Operational (non-fatal) backend condition that the user should be made
  *  aware of without it being a hard request failure. Emitted by two backend
  *  watchdogs:

@@ -313,6 +313,12 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   assert.equal(coerced?.toolUsage.subagentTaskScores.precision.sum, 3);
   assert.equal(coerced?.toolUsage.subagentTaskScores.creativity.sum, 0);
   assert.equal(coerced?.toolUsage.subagentTaskScores.reasoning.sum, 0);
+  assert.equal(coerced?.toolUsage.subagentInputTokens, 0);
+  assert.equal(coerced?.toolUsage.subagentOutputTokens, 0);
+  assert.equal(coerced?.toolUsage.subagentCacheReadTokens, 0);
+  assert.equal(coerced?.toolUsage.subagentCacheWriteTokens, 0);
+  assert.equal(coerced?.compactionCount, 0);
+  assert.equal(coerced?.autoRetryCount, 0);
 
   assert.deepEqual(coerced?.fileExtensions.readCountsByExtension, {});
   assert.deepEqual(coerced?.fileExtensions.writeCountsByExtension, { '.ts': 2 });

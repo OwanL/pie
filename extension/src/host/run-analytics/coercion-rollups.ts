@@ -202,6 +202,10 @@ export function createEmptyToolUsageRollup(): ToolUsageRollup {
       reasoning:    { sum: 0, count: 0, max: 0 },
       thoroughness: { sum: 0, count: 0, max: 0 },
     },
+    subagentInputTokens: 0,
+    subagentOutputTokens: 0,
+    subagentCacheReadTokens: 0,
+    subagentCacheWriteTokens: 0,
   };
 }
 
@@ -434,6 +438,10 @@ export function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     subagentAgentNames: coerceStringArray(value.subagentAgentNames),
     subagentScoredTaskCount: toNonNegativeInteger(value.subagentScoredTaskCount),
     subagentTaskScores: coerceSubagentTaskScores(value.subagentTaskScores),
+    subagentInputTokens: toNonNegativeInteger(value.subagentInputTokens),
+    subagentOutputTokens: toNonNegativeInteger(value.subagentOutputTokens),
+    subagentCacheReadTokens: toNonNegativeInteger(value.subagentCacheReadTokens),
+    subagentCacheWriteTokens: toNonNegativeInteger(value.subagentCacheWriteTokens),
   };
 }
 

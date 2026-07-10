@@ -23,6 +23,7 @@ function createHandlers() {
     onQueuedDelivered: (payload) => calls.push({ name: 'message.queuedDelivered', payload }),
     onRetryStarted: (payload) => calls.push({ name: 'retry.started', payload }),
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
+    onCompaction: (payload) => calls.push({ name: 'compaction.ended', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
     onRetryStuck: (payload) => calls.push({ name: 'retry.stuck', payload }),
     onBusyChanged: (payload) => calls.push({ name: 'busy.changed', payload }),

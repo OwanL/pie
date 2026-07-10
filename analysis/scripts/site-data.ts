@@ -148,7 +148,10 @@ function createOverview(prepared: PreparedAnalyticsData): OverviewData {
   const runs = prepared.runs;
   const completedRuns = runs.filter((run) => run.status !== 'open');
   const scoredRuns = completedRuns.filter((run) => run.satisfaction !== null);
-  const costValues = completedRuns.map((r) => r.estimatedCostUsd).filter((v): v is number => v !== null);
+  // True spend: prefer totalEstimatedCostUsd (parent + subagent sessions) so the
+  // headline cost reflects spawned sub-agent spend too. Falls back to the
+  // parent-only estimatedCostUsd for legacy runs that predate the field.
+  const costValues = completedRuns.map((r) => r.totalEstimatedCostUsd ?? r.estimatedCostUsd).filter((v): v is number => v !== null);
   const resolutionCounts = createEmptyResolutionCounts();
   for (const run of scoredRuns) {
     addResolutionCount(resolutionCounts, run.resolution);

@@ -86,6 +86,10 @@ function createMinimalRunSnapshot(overrides: Partial<RunSnapshot> = {}): RunSnap
         reasoning: { sum: 0, count: 0, max: 0 },
         thoroughness: { sum: 0, count: 0, max: 0 },
       },
+      subagentInputTokens: 0,
+      subagentOutputTokens: 0,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
     },
     fileMutation: {
       writeCount: 0,

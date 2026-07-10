@@ -157,6 +157,31 @@ function prepareRun(
     ? dimMeans.reduce((a, b) => a + b, 0) / dimMeans.length
     : null;
 
+  const subagentInputTokens = run.toolUsage.subagentInputTokens ?? 0;
+  const subagentOutputTokens = run.toolUsage.subagentOutputTokens ?? 0;
+  const subagentCacheReadTokens = run.toolUsage.subagentCacheReadTokens ?? 0;
+  const subagentCacheWriteTokens = run.toolUsage.subagentCacheWriteTokens ?? 0;
+
+  const parentEstimatedCostUsd = estimateRunCostUsd(normalizedModelId, {
+    inputTokens: run.inputTokens ?? 0,
+    outputTokens: run.outputTokens ?? 0,
+    cacheReadTokens: run.cacheReadTokens ?? 0,
+    cacheWriteTokens: run.cacheWriteTokens ?? 0,
+  }, pricingMap);
+  // The subagent model is not currently rolled up to the run snapshot; fall back
+  // to the parent model for cost estimation. This keeps the total cost accurate
+  // even when subagents use a different model, at the expense of provider-specific
+  // pricing precision.
+  const subagentEstimatedCostUsd = estimateRunCostUsd(normalizedModelId, {
+    inputTokens: subagentInputTokens,
+    outputTokens: subagentOutputTokens,
+    cacheReadTokens: subagentCacheReadTokens,
+    cacheWriteTokens: subagentCacheWriteTokens,
+  }, pricingMap);
+  const totalEstimatedCostUsd = parentEstimatedCostUsd === null && subagentEstimatedCostUsd === null
+    ? null
+    : (parentEstimatedCostUsd ?? 0) + (subagentEstimatedCostUsd ?? 0);
+
   return {
     runId: run.runId,
     taskGroupId: run.taskGroupId,
@@ -234,6 +259,14 @@ function prepareRun(
     subagentMaxReasoning: maxForDim('reasoning'),
     subagentMaxThoroughness: maxForDim('thoroughness'),
     subagentCompositeMean: compositeMean,
+    subagentInputTokens,
+    subagentOutputTokens,
+    subagentCacheReadTokens,
+    subagentCacheWriteTokens,
+    subagentEstimatedCostUsd,
+    totalEstimatedCostUsd,
+    compactionCount: run.compactionCount ?? 0,
+    autoRetryCount: run.autoRetryCount ?? 0,
     verificationTotalCount,
     verificationFailureCount,
     verificationState: normalizeVerificationState(verificationTotalCount, verificationFailureCount),
@@ -296,12 +329,7 @@ function prepareRun(
       const revisitOps = totalReadOps - distinctReadFiles;
       return round3(Math.max(0, revisitOps) / totalReadOps);
     })(),
-    estimatedCostUsd: estimateRunCostUsd(normalizedModelId, {
-      inputTokens: run.inputTokens ?? 0,
-      outputTokens: run.outputTokens ?? 0,
-      cacheReadTokens: run.cacheReadTokens ?? 0,
-      cacheWriteTokens: run.cacheWriteTokens ?? 0,
-    }, pricingMap),
+    estimatedCostUsd: parentEstimatedCostUsd,
   };
 }
 
@@ -759,6 +787,10 @@ function prepareTurnThroughput(run: RunSnapshot): PreparedTurnThroughputRow[] {
       turnLatencyMs: sample.turnLatencyMs,
       overheadMs: sample.overheadMs,
       providerLatencyMs: sample.providerLatencyMs,
+      inputTokens: sample.inputTokens ?? 0,
+      cacheReadTokens: sample.cacheReadTokens ?? 0,
+      cacheWriteTokens: sample.cacheWriteTokens ?? 0,
+      contextTokens: sample.contextTokens ?? null,
     };
   });
 }
