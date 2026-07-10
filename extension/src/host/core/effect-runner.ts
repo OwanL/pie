@@ -203,7 +203,7 @@ export interface EffectRunnerDeps {
    * when `prepassTimeoutSec` is null/invalid (SDK-owned default, presumed well
    * under 120s).
    */
-  getSendTimerTimeoutMs?: () => number;
+  getSendTimerTimeoutMs?: (sessionPath: string) => number;
   /**
    * Override the model-start send-timer budget (default 600s / 10min). The
    *  send-timer is RE-ARMED with this budget once the pruning prepass succeeds
@@ -748,7 +748,7 @@ export class EffectRunner {
     const abort = new AbortController();
     // Prepass-aware budget (read fresh each send so a runtime prepassTimeoutSec
     // change takes effect); falls back to the static override/default.
-    const budgetMs = this.deps.getSendTimerTimeoutMs?.() ?? this.sendTimerTimeoutMs;
+    const budgetMs = this.deps.getSendTimerTimeoutMs?.(sessionPath) ?? this.sendTimerTimeoutMs;
     const send: InFlightSend = {
       corrId,
       sessionPath,

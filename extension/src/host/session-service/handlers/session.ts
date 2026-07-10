@@ -10,6 +10,7 @@ import type {
   ErrorPayload,
   ExtensionInfo,
   ExtensionUIRequestPayload,
+  OperationalErrorPayload,
   SessionListChangedPayload,
   SessionSummary,
 } from '../../../shared/protocol';
@@ -138,6 +139,31 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
       code: payload.code ?? null,
     });
   }
+  deps.scheduleRender();
+}
+
+/** Operational (non-fatal) backend condition from a watchdog — either the
+ *  interrupt-abort watchdog (`session.abort()` did not settle) or the
+ *  willRetry watchdog (a retry's backoff did not complete). The watchdogs
+ *  already performed their side effects (force-clear `activeRequest` +
+ *  `busy=false`); this handler only surfaces the notice so the user is not
+ *  left looking at a silently-wedged session.
+ *
+ *  Routed through the existing `Error` event so the reducer's `handleError`
+ *  surfaces a non-blocking `operational-error` notice (recovery action:
+ *  show-logs). It does NOT stamp `AssistantMessageErrorStamped` — the turn
+ *  may still be running (retry-stuck case: `activeRequest` is still set), so
+ *  marking the assistant message errored would be wrong. No rollback, no
+ *  abort: purely a notice. STATE_CONTRACT § Notice Surfacing: `handleError`
+ *  strips any req-NN from the short `notice` and retains the verbatim message
+ *  as `noticeRaw`. */
+export function onOperationalError(payload: OperationalErrorPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('operational-error', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.runObserver.onBackendError(sessionPath, payload.code);
+  deps.dispatchArch({ kind: 'Error', sessionPath, error: payload.message });
   deps.scheduleRender();
 }
 

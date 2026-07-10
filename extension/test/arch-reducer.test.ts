@@ -168,6 +168,39 @@ test('reducer: non-Interrupt Command passes through unchanged', () => {
   assert.ok(result.effects.length > 0, 'Send should produce effects');
 });
 
+test('reducer: RetryStuck emits a warn Log effect and leaves state unchanged (no notice)', () => {
+  // The willRetry watchdog declared a retry stuck. The reducer must NOT set a
+  // notice (the companion operational-error already surfaced one via the
+  // Error event) — it only emits a Log effect so the structured timing detail
+  // is visible in the pie OutputChannel. State is unchanged.
+  const event: Event = {
+    kind: 'RetryStuck',
+    sessionPath: '/a',
+    delayMs: 30_000,
+    graceMs: 60_000,
+    requestId: 'req-1',
+  };
+
+  const result = reducer(initialArchState, event);
+
+  assert.deepEqual(result.state, initialArchState, 'state unchanged');
+  assert.equal(result.effects.length, 1);
+  assert.equal(result.effects[0]?.kind, 'Log');
+  if (result.effects[0]?.kind === 'Log') {
+    assert.equal(result.effects[0].level, 'warn');
+    assert.match(result.effects[0].message, /retry\.stuck/);
+    assert.deepEqual(result.effects[0].data, {
+      sessionPath: '/a',
+      delayMs: 30_000,
+      graceMs: 60_000,
+      requestId: 'req-1',
+    });
+  }
+  // No notice set (the companion operational-error owns the user-facing notice).
+  assert.equal(result.state.settings.notice, null);
+  assert.equal(result.state.settings.noticeKind, null);
+});
+
 // ─── Phase 4: Send ──────────────────────────────────────────────────────────
 
 test('reducer: Send command inserts optimistic message and produces SendRpc', () => {

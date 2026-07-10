@@ -47,6 +47,7 @@ import {
   handleRunningSessionsChanged,
   handleRetryStarted,
   handleRetryEnded,
+  handleRetryStuck,
   handleUnreadFinishedSessionsChanged,
   handleSessionSummaryUpserted,
   handleSessionSummariesReplaced,
@@ -254,6 +255,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'RetryEnded': {
       return handleRetryEnded(state, event);
+    }
+
+    case 'RetryStuck': {
+      return handleRetryStuck(state, event);
     }
 
     case 'SessionsInterrupted': {

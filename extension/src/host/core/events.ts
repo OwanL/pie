@@ -712,6 +712,26 @@ export interface RetryEndedEvent {
   finalError?: string;
 }
 
+/** The willRetry watchdog declared a retry stuck: the SDK's backoff did not
+ *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,
+ *  or an extension hook blocked the retry). Emitted by the backend alongside
+ *  an `operational-error` (code `RETRY_STUCK`) which carries the user-facing
+ *  message; this event carries the structured timing detail.
+ *
+ *  The reducer emits a `Log` effect (warn) so the stuck detail is visible in
+ *  the pie OutputChannel. It does NOT set a notice — the companion
+ *  `operational-error` already surfaced one for the same condition (the two
+ *  events fire in the same watchdog callback), so a notice here would
+ *  double-notify. The reducer stays pure: the side effect (logging) is an
+ *  `Effect`, executed by the `EffectRunner`. */
+export interface RetryStuckEvent {
+  kind: 'RetryStuck';
+  sessionPath: string;
+  delayMs: number;
+  graceMs: number;
+  requestId?: string;
+}
+
 export type BackendEvent =
   | MessageStartedEvent
   | MessageAbortedEvent
@@ -730,7 +750,8 @@ export type BackendEvent =
   | SessionClosedEvent
   | QueuedDeliveredEvent
   | RetryStartedEvent
-  | RetryEndedEvent;
+  | RetryEndedEvent
+  | RetryStuckEvent;
 
 /** Emitted when a session summary is upserted (used for placeholder creation). */
 export interface SessionSummaryUpsertedEvent {

@@ -248,6 +248,7 @@ test('runtimePrefs.set applies providerConcurrency overrides to the live Provide
     queuedRequests: 0,
     maxConcurrentRequests: 3,
     afterburnSeconds: 7,
+    queueWaitSeconds: 9,
     paused: false,
     pausedUntilMs: 0,
     strikeCount: 0,

@@ -10,10 +10,12 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  OperationalErrorPayload,
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
   RetryStartedPayload,
+  RetryStuckPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -31,10 +33,12 @@ import {
   isMessageFinishedPayload,
   isMessageStartedPayload,
   isMessageThinkingPayload,
+  isOperationalErrorPayload,
   isPreflightFailedPayload,
   isQueuedDeliveredPayload,
   isRetryEndedPayload,
   isRetryStartedPayload,
+  isRetryStuckPayload,
   isSessionListChangedPayload,
   isSessionOpenedPayload,
   isToolFinishedPayload,
@@ -59,6 +63,8 @@ export interface SessionBackendEventHandlers {
   onQueuedDelivered(payload: QueuedDeliveredPayload): void;
   onRetryStarted(payload: RetryStartedPayload): void;
   onRetryEnded(payload: RetryEndedPayload): void;
+  onOperationalError(payload: OperationalErrorPayload): void;
+  onRetryStuck(payload: RetryStuckPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
   onContextUsageChanged(payload: ContextUsageChangedPayload): void;
   onExtensionUIRequest(payload: ExtensionUIRequestPayload): void;
@@ -137,6 +143,12 @@ export function dispatchSessionBackendEvent(
       return;
     case 'retry.ended':
       dispatch(event, isRetryEndedPayload, handlers.onRetryEnded);
+      return;
+    case 'operational-error':
+      dispatch(event, isOperationalErrorPayload, handlers.onOperationalError);
+      return;
+    case 'retry.stuck':
+      dispatch(event, isRetryStuckPayload, handlers.onRetryStuck);
       return;
     case 'busy.changed':
       dispatch(event, isBusyChangedPayload, handlers.onBusyChanged);

@@ -23,6 +23,8 @@ function createHandlers() {
     onQueuedDelivered: (payload) => calls.push({ name: 'message.queuedDelivered', payload }),
     onRetryStarted: (payload) => calls.push({ name: 'retry.started', payload }),
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
+    onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
+    onRetryStuck: (payload) => calls.push({ name: 'retry.stuck', payload }),
     onBusyChanged: (payload) => calls.push({ name: 'busy.changed', payload }),
     onContextUsageChanged: (payload) => calls.push({ name: 'contextUsage.changed', payload }),
     onExtensionUIRequest: (payload) => calls.push({ name: 'extension_ui.request', payload }),
@@ -108,6 +110,67 @@ test('dispatchSessionBackendEvent drops a malformed message.aborted payload', ()
   };
 
   dispatchSessionBackendEvent({ event: 'message.aborted', payload }, handlers);
+
+  assert.deepEqual(calls, []);
+});
+
+test('dispatchSessionBackendEvent routes operational-error payloads', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    code: 'INTERRUPT_ABORT_STUCK',
+    message: 'message.interrupt: session.abort() did not settle within 30000ms — activeRequest force-cleared.',
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'req-1',
+  };
+
+  dispatchSessionBackendEvent({ event: 'operational-error', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'operational-error', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes operational-error without a requestId', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    code: 'RETRY_STUCK',
+    message: 'A retry has not completed within 90000ms.',
+    sessionPath: '/workspace/session.jsonl',
+  };
+
+  dispatchSessionBackendEvent({ event: 'operational-error', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'operational-error', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes retry.stuck payloads', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    delayMs: 30_000,
+    graceMs: 60_000,
+    requestId: 'req-1',
+  };
+
+  dispatchSessionBackendEvent({ event: 'retry.stuck', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'retry.stuck', payload }]);
+});
+
+test('dispatchSessionBackendEvent drops a malformed operational-error payload', () => {
+  const { handlers, calls } = createHandlers();
+  // Missing `message` — fails the guard, must be dropped.
+  const payload = { code: 'RETRY_STUCK', sessionPath: '/workspace/session.jsonl' };
+
+  dispatchSessionBackendEvent({ event: 'operational-error', payload }, handlers);
+
+  assert.deepEqual(calls, []);
+});
+
+test('dispatchSessionBackendEvent drops a malformed retry.stuck payload', () => {
+  const { handlers, calls } = createHandlers();
+  // `graceMs` is a string — fails the guard, must be dropped.
+  const payload = { sessionPath: '/workspace/session.jsonl', delayMs: 30_000, graceMs: '60000' };
+
+  dispatchSessionBackendEvent({ event: 'retry.stuck', payload }, handlers);
 
   assert.deepEqual(calls, []);
 });

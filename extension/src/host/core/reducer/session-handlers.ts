@@ -2,6 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
+import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, removeFromArray, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
 import type { SessionSummary } from '../../../shared/protocol.js';
@@ -400,6 +401,30 @@ export function handleRetryEnded(state: ArchState, event: Extract<Event, { kind:
     },
     effects: [],
   };
+}
+
+/** The willRetry watchdog declared a retry stuck (the SDK's backoff did not
+ *  complete within `delayMs + graceMs`). The companion `operational-error`
+ *  (code `RETRY_STUCK`) — fired in the same watchdog callback — already
+ *  surfaced a user-facing notice via the `Error` event, so this handler does
+ *  NOT set a notice (avoiding a double-notify). It emits a `Log` effect so
+ *  the structured timing detail is visible in the pie OutputChannel for
+ *  diagnosis. The reducer stays pure: logging is an `Effect`, executed by the
+ *  `EffectRunner`. State is unchanged. */
+export function handleRetryStuck(state: ArchState, event: Extract<Event, { kind: 'RetryStuck' }>): ReducerResult {
+  const logEffect: Effect = {
+    kind: 'Log',
+    corrId: '',
+    level: 'warn',
+    message: 'retry.stuck: a retry backoff did not complete within the watchdog window',
+    data: {
+      sessionPath: event.sessionPath,
+      delayMs: event.delayMs,
+      graceMs: event.graceMs,
+      requestId: event.requestId ?? null,
+    },
+  };
+  return { state, effects: [logEffect] };
 }
 
 /**

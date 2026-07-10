@@ -13,6 +13,7 @@ import type {
   QueuedDeliveredPayload,
   RetryEndedPayload,
   RetryStartedPayload,
+  RetryStuckPayload,
 } from '../../../shared/protocol';
 import type { TurnThroughputStatus } from '../../run-analytics';
 import { stripReqIds } from '../../../shared/error-mapping.js';
@@ -274,5 +275,28 @@ export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): voi
     success: payload.success,
     attempt: payload.attempt,
     finalError: payload.finalError,
+  });
+}
+
+/** The willRetry watchdog declared a retry stuck (the SDK's backoff did not
+ *  complete within `delayMs + graceMs`). Dispatches a `RetryStuck` reducer
+ *  event; the reducer emits a `Log` effect (warn) so the structured timing
+ *  detail is visible in the pie OutputChannel. Does NOT set a notice — the
+ *  companion `operational-error` (code `RETRY_STUCK`), fired in the same
+ *  watchdog callback, already surfaced a user-facing notice via the `Error`
+ *  event, so a notice here would double-notify. This event is NOT noisy: the
+ *  watchdog only fires once per stuck retry (after the full `delayMs +
+ *  grace` window), not on every backoff. */
+export function onRetryStuck(payload: RetryStuckPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('retry.stuck', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+  deps.dispatchArch({
+    kind: 'RetryStuck',
+    sessionPath,
+    delayMs: payload.delayMs,
+    graceMs: payload.graceMs,
+    requestId: payload.requestId,
   });
 }

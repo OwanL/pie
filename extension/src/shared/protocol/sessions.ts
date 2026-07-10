@@ -346,6 +346,48 @@ export interface RetryEndedPayload {
   finalError?: string;
 }
 
+/** Operational (non-fatal) backend condition that the user should be made
+ *  aware of without it being a hard request failure. Emitted by two backend
+ *  watchdogs:
+ *  - `INTERRUPT_ABORT_STUCK` (request-handler.ts interrupt-abort watchdog):
+ *    `session.abort()` invoked by `message.interrupt` did not settle within
+ *    the watchdog window; `activeRequest` was force-cleared so the session is
+ *    not permanently blocked. The side effects (clear + busy=false) are
+ *    already wired — only the notice was lost before this channel was wired.
+ *  - `RETRY_STUCK` (session-event-handler.ts willRetry watchdog): a retry's
+ *    backoff did not complete within `delayMs + grace`; emitted alongside a
+ *    `retry.stuck` event carrying the structured timing detail.
+ *
+ *  The host surfaces this as a non-blocking `operational-error` notice
+ *  (recovery action: show-logs). It does NOT roll back optimistic state or
+ *  abort a turn — the watchdogs already performed their side effects. */
+export interface OperationalErrorPayload {
+  /** Stable machine code (e.g. `INTERRUPT_ABORT_STUCK`, `RETRY_STUCK`). */
+  code: string;
+  /** Plain-language message safe to surface to the user. */
+  message: string;
+  sessionPath: string;
+  requestId?: string;
+}
+
+/** Emitted by the backend's willRetry watchdog when a retry's backoff did not
+ *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,
+ *  or an extension hook blocked the retry). Fires alongside an
+ *  `operational-error` (code `RETRY_STUCK`) which carries the user-facing
+ *  message; this event carries the structured timing detail for diagnostic
+ *  logging. The host dispatches a `RetryStuck` reducer event that emits a
+ *  `Log` effect (visible in the pie OutputChannel) — it does NOT set a
+ *  notice, since the companion `operational-error` already surfaced one for
+ *  the same condition (avoiding a double-notify). */
+export interface RetryStuckPayload {
+  sessionPath: string;
+  /** SDK-reported backoff delay (ms) the retry was sleeping. */
+  delayMs: number;
+  /** Grace (ms) added on top of `delayMs` before the watchdog declared stuck. */
+  graceMs: number;
+  requestId?: string;
+}
+
 export type FileChangeKind = 'created' | 'modified' | 'deleted';
 
 export interface FileChangeEntry {

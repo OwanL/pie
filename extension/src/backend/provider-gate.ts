@@ -79,6 +79,11 @@ export interface ProviderGateMetrics {
 	maxConcurrentRequests: number;
 	/** Configured afterburn sticky-slot window (seconds; 0 = disabled). */
 	afterburnSeconds: number;
+	/** Max seconds a queued request waits for a slot before failing with a
+	 *  retryable 429/503 (0 = unbounded). Surfaced end-to-end so the host's
+	 *  send-timer can size its prepass headroom to the real configured bound
+	 *  (FP-C3) instead of a hardcoded 30s default. */
+	queueWaitSeconds: number;
 	/** True if the circuit breaker is currently armed (account paused). */
 	paused: boolean;
 	/** Epoch-ms until which the provider is paused (0 = not paused). */
@@ -934,6 +939,7 @@ export class ProviderGate {
 				queuedRequests: entry.pool.queuedRequests,
 				maxConcurrentRequests: entry.pool.maxConcurrent,
 				afterburnSeconds: Math.round(entry.pool.afterburnMs / 1000),
+				queueWaitSeconds: Math.round(entry.pool.queueWaitMs / 1000),
 				paused: entry.pool.isPaused(),
 				pausedUntilMs: entry.pool.pausedUntilMs(),
 				strikeCount: entry.pool.strikeCount(),

@@ -31,10 +31,12 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  OperationalErrorPayload,
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
   RetryStartedPayload,
+  RetryStuckPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -334,6 +336,26 @@ export function isRetryEndedPayload(value: unknown): value is RetryEndedPayload 
     && isBoolean(value.success)
     && isFiniteNumber(value.attempt)
     && isOptionalString(value.finalError)
+  );
+}
+
+export function isOperationalErrorPayload(value: unknown): value is OperationalErrorPayload {
+  return (
+    isObject(value)
+    && isString(value.code)
+    && isString(value.message)
+    && isString(value.sessionPath)
+    && isOptionalString(value.requestId)
+  );
+}
+
+export function isRetryStuckPayload(value: unknown): value is RetryStuckPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isFiniteNumber(value.delayMs)
+    && isFiniteNumber(value.graceMs)
+    && isOptionalString(value.requestId)
   );
 }
 

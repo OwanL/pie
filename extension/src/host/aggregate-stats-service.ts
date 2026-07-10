@@ -390,6 +390,7 @@ function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
       || x.queuedRequests !== y.queuedRequests
       || x.maxConcurrentRequests !== y.maxConcurrentRequests
       || x.afterburnSeconds !== y.afterburnSeconds
+      || x.queueWaitSeconds !== y.queueWaitSeconds
       || x.paused !== y.paused
       || x.pausedUntilMs !== y.pausedUntilMs
       || x.strikeCount !== y.strikeCount

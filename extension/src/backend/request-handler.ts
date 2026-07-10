@@ -20,7 +20,7 @@ import {
   validateOpenTabsSet,
 } from './rpc';
 import { collectWarmBashStats } from './warm-bash-stats';
-import { ProviderGate } from './provider-gate';
+import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
 import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
@@ -68,6 +68,58 @@ const PROMPT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — tunable
  * budget plus one deferred window to ride out a transient saturation/pause.
  */
 const PROMPT_TIMEOUT_HARD_CEILING_MS = 2 * PROMPT_TIMEOUT_MS; // 20 minutes — tunable
+
+/** The prompt-safety-timer's defer-vs-fire decision for the metric-gated
+ *  deferral (FP-C2b). Pure (no I/O, no `Date.now`, no randomness) so it can be
+ *  unit-tested directly and called from the backend without violating purity
+ *  concerns. Extracted from `onPromptSafetyTimerFire` so the defer branch is
+ *  testable without driving the raw `setTimeout` + `session.prompt()`.
+ *
+ *  - `defer`: the in-flight request's provider is legitimately QUEUED
+ *    (`queuedRequests > 0`) or PAUSED (circuit breaker) AND the cumulative
+ *    elapsed is under the hard ceiling — a fire now would be a FALSE POSITIVE
+ *    (the turn is queued, not hung). Re-arm instead.
+ *  - `fire`: genuinely stuck, ceiling exceeded, or fail-open (absent
+ *    metrics/provider, or a free slot — not a queue wait). Carries the
+ *    plain-language `reason` for the `preflight.failed` emission.
+ *
+ *  FAIL-OPEN: `provider` undefined, `metrics` undefined, no matching provider
+ *  metric, or a non-queued/non-paused provider all yield `fire` (never hang on
+ *  a missing gate). Mirrors `EffectRunner.shouldReArmModelStartTimer` (FP-C2a)
+ *  but for the backend's pre-commit safety net. */
+export interface PromptSafetyTimerDecision {
+  action: 'defer' | 'fire';
+  /** Plain-language reason for the `preflight.failed` emission. Empty for a
+   *  `defer` (no emission). */
+  reason: string;
+}
+
+export function decidePromptSafetyTimerAction(opts: {
+  elapsed: number;
+  ceiling: number;
+  promptTimeoutMs: number;
+  provider?: string;
+  metrics?: readonly ProviderGateMetrics[];
+}): PromptSafetyTimerDecision {
+  const { elapsed, ceiling, promptTimeoutMs, provider, metrics } = opts;
+  // Fail-open chain: `providerMetric` is undefined when the gate is absent,
+  // the provider can't be resolved, or the provider is ungated (no metric) —
+  // in every such case `saturated` is falsy and we fall through to fire.
+  const providerMetric = provider
+    ? metrics?.find((m) => m.provider === provider)
+    : undefined;
+  const saturated = !!providerMetric
+    && (providerMetric.queuedRequests > 0 || providerMetric.paused);
+
+  if (saturated && elapsed < ceiling) {
+    return { action: 'defer', reason: '' };
+  }
+
+  const reason = saturated
+    ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'saturated'} without reaching a commit point.`
+    : `Prompt timed out after ${promptTimeoutMs}ms without reaching a commit point.`;
+  return { action: 'fire', reason };
+}
 
 /** Environment key for the interrupt-abort watchdog. */
 const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
@@ -121,6 +173,19 @@ export interface BackendRequestHandlerDeps {
   listAvailableModels(context?: SessionContext): ModelInfo[];
   readModelSettings(): Promise<ModelSettings>;
   writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings>;
+  /** FP-C2b: provider-gate metrics accessor for the prompt-safety-timer defer
+   *  branch. Defaults to `ProviderGate.getInstance()?.getMetrics()` so
+   *  production behavior is unchanged. Injectable so the defer branch can be
+   *  unit-tested without singleton/private-internals coupling (mirrors
+   *  FP-C2a's `EffectRunnerDeps.getProviderGateMetrics`). Optional +
+   *  fail-open: when absent the timer fires as before (never hangs). */
+  getProviderGateMetrics?: () => readonly ProviderGateMetrics[] | undefined;
+  /** FP-C2b: resolve the in-flight request's provider name for the
+   *  prompt-safety-timer defer branch. Defaults to
+   *  `resolveActiveModel(context).provider`. Injectable for unit tests
+   *  (mirrors FP-C2a's `EffectRunnerDeps.resolveSessionProvider`). Optional +
+   *  fail-open: when absent the provider is unresolved → the timer fires. */
+  resolveSessionProvider?: (context: SessionContext) => string | undefined;
 }
 
 type RequestHandler = (deps: BackendRequestHandlerDeps, request: RequestEnvelope) => Promise<unknown>;
@@ -552,23 +617,30 @@ async function handleMessageSend(
   // provider / missing metric falls through to abort (never hang). `firstArmedAt`
   // is a closure local anchoring the cumulative ceiling (no other site reads it).
   const firstArmedAt = Date.now();
+  // FP-C2b: resolve the provider-gate accessor + provider resolver from deps,
+  // defaulting to the production singletons so behavior is unchanged when the
+  // deps are not injected (production wiring). Injectable so the defer branch
+  // is unit-testable (mirrors FP-C2a's EffectRunnerDeps accessors).
+  const getProviderGateMetrics = deps.getProviderGateMetrics
+    ?? (() => ProviderGate.getInstance()?.getMetrics());
+  const resolveSessionProvider = deps.resolveSessionProvider
+    ?? ((ctx) => resolveActiveModel(ctx).provider);
   const onPromptSafetyTimerFire = () => {
     if (!context.activeRequest || context.activeRequest.id !== requestId) return;
     if (preflightFailed) return;
 
     const elapsed = Date.now() - firstArmedAt;
-    const gate = ProviderGate.getInstance();
-    const provider = resolveActiveModel(context).provider;
-    // Fail-open chain: `providerMetric` is undefined when the gate is absent,
-    // the provider can't be resolved, or the provider is ungated (no metric) —
-    // in every such case `saturated` is falsy and we fall through to abort.
-    const providerMetric = provider
-      ? gate?.getMetrics()?.find((m) => m.provider === provider)
-      : undefined;
-    const saturated = !!providerMetric
-      && (providerMetric.queuedRequests > 0 || providerMetric.paused);
+    const provider = resolveSessionProvider(context);
+    const metrics = getProviderGateMetrics();
+    const decision = decidePromptSafetyTimerAction({
+      elapsed,
+      ceiling: PROMPT_TIMEOUT_HARD_CEILING_MS,
+      promptTimeoutMs: PROMPT_TIMEOUT_MS,
+      provider,
+      metrics,
+    });
 
-    if (saturated && elapsed < PROMPT_TIMEOUT_HARD_CEILING_MS) {
+    if (decision.action === 'defer') {
       // DEFER: re-arm for another window. `preflightFailed` is intentionally
       // NOT set here — the one-shot guard is set ONLY in the FIRE branch
       // below, so a deferred re-arm can still be superseded by a real
@@ -586,10 +658,7 @@ async function handleMessageSend(
     void context.session.abort().catch(() => {
       // Best-effort abort; the failure is surfaced via `preflight.failed` below.
     });
-    const reason = saturated
-      ? `Prompt timed out after ${elapsed}ms (hard ceiling): provider "${provider ?? 'unknown'}" remained ${providerMetric?.paused ? 'paused' : 'saturated'} without reaching a commit point.`
-      : `Prompt timed out after ${PROMPT_TIMEOUT_MS}ms without reaching a commit point.`;
-    emitPreflightFailed(deps, context, requestId, reason);
+    emitPreflightFailed(deps, context, requestId, decision.reason);
   };
   const promptTimer = setTimeout(onPromptSafetyTimerFire, PROMPT_TIMEOUT_MS);
   context.activeRequest.promptSafetyTimer = promptTimer;

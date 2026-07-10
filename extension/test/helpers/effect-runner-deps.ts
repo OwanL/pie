@@ -49,8 +49,10 @@ export interface MakeEffectRunnerDepsOpts {
    *  post-ack, pre-commit phase; on fire it dispatches PreflightFailed. */
   sendTimerTimeoutMs?: number;
   /** Dynamic send-timer budget (prepass-aware production wiring); takes
-   *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. */
-  getSendTimerTimeoutMs?: () => number;
+   *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. Takes
+   *  the `sessionPath` (FP-C3) so the budget can be sized to the send's
+   *  provider; tests may ignore the arg. */
+  getSendTimerTimeoutMs?: (sessionPath: string) => number;
   /** Override the model-start send-timer budget (default 600s). The send-timer
    *  is re-armed with this budget once the pruning prepass succeeds
    *  (`ReArmSendTimer`); a fire after re-arm carries the model-start error

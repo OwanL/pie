@@ -449,6 +449,60 @@ test('agent_end with willRetry=true is a no-op (mid-retry: preserve activeReques
   assert.deepEqual(emitted, []);
 });
 
+test('willRetry watchdog emits operational-error + retry.stuck when a retry backoff never completes', async () => {
+  // The willRetry watchdog (armed on agent_end willRetry:true / re-armed on
+  // auto_retry_start) emits BOTH an operational-error (code RETRY_STUCK,
+  // user-facing message) and a retry.stuck (structured timing detail) when a
+  // retry's backoff does not complete within delayMs + grace. These were
+  // previously SILENTLY DROPPED by the host (no dispatch case); this test
+  // pins the backend emission contract so the host wiring (event-dispatch +
+  // handlers) has a signal to surface. Grace is pinned to 0 via env so the
+  // watchdog fires promptly without a real wall-clock wait.
+  const prevGrace = process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS;
+  process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS = '0';
+  try {
+    const { deps, emitted } = createDeps();
+    const context = createContext({
+      activeRequest: { id: 'req-stuck', messageIndex: 1, aborted: false, lastAssistantMessageId: 'req-stuck:1' },
+    });
+
+    // agent_end willRetry:true arms the watchdog with delayMs=0; grace=0 →
+    // windowMs=0 → the timer fires on the next macrotask.
+    handleSdkSessionEvent(deps, context, { type: 'agent_end', willRetry: true });
+
+    // Let the 0ms watchdog timer fire.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const opError = emitted.find((e) => e.event === 'operational-error');
+    const retryStuck = emitted.find((e) => e.event === 'retry.stuck');
+    assert.ok(opError, 'emits operational-error');
+    assert.deepEqual(opError?.payload, {
+      code: 'RETRY_STUCK',
+      message: (opError?.payload as { message: string }).message,
+      sessionPath: '/workspace/session.jsonl',
+      requestId: 'req-stuck',
+    });
+    assert.match((opError?.payload as { message: string }).message, /retry has not completed/i);
+    assert.ok(retryStuck, 'emits retry.stuck');
+    assert.deepEqual(retryStuck?.payload, {
+      sessionPath: '/workspace/session.jsonl',
+      delayMs: 0,
+      graceMs: 0,
+      requestId: 'req-stuck',
+    });
+    // The watchdog cleared its timer handle after firing.
+    assert.equal(context.willRetryWatchdogTimer, undefined);
+  } finally {
+    if (prevGrace === undefined) {
+      delete process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS;
+    } else {
+      process.env.PIE_WILLRETRY_WATCHDOG_GRACE_MS = prevGrace;
+    }
+    // Defensive: clear any lingering watchdog timer so the test never leaks.
+    // (No-op once the timer has fired.)
+  }
+});
+
 test('auto_retry_start emits retry.started with attempt/delay/error', () => {
   const { deps, emitted } = createDeps();
   const context = createContext();

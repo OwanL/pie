@@ -506,6 +506,30 @@ test('EffectRunner SendRpc keeps the send-timer armed after early-ack (cleared a
   runner.dispose();
 });
 
+test('EffectRunner SendRpc passes the sessionPath to getSendTimerTimeoutMs so the budget can be sized per-provider (FP-C3)', async () => {
+  // FP-C3: the send-timer budget getter now receives the sessionPath so the
+  // production wiring can add the real per-provider queueWaitSeconds as
+  // headroom. Verify the runner forwards the sessionPath (the getter is the
+  // only seam; the extension-host's resolveQueueWaitHeadroomMs reads it).
+  const timers = new FakeTimerSink();
+  let capturedSessionPath: string | undefined;
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-fp3' }),
+    getSendTimerTimeoutMs: (sessionPath: string) => {
+      capturedSessionPath = sessionPath;
+      return 60_000;
+    },
+    timer: timers,
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SendRpc', corrId: 'c-fp3', sessionPath: '/fp3-session', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-fp3' });
+  await settle();
+
+  assert.equal(capturedSessionPath, '/fp3-session', 'getSendTimerTimeoutMs received the send sessionPath');
+  runner.dispose();
+});
+
 test('EffectRunner SendRpc send-timer dispatches PreflightFailed on timeout (post-ack, no commit point)', async () => {
   const timers = new FakeTimerSink();
   const dispatchedEvents: Event[] = [];
