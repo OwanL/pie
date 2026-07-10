@@ -566,8 +566,10 @@ export class ProviderGate {
 	private wrapFetch(): void {
 		if (this.originalFetch) return; // already wrapped
 		this.originalFetch = globalThis.fetch;
-		globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
-			this.handleFetch(input, init);
+		const self = this;
+		globalThis.fetch = async function patchedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+			return self.handleFetch(input, init);
+		} as typeof globalThis.fetch;
 	}
 
 	/** Match a request URL to a configured provider and return its pool. */

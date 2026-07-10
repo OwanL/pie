@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { ChatMessage, SystemPromptEntry } from '../src/shared/protocol';
 import {
   buildContextWindowBreakdown,
+  clearToolCallTokenCache,
   getToolCallTokenCacheSize,
   TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES,
 } from '../src/webview/panel/context-window/breakdown';
@@ -222,6 +223,7 @@ test('per-tool-call token cache: a completed tool call is cached and reused on r
   // during an active turn. Without the cache each recompute re-runs cl100k_base
   // BPE over every accumulated tool result; the cache makes a recompute skip
   // completed calls whose result already landed (immutable, id-unique).
+  clearToolCallTokenCache();
   const tc = makeToolCall({ id: 'cache-hit-1', result: 'a'.repeat(2000) });
   const first = buildWithToolCalls([tc]);
   assert.equal(getToolCallTokenCacheSize(), 1, 'completed tool call should be cached');
@@ -237,11 +239,13 @@ test('per-tool-call token cache: a completed tool call is cached and reused on r
 });
 
 test('per-tool-call token cache: running tool calls are not cached (no result yet)', () => {
+  clearToolCallTokenCache();
   buildWithToolCalls([makeToolCall({ id: 'running-1', status: 'running', result: undefined })]);
   assert.equal(getToolCallTokenCacheSize(), 0, 'running calls have no result and are not cached');
 });
 
 test('per-tool-call token cache: distinct completed calls are bounded by LRU eviction', () => {
+  clearToolCallTokenCache();
   const toolCalls = [];
   for (let i = 0; i < TOOL_CALL_TOKEN_CACHE_MAX_ENTRIES + 50; i++) {
     toolCalls.push(makeToolCall({ id: `evict-${i}`, result: `payload-${i}` }));

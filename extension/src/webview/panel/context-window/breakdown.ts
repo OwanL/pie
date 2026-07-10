@@ -35,6 +35,13 @@ export function getToolCallTokenCacheSize(): number {
   return toolCallTokenCache.size;
 }
 
+/** Reset the per-tool-call token cache. Entries are id-keyed and stable for a
+ *  completed call's lifetime, so production never needs to clear this — it
+ *  exists for tests that need a deterministic cache state. */
+export function clearToolCallTokenCache(): void {
+  toolCallTokenCache.clear();
+}
+
 export type ContextWindowBreakdownKind = 'exact' | 'estimated' | 'derived' | 'unknown';
 
 export interface ContextWindowBreakdownEntry {
