@@ -22,8 +22,8 @@ import {
 	type NestedAllowedBuckets,
 	ALL_NESTED_BUCKETS_ALLOWED,
 	downgradeBucketForNested,
-	selectModel,
-} from "../bucket-selector.js";
+} from "./bucket-config.js";
+import { selectModel } from "../bucket-selector.js";
 
 /** Context for model selection settings and restrictions. */
 export interface SelectionContext {

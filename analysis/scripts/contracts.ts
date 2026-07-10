@@ -12,7 +12,26 @@ export type {
   VerificationCommandKind,
 } from '../../shared/tool-analysis-kinds.js';
 
-export const RUN_ANALYTICS_SCHEMA_VERSION = 1;
+import type {
+  AssistantUsage, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
+  RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
+  SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
+  TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
+  VerificationRollup, RunSnapshot, TaskBoundaryIntent,
+} from '../../shared/run-analytics-contracts.js';
+
+export type {
+  AssistantUsage, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
+  RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
+  SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
+  TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
+  VerificationRollup, RunSnapshot, TaskBoundaryIntent,
+};
+
+export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
+
 export const SITE_DATA_SCHEMA_VERSION = 1;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
 export const GENERATOR_VERSION = 'analysis-v1';
@@ -38,238 +57,8 @@ export const SITE_DATA_FILE_NAMES = [
 
 export type SiteDataFileName = (typeof SITE_DATA_FILE_NAMES)[number];
 
-export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
-export type RunFinalizationReason = 'scored' | 'closed_unscored' | 'new_task';
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
-export type PruningMode = 'auto' | 'shadow' | 'off' | 'custom';
-export type InputKind = 'filesystemPathRef' | 'imageBlob' | 'fileBlob';
-// VerificationCommandKind, ToolFailureKind, ToolResultIssueKind, and
-// TreatmentChangeKind are re-exported above from the shared canonical module
-// (../../shared/tool-analysis-kinds.js).
-export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
 export type VerificationState = 'none' | 'passing' | 'failing';
 export type VerificationCountBucket = '0' | '1' | '2-3' | '4+';
-
-export interface RunOutcome {
-  resolution: RunOutcomeResolution;
-  satisfaction: number;
-}
-
-export interface SessionContextFileFactor {
-  path: string;
-  hash: string;
-}
-
-export interface SessionToolSnippetFactor {
-  toolId: string;
-  hash: string;
-}
-
-export interface SessionSkillFactor {
-  name: string;
-  contentHash: string | null;
-  sourceHash: string | null;
-  disableModelInvocation: boolean;
-  lastModifiedAt: string | null;
-}
-
-export interface SessionAnalyticsFactors {
-  promptFamily: string | null;
-  promptHash: string | null;
-  promptCapturedAt: string | null;
-  harnessPromptHash: string | null;
-  customPromptHash: string | null;
-  appendSystemPromptHash: string | null;
-  promptGuidelineHashes: string[];
-  contextFiles: SessionContextFileFactor[];
-  selectedToolIds: string[];
-  toolSnippetHashes: SessionToolSnippetFactor[];
-  toolSetHash: string | null;
-  skills: SessionSkillFactor[];
-  skillSetHash: string | null;
-  /** Names of extensions active during this run (e.g. 'subagent', 'safeguard'). */
-  activeExtensions: string[];
-}
-
-/**
- * Snapshot of the functional (behavioral) settings in effect when a run
- * started. Mirrors `extension/src/host/run-analytics/types.ts`. Null for runs
- * recorded before functional-settings tracking existed.
- */
-export interface FunctionalSettingsSnapshot {
-  /** When true, sub-agents always use the parent's active model (skip bucket selection). */
-  subagentAlwaysParentModel: boolean;
-  /** Pruning mode at run start. */
-  pruningMode: PruningMode;
-  /** Per-extension enabled/disabled toggles at run start (extension id -> enabled). */
-  extensionToggles: Record<string, boolean>;
-  /** Tool-result-pruning enabled flag at run start (null = untracked, predates field). Backs the
-   *  outcome comparison: are runs better with tool-result pruning on or off? */
-  toolResultPruningEnabled: boolean | null;
-  /** Tool-result-pruning profile at run start (null = untracked). */
-  toolResultPruningProfile: 'default' | 'security' | null;
-}
-
-export interface SubagentTaskScoreRollup {
-  precision:    { sum: number; count: number; max: number };
-  creativity:   { sum: number; count: number; max: number };
-  reasoning:    { sum: number; count: number; max: number };
-  thoroughness: { sum: number; count: number; max: number };
-}
-
-export interface ToolFailureSample {
-  toolName: string;
-  failureKind: ToolFailureKind;
-  exitCode: number | null;
-  errorExcerpt: string;
-  verificationKinds: VerificationCommandKind[];
-  occurredAt: string;
-}
-
-export interface ToolResultIssueSample {
-  toolName: string;
-  /** Non-success result kind: a verification command that exposed project failures, or an empty probe/search. */
-  resultIssueKind: ToolResultIssueKind;
-  exitCode: number | null;
-  errorExcerpt: string;
-  verificationKinds: VerificationCommandKind[];
-  occurredAt: string;
-}
-
-/** Terminal status of a single assistant turn, mirrored on throughput samples. */
-export type TurnThroughputStatus = 'completed' | 'error' | 'interrupted';
-
-/**
- * One timestamped throughput observation per assistant turn. Throughput =
- * `outputTokens` / (`generationDurationMs` / 1000); the generation duration
- * excludes tool-execution time (tools run between messages). The latency
- * fields decompose the gap from the previous tool finishing to the model's
- * first reply token (null when not measurable for a turn).
- */
-export interface TurnThroughputSample {
-  endedAt: string;
-  outputTokens: number;
-  generationDurationMs: number;
-  concurrentBusySessions: number;
-  status: TurnThroughputStatus;
-  turnLatencyMs: number | null;
-  overheadMs: number | null;
-  providerLatencyMs: number | null;
-}
-
-export interface ToolUsageRollup {
-  totalCount: number;
-  /** Execution failures only (the tool could not do its job). Non-success results are under `resultIssueCount`. */
-  failureCount: number;
-  /** Failed tool calls excluding verification-project failures and probe/no-match outcomes. */
-  executionFailureCount: number;
-  /** Failed tool calls where the command was verification and exposed project failures. */
-  verificationProjectFailureCount: number;
-  /** Failed probe/search commands that likely mean "no matches" rather than a broken tool. */
-  probeFailureCount: number;
-  /** Non-success results: tool ran to completion but reported a non-success outcome (verification failure or empty probe). */
-  resultIssueCount: number;
-  countsByName: Record<string, number>;
-  failureCountsByName: Record<string, number>;
-  failureCountsByKind: Record<ToolFailureKind, number>;
-  failureCountsByNameAndKind: Record<string, Record<ToolFailureKind, number>>;
-  failureSamples: ToolFailureSample[];
-  resultIssueCountsByName: Record<string, number>;
-  resultIssueCountsByKind: Record<ToolResultIssueKind, number>;
-  resultIssueCountsByNameAndKind: Record<string, Record<ToolResultIssueKind, number>>;
-  resultIssueSamples: ToolResultIssueSample[];
-  /** Cumulative wall-clock execution time (ms) across all timed tool calls. */
-  totalDurationMs: number;
-  /** Number of completed/failed tool calls that reported an execution duration. */
-  timedCallCount: number;
-  /** Cumulative execution time (ms) per normalized tool name. */
-  durationMsByName: Record<string, number>;
-  subagentCallCount: number;
-  subagentTaskCount: number;
-  subagentAgentNames: string[];
-  subagentScoredTaskCount: number;
-  subagentTaskScores: SubagentTaskScoreRollup;
-}
-
-export interface FileMutationRollup {
-  writeCount: number;
-  editCount: number;
-  deleteCount: number;
-  renameCount: number;
-  touchedFileCount: number;
-  lineAdditions: number;
-  lineDeletions: number;
-  lineModifications: number;
-  /** Per-file EDIT counts keyed by a path hash. Backs the file-churn signal (re-editing the same
-   *  file repeatedly). Edits only; empty for runs captured before this field existed. */
-  editCountsByFile: Record<string, number>;
-  /** Per-file READ counts keyed by a path hash. Backs the "files reviewed" breadth signal (how
-   *  many distinct files the agent reviewed) and the re-read churn signal (re-opening the same
-   *  file). Reads only; empty for runs captured before this field existed or when no read had an
-   *  extractable path. */
-  readCountsByFile: Record<string, number>;
-}
-
-export interface FileExtensionRollup {
-  readCountsByExtension: Record<string, number>;
-  writeCountsByExtension: Record<string, number>;
-  editCountsByExtension: Record<string, number>;
-}
-
-export interface VerificationRollup {
-  totalCount: number;
-  failureCount: number;
-  countsByKind: Record<VerificationCommandKind, number>;
-}
-
-export interface RunSnapshot {
-  sessionPath: string;
-  runId: string;
-  taskGroupId: string;
-  status: ActiveRunStatus;
-  scored: boolean;
-  startedAt: string;
-  updatedAt: string;
-  finalizedAt?: string;
-  finalizationReason?: RunFinalizationReason;
-  outcome?: RunOutcome;
-  modelId?: string;
-  thinkingLevel?: ThinkingLevel;
-  mixedModelConfig: boolean;
-  mixedTreatmentConfig: boolean;
-  treatmentChangeKinds: TreatmentChangeKind[];
-  experimentAssignment: string | null;
-  analyticsFactors: SessionAnalyticsFactors | null;
-  /** Functional settings snapshot captured at run start; null for runs recorded before tracking existed. */
-  functionalSettings: FunctionalSettingsSnapshot | null;
-  sendCount: number;
-  assistantTurnCount: number;
-  assistantTurnDurationMs: number;
-  busyDurationMs: number;
-  busyPeriodCount: number;
-  interruptedCount: number;
-  messageEditCount: number;
-  truncatedAfterCount: number;
-  backendErrorCodes: string[];
-  contextTokens: number | null;
-  contextLimit: number | null;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  tokenReportedTurnCount: number;
-  /** Per-turn throughput observations; empty for runs recorded before sampling existed. */
-  turnThroughputSamples: TurnThroughputSample[];
-  filesystemPathRefCount: number;
-  imageInputCount: number;
-  imageInputBytes: number;
-  unsupportedInputCount: number;
-  inputKindsUsed: InputKind[];
-  toolUsage: ToolUsageRollup;
-  fileMutation: FileMutationRollup;
-  fileExtensions: FileExtensionRollup;
-  verification: VerificationRollup;
-}
 
 export interface OutcomeHistoryLogEntry {
   schemaVersion: number;

@@ -1,5 +1,18 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
+import type {
+  SessionAnalyticsFactors,
+  SessionContextFileFactor,
+  SessionSkillFactor,
+  SessionToolSnippetFactor,
+} from '../../../../shared/run-analytics-contracts.js';
+
+export type {
+  SessionAnalyticsFactors,
+  SessionContextFileFactor,
+  SessionSkillFactor,
+  SessionToolSnippetFactor,
+};
 
 /** Agent-assigned task-completion classification for a session review.
  *  - `fully`: the session's task was completed.
@@ -128,43 +141,6 @@ export interface SystemPromptEntry {
    *  always shown in the transcript (never hidden) and never render a checkbox
    *  in the toggle menu. Absent/`true` = toggleable. */
   toggleable?: boolean;
-}
-
-export interface SessionContextFileFactor {
-  path: string;
-  hash: string;
-}
-
-export interface SessionToolSnippetFactor {
-  toolId: string;
-  hash: string;
-}
-
-export interface SessionSkillFactor {
-  name: string;
-  contentHash: string | null;
-  sourceHash: string | null;
-  disableModelInvocation: boolean;
-  lastModifiedAt: string | null;
-}
-
-export interface SessionAnalyticsFactors {
-  promptFamily: string | null;
-  promptHash: string | null;
-  /** ISO timestamp when the prompt factors were captured (session open time). */
-  promptCapturedAt: string | null;
-  harnessPromptHash: string | null;
-  customPromptHash: string | null;
-  appendSystemPromptHash: string | null;
-  promptGuidelineHashes: string[];
-  contextFiles: SessionContextFileFactor[];
-  selectedToolIds: string[];
-  toolSnippetHashes: SessionToolSnippetFactor[];
-  toolSetHash: string | null;
-  skills: SessionSkillFactor[];
-  skillSetHash: string | null;
-  /** Names of extensions active during this run (e.g. 'subagent', 'safeguard'). */
-  activeExtensions: string[];
 }
 
 export interface BackendReadyPayload {

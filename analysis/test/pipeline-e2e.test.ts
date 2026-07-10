@@ -117,6 +117,7 @@ function createMinimalRunSnapshot(overrides: Partial<RunSnapshot> = {}): RunSnap
       },
     },
     ...overrides,
+    lastTurnUsage: overrides.lastTurnUsage ?? null,
   };
 }
 

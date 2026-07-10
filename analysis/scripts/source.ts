@@ -19,6 +19,7 @@ import { listStorageDirCandidates } from './source-auto.ts';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   type AgentReviewSourceEvent,
+  type AssistantUsage,
   type FileExtensionRollup,
   type FileMutationRollup,
   type FunctionalSettingsSnapshot,
@@ -750,6 +751,19 @@ function coerceThinkingLevel(value: unknown): ThinkingLevel | undefined {
   return THINKING_LEVELS.has(normalized as ThinkingLevel) ? normalized as ThinkingLevel : undefined;
 }
 
+function coerceAssistantUsage(value: unknown): AssistantUsage | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return {
+    inputTokens: toNonNegativeInteger(value.inputTokens),
+    outputTokens: toNonNegativeInteger(value.outputTokens),
+    cacheReadTokens: toNonNegativeInteger(value.cacheReadTokens),
+    cacheWriteTokens: toNonNegativeInteger(value.cacheWriteTokens),
+    totalTokens: toNonNegativeInteger(value.totalTokens),
+  };
+}
+
 export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
   if (!isRecord(value)) {
     return null;
@@ -819,6 +833,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     cacheReadTokens: toNonNegativeInteger(value.cacheReadTokens),
     cacheWriteTokens: toNonNegativeInteger(value.cacheWriteTokens),
     tokenReportedTurnCount: toNonNegativeInteger(value.tokenReportedTurnCount),
+    lastTurnUsage: coerceAssistantUsage(value.lastTurnUsage),
     turnThroughputSamples: coerceTurnThroughputSamples(value.turnThroughputSamples),
     filesystemPathRefCount: toNonNegativeInteger(value.filesystemPathRefCount),
     imageInputCount: toNonNegativeInteger(value.imageInputCount),

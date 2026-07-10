@@ -1,5 +1,13 @@
 import type { ThinkingLevel } from './models.js';
 import type { TranscriptWindow } from './sessions.js';
+import type {
+  ActiveRunStatus,
+  PruningMode,
+  RunOutcome,
+  RunOutcomeResolution,
+} from '../../../../shared/run-analytics-contracts.js';
+
+export type { ActiveRunStatus, PruningMode, RunOutcome, RunOutcomeResolution };
 
 /** Webview-local UI preferences. Owned by the host so they survive teardown. */
 /** Metadata describing a known pi extension (tool or hook). */
@@ -65,8 +73,6 @@ export interface PruningDetails {
   /** Reason surfaced when a keep-all safeguard retained every item (prepass pruned 100% of a category, or a non-JSON parse failure). */
   prepassSafeguardReason?: string;
 }
-
-export type PruningMode = 'auto' | 'shadow' | 'off' | 'custom';
 
 /** Subset of pruning config exposed in the settings UI. */
 export interface PruningSettings {
@@ -183,10 +189,14 @@ export interface ChatPrefs {
   /** Max parallel tasks allowed in a single `subagent` call. Default 4.
    *  Mirrored via PIE_SUBAGENT_MAX_PARALLEL_TASKS. */
   subagentMaxParallelTasks: number;
-  /** Size of the per-session warm bash pool (pre-warmed bash processes that
-   *  hide shell-spawn latency). 0 disables warm bash (today's fresh-spawn
-   *  behaviour). Default 2. Mirrored via PIE_BASH_WARM_POOL. Applies on the
-   *  next bash call (the pool is rebuilt live when this changes). */
+  /** Idle target for the single shared warm bash pool — the number of
+   *  pre-warmed bash processes kept warm across ALL sessions (not per session)
+   *  to hide shell-spawn latency. The pool dynamically spawns up to the target
+   *  and kills excess idle when the target is lowered, so total idle bash
+   *  processes are capped process-wide regardless of session count. 0 disables
+   *  warm bash (today's fresh-spawn behaviour). Default 2. Range [0, 8].
+   *  Mirrored via PIE_BASH_WARM_POOL. Live-tuned on the next bash call
+   *  (target-only changes never rebuild the pool; shell/timeout changes do). */
   bashWarmPoolSize: number;
   /** When true, simple commands (no shell metacharacters) are exec'd directly
    *  without spawning bash at all. Default true. Mirrored via PIE_BASH_FAST_PATH. */
@@ -196,7 +206,7 @@ export interface ChatPrefs {
   bashShellPath: string;
   /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
    *  default (10000). Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000].
- *  Applies on the next bash call (the pool is rebuilt live when this changes). */
+   *  A change rebuilds the shared warm pool on the next bash call. */
   bashWarmupTimeoutMs: number;
   /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
    *  default (15000). Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
@@ -335,22 +345,12 @@ export const SUBAGENT_BUCKETS_ENV = 'PIE_SUBAGENT_BUCKETS_JSON';
  *  `NestedAllowedBuckets`. */
 export const NESTED_ALLOWED_BUCKETS_ENV = 'PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON';
 
-export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
-
 export interface ActiveRunSummary {
   runId: string;
   status: ActiveRunStatus;
   scored: boolean;
   /** True when the next send is queued to start a new task group. */
   nextSendStartsNewTask?: boolean;
-}
-
-export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
-
-export interface RunOutcome {
-  resolution: RunOutcomeResolution;
-  /** Intended to be a user-facing ordinal score (e.g. 1–5). */
-  satisfaction: number;
 }
 
 export const DEFAULT_CHAT_PREFS: ChatPrefs = {

@@ -34,7 +34,7 @@ export { initialArchState };
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
 import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult } from './reducer/result-handlers.js';
-import { handleStreamingEvent, handleQueuedDelivered } from './reducer/streaming-handlers.js';
+import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
   handleSessionListChanged,
@@ -65,7 +65,6 @@ import {
   handleTranscriptPageLoaded,
   handleTranscriptTrimmed,
   handleAvailableExtensionsChanged,
-  handleAssistantMessageErrorStamped,
 } from './reducer/host-handlers.js';
 import {
   handleOptimisticMessageInserted,

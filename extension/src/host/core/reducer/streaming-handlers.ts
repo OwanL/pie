@@ -331,3 +331,24 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
   });
   return { state: nextState, effects: [] };
 }
+
+export function handleAssistantMessageErrorStamped(
+  state: ArchState,
+  event: Extract<Event, { kind: 'AssistantMessageErrorStamped' }>,
+): ReducerResult {
+  return {
+    state: produce(state, (draft) => {
+      const list = draft.transcript.bySession[event.sessionPath];
+      if (!list) return;
+      const reversed = [...list].reverse();
+      const msg = reversed.find(
+        (m) => m.role === 'assistant' && (m.status === 'streaming' || m.status === 'error'),
+      ) ?? reversed.find((m) => m.role === 'assistant');
+      if (msg) {
+        msg.status = 'error';
+        msg.errorDetail = event.errorMessage;
+      }
+    }),
+    effects: [],
+  };
+}

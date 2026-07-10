@@ -1,5 +1,7 @@
 
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+import type { AssistantUsage, ThinkingLevel } from '../../../../shared/run-analytics-contracts.js';
+
+export type { AssistantUsage, ThinkingLevel };
 
 export interface ModelSettings {
   defaultModel: string;
@@ -49,16 +51,4 @@ export interface ContextWindowUsage {
   percent: number | null;
 }
 
-/**
- * Per-assistant-message token usage. Mirrors the fields on the pi-ai `Usage`
- * object — kept optional so older messages (or aborted/errored ones) can omit
- * fields the provider didn't report.
- */
-export interface AssistantUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  totalTokens: number;
-}
 

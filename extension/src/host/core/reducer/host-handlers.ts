@@ -10,7 +10,6 @@ import type {
   TranscriptPageLoadedEvent,
   TranscriptTrimmedEvent,
   AvailableExtensionsChangedEvent,
-  AssistantMessageErrorStampedEvent,
 } from '../events.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
 import type { ReducerResult } from './helpers.js';
@@ -182,27 +181,6 @@ export function handleAvailableExtensionsChanged(
         availableExtensions: event.extensions,
       },
     },
-    effects: [],
-  };
-}
-
-export function handleAssistantMessageErrorStamped(
-  state: ArchState,
-  event: AssistantMessageErrorStampedEvent,
-): ReducerResult {
-  return {
-    state: produce(state, (draft) => {
-      const list = draft.transcript.bySession[event.sessionPath];
-      if (!list) return;
-      const reversed = [...list].reverse();
-      const msg = reversed.find(
-        (m) => m.role === 'assistant' && (m.status === 'streaming' || m.status === 'error'),
-      ) ?? reversed.find((m) => m.role === 'assistant');
-      if (msg) {
-        msg.status = 'error';
-        msg.errorDetail = event.errorMessage;
-      }
-    }),
     effects: [],
   };
 }

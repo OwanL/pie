@@ -1,12 +1,8 @@
 import { isRecord } from '../type-guards';
 import type { VerificationCommandKind } from '../../../../shared/tool-analysis-kinds.js';
+import type { SubagentTaskScoreRollup } from '../../../../shared/run-analytics-contracts.js';
 
-export interface SubagentTaskScoreRollup {
-  precision:    { sum: number; count: number; max: number };
-  creativity:   { sum: number; count: number; max: number };
-  reasoning:    { sum: number; count: number; max: number };
-  thoroughness: { sum: number; count: number; max: number };
-}
+export type { SubagentTaskScoreRollup };
 
 export function createEmptySubagentTaskScoreRollup(): SubagentTaskScoreRollup {
   return {
