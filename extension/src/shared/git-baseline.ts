@@ -1,7 +1,6 @@
 import * as cp from 'node:child_process';
 import * as path from 'node:path';
 
-import { appendPieLog } from '../host/util/pie-log';
 import { toErrorMessage } from './error-message';
 
 // ─── Git baseline resolution (shared, pure-node) ───────────────────────────
@@ -9,8 +8,24 @@ import { toErrorMessage } from './error-message';
 // Extracted from host/core/file-diff-service.ts so the session-changes
 // extension's `diff` action can resolve the same pre-change baseline the
 // changed-files UI diffs against — one implementation, two callers. Pure node
-// (child_process + path); no vscode, no ArchState. The host's FileDiffService
-// imports these and keeps its vscode-wired openFileDiff/revertFile wiring.
+// (child_process + path); no vscode, no ArchState, no host-side imports (a
+// `shared/` module must not reach into `host/`). Fallback diagnostics go to
+// `process.stderr` (captured by the host's BackendClient.logStderrLine → the
+// "pie (backend)" OutputChannel when run in the backend, and by the host
+// process stderr otherwise) — mirroring `backend/diag.ts`'s `backendTrace`.
+
+/** Write a structured diagnostic JSON line to stderr. Shared/pure-node so it
+ *  must not reach into `host/util/pie-log` (a `shared/` → `host/` smell);
+ *  stderr is captured by the host's OutputChannel the same way backend lines
+ *  are. Mirrors `backend/diag.ts`'s `backendTrace` shape. */
+function traceDebug(scope: string, event: string, payload: Record<string, unknown>): void {
+  process.stderr.write(`[pie] ${JSON.stringify({
+    ts: new Date().toISOString(),
+    scope,
+    event,
+    ...payload,
+  })}\n`);
+}
 
 /** Run `git` in `dir`; resolve `{ stdout, code }`. Non-zero exit codes (e.g.
  *  `git diff --exit-code` → 1 on differences, 128 for a bad ref) resolve with
@@ -101,12 +116,7 @@ export async function resolveBaselineRef(resolvedPath: string): Promise<string> 
     }
     return 'HEAD';
   } catch (err) {
-    appendPieLog(
-      'debug',
-      'git-baseline',
-      'failed to resolve baseline ref; falling back to HEAD',
-      { error: toErrorMessage(err) },
-    );
+    traceDebug('git-baseline', 'resolveBaselineRef.failed', { error: toErrorMessage(err), resolvedPath });
     return 'HEAD';
   }
 }
@@ -121,12 +131,7 @@ export async function isTrackedByGit(absPath: string): Promise<boolean> {
     const { code } = await execGit(dir, ['ls-files', '--error-unmatch', absPath]);
     return code === 0;
   } catch (err) {
-    appendPieLog(
-      'debug',
-      'git-baseline',
-      'failed to check if file is tracked; assuming untracked',
-      { error: toErrorMessage(err) },
-    );
+    traceDebug('git-baseline', 'isTracked.failed', { error: toErrorMessage(err), absPath });
     return false;
   }
 }

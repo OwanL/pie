@@ -3,6 +3,7 @@ import * as path from 'node:path';
 
 import { toErrorMessage } from '../shared/error-message';
 import { REVIEWS_DIR_ENV } from './session-review-store.js';
+import { backendTrace } from './diag.js';
 
 /**
  * Per-session system-prompt toggle persistence.
@@ -22,16 +23,6 @@ import { REVIEWS_DIR_ENV } from './session-review-store.js';
  * (`extension/src/host/backend/client.ts`); when unset, toggles are
  * in-memory only (lost on backend restart).
  */
-
-function backendTrace(scope: string, event: string, payload: Record<string, unknown>): void {
-  process.stderr.write(`[pie:backend] ${JSON.stringify({
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: `backend-${scope}`,
-    event,
-    ...payload,
-  })}\n`);
-}
 
 /** The sidecar filename inside the reviews/data directory. */
 const TOGGLES_FILE = 'system-prompt-toggles.json';

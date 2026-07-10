@@ -32,7 +32,14 @@ export function createCommandExecutor(platform?: NodeJS.Platform): CommandExecut
         invocation.args,
         { timeout, maxBuffer: DEFAULT_MAX_BUFFER_BYTES, encoding: 'utf8', ...options },
         (err, stdout, stderr) => {
-          if (err && (err.killed === true || err.signal === 'SIGTERM')) {
+          // Tighten the timeout-detection: Node sets `err.killed` ONLY for its
+          // own `timeout` enforcement (and maxBuffer overflow). Restrict to
+          // `err.killed === true` so an EXTERNAL SIGTERM (sent by another
+          // process, e.g. a kill signal) is not mislabelled as a timeout, and
+          // exclude the maxBuffer overflow (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)
+          // which also sets `killed=true` but is a buffer-size failure, not a
+          // timeout. (`err.signal === 'SIGTERM'` alone matched external kills.)
+          if (err && err.killed === true && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
             err.message = `Command timed out after ${timeout}ms: ${command}`;
           }
           // err.code is a string like 'ENOENT' for spawn errors; normalise to 1.

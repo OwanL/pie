@@ -158,10 +158,35 @@ function stringifyLogData(data: unknown): string {
     return data.stack || data.message;
   }
   try {
-    return JSON.stringify(data);
+    return JSON.stringify(redactSensitive(data));
   } catch {
     return String(data);
   }
+}
+
+// M2 redaction: known-sensitive keys are redacted before log data is serialized
+// so credentials never reach the pie OutputChannel / pie.log. Only error-
+// mapping.ts redacted before (req-NN). Conservative compound patterns avoid
+// over-redacting incidental substrings (e.g. bare 'token' would catch 'tokenCount';
+// 'access_token' / 'auth_token' / 'api_key' are precise enough).
+const SENSITIVE_KEY_PATTERN = /(api[_-]?key|authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer|password|passwd|secret|credential)/i;
+
+/** Deep-clone `data` with values of sensitive keys replaced by `'[redacted]'`.
+ *  Non-mutating; circular references are pruned to `'[circular]'`. Exported so
+ *  callers can opt into explicit redaction before passing data to `appendPieLog`
+ *  (e.g. for pre-formatted payloads). Applied automatically in {@link stringifyLogData}. */
+export function redactSensitive(data: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (data === null || typeof data !== 'object') return data;
+  if (seen.has(data as object)) return '[circular]';
+  seen.add(data as object);
+  if (Array.isArray(data)) {
+    return data.map((item) => redactSensitive(item, seen));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    out[key] = SENSITIVE_KEY_PATTERN.test(key) ? '[redacted]' : redactSensitive(value, seen);
+  }
+  return out;
 }
 
 function rotateLogIfNeeded(): void {
@@ -245,7 +270,7 @@ export function pieLog(
   }
 
   appendToPersistentLog(fullLine);
-  appendToConsole(level, scope, message, data);
+  appendToConsole(level, scope, message, data === undefined ? undefined : (redactSensitive(data) as Record<string, unknown>));
 }
 
 export function pieDebug(scope: string, message: string, data?: Record<string, unknown>): void {

@@ -8,7 +8,7 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
-import { webviewLog } from './utils/log';
+import { webviewLog, setWebviewLogSink } from './utils/log';
 
 // ─── VS Code API ─────────────────────────────────────────────────────────────
 
@@ -83,9 +83,18 @@ window.addEventListener('error', (e) => {
   webviewLog('error', 'panel', 'Uncaught error', { error: String(e.error?.stack || e.error) });
 });
 
+window.addEventListener('unhandledrejection', (e) => {
+  webviewLog('error', 'webview', 'unhandledrejection', e.reason);
+});
+
 // ─── Mount ───────────────────────────────────────────────────────────────────
 
 const adapter = { postMessage };
+
+// H4: forward webview logs to the host (pie OutputChannel / pie.log) so they
+// are durable + visible without opening devtools. `postMessage` is owned here
+// (the sole `acquireVsCodeApi`), so the sink is injected rather than re-acquired.
+setWebviewLogSink(postMessage);
 
 const container = document.getElementById('app');
 if (container) {

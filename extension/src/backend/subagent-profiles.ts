@@ -7,6 +7,7 @@ import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 
 import type { ModelSubagentInfo } from '../shared/protocol';
 import { estimateNormalizedCost, loadModelPricing } from './pricing';
+import { backendTrace } from './diag';
 
 /**
  * Raw profile shape as stored in `<agentDir>/model-profiles.{yaml,json}`.
@@ -27,16 +28,6 @@ interface CacheEntry {
   mtimeMs: number;
   pricingMtimeMs: number;
   map: Map<string, ModelSubagentInfo>;
-}
-
-function backendTrace(scope: string, event: string, payload: Record<string, unknown>): void {
-  process.stderr.write(`[pie:backend] ${JSON.stringify({
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: `backend-${scope}`,
-    event,
-    ...payload,
-  })}\n`);
 }
 
 const cache = new Map<string, CacheEntry>();

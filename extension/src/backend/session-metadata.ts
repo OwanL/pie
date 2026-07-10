@@ -12,16 +12,7 @@ import type { SessionContext } from './server-types';
 import { loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
-
-function backendTrace(scope: string, event: string, payload: Record<string, unknown>): void {
-  process.stderr.write(`[pie:backend] ${JSON.stringify({
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: `backend-${scope}`,
-    event,
-    ...payload,
-  })}\n`);
-}
+import { backendTrace } from './diag';
 
 function textFromSessionMessageContent(content: unknown): string {
   if (typeof content === 'string') {

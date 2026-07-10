@@ -332,5 +332,12 @@ export type WebviewToHostMessage =
       type: 'cancelDeferredTrigger';
       sessionPath: string;
       triggerId?: string;
-    };
+    }
+  // ── H4: webview → host log routing. The webview cannot import host
+  //    utilities, so it forwards diagnostic logs (render errors, unhandled
+  //    rejections, file-drop parse failures) to the host, which routes them
+  //    through `appendPieLog` → the pie OutputChannel / pie.log (durable +
+  //    visible without opening devtools). `level` is restricted to warn/error
+  //    (the webview logger's levels). ──
+  | { type: 'log'; level: 'warn' | 'error'; scope: string; message: string; data?: unknown };
 

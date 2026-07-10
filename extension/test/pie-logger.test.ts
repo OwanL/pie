@@ -17,6 +17,7 @@ import {
   setLogLevel,
   getLogLevel,
   showPieLogs,
+  redactSensitive,
 } from '../src/host/util/pie-logger';
 
 const PIE_LOG_PATH = path.join(os.tmpdir(), 'pie-logs', 'pie.log');
@@ -221,4 +222,65 @@ test('showPieLogs does not throw when vscode is unavailable', () => {
   resetState();
   // In a plain node test runner vscode is not present; this should be a no-op.
   assert.doesNotThrow(() => showPieLogs(true));
+});
+
+test('redactSensitive redacts known-sensitive keys (M2)', () => {
+  const input = {
+    apiKey: 'sk-secret',
+    api_key: 'sk-secret2',
+    authorization: 'Bearer abc',
+    bearer: 'tok',
+    access_token: 'tok2',
+    refreshToken: 'r-tok',
+    password: 'hunter2',
+    secret: 's',
+    credential: 'c',
+    safe: 'kept',
+    nested: { authToken: 'inner', ok: 1 },
+    arr: [{ api_key: 'a' }, { ok: 2 }],
+  };
+  const out = redactSensitive(input) as Record<string, unknown>;
+  assert.equal(out.apiKey, '[redacted]');
+  assert.equal(out.api_key, '[redacted]');
+  assert.equal(out.authorization, '[redacted]');
+  assert.equal(out.bearer, '[redacted]');
+  assert.equal(out.access_token, '[redacted]');
+  assert.equal(out.refreshToken, '[redacted]');
+  assert.equal(out.password, '[redacted]');
+  assert.equal(out.secret, '[redacted]');
+  assert.equal(out.credential, '[redacted]');
+  assert.equal(out.safe, 'kept', 'non-sensitive fields are preserved');
+  assert.equal((out.nested as Record<string, unknown>).authToken, '[redacted]', 'nested sensitive redacted');
+  assert.equal((out.nested as Record<string, unknown>).ok, 1, 'nested safe preserved');
+  assert.equal((out.arr as Record<string, unknown>[])[0]?.api_key, '[redacted]', 'array item redacted');
+  assert.equal((out.arr as Record<string, unknown>[])[1]?.ok, 2, 'array safe preserved');
+  // Original is not mutated.
+  assert.equal(input.apiKey, 'sk-secret', 'input is not mutated');
+});
+
+test('redactSensitive does not over-redact incidental substrings (tokenCount stays)', () => {
+  const out = redactSensitive({ tokenCount: 5, primaryKey: 'k', keyCount: 2 }) as Record<string, unknown>;
+  assert.equal(out.tokenCount, 5, 'bare token substring is not redacted');
+  assert.equal(out.primaryKey, 'k', 'bare key substring is not redacted');
+  assert.equal(out.keyCount, 2);
+});
+
+test('redactSensitive prunes circular references', () => {
+  const input: Record<string, unknown> = { safe: 1 };
+  input.self = input;
+  const out = redactSensitive(input) as Record<string, unknown>;
+  assert.equal(out.safe, 1);
+  assert.equal(out.self, '[circular]');
+});
+
+test('appendPieLog redacts sensitive data before writing (M2 integration)', () => {
+  resetState();
+  clearLogFiles();
+  initPieLogger({ devMode: false });
+  setLogLevel('debug');
+  appendPieLog('warn', 'test-redact', 'msg with secret', { apiKey: 'sk-leak', safe: 'ok' });
+  const written = fs.readFileSync(PIE_LOG_PATH, 'utf8');
+  assert.ok(!written.includes('sk-leak'), 'sensitive value must not reach the log file');
+  assert.ok(written.includes('[redacted]'), 'sensitive key is redacted');
+  assert.ok(written.includes('ok'), 'safe value is preserved');
 });
