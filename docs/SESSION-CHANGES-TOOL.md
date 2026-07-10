@@ -60,12 +60,12 @@ This was the one risk that could have sunk option A, and the SDK code settles it
 One tool, `session_changes`, with `action: 'list' | 'diff'` — mirroring `session_review`'s `listOpen` / `getTranscript` / `setReview` shape (one registration, one `promptGuidelines` block, discriminated-union schema). The two actions are the same domain (session changes) and `diff` takes a `path` returned by `list`.
 
 ```
-session_changes { action: 'list', sessionPath? }                 → compact file list + sizes
-session_changes { action: 'diff', sessionPath?, path, context? } → unified diff text
+session_changes { action: 'list', sessionPath? }                     → compact file list + sizes
+session_changes { action: 'diff', sessionPath?, path[], context? }   → unified diff text
 ```
 
 - `sessionPath` (optional) — defaults to the calling session via `ctx.sessionManager.getSessionFile()` (see §5). When provided (a session file path, same convention as `session_review.getTranscript`), targets another session through the same parse path.
-- `path` (`diff` only) — `string | string[]` of file paths (relative to session cwd, as the manifest reports them).
+- `path` (`diff` only) — **array** of file paths (relative to session cwd, as the manifest reports them). Pass `["path"]` for a single file.
 - `context` (`diff` only, optional) — lines of surrounding diff context. **Default `0`** (changes-only); see §4.
 
 ---

@@ -2,7 +2,9 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "skylos",
+#     # Pin to the last version that does not depend on tree-sitter-dart-orchard,
+#     # which only publishes an sdist and therefore requires MSVC on Windows.
+#     "skylos==4.10.0",
 # ]
 # ///
 """
@@ -66,6 +68,7 @@ Exit codes:
 """
 
 import fnmatch
+import os
 import re
 import shutil
 import subprocess
@@ -628,7 +631,17 @@ def _locate_skylos() -> list[str]:
         return [skylos]
     uv = _find_binary("uv")
     if uv is not None:
-        return [uv, "run", "--with", "skylos", "skylos"]
+        # Pin skylos to a version whose dependency tree ships prebuilt wheels
+        # on Windows, so ``uv run`` does not require MSVC build tools.
+        # skylos >=4.11 pulls in ``tree-sitter-dart-orchard``, which publishes
+        # only an sdist (no wheels) and therefore must be compiled from source
+        # — needing Microsoft Visual C++ 14.0+. skylos 4.10.0 still supports
+        # TypeScript/JavaScript (the common case) but predates the Dart grammar
+        # dependency. Override with the ``SKYLOS_VERSION`` env var (e.g.
+        # ``SKYLOS_VERSION=4.29.0``) where a newer skylos is available/needed.
+        version = os.environ.get("SKYLOS_VERSION", "4.10.0")
+        spec = f"skylos=={version}" if version else "skylos"
+        return [uv, "run", "--with", spec, "skylos"]
     print(SKYLOS_HINT, file=sys.stderr)
     sys.exit(2)
 
