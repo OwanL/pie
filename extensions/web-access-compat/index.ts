@@ -78,6 +78,19 @@ const RESOLVE_WORKFLOW_RE = /function resolveWorkflow\([^)]*\): WebSearchWorkflo
 const WORKFLOW_ENUM_RE = /StringEnum\(\["none", "summary-review", "auto-summary"\],[\s\S]*?\}\)/;
 
 /**
+ * Matches the misleading sentence in `web_search`'s tool `description` that
+ * claims searches auto-open the curator and that `"none"` / `"auto-summary"`
+ * are selectable workflows. After `patchWorkflowClampInSource`, the only
+ * effective mode is `"none"` (raw results); the curator and LLM summary are
+ * disabled, so the description must match that effective behavior.
+ */
+const WORKFLOW_DESCRIPTION_RE =
+	/Searches auto-open the interactive browser curator and stream results live; set workflow to "none" to skip curation or "auto-summary" for a model-generated summary without the browser curator\./g;
+
+const WORKFLOW_DESCRIPTION_FIXED =
+	'Only raw search results are returned in this deployment — the interactive curator and LLM summary modes are disabled (workflow is fixed to "none").';
+
+/**
  * The clamped `resolveWorkflow`: always returns `"none"`. The only way to
  * guarantee `generateSummaryDraft` can never be reached, regardless of config,
  * `/curator on`, or a per-call `workflow: "summary-review"` / `"auto-summary"
@@ -185,6 +198,20 @@ export function patchWorkflowClampInSource(content: string): string {
 		);
 }
 
+/**
+ * Rewrite `web_search`'s tool `description` so it matches the clamped runtime
+ * behavior: the workflow is always `"none"` (raw search results only), and
+ * the curator + LLM summary path is disabled in this deployment.
+ *
+ * Idempotent: once the misleading sentence is gone the regex no longer
+ * matches and the pass is a no-op. Forward-compatible: if upstream rewords
+ * the description, the regex misses and the pass is a no-op — same philosophy
+ * as `patchCompatInSource` and `patchWorkflowClampInSource`.
+ */
+export function patchWorkflowDescriptionInSource(content: string): string {
+	return content.replace(WORKFLOW_DESCRIPTION_RE, WORKFLOW_DESCRIPTION_FIXED);
+}
+
 /** True for npm's "could not replace" rename artifacts, e.g. `Readability.js.DELETE.e9020…`. */
 export function isDeleteArtifact(name: string): boolean {
 	return /\.DELETE\..+$/.test(name);
@@ -215,6 +242,16 @@ export async function patchCompatFiles(root: string): Promise<number> {
  */
 export async function patchWorkflowClampFiles(root: string): Promise<number> {
 	return patchFilesWith(root, patchWorkflowClampInSource, "workflow-clamp");
+}
+
+/**
+ * Rewrite `web_search`'s tool `description` across `pi-web-access`'s
+ * `.ts`/`.js` sources so it matches the effective workflow. Returns the
+ * number of files written. Idempotent and never-throwing, identical in contract
+ * to the other `patch*Files` helpers.
+ */
+export async function patchWorkflowDescriptionFiles(root: string): Promise<number> {
+	return patchFilesWith(root, patchWorkflowDescriptionInSource, "workflow-description");
 }
 
 /**
@@ -328,6 +365,7 @@ export async function readabilityIntact(root: string): Promise<boolean> {
 export async function applyCompatFixes(root: string): Promise<void> {
 	await patchCompatFiles(root);
 	await patchWorkflowClampFiles(root);
+	await patchWorkflowDescriptionFiles(root);
 	if (!(await readabilityIntact(root))) {
 		await repairDeleteArtifacts(root);
 	}

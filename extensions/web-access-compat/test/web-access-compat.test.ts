@@ -19,6 +19,8 @@ import {
 	patchCompatInSource,
 	patchWorkflowClampFiles,
 	patchWorkflowClampInSource,
+	patchWorkflowDescriptionFiles,
+	patchWorkflowDescriptionInSource,
 	readabilityIntact,
 	repairDeleteArtifacts,
 	runSelfHeal,
@@ -101,6 +103,14 @@ const WORKFLOW_ENUM_SRC = [
 	'\t\t\t),',
 ].join("\n");
 
+const WORKFLOW_DESCRIPTION_SRC = [
+	'\t\tdescription:',
+	'\t\t\t`Search the web using OpenAI, Brave, Parallel, Tavily, Exa, Perplexity, or Gemini. Returns an AI-synthesized answer with source citations. OpenAI web_search uses a Codex subscription or OpenAI API key. For comprehensive research, prefer queries (plural) with 2-4 varied angles over a single query — each query gets its own synthesized answer, so varying phrasing and scope gives much broader coverage. When includeContent is true, full page content is fetched in the background. Searches auto-open the interactive browser curator and stream results live; set workflow to "none" to skip curation or "auto-summary" for a model-generated summary without the browser curator. Provider auto-selects: OpenAI when suitable and available, then Exa, Brave, Parallel, Tavily, Perplexity, Gemini API, then Gemini Web.`,',
+].join("\n");
+
+const WORKFLOW_DESCRIPTION_FIXED_SUBSTRING =
+	'Only raw search results are returned in this deployment — the interactive curator and LLM summary modes are disabled (workflow is fixed to "none").';
+
 test("patchWorkflowClampInSource rewrites resolveWorkflow to always return none", () => {
 	const out = patchWorkflowClampInSource(RESOLVE_WORKFLOW_SRC);
 	assert.equal(
@@ -132,6 +142,31 @@ test("patchWorkflowClampInSource handles both sites in one pass", () => {
 test("patchWorkflowClampInSource is idempotent (already-clamped source is unchanged)", () => {
 	const clamped = patchWorkflowClampInSource(RESOLVE_WORKFLOW_SRC);
 	assert.equal(patchWorkflowClampInSource(clamped), clamped);
+});
+
+// --- pure: patchWorkflowDescriptionInSource ---
+
+test("patchWorkflowDescriptionInSource rewrites the misleading curator sentence", () => {
+	const out = patchWorkflowDescriptionInSource(WORKFLOW_DESCRIPTION_SRC);
+	assert.ok(
+		out.includes(WORKFLOW_DESCRIPTION_FIXED_SUBSTRING),
+		`expected fixed description, got:\n${out}`,
+	);
+	assert.ok(
+		!out.includes("auto-open the interactive browser curator"),
+		"misleading curator sentence should be gone",
+	);
+	assert.ok(!out.includes('"auto-summary"'), "auto-summary mention should be gone from description");
+});
+
+test("patchWorkflowDescriptionInSource is idempotent (already-patched source is unchanged)", () => {
+	const patched = patchWorkflowDescriptionInSource(WORKFLOW_DESCRIPTION_SRC);
+	assert.equal(patchWorkflowDescriptionInSource(patched), patched);
+});
+
+test("patchWorkflowDescriptionInSource leaves source without the sentence untouched", () => {
+	const src = 'export const x = 1;\n';
+	assert.equal(patchWorkflowDescriptionInSource(src), src);
 });
 
 test("patchWorkflowClampInSource leaves source without the sites untouched", () => {
@@ -185,6 +220,36 @@ test("patchWorkflowClampFiles is idempotent (second run writes nothing)", async 
 	}
 });
 
+// --- fs: patchWorkflowDescriptionFiles ---
+
+test("patchWorkflowDescriptionFiles rewrites the misleading description in index.ts", async () => {
+	const root = makePkg();
+	try {
+		writeFileSync(path.join(root, "index.ts"), WORKFLOW_DESCRIPTION_SRC + "\n", "utf8");
+		writeFileSync(path.join(root, "plain.ts"), 'export const x = 1;\n', "utf8");
+		const patched = await patchWorkflowDescriptionFiles(root);
+		assert.equal(patched, 1);
+		const out = readFileSync(path.join(root, "index.ts"), "utf8");
+		assert.ok(out.includes(WORKFLOW_DESCRIPTION_FIXED_SUBSTRING), `expected fixed description, got:\n${out}`);
+		assert.ok(!out.includes("auto-open the interactive browser curator"), "misleading sentence should be gone");
+		assert.equal(readFileSync(path.join(root, "plain.ts"), "utf8"), 'export const x = 1;\n');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("patchWorkflowDescriptionFiles is idempotent (second run writes nothing)", async () => {
+	const root = makePkg();
+	try {
+		const f = path.join(root, "index.ts");
+		writeFileSync(f, WORKFLOW_DESCRIPTION_SRC + "\n", "utf8");
+		assert.equal(await patchWorkflowDescriptionFiles(root), 1);
+		assert.equal(await patchWorkflowDescriptionFiles(root), 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 // --- fs: applyCompatFixes (workflow clamp) ---
 
 test("applyCompatFixes applies both the compat import fix and the workflow clamp", async () => {
@@ -201,6 +266,22 @@ test("applyCompatFixes applies both the compat import fix and the workflow clamp
 		assert.ok(!out.includes('return "summary-review";'), 'summary-review return should be gone');
 		assert.ok(out.includes('from "@earendil-works/pi-ai";'), 'compat import should be rewritten');
 		assert.ok(!out.includes('pi-ai/compat'), 'compat subpath should be gone');
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("applyCompatFixes also patches the workflow description", async () => {
+	const root = makePkg();
+	try {
+		writeFileSync(path.join(root, "index.ts"), WORKFLOW_DESCRIPTION_SRC + "\n", "utf8");
+		await applyCompatFixes(root);
+		const out = readFileSync(path.join(root, "index.ts"), "utf8");
+		assert.ok(
+			out.includes(WORKFLOW_DESCRIPTION_FIXED_SUBSTRING),
+			`description should match clamped behavior, got:\n${out}`,
+		);
+		assert.ok(!out.includes("auto-open the interactive browser curator"), "misleading sentence should be gone");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

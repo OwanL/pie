@@ -19,6 +19,8 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../agents.js";
 import { SubagentParams, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
@@ -26,6 +28,22 @@ import { execute } from "./execute.js";
 
 const THINKING_LEVEL_HINT = "Optional thinkingLevel: 'minimal', 'low', 'medium', 'high', 'xhigh'.";
 const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
+
+/** Root of the pi-config repo, resolved from this extension's known position.
+ *  Used as a stable fallback discovery cwd so the agent list is populated even
+ *  when the session cwd has no `agents/` dir and PI_CODING_AGENT_DIR is unset
+ *  (e.g. a session launched from C:\WINDOWS\System32). Mirrors CONFIG_ROOT in
+ *  ./execute.ts — keep the two in sync. */
+const CONFIG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+/** Discover agents for the tool description/prompt snippet. Uses "both" scope
+ *  (user + project) and includes CONFIG_ROOT as a stable fallback cwd so the
+ *  listing is never a silent "none" when the session cwd has no `agents/` and
+ *  PI_CODING_AGENT_DIR is unset. Built once at load; execution re-discovers
+ *  per call (see ./execute.ts) so the executable set is always current. */
+function discoverAgentsForDescription() {
+	return discoverAgents([process.cwd(), CONFIG_ROOT], "both").agents;
+}
 
 function buildDescription(disabled = false): string {
 	if (disabled) {
@@ -36,13 +54,13 @@ function buildDescription(disabled = false): string {
 		"Delegate tasks to specialized subagents with isolated context.",
 		"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 		'The "agent" field must be an exact discovered agent name, not a scope keyword like "user", "project", or "both".',
-		'Default agent scope is "user" (from ~/.pi/agent/agents).',
-		'To enable project-local agents in agents/ (project root), set agentScope: "both" (or "project").',
+		"Agents are discovered from the user scope (~/.pi/agent/agents, or PI_CODING_AGENT_DIR) and project-local agents/ dirs (nearest agents/ walking up from the cwd). If no user-scope agents are configured, project agents are used automatically.",
+		'Pass agentScope: "user", "project", or "both" to control the discovery scope explicitly.',
 		BUCKET_GUIDANCE,
 	];
 
 	try {
-		const { agents } = discoverAgents(process.cwd(), "user");
+		const agents = discoverAgentsForDescription();
 		if (agents.length > 0) {
 			const listing = agents.map((a) => `${a.name}: ${a.description}`).join("; ");
 			lines.push(`Available agents: ${listing}.`);
@@ -59,7 +77,7 @@ function buildPromptSnippet(disabled = false): string {
 		return "DISABLED: Sub agents are disabled. Do not call the subagent tool — it will return an error.";
 	}
 	try {
-		const { agents } = discoverAgents(process.cwd(), "user");
+		const agents = discoverAgentsForDescription();
 		if (agents.length > 0) {
 			const names = agents.map((a) => a.name).join(", ");
 			return `Delegate tasks to specialized subagents with isolated context. Available agents: ${names}. Subagents can delegate further to keep contexts focused. ${BUCKET_GUIDANCE}`;

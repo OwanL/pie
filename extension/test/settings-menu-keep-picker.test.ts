@@ -52,9 +52,10 @@ describe('computeToolKeepCatalog', () => {
     const result = computeToolKeepCatalog(['bash', 'edit', 'find', 'grep', 'read'], null, ['bash', 'edit', 'find', 'grep', 'read']);
 
     assert.ok(result.includes('web_search'));
-    assert.ok(result.includes('code_search'));
     assert.ok(result.includes('fetch_content'));
     assert.ok(result.includes('get_search_content'));
+    assert.ok(result.includes('session_changes'));
+    assert.ok(result.includes('session_review'));
   });
 });
 

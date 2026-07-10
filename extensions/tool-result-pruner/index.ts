@@ -63,6 +63,7 @@ import { dirname, join } from "node:path";
 import { isExtensionDisabledByToggle, loadConfig } from "./config.js";
 import { recordPruning } from "./logger.js";
 import { runPipeline } from "./pipeline.js";
+import { reapPrunedRawStashes } from "./reaper.js";
 import { countTokens } from "./tokenize.js";
 
 function getSessionId(ctx: unknown): string {
@@ -80,11 +81,13 @@ function getSessionId(ctx: unknown): string {
 // so recall returns the pre-pruning text verbatim).
 //
 // TODO(session-scope cleanup): design §7.3 specifies session-scoped stashes
-// cleaned on session end. We currently leave them for the OS to reap from
-// tmpdir (small, per-result). Wiring `session_shutdown` to delete a session's
-// stashes needs reliable per-session path tracking (the event carries no id;
-// ctx.sessionManager.getSessionId() is the only join key) — deferred to avoid
-// a cleanup that could delete another live session's recall raw.
+// cleaned on session end. We currently reap OLD stashes on extension load
+// via reapPrunedRawStashes (age + size cap; see reaper.ts) but leave
+// within-session stashes in place. Wiring `session_shutdown` to delete a
+// session's stashes needs reliable per-session path tracking (the event
+// carries no id; ctx.sessionManager.getSessionId() is the only join key) —
+// deferred to avoid a cleanup that could delete another live session's
+// recall raw.
 let stashDirOverride: string | null = null;
 
 /** Test seam: redirect the recall stash to a specific dir (null = os.tmpdir()). */
@@ -124,6 +127,12 @@ function buildFidelityMarker(recallRules: string[], markers: string[], rawPath: 
 const LOSSY_MIN_NET_SAVED = 8;
 
 export default function (pi: ExtensionAPI) {
+  // Reap orphaned recall stashes (pruned-raw-*.txt) from past sessions on
+  // load. Best-effort, fire-and-forget — never blocks handler registration.
+  // Mirrors the temp-log-reaper run on VS Code extension activation.
+  void reapPrunedRawStashes().catch(() => {
+    // Best-effort cleanup — never surface a reaper failure.
+  });
   pi.on("tool_result", async (event: ToolResultEvent, ctx: unknown): Promise<ToolResultEventResult | undefined> => {
     if (isExtensionDisabledByToggle()) return undefined;
     const config = loadConfig();

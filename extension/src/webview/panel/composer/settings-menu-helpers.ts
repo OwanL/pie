@@ -93,7 +93,6 @@ export function uiThemePresetToPrefs(
 export const DEFAULT_TOOL_KEEP_CATALOG = [
   'ask_user',
   'bash',
-  'code_search',
   'edit',
   'fetch_content',
   'find',
@@ -102,6 +101,8 @@ export const DEFAULT_TOOL_KEEP_CATALOG = [
   'ls',
   'read',
   'request_tool',
+  'session_changes',
+  'session_review',
   'web_search',
   'write',
 ];

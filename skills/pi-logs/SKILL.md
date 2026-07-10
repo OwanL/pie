@@ -21,8 +21,9 @@ Run any subcommand with `--help` for full options.
 | **Temp** | `$TMPDIR/pi-{bash,output}-<hex>.log` | pi, when a tool result is truncated | The full untruncated output of a bash command or tool (referenced in messages as `Full output: …`) | A bash/tool result was truncated and you need the full output; also: these are never auto-cleaned — see `temp --list` |
 
 The debug log is a **snapshot** (overwritten each `/debug`), not a live stream.
-Session JSONL is the durable record. Temp logs are orphans pi leaves in the system
-tmpdir — re-read them before the OS reaps them.
+Session JSONL is the durable record. Temp logs are written to the system tmpdir
+and reaped at extension activation (see Notes & gotchas) — re-read a needed one
+promptly.
 
 ## Unity-style grouping (the headline)
 
@@ -80,6 +81,12 @@ uv run pi-logs/pi_logs.py session --last 20               # limit to last N entr
 uv run pi-logs/pi_logs.py session --cwd /some/project     # pick session for a different cwd
 ```
 
+**Session directory resolution:** `summary` and `session` read from the sessions
+directory resolved in this order: (1) `--sessions-dir <path>` flag; (2)
+`sessionDir` from `settings.json` (resolved relative to the settings file — e.g.
+`data/outcomes/sessions`); (3) `~/.pi/agent/sessions` (pi's default). Pass
+`--sessions-dir` to point at a different store.
+
 Entry types: `session`, `message`, `model_change`, `thinking_level_change`, `compaction`,
 `branch_summary`, `custom`, `custom_message`, `label`, `session_info`.
 Message roles: `user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `branchSummary`, `compactionSummary`.
@@ -135,7 +142,13 @@ goes to stdout. If a section prints `… N more unique group(s)`, raise `--top` 
   (each `/`, `\`, `:` → `-`, wrapped in `--`/`--`). The `--cwd` flag handles this; if a
   session isn't found for the current cwd, `session` falls back to the newest overall
   (it prints `using session: …` to stderr — check that path's cwd matches).
-- **Temp log lifecycle**: pi does not delete them. They accumulate until the OS tmpdir
-  is cleaned. Don't rely on them for long-term audit — copy a needed one elsewhere.
+- **Temp log lifecycle**: pi reaps orphaned temp logs (`pi-bash-*` / `pi-output-*`)
+  at extension activation via a best-effort reaper
+  (`extension/src/host/util/temp-log-reaper.ts`). Retention is configurable via
+  the `pie.tempLogRetention` setting (`maxAgeDays` default 7, `maxTotalSizeMb`
+  default 500): files older than the age cutoff are deleted first, then oldest
+  survivors are evicted until the total is under the size cap. Recent logs you
+  may still need are kept; don't rely on temp logs for long-term audit — copy a
+  needed one elsewhere.
 - **Token/cost** are summed from `assistant` message `usage`; messages without `usage`
   (custom, compaction summaries) contribute nothing.

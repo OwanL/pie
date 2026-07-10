@@ -1,7 +1,7 @@
 ---
 name: codebase-maintenance
 description: >
-  Use this skill when the task is refactoring, or a maintenance related task, or after making significant changes (ie after a major feature addition or architectural change). Uses programatic tools and methodologies to identify and report on code quality.
+  Run scripted static analysis (dead code, code smells, duplication, complexity, large files, markdown drift) to audit code quality. Use when the user asks for a code-quality audit, dead-code sweep, or refactor review of an existing codebase — not for general editing or one-off changes.
 ---
 
 # Codebase Maintenance

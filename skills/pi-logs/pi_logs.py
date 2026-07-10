@@ -49,8 +49,59 @@ for _stream in (sys.stdout, sys.stderr):
 HOME = Path(os.path.expanduser("~"))
 AGENT_DIR = HOME / ".pi" / "agent"
 DEBUG_LOG = AGENT_DIR / "pi-debug.log"
-SESSIONS_DIR = AGENT_DIR / "sessions"
 TMP_DIR = Path(os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp")
+
+# --- Session directory resolution -------------------------------------------
+# pi's settings.json may set "sessionDir" (e.g. "data/outcomes/sessions"),
+# resolved relative to the settings file. Resolution order for the sessions dir:
+#   1. --sessions-dir flag (per invocation)
+#   2. settings.json `sessionDir` (resolved relative to the settings file,
+#      found by walking up from this script's location)
+#   3. ~/.pi/agent/sessions (pi's default)
+DEFAULT_SESSIONS_DIR = AGENT_DIR / "sessions"
+
+
+def _settings_file_dir() -> Path | None:
+    """Find settings.json by walking up from this script's location; return its
+    directory (the repo root) or None."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "settings.json").is_file():
+            return parent
+    return None
+
+
+def _session_dir_from_settings() -> Path | None:
+    """Read `sessionDir` from settings.json, resolved relative to the settings
+    file. Returns None when absent/unreadable."""
+    root = _settings_file_dir()
+    if root is None:
+        return None
+    try:
+        data = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = data.get("sessionDir")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = root / p
+    return p.resolve()
+
+
+def resolve_sessions_dir(explicit: str | None) -> Path:
+    """Resolve the sessions directory (see resolution order above)."""
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    from_settings = _session_dir_from_settings()
+    if from_settings is not None:
+        return from_settings
+    return DEFAULT_SESSIONS_DIR
+
+
+# Resolved at import for callers that don't pass an explicit dir.
+SESSIONS_DIR = resolve_sessions_dir(None)
 
 # Debug log section markers
 RENDERED_HEADER = "=== All rendered lines with visible widths ==="
@@ -329,22 +380,22 @@ def parse_session(path: Path) -> Session:
     return Session(path=path, header=header, entries=entries)
 
 
-def session_dir_for_cwd(cwd: str) -> Path | None:
+def session_dir_for_cwd(cwd: str, sessions_dir: Path = SESSIONS_DIR) -> Path | None:
     """
     Reverse pi's cwd->dir encoding: replace / \\ : with -, wrap in -- ... --.
     """
     encoded = "".join("-" if c in "/\\:" else c for c in cwd)
-    candidate = SESSIONS_DIR / f"--{encoded}--"
+    candidate = sessions_dir / f"--{encoded}--"
     return candidate if candidate.is_dir() else None
 
 
-def find_sessions(cwd: str | None = None) -> list[Path]:
-    """All session .jsonl files under SESSIONS_DIR, newest first."""
-    if not SESSIONS_DIR.is_dir():
+def find_sessions(cwd: str | None = None, sessions_dir: Path = SESSIONS_DIR) -> list[Path]:
+    """All session .jsonl files under sessions_dir, newest first."""
+    if not sessions_dir.is_dir():
         return []
-    files = sorted(SESSIONS_DIR.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(sessions_dir.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     if cwd:
-        target = session_dir_for_cwd(cwd)
+        target = session_dir_for_cwd(cwd, sessions_dir)
         if target is not None:
             files = sorted(target.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     return files
@@ -436,13 +487,14 @@ def cmd_summary(args) -> int:
         print(f"debug    {DEBUG_LOG}  (absent — run /debug in pi to capture)")
 
     # Sessions
+    sessions_dir = resolve_sessions_dir(args.sessions_dir)
     print()
-    sessions = find_sessions()
+    sessions = find_sessions(sessions_dir=sessions_dir)
     if not sessions:
-        print(f"sessions {SESSIONS_DIR}  (none found)")
+        print(f"sessions {sessions_dir}  (none found)")
     else:
         total_size = sum(p.stat().st_size for p in sessions)
-        print(f"sessions {SESSIONS_DIR}  ({len(sessions)} file(s), {human_size(total_size)})")
+        print(f"sessions {sessions_dir}  ({len(sessions)} file(s), {human_size(total_size)})")
         for p in sessions[:5]:
             st = p.stat()
             print(f"         {fmt_age(st.st_mtime):<10} {human_size(st.st_size):<10} {p.parent.name}/{p.name}")
@@ -586,17 +638,18 @@ def _print_messages(msgs: list[dict], args) -> None:
 
 def cmd_session(args) -> int:
     # Resolve target session file.
+    sessions_dir = resolve_sessions_dir(args.sessions_dir)
     path: Path | None
     if args.path:
         path = Path(args.path)
     else:
         cwd = args.cwd or os.getcwd()
-        sessions = find_sessions(cwd)
+        sessions = find_sessions(cwd, sessions_dir=sessions_dir)
         if not sessions:
             # fall back to newest overall
-            sessions = find_sessions()
+            sessions = find_sessions(sessions_dir=sessions_dir)
         if not sessions:
-            eprint(f"no sessions found under {SESSIONS_DIR}")
+            eprint(f"no sessions found under {sessions_dir}")
             return 1
         path = sessions[0]
         eprint(f"using session: {path}")
@@ -842,6 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # summary (default)
     sp = sub.add_parser("summary", help="Discover all pi logs and their sizes.")
+    sp.add_argument("--sessions-dir", help="Directory containing session JSONL files. Default: read `sessionDir` from settings.json (resolved relative to the settings file), else ~/.pi/agent/sessions.")
     sp.set_defaults(func=cmd_summary)
 
     # debug
@@ -861,6 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("session", help="Read a session JSONL (default: most recent).")
     sp.add_argument("path", nargs="?", help="Session .jsonl path. Defaults to most recent.")
     sp.add_argument("--cwd", help="Find session for this cwd (default: current).")
+    sp.add_argument("--sessions-dir", help="Directory containing session JSONL files. Default: read `sessionDir` from settings.json (resolved relative to the settings file), else ~/.pi/agent/sessions.")
     sp.add_argument("--summary", action="store_true", help="Overview only.")
     sp.add_argument("--role", help="Filter message role (user/assistant/toolResult/bashExecution/...).")
     sp.add_argument("--type", help="Filter entry type (session/message/model_change/...).")

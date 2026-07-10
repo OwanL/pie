@@ -503,7 +503,8 @@ export async function execute(
 ) {
 	if (isDisabled()) return disabledErrorResponse(params);
 
-	const agentScope: AgentScope = params.agentScope ?? "user";
+	const explicitScope = params.agentScope;
+	let agentScope: AgentScope = explicitScope ?? "user";
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
 	if (maxDepth === 0) return subagentsDisabledResponse(params, maxDepth);
@@ -519,11 +520,27 @@ export async function execute(
 	// which may sit ABOVE the actual project (e.g. a multi-repo workspace whose
 	// `agents/` lives in a subdirectory). Include each per-task `cwd` so a caller
 	// can point at a nested project root and have its agents discovered.
-	const discoveryCwds = [ctx.cwd];
+	// CONFIG_ROOT (this repo) is included as a stable fallback so project agents
+	// are discoverable even when the session cwd has no `agents/` dir and
+	// PI_CODING_AGENT_DIR is unset (e.g. a session launched from System32).
+	const discoveryCwds = [ctx.cwd, CONFIG_ROOT];
 	if (params.cwd) discoveryCwds.push(params.cwd);
 	if (params.tasks) for (const t of params.tasks) if (t.cwd) discoveryCwds.push(t.cwd);
 	if (params.chain) for (const s of params.chain) if (s.cwd) discoveryCwds.push(s.cwd);
-	const discovery = discoverAgents(discoveryCwds, agentScope);
+	let discovery = discoverAgents(discoveryCwds, agentScope);
+	// Auto-escalate: when the caller relied on the default "user" scope and no
+	// agents were discovered (e.g. PI_CODING_AGENT_DIR unset and
+	// ~/.pi/agent/agents absent), retry with "both" so project-local agents
+	// (this repo's agents/) are found instead of failing with a silent
+	// "Available agents: none". A caller who explicitly passes agentScope is
+	// respected as-is — this only recovers the implicit-default case.
+	if (!explicitScope && discovery.agents.length === 0) {
+		const escalated = discoverAgents(discoveryCwds, "both");
+		if (escalated.agents.length > 0) {
+			discovery = escalated;
+			agentScope = "both";
+		}
+	}
 	const agents = discovery.agents;
 	const validation = validateSubagentParams(params, agents);
 	if (!validation.ok) {

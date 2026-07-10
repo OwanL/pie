@@ -30,9 +30,10 @@
         "ls",
         "read",
         "request_tool",
+        "session_changes",
+        "session_review",
         "subagent",
         "write",
-        "code_search",
         "defer_trigger"
       ]
     }
