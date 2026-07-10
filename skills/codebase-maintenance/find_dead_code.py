@@ -456,15 +456,86 @@ def _python_search_symbol(
     return False
 
 
+def _rg_search_import(
+    basename: str, def_file: str, directory: Path, active_patterns: list[str],
+) -> bool:
+    """Use ripgrep to check whether any other file imports *basename* as a
+    module-path segment (e.g. ``from './<basename>'``, ``require('../<basename>')``,
+    ``import('<basename>')``). Used to verify "unused file" findings that skylos
+    misreports on bundler-driven (esbuild/webpack/vite/rollup) projects.
+
+    Returns True if another file references the module by its basename.
+    """
+    # Match a quoted import/require path whose trailing segment is <basename>,
+    # optionally followed by a JS/TS extension. Anchoring the close quote avoids
+    # matching longer names that merely start with <basename>.
+    pattern = rf'["\'](?:[^"\']*/)?{re.escape(basename)}(?:\.(?:js|ts|tsx|jsx|mjs|cjs))?["\']'
+    try:
+        result = subprocess.run(
+            ["rg", "-l", pattern, str(directory)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode not in (0, 1):  # 0 = matches, 1 = no matches
+        return False
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rel = Path(line.strip()).relative_to(directory).as_posix()
+        except (ValueError, OSError):
+            rel = line.strip()
+        if rel == def_file:
+            continue
+        if matches_ignore_patterns(rel, active_patterns):
+            continue
+        return True
+    return False
+
+
+def _python_search_import(
+    basename: str, def_file: str, directory: Path, active_patterns: list[str],
+) -> bool:
+    """Pure-Python fallback for :func:`_rg_search_import`."""
+    pattern = re.compile(
+        rf'["\'](?:[^"\']*/)?{re.escape(basename)}(?:\.(?:js|ts|tsx|jsx|mjs|cjs))?["\']'
+    )
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(directory).as_posix()
+        except ValueError:
+            continue
+        if rel == def_file:
+            continue
+        if matches_ignore_patterns(rel, active_patterns):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if pattern.search(text):
+            return True
+    return False
+
+
 def _verify_dead_code(
     findings: list[str], directory: Path, active_patterns: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Verify skylos findings by cross-referencing symbol usage.
+    """Verify skylos findings by cross-referencing usage.
 
-    For each finding, parses the path and line number, reads the symbol
-    from the source, and searches for it across the codebase. Findings
-    whose symbol appears in other files are classified as likely false
+    For function/class/variable findings, parses the path and line number,
+    reads the symbol from the source, and searches for it across the codebase.
+    Findings whose symbol appears in other files are classified as likely false
     positives.
+
+    For "unused file" findings, skylos cannot trace bundler entry graphs
+    (esbuild/webpack/vite/rollup), so it floods bundled TS/JS projects with
+    files that ARE imported via a bundler. The symbol heuristic is meaningless
+    for files (line 1 is usually an import with no declaration keyword), so we
+    instead check whether any other file imports the module by its basename.
 
     Returns (verified_dead, likely_false_positives).
     """
@@ -474,8 +545,13 @@ def _verify_dead_code(
     rg_available = shutil.which("rg") is not None
 
     for finding in findings:
+        # Normalise to a relative posix path so basename extraction (below) and
+        # the self-exclusion in the import search work on Windows — raw skylos
+        # lines carry absolute, backslash-bearing paths that PurePosixPath
+        # treats as a single component.
+        norm = _normalise_skylos_line(finding, directory)
         # Parse "path:line  reason"
-        m = re.match(r"^(.+?):(\d+)\s{2}(.+)$", finding)
+        m = re.match(r"^(.+?):(\d+)\s{2}(.+)$", norm)
         if not m:
             verified.append(finding)
             continue
@@ -483,6 +559,25 @@ def _verify_dead_code(
         file_path_str, line_num_str, _reason = m.groups()
         line_num = int(line_num_str)
         file_path = directory / file_path_str
+
+        reason_lower = _reason.lower()
+        is_file_finding = (
+            "file" in reason_lower
+            and ("not imported" in reason_lower or "unused" in reason_lower)
+        )
+        if is_file_finding:
+            basename = PurePosixPath(file_path_str).stem
+            if basename:
+                if rg_available:
+                    is_used = _rg_search_import(basename, file_path_str, directory, active_patterns)
+                else:
+                    is_used = _python_search_import(basename, file_path_str, directory, active_patterns)
+                if is_used:
+                    false_positives.append(finding)
+                    continue
+                verified.append(finding)
+                continue
+            # No usable basename — fall through to the symbol heuristic.
 
         try:
             lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()

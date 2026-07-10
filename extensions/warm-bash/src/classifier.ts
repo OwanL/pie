@@ -58,6 +58,15 @@ export function classify(command: string): Classification {
   const cd = c.match(CD_PREFIX);
   if (cd) {
     cwd = unquote(cd[1]!);
+    // On Windows, an agent often emits an MSYS/Git-Bash POSIX-style cwd such
+    // as `/c/Users/...`. Node's `path.resolve` corrupts that to `c:\c\Users\...`
+    // (a leading `/` is treated as the current drive root) and `spawn({ cwd })`
+    // cannot chdir to it, producing `cd: c:/c/Users/...: No such file or
+    // directory`. Rewrite `/x/...` → `x:/...` so the peeled cwd survives the
+    // fast-path `execFile({ cwd })` and the warm-path `path.resolve`.
+    if (process.platform === "win32" && cwd) {
+      cwd = fromMsysPosixCwd(cwd);
+    }
     rest = cd[2]!;
   }
 
@@ -87,6 +96,15 @@ export function unquote(token: string): string {
     return token.slice(1, -1);
   }
   return token;
+}
+
+/** Rewrite an MSYS/Git-Bash POSIX-style drive path `/x/...` → `x:/...`.
+ *  Only single-drive-letter roots are rewritten; genuine POSIX paths
+ *  (`/usr/...`, `/tmp/...`) and Windows paths (`c:/...`, `c:\\...`) pass
+ *  through unchanged. No-op off Windows. Exported for unit testing. */
+export function fromMsysPosixCwd(p: string): string {
+  const m = /^\/([A-Za-z])\/(.*)$/.exec(p);
+  return m ? `${m[1]}:/${m[2]}` : p;
 }
 
 function tokenize(s: string): string[] {

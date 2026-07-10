@@ -41,6 +41,15 @@ Dead code is the easiest win — unused functions, classes, imports, and files c
 outright. Use `--verify-dead-code` to suppress false positives. For intentionally retained code
 (plugin re-exports, dynamic dispatch), add a `// skylos-ignore` annotation.
 
+**Bundler caveat (esbuild/webpack/vite/rollup):** skylos traces static `import`/`require` edges
+only — it cannot see a bundler's entry-point graph, dynamic `import()`, or config-driven resolution.
+On bundled TS/JS projects it floods the output with `unused file (not imported by any other file)`
+findings that are in fact imported via the bundler. With `--verify-dead-code`, "unused file" findings
+are cross-checked by searching for the module's basename in import/require statements across the
+codebase (so a file that is `import`ed anywhere is suppressed automatically). If your project uses
+runtime/config-driven resolution that no static check can see, expect residual false positives in
+the "file" category and triage them manually rather than deleting blindly.
+
 **After removing dead code, re-run this script** to confirm findings are resolved. Then run your
 project's type-checker and linter immediately — dead-code removal often exposes `unused-import` or
 `no-unused-vars` violations that the scanner missed. Fix those before proceeding.

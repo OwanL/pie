@@ -129,6 +129,15 @@
             "Errors only."
           ],
           "description": "Minimum verbosity for pie's host-side logger (the `pie` OutputChannel, the persistent log file in the OS temp dir, and the extension-host console). Raising this surfaces existing debug/trace instrumentation (e.g. stream-telemetry snapshots) without restarting. Can also be changed live via the `pie: Set Log Level` command."
+        },
+        "pie.tempLogRetention": {
+          "type": "object",
+          "default": { "maxAgeDays": 7, "maxTotalSizeMb": 500 },
+          "properties": {
+            "maxAgeDays": { "type": "number", "default": 7, "minimum": 0, "description": "Delete orphaned pi tool-output temp logs (pi-bash-*.log / pi-output-*.log) older than this many days. 0 disables age-based deletion." },
+            "maxTotalSizeMb": { "type": "number", "default": 500, "minimum": 0, "description": "After age-based deletion, evict the oldest temp logs until the combined size of survivors is under this cap (MB). 0 disables the size cap." }
+          },
+          "description": "Retention for orphaned pi tool-output temp logs the SDK writes on truncation but never cleans up. Reaped best-effort on extension activation."
         }
       }
     }

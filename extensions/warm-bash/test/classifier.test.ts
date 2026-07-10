@@ -94,3 +94,37 @@ describe('warm-bash classifier', () => {
     expectShell(classify('ls my\\ dir'), null);
   });
 });
+
+describe('fromMsysPosixCwd', () => {
+  let fromMsysPosixCwd: (p: string) => string;
+  async function loadHelper() {
+    const m = (await import(classifierUrl)) as { fromMsysPosixCwd: (p: string) => string };
+    fromMsysPosixCwd = m.fromMsysPosixCwd;
+  }
+
+  test('rewrites single-drive-letter POSIX roots to Windows drive paths', async () => {
+    await loadHelper();
+    assert.equal(fromMsysPosixCwd('/c/Users/foo'), 'c:/Users/foo');
+    assert.equal(fromMsysPosixCwd('/D/bar/baz'), 'D:/bar/baz');
+  });
+
+  test('leaves genuine POSIX paths unchanged', async () => {
+    await loadHelper();
+    assert.equal(fromMsysPosixCwd('/usr/local/bin'), '/usr/local/bin');
+    assert.equal(fromMsysPosixCwd('/tmp/x'), '/tmp/x');
+    assert.equal(fromMsysPosixCwd('/mingw64/lib'), '/mingw64/lib');
+  });
+
+  test('leaves Windows and relative paths unchanged', async () => {
+    await loadHelper();
+    assert.equal(fromMsysPosixCwd('c:/Users/foo'), 'c:/Users/foo');
+    assert.equal(fromMsysPosixCwd('c:\\Users\\foo'), 'c:\\Users\\foo');
+    assert.equal(fromMsysPosixCwd('./src'), './src');
+    assert.equal(fromMsysPosixCwd('src/foo'), 'src/foo');
+  });
+
+  test('does not rewrite a bare drive root without a trailing slash', async () => {
+    await loadHelper();
+    assert.equal(fromMsysPosixCwd('/c'), '/c');
+  });
+});
