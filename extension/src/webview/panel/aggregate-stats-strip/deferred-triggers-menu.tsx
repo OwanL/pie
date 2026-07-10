@@ -3,6 +3,8 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
+import { useMenuListeners } from '../components/useMenuListeners';
+
 import type { DeferredTriggerView, SessionSummary, TriggerSpec } from '../../../shared/protocol';
 
 /**
@@ -73,23 +75,7 @@ export function DeferredTriggersMenu({
     return () => window.clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    const down = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    const resize = () => onClose();
-    document.addEventListener('mousedown', down);
-    document.addEventListener('keydown', key);
-    window.addEventListener('resize', resize);
-    return () => {
-      document.removeEventListener('mousedown', down);
-      document.removeEventListener('keydown', key);
-      window.removeEventListener('resize', resize);
-    };
-  }, [onClose]);
+  useMenuListeners(ref, onClose);
 
   return (
     <div

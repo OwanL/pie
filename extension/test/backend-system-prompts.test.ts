@@ -14,7 +14,6 @@ import {
   buildSessionSystemPrompts,
   captureOriginalSystemPromptOptions,
   contextFileEntryId,
-  filterDisplayEntries,
   isSupersetSystemPromptOptions,
   markDisabledEntries,
   stripDisabledSectionsFromPrompt,
@@ -298,21 +297,6 @@ test('buildSessionSystemPrompts marks disabled entries when disabledEntries is p
   assert.equal(harness.disabled, true);
   assert.equal(file.disabled, true);
   assert.equal(runtime.disabled, undefined);
-});
-
-test('filterDisplayEntries drops disabled entries and keeps the rest', () => {
-  const promptOptions: SdkBuildSystemPromptOptions = {
-    cwd: '/repo',
-    contextFiles: [{ path: '/repo/AGENTS.md', content: 'rules' }],
-  };
-  const prompts = buildSessionSystemPrompts({
-    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
-    promptOptions,
-    disabledEntries: [contextFileEntryId('/repo/AGENTS.md')],
-  });
-  const visible = filterDisplayEntries(prompts, new Set([contextFileEntryId('/repo/AGENTS.md')]));
-  assert.ok(!visible.some((p) => p.id === contextFileEntryId('/repo/AGENTS.md')));
-  assert.ok(visible.some((p) => p.id === HARNESS_ENTRY_ID));
 });
 
 test('applySystemPromptTogglesToOptions drops option-driven disabled sections', () => {

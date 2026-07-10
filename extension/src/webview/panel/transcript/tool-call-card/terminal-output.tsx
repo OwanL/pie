@@ -1,28 +1,13 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useRef } from 'preact/hooks';
-
 import { ResizeHandle } from '../../components/resize-handle';
 import { useResizableHeight } from '../../components/use-resizable-height';
+import { useStickToBottom } from '../use-stick-to-bottom';
 
 export function TerminalOutput({ text, running }: { text: string; running: boolean }) {
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLPreElement>();
-  const stickToBottomRef = useRef(true);
-
-  const handleScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
-  };
-
-  // Keep the pane pinned to the latest output as it streams in, unless the
-  // user has scrolled up to read earlier output.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !stickToBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [text]);
+  const { handleScroll } = useStickToBottom<HTMLPreElement>(scrollRef, [text]);
 
   return (
     <div class="resizable-scroll-area">

@@ -624,6 +624,25 @@ test('Brief H: NoticeBanner renders recovery action buttons for a projected noti
   assert.equal(findNoticeAction(container, 'Show logs'), null);
 });
 
+test('Brief H: NoticeBanner renders [retry, show-logs] for a model-start-timeout (concurrency wait, not pruning)', () => {
+  // Pruning already succeeded; the elapsed budget was the model-start budget.
+  // The notice blames model-start (concurrency/rate-limit), so the pruning
+  // remedies (retry-without-pruning, open-settings) do NOT apply.
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState({
+    notice: 'The model took too long to start this turn (it exceeded the 600s budget) — it may be waiting for an available concurrency slot or rate limit. You can retry, or show the logs for details.',
+    noticeKind: 'model-start-timeout',
+  });
+  act(() => { render(h(App, { adapter }), container); });
+
+  assert.ok(findNoticeAction(container, 'Retry'), 'Retry button renders');
+  assert.ok(findNoticeAction(container, 'Show logs'), 'Show logs button renders');
+  // Pruning remedies do NOT apply (pruning already succeeded).
+  assert.equal(findNoticeAction(container, 'Retry without pruning'), null);
+  assert.equal(findNoticeAction(container, 'Open settings'), null);
+  assert.equal(findNoticeAction(container, 'Restart backend'), null);
+});
+
 test('Brief H: Show logs posts showLogs WITHOUT dismissing (the error still stands)', () => {
   const adapter = makeAdapter();
   adapter.initialState = sessionViewState({

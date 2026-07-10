@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { produce } from 'immer';
 
 import { createInitialArchState, type ArchState } from '../src/host/core/arch-state';
-import { selectViewState, resetProjectionCache } from '../src/host/core/projection';
+import { selectViewState } from '../src/host/core/projection';
 import type { ChatMessage } from '../src/shared/protocol';
 
 const SESSION_A = '/ws/session-a';
@@ -45,7 +45,6 @@ function stateWithActiveSession(path: string, transcript: ChatMessage[] = []): A
 }
 
 test('projection memoization: same signature returns the SAME ViewState reference (O(1) cache hit)', () => {
-  resetProjectionCache();
   const state = stateWithActiveSession(SESSION_A, [assistantMsg('m1')]);
 
   const first = selectViewState(state);
@@ -61,7 +60,6 @@ test('projection memoization: same signature returns the SAME ViewState referenc
 });
 
 test('projection memoization: unchanged-delta posts are O(1) amortized (1000 repeated hits)', () => {
-  resetProjectionCache();
   const state = stateWithActiveSession(SESSION_A, [assistantMsg('m1')]);
 
   const first = selectViewState(state);
@@ -82,7 +80,6 @@ test('projection memoization: unchanged-delta posts are O(1) amortized (1000 rep
 });
 
 test('projection memoization: a background session streaming does NOT bust the active view cache', () => {
-  resetProjectionCache();
   // Active session A with one message; background session B exists but empty.
   const state = produce(stateWithActiveSession(SESSION_A, [assistantMsg('a1')]), (draft) => {
     draft.sessions.sessions.push(sessionSummary(SESSION_B));
@@ -105,7 +102,6 @@ test('projection memoization: a background session streaming does NOT bust the a
 });
 
 test('projection memoization: a genuine active-session delta recomputes but keeps unchanged slices referentially stable', () => {
-  resetProjectionCache();
   const state = stateWithActiveSession(SESSION_A, [assistantMsg('a1')]);
   const first = selectViewState(state);
 
@@ -130,7 +126,6 @@ test('projection memoization: a genuine active-session delta recomputes but keep
 });
 
 test('projection memoization: switching active session busts the cache', () => {
-  resetProjectionCache();
   const stateA = produce(stateWithActiveSession(SESSION_A, [assistantMsg('a1')]), (draft) => {
     draft.sessions.sessions.push(sessionSummary(SESSION_B));
     draft.transcript.bySession[SESSION_B] = [assistantMsg('b1')];
@@ -150,7 +145,6 @@ test('projection memoization: switching active session busts the cache', () => {
 });
 
 test('projection memoization: toggling pruning visibility busts the cache (settings reference changes)', () => {
-  resetProjectionCache();
   const state = stateWithActiveSession(SESSION_A, [assistantMsg('a1')]);
   const first = selectViewState(state);
 

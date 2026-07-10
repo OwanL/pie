@@ -561,7 +561,7 @@ describe('ProviderGate — account-pause circuit breaker', () => {
 		});
 
 		// We need to flip fetch between suspension + success. Use a counter.
-		let mode: 'suspend' | 'success' = 'suspend';
+		const mode: 'suspend' | 'success' = 'suspend';
 		globalThis.fetch = async () => {
 			if (mode === 'suspend') {
 				return new Response(suspensionBody, { status: 429, headers: { 'content-type': 'application/json' } });
@@ -596,7 +596,7 @@ describe('ProviderGate — metrics', () => {
 		const gate = ProviderGate.install([config], 0);
 
 		// Initially idle.
-		let metrics = gate.getMetrics();
+		const metrics = gate.getMetrics();
 		assert.equal(metrics.length, 1);
 		assert.equal(metrics[0].provider, 'test-provider');
 		assert.equal(metrics[0].activeRequests, 0);

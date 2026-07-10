@@ -1,4 +1,4 @@
-import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection } from '../shared/protocol';
+import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, RuntimePrefsSetParams, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection } from '../shared/protocol';
 import { ALL_NESTED_BUCKETS_ALLOWED } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
@@ -42,10 +42,6 @@ export function parseArgs(argv: string[]): BackendArgs {
 
 export interface SessionPathParams {
   sessionPath: string;
-}
-
-export interface SessionPathOptionalParams {
-  sessionPath?: string;
 }
 
 export interface MessageSendParams {
@@ -102,16 +98,6 @@ export function validateSessionPath(method: string, params: unknown): SessionPat
     fail(method, 'requires a string sessionPath');
   }
   return { sessionPath: params['sessionPath'] as string };
-}
-
-export function validateSessionPathOptional(params: unknown): SessionPathOptionalParams {
-  if (params === undefined || params === null) return {};
-  if (!isObj(params)) return {};
-  const sp = params['sessionPath'];
-  if (sp !== undefined && typeof sp !== 'string') {
-    fail('<rpc>', 'sessionPath must be a string when provided');
-  }
-  return { sessionPath: sp as string | undefined };
 }
 
 export function validateSessionCreate(params: unknown): SessionCreateParams {
@@ -331,42 +317,6 @@ export function validateMessageSend(params: unknown): MessageSendParams {
   }
 
   return { text: text as string, sessionPath: sp as string, inputs };
-}
-
-export interface RuntimePrefsSetParams {
-  providerToggles: Record<string, boolean>;
-  extensionToggles: Record<string, boolean>;
-  subagentAlwaysParentModel?: boolean;
-  subagentMaxDepth?: number;
-  subagentMaxTreeSessions?: number;
-  subagentMaxInflight?: number;
-  subagentMaxConcurrency?: number;
-  subagentMaxParallelTasks?: number;
-  bashWarmPoolSize?: number;
-  bashFastPath?: boolean;
-  bashShellPath?: string;
-  /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
-   *  default. Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000]. */
-  bashWarmupTimeoutMs?: number;
-  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
-   *  default. Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
-  bashAcquireTimeoutMs?: number;
-  /** Default timeout (seconds) for bash commands that don't specify one.
-   *  Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
-  bashDefaultTimeout?: number;
-  subagentBuckets?: SubagentBuckets;
-  subagentNestedAllowedBuckets?: NestedAllowedBuckets;
-  subagentDropTools?: string[];
-  /** Per-provider concurrency overrides. Keys are provider names; values are
-   *  objects with optional `maxConcurrentRequests`, `afterburnSeconds`,
-   *  `queueWaitSeconds`, `headerWaitSeconds`. Applied to the live
-   *  `ProviderGate` via `ProviderGate.applyUserOverrides()`. */
-  providerConcurrency?: Record<string, {
-    maxConcurrentRequests?: number;
-    afterburnSeconds?: number;
-    queueWaitSeconds?: number;
-    headerWaitSeconds?: number;
-  }>;
 }
 
 export interface SettingsSetParams extends Partial<ModelSettings> {

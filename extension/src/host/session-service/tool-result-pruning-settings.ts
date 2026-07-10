@@ -7,9 +7,9 @@ import {
   type ToolResultPruningSettings,
 } from '../../shared/protocol';
 import { parseJsonOrThrow } from '../util/error-message';
-import { resolveSettingsPath } from './pruning-settings';
+import { resolveSettingsPath } from '../util/settings-path';
 
-export { resolveSettingsPath };
+export { resolveSettingsPath } from '../util/settings-path';
 
 export function toolResultPruningSettingsFileExists(): boolean {
   const settingsPath = resolveSettingsPath();

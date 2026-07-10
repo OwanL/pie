@@ -605,11 +605,12 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
 }
 
 /**
- * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
- * Shared between the live `setPrefs` path and startup restore so a pref field
- * is never mirrored on one path but missing on the other.
+ * Params for the `runtimePrefs.set` RPC — the wire shape produced by
+ * {@link buildRuntimePrefsPayload} and validated by the backend's
+ * `validateRuntimePrefsSet`. Canonical definition lives in the shared protocol
+ * so the host and backend never drift on a field.
  */
-export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
+export interface RuntimePrefsSetParams {
   providerToggles: Record<string, boolean>;
   extensionToggles: Record<string, boolean>;
   subagentAlwaysParentModel?: boolean;
@@ -621,14 +622,31 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   bashWarmPoolSize?: number;
   bashFastPath?: boolean;
   bashShellPath?: string;
+  /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
+   *  default. Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000]. */
   bashWarmupTimeoutMs?: number;
+  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
+   *  default. Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
   bashAcquireTimeoutMs?: number;
+  /** Default timeout (seconds) for bash commands that don't specify one.
+   *  Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
   bashDefaultTimeout?: number;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
   subagentDropTools?: string[];
+  /** Per-provider concurrency overrides. Keys are provider names; values are
+   *  objects with optional `maxConcurrentRequests`, `afterburnSeconds`,
+   *  `queueWaitSeconds`, `headerWaitSeconds`. Applied to the live
+   *  `ProviderGate` via `ProviderGate.applyUserOverrides()`. */
   providerConcurrency?: ProviderConcurrencyMap;
-} {
+}
+
+/**
+ * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
+ * Shared between the live `setPrefs` path and startup restore so a pref field
+ * is never mirrored on one path but missing on the other.
+ */
+export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParams {
   return {
     providerToggles: prefs.providerToggles,
     extensionToggles: prefs.extensionToggles,

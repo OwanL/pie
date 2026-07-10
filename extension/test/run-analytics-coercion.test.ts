@@ -17,7 +17,6 @@ import {
 } from '../src/host/run-analytics/coercion-rollups';
 import {
   areStringArraysEqual,
-  isTaskBoundaryIntent,
   summarizeInputs,
   toActiveRunSummary,
   toPersistedSessionState,
@@ -250,10 +249,6 @@ test('stats-service helpers summarize inputs, checkpoint parsing, and utility he
   assert.equal(toActiveRunSummary(null), null);
   assert.deepEqual(toActiveRunSummary(run), { runId: 'run-1', status: 'open', scored: false });
   assert.deepEqual(toActiveRunSummary(run, true), { runId: 'run-1', status: 'open', scored: false, nextSendStartsNewTask: true });
-
-  assert.equal(isTaskBoundaryIntent('new_task'), true);
-  assert.equal(isTaskBoundaryIntent('continue_task'), true);
-  assert.equal(isTaskBoundaryIntent('invalid'), false);
 
   const persisted = toPersistedSessionState({
     currentRun: run,

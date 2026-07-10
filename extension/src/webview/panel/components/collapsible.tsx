@@ -5,6 +5,7 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 
 import { cx } from '../utils/cx';
+import { toMouseEvent } from '../utils/preact-events';
 import { CollapsibleChevron } from './chevron';
 import { CollapsibleCloseFooter } from './collapsible-close-footer';
 
@@ -142,7 +143,7 @@ export function Collapsible({
     <div
       class={cx('collapsible', open && 'collapsible-open', className)}
       {...(dataAttrs as Record<string, string> | undefined)}
-      onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu(e as unknown as MouseEvent); } : undefined}
+      onContextMenu={onContextMenu ? (e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); } : undefined}
     >
       <button
         type="button"

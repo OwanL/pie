@@ -1,6 +1,8 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
+import { bindResizeMouseup } from './bind-resize-mouseup';
+
 export interface UseResizableHeightOptions {
   /** Minimum height in px. Default 120. */
   minHeight?: number;
@@ -102,16 +104,7 @@ export function useResizableHeight<T extends HTMLElement = HTMLElement>(
         const next = Math.max(minHeight, Math.min(maxH, Math.round(startH + delta)));
         setHeight(next);
       };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-      document.body.style.cursor = 'row-resize';
-      document.body.style.userSelect = 'none';
+      bindResizeMouseup(onMove, 'row-resize');
     },
     [minHeight, maxHeight, onResizeStart],
   );

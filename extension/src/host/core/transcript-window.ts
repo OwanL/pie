@@ -91,34 +91,6 @@ export function withDecrementedWindowCounts(window: TranscriptWindow | undefined
   };
 }
 
-export function trimTranscriptWindowTail(
-  transcript: ChatMessage[],
-  window: TranscriptWindow,
-  tailCount: number,
-): { transcript: ChatMessage[]; transcriptWindow: TranscriptWindow } {
-  if (transcript.length <= tailCount) {
-    return { transcript, transcriptWindow: normalizeTranscriptWindow(transcript, window) };
-  }
-
-  const removedCount = transcript.length - tailCount;
-  const nextTranscript = transcript.slice(-tailCount);
-  const nextLoadedStart = window.loadedStart + removedCount;
-  const nextLoadedEnd = nextLoadedStart + nextTranscript.length;
-  const nextWindow: TranscriptWindow = {
-    ...window,
-    loadedStart: nextLoadedStart,
-    loadedEnd: nextLoadedEnd,
-    hasOlder: true,
-    hasNewer: nextLoadedEnd < window.totalCount,
-    isPartial: true,
-  };
-
-  return {
-    transcript: nextTranscript,
-    transcriptWindow: normalizeTranscriptWindow(nextTranscript, nextWindow),
-  };
-}
-
 export function cullTranscriptWindowAroundActiveTurn(options: {
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;

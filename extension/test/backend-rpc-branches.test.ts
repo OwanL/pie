@@ -11,7 +11,6 @@ import {
   validateSessionDuplicate,
   validateSessionOpen,
   validateSessionPath,
-  validateSessionPathOptional,
   validateSettingsSet,
   validateTruncateAfter,
 } from '../src/backend/rpc';
@@ -22,12 +21,8 @@ test('parseArgs reads sdkPath and cwd and errors when sdkPath is missing', () =>
   assert.throws(() => parseArgs(['--cwd', '/repo']), /Missing required --sdkPath argument/);
 });
 
-test('session path validators handle optional and required path forms', () => {
+test('validateSessionPath handles required path form', () => {
   assert.deepEqual(validateSessionPath('session.open', { sessionPath: '/repo/session.jsonl' }), { sessionPath: '/repo/session.jsonl' });
-  assert.deepEqual(validateSessionPathOptional(undefined), {});
-  assert.deepEqual(validateSessionPathOptional('invalid'), {});
-  assert.deepEqual(validateSessionPathOptional({ sessionPath: '/repo/session.jsonl' }), { sessionPath: '/repo/session.jsonl' });
-  assert.throws(() => validateSessionPathOptional({ sessionPath: 123 }), /sessionPath must be a string/);
   assert.throws(() => validateSessionPath('session.open', { sessionPath: '' }), /requires a string sessionPath/);
 });
 

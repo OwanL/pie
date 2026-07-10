@@ -1,7 +1,9 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect } from 'preact/hooks';
+
+import { useMenuListeners } from './useMenuListeners';
 
 import type { ChatPrefs } from '../../../shared/protocol';
 import {
@@ -11,6 +13,7 @@ import {
   getChatPrefContextValue,
   toggleChatPrefForContext,
 } from '../chat-prefs';
+import { useMenuViewportClamp } from './useMenuViewportClamp';
 
 export interface ContextMenuState {
   type: TranscriptContextMenuType;
@@ -41,48 +44,11 @@ export function ContextMenu({
   onSetPrefs: (p: Partial<ChatPrefs>) => void;
   onClose: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLElement | null>(null);
-  const [pos, setPos] = useState<{ top: number; left: number }>({ top: menu.y, left: menu.x });
-
-  // Position: measure the RENDERED menu after mount and clamp to the viewport.
-  // If it would overflow the bottom/right, flip it above/left of the cursor
-  // instead of clamping it under. Uses offsetWidth/offsetHeight so the
-  // panel-scale-in transform doesn't skew the measurement. Runs before paint
-  // (useLayoutEffect) so the corrected position is what the user first sees.
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const margin = 4;
-    const width = node.offsetWidth;
-    const height = node.offsetHeight;
-    let top = menu.y;
-    let left = menu.x;
-    if (top + height > window.innerHeight - margin) {
-      const flipped = menu.y - height;
-      top = flipped >= margin ? flipped : Math.max(margin, window.innerHeight - margin - height);
-    }
-    if (left + width > window.innerWidth - margin) {
-      const flipped = menu.x - width;
-      left = flipped >= margin ? flipped : Math.max(margin, window.innerWidth - margin - width);
-    }
-    top = Math.max(margin, top);
-    left = Math.max(margin, left);
-    setPos({ top, left });
-  }, [menu.x, menu.y]);
-
-  // Focus management: capture the trigger that opened the menu, move focus to
-  // the first item on open, and restore focus to the trigger on close. Trigger-
-  // side aria-haspopup/aria-expanded are toggled separately below, keyed on
-  // menu.triggerEl (the element that opened the menu).
-  useEffect(() => {
-    triggerRef.current = document.activeElement as HTMLElement | null;
-    const firstItem = ref.current?.querySelector<HTMLButtonElement>('button.context-menu-item');
-    firstItem?.focus();
-    return () => {
-      triggerRef.current?.focus?.();
-    };
-  }, []);
+  const { ref, pos } = useMenuViewportClamp({
+    x: menu.x,
+    y: menu.y,
+    restoreFocusOnClose: true,
+  });
 
   // Trigger-side ARIA (Overlays-3): mirror the menu's open state onto the
   // trigger that opened it. aria-haspopup="menu" declares the trigger opens a
@@ -103,11 +69,12 @@ export function ContextMenu({
     };
   }, [menu.triggerEl]);
 
-  useEffect(() => {
-    const down = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
-    const key = (e: KeyboardEvent) => {
+  // Don't close on scroll: the menu is position:fixed so it stays correctly
+  // placed, and a capture-phase window scroll listener would dismiss the menu
+  // whenever the transcript auto-scrolls during a run. Close on resize since
+  // viewport changes can leave the fixed menu misplaced.
+  useMenuListeners(ref, onClose, {
+    onKey: (e: KeyboardEvent) => {
       if (e.key === 'Escape') { onClose(); return; }
       const node = ref.current;
       if (!node) return;
@@ -129,21 +96,8 @@ export function ContextMenu({
         e.preventDefault();
         items[items.length - 1].focus();
       }
-    };
-    // Don't close on scroll: the menu is position:fixed so it stays correctly
-    // placed, and a capture-phase window scroll listener would dismiss the menu
-    // whenever the transcript auto-scrolls during a run. Close on resize since
-    // viewport changes can leave the fixed menu misplaced.
-    const resize = () => onClose();
-    document.addEventListener('mousedown', down);
-    document.addEventListener('keydown', key);
-    window.addEventListener('resize', resize);
-    return () => {
-      document.removeEventListener('mousedown', down);
-      document.removeEventListener('keydown', key);
-      window.removeEventListener('resize', resize);
-    };
-  }, [onClose]);
+    },
+  });
 
   const style = `position:fixed;top:${pos.top}px;left:${pos.left}px`;
 

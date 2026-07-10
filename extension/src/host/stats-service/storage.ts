@@ -3,14 +3,12 @@ import * as path from 'node:path';
 
 import { serializeJsonLine } from '../../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../../shared/error-message';
-import { parseCheckpoint, readOptionalText } from '../shared/checkpoint-io';
+import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
 import { workspaceHash } from './helpers';
-import {
-  readCheckpointFromDisk,
-  writeCheckpointToDisk,
-  type CheckpointSlot,
-} from './persistence';
+import { writeCheckpointToDisk } from './persistence';
+import { readCheckpointSlots } from '../run-analytics/checkpoint';
+import type { CheckpointSlot } from '../shared/checkpoint-slots';
 import {
   exportRunAnalyticsStore,
   queryRunAnalyticsStore,
@@ -325,7 +323,7 @@ export class RunAnalyticsStorage {
   }
 
   private async readCheckpoint(): Promise<RunCheckpoint | null> {
-    const { checkpoint, activeSlot } = await readCheckpointFromDisk(this.storageDir, parseCheckpoint);
+    const { checkpoint, activeSlot } = await readCheckpointSlots(this.storageDir);
     this.activeSlot = activeSlot;
     return checkpoint;
   }
@@ -396,9 +394,9 @@ export class RunAnalyticsStorage {
   }
 
   private async mergeCheckpointStates(legacyStorageDirs: string[]): Promise<void> {
-    const currentState = await readCheckpointFromDisk(this.storageDir, parseCheckpoint);
+    const currentState = await readCheckpointSlots(this.storageDir);
     const legacyStates = await Promise.all(
-      legacyStorageDirs.map((legacyStorageDir) => readCheckpointFromDisk(legacyStorageDir, parseCheckpoint)),
+      legacyStorageDirs.map((legacyStorageDir) => readCheckpointSlots(legacyStorageDir)),
     );
     const checkpoints = [
       ...legacyStates.map((state) => state.checkpoint).filter((checkpoint): checkpoint is RunCheckpoint => !!checkpoint),

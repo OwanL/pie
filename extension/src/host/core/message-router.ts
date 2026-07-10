@@ -8,7 +8,7 @@ import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
 import { showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
-import { resolveSettingsPath } from '../session-service/pruning-settings';
+import { resolveSettingsPath } from '../util/settings-path';
 
 /** Minimal sidebar provider surface the router needs. */
 export interface SidebarProviderLike {

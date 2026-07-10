@@ -25,29 +25,6 @@ export function normalizeAttachUris(uris: vscode.Uri[]): vscode.Uri[] {
   return uris.filter((uri) => uri.scheme === 'file');
 }
 
-export function upsertPendingComposerInput(
-  sessionPath: string,
-  input: ComposerInput,
-  getArchState: GetArchState,
-  dispatchArchEvent: DispatchArchEvent,
-): void {
-  const existingInputs = getArchState().composer.pendingComposerInputsBySession[sessionPath] ?? [];
-  if (input.kind === 'filesystemPathRef') {
-    const duplicate = existingInputs.some(
-      (existing) => existing.kind === 'filesystemPathRef' && existing.path === input.path,
-    );
-    if (duplicate) {
-      return;
-    }
-  }
-
-  dispatchArchEvent({
-    kind: 'ComposerInputsReplaced',
-    sessionPath,
-    inputs: [...existingInputs, input],
-  });
-}
-
 export function validateAndMaterializeComposerInput(
   sessionPath: string,
   inputDraft: ComposerInputDraft,

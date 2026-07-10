@@ -6,7 +6,6 @@ import type {
   ViewState,
   WebviewToHostMessage,
   ChatMessageToolCallPart,
-  ChatMessage,
 } from '../../shared/protocol';
 import { resolvePanelSurface, resolveLoadingStatus } from './panel-state';
 import { isTranscriptHydrating } from './transcript/state';
@@ -108,12 +107,10 @@ export function useAppBodyDerivedState(
   );
   const deferredSessionPaths = useMemo(
     () => Array.from(new Set(deferredTriggers.map((t) => t.sessionPath))),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [deferredSig],
   );
   const activeSessionHasDeferredTriggers = useMemo(
     () => deferredTriggers.some((t) => t.sessionPath === activeSessionPath),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [deferredSig, activeSessionPath],
   );
 

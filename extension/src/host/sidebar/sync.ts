@@ -74,16 +74,6 @@ export function flushDirtySnapshot(
 }
 
 /**
- * No-op: sync state no longer tracks per-session revisions.
- */
-export function clearSessionSync(
-  syncState: SidebarSyncState,
-  _sessionPath: string,
-): SidebarSyncState {
-  return syncState;
-}
-
-/**
  * A host->webview post can fail even after we've decided the view is ready
  * enough to attempt delivery. Treat that as dropped state and force snapshot
  * recovery on the next explicit resync or visibility transition.

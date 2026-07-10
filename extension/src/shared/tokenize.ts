@@ -13,10 +13,10 @@ import { countTokens as bpeCountTokens } from 'gpt-tokenizer/encoding/cl100k_bas
  */
 /**
  * Estimate output tokens for a chunk of model-produced text: a real BPE
- * (cl100k_base) count of the trimmed text, with the same guards as
- * {@link countTextTokens}. Shared between the webview (context-window / token
- * breakdowns) and the host (token-rate measurement), so the host-side rate
- * measurement uses the exact same token magnitudes as the webview did.
+ * (cl100k_base) count of the trimmed text, with guards for empty or non-string
+ * input. Shared between the webview (context-window / token breakdowns) and
+ * the host (token-rate measurement), so the host-side rate measurement uses the
+ * exact same token magnitudes as the webview did.
  */
 export function estimateTextTokens(text: string): number {
   if (typeof text !== 'string') {
@@ -32,7 +32,3 @@ export function estimateTextTokens(text: string): number {
   return bpeCountTokens(trimmed);
 }
 
-export function countTextTokens(text: string): number {
-  if (typeof text !== 'string' || text.length === 0) return 0;
-  return bpeCountTokens(text);
-}

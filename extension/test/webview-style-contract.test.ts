@@ -28,7 +28,6 @@ test('panel chip styling is centralized instead of embedded in feature component
   const panelChipCss = await readStyleSource('panel-chip.css');
   const toolbar = await readWebviewSource('composer/toolbar.tsx');
   const pruningHeader = await readWebviewSource('transcript/pruning-header.tsx');
-  const pruningInline = await readWebviewSource('transcript/pruning-inline.tsx');
   const panelChipComponent = await readWebviewSource('components/panel-chip.tsx');
 
   assert.match(indexCss, /@import '\.\/panel-chip\.css';/);
@@ -47,14 +46,12 @@ test('panel chip styling is centralized instead of embedded in feature component
 
   assert.match(pruningHeader, /PruningHeaderChipControl/);
   assert.match(pruningHeader, /PruningDiagnostics/);
-  assert.match(pruningInline, /PruningDiagnostics/);
   assert.doesNotMatch(pruningHeader, /PanelChip/);
   assert.doesNotMatch(pruningHeader, /variant=/);
 
   for (const [name, source] of [
     ['toolbar', toolbar],
     ['pruning header', pruningHeader],
-    ['pruning inline', pruningInline],
   ] as const) {
     assert.doesNotMatch(source, /inline-flex h-\[(18|22)px\]/, `${name} should not own chip height/layout utilities`);
     assert.doesNotMatch(source, /rounded-full border border-transparent bg-control/, `${name} should not own chip shell utilities`);

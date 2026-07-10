@@ -8,7 +8,6 @@ import {
   WINDOW_MS,
 } from '../src/webview/panel/composer/use-token-rate';
 import { computeIdleDisplayState, IDLE_STATE } from '../src/shared/token-rate';
-import { countTextTokens } from '../src/shared/tokenize';
 import { encode as bpeEncode, decode as bpeDecode } from 'gpt-tokenizer/encoding/cl100k_base';
 
 const BASE_NOW = 1_700_000_0000;
@@ -116,7 +115,7 @@ function runTicks(
 
 test('tokenText produces exactly N cl100k_base tokens (calibration guard)', () => {
   for (const n of [0, 1, 2, 10, 100, 200, 1080]) {
-    assert.equal(countTextTokens(tokenText(n)), n, `tokenText(${n})`);
+    assert.equal(bpeEncode(tokenText(n)).length, n, `tokenText(${n})`);
   }
 });
 

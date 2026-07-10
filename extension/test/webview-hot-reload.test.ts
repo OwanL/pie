@@ -1,14 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import {
-  getWebviewAssetDir,
-  isHotReloadAssetFileName,
-  readWebviewAssetVersion,
-} from '../src/host/webview/hot-reload';
+import { isHotReloadAssetFileName } from '../src/host/webview/hot-reload';
 
 test('isHotReloadAssetFileName matches built assets and ignores sourcemaps', () => {
   assert.equal(isHotReloadAssetFileName('panel.js'), true);
@@ -19,34 +13,6 @@ test('isHotReloadAssetFileName matches built assets and ignores sourcemaps', () 
   assert.equal(isHotReloadAssetFileName('/tmp/panel.js'), true);
   assert.equal(isHotReloadAssetFileName('panel.js.map'), false);
   assert.equal(isHotReloadAssetFileName(undefined), false);
-});
-
-test('readWebviewAssetVersion changes when the Vite manifest changes', async () => {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'pie-webview-hot-reload-'));
-  const assetDir = getWebviewAssetDir(rootDir);
-
-  try {
-    const manifestDir = path.join(assetDir, '.vite');
-    await mkdir(manifestDir, { recursive: true });
-    await writeFile(
-      path.join(manifestDir, 'manifest.json'),
-      JSON.stringify({ 'src/webview/panel/panel.tsx': { file: 'assets/panel-aaa.js', isEntry: true } }),
-    );
-
-    const firstVersion = await readWebviewAssetVersion(assetDir);
-    const unchangedVersion = await readWebviewAssetVersion(assetDir);
-    assert.equal(unchangedVersion, firstVersion);
-
-    await writeFile(
-      path.join(manifestDir, 'manifest.json'),
-      JSON.stringify({ 'src/webview/panel/panel.tsx': { file: 'assets/panel-bbb.js', isEntry: true } }),
-    );
-    const updatedVersion = await readWebviewAssetVersion(assetDir);
-
-    assert.notEqual(updatedVersion, firstVersion);
-  } finally {
-    await rm(rootDir, { recursive: true, force: true });
-  }
 });
 
 test('build script removes stale installed output before syncing rebuilt assets', async () => {

@@ -78,27 +78,6 @@ export async function migrateAuthFile(source: string, dest: string): Promise<boo
   return false;
 }
 
-export async function resolveAuthPath(agentDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
-  const authDir = env.PI_CODING_AGENT_AUTH_DIR?.trim();
-  if (authDir) {
-    return path.resolve(authDir, 'auth.json');
-  }
-
-  const agentDirAuthPath = path.resolve(agentDir, 'auth.json');
-  if (!await isInsideGitWorkTree(agentDirAuthPath)) {
-    return agentDirAuthPath;
-  }
-
-  const allowInTree = env.PIE_ALLOW_IN_TREE_AUTH === '1';
-  if (allowInTree) {
-    return agentDirAuthPath;
-  }
-
-  const authPath = path.resolve(getDefaultAuthDir(env), 'auth.json');
-  await migrateAuthFile(agentDirAuthPath, authPath);
-  return authPath;
-}
-
 export async function ensureAuthPathDirectory(authPath: string): Promise<void> {
   await ensureDir(path.dirname(authPath));
 }

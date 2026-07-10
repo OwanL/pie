@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { _clearSubagentProfilesCache, loadSubagentProfiles } from '../src/backend/subagent-profiles';
+import { loadSubagentProfiles } from '../src/backend/subagent-profiles';
 
 function makeAgentDir(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-subagent-profiles-'));
@@ -15,7 +15,6 @@ function makeAgentDir(files: Record<string, string>): string {
 }
 
 test('loadSubagentProfiles parses YAML content and skips invalid profile entries', () => {
-  _clearSubagentProfilesCache();
   const agentDir = makeAgentDir({
     'model-profiles.yaml': JSON.stringify({
       profiles: [
@@ -34,7 +33,6 @@ test('loadSubagentProfiles parses YAML content and skips invalid profile entries
 });
 
 test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when needed', () => {
-  _clearSubagentProfilesCache();
   const yamlPreferredDir = makeAgentDir({
     'model-profiles.yaml': JSON.stringify({
       profiles: [{ id: 'from-yaml', precision: 5, creativity: 5, thoroughness: 5, reasoning: 5, eligible: true }],
@@ -47,7 +45,6 @@ test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when ne
   assert.ok(yamlProfiles.has('from-yaml'));
   assert.ok(!yamlProfiles.has('from-json'));
 
-  _clearSubagentProfilesCache();
   const ymlFallbackDir = makeAgentDir({
     'model-profiles.yml': JSON.stringify({
       profiles: [{ id: 'from-yml', precision: 2, creativity: 2, thoroughness: 2, reasoning: 2, eligible: false }],
@@ -58,14 +55,12 @@ test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when ne
 });
 
 test('loadSubagentProfiles tolerates malformed YAML without throwing', () => {
-  _clearSubagentProfilesCache();
   const agentDir = makeAgentDir({ 'model-profiles.yaml': '::{ not valid yaml' });
   const profiles = loadSubagentProfiles(agentDir);
   assert.equal(profiles.size, 0);
 });
 
 test('loadSubagentProfiles falls back to JSON when no YAML exists', () => {
-  _clearSubagentProfilesCache();
   const agentDir = makeAgentDir({
     'model-profiles.json': JSON.stringify({
       profiles: [
@@ -80,18 +75,15 @@ test('loadSubagentProfiles falls back to JSON when no YAML exists', () => {
 });
 
 test('loadSubagentProfiles returns an empty map for malformed JSON, empty agent dirs, and empty input paths', () => {
-  _clearSubagentProfilesCache();
   const malformedDir = makeAgentDir({ 'model-profiles.json': '{ this is not json' });
   assert.equal(loadSubagentProfiles(malformedDir).size, 0);
 
-  _clearSubagentProfilesCache();
   const missingDir = makeAgentDir({});
   assert.equal(loadSubagentProfiles(missingDir).size, 0);
   assert.equal(loadSubagentProfiles('').size, 0);
 });
 
 test('loadSubagentProfiles reuses cached maps until the file changes and clears cache when the file disappears', () => {
-  _clearSubagentProfilesCache();
   const fileName = 'model-profiles.json';
   const agentDir = makeAgentDir({
     [fileName]: JSON.stringify({
@@ -119,7 +111,6 @@ test('loadSubagentProfiles reuses cached maps until the file changes and clears 
 });
 
 test('loadSubagentProfiles tolerates stat and read races without throwing', () => {
-  _clearSubagentProfilesCache();
   const agentDir = makeAgentDir({
     'model-profiles.json': JSON.stringify({
       profiles: [{ id: 'race', precision: 1, creativity: 1, thoroughness: 1, reasoning: 1, eligible: true }],
@@ -133,7 +124,6 @@ test('loadSubagentProfiles tolerates stat and read races without throwing', () =
   assert.equal(loadSubagentProfiles(agentDir).size, 0);
 
   // Restore and verify it works when file exists
-  _clearSubagentProfilesCache();
   fs.renameSync(backup, filePath);
   assert.equal(loadSubagentProfiles(agentDir).size, 1);
 });

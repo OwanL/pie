@@ -24,7 +24,6 @@ import type {
   RetryStatus,
   SessionSummary,
   SystemPromptEntry,
-  ToolResultPruningSettings,
   TranscriptWindow,
   ViewState,
 } from '../../shared/protocol';
@@ -274,17 +273,6 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
 let cachedSignature: ProjectionSignature | null = null;
 let cachedViewState: ViewState | null = null;
 
-/**
- * Drop the projection cache. Production never needs this — the reducer always
- * produces a fresh Immer tree, so references stay honest. Tests that mutate
- * ArchState in place (bypassing Immer) between selectViewState calls should
- * call this to avoid a stale cache hit.
- */
-export function resetProjectionCache(): void {
-  cachedSignature = null;
-  cachedViewState = null;
-}
-
 // ─── Main projection ──────────────────────────────────────────────────────────
 
 /**
@@ -368,6 +356,18 @@ function projectViewState(state: ArchState): ViewState {
   // ── Derived busy flag ──
   const busy = !!activePath && sessions.runningSessionPaths.includes(activePath);
 
+  // ── 'Starting model' session paths (muted tab dot) ──
+  // A running turn whose pruning prepass already succeeded but has not yet
+  // committed (first MessageStarted) — the post-pruning, pre-streaming window
+  // that includes concurrency-limit / rate-limit waits. `prepassBySession`
+  // phase 'succeeded' is only set while a promoted (pre-commit) op exists and
+  // is cleared at the commit point, so intersecting with runningSessionPaths is
+  // belt-and-suspenders (a stale 'succeeded' on a non-running session shows no
+  // dot anyway). The tab bar renders a muted dot for these.
+  const startingModelSessionPaths = sessions.runningSessionPaths.filter(
+    (path) => state.pending.prepassBySession[path]?.phase === 'succeeded',
+  );
+
   // ── Live auto-retry status for the active session ──
   // Independent of `busy`: a retry sleeps between turns and the `willRetry`
   // gate on `agent_end` keeps `busy` true, but this is the authoritative
@@ -386,6 +386,7 @@ function projectViewState(state: ArchState): ViewState {
     openTabPaths: sessions.openTabPaths,
     pinnedTabPaths: sessions.pinnedTabPaths,
     runningSessionPaths: sessions.runningSessionPaths,
+    startingModelSessionPaths,
     unreadFinishedSessionPaths: sessions.unreadFinishedSessionPaths,
     activeSession,
     transcript: activeTranscript,

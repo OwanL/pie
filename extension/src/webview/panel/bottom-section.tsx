@@ -6,7 +6,6 @@ import type {
   ViewState,
   ChatMessage,
   WebviewToHostMessage,
-  ThinkingLevel,
   ProviderGateStats,
 } from '../../shared/protocol';
 import { ExtensionUIPrompt } from './extension-ui-prompt';

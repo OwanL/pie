@@ -55,6 +55,55 @@ interface ThroughputAcc {
   sampleCount: number;
 }
 
+/** Window dates used for today / this-week bucketing. */
+interface DateWindow {
+  todayDate: string;
+  weekStartMs: number;
+  weekDates: Set<string>;
+}
+
+/** Accumulated run statistics produced by a single pass over the runs. */
+interface RunAccumulations {
+  byProvider: Map<string, ProviderAccumulator>;
+  byDay: Map<string, DayAccumulator>;
+  throughputByDay: Map<string, Map<string, ThroughputAcc>>;
+  sessionPaths: Set<string>;
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  totalThroughputOutputTokens: number;
+  totalThroughputGenerationMs: number;
+  todayRunCount: number;
+  weekRunCount: number;
+  todayInputTokens: number;
+  todayOutputTokens: number;
+  todayToolCallCount: number;
+  todayTouchedFileCount: number;
+  lastRun: AggregateLastRun | null;
+}
+
+/** Today-specific cost and throughput rollups. */
+interface TodayStats {
+  todayCost: number;
+  todayCostByProvider: AggregateProviderCost[];
+  todayTokensPerSecond: number;
+  todayTokensPerSecondByProvider: AggregateProviderThroughput[];
+}
+
+/** Week cost rollup. */
+interface WeekStats {
+  weekCost: number;
+  weekCostByProvider: AggregateProviderCost[];
+}
+
+/** Live aggregate tok/s and running-session count. */
+interface LiveStats {
+  liveTokensPerSecond: number;
+  runningSessionCount: number;
+}
+
 function createProviderAccumulator(provider: string): ProviderAccumulator {
   return {
     provider,
@@ -173,46 +222,29 @@ function sortThroughputDesc(a: AggregateProviderThroughput, b: AggregateProvider
   return b.outputTokens - a.outputTokens || a.provider.localeCompare(b.provider);
 }
 
-/** Merge a list of per-day per-provider cost rollups into a single provider list. */
-function mergeDayProviders(
-  days: AggregateDailyCost[],
-): AggregateProviderCost[] {
-  const merged = new Map<string, ProviderAccumulator>();
-  for (const day of days) {
-    for (const entry of day.byProvider) {
-      let acc = merged.get(entry.provider);
-      if (!acc) {
-        acc = createProviderAccumulator(entry.provider);
-        merged.set(entry.provider, acc);
-      }
-      acc.cost += entry.cost;
-      acc.inputTokens += entry.inputTokens;
-      acc.outputTokens += entry.outputTokens;
-      acc.cacheReadTokens += entry.cacheReadTokens;
-      acc.cacheWriteTokens += entry.cacheWriteTokens;
-    }
+/** Build the set of dates in the rolling week window plus the week start timestamp. */
+function buildDateWindows(nowMs: number): DateWindow {
+  const todayDate = utcDateString(nowMs);
+  const weekStartMs = nowMs - (WEEK_WINDOW_DAYS - 1) * 86_400_000;
+  const weekDates = new Set<string>();
+  for (let i = 0; i < WEEK_WINDOW_DAYS; i += 1) {
+    weekDates.add(utcDateString(weekStartMs + i * 86_400_000));
   }
-  return [...merged.values()].map(toProviderCost).sort(sortCostDesc);
+  return { todayDate, weekStartMs, weekDates };
 }
 
 /**
- * Compute aggregate stats from raw runs + pricing.
- *
- * @param runs all runs (completed + open) for the workspace.
- * @param pricingMap model id → pricing records (from `loadModelPricing`).
- * @param nowMs current wall-clock (ms epoch); used for "today" + the daily/week windows.
- * @param runningSessionPaths currently-running session paths (for the live count).
- * @param ratesBySession live per-session rate states (from `TokenRateService`).
- * @param openTabCount currently-open session tabs (current UI state).
+ * Single pass over all runs that accumulates per-provider, per-day, and
+ * per-day-throughput statistics, plus today / week counts and the most-recent
+ * run. Returns all intermediate state so the caller can derive the final
+ * rollups.
  */
-export function computeAggregateStats(
+function accumulateRuns(
   runs: RunSnapshot[],
   pricingMap: Map<string, ModelPricingRecord[]>,
-  nowMs: number,
-  runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
-  openTabCount: number,
-): AggregateStats {
+  todayDate: string,
+  weekDates: Set<string>,
+): RunAccumulations {
   const byProvider = new Map<string, ProviderAccumulator>();
   const byDay = new Map<string, DayAccumulator>();
   // Throughput bucketed by the SAMPLE's end-date (a run spanning midnight
@@ -228,13 +260,6 @@ export function computeAggregateStats(
   let totalCacheWriteTokens = 0;
   let totalThroughputOutputTokens = 0;
   let totalThroughputGenerationMs = 0;
-
-  const todayDate = utcDateString(nowMs);
-  const weekStartMs = nowMs - (WEEK_WINDOW_DAYS - 1) * 86_400_000;
-  const weekDates = new Set<string>();
-  for (let i = 0; i < WEEK_WINDOW_DAYS; i += 1) {
-    weekDates.add(utcDateString(weekStartMs + i * 86_400_000));
-  }
 
   let todayRunCount = 0;
   let weekRunCount = 0;
@@ -376,21 +401,34 @@ export function computeAggregateStats(
     }
   }
 
-  // ── All-time per-provider rollups ──
-  const costByProvider = [...byProvider.values()]
-    .map(toProviderCost)
-    .sort(sortCostDesc);
+  return {
+    byProvider,
+    byDay,
+    throughputByDay,
+    sessionPaths,
+    totalCost,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCacheReadTokens,
+    totalCacheWriteTokens,
+    totalThroughputOutputTokens,
+    totalThroughputGenerationMs,
+    todayRunCount,
+    weekRunCount,
+    todayInputTokens,
+    todayOutputTokens,
+    todayToolCallCount,
+    todayTouchedFileCount,
+    lastRun,
+  };
+}
 
-  const tokensPerSecondByProvider = [...byProvider.values()]
-    .map(toProviderThroughput)
-    .filter((entry) => entry.sampleCount > 0)
-    .sort(sortThroughputDesc);
-
-  const tokensPerSecond = totalThroughputGenerationMs > 0
-    ? totalThroughputOutputTokens / (totalThroughputGenerationMs / 1000)
-    : 0;
-
-  // ── Today per-provider ──
+/** Derive today's per-provider cost and throughput from accumulated buckets. */
+function buildTodayStats(
+  todayDate: string,
+  byDay: Map<string, DayAccumulator>,
+  throughputByDay: Map<string, Map<string, ThroughputAcc>>,
+): TodayStats {
   const todayAcc = byDay.get(todayDate);
   const todayCostByProvider: AggregateProviderCost[] = todayAcc
     ? [...todayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc)
@@ -399,8 +437,12 @@ export function computeAggregateStats(
 
   const todayThroughputMap = throughputByDay.get(todayDate);
   const todayTokensPerSecondByProvider: AggregateProviderThroughput[] = todayThroughputMap
-    ? [...todayThroughputMap.values()].map(throughputAccToEntry).filter((e) => e.sampleCount > 0).sort(sortThroughputDesc)
+    ? [...todayThroughputMap.values()]
+      .map(throughputAccToEntry)
+      .filter((entry) => entry.sampleCount > 0)
+      .sort(sortThroughputDesc)
     : [];
+
   let todayThroughputOutputTokens = 0;
   let todayThroughputGenerationMs = 0;
   if (todayThroughputMap) {
@@ -413,7 +455,41 @@ export function computeAggregateStats(
     ? todayThroughputOutputTokens / (todayThroughputGenerationMs / 1000)
     : 0;
 
-  // ── Week (last 7 days) per-provider ──
+  return {
+    todayCost,
+    todayCostByProvider,
+    todayTokensPerSecond,
+    todayTokensPerSecondByProvider,
+  };
+}
+
+/** Merge a list of per-day per-provider cost rollups into a single provider list. */
+function mergeDayProviders(
+  days: AggregateDailyCost[],
+): AggregateProviderCost[] {
+  const merged = new Map<string, ProviderAccumulator>();
+  for (const day of days) {
+    for (const entry of day.byProvider) {
+      let acc = merged.get(entry.provider);
+      if (!acc) {
+        acc = createProviderAccumulator(entry.provider);
+        merged.set(entry.provider, acc);
+      }
+      acc.cost += entry.cost;
+      acc.inputTokens += entry.inputTokens;
+      acc.outputTokens += entry.outputTokens;
+      acc.cacheReadTokens += entry.cacheReadTokens;
+      acc.cacheWriteTokens += entry.cacheWriteTokens;
+    }
+  }
+  return [...merged.values()].map(toProviderCost).sort(sortCostDesc);
+}
+
+/** Derive this-week per-provider cost and total from accumulated day buckets. */
+function buildWeekStats(
+  byDay: Map<string, DayAccumulator>,
+  weekStartMs: number,
+): WeekStats {
   const weekDays: AggregateDailyCost[] = [];
   for (let i = 0; i < WEEK_WINDOW_DAYS; i += 1) {
     const date = utcDateString(weekStartMs + i * 86_400_000);
@@ -427,8 +503,14 @@ export function computeAggregateStats(
   }
   const weekCostByProvider = mergeDayProviders(weekDays);
   const weekCost = weekCostByProvider.reduce((sum, entry) => sum + entry.cost, 0);
+  return { weekCost, weekCostByProvider };
+}
 
-  // ── Daily series (last 14 days, ascending date) — tooltip context ──
+/** Build the daily cost series for the trailing window (oldest → newest). */
+function buildDailyCostSeries(
+  byDay: Map<string, DayAccumulator>,
+  nowMs: number,
+): AggregateDailyCost[] {
   const dailyCost: AggregateDailyCost[] = [];
   for (let i = DAILY_COST_WINDOW_DAYS - 1; i >= 0; i -= 1) {
     const dayMs = nowMs - i * 86_400_000;
@@ -441,16 +523,17 @@ export function computeAggregateStats(
       byProvider: [...dayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc),
     });
   }
+  return dailyCost;
+}
 
-  // ── Live aggregate tok/s: sum of measured rates across running sessions ──
-  // Only sessions ACTIVELY generating contribute. A session paused on a tool
-  // call (or between turns) holds its last rate for the chip display (the
-  // chip shows '⏸ 200 tok/s' — see token-rate.ts, whose paused branch returns
-  // state:'paused' with a held `rate`) but must NOT inflate the status-bar
-  // total for the whole tool-call duration. The contract documents this as
-  // "0 when no session is generating". Filtering on `state.state ===
-  // 'generating'` (in addition to `rate > 0`) is what excludes the stale held
-  // rate; `rate > 0` alone sums it for the entire pause.
+/**
+ * Sum measured tok/s across running sessions that are actively generating.
+ * Paused sessions holding a stale rate are intentionally excluded.
+ */
+function computeLiveTokensPerSecond(
+  runningSessionPaths: string[],
+  ratesBySession: Record<string, TokenRateIndicatorState>,
+): LiveStats {
   let liveTokensPerSecond = 0;
   const runningSet = new Set(runningSessionPaths);
   for (const sessionPath of runningSet) {
@@ -465,35 +548,80 @@ export function computeAggregateStats(
       liveTokensPerSecond += state.rate;
     }
   }
+  return { liveTokensPerSecond, runningSessionCount: runningSet.size };
+}
+
+/**
+ * Compute aggregate stats from raw runs + pricing.
+ *
+ * @param runs all runs (completed + open) for the workspace.
+ * @param pricingMap model id → pricing records (from `loadModelPricing`).
+ * @param nowMs current wall-clock (ms epoch); used for "today" + the daily/week windows.
+ * @param runningSessionPaths currently-running session paths (for the live count).
+ * @param ratesBySession live per-session rate states (from `TokenRateService`).
+ * @param openTabCount currently-open session tabs (current UI state).
+ */
+export function computeAggregateStats(
+  runs: RunSnapshot[],
+  pricingMap: Map<string, ModelPricingRecord[]>,
+  nowMs: number,
+  runningSessionPaths: string[],
+  ratesBySession: Record<string, TokenRateIndicatorState>,
+  openTabCount: number,
+): AggregateStats {
+  const { todayDate, weekStartMs, weekDates } = buildDateWindows(nowMs);
+  const acc = accumulateRuns(runs, pricingMap, todayDate, weekDates);
+
+  // ── All-time per-provider rollups ──
+  const costByProvider = [...acc.byProvider.values()]
+    .map(toProviderCost)
+    .sort(sortCostDesc);
+
+  const tokensPerSecondByProvider = [...acc.byProvider.values()]
+    .map(toProviderThroughput)
+    .filter((entry) => entry.sampleCount > 0)
+    .sort(sortThroughputDesc);
+
+  const tokensPerSecond = acc.totalThroughputGenerationMs > 0
+    ? acc.totalThroughputOutputTokens / (acc.totalThroughputGenerationMs / 1000)
+    : 0;
+
+  // ── Today / week / daily rollups ──
+  const todayStats = buildTodayStats(todayDate, acc.byDay, acc.throughputByDay);
+  const weekStats = buildWeekStats(acc.byDay, weekStartMs);
+  const dailyCost = buildDailyCostSeries(acc.byDay, nowMs);
+
+  // ── Live aggregate tok/s ──
+  const liveStats = computeLiveTokensPerSecond(runningSessionPaths, ratesBySession);
 
   return {
-    todayCost,
-    todayCostByProvider,
-    todayTokensPerSecond,
-    todayTokensPerSecondByProvider,
-    todayRunCount,
-    todayInputTokens,
-    todayOutputTokens,
-    todayToolCallCount,
-    todayTouchedFileCount,
-    weekCost,
-    weekCostByProvider,
-    weekRunCount,
+    todayCost: todayStats.todayCost,
+    todayCostByProvider: todayStats.todayCostByProvider,
+    todayTokensPerSecond: todayStats.todayTokensPerSecond,
+    todayTokensPerSecondByProvider: todayStats.todayTokensPerSecondByProvider,
+    todayRunCount: acc.todayRunCount,
+    todayInputTokens: acc.todayInputTokens,
+    todayOutputTokens: acc.todayOutputTokens,
+    todayToolCallCount: acc.todayToolCallCount,
+    todayTouchedFileCount: acc.todayTouchedFileCount,
+    weekCost: weekStats.weekCost,
+    weekCostByProvider: weekStats.weekCostByProvider,
+    weekRunCount: acc.weekRunCount,
     dailyCost,
-    liveTokensPerSecond,
-    runningSessionCount: runningSet.size,
+    liveTokensPerSecond: liveStats.liveTokensPerSecond,
+    runningSessionCount: liveStats.runningSessionCount,
     openTabCount,
-    totalCost,
+    totalCost: acc.totalCost,
     costByProvider,
     tokensPerSecond,
     tokensPerSecondByProvider,
-    totalInputTokens,
-    totalOutputTokens,
-    totalCacheReadTokens,
-    totalCacheWriteTokens,
+    totalInputTokens: acc.totalInputTokens,
+    totalOutputTokens: acc.totalOutputTokens,
+    totalCacheReadTokens: acc.totalCacheReadTokens,
+    totalCacheWriteTokens: acc.totalCacheWriteTokens,
     runCount: runs.length,
-    sessionCount: sessionPaths.size,
-    lastRun,
+    sessionCount: acc.sessionPaths.size,
+    lastRun: acc.lastRun,
     warmBash: EMPTY_WARM_BASH_STATS,
     providerGate: EMPTY_PROVIDER_GATE_STATS,
     ready: true,

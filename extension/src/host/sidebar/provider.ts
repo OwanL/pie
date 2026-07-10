@@ -374,12 +374,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     }, debounceMs);
   }
 
-  /** Drop sync bookkeeping for a session that was closed or invalidated. */
-  /** Drop sync bookkeeping for a session that was closed or invalidated (no-op). */
-  clearSessionSync(_sessionPath: string): void {
-    // no-op: sync state no longer tracks per-session revisions
-  }
-
   /**
    * Post an imperative message that does not carry a revision. The webview
    * handles these independently from the state flow.

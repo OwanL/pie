@@ -10,6 +10,7 @@ import { ToolCallCard } from '../tool-call-card';
 import { getToolCallContextType } from '../../chat-prefs';
 import { ExtensionUIPrompt } from '../../extension-ui-prompt';
 import { renderMarkdown } from '../../markdown';
+import { toMouseEvent } from '../../utils/preact-events';
 import { QuestionIcon } from '../../components/question-icon';
 import { registerToolRenderer, type ToolRendererProps } from '../registry';
 import type { TranscriptContextMenuHandler } from '../types';
@@ -89,7 +90,7 @@ function AskUserCompleted({ toolCall, parsedInput, parsedResult, onContextMenu }
   return (
     <div
       class="ask-user-completed"
-      onContextMenu={(e) => { e.preventDefault(); handleContextMenu(e as unknown as MouseEvent); }}
+      onContextMenu={(e) => { e.preventDefault(); handleContextMenu(toMouseEvent(e)); }}
     >
       <div class="ask-user-header ask-user-header-completed">
         <span class="ask-user-icon ask-user-icon-completed" aria-hidden="true"><QuestionIcon /></span>
@@ -144,7 +145,7 @@ function renderAskUserTool({
   if (toolCall.status === 'running') {
     if (matchingRequest && sessionPath) {
       return (
-        <div onContextMenu={(e) => { e.preventDefault(); onContextMenu(getToolCallContextType('ask_user'), JSON.stringify(toolCall, null, 2), e as unknown as MouseEvent); }}>
+        <div onContextMenu={(e) => { e.preventDefault(); onContextMenu(getToolCallContextType('ask_user'), JSON.stringify(toolCall, null, 2), toMouseEvent(e)); }}>
           <ExtensionUIPrompt
             sessionPath={sessionPath}
             request={matchingRequest}

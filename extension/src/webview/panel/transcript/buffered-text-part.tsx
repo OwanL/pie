@@ -1,6 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
+import type { JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { renderMarkdown } from '../markdown';
@@ -11,7 +12,7 @@ interface BufferedTextPartProps {
   index: number;
   text: string;
   streaming: boolean;
-  onContextMenu: (e: Event) => void;
+  onContextMenu: (e: JSX.TargetedMouseEvent<HTMLDivElement>) => void;
 }
 
 /** Re-parse streamed markdown at most this often (ms): bounds marked+DOMPurify cost and reduces mid-token flicker. */

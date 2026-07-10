@@ -299,10 +299,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleCustomMessage(state, event);
     }
 
-    case 'QueuedDelivered': {
-      return handleQueuedDelivered(state, event);
-    }
-
     case 'ExtensionUIRequest': {
       return handleExtensionUIRequest(state, event);
     }

@@ -10,6 +10,7 @@ import { getToolCallContextType } from '../chat-prefs';
 import { AskUserContext } from '../hooks/ask-user-context';
 
 import { cx } from '../utils/cx';
+import { toMouseEvent } from '../utils/preact-events';
 import { CollapsibleChevron } from '../components/chevron';
 import { CollapsibleCloseFooter } from '../components/collapsible-close-footer';
 import { ResizeHandle } from '../components/resize-handle';
@@ -30,6 +31,7 @@ import { TranscriptMessageList } from './transcript-message-list';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { getToolRenderer } from './registry';
 import { useCollapsibleOpen } from './use-collapsible-open';
+import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 
 interface ToolCallItemProps {
@@ -237,21 +239,7 @@ function SubagentMessages({
   );
   const nestedCollapsibleDefaultsKey = `${prefs.autoExpandReasoning ? 'r1' : 'r0'}-${prefs.autoExpandToolCalls ? 't1' : 't0'}`;
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
-  const stickToBottomRef = useRef(true);
-
-  const handleScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
-  };
-
-  // Default to the bottom: pin to the latest reasoning/reply as it streams
-  // in, unless the user has scrolled up to read earlier messages.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !stickToBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  const { handleScroll } = useStickToBottom<HTMLDivElement>(scrollRef, [messages]);
 
   return (
     <div
@@ -271,7 +259,7 @@ function SubagentMessages({
         }
         e.preventDefault();
         e.stopPropagation();
-        onContextMenu(e as unknown as MouseEvent);
+        onContextMenu(toMouseEvent(e));
       }}
       onKeyDown={(e) => e.stopPropagation()}
     >
@@ -436,7 +424,7 @@ function SubagentSingleBlock({
     // longer sticky, so this no longer exists to free a sticky header.)
     <div
       class={cx('tool-call tool-call-subagent', 'border border-border-subtle rounded-xl bg-card shadow-sm overflow-clip transition-[border-color,background,box-shadow] duration-150 hover:border-border hover:bg-control-hover hover:shadow-md forced-colors:border forced-colors:border-[ButtonText]', status, hasPendingAskUser && 'pending-ask-user')}
-      onContextMenu={(e) => { e.preventDefault(); onContextMenu(e as unknown as MouseEvent); }}
+      onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}
     >
       <div
         class={cx('subagent-header min-h-[28px] select-none', isNested && 'subagent-header-nested')}

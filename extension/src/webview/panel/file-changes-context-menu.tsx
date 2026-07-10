@@ -1,8 +1,9 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import type { FileChangeKind } from '../../shared/protocol';
+import { useMenuViewportClamp } from './components/useMenuViewportClamp';
 import { KIND_LABEL, basename } from './file-changes-stats';
 
 export interface FileChangeContextMenuState {
@@ -35,38 +36,17 @@ export function FileChangeContextMenu({
   onSetFileRead: (path: string, read: boolean) => void;
   onClose: () => void;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ top: menu.y, left: menu.x });
   const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Clamp to viewport after first paint so the corrected position is what the
-  // user first sees (mirrors the transcript ContextMenu).
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const margin = 4;
-    const width = node.offsetWidth;
-    const height = node.offsetHeight;
-    let top = menu.y;
-    let left = menu.x;
-    if (top + height > window.innerHeight - margin) {
-      const flipped = menu.y - height;
-      top = flipped >= margin ? flipped : Math.max(margin, window.innerHeight - margin - height);
-    }
-    if (left + width > window.innerWidth - margin) {
-      const flipped = menu.x - width;
-      left = flipped >= margin ? flipped : Math.max(margin, window.innerWidth - margin - width);
-    }
-    top = Math.max(margin, top);
-    left = Math.max(margin, left);
-    setPos({ top, left });
-  }, [menu.x, menu.y]);
+  const { ref, pos } = useMenuViewportClamp({
+    x: menu.x,
+    y: menu.y,
+  });
 
-  // Focus the first item on open; clear the copied-feedback timer on close.
+  // Clear the copied-feedback timer when the menu closes.
   useEffect(() => {
-    ref.current?.querySelector<HTMLButtonElement>('button.context-menu-item')?.focus();
     return () => {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
     };

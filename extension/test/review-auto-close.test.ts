@@ -48,7 +48,7 @@ test('review-auto-close: a fresh done transition on an open tab is closed once',
 });
 
 test('review-auto-close: a done session that is not an open tab is not closed, but is remembered', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
     incoming: [],
     openTabPaths: [],
     runningPaths: [],
@@ -89,7 +89,7 @@ test('review-auto-close: a running session is not closed while running, but clos
 
 test('review-auto-close: a pending tab is never closed', () => {
   const pending = `${PENDING_SESSION_PREFIX}1-abc`;
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
     incoming: [summary(pending, false)],
     openTabPaths: [pending],
     runningPaths: [],
@@ -125,7 +125,7 @@ test('review-auto-close: flip back to not-done forgets, so a later done re-close
 });
 
 test('review-auto-close: multiple fresh done transitions close together', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
     incoming: [summary('/a', false), summary('/b', false)],
     openTabPaths: ['/a', '/b'],
     runningPaths: [],
@@ -143,7 +143,7 @@ test('review-auto-close: a pinned tab with a fresh done transition is closed (pi
   // `pinnedTabPaths`. The host's `CloseSession` command drops them from
   // `pinnedTabPaths` via `evictSession`, so a done review on a pinned tab
   // unpins + closes it, matching the user's cleanup intent.
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
     incoming: [summary('/p', false)],
     openTabPaths: ['/p'],
     runningPaths: [],
@@ -157,7 +157,7 @@ test('review-auto-close: a pinned tab with a fresh done transition is closed (pi
 });
 
 test('review-auto-close: a session missing from the incoming list is left alone', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
     incoming: [summary('/a', false)],
     openTabPaths: ['/a'],
     runningPaths: [],

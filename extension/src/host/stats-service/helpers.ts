@@ -81,10 +81,6 @@ export function toPersistedSessionState(state: PersistableSessionState): Persist
   };
 }
 
-export function isTaskBoundaryIntent(value: unknown): value is Exclude<TaskBoundaryIntent, null> {
-  return value === 'new_task' || value === 'continue_task';
-}
-
 export function appendUnique<TValue>(values: TValue[], nextValues: TValue[]): TValue[] {
   return [...new Set([...values, ...nextValues])];
 }

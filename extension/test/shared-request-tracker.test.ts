@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { RequestTracker, isCancelledError } from '../src/shared/request-tracker';
+import { RequestTracker } from '../src/shared/request-tracker';
 
 /**
  * `RequestTracker` is a promise + timeout bookkeeping map keyed by request id.
@@ -168,23 +168,6 @@ test('rejectAll detaches abort listeners (a later abort does not throw)', async 
   // Subsequent resolves/rejects are no-ops.
   assert.equal(tracker.resolve('a', 'x'), false);
   assert.equal(tracker.reject('b', new Error('x')), false);
-});
-
-test('isCancelledError recognises cancel errors produced by the tracker', () => {
-  // Brief E/H seam: distinguish a cancel from a backend failure when mapping
-  // to a user-facing message.
-  const tracker = new RequestTracker<string>();
-  return assert.rejects(
-    (async () => {
-      const p = tracker.create('id', LONG_TIMEOUT);
-      tracker.cancel('id', 'user interrupted');
-      await p;
-    })(),
-    (err: unknown) => {
-      assert.equal(isCancelledError(err), true);
-      return true;
-    },
-  );
 });
 
 test('create honours a per-call timeout budget (override) — fires at the given budget', async () => {

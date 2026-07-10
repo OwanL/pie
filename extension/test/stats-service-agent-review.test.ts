@@ -292,8 +292,8 @@ test('onSessionListChanged records agent-review analytics on a fresh done transi
   const context = {
     globalState: { update: async () => undefined },
     workspaceState: { update: async () => undefined },
-  } as any; // eslint-disable-line @typescript-eslint/no-explicit-any
-  const backend = { request: async () => ({}) } as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  } as any;  
+  const backend = { request: async () => ({}) } as any;  
   const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
 
   const recordAgentReviewCalls: Array<{ sessionPath: string; review: Record<string, unknown> }> = [];
@@ -382,8 +382,8 @@ test('onSessionListChanged applies defaults for missing review fields on a done 
   const context = {
     globalState: { update: async () => undefined },
     workspaceState: { update: async () => undefined },
-  } as any; // eslint-disable-line @typescript-eslint/no-explicit-any
-  const backend = { request: async () => ({}) } as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  } as any;  
+  const backend = { request: async () => ({}) } as any;  
   const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
 
   const recordAgentReviewCalls: Array<{ sessionPath: string; review: Record<string, unknown> }> = [];

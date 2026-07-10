@@ -4,27 +4,19 @@ import type {
   ToolCall,
   UserContentPart,
 } from '../../shared/protocol';
-import { cloneToolCall, isEmptyToolCallInput } from '../../shared/chat-message-parts';
+import {
+  buildAssistantParts,
+  cloneToolCall,
+  isEmptyToolCallInput,
+} from '../../shared/chat-message-parts';
 
 export function ensureAssistantParts(message: ChatMessage): ChatMessagePart[] {
   if (message.parts) {
     return message.parts;
   }
 
-  const parts: ChatMessagePart[] = [];
-
-  if (message.thinking) {
-    parts.push({ kind: 'reasoning', text: message.thinking });
-  }
-  for (const toolCall of message.toolCalls ?? []) {
-    parts.push({ kind: 'toolCall', toolCall: cloneToolCall(toolCall) });
-  }
-  if (message.markdown) {
-    parts.push({ kind: 'text', text: message.markdown });
-  }
-
-  message.parts = parts;
-  return parts;
+  message.parts = buildAssistantParts(message);
+  return message.parts;
 }
 
 export function withAssistantParts(message: ChatMessage): ChatMessage {

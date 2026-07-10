@@ -248,16 +248,8 @@ export function pieLog(
   appendToConsole(level, scope, message, data);
 }
 
-export function pieTrace(scope: string, message: string, data?: Record<string, unknown>): void {
-  pieLog('trace', scope, message, data);
-}
-
 export function pieDebug(scope: string, message: string, data?: Record<string, unknown>): void {
   pieLog('debug', scope, message, data);
-}
-
-export function pieInfo(scope: string, message: string, data?: Record<string, unknown>): void {
-  pieLog('info', scope, message, data);
 }
 
 export function pieWarn(scope: string, message: string, data?: Record<string, unknown>): void {

@@ -30,6 +30,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   openTabPaths: [],
   pinnedTabPaths: [],
   runningSessionPaths: [],
+  startingModelSessionPaths: [],
   unreadFinishedSessionPaths: [],
   activeSession: null,
   transcript: [],

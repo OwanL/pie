@@ -140,8 +140,3 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
     return new Map();
   }
 }
-
-/** Test hook: drop the in-memory cache. */
-export function _clearSubagentProfilesCache(): void {
-  cache.clear();
-}

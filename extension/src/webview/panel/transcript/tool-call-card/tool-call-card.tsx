@@ -3,6 +3,7 @@
 
 import type { ToolCall } from '../../../../shared/protocol';
 import { cx } from '../../utils/cx';
+import { toMouseEvent } from '../../utils/preact-events';
 import { getToolCallPresentation } from '../../tool-call-summary';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 import { CollapsibleCloseFooter } from '../../components/collapsible-close-footer';
@@ -257,7 +258,7 @@ export function ToolCallCard({
         presentation.variant === 'skill-load' && 'bg-accent/5 skill-load-glow',
         className,
       )}
-      onContextMenu={(e) => { e.preventDefault(); onContextMenu(e as unknown as MouseEvent); }}
+      onContextMenu={(e) => { e.preventDefault(); onContextMenu(toMouseEvent(e)); }}
     >
       <ToolCallHeader
         open={open}

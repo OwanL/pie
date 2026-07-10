@@ -51,6 +51,14 @@ export interface ViewState {
   /** Pinned tab paths (browser-style: pinned tabs cluster at the left). */
   pinnedTabPaths: string[];
   runningSessionPaths: string[];
+  /** Session paths whose running turn is in the 'starting model' phase —
+   *  pruning already succeeded but the model has not yet started streaming
+   *  (the post-pruning, pre-commit window, which includes concurrency-limit /
+   *  rate-limit waits). The tab bar renders a muted dot for these instead of
+   *  the bright pulsing running dot, so an intended wait is visually distinct
+   *  from active streaming. Derived host-side from `prepassBySession` (phase
+   *  'succeeded' while a promoted op exists). */
+  startingModelSessionPaths: string[];
   unreadFinishedSessionPaths: string[];
   activeSession: SessionSummary | null;
   transcript: ChatMessage[];

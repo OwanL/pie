@@ -7,6 +7,7 @@ import { useMemo } from 'preact/hooks';
 
 import type { ChatMessage, ChatMessagePart, ChatPrefs } from '../../../../shared/protocol';
 import { renderMarkdown } from '../../markdown';
+import { toMouseEvent } from '../../utils/preact-events';
 import { BufferedTextPart } from '../buffered-text-part';
 import {
   assistantPartsFromMessage,
@@ -148,7 +149,7 @@ function AssistantParts({
             // for the whole streaming duration (see use-buffered-text).
             streaming={isCurrentlyStreaming && index === parts.length - 1}
             onContextMenu={(e) => {
-              onContextMenu('message', getMessageRaw(), e as unknown as MouseEvent);
+              onContextMenu('message', getMessageRaw(), toMouseEvent(e));
             }}
           />
         );
@@ -279,7 +280,7 @@ export function MessageContent({
       dangerouslySetInnerHTML={{ __html: html }}
       onContextMenu={role === 'assistant' ? (e) => {
         e.preventDefault();
-        onContextMenu('message', getMessageRaw(), e as unknown as MouseEvent);
+        onContextMenu('message', getMessageRaw(), toMouseEvent(e));
       } : undefined}
     />
   );

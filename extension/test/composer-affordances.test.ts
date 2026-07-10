@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   describeImagePasteAffordance,
-  describeRunAnalyticsStatus,
   shouldHandleGlobalComposerPaste,
 } from '../src/webview/panel/composer/affordances';
 
@@ -34,16 +33,6 @@ test('shouldHandleGlobalComposerPaste follows parentElement for text-node-like t
 
 test('shouldHandleGlobalComposerPaste defaults to handling when target cannot use closest', () => {
   assert.equal(shouldHandleGlobalComposerPaste({} as EventTarget), true);
-});
-
-test('describeRunAnalyticsStatus reflects local run-tracking state', () => {
-  assert.equal(describeRunAnalyticsStatus(null), 'Local analytics ready');
-  assert.equal(describeRunAnalyticsStatus({ runId: 'run-open', status: 'open', scored: false }), 'Local analytics tracking');
-  assert.equal(
-    describeRunAnalyticsStatus({ runId: 'run-rate', status: 'closed_unscored', scored: false }),
-    'Local analytics awaiting rating',
-  );
-  assert.equal(describeRunAnalyticsStatus({ runId: 'run-scored', status: 'scored', scored: true }), 'Local analytics scored');
 });
 
 test('describeImagePasteAffordance explains when screenshot paste is available', () => {

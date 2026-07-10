@@ -160,21 +160,21 @@ test('resnapshot retries while streaming, then escalates to a force-reload after
     const resnapshots: number[] = [];
     const reloads: number[] = [];
     let nextRevision = 1;
-    let watchdog!: StateAppliedWatchdog;
-    const deps = fakeDeps({
-      getRunningSessionCount: () => 1, // streaming
-      onResnapshot: () => {
-        // Mirror the real flow: the resnapshot re-posts a fresh revision and
-        // re-arms the watchdog for it.
-        nextRevision += 1;
-        resnapshots.push(nextRevision);
-        watchdog.armStateAppliedWatchdog(nextRevision);
-      },
-      onForceReload: async (revision: number) => {
-        reloads.push(revision);
-      },
-    });
-    watchdog = new StateAppliedWatchdog(deps);
+    const watchdog = new StateAppliedWatchdog(
+      fakeDeps({
+        getRunningSessionCount: () => 1, // streaming
+        onResnapshot: () => {
+          // Mirror the real flow: the resnapshot re-posts a fresh revision and
+          // re-arms the watchdog for it.
+          nextRevision += 1;
+          resnapshots.push(nextRevision);
+          watchdog.armStateAppliedWatchdog(nextRevision);
+        },
+        onForceReload: async (revision: number) => {
+          reloads.push(revision);
+        },
+      }),
+    );
 
     watchdog.armStateAppliedWatchdog(nextRevision); // rev 1
     timers.advance(2_500); // first timeout -> resnapshot #1, re-arm rev 2
@@ -205,19 +205,19 @@ test('a mid-stream ack resets the resnapshot retry budget so a slow-but-function
     const resnapshots: number[] = [];
     const reloads: number[] = [];
     let nextRevision = 10;
-    let watchdog!: StateAppliedWatchdog;
-    const deps = fakeDeps({
-      getRunningSessionCount: () => 1,
-      onResnapshot: () => {
-        nextRevision += 1;
-        resnapshots.push(nextRevision);
-        watchdog.armStateAppliedWatchdog(nextRevision);
-      },
-      onForceReload: async (revision: number) => {
-        reloads.push(revision);
-      },
-    });
-    watchdog = new StateAppliedWatchdog(deps);
+    const watchdog = new StateAppliedWatchdog(
+      fakeDeps({
+        getRunningSessionCount: () => 1,
+        onResnapshot: () => {
+          nextRevision += 1;
+          resnapshots.push(nextRevision);
+          watchdog.armStateAppliedWatchdog(nextRevision);
+        },
+        onForceReload: async (revision: number) => {
+          reloads.push(revision);
+        },
+      }),
+    );
 
     watchdog.armStateAppliedWatchdog(nextRevision); // rev 10
     timers.advance(2_500); // resnapshot #1 -> re-arm rev 11
@@ -246,23 +246,23 @@ test('escalated force-reloads while streaming are throttled to STATE_APPLIED_REL
   try {
     const reloads: number[] = [];
     let nextRevision = 100;
-    let watchdog!: StateAppliedWatchdog;
-    const deps = fakeDeps({
-      getRunningSessionCount: () => 1,
-      onResnapshot: () => {
-        nextRevision += 1;
-        watchdog.armStateAppliedWatchdog(nextRevision);
-      },
-      onForceReload: async (revision: number) => {
-        reloads.push(revision);
-        // Reload resets the bridge; simulate the post-reload re-arm with a
-        // fresh revision and a reset resnapshot budget.
-        watchdog.resetResnapshotFlag();
-        nextRevision += 1;
-        watchdog.armStateAppliedWatchdog(nextRevision);
-      },
-    });
-    watchdog = new StateAppliedWatchdog(deps);
+    const watchdog = new StateAppliedWatchdog(
+      fakeDeps({
+        getRunningSessionCount: () => 1,
+        onResnapshot: () => {
+          nextRevision += 1;
+          watchdog.armStateAppliedWatchdog(nextRevision);
+        },
+        onForceReload: async (revision: number) => {
+          reloads.push(revision);
+          // Reload resets the bridge; simulate the post-reload re-arm with a
+          // fresh revision and a reset resnapshot budget.
+          watchdog.resetResnapshotFlag();
+          nextRevision += 1;
+          watchdog.armStateAppliedWatchdog(nextRevision);
+        },
+      }),
+    );
 
     watchdog.armStateAppliedWatchdog(nextRevision); // rev 100
     // Burn through the resnapshot budget -> first reload.

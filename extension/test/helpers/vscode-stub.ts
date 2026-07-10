@@ -7,7 +7,7 @@
 // Import this helper BEFORE importing any module that uses `vscode` at runtime.
 // Node runs test files in isolated processes, so this global patch is scoped to
 // the importing test file.
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 import Module from 'node:module';
 
 const vscodeStub: any = {

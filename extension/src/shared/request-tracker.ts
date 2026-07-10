@@ -44,13 +44,6 @@ export function cancelledError(id: string, reason?: string): CancelError {
   return new CancelError(reason ? `Request ${id} was cancelled: ${reason}` : `Request ${id} was cancelled.`);
 }
 
-/** True if `err` is a cancel error produced by {@link cancelledError} / the
- *  tracker's abort path. Brief E/H can use this to distinguish a cancel from a
- *  backend failure when mapping to a user-facing message. */
-export function isCancelledError(err: unknown): boolean {
-  return err instanceof CancelError || (err instanceof Error && err.name === 'CancelError');
-}
-
 export class RequestTracker<TResult = unknown> {
   private readonly pending = new Map<
     string,

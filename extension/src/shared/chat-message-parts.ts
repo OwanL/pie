@@ -103,7 +103,7 @@ export function upsertAssistantToolPart(parts: ChatMessagePart[], toolCall: Tool
   parts[index] = { kind: 'toolCall', toolCall: merged };
 }
 
-export function legacyAssistantParts(message: ChatMessage): ChatMessagePart[] {
+export function buildAssistantParts(message: ChatMessage): ChatMessagePart[] {
   const parts: ChatMessagePart[] = [];
 
   if (message.thinking) {
@@ -117,6 +117,10 @@ export function legacyAssistantParts(message: ChatMessage): ChatMessagePart[] {
   }
 
   return parts;
+}
+
+export function legacyAssistantParts(message: ChatMessage): ChatMessagePart[] {
+  return buildAssistantParts(message);
 }
 
 export function assistantPartsFromMessage(message: ChatMessage): ChatMessagePart[] | undefined {

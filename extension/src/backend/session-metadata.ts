@@ -3,7 +3,6 @@ import * as fs from 'node:fs/promises';
 import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../shared/session-name';
 import { parseJsonOrThrow } from '../shared/error-message';
 import type {
-  ChatMessage,
   ModelInfo,
   SessionSummary,
 } from '../shared/protocol';
@@ -11,7 +10,7 @@ import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs
 import type { SdkModule } from './sdk';
 import type { SessionContext } from './server-types';
 import { loadSubagentProfiles } from './subagent-profiles';
-import { mapTranscript, summarizeSession, type SessionEntryLike } from './transcript';
+import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
 
 function textFromSessionMessageContent(content: unknown): string {
@@ -117,11 +116,6 @@ export function buildCurrentSummary(
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
   };
   return mergeReviewIntoSummary(summary, readReviews());
-}
-
-export function buildTranscript(context: SessionContext): ChatMessage[] {
-  const entries = context.session.sessionManager.getBranch() ?? [];
-  return mapTranscript(entries);
 }
 
 export interface ActiveModelInfo {

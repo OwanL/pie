@@ -341,7 +341,7 @@ export function handlePreflightSuperseded(state: ArchState, event: Extract<Event
 
     draft.sessions.runningSessionPaths = addToArray(draft.sessions.runningSessionPaths, sessionPath);
 
-    if (draft.settings.noticeKind === 'prepass-timeout') {
+    if (draft.settings.noticeKind === 'prepass-timeout' || draft.settings.noticeKind === 'model-start-timeout') {
       draft.settings.notice = null;
       draft.settings.noticeKind = null;
       draft.settings.noticeRaw = null;

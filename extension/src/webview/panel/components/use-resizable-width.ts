@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState } from 'preact/hooks';
 import type { RefObject } from 'preact';
 
+import { bindResizeMouseup } from './bind-resize-mouseup';
+
 export interface UseResizableWidthOptions {
   /** Minimum width in px. Default 160. */
   minWidth?: number;
@@ -68,16 +70,7 @@ export function useResizableWidth<T extends HTMLElement = HTMLElement>(
         const next = Math.max(minWidth, Math.min(maxW, Math.round(startW + delta)));
         setWidth(next);
       };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
+      bindResizeMouseup(onMove, 'col-resize');
     },
     [minWidth, maxWidth, onResizeStart],
   );

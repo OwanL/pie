@@ -1,5 +1,3 @@
-import * as crypto from 'node:crypto';
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 export const DEFAULT_WEBVIEW_VIEW_NAME = 'panel';
@@ -24,15 +22,3 @@ export function isHotReloadAssetFileName(
   return !fileName.endsWith('.map');
 }
 
-export async function readWebviewAssetVersion(
-  baseDir: string,
-  _viewName = DEFAULT_WEBVIEW_VIEW_NAME,
-): Promise<string> {
-  const manifestPath = path.join(baseDir, '.vite', 'manifest.json');
-  try {
-    const manifestText = await fs.readFile(manifestPath, 'utf8');
-    return crypto.createHash('sha256').update(manifestText).digest('hex').slice(0, 16);
-  } catch {
-    return 'no-manifest';
-  }
-}

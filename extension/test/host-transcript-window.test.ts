@@ -6,7 +6,6 @@ import {
   buildTranscriptPageRequest,
   cullTranscriptWindowAroundActiveTurn,
   normalizeTranscriptWindow,
-  trimTranscriptWindowTail,
   withDecrementedWindowCounts,
   withIncrementedWindowCounts,
 } from '../src/host/core/transcript-window';
@@ -92,36 +91,6 @@ test('window count helpers handle undefined and preserve partial-window flags', 
     hasOlder: true,
     hasNewer: true,
     isPartial: true,
-  });
-});
-
-test('trimTranscriptWindowTail keeps small transcripts and trims larger ones from the front', () => {
-  const smallTranscript = [message('m1')];
-  assert.deepEqual(trimTranscriptWindowTail(smallTranscript, baseWindow, 5), {
-    transcript: smallTranscript,
-    transcriptWindow: normalizeTranscriptWindow(smallTranscript, baseWindow),
-  });
-
-  const transcript = [message('m1'), message('m2'), message('m3'), message('m4')];
-  const trimmed = trimTranscriptWindowTail(transcript, {
-    totalCount: 10,
-    loadedStart: 3,
-    loadedEnd: 7,
-    hasOlder: false,
-    hasNewer: true,
-    isPartial: true,
-    hasUserMessages: false,
-  }, 2);
-
-  assert.deepEqual(trimmed.transcript.map((entry) => entry.id), ['m3', 'm4']);
-  assert.deepEqual(trimmed.transcriptWindow, {
-    totalCount: 10,
-    loadedStart: 5,
-    loadedEnd: 7,
-    hasOlder: true,
-    hasNewer: true,
-    isPartial: true,
-    hasUserMessages: false,
   });
 });
 

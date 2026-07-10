@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, ToolResultPruningSettings } from '../../../shared/protocol';
-import { filterEnabledProviders, orderModelsForPicker } from './model-list';
+import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
 
 import {
   computeKeepCatalog,
@@ -190,6 +190,304 @@ interface SearchToggleEntry {
 
 type SearchEntry = SearchJumpEntry | SearchToggleEntry;
 
+/** Build the searchable index of category jumps, continuous-control jumps,
+ *  and boolean toggles that powers the settings search box. Kept as a pure
+ *  helper so the component's control flow stays focused on rendering. */
+function buildSettingsSearchIndex(
+  visibleTabs: typeof TAB_DEFS,
+  availableExtensions: ExtensionInfo[],
+  providers: string[],
+  prefs: ChatPrefs,
+  onSetPrefs: (p: Partial<ChatPrefs>) => void,
+): SearchEntry[] {
+  const entries: SearchEntry[] = [];
+  const extIds = new Set(availableExtensions.map((e) => e.id));
+  const hasSkillPruner = extIds.has('skill-pruner');
+  const hasSubagent = extIds.has('subagent');
+  const hasToolResultPruner = extIds.has('tool-result-pruner');
+  const hasWarmBash = extIds.has('warm-bash');
+
+  // Category jump entries (one per visible tab).
+  for (const tab of visibleTabs) {
+    entries.push({
+      type: 'jump',
+      id: `cat:${tab.id}`,
+      label: tab.label,
+      haystack: tab.label.toLowerCase(),
+      tab: tab.id,
+    });
+  }
+
+  // Continuous setting jumps.
+  const pushSettings = (labels: readonly string[], tab: SettingsTab, expandExt?: string) => {
+    for (const label of labels) {
+      entries.push({
+        type: 'jump',
+        id: `set:${tab}:${expandExt ?? ''}:${label}`,
+        label,
+        haystack: `${TAB_LABEL[tab]} ${label}`.toLowerCase(),
+        tab,
+        expandExt,
+      });
+    }
+  };
+  if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
+  if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
+  if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
+  if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
+  if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
+  if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'extensions', 'tool-result-pruner');
+
+  // Chat prefs (transcript / alerts / diagnostics).
+  for (const section of CHAT_PREF_MENU_SECTIONS) {
+    for (const item of section.items) {
+      const key = item.key as BooleanPrefKey;
+      entries.push({
+        type: 'toggle',
+        id: `chatpref:${key}`,
+        label: item.label,
+        haystack: `${section.label ?? ''} ${item.label}`.toLowerCase(),
+        checked: !!prefs[key],
+        apply: () => onSetPrefs(toggleChatPref(prefs, key)),
+      });
+    }
+  }
+
+  // Bash fast-path toggle (warm-bash extension).
+  if (hasWarmBash) {
+    entries.push({
+      type: 'toggle',
+      id: 'bash:fastpath',
+      label: 'Fast path (no shell for simple commands)',
+      haystack: 'bash fast path no shell simple commands'.toLowerCase(),
+      checked: !!prefs.bashFastPath,
+      apply: () => onSetPrefs({ bashFastPath: !prefs.bashFastPath }),
+    });
+  }
+
+  // Extension enable toggles.
+  for (const ext of availableExtensions) {
+    const checked = prefs.extensionToggles[ext.id] !== false;
+    entries.push({
+      type: 'toggle',
+      id: `ext:${ext.id}`,
+      label: ext.label,
+      haystack: `extensions ${ext.label} ${ext.description ?? ''}`.toLowerCase(),
+      checked,
+      apply: () => onSetPrefs(setExtensionEnabled(prefs, ext.id, !checked)),
+    });
+  }
+
+  // Skill-pruner "show summary" toggle (only when the extension is present).
+  if (hasSkillPruner) {
+    entries.push({
+      type: 'toggle',
+      id: 'pruning:show',
+      label: 'Show pruning summary',
+      haystack: 'extensions skill-pruner show pruning summary'.toLowerCase(),
+      checked: !!prefs.showPruningMessages,
+      apply: () => onSetPrefs(toggleChatPref(prefs, 'showPruningMessages')),
+    });
+  }
+
+  // Subagent toggles (only when the extension is present).
+  if (hasSubagent) {
+    entries.push({
+      type: 'toggle',
+      id: 'subagent:parentmodel',
+      label: 'Always use parent model',
+      haystack: 'subagent always use parent model'.toLowerCase(),
+      checked: !!prefs.subagentAlwaysParentModel,
+      apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentAlwaysParentModel')),
+    });
+    for (const def of NESTED_LABELS) {
+      const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
+      entries.push({
+        type: 'toggle',
+        id: `subagent:nested:${def.key}`,
+        label: `Allow ${def.label}`,
+        haystack: `subagent nested bucket allowlist allow ${def.label}`.toLowerCase(),
+        checked: enabled,
+        apply: () => onSetPrefs(setNestedAllowedBucket(prefs, def.key, !enabled)),
+      });
+    }
+  }
+
+  // Provider enable toggles.
+  for (const provider of providers) {
+    const checked = prefs.providerToggles[provider] !== false;
+    entries.push({
+      type: 'toggle',
+      id: `provider:${provider}`,
+      label: provider,
+      haystack: `providers ${provider}`.toLowerCase(),
+      checked,
+      apply: () => onSetPrefs(setProviderEnabled(prefs, provider, !checked)),
+    });
+  }
+
+  return entries;
+}
+
+interface SettingsSearchResultsProps {
+  query: string;
+  jumps: SearchJumpEntry[];
+  toggles: SearchToggleEntry[];
+  onJump: (tab: SettingsTab, expandExt?: string) => void;
+}
+
+/** Renders the flat search-result list (jumps + toggles + empty state). */
+function SettingsSearchResults({ query, jumps, toggles, onJump }: SettingsSearchResultsProps) {
+  return (
+    <div class="toolbar-settings-search-results">
+      {jumps.length === 0 && toggles.length === 0 && (
+        <div class="toolbar-settings-search-empty">No settings match “{query}”.</div>
+      )}
+      {jumps.map((entry) => (
+        <button
+          key={entry.id}
+          class="toolbar-settings-search-result toolbar-settings-search-result-jump"
+          type="button"
+          onClick={() => onJump(entry.tab, entry.expandExt)}
+        >
+          <span class="toolbar-settings-search-result-label">{entry.label}</span>
+          <span class="toolbar-settings-search-result-meta">{TAB_LABEL[entry.tab]}</span>
+        </button>
+      ))}
+      {toggles.map((entry) => (
+        <button
+          key={entry.id}
+          class={`toolbar-settings-item toolbar-settings-search-result${entry.checked ? ' checked' : ''}`}
+          type="button"
+          role="checkbox"
+          aria-checked={entry.checked}
+          onClick={() => entry.apply()}
+        >
+          <span class="toolbar-settings-item-check" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={entry.checked ? '' : 'opacity:0'}>
+              <polyline points="2.5,6.5 5,9 10.5,3.5" />
+            </svg>
+          </span>
+          <span class="toolbar-settings-item-label">{entry.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+interface SettingsTabListProps {
+  visibleTabs: typeof TAB_DEFS;
+  effectiveTab: SettingsTab;
+  tabpanelId: string;
+  tablistRef: { current: HTMLDivElement | null };
+  onKeyDown: (event: KeyboardEvent) => void;
+  onSelect: (tab: SettingsTab) => void;
+}
+
+/** Renders the vertical tab strip for switching settings categories. */
+function SettingsTabList({ visibleTabs, effectiveTab, tabpanelId, tablistRef, onKeyDown, onSelect }: SettingsTabListProps) {
+  return (
+    <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-orientation="vertical" aria-label="Settings categories" onKeyDown={onKeyDown}>
+      {visibleTabs.map((tab) => {
+        const active = tab.id === effectiveTab;
+        return (
+          <button
+            key={tab.id}
+            id={`toolbar-settings-tab-${tab.id}`}
+            class={`toolbar-settings-tab${active ? ' active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            aria-controls={tabpanelId}
+            tabindex={active ? 0 : -1}
+            data-tab={tab.id}
+            onClick={() => onSelect(tab.id)}
+          >
+            <span class="toolbar-settings-tab-icon" aria-hidden="true">
+              <TabIcon id={tab.id} />
+            </span>
+            <span class="toolbar-settings-tab-label">{tab.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+interface SettingsTabBodyProps {
+  effectiveTab: SettingsTab;
+  expandedExt: string | null;
+  setExpandedExt: (id: string | null) => void;
+  prefs: ChatPrefs;
+  onSetPrefs: (p: Partial<ChatPrefs>) => void;
+  pruningSettings: PruningSettings;
+  onSetPruningSettings: (s: Partial<PruningSettings>) => void;
+  toolResultPruningSettings: ToolResultPruningSettings;
+  onSetToolResultPruningSettings: (s: Partial<ToolResultPruningSettings>) => void;
+  providers: string[];
+  providerGateStats: ProviderGateStats;
+  modelEntries: ModelPickerEntry[];
+  availableModels: ModelInfo[];
+  availableExtensions: ExtensionInfo[];
+  skillCatalog: string[];
+  toolCatalog: string[];
+}
+
+/** Renders the content of the active settings tab. */
+function SettingsTabBody(props: SettingsTabBodyProps) {
+  const {
+    effectiveTab,
+    expandedExt,
+    setExpandedExt,
+    prefs,
+    onSetPrefs,
+    pruningSettings,
+    onSetPruningSettings,
+    toolResultPruningSettings,
+    onSetToolResultPruningSettings,
+    modelEntries,
+    availableModels,
+    availableExtensions,
+    providers,
+    providerGateStats,
+    skillCatalog,
+    toolCatalog,
+  } = props;
+  return (
+    <>
+      {effectiveTab === 'chat' && (
+        <>
+          <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} />
+          <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
+        </>
+      )}
+      {effectiveTab === 'appearance' && (
+        <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
+      )}
+      {effectiveTab === 'extensions' && (
+        <ExtensionsSection
+          availableExtensions={availableExtensions}
+          prefs={prefs}
+          onSetPrefs={onSetPrefs}
+          expandedExt={expandedExt}
+          setExpandedExt={setExpandedExt}
+          pruningSettings={pruningSettings}
+          toolResultPruningSettings={toolResultPruningSettings}
+          modelEntries={modelEntries}
+          availableModels={availableModels}
+          skillCatalog={skillCatalog}
+          toolCatalog={toolCatalog}
+          onSetPruningSettings={onSetPruningSettings}
+          onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+        />
+      )}
+      {effectiveTab === 'providers' && (
+        <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
+      )}
+    </>
+  );
+}
+
 export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
@@ -263,135 +561,10 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   // Search index: category jumps + every boolean toggle across all categories,
   // plus jump entries for the continuous (slider/select/stepper/text) controls,
   // so a single search box can find any setting without hunting through tabs.
-  const searchIndex = useMemo<SearchEntry[]>(() => {
-    const entries: SearchEntry[] = [];
-    const extIds = new Set(availableExtensions.map((e) => e.id));
-    const hasSkillPruner = extIds.has('skill-pruner');
-    const hasSubagent = extIds.has('subagent');
-    const hasToolResultPruner = extIds.has('tool-result-pruner');
-    const hasWarmBash = extIds.has('warm-bash');
-
-    // Category jump entries (one per visible tab).
-    for (const tab of visibleTabs) {
-      entries.push({
-        type: 'jump',
-        id: `cat:${tab.id}`,
-        label: tab.label,
-        haystack: tab.label.toLowerCase(),
-        tab: tab.id,
-      });
-    }
-
-    // Continuous setting jumps.
-    const pushSettings = (labels: readonly string[], tab: SettingsTab, expandExt?: string) => {
-      for (const label of labels) {
-        entries.push({
-          type: 'jump',
-          id: `set:${tab}:${expandExt ?? ''}:${label}`,
-          label,
-          haystack: `${TAB_LABEL[tab]} ${label}`.toLowerCase(),
-          tab,
-          expandExt,
-        });
-      }
-    };
-    if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
-    if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
-    if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
-    if (hasSkillPruner) pushSettings(SKILL_PRUNER_SETTING_LABELS, 'extensions', 'skill-pruner');
-    if (hasSubagent) pushSettings(SUBAGENT_SETTING_LABELS, 'extensions', 'subagent');
-    if (hasToolResultPruner) pushSettings(TOOL_RESULT_PRUNER_SETTING_LABELS, 'extensions', 'tool-result-pruner');
-
-    // Chat prefs (transcript / alerts / diagnostics).
-    for (const section of CHAT_PREF_MENU_SECTIONS) {
-      for (const item of section.items) {
-        const key = item.key as BooleanPrefKey;
-        entries.push({
-          type: 'toggle',
-          id: `chatpref:${key}`,
-          label: item.label,
-          haystack: `${section.label ?? ''} ${item.label}`.toLowerCase(),
-          checked: !!prefs[key],
-          apply: () => onSetPrefs(toggleChatPref(prefs, key)),
-        });
-      }
-    }
-
-    // Bash fast-path toggle (warm-bash extension).
-    if (hasWarmBash) {
-      entries.push({
-        type: 'toggle',
-        id: 'bash:fastpath',
-        label: 'Fast path (no shell for simple commands)',
-        haystack: 'bash fast path no shell simple commands'.toLowerCase(),
-        checked: !!prefs.bashFastPath,
-        apply: () => onSetPrefs({ bashFastPath: !prefs.bashFastPath }),
-      });
-    }
-
-    // Extension enable toggles.
-    for (const ext of availableExtensions) {
-      const checked = prefs.extensionToggles[ext.id] !== false;
-      entries.push({
-        type: 'toggle',
-        id: `ext:${ext.id}`,
-        label: ext.label,
-        haystack: `extensions ${ext.label} ${ext.description ?? ''}`.toLowerCase(),
-        checked,
-        apply: () => onSetPrefs(setExtensionEnabled(prefs, ext.id, !checked)),
-      });
-    }
-
-    // Skill-pruner "show summary" toggle (only when the extension is present).
-    if (hasSkillPruner) {
-      entries.push({
-        type: 'toggle',
-        id: 'pruning:show',
-        label: 'Show pruning summary',
-        haystack: 'extensions skill-pruner show pruning summary'.toLowerCase(),
-        checked: !!prefs.showPruningMessages,
-        apply: () => onSetPrefs(toggleChatPref(prefs, 'showPruningMessages')),
-      });
-    }
-
-    // Subagent toggles (only when the extension is present).
-    if (hasSubagent) {
-      entries.push({
-        type: 'toggle',
-        id: 'subagent:parentmodel',
-        label: 'Always use parent model',
-        haystack: 'subagent always use parent model'.toLowerCase(),
-        checked: !!prefs.subagentAlwaysParentModel,
-        apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentAlwaysParentModel')),
-      });
-      for (const def of NESTED_LABELS) {
-        const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
-        entries.push({
-          type: 'toggle',
-          id: `subagent:nested:${def.key}`,
-          label: `Allow ${def.label}`,
-          haystack: `subagent nested bucket allowlist allow ${def.label}`.toLowerCase(),
-          checked: enabled,
-          apply: () => onSetPrefs(setNestedAllowedBucket(prefs, def.key, !enabled)),
-        });
-      }
-    }
-
-    // Provider enable toggles.
-    for (const provider of providers) {
-      const checked = prefs.providerToggles[provider] !== false;
-      entries.push({
-        type: 'toggle',
-        id: `provider:${provider}`,
-        label: provider,
-        haystack: `providers ${provider}`.toLowerCase(),
-        checked,
-        apply: () => onSetPrefs(setProviderEnabled(prefs, provider, !checked)),
-      });
-    }
-
-    return entries;
-  }, [visibleTabs, availableExtensions, providers, prefs, onSetPrefs]);
+  const searchIndex = useMemo<SearchEntry[]>(
+    () => buildSettingsSearchIndex(visibleTabs, availableExtensions, providers, prefs, onSetPrefs),
+    [visibleTabs, availableExtensions, providers, prefs, onSetPrefs],
+  );
 
   const q = query.trim().toLowerCase();
   const searchResults = useMemo(() => {
@@ -571,30 +744,14 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
 
           <div class="toolbar-settings-layout">
             {!searching && (
-              <div ref={tablistRef} class="toolbar-settings-tabs" role="tablist" aria-orientation="vertical" aria-label="Settings categories" onKeyDown={onTablistKeyDown}>
-                {visibleTabs.map((tab) => {
-                  const active = tab.id === effectiveTab;
-                  return (
-                    <button
-                      key={tab.id}
-                      id={`toolbar-settings-tab-${tab.id}`}
-                      class={`toolbar-settings-tab${active ? ' active' : ''}`}
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
-                      aria-controls={tabpanelId}
-                      tabindex={active ? 0 : -1}
-                      data-tab={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                    >
-                      <span class="toolbar-settings-tab-icon" aria-hidden="true">
-                        <TabIcon id={tab.id} />
-                      </span>
-                      <span class="toolbar-settings-tab-label">{tab.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+              <SettingsTabList
+                visibleTabs={visibleTabs}
+                effectiveTab={effectiveTab}
+                tabpanelId={tabpanelId}
+                tablistRef={tablistRef}
+                onKeyDown={onTablistKeyDown}
+                onSelect={setActiveTab}
+              />
             )}
 
             <div
@@ -604,71 +761,31 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
               aria-labelledby={`toolbar-settings-tab-${effectiveTab}`}
             >
             {searching ? (
-              <div class="toolbar-settings-search-results">
-                {searchResults.jumps.length === 0 && searchResults.toggles.length === 0 && (
-                  <div class="toolbar-settings-search-empty">No settings match “{query}”.</div>
-                )}
-                {searchResults.jumps.map((entry) => (
-                  <button
-                    key={entry.id}
-                    class="toolbar-settings-search-result toolbar-settings-search-result-jump"
-                    type="button"
-                    onClick={() => jumpTo(entry.tab, entry.expandExt)}
-                  >
-                    <span class="toolbar-settings-search-result-label">{entry.label}</span>
-                    <span class="toolbar-settings-search-result-meta">{TAB_LABEL[entry.tab]}</span>
-                  </button>
-                ))}
-                {searchResults.toggles.map((entry) => (
-                  <button
-                    key={entry.id}
-                    class={`toolbar-settings-item toolbar-settings-search-result${entry.checked ? ' checked' : ''}`}
-                    type="button"
-                    role="checkbox"
-                    aria-checked={entry.checked}
-                    onClick={() => entry.apply()}
-                  >
-                    <span class="toolbar-settings-item-check" aria-hidden="true">
-                      <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={entry.checked ? '' : 'opacity:0'}>
-                        <polyline points="2.5,6.5 5,9 10.5,3.5" />
-                      </svg>
-                    </span>
-                    <span class="toolbar-settings-item-label">{entry.label}</span>
-                  </button>
-                ))}
-              </div>
+              <SettingsSearchResults
+                query={query}
+                jumps={searchResults.jumps}
+                toggles={searchResults.toggles}
+                onJump={jumpTo}
+              />
             ) : (
-              <>
-                {effectiveTab === 'chat' && (
-                  <>
-                    <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} />
-                    <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
-                  </>
-                )}
-                {effectiveTab === 'appearance' && (
-                  <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
-                )}
-                {effectiveTab === 'extensions' && (
-                  <ExtensionsSection
-                    availableExtensions={availableExtensions}
-                    prefs={prefs}
-                    onSetPrefs={onSetPrefs}
-                    expandedExt={expandedExt}
-                    setExpandedExt={setExpandedExt}
-                    pruningSettings={pruningSettings}
-                    toolResultPruningSettings={toolResultPruningSettings}
-                    modelEntries={modelEntries}
-                    availableModels={availableModels}
-                    skillCatalog={skillCatalog}
-                    toolCatalog={toolCatalog}
-                    onSetPruningSettings={onSetPruningSettings}
-                    onSetToolResultPruningSettings={onSetToolResultPruningSettings}
-                  />
-                )}
-                {effectiveTab === 'providers' && (
-                  <ProvidersSection providers={providers} prefs={prefs} onSetPrefs={onSetPrefs} providerGateStats={providerGateStats} />
-                )}
-              </>
+              <SettingsTabBody
+                effectiveTab={effectiveTab}
+                expandedExt={expandedExt}
+                setExpandedExt={setExpandedExt}
+                prefs={prefs}
+                onSetPrefs={onSetPrefs}
+                pruningSettings={pruningSettings}
+                onSetPruningSettings={onSetPruningSettings}
+                toolResultPruningSettings={toolResultPruningSettings}
+                onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+                modelEntries={modelEntries}
+                availableModels={availableModels}
+                availableExtensions={availableExtensions}
+                providers={providers}
+                providerGateStats={providerGateStats}
+                skillCatalog={skillCatalog}
+                toolCatalog={toolCatalog}
+              />
             )}
           </div>
           </div>

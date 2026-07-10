@@ -135,16 +135,6 @@ export function stripDisabledSectionsFromPrompt(
   return out.replace(/^\n+/, '').replace(/\n{3,}/g, '\n\n');
 }
 
-/** Filter display entries: drop entries whose id is in `disabled` (hidden from
- *  the transcript). Entries without an `id` are always kept. */
-export function filterDisplayEntries(
-  entries: readonly SystemPromptEntry[],
-  disabled: ReadonlySet<string>,
-): SystemPromptEntry[] {
-  if (disabled.size === 0) return entries as SystemPromptEntry[];
-  return entries.filter((e) => !e.id || !disabled.has(e.id)) as SystemPromptEntry[];
-}
-
 /** A shallow clone of `options` sufficient to snapshot it: nested arrays are
  *  never mutated in place by `applySystemPromptTogglesToOptions` (it spreads
  *  the object and reassigns `contextFiles` / `skills` / `appendSystemPrompt` to

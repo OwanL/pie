@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
 import { setBucketModels, setNestedAllowedBucket, setSubagentDropTools, toggleChatPref } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
+import { PickerTag } from '../components/PickerTag';
 import { UiGroupLabel } from './ui-appearance-settings';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -33,7 +34,6 @@ const NESTED_TOGGLE_DEFS: readonly { key: BucketKey; label: string }[] = [
 ];
 
 interface BucketModelsEditorProps {
-  bucket: BucketKey;
   label: string;
   hint: string;
   selected: string[];
@@ -54,7 +54,7 @@ interface BucketModelsEditorProps {
  * remove stale entries — selection-time filtering in the subagent extension
  * drops unavailable models from the pool anyway.
  */
-function BucketModelsEditor({ bucket, label, hint, selected, availableModels, modelEntries, onChange }: BucketModelsEditorProps) {
+function BucketModelsEditor({ label, hint, selected, availableModels, modelEntries, onChange }: BucketModelsEditorProps) {
   const labelFor = (id: string): string => availableModels.find((m) => m.id === id)?.name ?? id;
 
   const availableOptions = useMemo(
@@ -87,20 +87,13 @@ function BucketModelsEditor({ bucket, label, hint, selected, availableModels, mo
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
           {selected.map((id) => (
-            <span key={id} class="toolbar-settings-keep-chip">
-              <span>{labelFor(id)}</span>
-              <button
-                type="button"
-                class="toolbar-settings-keep-chip-remove"
-                aria-label={`Remove ${labelFor(id)} from ${label}`}
-                onClick={() => removeModel(id)}
-              >
-                <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="3" y1="3" x2="10" y2="10" />
-                  <line x1="10" y1="3" x2="3" y2="10" />
-                </svg>
-              </button>
-            </span>
+            <PickerTag
+              key={id}
+              value={id}
+              label={labelFor(id)}
+              removeLabel={`Remove ${labelFor(id)} from ${label}`}
+              onRemove={() => removeModel(id)}
+            />
           ))}
         </div>
       )}
@@ -167,20 +160,13 @@ function DropToolsEditor({ selected, onChange }: DropToolsEditorProps) {
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
           {selected.map((name) => (
-            <span key={name} class="toolbar-settings-keep-chip">
-              <span>{name}</span>
-              <button
-                type="button"
-                class="toolbar-settings-keep-chip-remove"
-                aria-label={`Stop dropping ${name}`}
-                onClick={() => removeTool(name)}
-              >
-                <svg width="12" height="12" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <line x1="3" y1="3" x2="10" y2="10" />
-                  <line x1="10" y1="3" x2="3" y2="10" />
-                </svg>
-              </button>
-            </span>
+            <PickerTag
+              key={name}
+              value={name}
+              label={name}
+              removeLabel={`Stop dropping ${name}`}
+              onRemove={() => removeTool(name)}
+            />
           ))}
         </div>
       )}
@@ -249,7 +235,6 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
       {BUCKET_DEFS.map((def) => (
         <BucketModelsEditor
           key={def.key}
-          bucket={def.key}
           label={def.label}
           hint={def.hint}
           selected={prefs.subagentBuckets[def.key] ?? []}

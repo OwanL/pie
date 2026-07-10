@@ -8,6 +8,7 @@ import type { ChatPrefs, ToolCall } from '../../../../shared/protocol';
 import { renderMarkdown } from '../../markdown';
 import { getToolCallContextType } from '../../chat-prefs';
 import { cx } from '../../utils/cx';
+import { toMouseEvent } from '../../utils/preact-events';
 import {
   formatValueAsHighlightedYaml,
   textFromToolResult,
@@ -259,7 +260,7 @@ function WebSearchCard({
         toolCall.status === 'completed' && 'border-l-success/60',
         justCompleted && 'tool-call-just-completed',
       )}
-      onContextMenu={(e) => { e.preventDefault(); handleContextMenu(e as unknown as MouseEvent); }}
+      onContextMenu={(e) => { e.preventDefault(); handleContextMenu(toMouseEvent(e)); }}
     >
       <ToolCallHeader
         open={open}

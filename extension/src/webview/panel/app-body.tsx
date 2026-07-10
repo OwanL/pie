@@ -145,6 +145,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           openTabPaths={viewState.openTabPaths}
           pinnedTabPaths={viewState.pinnedTabPaths}
           runningSessionPaths={viewState.runningSessionPaths}
+          startingModelSessionPaths={viewState.startingModelSessionPaths}
           unreadFinishedSessionPaths={viewState.unreadFinishedSessionPaths}
           activeSession={viewState.activeSession}
           activeRunSummary={viewState.activeRunSummary}

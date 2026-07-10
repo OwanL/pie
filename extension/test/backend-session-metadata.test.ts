@@ -6,7 +6,6 @@ import test from 'node:test';
 
 import {
   buildCurrentSummary,
-  buildTranscript,
   deriveSessionName,
   listAvailableModels,
   listSessions,
@@ -132,37 +131,6 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   assert.equal(summary.messageCount, 2);
   assert.equal(summary.modelId, 'claude-test');
   assert.equal(summary.thinkingLevel, undefined);
-});
-
-test('buildTranscript maps branch entries into display messages', () => {
-  const transcript = buildTranscript(makeContext({
-    session: {
-      ...makeContext().session,
-      sessionManager: {
-        ...makeContext().session.sessionManager,
-        getBranch: () => [
-          {
-            id: 'user-1',
-            timestamp: '2026-01-01T00:00:00.000Z',
-            type: 'message',
-            message: { role: 'user', content: [{ type: 'text', text: 'Look at this image' }, { type: 'image', data: 'ZmFrZQ==', mimeType: 'image/png' }] },
-          },
-          {
-            id: 'assistant-1',
-            timestamp: '2026-01-01T00:00:01.000Z',
-            type: 'message',
-            message: { role: 'assistant', content: [{ type: 'text', text: 'Done' }] },
-          },
-        ],
-      },
-    },
-  }));
-
-  assert.equal(transcript.length, 2);
-  assert.equal(transcript[0]?.role, 'user');
-  assert.equal(transcript[0]?.userParts?.[1]?.kind, 'image');
-  assert.equal(transcript[1]?.role, 'assistant');
-  assert.equal(transcript[1]?.markdown, 'Done');
 });
 
 test('listAvailableModels derives input kinds and tolerates missing or failing registries', () => {

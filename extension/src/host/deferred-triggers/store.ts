@@ -51,7 +51,7 @@ export interface TriggerOp {
   reason?: string;
 }
 
-export interface ActiveTrigger extends DeferredTriggerView {}
+export type ActiveTrigger = DeferredTriggerView;
 
 /** Resolve the sidecar file path, or undefined when the dir env is unset. */
 export function getTriggersFilePath(): string | undefined {

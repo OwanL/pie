@@ -378,6 +378,28 @@ test('selectViewState: busy is false when no active session even if sessions are
   assert.equal(vs.busy, false);
 });
 
+test('selectViewState: startingModelSessionPaths lists running sessions whose prepass already succeeded (muted-dot signal)', () => {
+  // A running turn whose pruning prepass succeeded but has not yet committed
+  // (first MessageStarted) is in the 'starting model' window — includes
+  // concurrency-limit / rate-limit waits. The tab bar renders a muted dot for
+  // these instead of the bright pulsing running dot.
+  const state = produce(initialArchState, draft => {
+    draft.sessions.runningSessionPaths = ['/s', '/t'];
+    draft.pending.prepassBySession = {
+      '/s': { phase: 'succeeded', latencyMs: 8700 },
+      '/t': { phase: 'running', latencyMs: null },
+    };
+  });
+  const vs = selectViewState(state);
+  // Only '/s' (running + prepass 'succeeded'); '/t' is still pruning.
+  assert.deepEqual(vs.startingModelSessionPaths, ['/s']);
+});
+
+test('selectViewState: startingModelSessionPaths is empty when no running session has a succeeded prepass', () => {
+  const vs = selectViewState(initialArchState);
+  assert.deepEqual(vs.startingModelSessionPaths, []);
+});
+
 test('selectViewState: systemPrompts is empty when no active session', () => {
   const vs = selectViewState(initialArchState);
   assert.deepEqual(vs.systemPrompts, []);
