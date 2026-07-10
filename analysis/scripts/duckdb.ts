@@ -10,6 +10,8 @@ import type {
   PreparedPruningEventRow,
   PreparedPruningSignalRow,
   PreparedToolResultPruningRow,
+  PreparedWarmBashRewriteRow,
+  PreparedWarmBashSummaryRow,
   PreparedRunRow,
   PreparedToolFailureRow,
   PreparedToolUsageRow,
@@ -30,6 +32,7 @@ export const QUERY_FILE_BY_NAME = {
   treatment_comparison: path.resolve(SCRIPT_DIR, '../queries/treatment_comparison.sql'),
   timeline: path.resolve(SCRIPT_DIR, '../queries/timeline.sql'),
   pruning_prepass_cost: path.resolve(SCRIPT_DIR, '../queries/pruning_prepass_cost.sql'),
+  warm_bash: path.resolve(SCRIPT_DIR, '../queries/warm_bash.sql'),
 } as const;
 
 export type NamedQuery = keyof typeof QUERY_FILE_BY_NAME;
@@ -268,6 +271,30 @@ interface DuckDbToolResultPruningRow {
   before_tokens: number;
   after_tokens: number;
   tokens_saved: number;
+}
+
+interface DuckDbWarmBashRewriteRow {
+  run_id: string;
+  session_path_hash: string;
+  timestamp: string;
+  started_day: string;
+  before: string;
+  after: string;
+}
+
+interface DuckDbWarmBashSummaryRow {
+  run_id: string;
+  session_path_hash: string;
+  timestamp: string;
+  started_day: string;
+  fast_path: number;
+  warm: number;
+  fallback: number;
+  pool_size: number;
+  warmup_failures: number;
+  auto_prune_enabled: boolean;
+  fast_path_enabled: boolean;
+  gnu_grep: boolean;
 }
 
 interface DuckDbAgentReviewRow {
@@ -557,6 +584,34 @@ function toDuckDbToolResultPruningRow(row: PreparedToolResultPruningRow): DuckDb
   };
 }
 
+function toDuckDbWarmBashRewriteRow(row: PreparedWarmBashRewriteRow): DuckDbWarmBashRewriteRow {
+  return {
+    run_id: row.runId,
+    session_path_hash: row.sessionPathHash,
+    timestamp: row.timestamp,
+    started_day: row.startedDay,
+    before: row.before,
+    after: row.after,
+  };
+}
+
+function toDuckDbWarmBashSummaryRow(row: PreparedWarmBashSummaryRow): DuckDbWarmBashSummaryRow {
+  return {
+    run_id: row.runId,
+    session_path_hash: row.sessionPathHash,
+    timestamp: row.timestamp,
+    started_day: row.startedDay,
+    fast_path: row.fastPath,
+    warm: row.warm,
+    fallback: row.fallback,
+    pool_size: row.poolSize,
+    warmup_failures: row.warmupFailures,
+    auto_prune_enabled: row.autoPruneEnabled,
+    fast_path_enabled: row.fastPathEnabled,
+    gnu_grep: row.gnuGrep,
+  };
+}
+
 function toDuckDbAgentReviewRow(row: PreparedAgentReviewRow): DuckDbAgentReviewRow {
   return {
     run_id: row.runId,
@@ -604,6 +659,8 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   pruningEventsPath: string;
   pruningSignalsPath: string;
   toolResultPruningPath: string;
+  warmBashRewritesPath: string;
+  warmBashSummariesPath: string;
   agentReviewsPath: string;
   turnThroughputPath: string;
 }> {
@@ -617,6 +674,8 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const pruningEventsPath = path.join(exportsDir, 'pruning-events.json');
   const pruningSignalsPath = path.join(exportsDir, 'pruning-signals.json');
   const toolResultPruningPath = path.join(exportsDir, 'tool-result-pruning.json');
+  const warmBashRewritesPath = path.join(exportsDir, 'warm-bash-rewrites.json');
+  const warmBashSummariesPath = path.join(exportsDir, 'warm-bash-summaries.json');
   const agentReviewsPath = path.join(exportsDir, 'agent-reviews.json');
   const turnThroughputPath = path.join(exportsDir, 'turn-throughput.json');
 
@@ -630,11 +689,13 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(pruningEventsPath, prepared.pruningEvents.map(toDuckDbPruningEventRow)),
     writeJsonFile(pruningSignalsPath, prepared.pruningSignals.map(toDuckDbPruningSignalRow)),
     writeJsonFile(toolResultPruningPath, prepared.toolResultPruning.map(toDuckDbToolResultPruningRow)),
+    writeJsonFile(warmBashRewritesPath, prepared.warmBashRewrites.map(toDuckDbWarmBashRewriteRow)),
+    writeJsonFile(warmBashSummariesPath, prepared.warmBashSummaries.map(toDuckDbWarmBashSummaryRow)),
     writeJsonFile(agentReviewsPath, prepared.agentReviews.map(toDuckDbAgentReviewRow)),
     writeJsonFile(turnThroughputPath, prepared.turnThroughput.map(toDuckDbTurnThroughputRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, agentReviewsPath, turnThroughputPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -929,6 +990,38 @@ CREATE TABLE tool_result_pruning (
 `.trim();
 }
 
+function warmBashRewritesTableSchema(): string {
+  return `
+CREATE TABLE warm_bash_rewrites (
+  run_id VARCHAR,
+  session_path_hash VARCHAR,
+  timestamp TIMESTAMP,
+  started_day DATE,
+  before VARCHAR,
+  after VARCHAR
+);
+`.trim();
+}
+
+function warmBashSummariesTableSchema(): string {
+  return `
+CREATE TABLE warm_bash_summaries (
+  run_id VARCHAR,
+  session_path_hash VARCHAR,
+  timestamp TIMESTAMP,
+  started_day DATE,
+  fast_path BIGINT,
+  warm BIGINT,
+  fallback BIGINT,
+  pool_size BIGINT,
+  warmup_failures BIGINT,
+  auto_prune_enabled BOOLEAN,
+  fast_path_enabled BOOLEAN,
+  gnu_grep BOOLEAN
+);
+`.trim();
+}
+
 function agentReviewTableSchema(): string {
   return `
 CREATE TABLE agent_reviews (
@@ -1063,6 +1156,8 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'pruning_events', pruningEventsTableSchema(), stagingPaths.pruningEventsPath);
     await populateTableFromJson(connection, 'pruning_signals', pruningSignalsTableSchema(), stagingPaths.pruningSignalsPath);
     await populateTableFromJson(connection, 'tool_result_pruning', toolResultPruningTableSchema(), stagingPaths.toolResultPruningPath);
+    await populateTableFromJson(connection, 'warm_bash_rewrites', warmBashRewritesTableSchema(), stagingPaths.warmBashRewritesPath);
+    await populateTableFromJson(connection, 'warm_bash_summaries', warmBashSummariesTableSchema(), stagingPaths.warmBashSummariesPath);
     await populateTableFromJson(connection, 'agent_reviews', agentReviewTableSchema(), stagingPaths.agentReviewsPath);
     await populateTableFromJson(connection, 'turn_throughput', turnThroughputTableSchema(), stagingPaths.turnThroughputPath);
     await createDerivedViews(connection);

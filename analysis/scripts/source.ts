@@ -29,6 +29,8 @@ import {
   type PruningSourceDecision,
   type PruningSourceEvent,
   type ToolResultPruningSourceEvent,
+  type WarmBashRewriteSourceEvent,
+  type WarmBashSessionSummarySourceEvent,
   type RunFinalizationReason,
   type RunOutcome,
   type RunSnapshot,
@@ -1105,6 +1107,82 @@ export function readAgentReviewsLog(storageDir: string): AgentReviewSourceEvent[
   }
   return events;
 }
+export function readWarmBashLog(configRoot: string): { rewrites: WarmBashRewriteSourceEvent[]; summaries: WarmBashSessionSummarySourceEvent[] } {
+  const logPath = path.join(configRoot, 'data', 'warm-bash.jsonl');
+  let raw: string;
+  try {
+    raw = readFileSync(logPath, 'utf8');
+  } catch {
+    return { rewrites: [], summaries: [] };
+  }
+  const lines = raw.trim().split('\n').filter((line) => line.trim().length > 0);
+  const rewrites: WarmBashRewriteSourceEvent[] = [];
+  const summaries: WarmBashSessionSummarySourceEvent[] = [];
+  for (const line of lines) {
+    try {
+      const parsed = parseJsonOrThrow<any>(line, logPath);
+      if (
+        parsed.event === 'auto_prune_rewrite' &&
+        typeof parsed.sessionId === 'string' &&
+        typeof parsed.timestamp === 'string' &&
+        typeof parsed.before === 'string' &&
+        typeof parsed.after === 'string'
+      ) {
+        rewrites.push({
+          event: 'auto_prune_rewrite',
+          sessionId: parsed.sessionId,
+          timestamp: parsed.timestamp,
+          before: parsed.before,
+          after: parsed.after,
+        });
+        continue;
+      }
+      if (
+        parsed.event === 'session_summary' &&
+        typeof parsed.sessionId === 'string' &&
+        typeof parsed.timestamp === 'string' &&
+        typeof parsed.fastPath === 'number' &&
+        typeof parsed.warm === 'number' &&
+        typeof parsed.fallback === 'number' &&
+        typeof parsed.poolSize === 'number' &&
+        typeof parsed.warmupFailures === 'number' &&
+        typeof parsed.autoPruneEnabled === 'boolean' &&
+        typeof parsed.fastPathEnabled === 'boolean' &&
+        typeof parsed.gnuGrep === 'boolean'
+      ) {
+        summaries.push({
+          event: 'session_summary',
+          sessionId: parsed.sessionId,
+          timestamp: parsed.timestamp,
+          fastPath: parsed.fastPath,
+          warm: parsed.warm,
+          fallback: parsed.fallback,
+          poolSize: parsed.poolSize,
+          warmupFailures: parsed.warmupFailures,
+          autoPruneEnabled: parsed.autoPruneEnabled,
+          fastPathEnabled: parsed.fastPathEnabled,
+          gnuGrep: parsed.gnuGrep,
+        });
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return { rewrites, summaries };
+}
+
+/** Attach the global side-channel logs (pruning.jsonl, tool-result-pruning.jsonl,
+ *  warm-bash.jsonl — all read once from <configRoot>/data/) to a source payload. */
+function attachGlobalSideChannelLogs(source: SourceAnalyticsPayload, configRoot: string): void {
+  const { decisions, events } = readPruningLog(configRoot);
+  source.pruningDecisions = decisions;
+  source.pruningEvents = events;
+  source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
+  const warmBash = readWarmBashLog(configRoot);
+  source.warmBashRewrites = warmBash.rewrites;
+  source.warmBashSummaries = warmBash.summaries;
+}
+
 function readPruningLog(configRoot: string): { decisions: PruningSourceDecision[]; events: PruningSourceEvent[] } {
   const pruningPath = path.join(configRoot, 'data', 'pruning.jsonl');
   let raw: string;
@@ -1255,28 +1333,14 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   const configRoot = CONFIG_ROOT;
   if (selection.exportPath) {
     const source = await readSourceAnalyticsPayload(selection.exportPath);
-    const { decisions, events } = readPruningLog(configRoot);
-    source.pruningDecisions = decisions;
-    source.pruningEvents = events;
-    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
-    return {
-      source,
-      sourceKind: 'export',
-      sourcePath: selection.exportPath,
-    };
+    attachGlobalSideChannelLogs(source, configRoot);
+    return { source, sourceKind: 'export', sourcePath: selection.exportPath };
   }
 
   if (selection.storageDir) {
     const source = await querySourceAnalyticsPayloadFromStorageDir(selection.storageDir);
-    const { decisions, events } = readPruningLog(configRoot);
-    source.pruningDecisions = decisions;
-    source.pruningEvents = events;
-    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
-    return {
-      source,
-      sourceKind: 'storage-dir',
-      sourcePath: selection.storageDir,
-    };
+    attachGlobalSideChannelLogs(source, configRoot);
+    return { source, sourceKind: 'storage-dir', sourcePath: selection.storageDir };
   }
 
   // Default: aggregate every run store under the outcomes root (all
@@ -1285,26 +1349,13 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   // dashboard still renders in a fresh checkout.
   const outcomesRoot = selection.outcomesRoot ?? DEFAULT_OUTCOMES_ROOT;
   const { source, storeCount } = await queryAllRunAnalyticsStores(outcomesRoot);
-  const { decisions, events } = readPruningLog(configRoot);
   if (storeCount > 0) {
-    source.pruningDecisions = decisions;
-    source.pruningEvents = events;
-    source.toolResultPruningEvents = readToolResultPruningLog(configRoot);
-    return {
-      source,
-      sourceKind: 'all-stores',
-      sourcePath: outcomesRoot,
-    };
+    attachGlobalSideChannelLogs(source, configRoot);
+    return { source, sourceKind: 'all-stores', sourcePath: outcomesRoot };
   }
 
   const fixtureSource = await readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
-  fixtureSource.pruningDecisions = decisions;
-  fixtureSource.pruningEvents = events;
-  fixtureSource.toolResultPruningEvents = readToolResultPruningLog(configRoot);
-  return {
-    source: fixtureSource,
-    sourceKind: 'fixture',
-    sourcePath: DEFAULT_FIXTURE_PATH,
-  };
+  attachGlobalSideChannelLogs(fixtureSource, configRoot);
+  return { source: fixtureSource, sourceKind: 'fixture', sourcePath: DEFAULT_FIXTURE_PATH };
 }
 

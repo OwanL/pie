@@ -9,6 +9,8 @@ import {
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
   type PreparedToolResultPruningRow,
+  type PreparedWarmBashRewriteRow,
+  type PreparedWarmBashSummaryRow,
   type PreparedRunRow,
   type PreparedToolFailureRow,
   type PreparedToolUsageRow,
@@ -17,6 +19,8 @@ import {
   type PruningSourceDecision,
   type PruningSourceEvent,
   type ToolResultPruningSourceEvent,
+  type WarmBashRewriteSourceEvent,
+  type WarmBashSessionSummarySourceEvent,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
   type VerificationCommandKind,
@@ -623,6 +627,63 @@ function prepareToolResultPruning(
   });
 }
 
+/** Join warm-bash auto-prune rewrite events to runs by sessionPathHash (same
+ *  mechanism as pruning signals — the event carries sessionId, which hashes to
+ *  the run's sessionPathHash). One row per transparent command rewrite. */
+function prepareWarmBashRewrites(
+  events: WarmBashRewriteSourceEvent[],
+  runs: PreparedRunRow[],
+): PreparedWarmBashRewriteRow[] {
+  const runBySessionHash = new Map<string, PreparedRunRow>();
+  for (const run of runs) {
+    runBySessionHash.set(run.sessionPathHash, run);
+  }
+  return events.map((e) => {
+    const sessionPathHash = hashToPrefix(e.sessionId, 16);
+    const matchedRun = runBySessionHash.get(sessionPathHash);
+    const runId = matchedRun?.runId ?? `warm-bash-${sessionPathHash}`;
+    return {
+      runId,
+      sessionPathHash,
+      timestamp: e.timestamp,
+      startedDay: e.timestamp.slice(0, 10),
+      before: e.before,
+      after: e.after,
+    };
+  });
+}
+
+/** Join warm-bash per-session routing-counter summaries to runs by sessionPathHash.
+ *  Counters are session-cumulative (one row per session that used bash). */
+function prepareWarmBashSummaries(
+  events: WarmBashSessionSummarySourceEvent[],
+  runs: PreparedRunRow[],
+): PreparedWarmBashSummaryRow[] {
+  const runBySessionHash = new Map<string, PreparedRunRow>();
+  for (const run of runs) {
+    runBySessionHash.set(run.sessionPathHash, run);
+  }
+  return events.map((e) => {
+    const sessionPathHash = hashToPrefix(e.sessionId, 16);
+    const matchedRun = runBySessionHash.get(sessionPathHash);
+    const runId = matchedRun?.runId ?? `warm-bash-${sessionPathHash}`;
+    return {
+      runId,
+      sessionPathHash,
+      timestamp: e.timestamp,
+      startedDay: e.timestamp.slice(0, 10),
+      fastPath: e.fastPath,
+      warm: e.warm,
+      fallback: e.fallback,
+      poolSize: e.poolSize,
+      warmupFailures: e.warmupFailures,
+      autoPruneEnabled: e.autoPruneEnabled,
+      fastPathEnabled: e.fastPathEnabled,
+      gnuGrep: e.gnuGrep,
+    };
+  });
+}
+
 /** Join agent-review events to runs by sessionPathHash + runId (the event carries both).
  *  Mirrors how outcomes are joined to runs, but disambiguates same-session runs via runId:
  *  the composite key `${sessionPathHash}::${runId}` picks the exact run whose session path
@@ -732,6 +793,8 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const pruningEvents = preparePruningEvents(source.pruningDecisions ?? [], runs);
   const pruningSignals = preparePruningSignals(source.pruningEvents ?? [], runs);
   const toolResultPruning = prepareToolResultPruning(source.toolResultPruningEvents ?? [], runs);
+  const warmBashRewrites = prepareWarmBashRewrites(source.warmBashRewrites ?? [], runs);
+  const warmBashSummaries = prepareWarmBashSummaries(source.warmBashSummaries ?? [], runs);
   const agentReviews = prepareAgentReviews(source.agentReviews ?? [], runs);
 
   return {
@@ -748,6 +811,8 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     pruningEvents,
     pruningSignals,
     toolResultPruning,
+    warmBashRewrites,
+    warmBashSummaries,
     agentReviews,
   };
 }

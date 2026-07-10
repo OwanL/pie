@@ -8,12 +8,11 @@ import {
   coerceRunSnapshot,
   type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
-  type RunCheckpoint,
   type RunSnapshot,
 } from './index';
-import { parseCheckpoint, readOptionalText } from '../shared/checkpoint-io';
+import { readOptionalText } from '../shared/checkpoint-io';
 import { parseJsonOrThrow } from '../../shared/error-message';
-import { resolveCheckpointSlot } from '../shared/checkpoint-slots';
+import { readCheckpointSlots } from './checkpoint';
 
 export interface RunAnalyticsQueryResult {
   completedRuns: RunSnapshot[];
@@ -71,28 +70,12 @@ async function readJsonlObjects(filePath: string): Promise<unknown[]> {
     .filter((value): value is unknown => value !== null);
 }
 
-async function readCheckpoint(storageDir: string): Promise<RunCheckpoint | null> {
-  const genPath = path.join(storageDir, 'open-runs.gen');
-  const slotAPath = path.join(storageDir, 'open-runs.a.json');
-  const slotBPath = path.join(storageDir, 'open-runs.b.json');
-
-  const [genValue, slotA, slotB] = await Promise.all([
-    readOptionalText(genPath),
-    readOptionalText(slotAPath),
-    readOptionalText(slotBPath),
-  ]);
-
-  const checkpointA = slotA ? parseCheckpoint(slotA) : null;
-  const checkpointB = slotB ? parseCheckpoint(slotB) : null;
-  return resolveCheckpointSlot(genValue, checkpointA, checkpointB).checkpoint;
-}
-
 export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAnalyticsQueryResult> {
   const [snapshotLines, outcomeLines, reviewLines, checkpoint] = await Promise.all([
     readJsonlObjects(path.join(storageDir, 'run-snapshots.jsonl')),
     readJsonlObjects(path.join(storageDir, 'outcome-history.jsonl')),
     readJsonlObjects(path.join(storageDir, 'agent-reviews.jsonl')),
-    readCheckpoint(storageDir),
+    readCheckpointSlots(storageDir).then((resolved) => resolved.checkpoint),
   ]);
 
   const latestCompletedRuns = new Map<string, RunSnapshot>();

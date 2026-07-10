@@ -24,6 +24,7 @@
 import { createBashTool, createLocalBashOperations, getShellConfig, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createWarmBashOperations, createWarmBashMetrics } from "./src/operations.js";
 import { probeGnuGrep } from "./src/auto-prune.js";
+import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./src/logger.js";
 import { WarmBashPool } from "./src/warm-pool.js";
 import { registerWarmBashStats, type WarmBashStats } from "./src/stats.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
@@ -176,7 +177,12 @@ export default function (pi: ExtensionAPI) {
         fastPathEnabled: cfg.fastPath,
         autoPruneEnabled: cfg.autoPrune,
         gnuGrepProbe,
-        log: (payload) => console.error(JSON.stringify(payload)),
+        log: (payload) => {
+          // Live debug line for the pi OutputChannel (pi-logs) + persisted
+          // side-channel record for analytics ingestion.
+          console.error(JSON.stringify(payload));
+          logAutoPruneRewrite(sessionId, payload.before as string, payload.after as string);
+        },
         fallbackOps,
         metrics: m,
       });
@@ -235,7 +241,27 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event: unknown, ctx: { sessionManager: { getSessionId: () => string } }) => {
     const id = ctx.sessionManager.getSessionId();
-    pools.get(id)?.dispose();
+    const pool = pools.get(id) ?? null;
+    const m = metrics.get(id);
+    const cfg = toolConfig.get(id);
+    // Persist the session's cumulative routing counters + config context BEFORE
+    // disposing the pool (getStats() would read disposed afterwards). Only
+    // sessions that actually invoked bash have metrics (getTool created them).
+    if (m && cfg) {
+      const ps = pool?.getStats() ?? null;
+      const summary: WarmBashSessionSummary = {
+        fastPath: m.totalFastPath,
+        warm: m.totalWarm,
+        fallback: m.totalFallback,
+        poolSize: ps ? ps.poolSize : 0,
+        warmupFailures: ps ? ps.totalWarmupFailures : 0,
+        autoPruneEnabled: cfg.autoPrune,
+        fastPathEnabled: cfg.fastPath,
+        gnuGrep: gnuGrepProbe(),
+      };
+      logSessionSummary(id, summary);
+    }
+    pool?.dispose();
     pools.delete(id);
     tools.delete(id);
     sessionCwd.delete(id);
@@ -243,6 +269,8 @@ export default function (pi: ExtensionAPI) {
     unregisterStats.get(id)?.();
     unregisterStats.delete(id);
     metrics.delete(id);
+    // Best-effort drain so the summary line lands on disk before the worker exits.
+    await flushLog();
   });
 
   // Best-effort cleanup if the process exits without per-session shutdown.
