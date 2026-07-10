@@ -23,13 +23,13 @@ interface ToolResultPruningBadgeProps {
 }
 
 export function ToolResultPruningBadge({ badge }: ToolResultPruningBadgeProps) {
-  if (!badge || badge.rules.length === 0) return null;
-  const rulesLabel = badge.rules.join(', ');
-  const title = `Tool-result pruning applied: ${rulesLabel} · ~${badge.tokensSaved} tokens saved`;
+  if (!badge || badge.tokensSaved <= 0) return null;
+  const label = `${badge.tokensSaved} tokens pruned`;
+  const title = `Tool-result pruning saved ${badge.tokensSaved} tokens`;
   return (
     <span class="tool-result-pruning-badge" title={title} aria-label={title}>
       <span class="tool-result-pruning-badge-text">
-        ✂ pruned · {rulesLabel} · ~{badge.tokensSaved} tokens saved
+        ✂ {label}
       </span>
     </span>
   );

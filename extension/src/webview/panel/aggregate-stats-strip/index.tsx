@@ -384,7 +384,7 @@ function providerGateTooltip(g: ProviderGateStats): string {
     if (p.queuedRequests > 0) line += `  · ${p.queuedRequests} queued`;
     if (p.paused) {
       const seconds = Math.max(0, Math.ceil((p.pausedUntilMs - Date.now()) / 1000));
-      line += `  · PAUSED (~${seconds}s, ${p.strikeCount} strike${p.strikeCount === 1 ? '' : 's'})`;
+      line += `  · PAUSED (${seconds}s, ${p.strikeCount} strike${p.strikeCount === 1 ? '' : 's'})`;
     } else if (p.afterburnSeconds > 0) {
       line += `  · afterburn ${p.afterburnSeconds}s`;
     }

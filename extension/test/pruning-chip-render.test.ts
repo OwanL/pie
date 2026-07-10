@@ -30,7 +30,7 @@ test('PruningHeaderButton renders a compact shared chip label with full summary 
 
   assert.match(html, /panel-chip panel-chip-pruning panel-chip-muted panel-chip-interactive/);
   assert.match(html, /<span class="panel-chip-label">2\/15 skills · 3\/4 tools<\/span>/);
-  assert.match(html, /title="Kept 2\/15 skills, Kept 3\/4 tools · Saved ~1500 tokens"/);
+  assert.match(html, /title="Kept 2\/15 skills, Kept 3\/4 tools · Saved 1500 tokens"/);
   assert.doesNotMatch(html, /max-w-\[30ch\]/);
 });
 

@@ -358,7 +358,7 @@ test('message_end emits custom transcript messages for displayed extension outpu
     message: {
       role: 'custom',
       customType: 'pruning-result',
-      content: 'Kept 4/14 skills, Kept 8/13 tools · Saved ~1815 tokens',
+      content: 'Kept 4/14 skills, Kept 8/13 tools · Saved 1815 tokens',
       details: {
         includedSkills: ['systematic-debugging'],
         excludedSkills: ['frontend-design'],
@@ -381,7 +381,7 @@ test('message_end emits custom transcript messages for displayed extension outpu
         id: 'req-custom:custom:1',
         role: 'system',
         createdAt: '2026-01-01T00:00:01.000Z',
-        markdown: 'Kept 4/14 skills, Kept 8/13 tools · Saved ~1815 tokens',
+        markdown: 'Kept 4/14 skills, Kept 8/13 tools · Saved 1815 tokens',
         status: 'completed',
         customType: 'pruning-result',
         customDetails: {

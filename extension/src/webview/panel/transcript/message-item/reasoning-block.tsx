@@ -120,7 +120,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
             <span
               class="ml-auto flex-none whitespace-nowrap font-mono text-[10px] text-muted/50"
               title={`${lineCount} lines`}
-            >~{lineCount} lines</span>
+            >{lineCount} lines</span>
           )}
         </>
       }

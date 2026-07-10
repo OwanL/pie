@@ -14,7 +14,6 @@
 @import './file-changes.css';
 @import './extension-ui-prompt.css';
 @import './ask-user-prompt.css';
-@import './pruning-banner.css';
 @import './tooltip.css';
 
 @source "../**/*.tsx";

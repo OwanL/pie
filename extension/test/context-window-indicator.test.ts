@@ -31,7 +31,7 @@ test('buildContextWindowIndicatorState marks estimated usage and severity near t
     remainingKind: 'estimated',
   }));
 
-  assert.equal(state.label, '~350.5k / 400k tokens');
+  assert.equal(state.label, '350.5k / 400k tokens');
   assert.equal(state.ariaLabel, 'Estimated context window usage: 350,500 of 400,000 tokens used.');
   assert.equal(state.severity, 'critical');
 });

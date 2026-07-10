@@ -10,10 +10,7 @@ import { DIRECT_FILE_PATH_KEYS, GENERIC_PATH_KEYS } from '../../shared/tool-call
 import {
   relativePathFromBase,
   truncatePathText,
-  truncateString,
 } from '../../shared/path-utils.js';
-
-const TOOL_CALL_SUMMARY_MAX_LENGTH = 300;
 
 export interface ToolCallPresentation {
   name: string;
@@ -26,8 +23,6 @@ export interface ToolCallPresentation {
 export interface ToolCallPresentationOptions {
   workingDirectory?: string | null;
 }
-
-const truncateText = (text: string, maxLength = TOOL_CALL_SUMMARY_MAX_LENGTH) => truncateString(text, maxLength);
 
 import { isRecord } from '../../shared/type-guards';
 
@@ -165,15 +160,7 @@ function formatPresentationSizeHint(sizeHint: string | null | undefined): string
     return undefined;
   }
 
-  if (/^[~+-]/.test(sizeHint)) {
-    return sizeHint;
-  }
-
-  if (/\bline(?:s)?\b/i.test(sizeHint)) {
-    return `~${sizeHint}`;
-  }
-
-  return sizeHint;
+  return sizeHint.replace(/^~/, '');
 }
 
 export function getToolCallPresentation(

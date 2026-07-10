@@ -23,7 +23,7 @@ export function formatSystemPromptTokenLabel(tokenCount: number): string {
     ? formatTokensCompact(tokenCount)
     : tokenCount.toLocaleString();
 
-  return `~${formatted} ${tokenCount === 1 ? 'token' : 'tokens'}`;
+  return `${formatted} ${tokenCount === 1 ? 'token' : 'tokens'}`;
 }
 
 export function getSystemPromptTokenEstimateTitle(

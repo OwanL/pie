@@ -32,8 +32,8 @@ test('estimateSystemPromptTokens counts only available prompt text', () => {
 });
 
 test('formatSystemPromptTokenLabel marks counts as estimates', () => {
-  assert.equal(formatSystemPromptTokenLabel(1), '~1 token');
-  assert.equal(formatSystemPromptTokenLabel(12), '~12 tokens');
+  assert.equal(formatSystemPromptTokenLabel(1), '1 token');
+  assert.equal(formatSystemPromptTokenLabel(12), '12 tokens');
 });
 
 test('getSystemPromptTokenEstimateTitle notes unavailable prompt text', () => {

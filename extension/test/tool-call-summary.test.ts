@@ -45,7 +45,7 @@ test('getToolCallPresentation renders skill reads as skill loads', () => {
   assert.deepEqual(presentation, {
     name: 'Load skill frontend-design',
     summary: null,
-    sizeHint: '~47 lines',
+    sizeHint: '47 lines',
     variant: 'skill-load',
   });
 });
@@ -66,7 +66,7 @@ test('getToolCallPresentation makes in-workdir file paths relative and clickable
     name: 'read_file',
     summary: 'main.java',
     summaryPath: 'D:\\Projects\\StandAloneProjects\\pie\\main.java',
-    sizeHint: '~20 lines',
+    sizeHint: '20 lines',
   });
 });
 
@@ -86,7 +86,7 @@ test('getToolCallPresentation keeps out-of-workdir file paths absolute', () => {
     name: 'read_file',
     summary: 'D:\\Projects\\Elsewhere\\main.java',
     summaryPath: 'D:\\Projects\\Elsewhere\\main.java',
-    sizeHint: '~20 lines',
+    sizeHint: '20 lines',
   });
 });
 
@@ -393,7 +393,7 @@ test('getToolCallPresentation estimates limit-based read sizes', () => {
     name: 'read',
     summary: 'src\\main.java',
     summaryPath: 'D:\\Projects\\StandAloneProjects\\pie\\src\\main.java',
-    sizeHint: '~12 lines',
+    sizeHint: '12 lines',
   });
 });
 
@@ -414,7 +414,7 @@ test('getToolCallPresentation clamps read size hints to the returned content', (
     name: 'read_file',
     summary: 'src\\short.ts',
     summaryPath: 'D:\\Projects\\StandAloneProjects\\pie\\src\\short.ts',
-    sizeHint: '~5 lines',
+    sizeHint: '5 lines',
   });
 });
 
@@ -515,7 +515,7 @@ test('getToolCallPresentation marks replacement edits as approximate changes', (
     name: 'edit',
     summary: 'src\\main.ts',
     summaryPath: 'D:\\Projects\\StandAloneProjects\\pie\\src\\main.ts',
-    sizeHint: '~2 lines',
+    sizeHint: '2 lines',
   });
 });
 
@@ -555,7 +555,7 @@ test('getToolCallPresentation adds patch size hints even without file-path summa
   assert.deepEqual(presentation, {
     name: 'apply_patch',
     summary: 'Update collapsed tool-call headers',
-    sizeHint: '~2 lines',
+    sizeHint: '2 lines',
   });
 });
 
@@ -571,7 +571,7 @@ test('getToolCallPresentation treats raw patch replacements as touched-line esti
   assert.deepEqual(presentation, {
     name: 'apply_patch',
     summary: 'Rename one line',
-    sizeHint: '~1 line',
+    sizeHint: '1 line',
   });
 });
 

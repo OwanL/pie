@@ -37,9 +37,7 @@ export function buildContextWindowIndicatorState(summary: ContextWindowSummary):
     };
   }
 
-  const compactUsed = usedKind === 'estimated' && usedTokens > 0
-    ? `~${formatCompactTokens(usedTokens)}`
-    : formatCompactTokens(usedTokens);
+  const compactUsed = formatCompactTokens(usedTokens);
   const ariaPrefix = usedKind === 'estimated' ? 'Estimated context window usage' : 'Context window usage';
 
   return {

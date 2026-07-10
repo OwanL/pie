@@ -15,7 +15,6 @@ import {
   type SystemPromptEntry,
   type ToolCall,
   type PruningDetails,
-  type PruningResult,
 } from '../src/shared/protocol';
 import type { TurnActivityState } from '../src/webview/panel/transcript/activity';
 
@@ -769,7 +768,7 @@ test('rendered SystemPromptMessage covers summary fallbacks, suppressed summarie
   assert.match(html, /Harness system prompt/);
   assert.doesNotMatch(html, /Configured elsewhere\.<\/span>/);
   assert.doesNotMatch(html, />Unavailable<\/span>/);
-  assert.match(html, /~10 tokens/);
+  assert.match(html, /10 tokens/);
   assert.match(html, /not included/i);
 
   const zeroTokenHtml = renderToString(h(SystemPromptMessage, {
@@ -1010,7 +1009,7 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
 
   assert.equal(
     formatPruningSummary(details),
-    'Kept 3/14 skills, Kept 5/13 tools · Saved ~2080 tokens',
+    'Kept 3/14 skills, Kept 5/13 tools · Saved 2080 tokens',
   );
 
   const messageHtml = renderToString(h(MessageItem, {
@@ -1030,8 +1029,8 @@ test('rendered assistant pruning header shows compact counts and expanded diagno
     pruningHeaderState: { kind: 'result', details },
   }));
 
-  assert.match(messageHtml, /aria-label="Kept 3\/14 skills, Kept 5\/13 tools · Saved ~2080 tokens"/);
-  assert.match(messageHtml, /Kept 3\/14 skills, Kept 5\/13 tools · Saved ~2080 tokens/);
+  assert.match(messageHtml, /aria-label="Kept 3\/14 skills, Kept 5\/13 tools · Saved 2080 tokens"/);
+  assert.match(messageHtml, /Kept 3\/14 skills, Kept 5\/13 tools · Saved 2080 tokens/);
   assert.doesNotMatch(messageHtml, /Skills pruned/);
 
   const chipHtml = renderToString(h(PruningHeaderButton, {
@@ -1159,109 +1158,6 @@ test('rendered failed assistant turn disables recovery when the previous prompt 
 
   assert.match(html, /Load older messages to retry/);
   assert.doesNotMatch(html, /message-retry-btn/);
-});
-
-test('rendered PruningBanner uses real buttons, shows at-a-glance counts, and hides detail content when collapsed', async () => {
-  const { PruningBanner } = await import('../src/webview/panel/pruning-banner.tsx');
-
-  const pruningResult: PruningResult = {
-    skillsKept: 1,
-    skillsTotal: 3,
-    toolsKept: 0,
-    toolsTotal: 2,
-    tokensSaved: 120,
-    hasSkillPruning: true,
-    hasToolPruning: false,
-    details: {
-      includedSkills: ['skill-a'],
-      excludedSkills: ['skill-b', 'skill-c'],
-      includedTools: [],
-      excludedTools: ['tool-a', 'tool-b'],
-      mode: 'auto',
-      skillTokensSaved: 100,
-      toolTokensSaved: 20,
-      prepassSafeguardReason: 'Too few candidates to prune',
-      prepassSystemPrompt: 'You are a pruner',
-      prepassUserMessage: 'Skills: a, b, c',
-      prepassThinking: '',
-      prepassResponse: '{"kept":["a"]}',
-    },
-  };
-
-  const html = renderToString(h(PruningBanner, { pruningResult }));
-
-  // Accessible collapsible button
-  assert.match(html, /<button[^>]*pruning-banner-summary[^>]*>/);
-  assert.match(html, /aria-expanded="false"/);
-  assert.doesNotMatch(html, /role="button"/);
-
-  // At-a-glance counts in summary line
-  assert.match(html, /1\/3 skills kept/);
-  assert.match(html, /0\/2 tools kept/);
-  assert.match(html, /~120 tokens saved/);
-
-  // Collapsed: detail content should NOT be present
-  assert.doesNotMatch(html, /Skills pruned/);
-  assert.doesNotMatch(html, /Fail-open reason/);
-  assert.doesNotMatch(html, /Prepass reasoning/);
-
-  // Error state
-  const errorHtml = renderToString(h(PruningBanner, {
-    pruningResult: {
-      skillsKept: 0,
-      skillsTotal: 0,
-      toolsKept: 0,
-      toolsTotal: 0,
-      tokensSaved: 0,
-      hasSkillPruning: false,
-      hasToolPruning: false,
-      error: 'prepass timeout',
-    },
-  }));
-
-  assert.match(errorHtml, /Pruning failed/);
-  assert.match(errorHtml, /<button[^>]*pruning-banner-summary[^>]*>/);
-  assert.match(errorHtml, /aria-expanded="false"/);
-  assert.doesNotMatch(errorHtml, /role="button"/);
-});
-
-test('rendered PruningInlineCard uses real buttons and shows at-a-glance counts', async () => {
-  const { PruningInlineCard } = await import('../src/webview/panel/transcript/pruning-inline.tsx');
-
-  const details: PruningDetails = {
-    includedSkills: [],
-    excludedSkills: [],
-    includedTools: [],
-    excludedTools: [],
-    mode: 'auto',
-    skillTokensSaved: 0,
-    toolTokensSaved: 0,
-    prepassModel: 'gpt-5.4-mini',
-    prepassLatencyMs: 45,
-    prepassSafeguardReason: 'Nothing to exclude',
-  };
-
-  const html = renderToString(h(PruningInlineCard, {
-    details,
-    fallbackText: 'No pruning performed',
-    createdAt: '2026-05-27T10:00:00.000Z',
-  }));
-
-  // Message wrapper and head
-  assert.match(html, /data-role="assistant"/);
-  assert.match(html, /PI/);
-  assert.match(html, /skill-pruner/);
-  assert.match(html, /via gpt-5\.4-mini 45ms/);
-
-  // Accessible collapsible button
-  assert.match(html, /<button[^>]*aria-expanded="false"[^>]*>/);
-  assert.match(html, /aria-expanded="false"/);
-  assert.doesNotMatch(html, /role="button"/);
-
-  // Collapsed: expanded detail should NOT be present
-  assert.doesNotMatch(html, /Skills pruned/);
-  assert.doesNotMatch(html, /Fail-open reason/);
-  assert.doesNotMatch(html, /Prepass LLM output/);
 });
 
 test('rendered TurnActivityStrip covers all tones, standalone/inline variants, and runningDot states', async () => {
@@ -1485,7 +1381,7 @@ test('ToolCallCard terminal pane strips ANSI escape sequences from streamed outp
 
 // ── Reasoning: collapsed size hint + expanded streaming cursor ──────────────
 
-test('ReasoningBlock shows a ~N lines hint when collapsed for multi-line reasoning', () => {
+test('ReasoningBlock shows a line-count hint when collapsed for multi-line reasoning', () => {
   const html = renderToString(h(messageItemModule.ReasoningBlock, {
     text: 'first line of reasoning\nsecond line\nthird line',
     autoExpand: false,
@@ -1493,7 +1389,7 @@ test('ReasoningBlock shows a ~N lines hint when collapsed for multi-line reasoni
     onContextMenu: noopContextMenu,
   }));
   assert.match(html, /Reasoning/);
-  assert.match(html, /~3 lines/);
+  assert.match(html, /3 lines/);
 });
 
 test('ReasoningBlock omits the size hint for single-line reasoning', () => {

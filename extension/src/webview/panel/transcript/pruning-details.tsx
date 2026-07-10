@@ -43,9 +43,9 @@ function tokenBreakdown(details: PruningDetails): string | null {
   if (total <= 0) return null;
 
   const parts: string[] = [];
-  if (skillTokens > 0) parts.push(`skills ~${skillTokens} tokens`);
-  if (toolTokens > 0) parts.push(`tools ~${toolTokens} tokens`);
-  parts.push(`total ~${total} tokens`);
+  if (skillTokens > 0) parts.push(`skills ${skillTokens} tokens`);
+  if (toolTokens > 0) parts.push(`tools ${toolTokens} tokens`);
+  parts.push(`total ${total} tokens`);
   return parts.join(' · ');
 }
 
