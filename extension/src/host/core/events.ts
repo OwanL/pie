@@ -675,6 +675,30 @@ export interface SessionsInterruptedEvent {
   reason: string;
 }
 
+/** Non-blocking "still waiting for a concurrency slot" notice for a session
+ *  (FP-C4). Dispatched by the EffectRunner when a send's modelStart phase has
+ *  been queued waiting for a saturated provider's slot for ~one model-start
+ *  budget (~10min). The reducer records it in `waitingForSlotBySession`; the
+ *  projection surfaces the active session's entry as a non-blocking info
+ *  chip/banner INDEPENDENT of the error-notice triple (a non-error
+ *  NoticeShown would clobber an error notice's kind/raw). Cleared by
+ *  `WaitingForSlotCleared` on commit / fire / dispose. */
+export interface WaitingForSlotShownEvent {
+  kind: 'WaitingForSlotShown';
+  sessionPath: string;
+  message: string;
+}
+
+/** Clears a session's "still waiting for a concurrency slot" notice (FP-C4).
+ *  Dispatched by the EffectRunner when the send commits (MessageStarted →
+ *  ClearSendTimer), fires (PreflightFailed — the user now sees an error), or
+ *  the in-flight entry is disposed. The reducer deletes the entry from
+ *  `waitingForSlotBySession` (no-op if absent — idempotent). */
+export interface WaitingForSlotClearedEvent {
+  kind: 'WaitingForSlotCleared';
+  sessionPath: string;
+}
+
 /** Steering (FollowUp): the agent loop injected a queued follow-up user
  *  message into a turn. The host promotes its earliest optimistic 'queued'
  *  transcript message to 'completed' (FIFO — the SDK drains the follow-up
@@ -791,6 +815,8 @@ export type HostEvent =
   | OpenTabsChangedEvent
   | PreflightFailedEvent
   | PreflightSupersededEvent
-  | SessionsInterruptedEvent;
+  | SessionsInterruptedEvent
+  | WaitingForSlotShownEvent
+  | WaitingForSlotClearedEvent;
 
 export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;

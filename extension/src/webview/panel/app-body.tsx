@@ -139,6 +139,14 @@ export function AppBody({ adapter }: AppBodyProps) {
         />
       )}
 
+      {viewState.waitingForSlot && !viewState.notice && (
+        <div class="notice info waiting-for-slot" role="status" aria-live="polite">
+          <div class="notice-content">
+            <span class="notice-text">{viewState.waitingForSlot}</span>
+          </div>
+        </div>
+      )}
+
       {derived.showSessionChrome && (
         <SessionTabs
           sessions={viewState.sessions}

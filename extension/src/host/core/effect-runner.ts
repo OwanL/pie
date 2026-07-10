@@ -302,6 +302,12 @@ interface InFlightSend {
    *  fire / pre-ack failure) so pruning returns to the user's prior mode for the
    *  next turn. Absent on a normal send (no restore). */
   priorPruningMode?: PruningMode;
+  /** FP-C4: true once the EffectRunner has dispatched `WaitingForSlotShown` for
+   *  this send, so a re-arm doesn't re-dispatch on every cycle (the modelStart
+   *  timer re-arms ~every 10min while the provider stays saturated). Cleared
+   *  implicitly when the entry is disposed (a `WaitingForSlotCleared` is
+   *  dispatched on commit / fire / dispose). */
+  waitingForSlotShown?: boolean;
 }
 
 export class EffectRunner {
@@ -828,6 +834,19 @@ export class EffectRunner {
       const firstArmed = send.modelStartFirstArmedAt ?? Date.now();
       const elapsed = Date.now() - firstArmed;
       const remaining = EffectRunner.MODEL_START_HARD_CEILING_MS - elapsed;
+      // FP-C4: after ~one model-start budget of queued waiting (the re-arm
+      // itself only fires after the budget elapsed with the provider still
+      // saturated), surface a non-blocking "still waiting for a slot" notice
+      // so the user doesn't think pie hung. Dispatched once (guarded by
+      // `waitingForSlotShown`); cleared on commit / fire / dispose.
+      if (!send.waitingForSlotShown) {
+        send.waitingForSlotShown = true;
+        this.deps.dispatchEvent({
+          kind: 'WaitingForSlotShown',
+          sessionPath: send.sessionPath,
+          message: 'Still waiting for a free model slot — the provider is busy. Your turn will start as soon as a slot opens up.',
+        });
+      }
       // Re-arm for the lesser of a full model-start window or the remaining
       // ceiling (clamped to ≥1s so a near-ceiling re-arm still wakes to fire
       // rather than scheduling a non-positive timeout).
@@ -847,6 +866,10 @@ export class EffectRunner {
     }
     send.disposed = true;
     send.fired = true;
+    // FP-C4: clear the "still waiting for a slot" notice — the user now sees
+    //  an error (PreflightFailed) or a pre-ack-fire warn. Idempotent at the
+    //  reducer (no-op if absent).
+    this.clearWaitingForSlotNotice(send);
     // Do NOT delete the entry from the in-flight maps yet. A late commit
     // (MessageStarted → ClearSendTimer) needs to detect `fired === true` so it
     // can dispatch a `PreflightSuperseded` retraction that undoes the false-
@@ -910,6 +933,9 @@ export class EffectRunner {
     if (!send) return;
     const hadFired = send.fired;
     send.disposed = true;
+    // FP-C4: clear the "still waiting for a slot" notice (commit / pre-ack
+    //  failure / dispose). Idempotent at the reducer (no-op if absent).
+    this.clearWaitingForSlotNotice(send);
     if (send.timer) this.timer.cancel(send.timer);
     this.inFlightSends.delete(corrId);
     if (this.inFlightSendBySession.get(send.sessionPath) === send.corrId) {
@@ -965,6 +991,19 @@ export class EffectRunner {
     if (!mode) return;
     void this.deps.service.setPruningSettings({ mode }).catch((err) => {
       this.deps.log.log('warn', `failed to restore pruning mode to '${mode}' after retry (corrId=${send.corrId}): ${toErrorMessage(err)}`);
+    });
+  }
+
+  /** FP-C4: dispatch `WaitingForSlotCleared` for a send that had shown the
+   *  "still waiting for a slot" notice, so the non-blocking info chip clears on
+   *  commit / fire / dispose. No-op (and never dispatched) when the notice was
+   *  never shown. The reducer's `handleWaitingForSlotCleared` is idempotent. */
+  private clearWaitingForSlotNotice(send: InFlightSend): void {
+    if (!send.waitingForSlotShown) return;
+    send.waitingForSlotShown = false;
+    this.deps.dispatchEvent({
+      kind: 'WaitingForSlotCleared',
+      sessionPath: send.sessionPath,
     });
   }
 

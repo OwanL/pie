@@ -427,6 +427,49 @@ export function handleRetryStuck(state: ArchState, event: Extract<Event, { kind:
   return { state, effects: [logEffect] };
 }
 
+/** Record a non-blocking "still waiting for a concurrency slot" notice for a
+ *  session (FP-C4). Pure: spread-set into `waitingForSlotBySession`. The
+ *  EffectRunner dispatches this when a send's modelStart phase has been queued
+ *  ~one model-start budget (~10min); the projection surfaces the active
+ *  session's entry as a non-blocking info chip INDEPENDENT of the error-notice
+ *  triple. Idempotent (re-dispatch overwrites with the same message). */
+export function handleWaitingForSlotShown(state: ArchState, event: Extract<Event, { kind: 'WaitingForSlotShown' }>): ReducerResult {
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        waitingForSlotBySession: {
+          ...state.sessions.waitingForSlotBySession,
+          [event.sessionPath]: event.message,
+        },
+      },
+    },
+    effects: [],
+  };
+}
+
+/** Clear a session's "still waiting for a concurrency slot" notice (FP-C4).
+ *  Pure: shallow-copy + delete. No-op (returns state unchanged) when the
+ *  session has no entry — idempotent against a late/duplicate clear. */
+export function handleWaitingForSlotCleared(state: ArchState, event: Extract<Event, { kind: 'WaitingForSlotCleared' }>): ReducerResult {
+  if (!(event.sessionPath in state.sessions.waitingForSlotBySession)) {
+    return { state, effects: [] };
+  }
+  const nextWaiting = { ...state.sessions.waitingForSlotBySession };
+  delete nextWaiting[event.sessionPath];
+  return {
+    state: {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        waitingForSlotBySession: nextWaiting,
+      },
+    },
+    effects: [],
+  };
+}
+
 /**
  * Mark every still-streaming assistant message in each listed session as
  * `interrupted` and stamp `errorDetail` with the supplied reason. Dispatched by

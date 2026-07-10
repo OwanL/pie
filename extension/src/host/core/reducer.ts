@@ -48,6 +48,8 @@ import {
   handleRetryStarted,
   handleRetryEnded,
   handleRetryStuck,
+  handleWaitingForSlotShown,
+  handleWaitingForSlotCleared,
   handleUnreadFinishedSessionsChanged,
   handleSessionSummaryUpserted,
   handleSessionSummariesReplaced,
@@ -259,6 +261,14 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'RetryStuck': {
       return handleRetryStuck(state, event);
+    }
+
+    case 'WaitingForSlotShown': {
+      return handleWaitingForSlotShown(state, event);
+    }
+
+    case 'WaitingForSlotCleared': {
+      return handleWaitingForSlotCleared(state, event);
     }
 
     case 'SessionsInterrupted': {

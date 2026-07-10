@@ -104,6 +104,18 @@ export interface SessionsState {
    *  Independent of `runningSessionPaths` (a retry sleeps between turns and the
    *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
   retryStatusBySession: Record<string, RetryStatus>;
+
+  /** Per-session non-blocking "still waiting for a concurrency slot" notice
+   *  (FP-C4). Set by the EffectRunner when a send's modelStart phase has been
+   *  queued waiting for a saturated provider's slot for ~one model-start
+   *  budget (~10min) — so a user doesn't think pie hung during a long
+   *  saturation window. Cleared on commit (MessageStarted), on fire
+   *  (PreflightFailed — the user now sees an error), or when the entry is
+   *  disposed. Surfaced to the webview as a non-blocking info chip/banner
+   *  for the active session, INDEPENDENT of the error-notice triple (a
+   *  non-error NoticeShown would clobber an error notice's kind/raw —
+   *  STATE_CONTRACT § Notice Surfacing). Mirrors `retryStatusBySession`. */
+  waitingForSlotBySession: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +448,7 @@ export function createInitialArchState(): ArchState {
       analyticsFactorsBySession: {},
       interruptInFlightBySession: {},
       retryStatusBySession: {},
+      waitingForSlotBySession: {},
     },
     settings: {
       modelSettings: null,

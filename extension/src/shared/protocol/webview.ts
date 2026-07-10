@@ -98,6 +98,13 @@ export interface ViewState {
  *  with `willRetry`, which the backend now gates on, so `busy` stays true
  *  throughout a retry; this field is the authoritative retry signal). */
   retryStatus: RetryStatus | null;
+  /** Non-blocking "still waiting for a concurrency slot" notice for the active
+   *  session, or null (FP-C4). Set when a send's modelStart phase has been
+   *  queued ~one model-start budget (~10min) waiting for a saturated
+   *  provider's slot; cleared on commit / fire / dispose. Surfaced as a
+   *  non-blocking info chip/banner INDEPENDENT of the error-notice triple
+   *  (a non-error NoticeShown would clobber an error notice's kind/raw). */
+  waitingForSlot: string | null;
   notice: string | null;
   /** Failure category for the current notice, or null when the notice is a
    *  plain info/warning string (or there is no notice). Set ONLY at the Brief H

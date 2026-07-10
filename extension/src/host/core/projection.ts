@@ -375,6 +375,11 @@ function projectViewState(state: ArchState): ViewState {
   const retryStatus: RetryStatus | null =
     activePath ? sessions.retryStatusBySession[activePath] ?? null : null;
 
+  // FP-C4: non-blocking "still waiting for a concurrency slot" notice for the
+  // active session. Independent of the error-notice triple.
+  const waitingForSlot: string | null =
+    activePath ? sessions.waitingForSlotBySession[activePath] ?? null : null;
+
   // ── Pruning projection ──
   const pruningResult = selectActivePruningResult(state);
   const pruningCatalog = selectActivePruningCatalog(activePath, sessions.analyticsFactorsBySession);
@@ -413,6 +418,7 @@ function projectViewState(state: ArchState): ViewState {
     draftText: activeDraftText,
     busy,
     retryStatus,
+    waitingForSlot,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
     noticeRaw: settings.noticeRaw,

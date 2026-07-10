@@ -57,6 +57,7 @@ function emptyViewState(): ViewState {
     draftText: '',
     busy: false,
     retryStatus: null,
+    waitingForSlot: null,
     notice: null,
     backendReady: false,
     workspaceCwd: null,

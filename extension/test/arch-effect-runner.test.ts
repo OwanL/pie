@@ -1285,3 +1285,119 @@ test('EffectRunner send-timer provider-gate re-arm is scoped to the modelStart p
   }
   runner.dispose();
 });
+
+// ─── FP-C4: non-blocking "still waiting for a slot" notice on modelStart re-arm ──
+// When a send's modelStart phase re-arms because the provider is saturated
+// (FP-C2a), the user has been waiting ~one model-start budget (~10min) with no
+// visible feedback. The EffectRunner dispatches a non-blocking
+// `WaitingForSlotShown` notice (once — guarded by `waitingForSlotShown`) so the
+// webview can surface an info chip INDEPENDENT of the error-notice triple. It
+// is cleared on commit (ClearSendTimer) or fire (PreflightFailed) via
+// `WaitingForSlotCleared`.
+
+test('EffectRunner modelStart re-arm dispatches WaitingForSlotShown once (non-blocking, independent of error-notice triple)', async () => {
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-wait' }),
+    sendTimerTimeoutMs: 50_000,
+    modelStartTimerTimeoutMs: 90_000,
+    timer: timers,
+  });
+  const runner = new EffectRunner({
+    ...deps,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+    getProviderGateMetrics: () => ({
+      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
+    }),
+    resolveSessionProvider: () => 'openai',
+  });
+
+  runner.run({ kind: 'SendRpc', corrId: 'c-wait', sessionPath: '/wait', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-wait' });
+  await settle();
+  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-wait' }); // pruning succeeds → modelStart phase
+  assert.equal(timers.size, 1, 'model-start timer armed');
+
+  // First re-arm (provider saturated): dispatch WaitingForSlotShown ONCE.
+  timers.runAll();
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
+  const shown = dispatchedEvents.find((e) => e.kind === 'WaitingForSlotShown');
+  if (shown?.kind === 'WaitingForSlotShown') {
+    assert.equal(shown.sessionPath, '/wait');
+    assert.match(shown.message, /Still waiting for a free model slot/i);
+  }
+  assert.equal(timers.size, 1, 're-armed for another cycle');
+
+  // Second re-arm: must NOT re-dispatch (guarded by waitingForSlotShown).
+  timers.runAll();
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1, 'dispatched once even across re-arms');
+  runner.dispose();
+});
+
+test('EffectRunner clears WaitingForSlotShown on commit (ClearSendTimer) and on fire (PreflightFailed)', async () => {
+  const timers = new FakeTimerSink();
+  const dispatchedEvents: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-clear' }),
+    sendTimerTimeoutMs: 50_000,
+    modelStartTimerTimeoutMs: 90_000,
+    timer: timers,
+  });
+  const runner = new EffectRunner({
+    ...deps,
+    dispatchEvent: (e) => dispatchedEvents.push(e),
+    getProviderGateMetrics: () => ({
+      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
+    }),
+    resolveSessionProvider: () => 'openai',
+  });
+
+  // --- Commit path: clear on MessageStarted ---
+  runner.run({ kind: 'SendRpc', corrId: 'c-commit', sessionPath: '/commit', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-commit' });
+  await settle();
+  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-commit' });
+  timers.runAll(); // re-arm → WaitingForSlotShown
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
+
+  // Commit (ClearSendTimer) → WaitingForSlotCleared.
+  runner.run({ kind: 'ClearSendTimer', corrId: 'c-commit' });
+  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotCleared').length, 1);
+  runner.dispose();
+
+  // --- Fire path: clear on PreflightFailed ---
+  const timers2 = new FakeTimerSink();
+  const dispatched2: Event[] = [];
+  const { deps: deps2 } = makeEffectRunnerDeps({
+    requestImpl: () => Promise.resolve({ requestId: 'req-fire' }),
+    sendTimerTimeoutMs: 50_000,
+    modelStartTimerTimeoutMs: 90_000,
+    timer: timers2,
+  });
+  const runner2 = new EffectRunner({
+    ...deps2,
+    dispatchEvent: (e) => dispatched2.push(e),
+    getProviderGateMetrics: () => ({
+      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
+    }),
+    resolveSessionProvider: () => 'openai',
+  });
+  runner2.run({ kind: 'SendRpc', corrId: 'c-fire', sessionPath: '/fire', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-fire' });
+  await settle();
+  runner2.run({ kind: 'ReArmSendTimer', corrId: 'c-fire' });
+  timers2.runAll(); // re-arm → WaitingForSlotShown
+  assert.equal(dispatched2.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
+
+  // Advance past the hard ceiling so the next fire is a genuine FIRE (not re-arm).
+  const realNow = Date.now;
+  const base = Date.now();
+  let now = base + MODEL_START_HARD_CEILING_MS + 1;
+  Date.now = () => now;
+  try {
+    timers2.runAll(); // fire → PreflightFailed + WaitingForSlotCleared
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(dispatched2.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fired past ceiling');
+  assert.equal(dispatched2.filter((e) => e.kind === 'WaitingForSlotCleared').length, 1, 'cleared on fire');
+  runner2.dispose();
+});

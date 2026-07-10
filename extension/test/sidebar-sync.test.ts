@@ -38,6 +38,7 @@ const baseViewState: ViewState = {
   draftText: '',
   busy: false,
   retryStatus: null,
+  waitingForSlot: null,
   notice: null,
   backendReady: true,
   workspaceCwd: '/workspace',

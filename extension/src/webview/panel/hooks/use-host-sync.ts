@@ -45,6 +45,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   deferredTriggers: [],
   busy: false,
   retryStatus: null,
+  waitingForSlot: null,
   notice: null,
   noticeKind: null,
   backendReady: false,

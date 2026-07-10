@@ -201,6 +201,37 @@ test('reducer: RetryStuck emits a warn Log effect and leaves state unchanged (no
   assert.equal(result.state.settings.noticeKind, null);
 });
 
+test('reducer: WaitingForSlotShown records a non-blocking notice per session (independent of the error-notice triple)', () => {
+  const event: Event = {
+    kind: 'WaitingForSlotShown',
+    sessionPath: '/a',
+    message: 'Still waiting for a free model slot.',
+  };
+  const result = reducer(initialArchState, event);
+  assert.equal(result.state.sessions.waitingForSlotBySession['/a'], 'Still waiting for a free model slot.');
+  // The error-notice triple is untouched (independent field).
+  assert.equal(result.state.settings.notice, null);
+  assert.equal(result.state.settings.noticeKind, null);
+  assert.equal(result.state.settings.noticeRaw, null);
+});
+
+test('reducer: WaitingForSlotCleared removes the notice and is a no-op when absent (idempotent)', () => {
+  const withNotice: ArchState = {
+    ...initialArchState,
+    sessions: {
+      ...initialArchState.sessions,
+      waitingForSlotBySession: { '/a': 'Still waiting for a free model slot.' },
+    },
+  };
+  const result = reducer(withNotice, { kind: 'WaitingForSlotCleared', sessionPath: '/a' });
+  assert.equal(result.state.sessions.waitingForSlotBySession['/a'], undefined);
+
+  // Idempotent: clearing an absent session is a no-op (state unchanged).
+  const noOp = reducer(initialArchState, { kind: 'WaitingForSlotCleared', sessionPath: '/b' });
+  assert.deepEqual(noOp.state, initialArchState);
+  assert.deepEqual(noOp.effects, []);
+});
+
 // ─── Phase 4: Send ──────────────────────────────────────────────────────────
 
 test('reducer: Send command inserts optimistic message and produces SendRpc', () => {
