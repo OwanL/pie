@@ -95,7 +95,7 @@ export function ComposerToolbar({
             onChange={(modelId) => onModelChange(modelId, selectedLevel)}
           />
         ) : selectedModel ? (
-          <ToolbarChip label={selectedModel} title={selectedModel} />
+          <ToolbarChip label={selectedModel} tooltip={selectedModel} />
         ) : null}
 
         {supportsReasoning && (

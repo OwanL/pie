@@ -6,6 +6,7 @@ import type { JSX } from 'preact';
 
 import type { SystemPromptEntry } from '../../../shared/protocol';
 import { CollapsibleChevron } from '../components/chevron';
+import { Tooltip } from '../components/tooltip';
 import { cx } from '../utils/cx';
 
 interface SystemPromptToggleMenuProps {
@@ -171,28 +172,29 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
 
   return (
     <div class="system-prompt-toggle-menu">
-      <button
-        ref={triggerRef}
-        type="button"
-        class={cx('system-prompt-toggle-trigger', open && 'open', disabledCount > 0 && 'has-disabled')}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label="Toggle system prompts"
-        title="Toggle system prompts on/off"
-        onClick={() => setOpen((o) => !o)}
-        onKeyDown={onTriggerKeyDown}
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="2" y="3" width="12" height="3.5" rx="1" />
-          <rect x="2" y="9.5" width="12" height="3.5" rx="1" />
-          <circle cx="5.5" cy="4.75" r="1.1" fill="currentColor" stroke="none" />
-          <circle cx="10" cy="11.25" r="1.1" fill="currentColor" stroke="none" />
-        </svg>
-        {disabledCount > 0 && (
-          <span class="system-prompt-toggle-badge" aria-label={`${disabledCount} disabled`}>{disabledCount}</span>
-        )}
-        <CollapsibleChevron open={open} size={10} class="system-prompt-toggle-caret" />
-      </button>
+      <Tooltip content={open ? null : 'Toggle system prompts on/off'} placement="top">
+        <button
+          ref={triggerRef}
+          type="button"
+          class={cx('system-prompt-toggle-trigger', open && 'open', disabledCount > 0 && 'has-disabled')}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label="Toggle system prompts"
+          onClick={() => setOpen((o) => !o)}
+          onKeyDown={onTriggerKeyDown}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="3.5" rx="1" />
+            <rect x="2" y="9.5" width="12" height="3.5" rx="1" />
+            <circle cx="5.5" cy="4.75" r="1.1" fill="currentColor" stroke="none" />
+            <circle cx="10" cy="11.25" r="1.1" fill="currentColor" stroke="none" />
+          </svg>
+          {disabledCount > 0 && (
+            <span class="system-prompt-toggle-badge" aria-label={`${disabledCount} disabled`}>{disabledCount}</span>
+          )}
+          <CollapsibleChevron open={open} size={10} class="system-prompt-toggle-caret" />
+        </button>
+      </Tooltip>
 
       {open && (
         <div ref={menuRef} class="system-prompt-toggle-dropdown" role="dialog" aria-label="System prompt toggles">

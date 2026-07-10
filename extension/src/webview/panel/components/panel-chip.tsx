@@ -36,6 +36,12 @@ interface PanelChipBaseProps {
    * tooltips that would otherwise resize/jump on every update.
    */
   freezeWhileVisible?: boolean;
+  /** Preferred placement of the custom tooltip relative to the trigger.
+   *  Defaults to `'bottom'` to preserve existing behavior outside the toolbar;
+   *  toolbar chips override this to `'top'` so the whole model-picker row opens
+   *  upward consistently (the default `'bottom'` flips up only on viewport
+   *  overflow, which looked inconsistent). */
+  placement?: 'top' | 'bottom';
   ariaLabel?: string;
 }
 
@@ -73,12 +79,12 @@ function chipContent({ label, children, leading, trailing }: Pick<PanelChipBaseP
   );
 }
 
-function wrapTooltip(node: JSX.Element, tooltip: string | undefined, tooltipNode: ComponentChildren | undefined, freezeWhileVisible?: boolean): JSX.Element {
+function wrapTooltip(node: JSX.Element, tooltip: string | undefined, tooltipNode: ComponentChildren | undefined, freezeWhileVisible?: boolean, placement?: 'top' | 'bottom'): JSX.Element {
   if (tooltipNode !== undefined && tooltipNode !== null && tooltipNode !== '') {
-    return <Tooltip contentNode={tooltipNode} freezeWhileVisible={freezeWhileVisible}>{node}</Tooltip>;
+    return <Tooltip contentNode={tooltipNode} freezeWhileVisible={freezeWhileVisible} placement={placement}>{node}</Tooltip>;
   }
   if (!tooltip) return node;
-  return <Tooltip content={tooltip} freezeWhileVisible={freezeWhileVisible}>{node}</Tooltip>;
+  return <Tooltip content={tooltip} freezeWhileVisible={freezeWhileVisible} placement={placement}>{node}</Tooltip>;
 }
 
 export function PanelChip(props: PanelChipProps) {
@@ -101,6 +107,7 @@ export function PanelChip(props: PanelChipProps) {
       props.tooltip,
       props.tooltipNode,
       props.freezeWhileVisible,
+      props.placement,
     );
   }
 
@@ -119,6 +126,7 @@ export function PanelChip(props: PanelChipProps) {
       props.tooltip,
       props.tooltipNode,
       props.freezeWhileVisible,
+      props.placement,
     );
   }
 
@@ -136,6 +144,7 @@ export function PanelChip(props: PanelChipProps) {
     props.tooltip,
     props.tooltipNode,
     props.freezeWhileVisible,
+    props.placement,
   );
 }
 
@@ -148,10 +157,12 @@ interface ToolbarChipProps {
   tooltipNode?: ComponentChildren;
   ariaLabel?: string;
   tone?: PanelChipTone;
+  /** Tooltip placement; defaults to `'top'` so toolbar tooltips open upward. */
+  placement?: 'top' | 'bottom';
 }
 
-export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted' }: ToolbarChipProps) {
-  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} />;
+export function ToolbarChip({ label, title, tooltip, tooltipNode, ariaLabel, tone = 'muted', placement = 'top' }: ToolbarChipProps) {
+  return <PanelChip variant="toolbar" tone={tone} label={label} title={title} tooltip={tooltip} tooltipNode={tooltipNode} ariaLabel={ariaLabel} placement={placement} />;
 }
 
 export type ToolbarIndicatorKind = 'tokens' | 'cost' | 'context' | 'speed';
@@ -165,6 +176,8 @@ interface ToolbarIndicatorChipProps extends ToolbarChipProps {
   freezeWhileVisible?: boolean;
 }
 
+// Indicator chips live on the composer toolbar (the model-picker row), so their
+// tooltip defaults to opening upward — consistent with the rest of the row.
 function indicatorClassName(kind: ToolbarIndicatorKind, severity?: string | null, state?: 'paused' | null): string {
   return [
     'panel-chip-indicator',
@@ -177,7 +190,7 @@ function indicatorClassName(kind: ToolbarIndicatorKind, severity?: string | null
   ].filter(Boolean).join(' ');
 }
 
-export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, tooltipNode, ariaLabel, freezeWhileVisible }: ToolbarIndicatorChipProps) {
+export function ToolbarIndicatorChip({ kind, severity, state, label, title, tooltip, tooltipNode, ariaLabel, freezeWhileVisible, placement = 'top' }: ToolbarIndicatorChipProps) {
   return (
     <PanelChip
       as="div"
@@ -191,6 +204,7 @@ export function ToolbarIndicatorChip({ kind, severity, state, label, title, tool
       tooltip={tooltip}
       tooltipNode={tooltipNode}
       freezeWhileVisible={freezeWhileVisible}
+      placement={placement}
       label={label}
     />
   );
@@ -210,9 +224,11 @@ interface ToolbarRunStatusChipProps {
   /** Custom tooltip text; when present it replaces the native title. */
   tooltip?: string;
   tone: ToolbarRunStatusTone;
+  /** Tooltip placement; defaults to `'top'` so toolbar tooltips open upward. */
+  placement?: 'top' | 'bottom';
 }
 
-export function ToolbarRunStatusChip({ label, title, tooltip, tone }: ToolbarRunStatusChipProps) {
+export function ToolbarRunStatusChip({ label, title, tooltip, tone, placement = 'top' }: ToolbarRunStatusChipProps) {
   return (
     <PanelChip
       as="div"
@@ -224,6 +240,7 @@ export function ToolbarRunStatusChip({ label, title, tooltip, tone }: ToolbarRun
       tabIndex={0}
       title={title}
       tooltip={tooltip}
+      placement={placement}
       label={label}
     />
   );
@@ -242,19 +259,23 @@ interface ToolbarSelectChipProps {
 }
 
 export function ToolbarSelectChip({ value, label, title, ariaLabel, width, onChange, children }: ToolbarSelectChipProps) {
+  // Wrap in the custom Tooltip (placement 'top') so the reasoning-level chip's
+  // tooltip opens upward like the rest of the model-picker row, instead of the
+  // native <select> title whose direction the browser controls.
   return (
-    <div class={`panel-chip panel-chip-toolbar panel-chip-select panel-chip-${width}-select`}>
-      <span class="panel-chip-select-label" aria-hidden="true">{label}</span>
-      <CollapsibleChevron open={false} size={10} class="panel-chip-select-caret" />
-      <select
-        value={value}
-        onChange={onChange}
-        aria-label={ariaLabel}
-        title={title}
-      >
-        {children}
-      </select>
-    </div>
+    <Tooltip content={title} placement="top">
+      <div class={`panel-chip panel-chip-toolbar panel-chip-select panel-chip-${width}-select`}>
+        <span class="panel-chip-select-label" aria-hidden="true">{label}</span>
+        <CollapsibleChevron open={false} size={10} class="panel-chip-select-caret" />
+        <select
+          value={value}
+          onChange={onChange}
+          aria-label={ariaLabel}
+        >
+          {children}
+        </select>
+      </div>
+    </Tooltip>
   );
 }
 

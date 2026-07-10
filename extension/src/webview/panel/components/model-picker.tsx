@@ -6,6 +6,7 @@ import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import type { ModelPickerEntry } from '../composer/model-list';
 import { CollapsibleChevron } from './chevron';
+import { Tooltip } from './tooltip';
 
 interface ModelPickerProps {
   /** Current selected model id. */
@@ -378,21 +379,26 @@ function ModelPickerTrigger({
   onClick,
   onKeyDown,
 }: ModelPickerTriggerProps) {
+  // Wrap the trigger in the custom Tooltip (placement 'top') so its tooltip
+  // opens upward like the rest of the model-picker row. Suppress the tooltip
+  // content while the dropdown is open so it doesn't collide with the
+  // (upward-opening) dropdown list.
   return (
-    <button
-      ref={triggerRef}
-      type="button"
-      class={className}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      aria-label={ariaLabel}
-      title={title}
-      onClick={onClick}
-      onKeyDown={onKeyDown}
-    >
-      <span class="model-picker-trigger-label">{label}</span>
-      <CollapsibleChevron open={open} />
-    </button>
+    <Tooltip content={open ? null : title} placement="top">
+      <button
+        ref={triggerRef}
+        type="button"
+        class={className}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
+      >
+        <span class="model-picker-trigger-label">{label}</span>
+        <CollapsibleChevron open={open} />
+      </button>
+    </Tooltip>
   );
 }
 
