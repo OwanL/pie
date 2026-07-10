@@ -15,6 +15,7 @@ import type {
 import type { SdkSessionEvent } from './sdk';
 import { mapAssistantMessage, mapCustomMessage } from './transcript';
 import type { SessionContext } from './server-types';
+import { backendLog, type BackendLogLevel } from './log';
 
 /**
  * Assistant-message streaming event types that count as the provider "replying
@@ -89,14 +90,11 @@ function armWillRetryWatchdog(
   };
 }
 
-function logBackendDiagnostic(event: string, payload: Record<string, unknown>): void {
-  process.stderr.write(`[pie:backend] ${JSON.stringify({
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: 'backend-session',
-    event,
-    ...payload,
-  })}\n`);
+/** Emit a structured `backend-session` diagnostic line via the shared backend
+ *  logger (explicit `level` field → host reads severity from the structured
+ *  field instead of guessing from line text). */
+function logBackendDiagnostic(level: BackendLogLevel, event: string, data: Record<string, unknown>): void {
+  backendLog(level, 'backend-session', event, data);
 }
 
 function summarizePayload(value: unknown): string | undefined {
@@ -358,7 +356,7 @@ export function handleSdkSessionEvent(
 
       // Diagnostic: log tool execution start to stderr for debugging file-changes tracking.
       // Raw argument values are intentionally omitted to avoid leaking secrets/PII.
-      logBackendDiagnostic('tool_execution_start', {
+      logBackendDiagnostic('debug', 'tool_execution_start', {
         toolName: event.toolName ?? '',
         toolCallId: event.toolCallId ?? '',
         args: summarizeToolArgs(event.args),
@@ -414,7 +412,7 @@ export function handleSdkSessionEvent(
       context.activeRequest.turnBoundaryAt = Date.now();
 
       if (event.isError) {
-        logBackendDiagnostic('tool.failed', {
+        logBackendDiagnostic('warn', 'tool.failed', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
           toolCallId: event.toolCallId ?? '',
@@ -529,7 +527,7 @@ export function handleSdkSessionEvent(
       if (message.status === 'interrupted') {
         const userInitiated = context.activeRequest.aborted === true;
         if (!userInitiated) {
-          logBackendDiagnostic('message.interrupted', {
+          logBackendDiagnostic('info', 'message.interrupted', {
             requestId: context.activeRequest.id,
             sessionPath: context.sessionPath,
             messageId,
@@ -597,7 +595,7 @@ export function handleSdkSessionEvent(
 
       if (requestId && interruptedWithoutMessage) {
         if (!userInitiated) {
-          logBackendDiagnostic('request.interruptedWithoutMessage', {
+          logBackendDiagnostic('info', 'request.interruptedWithoutMessage', {
             requestId,
             sessionPath: context.sessionPath,
             modelId,

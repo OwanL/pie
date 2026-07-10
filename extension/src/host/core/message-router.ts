@@ -6,7 +6,7 @@ import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, 
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
-import { appendPieError, showPieLogs } from '../util/pie-log';
+import { appendPieError, appendPieLog, showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
 import { resolveSettingsPath } from '../util/settings-path';
 
@@ -231,6 +231,9 @@ export class MessageRouter {
 
       case 'cancelDeferredTrigger':
         return this.onCancelDeferredTrigger(msg as Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>);
+
+      case 'log':
+        return this.onLog(msg as Extract<WebviewToHostMessage, { type: 'log' }>);
 
       default:
         return;
@@ -748,6 +751,16 @@ export class MessageRouter {
    *  reducer event, no notice change. */
   private onShowLogs(): void {
     showPieLogs(true);
+  }
+
+  /** `log` — forward a webview-originated log through the host logger
+   *  (`appendPieLog` → the `pie` OutputChannel / pie.log) so webview logs are
+   *  durable and visible without opening devtools. The webview cannot import
+   *  host utilities, so it posts a `log` message (see `webview/panel/utils/log.ts`);
+   *  this is the host-side sink. Severity is carried in the message (`warn` |
+   *  `error`) and attributed to the `webview` scope. */
+  private onLog(msg: Extract<WebviewToHostMessage, { type: 'log' }>): void {
+    appendPieLog(msg.level, 'webview', msg.message, msg.data);
   }
 
   /** `openSettings` — open the pruning settings file (`settings.json` in

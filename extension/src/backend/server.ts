@@ -63,18 +63,8 @@ import {
 } from './transcript-window';
 import type { SessionEntryLike } from './transcript';
 import { createRuntimeFactory } from './runtime-factory.js';
+import { backendTrace, backendError, backendInfo } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper } from './session-opened.js';
-
-function backendTrace(scope: string, event: string, payload: Record<string, unknown> = {}): void {
-  const record = {
-    ts: new Date().toISOString(),
-    pid: process.pid,
-    scope: `backend-${scope}`,
-    event,
-    ...payload,
-  };
-  console.warn(`[pie:backend] ${JSON.stringify(record)}`);
-}
 
 /** Simple stopwatch for backend timing probes. */
 function timed<T>(label: string, op: () => T): T;
@@ -89,7 +79,7 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
           return value;
         },
         (error) => {
-          backendTrace('timing', 'op.failed', { label, durationMs: Date.now() - start, error: toErrorMessage(error) });
+          backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
           throw error;
         },
       );
@@ -100,7 +90,7 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
   try {
     return finish(op());
   } catch (error) {
-    backendTrace('timing', 'op.failed', { label, durationMs: Date.now() - start, error: toErrorMessage(error) });
+    backendTrace('timing', 'op.failed', { level: 'warn', label, durationMs: Date.now() - start, error: toErrorMessage(error) });
     throw error;
   }
 }
@@ -118,25 +108,11 @@ function installBackendFatalHandlers(): void {
   backendFatalHandlersInstalled = true;
   process.on('unhandledRejection', (reason) => {
     const error = reason instanceof Error ? String(reason.stack ?? reason) : String(reason);
-    process.stderr.write(`[pie:backend] ${JSON.stringify({
-      ts: new Date().toISOString(),
-      pid: process.pid,
-      scope: 'backend',
-      level: 'error',
-      event: 'unhandledRejection',
-      error,
-    })}\n`);
+    backendError('backend', 'unhandledRejection', { error });
   });
   process.on('uncaughtException', (err) => {
     const error = err instanceof Error ? String(err.stack ?? err) : String(err);
-    process.stderr.write(`[pie:backend] ${JSON.stringify({
-      ts: new Date().toISOString(),
-      pid: process.pid,
-      scope: 'backend',
-      level: 'error',
-      event: 'uncaughtException',
-      error,
-    })}\n`);
+    backendError('backend', 'uncaughtException', { error });
   });
 }
 
@@ -189,7 +165,7 @@ export class BackendServer {
       } catch (error) {
         // Non-fatal: if models.json is missing or unreadable, the gate is
         // simply not installed — requests go direct (no concurrency cap).
-        console.warn(`[pie:backend] provider gate not installed: ${(error as Error).message}`);
+        backendInfo('backend', 'providerGate.notInstalled', { error: (error as Error).message });
       }
     });
 
@@ -730,7 +706,7 @@ export class BackendServer {
       writeStdout(responseOk(request.id, result));
     } catch (error) {
       const details = extractRequestError(error);
-      backendTrace('request', 'error', { id: request.id, method: request.method, code: details.code, message: details.message });
+      backendTrace('request', 'error', { level: 'warn', id: request.id, method: request.method, code: details.code, message: details.message });
       writeStdout(responseError(request.id, details.code, details.message, details.data));
       this.emit('error', details);
     }
