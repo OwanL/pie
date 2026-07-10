@@ -4,7 +4,7 @@
 # (or: node scripts/sync-models.mjs --check  to verify drift).
 #
 # Do NOT edit the derived files directly:
-#   models.json, model-profiles.yaml, proxy/litellm_config.yaml, settings.json
+#   models.json, model-profiles.yaml, settings.json
 # They are regenerated from this file by scripts/sync-models.mjs.
 #
 # Field flow (see docs/internal/centralized-model-config.md §4):

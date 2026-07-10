@@ -48,7 +48,7 @@ function resolveDep(name) {
     }
   }
   throw new Error(
-    `Could not resolve "${name}" — run "npm install" in extension/ (yaml is a direct dep, ajv is transitive).`,
+    `Could not resolve "${name}" — run "npm install" in extension/ (yaml and ajv are direct devDependencies of the extension).`,
   );
 }
 

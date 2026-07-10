@@ -1,7 +1,10 @@
 {
   "name": "pi-config",
   "private": true,
-  "//workspaces": "npm workspaces are intentionally NOT enabled. Only extensions/ask-user has a package.json; extensions/cwd-skills, extensions/safeguard, extensions/skill-pruner, extensions/subagent, and extensions/web-access-compat are resolved by the root test runner via direct globs and typechecked from the extension package. Activating workspaces would require package.json files for each and would break root npm install. Track enabling this in docs/internal/code-review/TODO-archive.md.",
+  "engines": {
+    "node": ">=20"
+  },
+  "//workspaces": "npm workspaces are intentionally NOT enabled. Six extensions currently ship a package.json (ask-user, deferred-triggers, session-changes, session-reviewer, tool-result-pruner, warm-bash); the remaining five (cwd-skills, safeguard, skill-pruner, subagent, web-access-compat) are resolved by the root test runner via direct globs and typechecked from the extension package. Activating workspaces would require package.json files for each and would break root npm install. Track enabling this in docs/internal/code-review/TODO-archive.md.",
   "scripts": {
     "test": "node ./scripts/run-tests.mjs",
     "shared:typecheck": "node ./extension/node_modules/typescript/bin/tsc -p shared/tsconfig.json",
