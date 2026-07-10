@@ -203,6 +203,79 @@ test('without freezeWhileVisible the tooltip text follows live content updates',
   }
 });
 
+test('scroll does not dismiss a tooltip whose trigger did not move (fixed container)', async () => {
+  // Regression: the bottom status strip and composer toolbar sit in fixed
+  // containers, so their triggers don't move when the transcript auto-scrolls
+  // during a run. The tooltip must stay open instead of dismissing on every
+  // scroll event (which fires ~continuously while content streams).
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(Tooltip, { content: 'stable', delayShow: 0, delayHide: 0 }, h('span', { class: 'trigger' }, 'target')), container);
+    });
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+
+    // Pin a fixed layout rect that does not change across the scroll.
+    Object.defineProperty(trigger(), 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ top: 200, bottom: 220, left: 0, right: 40, width: 40, height: 20, x: 0, y: 200 }),
+    });
+
+    await act(async () => {
+      trigger().dispatchEvent(new MouseEvent('mouseenter'));
+      flushTimers();
+    });
+    assert.equal(host().style.display, 'block');
+
+    // The transcript auto-scrolls; the trigger's rect is unchanged, so the
+    // tooltip must survive the scroll instead of closing.
+    await act(async () => {
+      window.dispatchEvent(new Event('scroll'));
+    });
+    assert.equal(host().style.display, 'block', 'a tooltip whose trigger did not move should survive scroll');
+  } finally {
+    restoreTimers();
+  }
+});
+
+test('scroll dismisses a tooltip whose trigger moved with the content', async () => {
+  // A transcript-message tooltip's trigger scrolls with the content; a fixed
+  // tooltip would detach and float over unrelated UI, so it should dismiss when
+  // the trigger actually moves on scroll (preserves the pre-fix behavior for
+  // scrolling triggers).
+  installFakeTimers();
+  try {
+    act(() => {
+      render(h(Tooltip, { content: 'moves', delayShow: 0, delayHide: 0 }, h('span', { class: 'trigger' }, 'target')), container);
+    });
+    const host = () => document.querySelector('.pie-tooltip-host') as HTMLElement;
+    const trigger = () => container.querySelector('.pie-tooltip-trigger') as HTMLElement;
+
+    // Simulate a trigger that reports a real layout rect, then moves on scroll.
+    let top = 100;
+    Object.defineProperty(trigger(), 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ top, bottom: top + 20, left: 0, right: 40, width: 40, height: 20, x: 0, y: top }),
+    });
+
+    await act(async () => {
+      trigger().dispatchEvent(new MouseEvent('mouseenter'));
+      flushTimers();
+    });
+    assert.equal(host().style.display, 'block');
+
+    // The trigger scrolls up by 50px — well beyond the 1px tolerance.
+    top = 50;
+    await act(async () => {
+      window.dispatchEvent(new Event('scroll'));
+    });
+    assert.equal(host().style.display, 'none', 'a tooltip whose trigger scrolled should dismiss');
+  } finally {
+    restoreTimers();
+  }
+});
+
 test('contentNode renders a rich JSX tooltip (hoverable, not textContent)', async () => {
   // A rich tooltip renders its JSX subtree into the host via an imperative
   // Preact root (not textContent), gets the --rich class + pointer events so

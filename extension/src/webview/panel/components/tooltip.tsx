@@ -103,6 +103,13 @@ export function Tooltip({
    *  hide/unmount can `render(null, host)` to tear it down cleanly instead of
    *  clobbering Preact-managed DOM with `textContent`. */
   const richMountedRef = useRef(false);
+  /** The trigger's viewport rect captured the last time the host was positioned.
+   *  Used by the scroll handler to tell whether the trigger actually moved on
+   *  scroll — tooltips in fixed containers (bottom status strip, composer
+   *  toolbar) don't move when the transcript auto-scrolls during a run, so
+   *  they stay open; transcript-message tooltips whose triggers scroll with the
+   *  content still dismiss (a fixed tooltip would otherwise detach and float). */
+  const lastTriggerRectRef = useRef<{ top: number; bottom: number } | null>(null);
 
   const hasRich = contentNode !== undefined && contentNode !== null && contentNode !== '';
   // Rich tooltips are hoverable: give the pointer enough time to cross the
@@ -202,6 +209,7 @@ export function Tooltip({
       } else {
         host.textContent = '';
       }
+      lastTriggerRectRef.current = null;
       return;
     }
 
@@ -223,6 +231,9 @@ export function Tooltip({
     }
 
     const rect = trigger.getBoundingClientRect();
+    // Snapshot the trigger rect so the scroll handler can detect whether the
+    // trigger actually moved on scroll (vs. a fixed container that stayed put).
+    lastTriggerRectRef.current = { top: rect.top, bottom: rect.bottom };
     const hostRect = host.getBoundingClientRect();
     const gap = 6;
 
@@ -260,17 +271,31 @@ export function Tooltip({
     };
   }, []);
 
-  // Hide on Escape, viewport resize, or any scroll (capture phase so it
-  // catches scroll within nested scrollable containers like the transcript,
-  // which auto-scrolls during a run and would leave the fixed tooltip
-  // detached from its trigger).
+  // Hide on Escape or viewport resize. For scroll, only dismiss when the
+  // trigger actually moved with the scroll. The transcript auto-follows during a
+  // run (scroll events fire ~continuously while content streams), but tooltips
+  // in fixed containers — the bottom status strip and the composer toolbar —
+  // don't move with that scroll, so they must stay open and inspectable instead
+  // of dismissing on every content update. Compare the trigger's current rect
+  // against the one captured at positioning time; a >1px shift means the trigger
+  // scrolled (e.g. a transcript-message tooltip) and the fixed tooltip would
+  // detach, so dismiss. Capture phase so it catches scroll within nested
+  // scrollable containers like the transcript.
   useEffect(() => {
     if (!isVisible) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setIsVisible(false);
     };
     const handleResize = () => setIsVisible(false);
-    const handleScroll = () => setIsVisible(false);
+    const handleScroll = () => {
+      const trigger = triggerRef.current;
+      const last = lastTriggerRectRef.current;
+      if (!trigger || !last) return;
+      const r = trigger.getBoundingClientRect();
+      if (Math.abs(r.top - last.top) > 1 || Math.abs(r.bottom - last.bottom) > 1) {
+        setIsVisible(false);
+      }
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('resize', handleResize);
     window.addEventListener('scroll', handleScroll, true);
