@@ -179,3 +179,12 @@ successful build/test runs, re-read diffs, a final assistant message that
 matches the original intent. "The agent said it's done" is **not** sufficient
 by itself; corroborate it with tool results. If you can't corroborate, prefer
 `done: false` with a `partial` review and say why in the reason.
+
+**Some changes can't be validated from tool results at all.** UI styling,
+visual layout, animations, copy/wording, and other subjective or perceptual
+changes may compile, typecheck, and pass tests yet still not be what the user
+actually wanted — and you (like the agent that did the work) cannot see the
+rendered result from the transcript. For these, do **not** mark the session
+done on the strength of green builds alone. Ask the user whether the change
+landed as intended (see the check-in step in the Flow) and let their answer
+drive `done`/`completion`. Default to `done: false` until they confirm.
