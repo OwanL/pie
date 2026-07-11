@@ -41,4 +41,6 @@ export interface PrepassRunResult {
 	usage?: PrepassUsage;
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;
+	/** True when this result was reused from the per-session cache. */
+	cacheHit?: boolean;
 }

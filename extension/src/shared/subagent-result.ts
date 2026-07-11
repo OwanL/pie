@@ -63,6 +63,12 @@ export interface SubagentSingleResult {
   errorMessage?: string;
   /** Tool names currently executing inside this subagent run. */
   runningTools?: string[];
+  /** Live child lifecycle diagnostics emitted by the subagent extension. */
+  activityPhase?: 'queued' | 'preparing' | 'waiting_provider' | 'streaming' | 'running_tool' | 'retry_wait' | 'completed' | 'failed' | 'cancelled' | 'orphaned_cleanup';
+  activityDetail?: string;
+  activitySince?: number;
+  lastProgressAt?: number;
+  inactivityBudgetMs?: number;
   /** The model chosen by scored selection. */
   selectedModel?: string;
   /** Thinking level applied to this run. */
@@ -185,6 +191,41 @@ function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | un
   return undefined;
 }
 
+function terminalResultMessage(rawResult: unknown): string | undefined {
+  if (!isRecord(rawResult)) return undefined;
+  const content = rawResult.content;
+  if (typeof content === 'string') return nonEmptyText(content);
+  if (!Array.isArray(content)) return undefined;
+
+  const text = content
+    .map((part) => (isRecord(part) && typeof part.text === 'string' ? part.text.trim() : ''))
+    .filter(Boolean)
+    .join('\n');
+  return nonEmptyText(text);
+}
+
+/** A force-settle or pre-dispatch failure can legitimately finish with
+ * `details.results: []`. Falling back to the generic tool card hides every
+ * requested child, which made the failed delegation appear to have vanished.
+ * Reconstruct the child cards from the immutable tool input and stamp the
+ * terminal tool error onto each placeholder. */
+function synthesizeTerminalSubagentResult(input: unknown, rawResult: unknown): SubagentResult | undefined {
+  const synthesized = synthesizeRenderableSubagentResult(input);
+  if (!synthesized) return undefined;
+
+  const errorMessage = terminalResultMessage(rawResult)
+    ?? 'Subagent failed before reporting child results.';
+  return {
+    ...synthesized,
+    results: synthesized.results.map((result) => ({
+      ...result,
+      exitCode: 1,
+      stopReason: 'error',
+      errorMessage,
+    })),
+  };
+}
+
 function normalizeRenderableSubagentResult(
   result: SubagentResult,
   toolStatus: ToolCall['status'],
@@ -239,6 +280,15 @@ export function getRenderableSubagentResultFromToolCall(
 
   if (toolCall.status === 'running') {
     return synthesizeRenderableSubagentResult(toolCall.input);
+  }
+
+  // Terminal calls with empty/missing child results are not successful empty
+  // runs: the subagent protocol only emits that shape when execution failed
+  // before it could return per-child details (notably the settlement net).
+  // Keep the delegation visible and actionable instead of collapsing it into
+  // an opaque generic tool row.
+  if (toolCall.result !== undefined) {
+    return synthesizeTerminalSubagentResult(toolCall.input, toolCall.result);
   }
 
   return undefined;

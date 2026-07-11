@@ -504,6 +504,7 @@ test('subagent tool call forwards turnThroughputSamples into the parent run', ()
             exitCode: 0,
             messages: [],
             model: 'openai/gpt-sub',
+            usage: { input: 200, output: 100, cacheRead: 20, cacheWrite: 10 },
             turnThroughputSamples: [
               { endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 100, generationDurationMs: 1000, status: 'completed', modelId: 'openai/gpt-sub' },
             ],
@@ -524,6 +525,55 @@ test('subagent tool call forwards turnThroughputSamples into the parent run', ()
   assert.equal(sample?.generationDurationMs, 1000);
   assert.equal(sample?.status, 'completed');
   assert.equal(sample?.modelId, 'openai/gpt-sub');
+  assert.equal(run?.toolUsage.subagentInputTokens, 200);
+  assert.equal(run?.toolUsage.subagentOutputTokens, 100);
+  assert.deepEqual(run?.auxiliaryLlmUsage, [{
+    kind: 'subagent',
+    sourceId: 'subagent-1:0',
+    occurredAt: '2026-01-01T00:00:00.000Z',
+    modelId: 'openai/gpt-sub',
+    inputTokens: 200,
+    outputTokens: 100,
+    cacheReadTokens: 20,
+    cacheWriteTokens: 10,
+  }]);
+});
+
+test('skill-pruning usage records the actual model and ignores duplicate CustomMessage delivery', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const details = {
+    prepassModel: 'openai/pruner',
+    prepassInputTokens: 123,
+    prepassOutputTokens: 45,
+    prepassCacheReadTokens: 6,
+    prepassCacheWriteTokens: 7,
+  };
+
+  harness.tracker.onSkillPruningUsage(
+    harness.sessionPath,
+    'pruning-message-1',
+    '2026-01-01T00:00:00.250Z',
+    details,
+  );
+  harness.tracker.onSkillPruningUsage(
+    harness.sessionPath,
+    'pruning-message-1',
+    '2026-01-01T00:00:00.250Z',
+    details,
+  );
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.deepEqual(run?.auxiliaryLlmUsage, [{
+    kind: 'skill_pruning_prepass',
+    sourceId: 'pruning-message-1',
+    occurredAt: '2026-01-01T00:00:00.250Z',
+    modelId: 'openai/pruner',
+    inputTokens: 123,
+    outputTokens: 45,
+    cacheReadTokens: 6,
+    cacheWriteTokens: 7,
+  }]);
 });
 
 test('subagent tool call stamps modelId from result.model when sample lacks modelId', () => {

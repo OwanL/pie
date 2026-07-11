@@ -1,42 +1,37 @@
 import type { Event } from '../core/events.js';
 
-/**
- * Pure policy: given the running session paths at backend-exit time and the
- * exit info, return the sequence of `Event`s the host should dispatch.
- *
- * Extracted from `attach.ts#onExit` so the alert behavior is unit-testable
- * without mocking `vscode`. When one or more sessions were streaming, the
- * returned events include `SessionsInterrupted` so the reducer can mark their
- * orphaned streaming assistant messages `interrupted` with a reason — no
- * `message.aborted` event ever fires when the backend dies, so without this
- * those messages would stay `status: 'streaming'` forever and the user would
- * never be alerted that the interruption was not their doing. When nothing was
- * running, only the generic "PI backend stopped" notice is returned — a clean
- * exit with no in-flight work should not produce an interrupt alert.
- */
+export type InterruptedSessionActivity = 'waiting for user input' | 'running a tool' | 'generating';
+
+/** Pure backend-exit notice/cleanup policy. Paths are deduplicated because a
+ * session must be counted and terminalized exactly once. Raw stderr is kept in
+ * noticeRaw, never in the short user-facing notice. */
 export function backendExitEvents(
   runningSessionPaths: readonly string[],
   code: number | null,
   stderr: string,
+  activityBySession: Readonly<Record<string, InterruptedSessionActivity>> = {},
 ): Event[] {
+  const paths = [...new Set(runningSessionPaths)];
   const codeSuffix = code !== null ? ` (code ${code})` : '';
-  const stderrSuffix = stderr ? `: ${stderr.slice(0, 300)}` : '';
-  const baseNotice = `PI backend stopped${codeSuffix}${stderrSuffix}.`;
-  const interruptReason = `PI backend stopped unexpectedly${codeSuffix}${stderrSuffix}`;
+  const reason = `PI backend stopped unexpectedly${codeSuffix}`;
+  const counts = new Map<InterruptedSessionActivity, number>();
+  for (const path of paths) {
+    const activity = activityBySession[path] ?? 'generating';
+    counts.set(activity, (counts.get(activity) ?? 0) + 1);
+  }
+  const breakdown = [...counts].map(([kind, count]) => `${count} ${kind}`).join(', ');
+  const countText = paths.length > 0
+    ? ` ${paths.length} ${paths.length === 1 ? 'session was' : 'sessions were'} interrupted${breakdown ? ` (${breakdown})` : ''}.`
+    : '.';
 
-  const events: Event[] = [];
-  if (runningSessionPaths.length > 0) {
-    const countSuffix = runningSessionPaths.length === 1
-      ? ' The active session was interrupted.'
-      : ` ${runningSessionPaths.length} running sessions were interrupted.`;
-    events.push({ kind: 'NoticeShown', notice: baseNotice + countSuffix });
-    events.push({
-      kind: 'SessionsInterrupted',
-      sessionPaths: [...runningSessionPaths],
-      reason: interruptReason,
-    });
-  } else {
-    events.push({ kind: 'NoticeShown', notice: baseNotice });
+  const events: Event[] = [{
+    kind: 'NoticeShown',
+    notice: `PI backend stopped${codeSuffix}.${countText}`.replace('..', '.'),
+    noticeKind: 'backend-exit',
+    noticeRaw: stderr || null,
+  }];
+  if (paths.length > 0) {
+    events.push({ kind: 'SessionsInterrupted', sessionPaths: paths, reason });
   }
   events.push({ kind: 'BackendReadyChanged', ready: false });
   events.push({ kind: 'RunningSessionsChanged', sessionPaths: [] });

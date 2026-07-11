@@ -85,6 +85,22 @@ test('validateAndMaterializeComposerInput accepts imageBlob when model supports 
   assert.equal(input?.kind, 'imageBlob');
 });
 
+test('host rejects an attachment immediately when aggregate raw image bytes exceed 20 MiB', () => {
+  let state = createInitialArchState();
+  const image = (name: string) => ({
+    kind: 'imageBlob' as const, mimeType: 'image/png', name, sizeBytes: 7 * 1024 * 1024,
+    dataBase64: 'abc', source: 'paste' as const,
+  });
+  for (const [index, name] of ['one.png', 'two.png', 'three.png'].entries()) {
+    state = reducer(state, {
+      kind: 'Command',
+      cmd: { kind: 'AddComposerInput', corrId: `c${index}`, sessionPath: '/s', input: image(name) },
+    }).state;
+  }
+  assert.equal(state.composer.pendingComposerInputsBySession['/s']?.length, 2);
+  assert.match(state.settings.notice ?? '', /aggregate image size exceeds/);
+});
+
 test('validateAndMaterializeComposerInput rejects imageBlob when model does not support images', () => {
   let state = createInitialArchState();
   state = {

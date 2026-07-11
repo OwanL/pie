@@ -281,10 +281,33 @@ export function pieWarn(scope: string, message: string, data?: Record<string, un
   pieLog('warn', scope, message, data);
 }
 
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|secret)=)[^&\s]+/gi, '$1[redacted]')
+    .replace(/\b(api[_-]?key|authorization|password|passwd|secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[redacted]');
+}
+
+function errorDiagnostic(error: unknown): Record<string, unknown> {
+  const diagnostic: Record<string, unknown> = { error: redactSensitiveText(toErrorMessage(error)) };
+  if (!(error instanceof Error)) return diagnostic;
+
+  diagnostic.errorName = error.name;
+  // The message alone is rarely enough for asynchronous failures such as
+  // "Canceled" or "Channel has been closed". Preserve the originating stack
+  // in the durable log while keeping the short `error` field for grouping.
+  if (error.stack) diagnostic.stack = redactSensitiveText(error.stack).slice(0, 32 * 1024);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (cause !== undefined) diagnostic.cause = redactSensitiveText(toErrorMessage(cause));
+  const code = (error as Error & { code?: unknown }).code;
+  if (typeof code === 'string' || typeof code === 'number') diagnostic.errorCode = code;
+  return diagnostic;
+}
+
 export function pieError(scope: string, message: string, error?: unknown, data?: Record<string, unknown>): void {
   const details = data && typeof data === 'object'
-    ? { ...data, error: toErrorMessage(error) }
-    : { error: toErrorMessage(error), data };
+    ? { ...data, ...errorDiagnostic(error) }
+    : { data, ...errorDiagnostic(error) };
   pieLog('error', scope, message, details);
 }
 

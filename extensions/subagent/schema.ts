@@ -13,7 +13,7 @@
 // the exact TypeBox instance pi-ai's tool-parameter API expects.
 import { StringEnum, Type } from "@mariozechner/pi-ai";
 
-export const BUCKET_GUIDANCE = "Bucket hint for model selection: 'small' (Haiku-class, busywork), 'medium' (Sonnet-class, main development), or 'frontier' (Opus-class, hardest problems). Prefer 'medium' for almost all tasks — it is the best balance of cost and capability. Reserve 'frontier' for only the absolute hardest problems, as it is far more expensive; use 'small' only for trivial busywork. Defaults to 'medium' when omitted.";
+export const BUCKET_GUIDANCE = "Model bucket: 'small' for trivial work, 'medium' for normal development (default), or 'frontier' only for exceptional difficulty.";
 
 const THINKING_LEVEL_GUIDANCE = "Optional thinking effort hint: 'minimal', 'low', 'medium', 'high', or 'xhigh'. When omitted, the model uses its default thinking behavior.";
 

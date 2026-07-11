@@ -274,6 +274,7 @@ export type WebviewToHostMessage =
       type: 'setModel';
       sessionPath?: string;
       defaultModel: string;
+      defaultProvider?: string;
       defaultThinkingLevel: ThinkingLevel;
     }
   | { type: 'setPrefs'; prefs: Partial<ChatPrefs> }

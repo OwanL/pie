@@ -100,16 +100,13 @@ export default function (pi: ExtensionAPI) {
     name: 'session_changes',
     label: 'Session changes',
     description:
-      'Inspect what files THIS session changed — a compaction-surviving change manifest an agent (or a reviewer subagent it feeds) can reason over. `list` derives the set of changed files + per-file line churn as a compact TSV (subagent-attributed changes included). `diff` emits a minified unified diff (default context=0, changes-only) for one or more files from the manifest. `diff` accepts `path` as an array of manifest paths (use `["path"]` for one file). Defaults to the calling session; pass sessionPath for another. Sits alongside session_review as a second session-introspection tool.',
+      'Inspect files changed by a pi session. `list` returns a compact manifest with line churn; `diff` returns minified unified diffs for selected manifest paths. Defaults to the calling session and includes subagent-attributed edits.',
     promptSnippet:
-      'Inspect what files THIS session changed: `list` → compact TSV manifest of changed files + churn; `diff` → minified unified diff per file. Defaults to your own session.',
+      'Inspect this session\'s changed-file manifest and focused diffs. Defaults to your own session.',
     promptGuidelines: [
-      'Call `list` first (no args) to see the files this session changed + per-file line churn. It defaults to YOUR session and is compaction-surviving (parses the session JSONL, which compaction never truncates).',
-      'Then call `diff` with a `path` array from the manifest for a minified unified diff. Default `context=0` (changes-only) is the most compact and still agent-native — git emits the enclosing function/section label in the `@@` hunk header, so semantic context is preserved. Raise `context` or `read` the file when surrounding unchanged lines are needed.',
-      'Subagent-attributed changes ARE included — a `session_changes` call on the parent surfaces files a subagent edited.',
-      'The high-value composition is manifest-tool → fresh-context `reviewer` subagent: call `session_changes`, then paste the compact manifest/diffs into the reviewer\'s task description. The reviewer reasons over the manifest in a fresh context; it does not call this tool. (A model judging its own just-made changes in the same context is biased toward the decisions it already rationalised.)',
-      '`diff` needs git and resolves the pre-change baseline (the commit before the agent\'s change, not bare HEAD — agents commit after each task). For created/untracked/non-git files it emits the stat header + an inline note instead of a diff body; it never errors — fall back to `read`.',
-      'Honest limitation: if several commits touched the same file this session, `diff` may show only the final delta while `list` stats are session-cumulative (a +50 -2 list vs +5 -2 diff mismatch). The diff header flags the baseline; use `read` for the full current state when that matters.',
+      'Call `list` first, then `diff` with a `path` array from that manifest. Start with `context=0`; raise it or read the file when surrounding code is needed.',
+      'Use the manifest to separate this session\'s work from unrelated checkout changes. Subagent-attributed edits are included.',
+      'For created, untracked, non-git, or multi-commit files, the diff may be incomplete; read the current file when the result says so or the churn does not match.',
     ],
     parameters: sessionChangesSchema,
 

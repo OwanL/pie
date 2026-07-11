@@ -26,6 +26,7 @@ export interface PrepassDiagnostics {
 	userMessage: string;
 	latencyMs: number;
 	usage?: PrepassUsage;
+	cacheHit?: boolean;
 	error?: string | null;
 	safeguardReason?: string | null;
 }
@@ -167,6 +168,8 @@ export function buildDecision(input: {
 	prepassUserMessage?: string;
 	/** Short git SHA tagging the pruning-code version that produced this decision. */
 	codeVersion?: string;
+	/** True when a prior successful prepass was reused. */
+	cacheHit?: boolean;
 }): PruningDecision {
 	return {
 		timestamp: new Date().toISOString(),
@@ -189,6 +192,7 @@ export function buildDecision(input: {
 		toolBlockTokens: input.toolBlockTokens,
 		originalToolBlockTokens: input.originalToolBlockTokens,
 		keptAllDueToParseFailure: input.keptAllDueToParseFailure,
+		cacheHit: input.cacheHit,
 		prepassInputTokens: input.prepassUsage?.input,
 		prepassOutputTokens: input.prepassUsage?.output,
 		prepassCacheReadTokens: input.prepassUsage?.cacheRead,
@@ -295,6 +299,7 @@ export function buildFeedbackMessage(
 		if (prepass.userMessage) details.prepassUserMessage = prepass.userMessage;
 		details.prepassLatencyMs = prepass.latencyMs;
 		applyPrepassUsage(details, prepass.usage);
+		if (prepass.cacheHit) details.cacheHit = true;
 		if (prepass.safeguardReason) details.prepassSafeguardReason = prepass.safeguardReason;
 	}
 
@@ -316,12 +321,13 @@ export function buildFeedbackMessage(
 	const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
 	const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
 	const latencyNote = formatLatencyNote(prepass?.latencyMs);
+	const cacheNote = prepass?.cacheHit ? " · cached" : "";
 
 	// Note: a keep-all outcome (nothing pruned) is the *expected* result of the
 	// keep-biased prepass, not a warning. Frame it identically to the pruned
 	// case — just the kept counts plus any notes — so it never reads as a
 	// prepass failure. The latency note is the real signal for a slow prepass.
-	const content = `${parts.join(", ")}${tokenNote}${latencyNote}`;
+	const content = `${parts.join(", ")}${tokenNote}${latencyNote}${cacheNote}`;
 
 	return {
 		customType: "pruning-result",

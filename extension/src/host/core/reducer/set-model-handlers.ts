@@ -196,6 +196,7 @@ export function handleModelSettingsHydrated(
   const current = state.settings.modelSettings;
   if (current
     && current.defaultModel === event.modelSettings.defaultModel
+    && current.defaultProvider === event.modelSettings.defaultProvider
     && current.defaultThinkingLevel === event.modelSettings.defaultThinkingLevel) {
     return { state, effects: [] };
   }

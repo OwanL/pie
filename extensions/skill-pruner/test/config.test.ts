@@ -256,6 +256,7 @@ test("loadConfig parses a full prepass block", () => {
 		pruning: {
 			prepass: {
 				timeoutMs: { minimal: 20000, low: 30000 },
+				maxOutputTokens: 512,
 				maxTransportRetries: 4,
 				transportBackoffBaseMs: 500,
 				oauthRaceBackoffMs: 0,
@@ -265,6 +266,7 @@ test("loadConfig parses a full prepass block", () => {
 	const result = loadConfig(settingsPath);
 	assert.deepEqual(result.prepass, {
 		timeoutMs: { minimal: 20000, low: 30000 },
+		maxOutputTokens: 512,
 		maxTransportRetries: 4,
 		transportBackoffBaseMs: 500,
 		oauthRaceBackoffMs: 0,
@@ -311,6 +313,24 @@ test("loadConfig rejects non-integer prepass budgets and warns", () => {
 	assert.ok(warnings.some((w) => w.includes("maxTransportRetries")));
 	assert.ok(warnings.some((w) => w.includes("transportBackoffBaseMs")));
 	assert.ok(warnings.some((w) => w.includes("oauthRaceBackoffMs")));
+});
+
+test("loadConfig parses maxOutputTokens and autoSkipBelowTokens", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({
+		pruning: { autoSkipBelowTokens: 400, prepass: { maxOutputTokens: 256 } },
+	})));
+	assert.equal(result.autoSkipBelowTokens, 400);
+	assert.equal(result.prepass?.maxOutputTokens, 256);
+});
+
+test("loadConfig rejects invalid positive token limits and keeps auto-skip disabled", () => {
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { autoSkipBelowTokens: 0, prepass: { maxOutputTokens: -1 } },
+	}))));
+	assert.equal(result.autoSkipBelowTokens, null);
+	assert.equal(result.prepass, undefined);
+	assert.ok(warnings.some((w) => w.includes("autoSkipBelowTokens")));
+	assert.ok(warnings.some((w) => w.includes("maxOutputTokens")));
 });
 
 test("loadConfig allows zero for retry/backoff budgets", () => {

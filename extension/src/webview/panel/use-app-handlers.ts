@@ -45,7 +45,7 @@ export interface AppHandlers {
   handleMoveTab: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
   handleRecordOutcome: (outcome: RunOutcome) => void;
   handleTabRunAction: (action: SessionTabRunAction, tabPath: string) => void;
-  handleModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
+  handleModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   handleEditSend: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
   handleOpenFileDiff: (filePath: string) => void;
   handleOpenFileInEditor: (filePath: string) => void;
@@ -198,10 +198,14 @@ export function useAppHandlers(
     }
   }, [postMessage, activeSessionPathRef]);
 
-  const handleModelChange = useCallback((model: string, thinkingLevel: ThinkingLevel) => {
+  const handleModelChange = useCallback((model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
-    postMessage({ type: 'setModel', sessionPath, defaultModel: model, defaultThinkingLevel: thinkingLevel });
+    // defaultProvider is sent as a separate field (never encoded in
+    // defaultModel) so the backend can resolve duplicate ids across providers
+    // and persist it for session restore. Omitted (undefined) when only the
+    // thinking level changes — the backend then keeps the current provider.
+    postMessage({ type: 'setModel', sessionPath, defaultModel: model, defaultProvider: provider, defaultThinkingLevel: thinkingLevel });
   }, [postMessage, activeSessionPathRef]);
 
   const handleEditSend = useCallback((messageId: string, text: string, inputs?: ComposerInput[]) => {

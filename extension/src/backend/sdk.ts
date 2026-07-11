@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { SessionEntryLike } from './transcript';
+import type { MessageLike } from './transcript/types';
 
 // ─── Minimal SDK contract ────────────────────────────────────────────────────
 // We type only the surface the backend actually consumes. SDK breaking changes
@@ -25,13 +26,7 @@ export interface SdkSessionEvent {
     content?: unknown;
     stopReason?: string;
     errorMessage?: string;
-    usage?: {
-      input?: number;
-      output?: number;
-      cacheRead?: number;
-      cacheWrite?: number;
-      totalTokens?: number;
-    };
+    usage?: MessageLike['usage'];
   };
   assistantMessageEvent?: {
     type: 'text_delta' | 'thinking_delta' | string;
@@ -95,7 +90,7 @@ export interface SdkToolInfo {
 }
 
 export interface SdkSession {
-  model?: { id: string; contextWindow?: number; maxTokens?: number };
+  model?: { id: string; provider?: string; contextWindow?: number; maxTokens?: number };
   thinkingLevel?: string;
   sessionFile?: string;
   sessionName?: string;

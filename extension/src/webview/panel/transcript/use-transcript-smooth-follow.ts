@@ -84,18 +84,15 @@ export function useRefreshFollowTarget(
  * produced visible jumps as streaming content grew. Each frame advances
  * scrollTop a bounded step toward the target (see `advanceSmoothScrollTop`),
  * so following feels continuous instead of snapping. CSS `scroll-behavior` is
- * bypassed while auto-following (each frame's set is instant) and restored when
- * idle so manual scrolling keeps its smooth feel.
+ * forced to instant while auto-following so each frame is deterministic, then
+ * the inline override is cleared when the loop stops.
  *
- * The loop is GATED on activity: it self-cancels (stops scheduling frames)
- * when there is nothing to follow (`!autoFollow && !hasNewer && !busy`), so an
- * idle transcript — e.g. the user scrolled up to read older content and nothing
- * is streaming — no longer wakes the main thread ~60x/s. The effect's reactive
- * deps (`busy`, `isInitialPositioning`, `autoFollow`) restart the loop when
- * activity resumes (streaming starts, a session-switch positioning window
- * opens, or — the case `autoFollow` alone covers — the user scrolls back to the
- * bottom while fully idle, re-engaging follow so a later non-busy height change
- * is again caught).
+ * The loop is GATED on follow state: it self-cancels whenever the user is not
+ * following the bottom (or newer messages are not loaded). In particular, an
+ * active agent must not leave a no-op rAF running at ~60fps while the user is
+ * reading earlier content. The `autoFollow` dependency restarts the loop as
+ * soon as the user returns to the bottom; `hasNewer` does the same when the
+ * latest page finishes loading.
  * `scrollToBottom` / `jumpToLatest` keep doing their own synchronous snaps and
  * do not depend on this loop.
  *
@@ -127,24 +124,17 @@ export function useSmoothAutoFollow(
     if (!el) return;
     let raf = 0;
     const tick = () => {
-      // Idle gate: stop the loop (do not schedule the next frame) when there is
-      // nothing to follow, so the main thread is not woken ~60x/s while idle —
-      // e.g. the user scrolled up to read older content and nothing is
-      // streaming. The effect's reactive deps (`busy`, `isInitialPositioning`,
-      // `autoFollow`) restart the loop when activity resumes — notably
-      // `autoFollow` re-engaging when the user scrolls back to the bottom while
-      // idle. While stopped, restore the inline `scroll-behavior` so manual
-      // scrolling keeps its smooth feel.
-      if (!autoFollowRef.current && !hasNewer && !busy) {
+      // Stop immediately when there is no bottom to follow. Keeping this loop
+      // alive merely because the agent is busy wastes a main-thread callback
+      // every frame while the user reads earlier content, making manual scroll
+      // input noticeably laggy. The reactive autoFollow/hasNewer deps restart
+      // it when following becomes meaningful again.
+      if (!autoFollowRef.current || hasNewer) {
         if (el.style.scrollBehavior === 'auto') el.style.scrollBehavior = '';
         raf = 0;
         return;
       }
       raf = requestAnimationFrame(tick);
-      if (!autoFollowRef.current || hasNewer) {
-        if (el.style.scrollBehavior === 'auto') el.style.scrollBehavior = '';
-        return;
-      }
       if (el.style.scrollBehavior !== 'auto') el.style.scrollBehavior = 'auto';
       const target = cachedTargetRef.current;
       // During the post-session-switch positioning window, snap to the bottom

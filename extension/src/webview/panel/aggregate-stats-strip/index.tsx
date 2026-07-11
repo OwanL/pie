@@ -17,7 +17,7 @@ import { Num } from './num';
  * Thin status strip anchored at the bottom of the panel (below the composer).
  * Focused on **recent + current** activity over long-term totals:
  *
- *   today $X · wk $Y · tok/s (live when running, else today's mean) · N tabs
+ *   today $X · wk $Y · tok/s (live while a session is running) · N tabs
  *
  * Each segment's tooltip is a **rich** tooltip (JSX rendered into an
  * out-of-tree host via the `Tooltip` component's `contentNode`): the numeric
@@ -45,23 +45,17 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     weekCost,
     todayInputTokens,
     todayOutputTokens,
-    todayTokensPerSecond,
-    tokensPerSecond,
     liveTokensPerSecond,
     runningSessionCount,
     openTabCount,
     lastRun,
   } = stats;
 
-  // Throughput headline: live when running, else today's mean, else all-time
-  // mean (label-agnostic inline; the tooltip distinguishes the source).
+  // The inline rate is strictly live. Historical means remain available in
+  // the tooltip, but showing one while idle makes it look like work is active.
   const running = runningSessionCount > 0;
-  const headlineRate = running
-    ? liveTokensPerSecond
-    : (todayTokensPerSecond > 0 ? todayTokensPerSecond : tokensPerSecond);
-  const rateSource = running
-    ? 'live'
-    : (todayTokensPerSecond > 0 ? 'today' : (tokensPerSecond > 0 ? 'all-time' : 'none'));
+  const headlineRate = running ? liveTokensPerSecond : 0;
+  const rateSource = running ? 'live' : 'none';
 
   return (
     <div

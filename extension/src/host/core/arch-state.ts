@@ -36,6 +36,7 @@ import type {
   ComposerInput,
   ActiveRunSummary,
   UserContentPart,
+  QueuedDwellEntry,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import {
@@ -402,6 +403,13 @@ export interface PendingState {
   /** Per-session pruning prepass phase for the live status chip (Brief F).
    *  Absent entry = `idle`. See {@link PrepassPhaseState}. */
   prepassBySession: Record<string, PrepassPhaseState>;
+  /** Per-session queued-message dwell + watchdog state (handoff §F). Each
+   *  optimistic 'queued' steering/followUp message gets a {@link QueuedDwellEntry}
+   *  at send time; the array is FIFO (mirrors the transcript's queued messages).
+   *  Cleared on delivery/clear/interrupt/rollback/session-close. An entry's
+   *  `watchdogFired`/`abandoned` flags are the actionable terminal signals the
+   *  projection surfaces for the active session. */
+  queuedDwellBySession: Record<string, QueuedDwellEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +493,7 @@ export function createInitialArchState(): ArchState {
       sendQueueBySession: {},
       backendReadyQueueBySession: {},
       prepassBySession: {},
+      queuedDwellBySession: {},
     },
   };
 }

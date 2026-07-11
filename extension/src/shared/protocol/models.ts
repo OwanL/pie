@@ -6,6 +6,13 @@ export type { AssistantUsage, ThinkingLevel };
 export interface ModelSettings {
   defaultModel: string;
   defaultThinkingLevel: ThinkingLevel;
+  /**
+   * Provider for `defaultModel`, used by the SDK to restore the model on new
+   * sessions (`modelRegistry.find(defaultProvider, defaultModel)`). Persisted
+   * alongside `defaultModel` when the picker sends a `provider/id` spec to
+   * disambiguate models that exist under multiple providers.
+   */
+  defaultProvider?: string;
 }
 
 export type ModelInputKind = 'text' | 'image';

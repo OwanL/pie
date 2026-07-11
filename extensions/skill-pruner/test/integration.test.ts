@@ -973,6 +973,63 @@ test("UI feedback message is returned in event result when skills are pruned", a
 	}
 });
 
+test("identical second prompt reuses prepass and marks feedback plus JSONL as cached", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-"));
+	const logPath = path.join(dir, "pruning.jsonl");
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config(), logPath);
+		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
+		const second = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills) as { message?: any };
+		assert.equal(calls, 1);
+		assert.equal(second.message.details.cacheHit, true);
+		assert.match(second.message.content, /· cached/);
+		assert.equal(second.message.details.prepassLatencyMs, 0);
+		await flushLog();
+		const decisions = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(decisions.at(-1).cacheHit, true);
+		assert.equal(decisions.at(-1).llmLatencyMs, 0);
+	} finally {
+		__setCompleteFn(null);
+		setLogPathForTesting(null);
+	}
+});
+
+test("autoSkipBelowTokens restores tools pruned by the prior turn without an LLM call or error feedback", async () => {
+	let calls = 0;
+	const setActiveToolsCalls: string[][] = [];
+	__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":[],"pruneTools":["web_search"]}' }; });
+	try {
+		const cfg = config({}, "auto", { ceiling: 10 });
+		const { handlers } = register(cfg);
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => ["read"],
+			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
+		});
+		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
+		assert.equal(calls, 1);
+		assert.ok(!setActiveToolsCalls[0].includes("web_search"));
+
+		const skipConfig = config({}, "auto", { ceiling: 10 });
+		skipConfig.autoSkipBelowTokens = 1_000_000;
+		setConfigForTesting(skipConfig);
+		const result = await runBeforeAgentStart(handlers, "A different small task", realisticSkills);
+		assert.equal(calls, 1);
+		assert.equal(result, undefined);
+		assert.ok(setActiveToolsCalls.at(-1)?.includes("web_search"));
+		assert.equal(readKeptSkills("session-1"), "keep-all");
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		clearKeptSkills("session-1");
+	}
+});
+
 test("feedback message returned even when nothing is pruned (LLM prunes nothing)", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: [], pruneTools: [] }));
 	try {

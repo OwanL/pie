@@ -43,7 +43,7 @@ interface ComposerToolbarProps {
   sessionCostIndicator: { label: string; ariaLabel: string; tooltip: string } | null;
   tokenRateIndicator: TokenRateIndicatorState;
   runStatus: ComposerToolbarStatus | null;
-  onModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
+  onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
 }
 
 export function ComposerToolbar({
@@ -92,7 +92,17 @@ export function ComposerToolbar({
             ariaLabel="Model"
             title="Select model"
             entries={modelEntries}
-            onChange={(modelId) => onModelChange(modelId, selectedLevel)}
+            onChange={(spec) => {
+              // The picker emits provider/id from the clicked entry so the
+              // backend resolves the exact provider even when the same model id
+              // exists under multiple providers (e.g. gpt-5.5 under both
+              // github-copilot and openai-codex). Split it back into a bare id +
+              // provider and forward them as separate fields.
+              const slash = spec.indexOf('/');
+              const provider = slash === -1 ? undefined : spec.substring(0, slash);
+              const id = slash === -1 ? spec : spec.substring(slash + 1);
+              onModelChange(id, provider, selectedLevel);
+            }}
           />
         ) : selectedModel ? (
           <ToolbarChip label={selectedModel} tooltip={selectedModel} />
@@ -105,7 +115,7 @@ export function ComposerToolbar({
             width="reasoning"
             onChange={(e) => {
               const target = e.target as HTMLSelectElement;
-              onModelChange(selectedModel, target.value as ThinkingLevel);
+              onModelChange(selectedModel, undefined, target.value as ThinkingLevel);
             }}
             ariaLabel="Reasoning level"
             title="Reasoning level"

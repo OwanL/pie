@@ -108,7 +108,10 @@ function useTranscriptVirtualizer(
       observeElementRect,
       observeElementOffset,
       initialOffset: () => Number.MAX_SAFE_INTEGER,
-      overscan: 10,
+      // Five rows on either side is enough to hide normal wheel/trackpad
+      // movement while halving expensive offscreen markdown/tool-card work on
+      // transcript mounts and tab switches.
+      overscan: 5,
       // Batch ResizeObserver-driven re-measurements with the next animation
       // frame. Without this, content that grows after initial measurement
       // (streaming markdown, late-loading tables/images) can leave a one-paint
@@ -130,7 +133,7 @@ function useTranscriptVirtualizer(
       getScrollElement: () => scrollRef.current,
       estimateSize: (index) => estimateTranscriptRowSize(rows[index] ?? fallbackTranscriptRow(rows)),
       getItemKey: (index) => rows[index]?.key ?? index,
-      overscan: 10,
+      overscan: 5,
       useAnimationFrameWithResizeObserver: true,
       onChange: scheduleVirtualRender,
     });
@@ -370,28 +373,15 @@ export function TranscriptVirtualList({
     totalSize,
   });
 
-  // Disable tanstack virtual's built-in scroll-position correction
-  // (`shouldAdjustScrollPositionOnItemSizeChange`) while auto-follow is engaged.
-  // The default mimics `overflow-anchor`: when a row above the viewport resizes
-  // it writes `scrollTop` (via `_scrollToOffset`) to keep the visible content
-  // stable. That write happens in the virtualizer's measure rAF, BEFORE
-  // `scheduleVirtualRender` defers the re-render that updates the inner div's
-  // explicit `height: totalSize` (and thus `el.scrollHeight`) by a frame. The
-  // resulting scroll event therefore sees a stale-high `scrollHeight` paired
-  // with a freshly-lowered `scrollTop` → `distanceFromBottom` reads large →
-  // `isNearBottom` is false → `resolveAutoFollowState` disengages auto-follow on
-  // a downward move that was actually a shrink-correction, not a user scroll-up.
-  // This is the root cause of "autoscroll stops after a tool-card animated
-  // close" (two parallel collapsing cards produce a tall shrink above the
-  // viewport). While following the bottom, our rAF loop + the browser's own
-  // scrollTop clamp (on the deferred height update) own the follow, so
-  // tanstack's correction is unneeded and harmful here. While scrolled up it
-  // stays enabled (and `useTranscriptScrollAnchor` backs it). The field is a
-  // public instance property read at call time, so it is set once and always
-  // sees the live ref value.
+  // Disable tanstack virtual's built-in scroll-position correction. Scroll
+  // ownership must be exclusive: bottom-follow is handled by the rAF loop and
+  // the scrolled-up viewport is handled by useTranscriptScrollAnchor below.
+  // Leaving tanstack's overflow-anchor-like correction enabled while scrolled
+  // up makes both systems apply the same row-size delta, which causes the
+  // transcript to drift and jump as streaming rows are remeasured.
   useLayoutEffect(() => {
-    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => !autoFollowRef.current;
-  }, [virtualizer, autoFollowRef]);
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => false;
+  }, [virtualizer]);
 
   // Pin the top visible row when the user has scrolled up and a tool body
   // above the viewport resizes (Tier 2). No-op while pinned to the bottom

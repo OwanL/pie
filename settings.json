@@ -1,7 +1,7 @@
 {
-  "defaultModel": "glm-5.2:cloud",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "ollama",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "medium",
+  "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -17,24 +17,21 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "gpt-5-mini",
-    "provider": "github-copilot",
-    "thinkingLevel": "low",
+    "model": "gpt-5.3-codex-spark",
+    "provider": "openai-codex",
+    "thinkingLevel": "off",
+    "skills": {
+      "strategy": "topK",
+      "ceiling": 5
+    },
     "tools": {
+      "strategy": "topK",
+      "ceiling": 10,
       "alwaysKeep": [
-        "ask_user",
         "bash",
         "edit",
-        "find",
-        "grep",
-        "ls",
         "read",
-        "request_tool",
-        "session_changes",
-        "session_review",
-        "subagent",
-        "write",
-        "defer_trigger"
+        "write"
       ]
     }
   },

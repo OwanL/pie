@@ -23,17 +23,18 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
   }
 
   // Directly update running state and clear interrupt flag
+  // Handoff §F: on a successful Stop, the backend clears the SDK steer queue, so
+  // the queued messages will never be delivered — clear their dwell entries and
+  // cancel their watchdog timers so they are not left immortal/nagging.
+  const cancelledLocalIds = event.ok
+    ? (state.pending.queuedDwellBySession[event.sessionPath] ?? []).map((e) => e.localId)
+    : [];
   nextState = produce(nextState, (draft) => {
     draft.sessions.interruptInFlightBySession[event.sessionPath] = false;
     if (event.ok) {
       draft.sessions.runningSessionPaths = draft.sessions.runningSessionPaths.filter(
         (p: string) => p !== event.sessionPath,
       );
-      // Steering (FollowUp): the backend clears the SDK follow-up queue on
-      // interrupt (see `handleMessageInterrupt`). Drop the optimistic 'queued'
-      // transcript messages and their `pending` snapshots so a late
-      // `QueuedDelivered` cannot re-promote a message the user already
-      // cancelled by stopping.
       const list = draft.transcript.bySession[event.sessionPath];
       if (list) {
         draft.transcript.bySession[event.sessionPath] = list.filter(
@@ -46,8 +47,13 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
       for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
         if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.promoted[corrId];
       }
+      delete draft.pending.queuedDwellBySession[event.sessionPath];
     }
   });
+
+  for (const localId of cancelledLocalIds) {
+    effects.push({ kind: 'CancelQueuedDwellWatchdog', corrId: event.corrId, localId });
+  }
 
   return { state: nextState, effects };
 }
@@ -130,9 +136,18 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
             list[idx].status = 'completed';
           }
         }
+        if (pending.queued) {
+          const dwell = draft.pending.queuedDwellBySession[pending.sessionPath];
+          if (dwell) draft.pending.queuedDwellBySession[pending.sessionPath] = dwell.filter((entry) => entry.localId !== pending.localId);
+        }
       }
     });
-    return { state: nextState, effects: [] };
+    return {
+      state: nextState,
+      effects: pending.queued && !event.queued
+        ? [{ kind: 'CancelQueuedDwellWatchdog', corrId: event.corrId, localId: pending.localId }]
+        : [],
+    };
   }
 
   // Failure: rollback optimistic message, notify user, restore session name
@@ -149,12 +164,19 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         inputs: pending.inputs ?? [],
       },
     },
+    ...(pending.queued
+      ? [{ kind: 'CancelQueuedDwellWatchdog' as const, corrId: event.corrId, localId: pending.localId }]
+      : []),
   ];
 
   const nextState = produce(state, (draft) => {
     draft.pending.ops = restOps;
     // Remove optimistic message from transcript
     removeMessage(draft, pending.sessionPath, pending.localId);
+    if (pending.queued) {
+      const dwell = draft.pending.queuedDwellBySession[pending.sessionPath];
+      if (dwell) draft.pending.queuedDwellBySession[pending.sessionPath] = dwell.filter((entry) => entry.localId !== pending.localId);
+    }
     // Clear busy state set optimistically at send time. A queued (follow-up)
     // send never added the session to `runningSessionPaths` (the session was
     // already running its original turn), so it must not clear it here — the

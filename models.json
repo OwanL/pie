@@ -935,6 +935,53 @@
           }
         }
       ]
+    },
+    "openai-codex": {
+      "baseUrl": "https://chatgpt.com/backend-api",
+      "apiKey": "oauth",
+      "concurrency": {
+        "maxConcurrentRequests": 4,
+        "afterburnSeconds": 15,
+        "queueWaitSeconds": 30
+      },
+      "modelOverrides": {
+        "gpt-5.6-luna": {
+          "name": "GPT-5.6 Luna",
+          "cost": {
+            "input": 1,
+            "output": 6,
+            "cacheRead": 0.1,
+            "cacheWrite": 1.25
+          }
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra",
+          "cost": {
+            "input": 2.5,
+            "output": 15,
+            "cacheRead": 0.25,
+            "cacheWrite": 3.125
+          }
+        },
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol",
+          "cost": {
+            "input": 5,
+            "output": 30,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        "gpt-5.3-codex-spark": {
+          "name": "GPT-5.3 Codex Spark",
+          "cost": {
+            "input": 1.75,
+            "output": 14,
+            "cacheRead": 0.175,
+            "cacheWrite": 0
+          }
+        }
+      }
     }
   }
 }

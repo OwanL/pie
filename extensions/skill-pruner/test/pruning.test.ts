@@ -663,22 +663,24 @@ test("runPruningPrepass: thrown transport error retried before failing open", as
 // ---------------------------------------------------------------------------
 // prepass budgets: `pruning.prepass` overrides flow through to the LLM call.
 // resolvePrepassBudgets merges config over built-in defaults; prepassTimeoutMs
-// honors per-level overrides; runPruningPrepass forwards the configured
-// maxTransportRetries as options.maxRetries.
+// honors per-level overrides; runPruningPrepass disables pi-ai retries and
+// forwards the configured output ceiling on every call.
 // ---------------------------------------------------------------------------
 
 test("resolvePrepassBudgets: returns built-in defaults when prepass absent", () => {
 	const b = resolvePrepassBudgets(config());
 	assert.equal(b.maxTransportRetries, PREPASS_MAX_TRANSPORT_RETRIES);
+	assert.equal(b.maxOutputTokens, undefined);
 	assert.equal(b.timeoutOverrides, undefined);
 });
 
 test("resolvePrepassBudgets: merges config overrides over defaults", () => {
-	const cfg = config({ prepass: { timeoutMs: { minimal: 12000 }, maxTransportRetries: 5, transportBackoffBaseMs: 250 } });
+	const cfg = config({ prepass: { timeoutMs: { minimal: 12000 }, maxOutputTokens: 333, maxTransportRetries: 5, transportBackoffBaseMs: 250 } });
 	const b = resolvePrepassBudgets(cfg);
 	assert.deepEqual(b.timeoutOverrides, { minimal: 12000 });
 	assert.equal(b.maxTransportRetries, 5);
 	assert.equal(b.transportBackoffBaseMs, 250);
+	assert.equal(b.maxOutputTokens, 333);
 });
 
 test("prepassTimeoutMs: uses override when present, built-in otherwise", () => {
@@ -697,11 +699,11 @@ test("prepassTimeoutMs: scales by attempt index", () => {
 	assert.equal(prepassTimeoutMs("minimal", 2, { minimal: 10000 }), 30000);
 });
 
-test("runPruningPrepass: forwards configured maxTransportRetries as options.maxRetries", async () => {
-	const cfg = config({ prepass: { maxTransportRetries: 7 } });
-	const seenMaxRetries: number[] = [];
-	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number }) => {
-		seenMaxRetries.push(options.maxRetries as number);
+test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutputTokens", async () => {
+	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333 } });
+	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number }> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number }) => {
+		seenOptions.push(options);
 		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
 	};
 	await runPruningPrepass(
@@ -710,17 +712,18 @@ test("runPruningPrepass: forwards configured maxTransportRetries as options.maxR
 		cfg,
 		completeFn as any,
 	);
-	assert.ok(seenMaxRetries.length >= 1, "prepass must have run at least once");
-	for (const mr of seenMaxRetries) {
-		assert.equal(mr, 7, `every call should forward the configured maxRetries; saw ${mr}`);
+	assert.ok(seenOptions.length >= 1, "prepass must have run at least once");
+	for (const options of seenOptions) {
+		assert.equal(options.maxRetries, 0);
+		assert.equal(options.maxTokens, 333);
 	}
 });
 
-test("runPruningPrepass: forwards default maxRetries when prepass absent", async () => {
+test("runPruningPrepass: omits maxTokens by default and disables pi-ai retries", async () => {
 	const cfg = config();
-	const seenMaxRetries: number[] = [];
-	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number }) => {
-		seenMaxRetries.push(options.maxRetries as number);
+	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number }> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number }) => {
+		seenOptions.push(options);
 		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
 	};
 	await runPruningPrepass(
@@ -729,9 +732,10 @@ test("runPruningPrepass: forwards default maxRetries when prepass absent", async
 		cfg,
 		completeFn as any,
 	);
-	assert.ok(seenMaxRetries.length >= 1);
-	for (const mr of seenMaxRetries) {
-		assert.equal(mr, PREPASS_MAX_TRANSPORT_RETRIES);
+	assert.ok(seenOptions.length >= 1);
+	for (const options of seenOptions) {
+		assert.equal(options.maxRetries, 0);
+		assert.equal(options.maxTokens, undefined);
 	}
 });
 

@@ -2,7 +2,8 @@
  * Immediate-stop interrupt (host-side). Verifies that dispatching an `Interrupt`
  * Command takes effect INSTANTLY in the reducer (Copilot/Codex-style): the
  * currently-streaming assistant message is marked `interrupted`,
- * `runningSessionPaths` is cleared, `interruptInFlightBySession` is set, and an
+ * `runningSessionPaths` remains set until the abort completion barrier,
+ * `interruptInFlightBySession` is set, and an
  * `InterruptRpc` effect is emitted — without waiting for the async
  * `session.abort()` to settle. Late streaming events (`MessageDelta`/
  * `MessageThinking`) arriving during the in-flight abort window are dropped as
@@ -60,7 +61,7 @@ function assistant(state: ArchState): ChatMessage {
   return list.find((m) => m.id === MSG_ID)!;
 }
 
-test('Interrupt instantly marks the streaming message interrupted, clears running, sets the flag, emits InterruptRpc, and drops late deltas until InterruptResult clears the flag', () => {
+test('Interrupt instantly marks the streaming message interrupted, keeps running until acknowledgement, sets the flag, emits InterruptRpc, and drops late deltas', () => {
   const initial = withStreamingAssistant(createInitialArchState());
 
   // Sanity: pre-Stop state.
@@ -76,8 +77,9 @@ test('Interrupt instantly marks the streaming message interrupted, clears runnin
 
   // (a) streaming message → interrupted.
   assert.equal(assistant(state).status, 'interrupted', 'streaming message marked interrupted');
-  // (b) running cleared.
-  assert.ok(!state.sessions.runningSessionPaths.includes(SESSION), 'running cleared');
+  // (b) running remains truthful until the backend abort settles. This keeps
+  // the composer in Stopping… and prevents stop→send from becoming follow-up.
+  assert.ok(state.sessions.runningSessionPaths.includes(SESSION), 'running retained during stop');
   // (c) flag set.
   assert.equal(state.sessions.interruptInFlightBySession[SESSION], true, 'flag set');
   // (d) InterruptRpc effect emitted.

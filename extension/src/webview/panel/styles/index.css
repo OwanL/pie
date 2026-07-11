@@ -385,8 +385,8 @@
     outline-offset: 2px;
   }
 
-  /* Smooth scroll behavior for transcript and other scrollable regions */
-  .transcript,
+  /* The transcript owns programmatic smoothing in its rAF follow loop. Native
+     smooth behavior delays manual input and can fight anchor restores. */
   .model-picker-dropdown {
     scroll-behavior: smooth;
     overscroll-behavior: contain;

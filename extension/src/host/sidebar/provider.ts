@@ -14,7 +14,7 @@ import {
   reconcilePostedMessageDelivery,
   type SidebarSyncState,
 } from './sync';
-import { getWebviewAssetVersion, renderWebviewHtml, getWebviewRoots } from '../webview/assets';
+import { resolveWebviewHtml, getWebviewRoots } from '../webview/assets';
 import { SidebarHotReloader } from './hot-reloader';
 import { StateAppliedWatchdog } from './state-applied-watchdog';
 import { WebviewReadinessProbe } from './readiness-probe';
@@ -155,7 +155,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       localResourceRoots: getWebviewRoots(this.context),
     };
 
-    this.hotReloader.setCurrentAssetVersion(await getWebviewAssetVersion(this.context));
+    // Resolve the immutable Vite manifest once for both the asset-version
+    // handshake and generated HTML. Reading/parsing/hashing it twice adds
+    // avoidable filesystem work directly to first-paint latency.
+    const resolvedAssets = await resolveWebviewHtml(this.context, webviewView.webview);
+    this.hotReloader.setCurrentAssetVersion(resolvedAssets.assetVersion);
 
     bootLog('sidebar-provider', 'view.resolved', {
       hostInstanceId: this.hostInstanceId,
@@ -250,11 +254,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     });
 
     this.hotReloader.ensureAssetWatcher();
-    webviewView.webview.html = await renderWebviewHtml(
-      this.context,
-      webviewView.webview,
-      this.hotReloader.getCurrentAssetVersion() ?? undefined,
-    );
+    webviewView.webview.html = resolvedAssets.html;
 
     // Cold-start restore can accumulate a fully loaded dirty snapshot before
     // the view is resolved. Flush it as soon as the HTML is assigned so the

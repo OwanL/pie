@@ -103,7 +103,8 @@ test('SubagentSection add-model selects list only models not already in their bu
   // so every model is selectable there. At minimum the add-model options exist.
   assert.match(html, /Add model…</);
   // GPT-5 is never selected, so it must appear as an addable option.
-  assert.match(html, /<option[^>]*value="gpt-5"[^>]*>GPT-5</);
+  // (The option label is now provider-prefixed: "openai · GPT-5".)
+  assert.match(html, /<option[^>]*value="gpt-5"[^>]*>[^<]*GPT-5</);
   // The two empty buckets (medium, frontier) each show an empty-bucket warning;
   // the populated small bucket does not.
   const warnCount = (html.match(/falls back to the parent model/g) ?? []).length;

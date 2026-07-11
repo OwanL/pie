@@ -18,13 +18,13 @@
  *
  * ## Provider attribution
  *
- * `RunSnapshot` carries only `modelId` (never the serving provider). A model id
- * can appear under multiple providers in `models.json`. For per-provider
- * breakdown we attribute each run to the **first priced provider** for its
- * `modelId` in `loadModelPricing`'s map — the SAME record the webview's
- * per-session cost display uses (`pricingForModel`), so aggregate totals stay
- * consistent with the per-session cost the user already sees. Runs whose
- * `modelId` is unknown or unpriced attribute to provider `'unknown'` (cost 0).
+ * `RunSnapshot` carries model ids but never the serving provider. Parent-turn
+ * usage uses the run model; skill-pruning and subagent usage use their recorded
+ * actual model when available, then fall back to the run model. A model id can
+ * appear under multiple providers in `models.json`, so each usage slice is
+ * attributed to the **first priced provider** for that model id — the SAME
+ * record the webview's per-session cost display uses (`pricingForModel`).
+ * Unknown or unpriced models attribute to provider `'unknown'` (cost 0).
  */
 
 import type { RunOutcome } from './settings.js';

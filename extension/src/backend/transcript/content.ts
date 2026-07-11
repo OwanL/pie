@@ -223,6 +223,16 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
   const reportedTotal = toNonNegativeInt(firstNumber(usage.totalTokens, usage.total_tokens));
   const total = reportedTotal > 0 ? reportedTotal : input + output + cacheRead + cacheWrite;
 
+  // Reasoning tokens are a SUBSET of output (never added to totals/cost).
+  // Clamp to `output` so a misreported value can never exceed the output count.
+  const reasoningRaw = toNonNegativeInt(firstNumber(
+    usage.reasoningTokens,
+    usage.reasoning_tokens,
+    usage.output_tokens_details?.reasoning_tokens,
+    usage.completion_tokens_details?.reasoning_tokens,
+  ));
+  const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, output) : undefined;
+
   if (total === 0) {
     return undefined;
   }
@@ -233,22 +243,32 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     cacheReadTokens: cacheRead,
     cacheWriteTokens: cacheWrite,
     totalTokens: total,
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
 }
 
-/** Sum two optional usage blocks. Returns `undefined` when both are undefined. */
+/** Sum two optional usage blocks. Returns `undefined` when both are undefined.
+ *  `reasoningTokens` is summed only when present on at least one operand
+ *  (omitted when both are undefined) and never alters the token/cost totals —
+ *  it is a subset of `outputTokens`, already covered by pricing. */
 export function addAssistantUsage(
   a: AssistantUsage | undefined,
   b: AssistantUsage | undefined,
 ): AssistantUsage | undefined {
   if (!a) return b;
   if (!b) return a;
+  const aReasoning = typeof a.reasoningTokens === 'number' ? a.reasoningTokens : undefined;
+  const bReasoning = typeof b.reasoningTokens === 'number' ? b.reasoningTokens : undefined;
+  const reasoningTokens = aReasoning !== undefined || bReasoning !== undefined
+    ? Math.max(0, (aReasoning ?? 0) + (bReasoning ?? 0))
+    : undefined;
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     totalTokens: a.totalTokens + b.totalTokens,
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
 }
 

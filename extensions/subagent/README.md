@@ -206,19 +206,17 @@ only host-side tool override.
 
 ## Timeouts
 
-Subagents **do not time out by default** — a subagent runs until it finishes or
-the parent aborts it (Ctrl+C / parent cancellation). The parent's abort signal
-is always the real escape hatch. Previously a hardcoded 10-minute timeout
-wrapped the *entire* multi-turn run and prematurely killed long exploratory
-work; that default has been removed.
+Subagents have **no short wall-clock deadline by default**. Productive work may
+continue beyond 15 minutes; provider header/stream watchdogs and the outer
+settlement net bound stalled phases. Parent cancellation remains immediate.
 
-A timeout safety net can be (re-)enabled via the `PI_SUBAGENT_TIMEOUT_MS`
-environment variable (milliseconds). It wraps the *entire* multi-turn run (all
-turns + tool calls), not a single model response. `0` or unset disables it.
+Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
+optional absolute containment ceiling. Unset, empty, zero, negative, and
+non-finite values disable this per-prompt ceiling.
 
 ```bash
-# 30-minute safety net
-export PI_SUBAGENT_TIMEOUT_MS=1800000
+# Use a 10-minute safety timeout
+export PI_SUBAGENT_TIMEOUT_MS=600000
 ```
 
 ## Parallel output preview

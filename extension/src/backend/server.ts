@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { attachJsonlLineReader } from '../shared/jsonl';
+import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import {
   PROTOCOL_VERSION,
@@ -42,7 +42,7 @@ import {
   type SdkSystemPromptModule,
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
-import { extractRequestError, responseError, responseOk, writeStdout } from './server-io';
+import { extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import {
   type SessionContext,
   type SessionContextCreationReason,
@@ -63,8 +63,13 @@ import {
 } from './transcript-window';
 import type { SessionEntryLike } from './transcript';
 import { createRuntimeFactory } from './runtime-factory.js';
-import { backendTrace, backendError, backendInfo } from './log';
+import { backendTrace, backendError, backendInfo, backendWarn } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper } from './session-opened.js';
+
+export function extractPreviewRequestId(preview: string): string | undefined {
+  const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
+  return match?.[1];
+}
 
 /** Simple stopwatch for backend timing probes. */
 function timed<T>(label: string, op: () => T): T;
@@ -113,6 +118,22 @@ function installBackendFatalHandlers(): void {
   process.on('uncaughtException', (err) => {
     const error = err instanceof Error ? String(err.stack ?? err) : String(err);
     backendError('backend', 'uncaughtException', { error });
+  });
+  // Node's default warning text omits the creation stack in normal runs. Keep a
+  // structured copy so listener leaks and deprecations point to the call site
+  // that created them rather than only reporting the final listener count.
+  process.on('warning', (warning) => {
+    backendWarn('backend', 'process.warning', {
+      warningName: warning.name,
+      message: warning.message,
+      stack: warning.stack,
+      listenerCounts: {
+        SIGINT: process.listenerCount('SIGINT'),
+        SIGTERM: process.listenerCount('SIGTERM'),
+        exit: process.listenerCount('exit'),
+        warning: process.listenerCount('warning'),
+      },
+    });
   });
 }
 
@@ -206,6 +227,25 @@ export class BackendServer {
     // rather than racing with reader attachment.
     const detachReader = attachJsonlLineReader(process.stdin, (line) => {
       void this.handleLine(line);
+    }, {
+      maxLineBytes: JSONL_MAX_LINE_BYTES,
+      onOverflow: ({ maxLineBytes, preview }) => {
+        const requestId = extractPreviewRequestId(preview);
+        log(JSON.stringify({
+          level: 'error',
+          event: 'protocol.stdin-overflow',
+          maxLineBytes,
+          requestId: requestId ?? null,
+          preview,
+        }));
+        if (requestId) {
+          writeStdout(responseError(
+            requestId,
+            'REQUEST_TOO_LARGE',
+            `Request exceeds the ${maxLineBytes}-byte JSONL transport limit.`,
+          ));
+        }
+      },
     });
 
     process.stdin.on('end', () => {
@@ -511,10 +551,14 @@ export class BackendServer {
     try {
       const raw = await fs.readFile(path.join(this.agentDir, 'settings.json'), 'utf8');
       const parsed = parseJsonOrThrow<Partial<ModelSettings>>(raw, 'settings.json');
-      return {
+      const result: ModelSettings = {
         defaultModel: parsed.defaultModel ?? defaults.defaultModel,
         defaultThinkingLevel: (parsed.defaultThinkingLevel as ThinkingLevel) ?? defaults.defaultThinkingLevel,
       };
+      if (typeof parsed.defaultProvider === 'string' && parsed.defaultProvider.length > 0) {
+        result.defaultProvider = parsed.defaultProvider;
+      }
+      return result;
     } catch (error) {
       backendTrace('modelSettings', 'read.failed', { level: 'warn', error: toErrorMessage(error) });
       return defaults;

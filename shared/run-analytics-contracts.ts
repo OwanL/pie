@@ -42,6 +42,15 @@ export interface AssistantUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  /**
+   * Provider-reported reasoning/thinking tokens, when the provider breaks them
+   * out. A SUBSET of `outputTokens` — never added to totals or cost separately
+   * (pricing already covers them via `outputTokens`). Surfaced only so the UI
+   * can show how much of the output was hidden reasoning. Undefined when the
+   * provider did not report a reasoning breakdown; clamped to `outputTokens`
+   * at extraction so it can never exceed it.
+   */
+  reasoningTokens?: number;
 }
 
 export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
@@ -140,10 +149,17 @@ export type TurnThroughputStatus = 'completed' | 'error' | 'interrupted';
 /**
  * One timestamped throughput observation per assistant turn.
  *
- * Throughput = `outputTokens` ÷ (`generationDurationMs` / 1000). The
- * generation duration is the wall-clock span from `message_start` to
- * `message_end`, which excludes tool-execution time (tools run between
- * messages), so it isolates how fast the model itself is emitting tokens.
+ * Throughput = `outputTokens` ÷ (`generationDurationMs` / 1000) — an
+ * *effective response throughput*, not an isolated token-emission rate.
+ * `generationDurationMs` is the wall-clock span from `message_start` to
+ * `message_end` (the full assistant response): it EXCLUDES tool-execution
+ * time (tools run between messages) but INCLUDES the initial wait for the
+ * first token (time-to-first-token) and any hidden-reasoning generation the
+ * provider performs within that span. TTFT is intentionally NOT subtracted:
+ * for hidden-reasoning models the `message_start`→`message_end` interval
+ * mixes unsurfaced token generation with visible emission and cannot be
+ * decomposed, so reported-output ÷ full-duration is the faithful effective
+ * throughput the user experienced.
  *
  * `concurrentBusySessions` records how many sessions were mid-run when the
  * turn ended (including this one), enabling multi-session throughput /
@@ -163,7 +179,7 @@ export interface TurnThroughputSample {
   endedAt: string;
   /** Output tokens reported for this turn (0 when the provider did not report usage). */
   outputTokens: number;
-  /** Wall-clock generation time for this turn in ms (tool-execution excluded). */
+  /** Full assistant response duration for this turn in ms (message_start→message_end; includes TTFT and hidden reasoning, excludes tool execution). */
   generationDurationMs: number;
   /** Sessions concurrently mid-run when this turn ended, including this one. */
   concurrentBusySessions: number;
@@ -208,6 +224,27 @@ export interface TurnThroughputSample {
    * wire; null = unreported. Backs the context-growth trajectory per turn.
    */
   contextTokens?: number | null;
+}
+
+export type AuxiliaryLlmUsageKind = 'skill_pruning_prepass' | 'subagent';
+
+/**
+ * Timestamped usage from an LLM call that is not one of the parent session's
+ * assistant turns. Subagent samples duplicate the canonical totals in
+ * `ToolUsageRollup.subagent*Tokens`; they preserve model/time attribution and
+ * must not be added independently without reconciling against those totals.
+ */
+export interface AuxiliaryLlmUsageSample {
+  kind: AuxiliaryLlmUsageKind;
+  /** Stable source event id used to make repeated backend delivery idempotent. */
+  sourceId: string;
+  occurredAt: string;
+  /** Actual model used when reported; consumers fall back to the run model. */
+  modelId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export interface ToolUsageRollup {
@@ -373,6 +410,13 @@ export interface RunSnapshot {
   cacheReadTokens: number;
   /** Cumulative cache-write tokens across assistant turns in this run. */
   cacheWriteTokens: number;
+  /**
+   * Usage from billable LLM calls outside the parent assistant-turn stream.
+   * Optional on the wire for historical snapshots. Skill-pruning samples are
+   * canonical usage; subagent samples provide attribution for the canonical
+   * `toolUsage.subagent*Tokens` totals and are not additional usage.
+   */
+  auxiliaryLlmUsage?: AuxiliaryLlmUsageSample[];
   /** Number of assistant turns in this run that reported provider usage. */
   tokenReportedTurnCount: number;
   /** Usage from the most recent assistant turn in this run that reported it. */

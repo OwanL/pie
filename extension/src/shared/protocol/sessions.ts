@@ -306,6 +306,17 @@ export interface PreflightFailedPayload {
 export interface QueuedDeliveredPayload {
   sessionPath: string;
   text: string;
+  /** Host-side optimistic message ID of the delivered queued message, when the
+   *  backend can correlate it (handoff §F: queued-message liveness). The backend
+   *  mirrors the SDK's FIFO steering/followUp drain order in a per-session
+   *  `queuedLocalIds` queue (pushed on `steer()`/`followUp()` success, shifted on
+   *  each user-role `message_start`); the shifted `localId` flows back here so the
+   *  host reducer can promote the *exact* optimistic 'queued' message truthfully
+   *  instead of guessing by FIFO order. Absent for a legacy host that did not send
+   *  a `localId` in `message.send`, or when the backend's queue was emptied
+   *  (clear/interrupt race) before the SDK drained — the host then falls back to
+   *  FIFO matching (the earliest remaining 'queued' message). */
+  localId?: string;
 }
 
 /** Live auto-retry status for a session's in-flight turn. The SDK retries
@@ -322,6 +333,40 @@ export interface RetryStatus {
   delayMs: number;
   /** Verbatim provider error that triggered the retry (e.g. "429 Too Many Requests"). */
   errorMessage: string;
+}
+
+/** Per-queued-message dwell + watchdog state (handoff §F: queued-message
+ *  liveness). One entry per optimistic 'queued' steering/followUp message,
+ *  tracked from send time until delivery/clear/interrupt/restart. The host
+ *  records `enqueuedAt` (pure, from the Send command timestamp) so the webview
+ *  can show elapsed wait; the watchdog marks an entry actionable when the hard
+ *  dwell threshold elapses; a backend restart marks it abandoned. Queued
+ *  messages are never silently discarded or left immortal: every entry reaches
+ *  a terminal signal (delivered / cleared / interrupted / watchdog-fired /
+ *  abandoned) that clears it.
+ *
+ *  Do not auto-interrupt healthy tools just because a user queued a follow-up:
+ *  the watchdog only marks the entry actionable (surfaced as Stop / Remove
+ *  affordances via the existing Interrupt / ClearQueue commands); it does NOT
+ *  interrupt the in-flight turn. */
+export interface QueuedDwellEntry {
+  /** The optimistic transcript message ID this entry tracks. */
+  localId: string;
+  /** Enqueue time (ms epoch) — PURE, captured from the Send command's
+   *  `timestamp` at the reducer (not a reducer wall-clock read), so dwell is
+   *  deterministic and testable without real timers. */
+  enqueuedAt: number;
+  /** True once the dwell watchdog fired (hard threshold reached). The entry is
+   *  now actionable: the webview surfaces Stop (Interrupt) / Remove (ClearQueue)
+   *  affordances. Cleared (with the whole entry) on delivery/clear/interrupt/
+   *  restart — never left set on an immortal message. */
+  watchdogFired: boolean;
+  /** True when the backend died (`SessionsInterrupted`) while this message was
+   *  queued. The SDK's in-memory steer/followUp queue is gone, so the message
+   *  can never be delivered. Terminal: the transcript message is also marked
+   *  `interrupted` (truthful persisted state — never immortal 'queued'), and the
+   *  only recovery is Remove (ClearQueue). */
+  abandoned: boolean;
 }
 
 /** Emitted by the backend when the SDK begins an auto-retry attempt (after a

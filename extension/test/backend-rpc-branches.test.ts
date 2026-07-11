@@ -77,6 +77,11 @@ test('validateMessageSend rejects malformed attachment payloads and invalid arra
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [{ id: '1', kind: 'imageBlob', mimeType: 'image/png', name: 'img.png', sizeBytes: 10, dataBase64: 'abc', source: 'picker' }] }), /source must be "paste" or "drop"/);
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [{ id: '1', kind: 'imageBlob', mimeType: 'image/png', name: 'img.png', sizeBytes: 10, dataBase64: 'abc', source: 'paste', width: 0 }] }), /width must be a positive number/);
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [{ id: '1', kind: 'imageBlob', mimeType: 'image/png', name: 'img.png', sizeBytes: 10, dataBase64: 'abc', source: 'paste', height: 0 }] }), /height must be a positive number/);
+  const image = (id: string) => ({ id, kind: 'imageBlob', mimeType: 'image/png', name: `${id}.png`, sizeBytes: 7 * 1024 * 1024, dataBase64: 'abc', source: 'paste' });
+  assert.throws(
+    () => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [image('1'), image('2'), image('3')] }),
+    /aggregate limit/,
+  );
 });
 
 test('runtime prefs and settings validators reject invalid object shapes', () => {

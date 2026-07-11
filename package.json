@@ -2,11 +2,15 @@
   "name": "pi-config",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=24.16.0",
+    "npm": ">=11.13.0"
   },
+  "packageManager": "npm@11.13.0",
   "//workspaces": "npm workspaces are intentionally NOT enabled. Six extensions currently ship a package.json (ask-user, deferred-triggers, session-changes, session-reviewer, tool-result-pruner, warm-bash); the remaining five (cwd-skills, safeguard, skill-pruner, subagent, web-access-compat) are resolved by the root test runner via direct globs and typechecked from the extension package. Activating workspaces would require package.json files for each and would break root npm install. Track enabling this in docs/internal/code-review/TODO-archive.md.",
   "scripts": {
     "test": "node ./scripts/run-tests.mjs",
+    "test:fast": "node ./scripts/run-tests.mjs --fast",
+    "test:scripts": "node --test scripts/test/*.test.mjs",
     "shared:typecheck": "node ./extension/node_modules/typescript/bin/tsc -p shared/tsconfig.json",
     "typecheck": "npm run shared:typecheck && npm run extension:typecheck && npm run analytics:typecheck && npm run extensions:typecheck",
     "analytics:typecheck": "npm --prefix analysis run typecheck --",
@@ -18,6 +22,8 @@
     "analytics:build-site": "npm --prefix analysis run build-site --",
     "analytics:serve": "npm --prefix analysis run serve --",
     "analytics:validate": "npm --prefix analysis run validate --",
+    "bootstrap": "node ./scripts/bootstrap.mjs",
+    "doctor": "node ./scripts/doctor.mjs",
     "extension:build": "npm --prefix extension run build --",
     "extension:test": "node ./scripts/run-tests.mjs --package extension",
     "extension:typecheck": "npm --prefix extension run typecheck --",

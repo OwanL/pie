@@ -316,6 +316,7 @@ export function isQueuedDeliveredPayload(value: unknown): value is QueuedDeliver
     isObject(value)
     && isString(value.sessionPath)
     && isString(value.text)
+    && isOptionalString(value.localId)
   );
 }
 

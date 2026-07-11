@@ -67,5 +67,18 @@ export interface MessageLike {
     // Ollama native usage fields.
     prompt_eval_count?: number;
     eval_count?: number;
+    // Reasoning/thinking token aliases. A SUBSET of output (never added to
+    // totals/cost separately) — surfaced so the UI can show how much of the
+    // output was hidden reasoning. Common across OpenAI (`reasoning_tokens`,
+    // nested under `completion_tokens_details` / `output_tokens_details`) and
+    // Anthropic-style top-level fields.
+    reasoningTokens?: number;
+    reasoning_tokens?: number;
+    output_tokens_details?: {
+      reasoning_tokens?: number;
+    };
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
+    };
   };
 }

@@ -8,7 +8,7 @@ import {
   getWebviewAssetDir,
   isHotReloadAssetFileName,
 } from '../webview/hot-reload';
-import { getWebviewAssetVersion, renderWebviewHtml } from '../webview/assets';
+import { resolveWebviewHtml } from '../webview/assets';
 import type { SidebarSyncState } from './sync';
 import type { WebviewToHostMessage } from '../../shared/protocol';
 
@@ -102,17 +102,16 @@ export class SidebarHotReloader {
     this.reloading = true;
     let applied = false;
     try {
-      const nextAssetVersion = await getWebviewAssetVersion(this.deps.getContext());
-      const nextHtml = await renderWebviewHtml(this.deps.getContext(), view.webview, nextAssetVersion);
+      const resolvedAssets = await resolveWebviewHtml(this.deps.getContext(), view.webview);
       if (this.deps.getView() !== view) {
         return;
       }
 
-      this.currentAssetVersion = nextAssetVersion;
+      this.currentAssetVersion = resolvedAssets.assetVersion;
       this.deps.setWebviewReady(false);
       this.deps.setSyncState({ ...this.deps.getSyncState(), globalDirty: true });
       this.deps.onReloadWebviewReadyReset();
-      view.webview.html = nextHtml;
+      view.webview.html = resolvedAssets.html;
       applied = true;
       this.reloadingForAssetMismatch = false;
       this.reloadingForStateAppliedTimeout = false;

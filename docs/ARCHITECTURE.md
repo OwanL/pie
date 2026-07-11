@@ -10,6 +10,12 @@ pie is a VS Code extension that provides a chat interface to a local PI (Program
 
 ---
 
+## Transport and Backend Lifecycle
+
+Stdio uses UTF-8 JSONL with a shared 20 MiB per-record limit, enough for a supported 10 MiB raw image after base64 encoding plus envelope headroom. Readers retain bounded memory, discard an overlong record through LF, and then recover. Oversized stdin requests receive a correlated `REQUEST_TOO_LARGE` response when their ID is present in the bounded preview; backend stdout overflow is fatal because dropping an event could desynchronize host state. Backend stdout writes are serialized with bounded application buffering; stale queued `tool.progress` events are coalesced while responses and terminal events are never silently dropped.
+
+The host distinguishes intentional stops from unexpected, generation-tagged exits. Intentional stop during startup rejects that child’s readiness wait, and an old-generation exit cannot clear a replacement process. Unexpected exits terminalize orphaned in-flight state and preserve a classified interruption notice. There is no automatic backend restart; restart remains an explicit user action.
+
 ## 2. Architecture Pattern
 
 The system follows a **CQRS/Elm-style MVI** pattern. User actions and backend events are unified into a single `Event` type processed by a pure reducer. The reducer returns updated state plus effect descriptors. An effect runner executes side effects (RPCs, persistence, logging) and feeds results back as events. The webview is a passive renderer of projected state — it never mutates logic state directly.

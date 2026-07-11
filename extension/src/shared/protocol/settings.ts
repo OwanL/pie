@@ -91,12 +91,12 @@ export interface PruningSettings {
   thinkingLevel: ThinkingLevel;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
-  /** Optional auto-skip threshold (estimated input tokens) below which the
-   *  skill-pruner prepass is skipped for small/trivial turns (Brief F #4).
-   *  `null`/absent = disabled (always run the prepass). Persisted to
-   *  settings.json so the SDK skill-pruner can consume it; the actual skip
-   *  behavior is a cross-repo follow-up in @earendil-works/pi-coding-agent
-   *  (see TODO.md). */
+  /** Optional assembled-prepass input token threshold below which the
+   *  skill-pruner keeps all candidates without an LLM call. Compared against
+   *  the local estimate of the assembled prepass input (system prompt +
+   *  candidate user message). `null`/absent = disabled (always run the
+   *  prepass); when triggered the pruner fail-open keeps everything with no
+   *  LLM call and no error feedback. */
   autoSkipBelowTokens?: number | null;
 }
 

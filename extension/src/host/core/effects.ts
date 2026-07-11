@@ -309,6 +309,8 @@ export type Effect =
   | DrainBackendReadyQueueEffect
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
+  | StartQueuedDwellWatchdogEffect
+  | CancelQueuedDwellWatchdogEffect
   | ClearSendTimerEffect
   | ReArmSendTimerEffect;
 
@@ -352,6 +354,33 @@ export interface StartBackendReadyWatchdogEffect extends EffectBase {
  */
 export interface CancelBackendReadyWatchdogEffect extends EffectBase {
   kind: 'CancelBackendReadyWatchdog';
+}
+
+/**
+ * Start the per-localId queued-message dwell watchdog (handoff §F). Emitted by
+ * the reducer on the Send-while-busy path (a steering/followUp message was
+ * queued). On fire, the runner dispatches `QueuedDwellWatchdogFired` → the
+ * reducer marks the dwell entry `watchdogFired` (actionable). Keyed by
+ * `localId` (globally unique) so multiple queued messages each have their own
+ * timer from their own enqueue time. Does NOT interrupt the in-flight turn.
+ */
+export interface StartQueuedDwellWatchdogEffect extends EffectBase {
+  kind: 'StartQueuedDwellWatchdog';
+  sessionPath: string;
+  localId: string;
+  timeoutMs: number;
+}
+
+/**
+ * Cancel the per-localId queued-message dwell watchdog. Emitted by the reducer
+ * when the queued message is delivered, cleared, interrupted, rolled back
+ * (pre-ack failure), abandoned (backend restart), or the session is closed —
+ * so the timer never fires into a stale/absent entry. The runner cancel is a
+ * no-op when no timer is running for that `localId` (idempotent).
+ */
+export interface CancelQueuedDwellWatchdogEffect extends EffectBase {
+  kind: 'CancelQueuedDwellWatchdog';
+  localId: string;
 }
 
 /**

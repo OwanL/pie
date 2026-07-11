@@ -1,6 +1,6 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
 import { RUN_ANALYTICS_SCHEMA_VERSION } from './types';
-import type { AgentReviewEntry, OutcomeHistoryLogEntry, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
+import type { AgentReviewEntry, AuxiliaryLlmUsageSample, OutcomeHistoryLogEntry, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
 import { coerceFunctionalSettings } from './coercion-functional-settings';
 import {
@@ -33,10 +33,54 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   if (totalTokens === 0) {
     return null;
   }
-  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, totalTokens };
+  // reasoningTokens is a subset of output (never added to totals); clamp to
+  // outputTokens defensively so persisted/malformed data can't exceed it.
+  const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
+  const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, outputTokens) : undefined;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens,
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+  };
 }
 
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
+const AUXILIARY_LLM_USAGE_KINDS = new Set(['skill_pruning_prepass', 'subagent']);
+
+function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const samples: AuxiliaryLlmUsageSample[] = [];
+  for (const entry of value) {
+    if (
+      !isObjectRecord(entry)
+      || typeof entry.kind !== 'string'
+      || !AUXILIARY_LLM_USAGE_KINDS.has(entry.kind)
+      || typeof entry.sourceId !== 'string'
+      || !entry.sourceId
+      || typeof entry.occurredAt !== 'string'
+      || !entry.occurredAt
+    ) {
+      continue;
+    }
+    samples.push({
+      kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
+      sourceId: entry.sourceId,
+      occurredAt: entry.occurredAt,
+      modelId: typeof entry.modelId === 'string' && entry.modelId ? entry.modelId : undefined,
+      inputTokens: toNonNegativeInteger(entry.inputTokens),
+      outputTokens: toNonNegativeInteger(entry.outputTokens),
+      cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
+      cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+    });
+  }
+  return samples;
+}
 
 /**
  * Coerce per-turn throughput samples from a persisted run snapshot. Malformed
@@ -208,6 +252,7 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     outputTokens: toNonNegativeInteger(candidate.outputTokens),
     cacheReadTokens: toNonNegativeInteger(candidate.cacheReadTokens),
     cacheWriteTokens: toNonNegativeInteger(candidate.cacheWriteTokens),
+    auxiliaryLlmUsage: coerceAuxiliaryLlmUsage(candidate.auxiliaryLlmUsage),
     tokenReportedTurnCount: toNonNegativeInteger(candidate.tokenReportedTurnCount),
     lastTurnUsage: coerceAssistantUsage(candidate.lastTurnUsage),
     turnThroughputSamples: coerceTurnThroughputSamples(candidate.turnThroughputSamples),

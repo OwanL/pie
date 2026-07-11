@@ -591,6 +591,66 @@ export async function execute(
 	// if a future bug reintroduces an unbounded wait. On timeout it aborts the
 	// run (so runner.ts can return its own abort result), then force-returns a
 	// synthesized error toolResult if the dispatch still doesn't settle.
+	// Retain the latest immutable progress snapshot at the execute boundary. If
+	// the last-resort settlement net fires, completed siblings and partial child
+	// output must survive; only children that are still running are terminalized.
+	let latestDetails: SubagentDetails | undefined;
+	const captureDetails = (details: SubagentDetails | undefined): void => {
+		if (!details?.results) return;
+		const previous = latestDetails?.results ?? [];
+		latestDetails = {
+			...details,
+			results: details.results.map((result, index) => ({
+				...previous[index],
+				...result,
+				// Preserve partial prose across the settlement-triggered abort update.
+				streamingText: result.streamingText ?? previous[index]?.streamingText,
+			})),
+		};
+	};
+	const preservingOnUpdate: OnUpdateCallback = (partial) => {
+		captureDetails(partial.details);
+		onUpdate?.(partial);
+	};
+	const fallbackResults = (cause: string): SingleResult[] => {
+		const requested = mode === "single"
+			? [{ agent: params.agent ?? "unknown", task: params.task ?? "" }]
+			: mode === "parallel"
+				? (params.tasks ?? [])
+				: (params.chain ?? []);
+		return requested.map((item, index) => ({
+			agent: item.agent,
+			agentSource: "unknown",
+			task: item.task,
+			exitCode: 1,
+			messages: [],
+			stderr: cause,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			stopReason: "error",
+			errorMessage: cause,
+			...(mode === "chain" ? { step: index + 1 } : {}),
+		}));
+	};
+	const terminalDetails = (cause: string): SubagentDetails => {
+		if (!latestDetails) return makeDetailsBound(mode, fallbackResults(cause));
+		return {
+			...latestDetails,
+			results: latestDetails.results.map((result) => {
+				const running = result.exitCode === -1 || result.streaming === true || (result.runningTools?.length ?? 0) > 0;
+				if (!running) return result;
+				return {
+					...result,
+					exitCode: 1,
+					streaming: false,
+					runningTools: [],
+					stopReason: "error",
+					errorMessage: result.errorMessage ?? cause,
+					stderr: result.stderr || cause,
+				};
+			}),
+		};
+	};
+
 	const settlementMs = resolveSettlementMs();
 	if (settlementMs <= 0) {
 		return dispatchToMode(
@@ -601,7 +661,7 @@ export async function execute(
 			checkSessionLimit,
 			runtimeCtx,
 			makeDetailsBound,
-			onUpdate,
+			preservingOnUpdate,
 			signal,
 			selectionCtx,
 			_toolCallId,
@@ -628,7 +688,7 @@ export async function execute(
 		checkSessionLimit,
 		runtimeCtx,
 		makeDetailsBound,
-		onUpdate,
+		preservingOnUpdate,
 		runSignal,
 		selectionCtx,
 		_toolCallId,
@@ -674,7 +734,7 @@ export async function execute(
 			content: [
 				{ type: "text", text: `⚠ Subagent force-settled: did not return within ${settlementMs / 1000}s. This is a bug — please report. See logs for [pie:subagent].` },
 			],
-			details: makeDetailsBound(mode, []),
+			details: terminalDetails(cause),
 		});
 
 		const graceMs = resolveSettlementGraceMs();
@@ -686,7 +746,10 @@ export async function execute(
 		try {
 			const graceWinner = await Promise.race([dispatchPromise, gracePromise]);
 			if (graceWinner !== FORCE_SETTLE) {
-				return graceWinner;
+				return {
+					...graceWinner,
+					details: terminalDetails(cause),
+				};
 			}
 		} finally {
 			if (graceTimer) clearTimeout(graceTimer);
@@ -702,7 +765,7 @@ export async function execute(
 					text: `Subagent did not settle within ${settlementMs / 1000}s and was force-settled. This is a bug — please report.`,
 				},
 			],
-			details: makeDetailsBound(mode, []),
+			details: terminalDetails(cause),
 			isError: true,
 		};
 	} finally {

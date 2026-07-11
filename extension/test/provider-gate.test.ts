@@ -11,7 +11,7 @@
 
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { ProviderGate, ProviderGateSaturatedError, ProviderGateAbortError, ProviderGateHeaderTimeoutError, type ProviderConcurrencyConfig } from '../src/backend/provider-gate.js';
+import { ProviderGate, ProviderGateSaturatedError, ProviderGateAbortError, ProviderGateHeaderTimeoutError, ProviderGateTransientPauseError, ProviderGateAuthError, type ProviderConcurrencyConfig } from '../src/backend/provider-gate.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -89,6 +89,34 @@ afterEach(() => {
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe('ProviderGate — transient circuit breaker', () => {
+	test('opens after a bounded 5xx burst and recovers through one half-open probe', async () => {
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			return calls <= 2 ? new Response('down', { status: 503 }) : new Response('ok', { status: 200 });
+		};
+		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 2, breakerOpenSeconds: 0.02, breakerMaxOpenSeconds: 1 }], 0);
+
+		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('a'))).status, 503);
+		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('b'))).status, 503);
+		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('c')), ProviderGateTransientPauseError);
+		assert.equal(calls, 2, 'open breaker must short-circuit without provider traffic');
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('probe'))).status, 200);
+		assert.equal(ProviderGate.getInstance()?.getMetrics()[0]?.breakerState, 'closed');
+	});
+
+	test('surfaces auth failures immediately without opening the transient breaker', async () => {
+		globalThis.fetch = async () => new Response('unauthorized', { status: 401 });
+		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1 }], 0);
+		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('auth')), ProviderGateAuthError);
+		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
+		assert.equal(metrics?.breakerState, 'closed');
+		assert.equal(metrics?.transientFailures, 0);
+	});
+});
 
 describe('ProviderGate — installation and passthrough', () => {
 	test('non-matching requests pass through unwrapped', async () => {

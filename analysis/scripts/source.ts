@@ -20,6 +20,7 @@ import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   type AgentReviewSourceEvent,
   type AssistantUsage,
+  type AuxiliaryLlmUsageSample,
   type FileExtensionRollup,
   type FileMutationRollup,
   type FunctionalSettingsSnapshot,
@@ -654,6 +655,38 @@ function coerceBooleanRecord(value: unknown): Record<string, boolean> {
 }
 
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
+const AUXILIARY_LLM_USAGE_KINDS = new Set(['skill_pruning_prepass', 'subagent']);
+
+function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const samples: AuxiliaryLlmUsageSample[] = [];
+  for (const entry of value) {
+    if (
+      !isRecord(entry)
+      || typeof entry.kind !== 'string'
+      || !AUXILIARY_LLM_USAGE_KINDS.has(entry.kind)
+      || typeof entry.sourceId !== 'string'
+      || !entry.sourceId
+      || typeof entry.occurredAt !== 'string'
+      || !entry.occurredAt
+    ) {
+      continue;
+    }
+    samples.push({
+      kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
+      sourceId: entry.sourceId,
+      occurredAt: entry.occurredAt,
+      modelId: typeof entry.modelId === 'string' && entry.modelId ? entry.modelId : undefined,
+      inputTokens: toNonNegativeInteger(entry.inputTokens),
+      outputTokens: toNonNegativeInteger(entry.outputTokens),
+      cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
+      cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+    });
+  }
+  return samples;
+}
 
 /**
  * Coerce per-turn throughput samples. Malformed samples are dropped; older runs
@@ -682,6 +715,7 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       generationDurationMs: toNonNegativeInteger(entry.generationDurationMs),
       concurrentBusySessions: toNonNegativeInteger(entry.concurrentBusySessions),
       status,
+      modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),
       overheadMs: toNullableNonNegativeInteger(entry.overheadMs),
       providerLatencyMs: toNullableNonNegativeInteger(entry.providerLatencyMs),
@@ -846,6 +880,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     outputTokens: toNonNegativeInteger(value.outputTokens),
     cacheReadTokens: toNonNegativeInteger(value.cacheReadTokens),
     cacheWriteTokens: toNonNegativeInteger(value.cacheWriteTokens),
+    auxiliaryLlmUsage: coerceAuxiliaryLlmUsage(value.auxiliaryLlmUsage),
     tokenReportedTurnCount: toNonNegativeInteger(value.tokenReportedTurnCount),
     lastTurnUsage: coerceAssistantUsage(value.lastTurnUsage),
     turnThroughputSamples: coerceTurnThroughputSamples(value.turnThroughputSamples),

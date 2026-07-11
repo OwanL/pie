@@ -12,6 +12,8 @@ Before each agent turn, `skill-pruner` sends the user prompt + available skill/t
 4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
 5. Logs the decision — including tool pruning — to `data/pruning.jsonl`.
 
+The scorer returns only the tiny JSON prune-list shape `{"pruneSkills":[],"pruneTools":[]}` with no explanation. The parser remains compatible with older responses containing an optional `reasoning` field.
+
 The model is **keep-biased**: an empty prune list (or an unreadable response) keeps everything, so "return nothing" always means "prune nothing". Pruning 100% of a category triggers a **keep-all safeguard**: everything is kept (with a recorded reason) rather than leaving the agent with nothing. The tool safeguard always fires on a 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune (e.g. a simple text edit where none of the specialized skills are relevant) is allowed through whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
 
 A `request_tool` recovery tool lets the agent re-enable a pruned tool mid-session; each recovery is logged to `data/pruning.jsonl` as the over-pruning quality signal.
@@ -33,6 +35,7 @@ Add a `pruning` block to `settings.json`:
       "transportBackoffBaseMs": 1000,
       "oauthRaceBackoffMs": 1500
     },
+    "autoSkipBelowTokens": null,
     "skills": {
       "strategy": "discretion",
       "ceiling": 8,
@@ -58,7 +61,8 @@ Add a `pruning` block to `settings.json`:
 | `model` | `"gpt-5.4-mini"` | LLM model for relevance scoring |
 | `provider` | `"github-copilot"` | Provider for the scoring model |
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
-| `prepass` | _(built-in defaults)_ | Timeout / retry budgets for the LLM prepass call; see [Prepass options](#prepass-options) |
+| `prepass` | _(built-in defaults)_ | Output, timeout, and manual retry budgets for the LLM prepass call; see [Prepass options](#prepass-options) |
+| `autoSkipBelowTokens` | `null` | When set to a positive integer, skip the LLM and keep all if the assembled prepass input (pruning system prompt + candidate user message) estimates below this threshold. Disabled by default |
 
 ### Skills options
 
@@ -84,10 +88,13 @@ Tunable knobs for the LLM prepass call itself (timeouts + retry budgets). Every 
 
 | Option | Default | Description |
 |---|---|---|
+| `maxOutputTokens` | _(disabled)_ | Optional scorer output cap, forwarded as pi-ai `maxTokens` on every initial, retry, and thinking-downgrade call. Use cautiously: some providers count hidden reasoning against this budget and may exhaust a low cap before emitting JSON |
 | `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
-| `maxTransportRetries` | `2` | Max transport-level retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables prepass-level transport retrying (pi-ai's own `maxRetries` is still forwarded) |
+| `maxTransportRetries` | `2` | Max extension-level classified transport retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables them. pi-ai `maxRetries` is always `0`, avoiding nested retry amplification |
 | `transportBackoffBaseMs` | `1000` | Base (ms) for the exponential backoff between transport retries (`base * 2**(attempt-1)`). `0` retries immediately |
 | `oauthRaceBackoffMs` | `1500` | Backoff (ms) for the github-copilot OAuth-token race in `resolveAuth` (the prepass runs before the main agent's first call triggers the lazy OAuth refresh). `0` skips the re-resolve |
+
+The latest successful parse-valid result is cached per session for 30 minutes. It is reused only when the catalog/config/context fingerprint is unchanged and the next prompt is identical or is an explicit continuation/retry phrase such as `continue`, `go ahead`, `retry`, or `fix this`. Cache hits still apply selection, emit feedback and analytics, and are marked `cached`; arbitrary short prompts are never reused.
 
 Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`, which emit encrypted reasoning tokens before the prune-list JSON):
 

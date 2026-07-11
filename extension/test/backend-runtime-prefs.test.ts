@@ -252,6 +252,10 @@ test('runtimePrefs.set applies providerConcurrency overrides to the live Provide
     paused: false,
     pausedUntilMs: 0,
     strikeCount: 0,
+    breakerState: 'closed',
+    breakerOpenUntilMs: 0,
+    transientFailures: 0,
+    breakerProbeInFlight: false,
   }]);
 });
 

@@ -399,15 +399,22 @@ test("executeSingleMode: model-failure retry excludes the failed model then brea
 // --- executeParallelMode ----------------------------------------------------
 
 test("executeParallelMode: too many tasks returns isError without running", async () => {
-	let called = false;
-	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const tasks = Array.from({ length: 9 }, () => ({ agent: "worker", task: "t" }));
-	const r: any = await execParallel(
-		{ tasks }, makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Too many parallel tasks \(9\)\. Max is 4\./);
-	assert.equal(called, false);
+	const previousMax = process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
+	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "4";
+	try {
+		let called = false;
+		setMockBehavior({ onPrompt: async () => { called = true; } });
+		const tasks = Array.from({ length: 9 }, () => ({ agent: "worker", task: "t" }));
+		const r: any = await execParallel(
+			{ tasks }, makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
+		);
+		assert.equal(r.isError, true);
+		assert.match(r.content[0].text, /Too many parallel tasks \(9\)\. Max is 4\./);
+		assert.equal(called, false);
+	} finally {
+		if (previousMax === undefined) delete process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
+		else process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = previousMax;
+	}
 });
 
 test("executeParallelMode: all tasks succeed -> not an error", async () => {

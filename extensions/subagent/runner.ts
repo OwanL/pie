@@ -31,6 +31,8 @@ import {
 	type ParentBridge,
 } from "./src/parent-extension-ui-bridge-proxy.js";
 import { inflightSemaphore } from "./src/concurrency-limit.js";
+import { ChildLifecycle, makeAttemptId, resolveLivenessConfig, type LeaseViolation } from "./src/lifecycle.js";
+import { orphanRegistry } from "./src/cleanup.js";
 
 /**
  * Minimal contract for the session events emitted by the pi SDK's
@@ -152,25 +154,20 @@ const SUBAGENT_TIMEOUT_ENV = "PI_SUBAGENT_TIMEOUT_MS";
  * escape; this timeout is the last-resort safety net that guarantees a stuck
  * subagent can't dangle the parent session indefinitely.
  *
- * 15 minutes is generous enough for real multi-turn tool-using work while
- * bounding a hung turn tightly enough to surface a loud failure long before the
- * 30-min settlement net. Set `PI_SUBAGENT_TIMEOUT_MS=0` to disable (or a
- * custom positive value to override). The main pie session is NOT affected —
- * its `httpIdleTimeoutMs: 0` setting is preserved.
+ * Disabled by default: productive subagents are bounded by renewable,
+ * phase-specific inactivity leases rather than total elapsed time. A custom
+ * positive value enables an additional absolute containment ceiling. The main
+ * pie session is not affected.
  */
-export const DEFAULT_SUBAGENT_TIMEOUT_MS = 15 * 60 * 1000;
+export const DEFAULT_SUBAGENT_TIMEOUT_MS = 0;
 
 /**
  * Resolve the per-prompt timeout for subagent runs, in milliseconds.
  *
  * Reads `PI_SUBAGENT_TIMEOUT_MS` from the environment:
- * - A positive number (milliseconds) sets an explicit timeout safety net that
- *   wraps the prompt. `0` explicitly DISABLES the timeout (escape hatch for
- *   environments that want only the parent-abort / settlement paths).
- * - Unset → the {@link DEFAULT_SUBAGENT_TIMEOUT_MS} safety net (a stuck
- *   subagent neither hangs the parent forever nor relies solely on the 30-min
- *   settlement net).
- * - Invalid → the default.
+ * - A positive number enables an explicit absolute prompt ceiling.
+ * - Unset, zero, negative, or invalid disables that ceiling; renewable phase
+ *   leases and the outer settlement net still bound inactivity.
  *
  * The parent's abort signal (Ctrl+C / parent cancellation) always takes
  * priority; the timeout is a last-resort net for cases where the provider
@@ -182,8 +179,8 @@ export function resolveSubagentTimeoutMs(): number {
 	const raw = process.env[SUBAGENT_TIMEOUT_ENV];
 	if (raw === undefined || raw === "") return DEFAULT_SUBAGENT_TIMEOUT_MS;
 	const ms = Number(raw);
-	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SUBAGENT_TIMEOUT_MS;
-	return ms === 0 ? 0 : ms;
+	if (!Number.isFinite(ms) || ms <= 0) return 0;
+	return ms;
 }
 
 /**
@@ -448,31 +445,39 @@ function subscribeToSession(
 	streamingTextRef: { value: string },
 	stageRef: { value: string },
 	turnStartRef: { value: number | null },
+	lifecycle?: ChildLifecycle,
 ): () => void {
 	return session.subscribe((event) => {
+		if (lifecycle?.isTerminal) return;
 		if (event.type === "message_start" && event.message?.role === "assistant") {
+			lifecycle?.transition("waiting_provider", { type: "response-headers" });
 			turnStartRef.value = Date.now();
 			return;
 		}
 		if (event.type === "message_update") {
+			lifecycle?.transition("streaming", { type: "model-delta" });
 			handleMessageUpdate(event, result, emitUpdate, streamingTextRef, stageRef);
 			return;
 		}
 		if (event.type === "tool_execution_start" && event.toolName) {
+			lifecycle?.transition("running_tool", { type: "tool-start", description: event.toolName });
 			result.runningTools = [...(result.runningTools ?? []), event.toolName];
 			emitUpdate();
 			return;
 		}
 		if (event.type === "tool_execution_end" && event.toolName) {
+			lifecycle?.transition("waiting_provider", { type: "tool-end", description: event.toolName });
 			result.runningTools = (result.runningTools ?? []).filter((t) => t !== event.toolName);
 			emitUpdate();
 			return;
 		}
 		if (event.type === "tool_execution_update" && event.toolCallId !== undefined) {
+			lifecycle?.progress({ type: "tool-heartbeat" });
 			applyToolExecutionUpdate(result, event.toolCallId, event.partialResult, emitUpdate);
 			return;
 		}
 		if (event.type === "message_end" && event.message) {
+			lifecycle?.progress({ type: "message-end" });
 			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef, turnStartRef);
 		}
 	});
@@ -956,6 +961,31 @@ export async function runSingleAgent(
 	);
 	const streamingTextRef = { value: "" };
 	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef);
+	const lifecycle = new ChildLifecycle(
+		makeAttemptId(agentName),
+		resolveLivenessConfig(),
+		Date.now,
+		(activity) => {
+			currentResult.activityPhase = activity.phase;
+			currentResult.activityDetail = activity.detail;
+			currentResult.activitySince = activity.phaseStartedAt;
+			currentResult.lastProgressAt = activity.lastProgressAt;
+			currentResult.inactivityBudgetMs = activity.budgetMs;
+			emitUpdate();
+		},
+	);
+	lifecycle.provider = resolvedModel?.provider;
+	lifecycle.model = actualModelId;
+	lifecycle.transition("preparing", { type: "session-prepare" });
+	const leaseController = new AbortController();
+	let leaseViolation: LeaseViolation | undefined;
+	lifecycle.startWatchdog((violation) => {
+		leaseViolation = violation;
+		leaseController.abort(new Error(violation.reason));
+	});
+	const effectiveSignal = signal
+		? (typeof AbortSignal.any === "function" ? AbortSignal.any([signal, leaseController.signal]) : signal)
+		: leaseController.signal;
 
 	const sdk = _internal?.sdk ?? (await loadSubagentSdk());
 	const promptTimeoutMs = _internal?.timeoutMs ?? resolveSubagentTimeoutMs();
@@ -1049,9 +1079,11 @@ export async function runSingleAgent(
 		if (parentAlreadyAborted) {
 			await raceTimeout("loading subagent resources (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, resourceLoader.reload());
 		} else {
-			await raceAbort(signal, resourceLoader.reload(), "loading subagent resources");
+			await raceAbort(effectiveSignal, resourceLoader.reload(), "loading subagent resources");
 		}
-		const release = await inflightSemaphore.acquire(parentAlreadyAborted ? undefined : signal);
+		lifecycle.transition("queued", { type: "concurrency-wait", description: "waiting for local subagent capacity" });
+		const release = await inflightSemaphore.acquire(parentAlreadyAborted ? undefined : effectiveSignal);
+		lifecycle.transition("preparing", { type: "permit-acquired", description: "creating isolated session" });
 		try {
 			const createSessionPromise = sdk.createSession({
 				cwd: sessionCwd,
@@ -1064,7 +1096,7 @@ export async function runSingleAgent(
 			});
 			const created = parentAlreadyAborted
 				? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
-				: await raceAbort(signal, createSessionPromise, "creating subagent session");
+				: await raceAbort(effectiveSignal, createSessionPromise, "creating subagent session");
 			session = created.session;
 		} finally {
 			release();
@@ -1077,12 +1109,18 @@ export async function runSingleAgent(
 		currentResult.exitCode = 1;
 		currentResult.errorMessage = toErrorMessage(err);
 		currentResult.stderr = currentResult.errorMessage;
+		lifecycle.fail(err);
+		const preSpawnClassified = lifecycle.classified;
 		logLoud("subagent pre-spawn aborted/failed", {
 			toolCallId: _toolCallId,
 			agent: agentName,
 			task,
 			stage: "pre-spawn",
 			cause: (err as { name?: string } | null)?.name === "AbortError" ? "aborted" : "error",
+			failureClass: preSpawnClassified?.class,
+			retryable: preSpawnClassified?.retryable,
+			replaySafety: preSpawnClassified?.replaySafety,
+			httpStatus: preSpawnClassified?.httpStatus,
 			error: currentResult.errorMessage,
 		});
 		onUpdate?.({
@@ -1118,7 +1156,7 @@ export async function runSingleAgent(
 	const turnStartRef: { value: number | null } = { value: null };
 
 	// 5. Subscribe to session events.
-	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef, turnStartRef);
+	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef, turnStartRef, lifecycle);
 
 	// Wrap the prompt in the shared subagent context (A) so extensions whose
 	// before_agent_start hooks fire during session.prompt() — notably the
@@ -1155,13 +1193,13 @@ export async function runSingleAgent(
 			return currentResult;
 		}
 
-		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(signal, promptTimeoutMs);
+		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(effectiveSignal, promptTimeoutMs);
 		let timedOut = false;
 		const removeAbortListener = onAbort(() => {
 			// If the prompt timeout has fired (even if the parent signal also fired
 			// simultaneously), flag it as a timeout so callers can distinguish the cause.
 			// When the timeout is disabled, timeoutSignal is undefined and this never fires.
-			if (timeoutSignal?.aborted) timedOut = true;
+			if (timeoutSignal?.aborted || leaseController.signal.aborted) timedOut = true;
 			// Immediately stop the child's billable windows (compaction,
 			// branch-summary, bash, retry) — these run in the gap between
 			// agent_end and teardownSession and are NOT covered by abort().
@@ -1193,6 +1231,18 @@ export async function runSingleAgent(
 				.then((outcome) => {
 					if (danglingTimer) clearTimeout(danglingTimer);
 					if (outcome === "__dangling__") {
+						orphanRegistry.register({
+							attemptId: lifecycle.attemptId,
+							provider: lifecycle.provider,
+							model: lifecycle.model,
+							phase: lifecycle.phase,
+							detachedAt: Date.now(),
+							lastError: "session.abort() did not settle within grace",
+							billableWindowsStopped: true,
+						}, async () => {
+							await session.abort();
+							session.dispose();
+						});
 						logLoud("child.dangling-detected", {
 							toolCallId: _toolCallId,
 							agent: agentName,
@@ -1225,6 +1275,7 @@ export async function runSingleAgent(
 		});
 
 		stageRef.value = "waiting for model response";
+		lifecycle.transition("waiting_provider", { type: "prompt-dispatched", description: "waiting for provider response" });
 		// Race the prompt against the combined abort signal. A hung provider
 		// stream / hung SDK that ignores `session.abort()` would otherwise
 		// hang the parent even after the timeout fires — racing the prompt
@@ -1252,7 +1303,7 @@ export async function runSingleAgent(
 			// catch for the timeout case; non-timeout aborts fall through to the
 			// outer catch to preserve their enriched stage/cause message.
 			if (timedOut) {
-				applyTimeoutFailure(currentResult, promptTimeoutMs, stageRef.value);
+				applyTimeoutFailure(currentResult, leaseViolation?.budgetMs ?? promptTimeoutMs, leaseViolation?.phase ?? stageRef.value);
 				return currentResult;
 			}
 			throw err;
@@ -1265,11 +1316,34 @@ export async function runSingleAgent(
 		}
 
 		applyStopReason(currentResult, signal?.aborted === true, stageRef.value);
+		if (currentResult.exitCode === 0) lifecycle.finish(currentResult);
+		else lifecycle.fail(currentResult.errorMessage);
 		return currentResult;
 	} catch (err) {
 		applyThrownError(currentResult, err, stageRef.value);
+		if (signal?.aborted) lifecycle.cancel(currentResult.errorMessage ?? "parent abort");
+		else lifecycle.fail(err);
+		// Surface the classified provider failure so the cause (transport /
+		// timeout / 429 / 5xx / auth / abort) and replay safety are observable
+		// in the [pie:subagent] log stream. Classification is recorded only —
+		// this does not change retry, model selection, or failover behaviour.
+		const promptClassified = lifecycle.classified;
+		logLoud("subagent prompt failed", {
+			toolCallId: _toolCallId,
+			agent: agentName,
+			task,
+			stage: stageRef.value,
+			cause: signal?.aborted ? "parent-abort" : "error",
+			failureClass: promptClassified?.class,
+			retryable: promptClassified?.retryable,
+			replaySafety: promptClassified?.replaySafety,
+			httpStatus: promptClassified?.httpStatus,
+			retryAfterMs: promptClassified?.retryAfterMs,
+			error: currentResult.errorMessage,
+		});
 		return currentResult;
 	} finally {
+		lifecycle.dispose();
 		teardownSession(unsubscribe, session);
 		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
 		// during this session (see `snapshotSignalListeners` above). Runs after

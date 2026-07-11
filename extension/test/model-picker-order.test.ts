@@ -45,7 +45,7 @@ test('orderModelsForPicker decorates ineligible options with a warning prefix an
   assert.match(bad!.title, /rating 4\/20/);
   assert.match(bad!.title, /Disabled for subagent use: broken/);
   assert.equal(good!.ineligible, false);
-  assert.equal(good!.label, 'Good Model');
+  assert.equal(good!.label, 'test · Good Model');
   assert.equal(good!.selectedLabel, 'Good Model');
   assert.match(good!.title, /rating 16\/20/);
 });
@@ -54,7 +54,7 @@ test('orderModelsForPicker strips provider text only from the compact selected l
   const [entry] = orderModelsForPicker([
     model('deepseek', { name: 'Ollama Cloud: Deepseek V4 pro', subagent: { eligible: true, aggregate: 12 } }),
   ]);
-  assert.equal(entry.label, 'Ollama Cloud: Deepseek V4 pro');
+  assert.equal(entry.label, 'test · Ollama Cloud: Deepseek V4 pro');
   assert.equal(entry.selectedLabel, 'Deepseek V4 pro');
 });
 

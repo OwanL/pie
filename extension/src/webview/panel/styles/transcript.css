@@ -7,12 +7,9 @@
   overflow-y: auto;
   overflow-x: hidden;
   overflow-anchor: none;
-  /* Smooth scrolling for `.transcript` is enabled in styles/index.css (base
-     layer) — see `scroll-behavior: smooth` there. The auto-follow rAF loop
-     (use-transcript-scroll) additionally owns smoothness for streaming deltas
-     and explicit jumps, interrupting/replacing the CSS animation
-     frame-by-frame when needed. This block intentionally does not re-declare
-     scroll-behavior. */
+  /* Programmatic bottom-follow smoothing is owned by the transcript rAF loop.
+     Keep native scroll behavior instant so manual wheel/keyboard input and
+     anchor restores never compete with a pending CSS scroll animation. */
   overscroll-behavior: contain;
   padding: var(--panel-gap-md) var(--panel-gap-lg) 10px;
   display: flex;

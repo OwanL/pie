@@ -41,6 +41,10 @@ export const state = {
 	 *  design), so without sticky recovery a recovered tool would be pruned
 	 *  again on the very next turn and the recovery would never take hold. */
 	recoveredTools: new Map<string, Set<string>>(),
+
+	/** Tools disabled by the latest auto-mode decision, tracked so neutral
+	 * keep-all/off/shadow paths can restore only pruner-owned changes. */
+	prunedTools: new Map<string, Set<string>>(),
 };
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
@@ -98,4 +102,18 @@ export function getRecoveredTools(sessionId: string): Set<string> {
 export function clearRecoveredToolsForTesting(sessionId?: string): void {
 	if (sessionId) state.recoveredTools.delete(sessionId);
 	else state.recoveredTools.clear();
+}
+
+export function getPrunedTools(sessionId: string): Set<string> {
+	return state.prunedTools.get(sessionId) ?? new Set<string>();
+}
+
+export function recordPrunedTools(sessionId: string, names: readonly string[]): void {
+	if (names.length === 0) state.prunedTools.delete(sessionId);
+	else state.prunedTools.set(sessionId, new Set(names));
+}
+
+export function clearPrunedToolsForTesting(sessionId?: string): void {
+	if (sessionId) state.prunedTools.delete(sessionId);
+	else state.prunedTools.clear();
 }

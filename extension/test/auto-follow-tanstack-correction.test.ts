@@ -12,10 +12,11 @@
  * animated close" (two parallel collapsing bash cards = a tall shrink above the
  * viewport).
  *
- * The fix (`virtual-list.tsx`): while auto-follow is engaged, set
- * `shouldAdjustScrollPositionOnItemSizeChange = () => false` so the correction
- * is suppressed — the rAF loop + browser clamp own the follow. While scrolled
- * up it stays enabled (backed by `useTranscriptScrollAnchor`).
+ * The fix (`virtual-list.tsx`) disables this correction in both scroll modes.
+ * The rAF loop + browser clamp exclusively own bottom-follow, while
+ * `useTranscriptScrollAnchor` exclusively owns a scrolled-up viewport. Running
+ * tanstack's correction alongside that anchor double-applies resize deltas and
+ * makes the viewport drift while streaming.
  *
  * This test drives the REAL `Virtualizer` (no React hooks, no happy-dom layout)
  * and asserts the correction is suppressed when the field returns `false` and
@@ -129,14 +130,14 @@ test('fix: shouldAdjustScrollPositionOnItemSizeChange=false suppresses the corre
   assert.equal(scroll.scrollTop, 800, 'scrollTop must stay pinned at the bottom (loop + clamp own the follow)');
 });
 
-test('scrolled-up case: shouldAdjustScrollPositionOnItemSizeChange=true keeps the correction enabled', () => {
+test('scrolled-up case: tanstack correction stays disabled so the custom anchor has sole ownership', () => {
   const scroll = makeScrollElement(1000, 200, 800);
-  // Simulate scrolled-up (autoFollow false) → correction stays enabled.
-  const v = makeVirtualizer(scroll, () => true);
-  assert.equal(scroll.scrollTop, 800, 'sanity: pinned at the bottom');
+  const v = makeVirtualizer(scroll, () => false);
+  assert.equal(scroll.scrollTop, 800, 'sanity: initial position');
+  const writesBefore = scroll.writes.length;
 
   v.resizeItem(0, 50);
 
-  assert.ok(scroll.writes.length > 0, 'correction must still fire when scrolled up (no regression)');
-  assert.ok(scroll.scrollTop < 800, `scrollTop should move down, got ${scroll.scrollTop}`);
+  assert.equal(scroll.writes.length, writesBefore, 'tanstack must not double-apply the custom anchor correction');
+  assert.equal(scroll.scrollTop, 800, 'position remains untouched until the custom anchor restores it');
 });

@@ -35,6 +35,7 @@ test('validateMessageSend accepts image-only sends with structured inputs', () =
     {
       sessionPath: '/workspace/session.jsonl',
       text: '',
+      localId: undefined,
       inputs: [{
         id: 'input-1',
         kind: 'imageBlob',

@@ -47,6 +47,30 @@ function resultHeader(theme: Theme, r: SingleResult, icon: string): string {
 	return header;
 }
 
+function compactDuration(ms: number): string {
+	if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
+	return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
+}
+
+function runningActivity(r: SingleResult): string {
+	const phaseLabels: Record<string, string> = {
+		queued: "queued locally",
+		preparing: "preparing session",
+		waiting_provider: "waiting for provider",
+		streaming: "provider streaming",
+		running_tool: "running tool",
+		retry_wait: "waiting to retry provider",
+	};
+	if (!r.activityPhase) return "running...";
+	const label = phaseLabels[r.activityPhase] || "running";
+	const elapsed = r.activitySince ? compactDuration(Date.now() - r.activitySince) : undefined;
+	const budget = r.inactivityBudgetMs ? compactDuration(r.inactivityBudgetMs) : undefined;
+	const detail = r.activityDetail && r.activityDetail !== label ? ` · ${r.activityDetail}` : "";
+	const timing = elapsed ? ` · ${elapsed}` : "";
+	const limit = budget ? ` · stall limit ${budget}` : "";
+	return `running... · ${label}${detail}${timing}${limit}`;
+}
+
 export function renderDisplayItems(items: DisplayItem[], theme: Theme, expanded: boolean, limit?: number): string {
 	const toShow = limit ? items.slice(-limit) : items;
 	const skipped = limit && items.length > limit ? items.length - limit : 0;
@@ -146,7 +170,7 @@ function renderSingleCollapsed(r: SingleResult, theme: Theme): Text {
 		text += ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}`;
 	}
 	if (isRunning) {
-		text += `\n${theme.fg("warning", "running...")}`;
+		text += `\n${theme.fg("warning", runningActivity(r))}`;
 	} else if (isError && r.errorMessage) {
 		text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 	} else if (displayItems.length === 0) {
@@ -218,7 +242,7 @@ function renderChainStepCollapsed(text: string, r: SingleResult, theme: Theme): 
 	text += `\n\n${chainStepHeader(theme, r, rIcon)}`;
 	const selInfoChainCol = formatSelectionInfo(r, theme.fg.bind(theme));
 	if (selInfoChainCol) text += `\n${selInfoChainCol}`;
-	if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+	if (displayItems.length === 0) text += `\n${theme.fg("muted", r.exitCode === -1 ? `(${runningActivity(r)})` : "(no output)")}`;
 	else text += `\n${renderDisplayItems(displayItems, theme, false, PARALLEL_RESULT_PREVIEW_LIMIT)}`;
 	return text;
 }
@@ -308,7 +332,7 @@ function renderParallelStepCollapsed(text: string, r: SingleResult, theme: Theme
 	const selInfoParCol = formatSelectionInfo(r, theme.fg.bind(theme));
 	if (selInfoParCol) text += `\n${selInfoParCol}`;
 	if (displayItems.length === 0)
-		text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
+		text += `\n${theme.fg("muted", r.exitCode === -1 ? `(${runningActivity(r)})` : "(no output)")}`;
 	else text += `\n${renderDisplayItems(displayItems, theme, false, PARALLEL_RESULT_PREVIEW_LIMIT)}`;
 	return text;
 }

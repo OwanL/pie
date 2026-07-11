@@ -23,10 +23,11 @@ These are the *original* design drivers. The architecture is being adjusted so e
 
 ## Prerequisites
 
-- Node.js 20+ (Node 24+ for the `analysis/` workspace)
-- npm 10+
-- [`pi`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) installed globally **only if you want the standalone `pi` CLI** in a terminal. The pie VS Code extension backend resolves its SDK from a pinned `dependency` in `extension/package.json` (installed by `npm install` in `extension/`), so it does not depend on the global install.
+- Node.js **24.16.0**, pinned by `.nvmrc` and `.node-version`
+- npm **11.13.0**, pinned by `packageManager` in `package.json`
 - VS Code, for interactive extension work
+
+The installers pin the optional standalone `pi` CLI to the exact SDK version resolved by `extension/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
 
 ## Install
 
@@ -50,27 +51,27 @@ Both installers are idempotent and safe to re-run. On each run they:
 
 1. **Set `PI_CODING_AGENT_DIR`** to the repo root (User env var on Windows; shell rc on macOS/Linux) so the `pi` CLI reads `settings.json` and `models.json` from here.
 2. **Pin `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` on Windows so standalone `pi` writes session JSONL to the repo-local store even when launched from an arbitrary working directory such as `C:\Windows\System32`.
-3. **Install `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally if the `pi` command is not on PATH.
+3. **Pin `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `extension/package-lock.json`, then restore packages with `pi update --extensions` without self-updating the CLI.
 4. **Relocate `auth.json`** out of the working tree into a secure OS user-data directory (`%LOCALAPPDATA%\pie\` on Windows; `~/.config/pie/` or `~/Library/Application Support/pie/` on macOS/Linux) and set `PI_CODING_AGENT_AUTH_DIR`.
 5. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
 6. **Write `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
 7. **Repair extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
-8. **Migrate session history** from legacy `~/.pi/agent/sessions/` into `data/outcomes/sessions/` (Windows only; planned for macOS/Linux).
-9. **Build and install the pie VS Code extension** from `extension/` via `vsce package` + `code --install-extension`.
-10. **Run a post-install verification** that checks auth content, `pie.agentDir`, and env vars, and warns about split-brain or missing credentials.
+8. **Migrate session history** from legacy `~/.pi/agent/sessions/` into the current checkout's local `data/outcomes/sessions/` store.
+9. **Install dependencies with `npm ci`**, then build, package, and install the pie VS Code extension when the VS Code CLI is available.
+10. **Run post-install verification** for auth, paths, versions, and split-brain credentials.
 
-The macOS/Linux script (`install.sh`) is intentionally lighter: it covers steps 1–5 and 9. Full feature parity (session migration, sessionDir repair, VSIX packaging) is planned — see [docs/internal/code-review/TODO-archive.md](docs/internal/code-review/TODO-archive.md).
+Both installers enforce the same portability policy: configuration comes from Git, while credentials, sessions, logs, analytics, dependencies, and build outputs remain local to each machine.
 
 ## Model Configuration
 
-Model configuration (providers, pricing, eligibility flags, provider concurrency, and the default model/provider/retry/pruning settings) has a single source of truth: [`models.yaml`](models.yaml). After editing it, regenerate the derived files:
+The provider catalog, pricing, eligibility, concurrency, retry policy, and initial chat/pruning selections have a single source of truth: [`models.yaml`](models.yaml). Existing chat and pruning selections are user preferences owned by `settings.json`; synchronization seeds them only when absent. After editing the catalog or defaults, regenerate the derived files:
 
 ```bash
 npm run sync-models            # regenerate models.json, model-profiles.yaml, settings.json model fields
 npm run sync-models -- --check  # dry-run: exit 1 if any derived file is out of sync
 ```
 
-Do not edit `models.json`, `model-profiles.yaml`, or the model fields of `settings.json` directly — the `model-config-sync` test fails on drift.
+Do not edit `models.json` or `model-profiles.yaml` directly. Change active chat and pruning selections through the UI (which writes `settings.json`); `sync-models` preserves those choices. The `model-config-sync` test guards generated catalog drift.
 
 ## Authentication
 
@@ -169,6 +170,26 @@ npm config get prefix   # shows where pi was installed
 
 **Fix:** The installer also writes `pie.agentDir` to VS Code User settings (which works immediately on reload) as a belt-and-suspenders fix. But for the `pi` CLI in integrated terminals, you still need to either restart VS Code fully or open a new integrated terminal.
 
+## Multi-machine workflow
+
+Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between machines. Clone to the final location, select the pinned Node version, and run the OS installer. Authenticate each machine independently; never transfer `auth.json`.
+
+For a deterministic dependency/build refresh after pulling, first close all VS Code windows using pie (Windows locks the running extension's native/esbuild files), then run from an external terminal:
+
+```bash
+npm run bootstrap
+```
+
+This runs `npm ci` in the root, `extension/`, and `analysis/`, installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+
+```bash
+npm run doctor
+```
+
+Dependency updates arrive as monthly Dependabot pull requests for each tracked lockfile root. Review and test those changes; do not run unpinned global upgrades independently on each machine.
+
+See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local state.
+
 ## Quick start
 
 ### Run repo-wide tests
@@ -177,18 +198,21 @@ npm config get prefix   # shows where pi was installed
 # from repo root; Node 24+ recommended because this includes analysis/
 npm run test
 
-# scope to one package when you only touched part of the repo
+# fast developer loop (parallel files, no coverage instrumentation)
+npm run test:fast -- --package extension
+
+# full verification scoped to one package
 npm run test -- --package extension
 npm run test -- --package subagent
 ```
 
-`npm run test` is the canonical repo-wide test runner. It runs each package in isolation, prints only per-package summaries plus exact failures, and enforces package-level line/branch coverage gates.
+`npm run test` is the canonical repo-wide verification runner. It runs each package in isolation and enforces package-level line/branch coverage gates. Use `npm run test:fast -- --package <id>` while iterating; it skips coverage and lets independent test files run in parallel, then run the full scoped command before merging.
 
 ### Build the pie VS Code extension
 
 ```bash
 cd extension
-npm install
+npm ci
 npm run build      # builds and syncs into the installed extension
 ```
 
@@ -210,10 +234,10 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 
 ## Persistence and storage
 
-- PI session history is stored as canonical JSONL under this checkout's local `data/outcomes/sessions/`. On Windows, `install.ps1` also pins `PI_CODING_AGENT_SESSION_DIR` to that absolute path so standalone `pi` does not fall back to the shell's current working directory.
-- `data/` is git-ignored. It is local runtime data, not part of the portable repo/config state.
-- `install.ps1` migrates legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`), repairs reachable absolute / `~`-based legacy `sessionDir` overrides, prefers newer transcripts on conflict, and preserves the loser as `.conflict.*.bak`.
-- Relative `sessionDir` overrides cannot be repaired safely by the installer and need manual cleanup.
+- Session history is canonical JSONL under each checkout's `data/outcomes/sessions/`. Both installers pin `PI_CODING_AGENT_SESSION_DIR` to that machine-local path.
+- `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same session directory.
+- Both installers migrate legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`), prefer newer transcripts on conflict, and preserve the loser as `.conflict.*.bak`.
+- Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations
 

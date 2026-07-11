@@ -8,6 +8,7 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
+import { isSuspenseThenable } from './render-error';
 import { webviewLog, setWebviewLogSink } from './utils/log';
 
 // ─── VS Code API ─────────────────────────────────────────────────────────────
@@ -73,6 +74,14 @@ function showRenderErrorOverlay(error: unknown) {
 
 const prevCatchError = (options as any).__e;
 (options as any).__e = (error: any, vnode: any, oldVNode: any) => {
+  // Lazy components suspend by throwing a Promise through this hook. Let
+  // preact/compat's Suspense handler consume it; reporting it as a crash both
+  // hides the fallback and produces the unhelpful "[object Promise]" overlay.
+  if (isSuspenseThenable(error)) {
+    if (prevCatchError) return prevCatchError(error, vnode, oldVNode);
+    throw error;
+  }
+
   webviewLog('error', 'panel', 'Preact render error', { error: String(error?.stack || error) });
   postMessage({ type: 'stateApplied', payload: { revision: -999, backendReady: false, transcriptLoaded: false, openTabCount: 0, transcriptCount: 0, systemPromptCount: 0, domTranscriptLoaderPresent: false, domTabsConnectingPresent: false, renderError: String(error?.stack || error) } } as any);
   showRenderErrorOverlay(error);

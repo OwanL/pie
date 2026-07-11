@@ -166,6 +166,33 @@ function estimatedOutputTokens(message: ChatMessage | null): number {
   return estimateTextTokens(message.markdown ?? '') + estimateTextTokens(message.thinking ?? '');
 }
 
+/**
+ * Latest completed turn's effective provider-reported throughput. This is the
+ * only reliable post-hoc rate for models whose reasoning is not streamed: the
+ * provider's output count includes hidden reasoning, while `durationMs` spans
+ * the full assistant response (including the initial wait). During streaming
+ * that breakdown is unknowable, so the live rate remains a surfaced-text
+ * estimate instead.
+ */
+function latestReportedTurnRate(transcript: ChatMessage[]): number | null {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const message = transcript[i];
+    if (message.role !== 'assistant' || message.status === 'streaming') continue;
+    const outputTokens = message.usage?.outputTokens;
+    const durationMs = message.durationMs;
+    if (
+      typeof outputTokens === 'number'
+      && outputTokens >= 0
+      && typeof durationMs === 'number'
+      && Number.isFinite(durationMs)
+      && durationMs > 0
+    ) {
+      return outputTokens / (durationMs / 1000);
+    }
+  }
+  return null;
+}
+
 function isSubagentRunning(result: SubagentSingleResult): boolean {
   return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
 }
@@ -337,6 +364,7 @@ function buildState(
   streaming: ChatMessage | null,
   toolBlocked: boolean,
   stats: TurnLatencyStats,
+  reportedTurnRate: number | null,
 ): TokenRateIndicatorState {
   const rate = computeRate(acc.samples);
   const genSec = Math.round(acc.genMs / 1000);
@@ -382,6 +410,24 @@ function buildState(
   }
 
   const reason = describePauseReason(streaming, toolBlocked);
+  // Between turns, prefer the completed provider-reported rate. Unlike the live
+  // estimate, its numerator includes hidden reasoning when the provider counts
+  // it in output. Never replace the held live rate while the current message is
+  // merely blocked on a tool call, or while a subagent is still active.
+  if (reportedTurnRate !== null) {
+    const num = formatRate(reportedTurnRate);
+    return {
+      label: latency.withTurnLatency(`⏸ ${num} tok/s`),
+      ariaLabel: latency.withTurnLatencyAria(`Generation paused (${reason}). Last rate ${num} tokens per second.`),
+      tooltip: latency.withLatencyLines([
+        `Generation paused (${reason}).`,
+        `Last rate: ${num} tok/s`,
+      ]),
+      state: 'paused',
+      paused: true,
+      rate: reportedTurnRate,
+    };
+  }
   if (rate === null) {
     return {
       label: latency.withTurnLatency('—'),
@@ -493,7 +539,10 @@ export function tickTokenRate(
   acc.lastWall = now;
 
   const latencyStats = computeTurnLatencyStats(transcript);
-  return buildState(acc, generating, streaming, toolBlocked, latencyStats);
+  const reportedTurnRate = !generating && streaming === null && runningSubagents.length === 0
+    ? latestReportedTurnRate(transcript)
+    : null;
+  return buildState(acc, generating, streaming, toolBlocked, latencyStats, reportedTurnRate);
 }
 
 /** Create a fresh accumulator (for tests / explicit reset). */

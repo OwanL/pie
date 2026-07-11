@@ -189,8 +189,8 @@ test('Enter selects the top filtered match', () => {
         ariaLabel: 'Model',
         title: 'Select model',
         entries: entries(),
-        onChange: (id: string) => {
-          selected = id;
+        onChange: (spec: string) => {
+          selected = spec;
         },
       }),
       container,
@@ -203,7 +203,8 @@ test('Enter selects the top filtered match', () => {
   type(input, 'sonnet');
   assert.deepEqual(rowLabels(dropdown), ['Claude Sonnet 4']);
   keydown(input, 'Enter');
-  assert.equal(selected, 'claude-sonnet');
+  // The picker emits `provider/id` so callers can route unambiguously.
+  assert.equal(selected, 'anthropic/claude-sonnet');
   // Selecting closes this dropdown (it is unmounted from the document).
   assert.equal(dropdown.isConnected, false);
 });

@@ -81,6 +81,34 @@ profiles:
       - high
     disabled_reason: Superseded by sonnet-4.5/4.6
     cost: 10
+  - id: gpt-5.6-sol
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+    cost: 25
+  - id: gpt-5.6-terra
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+    cost: 10
+  - id: gpt-5.6-luna
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+    cost: 6
   - id: gpt-5.5
     eligible: true
     thinking:
@@ -108,6 +136,14 @@ profiles:
     disabled_reason: null
     cost: 3
   - id: gpt-5.3-codex
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+    disabled_reason: null
+    cost: 10
+  - id: gpt-5.3-codex-spark
     eligible: true
     thinking:
       - low

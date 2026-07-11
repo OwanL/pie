@@ -575,3 +575,20 @@ test("renderSubagentResult: single collapsed running result shows running indica
 	assert.ok(text.includes("running..."), "running status text");
 	assert.ok(!text.includes("(no output)"), "no output marker not shown while running");
 });
+
+test("renderSubagentResult: running result explains provider wait and stall budget", () => {
+	const r1 = sr({
+		agent: "scout",
+		task: "audit",
+		exitCode: -1,
+		messages: [],
+		activityPhase: "waiting_provider",
+		activityDetail: "waiting for provider response",
+		activitySince: Date.now() - 12_000,
+		inactivityBudgetMs: 300_000,
+	});
+	const text = allText(renderSubagentResult({ details: details("single", [r1]) }, { expanded: false }, theme(), {}));
+	assert.ok(text.includes("waiting for provider"));
+	assert.ok(text.includes("waiting for provider response"));
+	assert.ok(text.includes("stall limit 5m 0s"));
+});

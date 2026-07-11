@@ -10,7 +10,7 @@ import { deriveFileChangesFromTranscript } from '../../core/file-change-derivati
 import { deriveAvailableExtensions } from './session.js';
 import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
-import { backendExitEvents } from '../backend-exit-events.js';
+import { backendExitEvents, type InterruptedSessionActivity } from '../backend-exit-events.js';
 import { appendPieLog } from '../../util/pie-log.js';
 
 interface ApplySessionOpenedDeps {
@@ -318,13 +318,24 @@ export function attach(
     // be alerted that the interruption was not their doing. The pure
     // `backendExitEvents` helper decides the exact event sequence so the
     // alert policy is unit-tested independently of vscode.
-    const runningSessionPaths = [...deps.getArchState().sessions.runningSessionPaths];
+    const arch = deps.getArchState();
+    const runningSessionPaths = [...new Set(arch.sessions.runningSessionPaths)];
+    const activityBySession: Record<string, InterruptedSessionActivity> = {};
+    for (const sessionPath of runningSessionPaths) {
+      if (arch.settings.pendingExtensionUIRequestsBySession[sessionPath]) {
+        activityBySession[sessionPath] = 'waiting for user input';
+      } else {
+        const messages = arch.transcript.bySession[sessionPath] ?? [];
+        const runningTool = messages.some((message) => message.toolCalls?.some((tool) => tool.status === 'running'));
+        activityBySession[sessionPath] = runningTool ? 'running a tool' : 'generating';
+      }
+    }
     bootLog('session-events', 'backend.exited', {
       code,
       notice: `PI backend stopped${code !== null ? ` (code ${code})` : ''}`,
       runningSessionPaths,
     });
-    for (const event of backendExitEvents(runningSessionPaths, code, stderr)) {
+    for (const event of backendExitEvents(runningSessionPaths, code, stderr, activityBySession)) {
       deps.dispatchArch(event);
     }
     deps.scheduleRender();

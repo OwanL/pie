@@ -5,12 +5,20 @@ import {
 	getFormatSkillsForPromptImpl,
 	getPiToolSeams,
 	getRecoveredTools,
+	getPrunedTools,
+	recordPrunedTools,
 	state,
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
 import { requestToolDefinition } from "./tools.js";
 import { getCodeVersion } from "./version.js";
+import { buildPruningSystemPrompt, buildPruningUserMessage } from "../llm-scorer.js";
+import {
+	buildPrepassFingerprint,
+	cacheSuccessfulPrepass,
+	getCachedPrepass,
+} from "./prepass-cache.js";
 import { pruningResultRenderer } from "./render.js";
 import {
 	shouldSkipPruning,
@@ -55,18 +63,28 @@ export default function register(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
 		const activeConfig = getConfig();
 		const skipInfo = shouldSkipPruning(event, activeConfig);
-		// Resolved before the early-return block so the disabled-by-toggle path can
-		// record keep-all for subagent inheritance (keyed by this session id).
 		const sessionId = getSessionId(ctx);
+		const allTools = state.getAllToolsOverride
+			? state.getAllToolsOverride()
+			: getPiToolSeams().getAllTools();
+		const restorePrunerOwnedTools = () => {
+			const previouslyPruned = getPrunedTools(sessionId);
+			if (previouslyPruned.size === 0) return;
+			const activeNames = state.getActiveToolsOverride
+				? state.getActiveToolsOverride()
+				: getPiToolSeams().getActiveTools();
+			const restored = [...new Set([...activeNames, ...previouslyPruned])];
+			if (state.setActiveToolsOverride) state.setActiveToolsOverride(restored);
+			else getPiToolSeams().setActiveTools(restored);
+			recordPrunedTools(sessionId, []);
+		};
+
 		if (skipInfo.skip && (skipInfo.reason === "disabled-by-toggle" || skipInfo.reason === "subagent")) {
-			// disabled-by-toggle: user turned the extension off via PIE_EXTENSION_TOGGLES_JSON.
-			// subagent: running inside a scoped subagent session — the prepass is
-			// main-agent-oriented and would add 20–35s (+ a failure mode) per turn.
-			//
-			// Record keep-all for the disabled path so subagents spawned this turn
-			// inherit "no filtering" rather than a stale set from a previous turn.
-			// The subagent path records nothing (subagent sessions are not main).
+			// Subagent sessions own their scoped tool set, so never mutate it. When
+			// the main-session extension is disabled, restore tools left inactive by
+			// a prior auto-mode turn before returning.
 			if (skipInfo.reason === "disabled-by-toggle") {
+				restorePrunerOwnedTools();
 				recordKeptSkills(sessionId, "keep-all");
 			}
 			return undefined;
@@ -76,12 +94,17 @@ export default function register(pi: ExtensionAPI) {
 		const allSkillPaths = skills.map((s: Skill) => s.filePath);
 
 		if (skipInfo.skip) {
+			restorePrunerOwnedTools();
 			recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 			// off / too-short: the main session keeps every visible skill, so
 			// subagents should inherit keep-all (no filter) for this turn.
 			recordKeptSkills(sessionId, "keep-all");
 			return undefined;
 		}
+
+		// Shadow mode observes decisions but must undo any tool filtering left by
+		// a preceding auto-mode turn.
+		if (activeConfig.mode === "shadow") restorePrunerOwnedTools();
 
 		const sessionPath = getSessionPath(ctx);
 		let modifiedSystemPrompt = event.systemPrompt;
@@ -99,10 +122,8 @@ export default function register(pi: ExtensionAPI) {
 		let skillSafeguardReason: string | undefined;
 		let toolSafeguardReason: string | undefined;
 		let keptAllDueToParseFailure = false;
+		let cacheHit = false;
 
-		const allTools = state.getAllToolsOverride
-			? state.getAllToolsOverride()
-			: getPiToolSeams().getAllTools();
 		const hasToolsConfig = activeConfig.tools && allTools.length > 0;
 
 		if (skills.length > 0 || hasToolsConfig) {
@@ -138,12 +159,30 @@ export default function register(pi: ExtensionAPI) {
 			let prunedSkills: string[] | null = null;
 			let prunedTools: string[] | null = null;
 
+			// autoSkipBelowTokens is based only on the assembled prepass input, not
+			// the main agent's much larger system prompt. This is a neutral keep-all
+			// optimization, not an error or pruning-result event.
+			const estimatedPrepassTokens = estimateTokens(buildPruningSystemPrompt(activeConfig))
+				+ estimateTokens(buildPruningUserMessage(llmInput));
+			if (activeConfig.autoSkipBelowTokens != null && estimatedPrepassTokens < activeConfig.autoSkipBelowTokens) {
+				// A prior auto-mode turn may have disabled tools. Fail-open means
+				// restoring the complete catalog, not merely skipping this decision.
+				if (activeConfig.mode === "auto") restorePrunerOwnedTools();
+				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
+				recordKeptSkills(sessionId, "keep-all");
+				return undefined;
+			}
+
+			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
+			const continuationFingerprint = buildPrepassFingerprint(llmInput, activeConfig, false);
+			const cached = getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
 			const completeFn = getCompleteFn(ctx);
-			if (!completeFn) {
+			if (!cached && !completeFn) {
 				pruningError = "No completion function available";
 				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 			} else {
-				const prepassResult = await runPruningPrepass(ctx, llmInput, activeConfig, completeFn);
+				const prepassResult = cached ?? await runPruningPrepass(ctx, llmInput, activeConfig, completeFn!);
+				if (!cached) cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, prepassResult);
 				prunedSkills = prepassResult.prunedSkills;
 				prunedTools = prepassResult.prunedTools;
 				pruningError = prepassResult.error;
@@ -155,7 +194,12 @@ export default function register(pi: ExtensionAPI) {
 				latencyMs = prepassResult.latencyMs;
 				prepassUsage = prepassResult.usage;
 				keptAllDueToParseFailure = prepassResult.keptAllDueToParseFailure ?? false;
+				cacheHit = prepassResult.cacheHit ?? false;
 			}
+
+			// Every failure is fail-open for tools, including auth/no-completion
+			// failures that do not enter the normal selection/rendering path below.
+			if (pruningError && activeConfig.mode === "auto") restorePrunerOwnedTools();
 
 			if (!pruningError || pruningError.startsWith("Model") || pruningError.startsWith("LLM pruning failed")) {
 				// Tool selection runs first so the skill keep-all safeguard can tell
@@ -201,12 +245,18 @@ export default function register(pi: ExtensionAPI) {
 
 				// --- Tool pruning: disable pruned tools (auto mode only) ---
 				if (activeConfig.tools && allTools.length > 0) {
-					if (activeConfig.mode === "auto" && toolSelection.excludedToolNames.length > 0) {
-						if (state.setActiveToolsOverride) {
-							state.setActiveToolsOverride(toolSelection.includedToolNames);
-						} else {
-							getPiToolSeams().setActiveTools(toolSelection.includedToolNames);
+					// Always apply the resolved auto-mode set, including keep-all and
+					// fail-open outcomes, so tools pruned on a previous turn are restored.
+					if (activeConfig.mode === "auto") {
+						const hadPrunedTools = getPrunedTools(sessionId).size > 0;
+						if (toolSelection.excludedToolNames.length > 0 || hadPrunedTools) {
+							if (state.setActiveToolsOverride) {
+								state.setActiveToolsOverride(toolSelection.includedToolNames);
+							} else {
+								getPiToolSeams().setActiveTools(toolSelection.includedToolNames);
+							}
 						}
+						recordPrunedTools(sessionId, toolSelection.excludedToolNames);
 					}
 					toolResult = {
 						included: toolSelection.includedToolNames,
@@ -235,6 +285,7 @@ export default function register(pi: ExtensionAPI) {
 						toolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, toolSelection.includedToolNames) : undefined,
 						originalToolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, allTools.map((t) => t.name)) : undefined,
 						keptAllDueToParseFailure,
+						cacheHit,
 						prepassUsage,
 						prepassSystemPrompt: rawSystemPrompt,
 						prepassUserMessage: rawUserMessage,
@@ -262,6 +313,7 @@ export default function register(pi: ExtensionAPI) {
 			userMessage: rawUserMessage,
 			latencyMs,
 			usage: prepassUsage,
+			cacheHit,
 			error: pruningError,
 			safeguardReason,
 		});

@@ -1,7 +1,7 @@
 ---
 name: codebase-maintenance
 description: >
-  Run scripted static analysis (dead code, code smells, duplication, complexity, large files, markdown drift) to audit code quality. Use when the user asks for a code-quality audit, dead-code sweep, or refactor review of an existing codebase — not for general editing or one-off changes.
+  Audit and improve an existing codebase using targeted static analysis plus human review (dead code, smells, duplication, complexity, large files, and documentation drift). Use for broad maintenance passes, code-quality audits, dead-code sweeps, or refactor reviews; not for a one-off feature or isolated edit.
 ---
 
 # Codebase Maintenance
@@ -13,8 +13,7 @@ ask user tool. This would look something like the following:
 "The file at src/save.py exceeds the line threshold, however it is a single-concern module that may be
 better left as is. Which of the following approaches should we take?"
 
-Script paths below (e.g. `codebase-maintenance/find_large_files.py`) are relative to the skill directory.
-Run any script with `--help` to see full argument documentation.
+Resolve script paths against this skill directory (for example, run `uv run find_large_files.py` with the skill directory as cwd). Run any script with `--help` to see full argument documentation.
 
 ## Ignoring files
 
@@ -34,7 +33,7 @@ Execute the following steps sequentially:
 ### 1. Dead code
 
 ```bash
-uv run codebase-maintenance/find_dead_code.py <directory> [options]
+uv run find_dead_code.py <directory> [options]
 ```
 
 Dead code is the easiest win — unused functions, classes, imports, and files can often be removed
@@ -57,7 +56,7 @@ project's type-checker and linter immediately — dead-code removal often expose
 ### 2. Code smells
 
 ```bash
-uv run codebase-maintenance/detect_smells.py <directory> [options]
+uv run detect_smells.py <directory> [options]
 ```
 
 Semgrep detects bugs and code smells. Fix findings, then re-run until clean. Use
@@ -66,7 +65,7 @@ Semgrep detects bugs and code smells. Fix findings, then re-run until clean. Use
 ### 3. Duplicates
 
 ```bash
-uv run codebase-maintenance/find_duplicates.py <directory> [options]
+uv run find_duplicates.py <directory> [options]
 ```
 
 Copy/paste duplicates across files (jscpd). Review each duplicate, some are
@@ -76,7 +75,7 @@ utilities. Use `--show-generated` to inspect lock-file / minified duplicates.
 ### 4. Complexity
 
 ```bash
-uv run codebase-maintenance/analyze_complexity.py <directory> [options]
+uv run analyze_complexity.py <directory> [options]
 ```
 
 Quality scores via Qualitas. Note: Qualitas reports at the **file level** — extracting helpers
@@ -86,7 +85,7 @@ file-level metrics. Domain-appropriate complexity (dispatchers, pipelines) need 
 ### 5. Large files
 
 ```bash
-uv run codebase-maintenance/find_large_files.py <directory> [max_lines]
+uv run find_large_files.py <directory> [max_lines]
 ```
 
 Files exceeding the line threshold (default: 500). Evaluate each — single-concern modules may
@@ -105,7 +104,7 @@ Check for any new 'noise' files that should be ignored. Add clear cut cases to t
 ### 8. Document drift
 
 ```bash
-uv run codebase-maintenance/find_markdown_drift.py <directory> [options]
+uv run find_markdown_drift.py <directory> [options]
 ```
 
 Stale internal references and broken external URLs in markdown files. Output sorted

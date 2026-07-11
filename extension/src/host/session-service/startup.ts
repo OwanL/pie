@@ -410,8 +410,13 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   dispatchArch({ kind: 'WorkspaceCwdChanged', workspaceCwd });
 
   applyStoredPrefs(options);
-  await loadPruningSettingsFromService(options);
-  await loadToolResultPruningSettingsFromService(options);
+  // Both settings families are independent and may each hit settings.json plus
+  // VS Code globalState. Keep them on the same cold-start critical-path step
+  // instead of paying their I/O latency serially before the backend can spawn.
+  await Promise.all([
+    loadPruningSettingsFromService(options),
+    loadToolResultPruningSettingsFromService(options),
+  ]);
 
   const {
     storedRawTabs,

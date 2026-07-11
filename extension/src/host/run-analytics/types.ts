@@ -1,6 +1,8 @@
 import type {
   ActiveRunStatus,
   AssistantUsage,
+  AuxiliaryLlmUsageKind,
+  AuxiliaryLlmUsageSample,
   FileExtensionRollup,
   FileMutationRollup,
   FunctionalSettingsSnapshot,
@@ -24,6 +26,8 @@ import type {
 export type {
   ActiveRunStatus,
   AssistantUsage,
+  AuxiliaryLlmUsageKind,
+  AuxiliaryLlmUsageSample,
   FileExtensionRollup,
   FileMutationRollup,
   FunctionalSettingsSnapshot,

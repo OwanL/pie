@@ -25,13 +25,11 @@ test.after(() => {
 });
 
 // ============================================================
-// resolveSubagentTimeoutMs — default is DEFAULT_SUBAGENT_TIMEOUT_MS (15min)
-// Phase 2: the per-prompt timeout was promoted from opt-in to a sane default so
-// a hung provider stream / hung SDK can't dangle the parent indefinitely. `0`
-// explicitly disables; unset/empty/invalid fall back to the default.
+// resolveSubagentTimeoutMs — no ordinary wall-clock deadline by default.
+// A positive value opts into a last-resort absolute containment ceiling.
 // ============================================================
 
-test("resolveSubagentTimeoutMs: unset → DEFAULT_SUBAGENT_TIMEOUT_MS (15min net)", () => {
+test("resolveSubagentTimeoutMs: unset → disabled", () => {
 	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
 	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
@@ -46,17 +44,17 @@ test("resolveSubagentTimeoutMs: positive ms → that value", () => {
 	assert.equal(resolveSubagentTimeoutMs(), 300000);
 });
 
-test("resolveSubagentTimeoutMs: 0 → 0 (disabled)", () => {
+test("resolveSubagentTimeoutMs: 0 → disabled", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "0";
-	assert.equal(resolveSubagentTimeoutMs(), 0);
+	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
-test("resolveSubagentTimeoutMs: negative → DEFAULT_SUBAGENT_TIMEOUT_MS (invalid falls back to default)", () => {
+test("resolveSubagentTimeoutMs: negative → disabled", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "-5";
 	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });
 
-test("resolveSubagentTimeoutMs: non-numeric → DEFAULT_SUBAGENT_TIMEOUT_MS (invalid falls back to default)", () => {
+test("resolveSubagentTimeoutMs: non-numeric → disabled", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "abc";
 	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
 });

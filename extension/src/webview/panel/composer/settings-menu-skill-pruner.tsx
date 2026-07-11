@@ -65,8 +65,13 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
           ariaLabel="Pruning prepass model"
           title="Select prepass model"
           entries={modelEntries}
-          onChange={(modelId) => {
-            const selected = availableModels.find((m) => m.id === modelId);
+          onChange={(spec) => {
+            // ModelPicker emits provider/id; split into the separate model +
+            // provider fields the pruning config stores.
+            const slash = spec.indexOf('/');
+            const id = slash === -1 ? spec : spec.substring(slash + 1);
+            const provider = slash === -1 ? undefined : spec.substring(0, slash);
+            const selected = availableModels.find((m) => m.id === id && (!provider || m.provider === provider));
             if (selected) {
               onSetPruningSettings({ model: selected.id, provider: selected.provider });
             }

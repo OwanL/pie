@@ -35,6 +35,7 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
 
 export function useComposerInput({
   busy,
+  sendBlocked = false,
   onSend,
   onRetrySend,
   pendingComposerInputsLength,
@@ -47,6 +48,8 @@ export function useComposerInput({
   supportsImageInputs,
 }: {
   busy: boolean;
+  /** Prevent both button and keyboard submission while a Stop is settling. */
+  sendBlocked?: boolean;
   onSend: (text: string) => void;
   /** Brief H: retry re-send. Mirrors `onSend` but the host disables pruning
    *  atomically before re-sending when `disablePruning` is set ("retry without
@@ -237,7 +240,7 @@ export function useComposerInput({
 
   const sendCurrentText = useCallback(() => {
     const trimmed = text.trim();
-    if (submitting.current) return;
+    if (submitting.current || sendBlocked) return;
     if (trimmed.length === 0 && pendingComposerInputsLength === 0) return;
     submitting.current = true;
     onSend(trimmed);
@@ -256,7 +259,7 @@ export function useComposerInput({
     setHistory(trimmed);
     setHistory('', true);
     resetComposer();
-  }, [busy, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
+  }, [busy, sendBlocked, onSend, pendingComposerInputsLength, resetComposer, setHistory, clearCheckpointTimer, text]);
 
   // Brief H: re-send the current draft as a `retrySend` (optionally disabling
   // pruning first). Mirrors `sendCurrentText` (trim + submit-latch + clear +

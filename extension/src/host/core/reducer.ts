@@ -34,7 +34,7 @@ export { initialArchState };
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
 import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult } from './reducer/result-handlers.js';
-import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
+import { handleStreamingEvent, handleQueuedDelivered, handleQueuedDwellWatchdogFired, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
   handleSessionListChanged,
@@ -145,6 +145,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'QueuedDelivered': {
       return handleQueuedDelivered(state, event);
+    }
+
+    case 'QueuedDwellWatchdogFired': {
+      return handleQueuedDwellWatchdogFired(state, event);
     }
 
     // ─── Session lifecycle events ─────────────────────────────────────────

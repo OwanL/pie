@@ -422,7 +422,9 @@ test("execute returns disabled response before any discovery", async () => {
 
 test("execute returns depth-limit response when nested depth is exhausted", async () => {
 	const previousDepth = process.env.PI_SUBAGENT_DEPTH;
+	const previousMaxDepth = process.env.PIE_SUBAGENT_MAX_DEPTH;
 	process.env.PI_SUBAGENT_DEPTH = "3";
+	process.env.PIE_SUBAGENT_MAX_DEPTH = "3";
 	try {
 		const response = await execute(
 			"tool-2",
@@ -436,11 +438,10 @@ test("execute returns depth-limit response when nested depth is exhausted", asyn
 		assert.equal(response.isError, true);
 		assert.match(response.content[0].text, /depth limit reached/i);
 	} finally {
-		if (previousDepth === undefined) {
-			delete process.env.PI_SUBAGENT_DEPTH;
-		} else {
-			process.env.PI_SUBAGENT_DEPTH = previousDepth;
-		}
+		if (previousDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
+		else process.env.PI_SUBAGENT_DEPTH = previousDepth;
+		if (previousMaxDepth === undefined) delete process.env.PIE_SUBAGENT_MAX_DEPTH;
+		else process.env.PIE_SUBAGENT_MAX_DEPTH = previousMaxDepth;
 	}
 });
 

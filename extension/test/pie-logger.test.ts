@@ -71,7 +71,9 @@ test('appendPieError includes error detail', () => {
   const captured: unknown[][] = [];
   console.error = (...args: unknown[]) => captured.push(args);
   try {
-    appendPieError('test-scope', 'persist failed', new Error('disk full'), { at: 'save' });
+    const error = new Error('disk full');
+    error.stack = 'Error: disk full\n    at save (https://example.test/run?api_key=super-secret)';
+    appendPieError('test-scope', 'persist failed', error, { at: 'save' });
   } finally {
     console.error = originalError;
   }
@@ -85,6 +87,13 @@ test('appendPieError includes error detail', () => {
     captured[0][1] && typeof captured[0][1] === 'object' && (captured[0][1] as Record<string, unknown>).error === 'disk full',
     'error detail should be captured',
   );
+  const detail = captured[0][1] as Record<string, unknown>;
+  assert.equal(detail.errorName, 'Error');
+  assert.match(String(detail.stack), /disk full/);
+  const logContent = fs.readFileSync(PIE_LOG_PATH, 'utf8');
+  assert.match(logContent, /"stack":"Error: disk full/);
+  assert.doesNotMatch(logContent, /super-secret/);
+  assert.match(logContent, /api_key=\[redacted\]/);
 });
 
 test('log level filtering blocks low-priority messages', () => {

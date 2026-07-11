@@ -19,6 +19,7 @@ function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTo
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 0,
+    reasoningTokens: 0,
     reportedTurnCount: 0,
     lastTurn: null,
     ...partial,
@@ -43,6 +44,7 @@ test('buildSessionTokenIndicator shows real counts once usage is reported', () =
     inputTokens: 1820,
     outputTokens: 540,
     totalTokens: 2360,
+    reasoningTokens: 400,
     reportedTurnCount: 1,
     lastTurn: {
       inputTokens: 1820,
@@ -50,10 +52,12 @@ test('buildSessionTokenIndicator shows real counts once usage is reported', () =
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       totalTokens: 2360,
+      reasoningTokens: 400,
     },
   });
   const indicator = buildSessionTokenIndicator(summary);
   assert.equal(indicator.label, '\u2191 1.8k \u2193 540');
+  assert.match(indicator.tooltip, /Reasoning \(included in output\): 400/);
 });
 
 test('buildSessionCostIndicator returns null when nothing has been spent', () => {

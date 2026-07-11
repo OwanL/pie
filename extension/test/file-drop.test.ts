@@ -279,6 +279,58 @@ test('extractComposerInputs lowers pasted image blobs into image inputs', async 
   });
 });
 
+test('extractComposerInputs compresses raster screenshots before base64 when injected codec is smaller', async () => {
+  const dataTransfer = makeTransfer({ files: [{
+    type: 'image/png', name: 'shot.png', size: 8,
+    arrayBuffer: async () => makeArrayBuffer('original'),
+  }] });
+  const result = await extractComposerInputs(dataTransfer, 'drop', async () => ({
+    data: makeArrayBuffer('webp'), mimeType: 'image/webp', width: 1600, height: 900,
+  }));
+  assert.deepEqual(result.inputs[0], {
+    kind: 'imageBlob', mimeType: 'image/webp', name: 'shot.webp', sizeBytes: 4,
+    dataBase64: Buffer.from('webp').toString('base64'), width: 1600, height: 900, source: 'drop',
+  });
+});
+
+test('extractComposerInputs uses the codec output MIME type for the compressed filename', async () => {
+  const result = await extractComposerInputs(makeTransfer({ files: [{
+    type: 'image/png', name: 'shot.png', arrayBuffer: async () => makeArrayBuffer('original'),
+  }] }), 'paste', async () => ({
+    data: makeArrayBuffer('jpg'), mimeType: 'image/jpeg', width: 1200, height: 800,
+  }));
+  assert.equal((result.inputs[0] as { mimeType: string }).mimeType, 'image/jpeg');
+  assert.equal((result.inputs[0] as { name: string }).name, 'shot.jpg');
+});
+
+test('extractComposerInputs keeps original for unsupported codec MIME metadata', async () => {
+  const result = await extractComposerInputs(makeTransfer({ files: [{
+    type: 'image/png', name: 'shot.png', arrayBuffer: async () => makeArrayBuffer('original'),
+  }] }), 'paste', async () => ({
+    data: makeArrayBuffer('bad'), mimeType: 'application/octet-stream', width: 1, height: 1,
+  }));
+  assert.equal((result.inputs[0] as { mimeType: string }).mimeType, 'image/png');
+  assert.equal((result.inputs[0] as { name: string }).name, 'shot.png');
+  assert.equal((result.inputs[0] as { sizeBytes: number }).sizeBytes, 8);
+});
+
+test('extractComposerInputs keeps original when compression is not smaller and skips GIF codec', async () => {
+  let calls = 0;
+  const codec = async () => {
+    calls += 1;
+    return { data: makeArrayBuffer('not-smaller'), mimeType: 'image/webp', width: 1, height: 1 };
+  };
+  const png = await extractComposerInputs(makeTransfer({ files: [{
+    type: 'image/png', name: 'shot.png', arrayBuffer: async () => makeArrayBuffer('png!'),
+  }] }), 'paste', codec);
+  const gif = await extractComposerInputs(makeTransfer({ files: [{
+    type: 'image/gif', name: 'animation.gif', arrayBuffer: async () => makeArrayBuffer('gif!'),
+  }] }), 'paste', codec);
+  assert.equal(calls, 1);
+  assert.equal((png.inputs[0] as { mimeType: string }).mimeType, 'image/png');
+  assert.equal((gif.inputs[0] as { mimeType: string }).mimeType, 'image/gif');
+});
+
 test('extractComposerInputs lowers item-based pasted image blobs into image inputs', async () => {
   const dataTransfer = makeTransfer({
     items: [{

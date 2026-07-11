@@ -100,6 +100,14 @@ export function onCustomMessage(payload: CustomMessagePayload, deps: HandlerDeps
     sessionPath,
     message: payload.message,
   });
+  if (payload.message.customType === 'pruning-result') {
+    deps.runObserver.onSkillPruningUsage(
+      sessionPath,
+      payload.message.id,
+      payload.message.createdAt,
+      payload.message.customDetails,
+    );
+  }
   deps.scheduleRender();
   deps.state.touchSessionTranscript(sessionPath);
 }

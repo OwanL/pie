@@ -2,7 +2,7 @@ import * as cp from 'node:child_process';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
-import { attachJsonlLineReader, serializeJsonLine } from '../../shared/jsonl';
+import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
 import { getDeferredTriggersDir } from '../../shared/deferred-triggers-paths';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
@@ -29,6 +29,15 @@ export interface BackendStartOptions {
 
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
 const STDERR_BUFFER_LIMIT = 64 * 1024;
+
+function utf8Tail(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  let start = bytes.length - maxBytes;
+  // Do not begin in the middle of a UTF-8 continuation sequence.
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
+  return bytes.subarray(start).toString('utf8');
+}
 
 /** Time to wait for the backend process to exit after SIGTERM before escalating
  *  to SIGKILL. */
@@ -84,6 +93,9 @@ export class BackendClient implements vscode.Disposable {
   private stderrLineBuffer = '';
   private detachReader?: () => void;
   private killEscalationTimer?: ReturnType<typeof setTimeout>;
+  private killEscalationProcess?: cp.ChildProcess;
+  private generation = 0;
+  private readonly intentionalStops = new WeakSet<cp.ChildProcess>();
 
   readonly onEvent = this.events.event;
   readonly onExit = this.exits.event;
@@ -148,6 +160,7 @@ export class BackendClient implements vscode.Disposable {
     });
 
     this.proc = proc;
+    const generation = ++this.generation;
 
     if (!proc.stdout || !proc.stderr || !proc.stdin) {
       this.proc = undefined;
@@ -156,30 +169,39 @@ export class BackendClient implements vscode.Disposable {
 
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', (chunk: string) => {
-      this.appendStderr(chunk);
+      if (generation === this.generation) this.appendStderr(chunk);
     });
 
     proc.on('exit', (code) => {
-      if (this.killEscalationTimer) {
+      const intentional = this.intentionalStops.has(proc);
+      if (this.killEscalationProcess === proc && this.killEscalationTimer) {
         clearTimeout(this.killEscalationTimer);
         this.killEscalationTimer = undefined;
+        this.killEscalationProcess = undefined;
       }
-      this.flushStderrLines(true);
-      this.detachReader?.();
-      this.detachReader = undefined;
-      this.proc = undefined;
-      this.requests.rejectAll(
-        new Error(`Backend exited unexpectedly${code === null ? '' : ` with code ${code}`}.`),
-      );
-      appendPieLog('error', 'backend', 'backend process exited', {
+      if (generation === this.generation) {
+        this.flushStderrLines(true);
+        this.detachReader?.();
+        this.detachReader = undefined;
+        if (this.proc === proc) this.proc = undefined;
+      }
+      const current = generation === this.generation;
+      if (!intentional && current) {
+        this.requests.rejectAll(
+          new Error(`Backend exited unexpectedly${code === null ? '' : ` with code ${code}`}.`),
+        );
+      }
+      appendPieLog(intentional ? 'info' : 'error', 'backend', intentional ? 'backend process stopped' : 'backend process exited', {
         code,
-        stderrTail: this.stderrBuffer.trim().slice(-4000) || null,
+        generation,
+        current,
+        stderrTail: current ? this.stderrBuffer.trim().slice(-4000) || null : null,
       });
-      this.exits.fire({ code, stderr: this.stderrBuffer.trim() });
+      if (!intentional && current) this.exits.fire({ code, stderr: this.stderrBuffer.trim() });
     });
 
     proc.on('error', (error) => {
-      this.requests.rejectAll(error);
+      if (generation === this.generation) this.requests.rejectAll(error);
     });
 
     return new Promise<BackendReadyPayload>((resolve, reject) => {
@@ -210,6 +232,7 @@ export class BackendClient implements vscode.Disposable {
       };
 
       const readyDisposable = this.onEvent((event) => {
+        if (generation !== this.generation || this.proc !== proc) return;
         if (event.event !== 'backend.ready') {
           return;
         }
@@ -224,18 +247,23 @@ export class BackendClient implements vscode.Disposable {
         }
       });
 
-      const exitDisposable = this.onExit(({ code, stderr }) => {
+      // Observe this exact child directly. Intentional stops suppress the
+      // public onExit event, but start() still has to reject immediately rather
+      // than hang until the readiness timeout.
+      const localExitListener = (code: number | null) => {
         finishReject(
           new Error(
             `Backend failed to start${code === null ? '' : ` (code ${code})`}${
-              stderr ? `: ${stderr}` : ''
+              this.stderrBuffer.trim() ? `: ${this.stderrBuffer.trim()}` : ''
             }`,
           ),
         );
-      });
+      };
+      proc.once('exit', localExitListener);
+      const exitDisposable = { dispose: () => proc.off('exit', localExitListener) };
 
       const errorListener = (error: Error) => {
-        this.proc = undefined;
+        if (generation === this.generation && this.proc === proc) this.proc = undefined;
         appendPieLog('error', 'backend', 'failed to spawn backend process', {
           backendPath: options.backendPath,
           cwd: options.cwd,
@@ -261,6 +289,15 @@ export class BackendClient implements vscode.Disposable {
       // line reader earlier can drop that event before `start()` subscribes.
       this.detachReader = attachJsonlLineReader(proc.stdout, (line) => {
         this.handleLine(line);
+      }, {
+        maxLineBytes: JSONL_MAX_LINE_BYTES,
+        onOverflow: ({ maxLineBytes, preview }) => {
+          appendPieLog('error', 'backend-client', 'backend stdout JSONL line exceeded limit; terminating backend', {
+            maxLineBytes,
+            preview,
+          });
+          if (this.proc === proc) proc.kill();
+        },
       });
     });
   }
@@ -316,10 +353,15 @@ export class BackendClient implements vscode.Disposable {
       return;
     }
     const proc = this.proc;
+    this.intentionalStops.add(proc);
     this.proc = undefined;
     proc.kill();
+    this.killEscalationProcess = proc;
     this.killEscalationTimer = setTimeout(() => {
-      this.killEscalationTimer = undefined;
+      if (this.killEscalationProcess === proc) {
+        this.killEscalationTimer = undefined;
+        this.killEscalationProcess = undefined;
+      }
       appendPieLog('warn', 'backend', 'backend did not exit on SIGTERM, escalating to SIGKILL');
       proc.kill('SIGKILL');
     }, STOP_KILL_TIMEOUT_MS);
@@ -391,13 +433,11 @@ export class BackendClient implements vscode.Disposable {
   }
 
   private appendStderr(chunk: string): void {
-    this.stderrBuffer += chunk;
-    if (this.stderrBuffer.length > STDERR_BUFFER_LIMIT) {
-      // Keep only the trailing window — most diagnostics live near the end.
-      this.stderrBuffer = this.stderrBuffer.slice(-STDERR_BUFFER_LIMIT);
-    }
+    this.stderrBuffer = utf8Tail(this.stderrBuffer + chunk, STDERR_BUFFER_LIMIT);
 
-    this.stderrLineBuffer += chunk;
+    // A newline-free stderr stream must not grow without bound. Keep the
+    // diagnostic tail, matching stderrBuffer's byte-bounded behavior.
+    this.stderrLineBuffer = utf8Tail(this.stderrLineBuffer + chunk, STDERR_BUFFER_LIMIT);
     this.flushStderrLines(false);
   }
 

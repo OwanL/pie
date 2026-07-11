@@ -1,15 +1,15 @@
 ---
 name: pi-logs
-description: For reading and interfacing with pie logs. Use when debugging pie, or when you want to see what the model actually received, or what a session did. Provides useful grouping for logs as to make them agent native.
+description: Inspect and group pie debug, session, and truncated-tool logs. Use when debugging pie runtime/TUI behavior, auditing what a model received or did, or recovering full tool output; not for general application logging.
 ---
 
 # Pi Logs
 
-Pi emits three distinct logs. This skill reads and groups them. Script paths below
-(e.g. `pi-logs/pi_logs.py`) are relative to the skill directory; run with `uv run`.
+Pi emits three distinct logs. This skill reads and groups them. Resolve `pi_logs.py`
+against this skill directory and run it with that directory as cwd.
 
 **No install step** — the script is stdlib-only Python. `uv run` bootstraps Python
-automatically. If `uv` is unavailable, `python3 pi-logs/pi_logs.py ...` works too.
+automatically. If `uv` is unavailable, `python3 pi_logs.py ...` works too.
 Run any subcommand with `--help` for full options.
 
 ## The three pi logs
@@ -48,19 +48,19 @@ Grouping applies to **any file** via the `group` subcommand — not just pi logs
 Always start with `summary` to see what exists and where:
 
 ```bash
-uv run pi-logs/pi_logs.py summary
+uv run pi_logs.py summary
 ```
 
 ### debug — read the /debug snapshot
 
 ```bash
-uv run pi-logs/pi_logs.py debug                          # both sections, grouped
-uv run pi-logs/pi_logs.py debug --section lines           # rendered TUI lines only
-uv run pi-logs/pi_logs.py debug --section messages        # agent messages only
-uv run pi-logs/pi_logs.py debug --filter "error" --top 50 # filter by regex
-uv run pi-logs/pi_logs.py debug --no-ansi                 # keep ANSI in grouping key
-uv run pi-logs/pi_logs.py debug --normalize smart         # collapse timestamps/ids
-uv run pi-logs/pi_logs.py debug --grouped                 # group message text too
+uv run pi_logs.py debug                          # both sections, grouped
+uv run pi_logs.py debug --section lines           # rendered TUI lines only
+uv run pi_logs.py debug --section messages        # agent messages only
+uv run pi_logs.py debug --filter "error" --top 50 # filter by regex
+uv run pi_logs.py debug --no-ansi                 # keep ANSI in grouping key
+uv run pi_logs.py debug --normalize smart         # collapse timestamps/ids
+uv run pi_logs.py debug --grouped                 # group message text too
 ```
 
 If absent: tell the user to run `/debug` in pi, then re-run.
@@ -68,17 +68,17 @@ If absent: tell the user to run `/debug` in pi, then re-run.
 ### session — read session JSONL
 
 ```bash
-uv run pi-logs/pi_logs.py session                         # most recent (for current cwd)
-uv run pi-logs/pi_logs.py session <path>                  # explicit file
-uv run pi-logs/pi_logs.py session --summary               # overview: types/roles/tools/tokens/cost
-uv run pi-logs/pi_logs.py session --context               # walk current leaf→root (the LLM context)
-uv run pi-logs/pi_logs.py session --role assistant        # filter by message role
-uv run pi-logs/pi_logs.py session --type model_change     # filter by entry type
-uv run pi-logs/pi_logs.py session --tool bash             # filter by tool name
-uv run pi-logs/pi_logs.py session --errors                # only errors / failed tool results
-uv run pi-logs/pi_logs.py session --grouped               # group identical message text
-uv run pi-logs/pi_logs.py session --last 20               # limit to last N entries
-uv run pi-logs/pi_logs.py session --cwd /some/project     # pick session for a different cwd
+uv run pi_logs.py session                         # most recent (for current cwd)
+uv run pi_logs.py session <path>                  # explicit file
+uv run pi_logs.py session --summary               # overview: types/roles/tools/tokens/cost
+uv run pi_logs.py session --context               # walk current leaf→root (the LLM context)
+uv run pi_logs.py session --role assistant        # filter by message role
+uv run pi_logs.py session --type model_change     # filter by entry type
+uv run pi_logs.py session --tool bash             # filter by tool name
+uv run pi_logs.py session --errors                # only errors / failed tool results
+uv run pi_logs.py session --grouped               # group identical message text
+uv run pi_logs.py session --last 20               # limit to last N entries
+uv run pi_logs.py session --cwd /some/project     # pick session for a different cwd
 ```
 
 **Session directory resolution:** `summary` and `session` read from the sessions
@@ -94,19 +94,19 @@ Message roles: `user`, `assistant`, `toolResult`, `bashExecution`, `custom`, `br
 ### group — Unity-group ANY file
 
 ```bash
-uv run pi-logs/pi_logs.py group <file>                    # exact grouping
-uv run pi-logs/pi_logs.py group <file> --normalize smart  # collapse volatile tokens
-uv run pi-logs/pi_logs.py group <file> --top 100 --min 3  # busy files
-uv run pi-logs/pi_logs.py group <file> --no-ansi          # raw escape sequences
-uv run pi-logs/pi_logs.py group <file> --context         # show line ranges
+uv run pi_logs.py group <file>                    # exact grouping
+uv run pi_logs.py group <file> --normalize smart  # collapse volatile tokens
+uv run pi_logs.py group <file> --top 100 --min 3  # busy files
+uv run pi_logs.py group <file> --no-ansi          # raw escape sequences
+uv run pi_logs.py group <file> --context         # show line ranges
 ```
 
 ### temp — tool-output temp logs
 
 ```bash
-uv run pi-logs/pi_logs.py temp --list                     # all pi-*.log in tmpdir (default)
-uv run pi-logs/pi_logs.py temp --read <name-or-path>      # grouped summary + tail
-uv run pi-logs/pi_logs.py temp --grouped <name-or-path>  # grouped only (full)
+uv run pi_logs.py temp --list                     # all pi-*.log in tmpdir (default)
+uv run pi_logs.py temp --read <name-or-path>      # grouped summary + tail
+uv run pi_logs.py temp --grouped <name-or-path>  # grouped only (full)
 ```
 
 `--read` accepts a bare filename (resolved in the tmpdir). Output is grouped first

@@ -123,9 +123,65 @@ test('SessionsInterrupted does not overwrite an existing errorDetail on a stream
   assert.equal(assistant.errorDetail, 'provider returned 503');
 });
 
-test('SessionsInterrupted skips sessions with no transcript loaded', () => {
-  const s = createInitialArchState();
-  // No transcript loaded for /s5 — the reducer must not throw.
+test('SessionsInterrupted terminalizes tools and clears crash transients', () => {
+  const initial = produce(withStreamingAssistant(createInitialArchState(), '/s6', 'a6'), (draft) => {
+    draft.transcript.bySession['/s6']![1]!.toolCalls = [{ id: 't1', name: 'bash', input: {}, status: 'running' }];
+    draft.sessions.retryStatusBySession['/s6'] = { attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: 'retry' };
+    draft.sessions.interruptInFlightBySession['/s6'] = true;
+    draft.settings.pendingExtensionUIRequestsBySession['/s6'] = { req: { id: 'req', sessionPath: '/s6', extensionId: 'x', method: 'input', title: 'Input' } };
+  });
+  const { state } = reducer(initial, { kind: 'SessionsInterrupted', sessionPaths: ['/s6'], reason: 'backend exited' });
+  const tool = state.transcript.bySession['/s6']![1]!.toolCalls![0]!;
+  assert.equal(tool.status, 'failed');
+  assert.deepEqual(tool.result, { error: 'backend exited' });
+  assert.equal(state.sessions.retryStatusBySession['/s6'], undefined);
+  assert.equal(state.sessions.interruptInFlightBySession['/s6'], undefined);
+  assert.equal(state.settings.pendingExtensionUIRequestsBySession['/s6'], undefined);
+});
+
+test('SessionsInterrupted rolls back a pre-ack optimistic send and late rejection is a no-op', () => {
+  const initial = produce(createInitialArchState(), (draft) => {
+    draft.transcript.bySession['/send'] = [{ id: 'local-send', role: 'user', createdAt: 'now', markdown: 'hello', status: 'completed' }];
+    draft.pending.ops['send-corr'] = {
+      kind: 'send', sessionPath: '/send', localId: 'local-send', previousSummary: null,
+      text: 'hello', inputs: [], startedAt: 1,
+    };
+  });
+  const rolledBack = reducer(initial, { kind: 'SessionsInterrupted', sessionPaths: ['/send'], reason: 'backend exited' });
+  assert.deepEqual(rolledBack.state.transcript.bySession['/send'], []);
+  assert.equal(rolledBack.state.composer.draftTextBySession['/send'], 'hello');
+  assert.equal(rolledBack.state.pending.ops['send-corr'], undefined);
+  assert.equal(rolledBack.effects.some((effect) => effect.kind === 'PostImperative'), true);
+
+  const late = reducer(rolledBack.state, { kind: 'SendResult', corrId: 'send-corr', sessionPath: '/send', ok: false, error: 'late' });
+  assert.equal(late.state, rolledBack.state);
+  assert.deepEqual(late.effects, []);
+});
+
+test('SessionsInterrupted restores the removed tail for a promoted optimistic edit', () => {
+  const oldUser: ChatMessage = { id: 'old-user', role: 'user', createdAt: 'old', markdown: 'old', status: 'completed' };
+  const oldReply: ChatMessage = { id: 'old-reply', role: 'assistant', createdAt: 'old', markdown: 'reply', status: 'completed' };
+  const initial = produce(createInitialArchState(), (draft) => {
+    draft.transcript.bySession['/edit'] = [{ id: 'local-edit', role: 'user', createdAt: 'now', markdown: 'new', status: 'completed' }];
+    draft.pending.promoted['edit-corr'] = {
+      kind: 'edit', sessionPath: '/edit', localId: 'local-edit', previousSummary: null,
+      removedTail: [oldUser, oldReply], startedAt: 1, requestId: 'request-edit',
+    };
+  });
+  const result = reducer(initial, { kind: 'SessionsInterrupted', sessionPaths: ['/edit'], reason: 'backend exited' });
+  assert.deepEqual(result.state.transcript.bySession['/edit'], [oldUser, oldReply]);
+  assert.equal(result.state.pending.promoted['edit-corr'], undefined);
+  assert.equal(result.effects.some((effect) => effect.kind === 'PostImperative'), false);
+});
+
+test('SessionsInterrupted clears non-transcript crash state when no transcript is loaded', () => {
+  const s = produce(createInitialArchState(), (draft) => {
+    draft.sessions.waitingForSlotBySession['/s5'] = 'waiting';
+    draft.sessions.interruptInFlightBySession['/s5'] = true;
+    draft.sessions.retryStatusBySession['/s5'] = { attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: 'retry' };
+    draft.settings.pendingExtensionUIRequestsBySession['/s5'] = { req: { id: 'req', sessionPath: '/s5', extensionId: 'x', method: 'input', title: 'Input' } };
+    draft.pending.prepassBySession['/s5'] = { phase: 'running', latencyMs: null };
+  });
 
   const { state } = reducer(s, {
     kind: 'SessionsInterrupted',
@@ -134,4 +190,9 @@ test('SessionsInterrupted skips sessions with no transcript loaded', () => {
   });
 
   assert.equal(state.transcript.bySession['/s5'], undefined);
+  assert.equal(state.sessions.waitingForSlotBySession['/s5'], undefined);
+  assert.equal(state.sessions.interruptInFlightBySession['/s5'], undefined);
+  assert.equal(state.sessions.retryStatusBySession['/s5'], undefined);
+  assert.equal(state.settings.pendingExtensionUIRequestsBySession['/s5'], undefined);
+  assert.equal(state.pending.prepassBySession['/s5'], undefined);
 });

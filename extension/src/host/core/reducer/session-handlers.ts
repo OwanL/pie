@@ -4,7 +4,7 @@ import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
-import { addToArray, removeFromArray, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
+import { addToArray, removeFromArray, removeMessage, restoreRemovedTail, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
 import type { SessionSummary } from '../../../shared/protocol.js';
 import { reorderOpenTabsPinnedFirst } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
@@ -486,14 +486,90 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     return { state, effects: [] };
   }
 
+  const abandonedLocalIds = sessionPaths.flatMap((sessionPath) =>
+    (state.pending.queuedDwellBySession[sessionPath] ?? []).map((entry) => entry.localId),
+  );
+  const affectedPaths = new Set(sessionPaths);
+  const rollbackOps = [
+    ...Object.entries(state.pending.ops),
+    ...Object.entries(state.pending.promoted),
+  ].filter(([, op]) => affectedPaths.has(op.sessionPath));
+  const rollbackEffects: Effect[] = rollbackOps.flatMap(([corrId, op]) => op.kind === 'send' ? [{
+    kind: 'PostImperative' as const,
+    corrId,
+    imperativeMessage: {
+      type: 'sendRejected' as const,
+      sessionPath: op.sessionPath,
+      text: op.text ?? '',
+      localId: op.localId,
+      inputs: op.inputs ?? [],
+    },
+  }] : []);
   const nextState = produce(state, (draft) => {
     for (const sessionPath of sessionPaths) {
       // A backend death mid-retry leaves a stale retry status; the retry is
       // dead (no `auto_retry_end` will fire), so clear it alongside the
       // streaming-message interruption.
       delete draft.sessions.retryStatusBySession[sessionPath];
+      delete draft.sessions.interruptInFlightBySession[sessionPath];
+      delete draft.sessions.waitingForSlotBySession[sessionPath];
+      delete draft.settings.pendingExtensionUIRequestsBySession[sessionPath];
+      delete draft.transcript.pagingInFlightBySession[sessionPath];
+      delete draft.pending.currentTurnBySession[sessionPath];
+      delete draft.pending.sendQueueBySession[sessionPath];
+      delete draft.pending.backendReadyQueueBySession[sessionPath];
+      delete draft.pending.prepassBySession[sessionPath];
+      delete draft.pending.queuedDwellBySession[sessionPath];
+
+      // Reconcile optimistic mutations before dropping their snapshots. This
+      // mirrors SendResult/EditResult failure and makes late RPC rejection a
+      // no-op because the corresponding pending entry is then absent.
+      for (const [, op] of rollbackOps) {
+        if (op.sessionPath !== sessionPath) continue;
+        removeMessage(draft, sessionPath, op.localId);
+        if (op.kind === 'edit' && op.removedTail?.length) {
+          restoreRemovedTail(draft, sessionPath, op.removedTail);
+        }
+        if (op.kind === 'send') {
+          draft.composer.draftTextBySession[sessionPath] = op.text ?? '';
+          if (op.inputs?.length) draft.composer.pendingComposerInputsBySession[sessionPath] = [...op.inputs];
+        }
+        if (op.previousSummary) {
+          const index = draft.sessions.sessions.findIndex((summary) => summary.path === op.previousSummary!.path);
+          if (index >= 0) draft.sessions.sessions[index] = op.previousSummary;
+          else draft.sessions.sessions.push(op.previousSummary);
+        }
+      }
+      for (const [corrId, op] of Object.entries(draft.pending.ops)) {
+        if (op.sessionPath === sessionPath) delete draft.pending.ops[corrId];
+      }
+      for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
+        if (op.sessionPath === sessionPath) delete draft.pending.promoted[corrId];
+      }
+      for (const [corrId, pending] of Object.entries(draft.pending.setModelByCorrId)) {
+        if (pending.sessionPath === sessionPath) delete draft.pending.setModelByCorrId[corrId];
+      }
+      for (const [requestId, pending] of Object.entries(draft.pending.requestIdToLocalId)) {
+        if (pending.sessionPath === sessionPath) delete draft.pending.requestIdToLocalId[requestId];
+      }
+
       const list = draft.transcript.bySession[sessionPath];
       if (!list) continue;
+      // The SDK steering queue is in-memory. After backend death delivery is
+      // unknowable, so queued messages become explicitly interrupted rather
+      // than remaining immortal optimistic rows.
+      for (const message of list) {
+        if (message.role === 'user' && message.status === 'queued') {
+          message.status = 'interrupted';
+          message.errorDetail = reason;
+        }
+        for (const tool of message.toolCalls ?? []) {
+          if (tool.status === 'running') {
+            tool.status = 'failed';
+            tool.result = { error: reason };
+          }
+        }
+      }
       // Walk newest-first because the streaming message is almost always the
       // last assistant message; resolving via alias on the underlying state
       // (read-only) covers continuation turns whose `id` is an alias of the
@@ -515,7 +591,17 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     }
   });
 
-  return { state: nextState, effects: [] };
+  return {
+    state: nextState,
+    effects: [
+      ...rollbackEffects,
+      ...abandonedLocalIds.map((localId) => ({
+        kind: 'CancelQueuedDwellWatchdog' as const,
+        corrId: 'queued:restart-unknown',
+        localId,
+      })),
+    ],
+  };
 }
 
 export function handleUnreadFinishedSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'UnreadFinishedSessionsChanged' }>): ReducerResult {

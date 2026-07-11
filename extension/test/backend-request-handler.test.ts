@@ -368,14 +368,11 @@ test('message.interrupt validates running state and reports abort failures', asy
   );
 
   const idleHarness = createHarness();
-  await assert.rejects(
-    async () => await handleBackendRequest(idleHarness.deps, {
-      id: '2',
-      method: 'message.interrupt',
-      params: { sessionPath: '/repo/session.jsonl' },
-    }),
-    /Cannot interrupt a session that is not running/,
-  );
+  assert.deepEqual(await handleBackendRequest(idleHarness.deps, {
+    id: '2',
+    method: 'message.interrupt',
+    params: { sessionPath: '/repo/session.jsonl' },
+  }), { interrupted: false, alreadyStopped: true });
 
   const activeHarness = createHarness({
     context: {
@@ -388,22 +385,12 @@ test('message.interrupt validates running state and reports abort failures', asy
       },
     },
   });
-  const interrupted = await handleBackendRequest(activeHarness.deps, {
+  await assert.rejects(() => handleBackendRequest(activeHarness.deps, {
     id: '3',
     method: 'message.interrupt',
     params: { sessionPath: '/repo/session.jsonl' },
-  });
-  assert.deepEqual(interrupted, { interrupted: true });
+  }), /abort failed/);
   assert.equal(activeHarness.context.activeRequest?.aborted, true);
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(activeHarness.emitted.at(-1), {
-    event: 'error',
-    payload: {
-      code: 'MESSAGE_INTERRUPT_FAILED',
-      message: 'abort failed',
-      requestId: 'req-1',
-    },
-  });
 });
 
 test('message.interrupt defensively clears a stuck activeRequest when abort settles and streaming has stopped', async () => {
@@ -423,18 +410,17 @@ test('message.interrupt defensively clears a stuck activeRequest when abort sett
     },
   });
 
-  const interrupted = await handleBackendRequest(harness.deps, {
+  const interruptPromise = handleBackendRequest(harness.deps, {
     id: '1',
     method: 'message.interrupt',
     params: { sessionPath: '/repo/session.jsonl' },
   });
-  assert.deepEqual(interrupted, { interrupted: true });
   assert.equal(harness.context.activeRequest?.aborted, true);
 
   // Simulate the provider tearing down the stream after abort resolves.
   (harness.context.session as unknown as { isStreaming: boolean }).isStreaming = false;
   abortResolve!();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(await interruptPromise, { interrupted: true, settled: true });
 
   // The defensive clear fired: activeRequest is gone and busy=false emitted.
   assert.equal(harness.context.activeRequest, undefined);
@@ -470,7 +456,7 @@ test('message.interrupt defensive clear does not clobber a still-streaming turn 
     },
   });
 
-  await handleBackendRequest(harness.deps, {
+  const interruptPromise = handleBackendRequest(harness.deps, {
     id: '1',
     method: 'message.interrupt',
     params: { sessionPath: '/repo/session.jsonl' },
@@ -478,7 +464,7 @@ test('message.interrupt defensive clear does not clobber a still-streaming turn 
 
   // Streaming continues after abort resolves.
   abortResolve!();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(await interruptPromise, { interrupted: true, settled: true });
 
   // activeRequest is preserved (turn_end will clear it later).
   assert.equal(harness.context.activeRequest?.id, 'req-streaming');
@@ -515,7 +501,7 @@ test('message.interrupt hard-stops compaction when interrupted during the post-a
     method: 'message.interrupt',
     params: { sessionPath: '/repo/session.jsonl' },
   });
-  assert.deepEqual(interrupted, { interrupted: true });
+  assert.deepEqual(interrupted, { interrupted: true, settled: true });
 
   // Every billable window was hard-stopped synchronously (before abort()).
   assert.equal(aborted.compaction, true);
@@ -524,10 +510,9 @@ test('message.interrupt hard-stops compaction when interrupted during the post-a
   assert.equal(aborted.retry, true);
 });
 
-test('message.interrupt is still rejected as SESSION_NOT_RUNNING when truly idle', async () => {
-  // The relaxed guard must still reject when nothing at all is running. This
-  // also covers an older SDK that doesn't expose the predicates (undefined →
-  // falsy → nothingRunning stays true, i.e. the legacy behaviour).
+test('message.interrupt is idempotent when truly idle', async () => {
+  // Host/backend busy events can cross at turn boundaries. Stop must remain a
+  // successful barrier rather than wedging the UI with SESSION_NOT_RUNNING.
   const harness = createHarness({
     sessionOverrides: {
       isStreaming: false,
@@ -536,14 +521,11 @@ test('message.interrupt is still rejected as SESSION_NOT_RUNNING when truly idle
       isBashRunning: false,
     },
   });
-  await assert.rejects(
-    async () => await handleBackendRequest(harness.deps, {
-      id: '1',
-      method: 'message.interrupt',
-      params: { sessionPath: '/repo/session.jsonl' },
-    }),
-    /Cannot interrupt a session that is not running/,
-  );
+  assert.deepEqual(await handleBackendRequest(harness.deps, {
+    id: '1',
+    method: 'message.interrupt',
+    params: { sessionPath: '/repo/session.jsonl' },
+  }), { interrupted: false, alreadyStopped: true });
 });
 
 test('compaction_start/compaction_end re-arm busy so a compaction call stays interruptable', async () => {
@@ -643,7 +625,11 @@ test('settings.set applies live model changes and rolls back persisted settings 
   );
   assert.deepEqual(failingHarness.writtenSettings, [
     { defaultModel: 'model-b' },
-    { defaultModel: 'model-a', defaultThinkingLevel: 'medium' },
+    // The rollback restores defaultModel + defaultThinkingLevel and explicitly
+    // resets defaultProvider (to undefined here, since the previous settings
+    // had none) so a provider added by the failed switch is dropped from the
+    // merge-persisted settings.json.
+    { defaultModel: 'model-a', defaultThinkingLevel: 'medium', defaultProvider: undefined },
   ]);
 });
 
@@ -1022,6 +1008,10 @@ test('provider_gate.metrics returns live ProviderGate metrics when installed', a
       paused: false,
       pausedUntilMs: 0,
       strikeCount: 0,
+      breakerState: 'closed',
+      breakerOpenUntilMs: 0,
+      transientFailures: 0,
+      breakerProbeInFlight: false,
     }],
   });
 });

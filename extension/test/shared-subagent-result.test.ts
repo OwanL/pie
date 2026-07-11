@@ -80,13 +80,48 @@ test('completed tool call with a well-formed result returns the result unchanged
 });
 
 test('completed tool call with no result and no synthesizable input returns undefined', () => {
-  // synthesize only runs for running calls.
   const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
-    input: { agent: 'worker', task: 't' },
+    input: {},
     status: 'completed',
     result: undefined,
   };
   assert.equal(getRenderableSubagentResultFromToolCall(toolCall), undefined);
+});
+
+test('terminal force-settle with empty child results renders failed cards from the original parallel input', () => {
+  const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
+    input: {
+      tasks: [
+        { agent: 'scout', task: 'Audit reliability' },
+        { agent: 'reviewer', task: 'Review findings' },
+      ],
+    },
+    status: 'failed',
+    result: {
+      content: [{ type: 'text', text: 'Subagent did not settle within 1800s and was force-settled.' }],
+      details: { mode: 'parallel', results: [] },
+      isError: true,
+    },
+  };
+
+  const out = getRenderableSubagentResultFromToolCall(toolCall)!;
+  assert.equal(out.mode, 'parallel');
+  assert.deepEqual(out.results.map((result) => ({
+    agent: result.agent,
+    task: result.task,
+    exitCode: result.exitCode,
+    stopReason: result.stopReason,
+    errorMessage: result.errorMessage,
+  })), [
+    {
+      agent: 'scout', task: 'Audit reliability', exitCode: 1, stopReason: 'error',
+      errorMessage: 'Subagent did not settle within 1800s and was force-settled.',
+    },
+    {
+      agent: 'reviewer', task: 'Review findings', exitCode: 1, stopReason: 'error',
+      errorMessage: 'Subagent did not settle within 1800s and was force-settled.',
+    },
+  ]);
 });
 
 // --- getRenderableSubagentResultFromToolCall: synthesize placeholder (running) ---

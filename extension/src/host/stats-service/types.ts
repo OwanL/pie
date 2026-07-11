@@ -29,6 +29,12 @@ export interface SessionRunState {
 export interface RunObserver {
   prepareForSend(sessionPath: string, inputs: ComposerInput[]): string;
   onAssistantTurnStarted(sessionPath: string, turnId: string): void;
+  onSkillPruningUsage(
+    sessionPath: string,
+    messageId: string,
+    occurredAt: string,
+    details: unknown,
+  ): void;
   onAssistantTurnEnded(
     sessionPath: string,
     turnId: string,
@@ -68,6 +74,7 @@ export interface RunObserver {
 export const NOOP_RUN_OBSERVER: RunObserver = {
   prepareForSend: () => 'noop-run',
   onAssistantTurnStarted: () => undefined,
+  onSkillPruningUsage: () => undefined,
   onAssistantTurnEnded: () => undefined,
   onToolStarted: () => undefined,
   onToolFinished: () => undefined,

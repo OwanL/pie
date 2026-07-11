@@ -84,7 +84,7 @@ interface ComposerProps {
   onOpenFilePicker: () => void;
   onAddInput: (input: ComposerInputDraft) => void;
   onRemoveInput: (inputId: string) => void;
-  onModelChange: (model: string, thinkingLevel: ThinkingLevel) => void;
+  onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   /** Apply the complete disabled-entry set for the active session's system
    *  prompts. The backend re-emits `session.opened` to update the displayed
@@ -187,6 +187,7 @@ function ComposerView({
     submitting,
   } = useComposerInput({
     busy,
+    sendBlocked: interrupting,
     onSend,
     onRetrySend,
     pendingComposerInputsLength: pendingComposerInputs.length,

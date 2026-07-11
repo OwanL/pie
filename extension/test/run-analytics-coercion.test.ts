@@ -56,6 +56,7 @@ function makeRunSnapshot(): RunSnapshot {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    auxiliaryLlmUsage: [],
     tokenReportedTurnCount: 0,
     lastTurnUsage: null,
     turnThroughputSamples: [],
@@ -376,6 +377,30 @@ test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defau
   assert.equal(c.turnLatencyMs, null, 'negative coerces to null');
   assert.equal(c.overheadMs, null, 'non-number coerces to null');
   assert.equal(c.providerLatencyMs, null);
+});
+
+test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compatibly', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.auxiliaryLlmUsage;
+  assert.deepEqual(coerceRunSnapshot(legacy)?.auxiliaryLlmUsage, []);
+
+  const snapshot = makeRunSnapshot();
+  snapshot.auxiliaryLlmUsage = [
+    {
+      kind: 'skill_pruning_prepass',
+      sourceId: 'prune-1',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      modelId: 'openai/pruner',
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 4,
+    },
+    { kind: 'subagent', sourceId: '', occurredAt: '', inputTokens: 10 } as never,
+    { kind: 'unknown', sourceId: 'bad', occurredAt: '2026-01-01T00:00:00.000Z' } as never,
+  ];
+  const coerced = coerceRunSnapshot(snapshot);
+  assert.deepEqual(coerced?.auxiliaryLlmUsage, [snapshot.auxiliaryLlmUsage[0]]);
 });
 
 test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollups', () => {

@@ -24,6 +24,29 @@ import { backendLog, type BackendLogLevel } from './log';
  * split. Covers text, thinking, and tool-call content blocks so pure tool-call
  * turns (no text/thinking) are still measured.
  */
+export const TOOL_PROGRESS_MAX_BYTES = 256 * 1024;
+
+/** Keep high-frequency progress events transport-safe. The terminal
+ * tool.finished result remains authoritative and is never bounded here. */
+export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_BYTES): unknown {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return { $toolProgress: 'unserializable' };
+  }
+  if (serialized === undefined) return { $toolProgress: 'unserializable' };
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (bytes <= maxBytes) return value;
+
+  const prefix = Buffer.from(serialized, 'utf8').subarray(0, Math.max(0, maxBytes - 160)).toString('utf8');
+  return {
+    $toolProgress: 'truncated',
+    originalBytes: bytes,
+    preview: prefix,
+  };
+}
+
 const FIRST_CONTENT_EVENT_TYPES = new Set([
   'text_start',
   'text_delta',
@@ -136,19 +159,52 @@ function summarizeToolArgs(args: unknown): { argKeys: string[]; argsLen: number 
   };
 }
 
-/** Redacted summary of a tool result for diagnostic logging.
- *  By default only the result type and serialized length are emitted.
- *  The full payload is emitted only when PIE_LOG_TOOL_PAYLOAD is set. */
-function summarizeToolResult(
-  result: unknown,
-): { resultType: string; resultLen: number } | string | undefined {
-  if (isToolPayloadLoggingEnabled()) {
-    return summarizePayload(result);
+/** Extract a short, sanitized failure reason without putting an entire tool
+ * result (which may contain source, credentials, or command output) in logs. */
+function toolFailureText(result: unknown): string | undefined {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return undefined;
+  const record = result as Record<string, unknown>;
+  for (const key of ['error', 'message', 'stderr']) {
+    if (typeof record[key] === 'string') return record[key];
   }
-  return {
+  if (Array.isArray(record.content)) {
+    const text = record.content
+      .map((item) => item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string'
+        ? (item as { text: string }).text
+        : '')
+      .filter(Boolean)
+      .join('\n');
+    if (text) return text;
+  }
+  const details = record.details;
+  return details && typeof details === 'object' ? toolFailureText(details) : undefined;
+}
+
+function sanitizeFailureText(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/\b(api[_-]?key|authorization|password|passwd|secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 800);
+}
+
+/** Bounded diagnostic summary for failed tools. Shape metadata is always safe;
+ * the short reason is best-effort sanitized. Full payload logging remains an
+ * explicit environment opt-in. */
+export function summarizeToolResult(
+  result: unknown,
+): { resultType: string; resultLen: number; resultKeys?: string[]; errorSummary?: string } | string | undefined {
+  if (isToolPayloadLoggingEnabled()) return summarizePayload(result);
+  const summary: { resultType: string; resultLen: number; resultKeys?: string[]; errorSummary?: string } = {
     resultType: typeof result,
     resultLen: safeSerializedLength(result),
   };
+  if (result && typeof result === 'object') summary.resultKeys = Object.keys(result).slice(0, 20);
+  const failure = toolFailureText(result);
+  if (failure) summary.errorSummary = sanitizeFailureText(failure);
+  return summary;
 }
 
 function nonEmptyTrimmed(value: string | undefined): string | undefined {
@@ -258,9 +314,18 @@ export function handleSdkSessionEvent(
       // emit a user-role message_start — the host inserts that optimistically
       // — so this branch only fires for injected queued messages.
       if (event.message?.role === 'user') {
+        // Handoff §F: correlate this delivery to the host's optimistic localId
+        // by shifting the next id from the FIFO queue we built in
+        // `handleMessageSend`. An empty sentinel means the original send carried
+        // no localId (legacy host) — fall back to FIFO matching in the reducer.
+        const queuedLocalIds = context.queuedLocalIds;
+        const localId = queuedLocalIds && queuedLocalIds.length > 0
+          ? queuedLocalIds.shift()
+          : undefined;
         deps.emit('message.queuedDelivered', {
           sessionPath: context.sessionPath,
           text: extractUserMessageText(event.message),
+          localId: localId || undefined,
         } satisfies QueuedDeliveredPayload);
         return;
       }
@@ -391,7 +456,7 @@ export function handleSdkSessionEvent(
         sessionPath: context.sessionPath,
         messageId: context.activeRequest.lastAssistantMessageId,
         toolCallId: event.toolCallId ?? '',
-        partialResult: event.partialResult,
+        partialResult: boundToolProgress(event.partialResult),
       } satisfies ToolProgressPayload);
       // Same rationale as message_update above: the context-window footprint
       // is static during tool execution (no new assistant usage until

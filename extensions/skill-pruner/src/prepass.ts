@@ -358,6 +358,9 @@ export interface PrepassBudgets {
 	timeoutOverrides?: Record<string, number>;
 	maxTransportRetries: number;
 	transportBackoffBaseMs: number;
+	/** Optional explicit cap. Disabled by default because reasoning tokens count
+	 * against this budget and can consume it before the model emits JSON. */
+	maxOutputTokens?: number;
 }
 
 /**
@@ -373,6 +376,7 @@ export function resolvePrepassBudgets(config: PruningConfig): PrepassBudgets {
 		timeoutOverrides: prepass?.timeoutMs,
 		maxTransportRetries: prepass?.maxTransportRetries ?? PREPASS_MAX_TRANSPORT_RETRIES,
 		transportBackoffBaseMs: prepass?.transportBackoffBaseMs ?? PREPASS_TRANSPORT_BACKOFF_BASE_MS,
+		maxOutputTokens: prepass?.maxOutputTokens,
 	};
 }
 
@@ -440,7 +444,7 @@ export async function runPruningPrepass(
 	// Resolve effective timeout/retry budgets: `pruning.prepass` overrides
 	// merged over the built-in defaults. Absent fields keep the calibrated
 	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
-	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs } = resolvePrepassBudgets(activeConfig);
+	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs, maxOutputTokens } = resolvePrepassBudgets(activeConfig);
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
@@ -450,11 +454,10 @@ export async function runPruningPrepass(
 		try {
 			const result = await runLlmPruning(llmInput, model, {
 				reasoning: thinkingLevel,
-				// Forward an explicit transport-retry budget so pi-ai's
-				// `openai-responses.js` (`maxRetries: options?.maxRetries ?? 0`)
-				// retries 5xx/429/timeout at the SDK layer instead of surfacing
-				// the first blip as a terminal "no text response".
-				maxRetries: maxTransportRetries,
+				// Disable pi-ai retries so only the classified manual loop below
+				// controls retry count and backoff (avoids nested amplification).
+				maxRetries: 0,
+				...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
 				signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 				...auth,
 			}, completeFn);
@@ -490,7 +493,8 @@ export async function runPruningPrepass(
 					try {
 						const retryResult = await runLlmPruning(llmInput, model, {
 							reasoning: thinkingLevel,
-							maxRetries: maxTransportRetries,
+							maxRetries: 0,
+							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
 							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 							...auth,
 						}, completeFn);
@@ -554,7 +558,8 @@ export async function runPruningPrepass(
 					try {
 						const retryResult = await runLlmPruning(llmInput, model, {
 							reasoning: thinkingLevel,
-							maxRetries: maxTransportRetries,
+							maxRetries: 0,
+							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
 							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
 							...auth,
 						}, completeFn);

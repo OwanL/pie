@@ -156,6 +156,35 @@ test('formatRate renders a zero rate as "0" when samples show no token growth', 
   assert.equal(state.label, '0 tok/s');
 });
 
+test('completed hidden reasoning replaces the stale visible estimate with reported effective throughput', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const streaming = streamingMessage({ markdown: tokenText(20) });
+
+  tickTokenRate(acc, [streaming], BASE_NOW + 1_000);
+  tickTokenRate(acc, [{ ...streaming, markdown: tokenText(40) }], BASE_NOW + 2_000);
+
+  const completed: ChatMessage = {
+    ...streaming,
+    status: 'completed',
+    markdown: tokenText(40),
+    durationMs: 10_000,
+    usage: {
+      inputTokens: 100,
+      outputTokens: 1_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 1_100,
+      reasoningTokens: 900,
+    },
+  };
+  const state = tickTokenRate(acc, [completed], BASE_NOW + 10_000);
+
+  assert.equal(state.state, 'paused');
+  assert.equal(state.rate, 100);
+  assert.match(state.label, /100 tok\/s/);
+  assert.match(state.tooltip, /Last rate: 100 tok\/s/);
+});
+
 // --- accumulator merge: cumTokens accumulates per-tick deltas across ticks ---
 
 test('cumTokens accumulates the per-tick deltas and one sample is pushed per generating tick', () => {

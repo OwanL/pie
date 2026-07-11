@@ -86,6 +86,10 @@ function isoLocal(year: number, month: number, day: number, h = 12, min = 0): st
 }
 const NOW = localNoon(2026, 7, 4);
 
+function assertClose(actual: number | undefined, expected: number): void {
+  assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${actual} ≉ ${expected}`);
+}
+
 test('computeAggregateStats: per-provider cost + token totals', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([
     ['openai/gpt', [pricing('openai', 2, 6)]],
@@ -447,7 +451,7 @@ test('computeAggregateStats: today token + throughput series, daily run count, l
   const pricingMap = new Map<string, ModelPricingRecord[]>([['openai/gpt', [pricing('openai', 0, 0)]]]);
   const runs = [
     makeRun({
-      runId: 'r1', modelId: 'openai/gpt',
+      runId: 'r1', modelId: 'openai/gpt', outputTokens: 1_000_000,
       startedAt: isoLocal(2026, 7, 4, 9, 0), updatedAt: isoLocal(2026, 7, 4, 10, 0), finalizedAt: isoLocal(2026, 7, 4, 10, 0),
       turnThroughputSamples: [
         { endedAt: isoLocal(2026, 7, 4, 9, 30), outputTokens: 400_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
@@ -472,6 +476,107 @@ test('computeAggregateStats: today token + throughput series, daily run count, l
   assert.equal(stats.lastRun!.turnSeries.length, 2);
   assert.equal(stats.lastRun!.turnSeries[0]!.outputTokens, 400_000);
   assert.equal(stats.lastRun!.turnSeries[1]!.outputTokens, 600_000);
+});
+
+test('computeAggregateStats: parent, subagent, and pruning usage reconcile across every cost/token rollup', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['parent', [pricing('parent-provider', 2, 6)]],
+    ['child', [pricing('child-provider', 3, 15)]],
+    ['pruner', [pricing('pruner-provider', 1, 2)]],
+  ]);
+  const endedAt = isoLocal(2026, 7, 4, 11, 0);
+  const run = makeRun({
+    modelId: 'parent',
+    startedAt: isoLocal(2026, 7, 4, 9, 0),
+    updatedAt: endedAt,
+    finalizedAt: endedAt,
+    inputTokens: 1_000_000,
+    outputTokens: 500_000,
+    toolUsage: {
+      ...makeRun({}).toolUsage,
+      subagentCallCount: 1,
+      subagentTaskCount: 1,
+      subagentInputTokens: 200_000,
+      subagentOutputTokens: 100_000,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
+    },
+    auxiliaryLlmUsage: [
+      {
+        kind: 'subagent', sourceId: 'tool-1:0', occurredAt: isoLocal(2026, 7, 4, 10, 30), modelId: 'child',
+        inputTokens: 200_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+      },
+      {
+        kind: 'skill_pruning_prepass', sourceId: 'prune-1', occurredAt: isoLocal(2026, 7, 4, 9, 1), modelId: 'pruner',
+        inputTokens: 100_000, outputTokens: 50_000, cacheReadTokens: 0, cacheWriteTokens: 0,
+      },
+    ],
+    turnThroughputSamples: [
+      { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 500_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', modelId: 'parent', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+      { endedAt: isoLocal(2026, 7, 4, 10, 30), outputTokens: 100_000, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'completed', modelId: 'child', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  // Parent $5 + child $2.10 + prepass $0.20.
+  assertClose(stats.totalCost, 7.3);
+  assertClose(stats.todayCost, 7.3);
+  assertClose(stats.weekCost, 7.3);
+  assertClose(stats.dailyCost[0]!.totalCost, 7.3);
+  assert.equal(stats.totalInputTokens, 1_300_000);
+  assert.equal(stats.totalOutputTokens, 650_000);
+  assert.equal(stats.todayInputTokens, 1_300_000);
+  assert.equal(stats.todayOutputTokens, 650_000);
+
+  const providers = new Map(stats.costByProvider.map((entry) => [entry.provider, entry]));
+  assertClose(providers.get('parent-provider')?.cost, 5);
+  assertClose(providers.get('child-provider')?.cost, 2.1);
+  assertClose(providers.get('pruner-provider')?.cost, 0.2);
+  assert.deepEqual(
+    new Map(stats.dailyCost[0]!.byModel.map((entry) => [entry.model, entry.cost])),
+    new Map([['parent', 5], ['child', 2.1], ['pruner', 0.2]]),
+  );
+
+  const finalCostPoint = stats.todayCostSeries.at(-1)!;
+  const finalTokenPoint = stats.todayTokenSeries.at(-1)!;
+  assertClose(finalCostPoint.byProvider.reduce((sum, entry) => sum + entry.value, 0), 7.3);
+  assertClose(finalCostPoint.byModel.reduce((sum, entry) => sum + entry.value, 0), 7.3);
+  assert.equal(finalTokenPoint.byProvider.reduce((sum, entry) => sum + entry.value, 0), 650_000);
+  assert.equal(finalTokenPoint.byModel.reduce((sum, entry) => sum + entry.value, 0), 650_000);
+  assert.equal(stats.tokensPerSecondByProvider.reduce((sum, entry) => sum + entry.sampleCount, 0), 2,
+    'auxiliary usage must not create duplicate throughput samples');
+  assertClose(stats.lastRun?.cost, 7.3);
+  assert.equal(stats.lastRun?.inputTokens, 1_300_000);
+  assert.equal(stats.lastRun?.outputTokens, 650_000);
+  assert.equal(stats.lastRun?.turnSeries.reduce((sum, entry) => sum + entry.outputTokens, 0), 650_000);
+});
+
+test('computeAggregateStats: historical subagent totals use the unique child throughput model as attribution', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['parent', [pricing('parent-provider', 0, 0)]],
+    ['child', [pricing('child-provider', 4, 10)]],
+  ]);
+  const endedAt = isoLocal(2026, 7, 4, 11, 0);
+  const base = makeRun({});
+  const run = makeRun({
+    modelId: 'parent', startedAt: endedAt, updatedAt: endedAt, finalizedAt: endedAt,
+    toolUsage: {
+      ...base.toolUsage,
+      subagentInputTokens: 100_000,
+      subagentOutputTokens: 50_000,
+      subagentCacheReadTokens: 0,
+      subagentCacheWriteTokens: 0,
+    },
+    turnThroughputSamples: [
+      { endedAt, outputTokens: 50_000, generationDurationMs: 1000, concurrentBusySessions: 1, status: 'completed', modelId: 'child', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
+    ],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  assert.equal(stats.totalCost, 0.9);
+  assert.equal(stats.totalInputTokens, 100_000);
+  assert.equal(stats.totalOutputTokens, 50_000);
+  assert.equal(stats.costByProvider.find((entry) => entry.provider === 'child-provider')?.cost, 0.9);
+  assert.equal(stats.dailyCost[0]!.byModel[0]?.model, 'child');
 });
 
 test('computeAggregateStats: empty series when no today runs', () => {

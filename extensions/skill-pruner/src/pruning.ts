@@ -264,11 +264,10 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 			alwaysKeep: [...(input.tools.alwaysKeep ?? [])],
 		} : undefined,
 		prepass: input.prepass ? {
-			timeoutMs: input.prepass.timeoutMs ? { ...input.prepass.timeoutMs } : undefined,
-			maxTransportRetries: input.prepass.maxTransportRetries,
-			transportBackoffBaseMs: input.prepass.transportBackoffBaseMs,
-			oauthRaceBackoffMs: input.prepass.oauthRaceBackoffMs,
+			...input.prepass,
+			...(input.prepass.timeoutMs ? { timeoutMs: { ...input.prepass.timeoutMs } } : {}),
 		} : undefined,
+		autoSkipBelowTokens: input.autoSkipBelowTokens,
 	};
 }
 

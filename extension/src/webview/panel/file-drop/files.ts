@@ -68,9 +68,52 @@ export function looksLikeBlobFile(file: FileLike): boolean {
   );
 }
 
+export interface CompressedRasterImage {
+  data: ArrayBuffer;
+  mimeType: string;
+  width: number;
+  height: number;
+}
+
+export type RasterImageCodec = (
+  data: ArrayBuffer,
+  mimeType: string,
+) => Promise<CompressedRasterImage | null>;
+
+/** Browser codec used at ingestion, before base64 inflates the payload. */
+export async function compressRasterScreenshot(
+  data: ArrayBuffer,
+  mimeType: string,
+): Promise<CompressedRasterImage | null> {
+  if (mimeType === 'image/gif' || typeof createImageBitmap !== 'function' || typeof document === 'undefined') return null;
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(new Blob([data], { type: mimeType }));
+    const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, width, height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.82));
+    if (!blob) return null;
+    const outputMimeType = blob.type.trim().toLowerCase();
+    if (!['image/webp', 'image/png', 'image/jpeg'].includes(outputMimeType)) return null;
+    return { data: await blob.arrayBuffer(), mimeType: outputMimeType, width, height };
+  } catch {
+    return null;
+  } finally {
+    bitmap?.close();
+  }
+}
+
 export async function fileToImageInput(
   file: FileLike,
   source: ComposerTransferSource,
+  codec: RasterImageCodec = compressRasterScreenshot,
 ): Promise<Extract<ComposerInputDraft, { kind: 'imageBlob' }> | null> {
   if (!isImageMimeType(file.type) || typeof file.arrayBuffer !== 'function') {
     return null;
@@ -84,16 +127,45 @@ export async function fileToImageInput(
     return null;
   }
 
-  const sizeBytes = typeof file.size === 'number' && Number.isFinite(file.size)
-    ? file.size
-    : buffer.byteLength;
+  const originalMimeType = file.type!.trim().toLowerCase();
+  let data = buffer;
+  let mimeType = originalMimeType;
+  let name = (file.name ?? '').trim() || 'image';
+  let width: number | undefined;
+  let height: number | undefined;
+  if (originalMimeType !== 'image/gif') {
+    try {
+      const compressed = await codec(buffer, originalMimeType);
+      if (compressed && compressed.data.byteLength < buffer.byteLength) {
+        const compressedMimeType = compressed.mimeType.trim().toLowerCase();
+        const extension = compressedMimeType === 'image/webp'
+          ? 'webp'
+          : compressedMimeType === 'image/png'
+            ? 'png'
+            : compressedMimeType === 'image/jpeg'
+              ? 'jpg'
+              : null;
+        if (extension) {
+          data = compressed.data;
+          mimeType = compressedMimeType;
+          width = compressed.width;
+          height = compressed.height;
+          name = name.replace(/\.[^.]+$/, '') + `.${extension}`;
+        }
+      }
+    } catch {
+      // Codec failures must never prevent attaching the original screenshot.
+    }
+  }
 
   return {
     kind: 'imageBlob',
-    mimeType: file.type!.trim().toLowerCase(),
-    name: (file.name ?? '').trim() || 'image',
-    sizeBytes,
-    dataBase64: arrayBufferToBase64(buffer),
+    mimeType,
+    name,
+    sizeBytes: data.byteLength,
+    dataBase64: arrayBufferToBase64(data),
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
     source,
   };
 }

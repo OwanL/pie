@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Disciplined diagnosis loop for hard bugs and performance regressions. Reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when user says "diagnose this" / "debug this", reports a bug, says something is broken/throwing/failing, or describes a performance regression.
+description: Disciplined evidence-first diagnosis for hard, unclear, intermittent, or performance bugs: reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when the user asks for diagnosis/debugging or the cause is genuinely uncertain; not for straightforward fixes with an obvious failing line and remedy.
 ---
 
 # Diagnose

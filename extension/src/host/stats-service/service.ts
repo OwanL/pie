@@ -92,6 +92,15 @@ export class StatsService implements RunObserver {
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
   }
 
+  onSkillPruningUsage(
+    sessionPath: string,
+    messageId: string,
+    occurredAt: string,
+    details: unknown,
+  ): void {
+    this.tracker.onSkillPruningUsage(sessionPath, messageId, occurredAt, details);
+  }
+
   onAssistantTurnEnded(
     sessionPath: string,
     turnId: string,

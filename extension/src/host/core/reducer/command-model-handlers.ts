@@ -7,7 +7,7 @@ import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { modelSupportsInputKind } from '../model-capability.js';
 import { applySetModelOptimistic } from './set-model-handlers.js';
 
-function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettings: { defaultModel?: string; defaultThinkingLevel?: string }): boolean {
+function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettings: { defaultModel?: string; defaultProvider?: string; defaultThinkingLevel?: string }): boolean {
   const currentSettings = state.settings.modelSettings;
   const currentSummary = state.sessions.sessions.find((session) => session.path === sessionPath);
   if (!currentSettings) {
@@ -16,6 +16,7 @@ function isNoOpModelSelection(state: ArchState, sessionPath: string, modelSettin
 
   const settingsMatch =
     currentSettings.defaultModel === modelSettings.defaultModel
+    && currentSettings.defaultProvider === modelSettings.defaultProvider
     && currentSettings.defaultThinkingLevel === modelSettings.defaultThinkingLevel;
   if (!settingsMatch) {
     return false;

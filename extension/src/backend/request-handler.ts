@@ -564,6 +564,15 @@ async function handleMessageSend(
     } else {
       await context.session.followUp(queuedPromptText, queuedImagePayload);
     }
+    // Handoff §F: mirror the SDK's FIFO steering/followUp drain order so we
+    // can correlate delivery back to the host's optimistic localId. The queue
+    // is shifted on each user-role `message_start` in session-event-handler.ts.
+    // An undefined localId is still pushed (as an empty sentinel) to keep the
+    // FIFO positions aligned with the SDK's actual drain order.
+    if (!context.queuedLocalIds) {
+      context.queuedLocalIds = [];
+    }
+    context.queuedLocalIds.push(params.localId ?? '');
     return { queued: true };
   }
 
@@ -749,7 +758,12 @@ async function handleMessageInterrupt(
     && !context.session.isRetrying
     && !context.session.isBashRunning;
   if (nothingRunning) {
-    throw new BackendError('SESSION_NOT_RUNNING', `Cannot interrupt a session that is not running: ${params.sessionPath}`);
+    // Stop is idempotent. The host can be a few events ahead/behind the SDK at
+    // turn boundaries; treating that race as an error wedges the optimistic
+    // "Stopping…" state and makes rapid stop→send unnecessarily fragile.
+    context.session.clearQueue();
+    context.queuedLocalIds = [];
+    return { interrupted: false, alreadyStopped: true };
   }
   if (context.activeRequest) {
     context.activeRequest.aborted = true;
@@ -762,6 +776,10 @@ async function handleMessageInterrupt(
   // of an unrelated future send. The host also removes 'queued' transcript
   // messages on `InterruptResult{ok:true}` to stay in sync.
   context.session.clearQueue();
+  // Handoff §F: the SDK queue is gone; drop the localId correlation queue so
+  // we don't try to match stale ids if the backend emits a late user-role
+  // message_start before the host finishes reconciling the interrupt.
+  context.queuedLocalIds = [];
   // Hard-stop every billable window the SDK exposes BEFORE the un-awaited
   // `session.abort()` runs. `abort()` alone does NOT stop the post-agent_end
   // compaction / branch-summary / retry / bash LLM calls, so spend would keep
@@ -772,55 +790,44 @@ async function handleMessageInterrupt(
   context.session.abortBranchSummary?.();
   context.session.abortBash?.();
   context.session.abortRetry?.();
-  // Bug 4 watchdog: `session.abort()` is un-awaited and un-bounded today. If it
-  // NEVER settles (a hung provider connection teardown), the `.finally` below
-  // never runs → `activeRequest` stays set forever → the session is permanently
-  // blocked from sending or live-switching models. Race the abort against a
-  // watchdog window; if it wins, force-clear `activeRequest` + emit an
-  // `operational-error` notice so the user can recover without reloading the
-  // window. The healthy-abort path (settles within the window) is unchanged.
+  // The RPC acknowledgement is a completion barrier, not merely an "abort was
+  // requested" acknowledgement. The host serializes stop→send/edit operations
+  // behind this request; returning before abort settles allowed the next send
+  // to enter the dying turn as a queued follow-up and then disappear.
   const watchdogMs = resolveInterruptAbortWatchdogMs();
-  let watchdogFired = false;
-  const watchdogTimer = setTimeout(() => {
-    watchdogFired = true;
-    if (context.activeRequest?.id === abortRequestId) {
-      context.activeRequest = undefined;
-      deps.emitBusyChanged(context, false);
-    }
+  let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    watchdogTimer = setTimeout(() => resolve('timeout'), watchdogMs);
+  });
+  const abort = context.session.abort().then(
+    () => 'settled' as const,
+    (error: unknown) => ({ error: toErrorMessage(error) } as const),
+  );
+  const outcome = await Promise.race([abort, timeout]);
+  if (watchdogTimer) clearTimeout(watchdogTimer);
+
+  if (outcome === 'timeout') {
+    const message = `message.interrupt: session.abort() did not settle within ${watchdogMs}ms. The session is still marked running so Stop can be retried; reload the window if the provider teardown remains wedged.`;
     deps.emit('operational-error', {
       code: 'INTERRUPT_ABORT_STUCK',
-      message: `message.interrupt: session.abort() did not settle within ${watchdogMs}ms — activeRequest force-cleared. The provider connection teardown may be stuck; reload the window if the session stays wedged.`,
+      message,
       requestId: abortRequestId,
       sessionPath: params.sessionPath,
     });
-  }, watchdogMs);
-  void context.session.abort()
-    .catch((error: unknown) => {
-      deps.emit('error', {
-        code: 'MESSAGE_INTERRUPT_FAILED',
-        message: toErrorMessage(error),
-        requestId: context.activeRequest?.id,
-      } satisfies ErrorPayload);
-    })
-    .finally(() => {
-      clearTimeout(watchdogTimer);
-      if (watchdogFired) return; // the watchdog already cleared; don't clobber.
-      // Defensive clear: the SDK normally fires `turn_end` after abort, which
-      // clears `activeRequest` via the session-event handler. But if the SDK
-      // never fires `turn_end` (e.g. a hung provider connection that abort
-      // couldn't tear down, or an abort that rejected without a turn-end
-      // event), `activeRequest` would stay set forever — leaving the session
-      // permanently blocked from sending or live-switching models. Clear it
-      // here once the abort promise settles AND the session has actually
-      // stopped streaming, so we never clobber a still-streaming turn that
-      // abort() failed to stop. The session-event handler's own `turn_end`
-      // clear is idempotent with this (it's an `undefined` re-assignment).
-      if (!context.session.isStreaming && context.activeRequest?.id === abortRequestId) {
-        context.activeRequest = undefined;
-        deps.emitBusyChanged(context, false);
-      }
-    });
-  return { interrupted: true };
+    throw new BackendError('INTERRUPT_ABORT_STUCK', message);
+  }
+
+  if (typeof outcome === 'object') {
+    throw new BackendError('MESSAGE_INTERRUPT_FAILED', outcome.error);
+  }
+
+  // turn_end normally clears this. Defensively reconcile providers that settle
+  // abort without emitting turn_end before acknowledging Stop to the host.
+  if (!context.session.isStreaming && context.activeRequest?.id === abortRequestId) {
+    context.activeRequest = undefined;
+    deps.emitBusyChanged(context, false);
+  }
+  return { interrupted: true, settled: true };
 }
 
 /** Host → backend push of the currently-open tab summaries. Stored into
@@ -840,6 +847,9 @@ async function handleMessageClearQueue(
   // optimistic 'queued' transcript messages on the result; this is the
   // authoritative backend clear so the SDK will not drain them later.
   const cleared = context.session.clearQueue();
+  // Handoff §F: drop the localId correlation queue so a late user-role
+  // message_start cannot carry a stale localId back to the host.
+  context.queuedLocalIds = [];
   return { cleared };
 }
 
@@ -900,18 +910,44 @@ async function handleSettingsSet(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSettingsSet(request.params);
-  const { sessionPath, ...settingsUpdates } = params;
+  const { sessionPath, ...rawUpdates } = params;
   const previousSettings = await deps.readModelSettings();
   const targetContext = sessionPath ? await deps.ensureSessionContext(sessionPath) : undefined;
-  const currentModelId = targetContext?.session.model?.id ?? previousSettings.defaultModel;
+  // The picker sends `defaultModel` (bare id) + `defaultProvider` as separate
+  // fields so models that exist under multiple providers (e.g. gpt-5.5 under
+  // both github-copilot and openai-codex) can be routed unambiguously, and so
+  // the SDK can restore the model on new sessions via
+  // `modelRegistry.find(defaultProvider, defaultModel)`. When `defaultProvider`
+  // is omitted (e.g. a thinking-level-only change), keep the current provider.
+  const currentSessionModel = targetContext?.session.model;
+  const currentProvider = currentSessionModel?.provider ?? previousSettings.defaultProvider;
+  const currentId = currentSessionModel?.id ?? previousSettings.defaultModel;
+  const requestedId = params.defaultModel ?? currentId;
+  const requestedProvider = params.defaultProvider ?? currentProvider;
   const currentThinkingLevel = targetContext?.session.thinkingLevel ?? previousSettings.defaultThinkingLevel;
-  const requestedModelId = params.defaultModel ?? previousSettings.defaultModel;
   const requestedThinkingLevel = params.defaultThinkingLevel ?? previousSettings.defaultThinkingLevel;
-  const isChangingModel = requestedModelId !== currentModelId;
+  // A model switch is any change to the id OR the provider (so switching
+  // github-copilot/gpt-5.5 -> openai-codex/gpt-5.5 is detected even though the
+  // id is identical).
+  const isChangingModel = requestedId !== currentId || requestedProvider !== currentProvider;
   const isChangingThinkingLevel = params.defaultThinkingLevel !== undefined
     && requestedThinkingLevel !== currentThinkingLevel;
-  const hasPersistedChanges = (params.defaultModel !== undefined && params.defaultModel !== previousSettings.defaultModel)
-    || (params.defaultThinkingLevel !== undefined && params.defaultThinkingLevel !== previousSettings.defaultThinkingLevel);
+  const hasPersistedChanges = (params.defaultModel !== undefined
+      && (requestedId !== previousSettings.defaultModel
+        || (params.defaultProvider !== undefined && requestedProvider !== previousSettings.defaultProvider)))
+    || (params.defaultThinkingLevel !== undefined && requestedThinkingLevel !== previousSettings.defaultThinkingLevel);
+
+  // Persist the bare id + explicit provider (never a `provider/id` compound)
+  // so the SDK's restore path resolves correctly on new sessions.
+  const settingsUpdates: Partial<ModelSettings> = { ...rawUpdates };
+  if (params.defaultModel !== undefined) {
+    settingsUpdates.defaultModel = requestedId;
+    if (requestedProvider) {
+      settingsUpdates.defaultProvider = requestedProvider;
+    } else {
+      delete settingsUpdates.defaultProvider;
+    }
+  }
 
   if ((isChangingModel || isChangingThinkingLevel) && targetContext && (targetContext.activeRequest || targetContext.session.isStreaming)) {
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model or thinking level while a request is in progress for this session.');
@@ -925,7 +961,8 @@ async function handleSettingsSet(
     if (targetContext && (params.defaultModel || params.defaultThinkingLevel)) {
       if (isChangingModel) {
         const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
-        const info = available.find((model) => model.id === params.defaultModel);
+        const info = available.find((model) => model.provider === requestedProvider && model.id === requestedId)
+          ?? available.find((model) => model.id === requestedId);
         if (!info) {
           throw new BackendError('MODEL_UNAVAILABLE', `Model not available in this session: ${params.defaultModel}`);
         }
@@ -940,7 +977,7 @@ async function handleSettingsSet(
         }
 
         await targetContext.session.setModel(resolvedModel);
-        if (targetContext.session.model?.id !== params.defaultModel) {
+        if (targetContext.session.model?.id !== requestedId || targetContext.session.model?.provider !== requestedProvider) {
           throw new BackendError('MODEL_SWITCH_FAILED', `Live model switch did not take effect: ${params.defaultModel}`);
         }
       }
@@ -963,10 +1000,18 @@ async function handleSettingsSet(
 
     return result;
   } catch (error) {
-    await deps.writeModelSettings({
+    // Roll back to the exact previous settings. defaultProvider must be
+    // restored too (the merge-only writer can't otherwise drop a provider we
+    // just added), and when it was previously absent we explicitly delete it
+    // so the file returns to its prior shape rather than retaining `undefined`.
+    const rollback: Partial<ModelSettings> = {
       defaultModel: previousSettings.defaultModel,
       defaultThinkingLevel: previousSettings.defaultThinkingLevel,
-    });
+    };
+    // Explicitly set defaultProvider (even to undefined) so the merge-only
+    // writer drops a provider we just added when the previous state had none.
+    rollback.defaultProvider = previousSettings.defaultProvider;
+    await deps.writeModelSettings(rollback);
     throw error;
   }
 }

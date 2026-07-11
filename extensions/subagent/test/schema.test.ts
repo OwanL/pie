@@ -28,7 +28,7 @@ import { BUCKET_GUIDANCE, SubagentParams } from "../schema.js";
 
 test("BUCKET_GUIDANCE is the exact non-empty string surfaced to users", () => {
 	const expected =
-		"Bucket hint for model selection: 'small' (Haiku-class, busywork), 'medium' (Sonnet-class, main development), or 'frontier' (Opus-class, hardest problems). Prefer 'medium' for almost all tasks — it is the best balance of cost and capability. Reserve 'frontier' for only the absolute hardest problems, as it is far more expensive; use 'small' only for trivial busywork. Defaults to 'medium' when omitted.";
+		"Model bucket: 'small' for trivial work, 'medium' for normal development (default), or 'frontier' only for exceptional difficulty.";
 	assert.equal(BUCKET_GUIDANCE, expected);
 	assert.ok(BUCKET_GUIDANCE.length > 0, "BUCKET_GUIDANCE must be non-empty");
 	assert.match(BUCKET_GUIDANCE, /small/);

@@ -66,12 +66,10 @@ function loadPromptTemplate(): string {
 	} catch {
 		return [
 			"You are a relevance curator for a coding agent's prompt-pruning prepass.",
-			"Your job is to decide which skills and tools can be safely REMOVED from the agent's context this turn.",
-			"Default to KEEPING. Only remove an item when you are confident it is irrelevant to the entire arc of the work.",
-			"",
-			"Respond with ONLY a valid JSON object in this exact shape:",
-			'{"reasoning":"1-2 short sentences","pruneSkills":["skill-name"],"pruneTools":["tool-name"]}',
-			"List only items to REMOVE. Empty or omitted lists keep everything. Do not wrap in markdown.",
+			"Judge relevance across the full arc of the work. Default to KEEPING; remove only clearly irrelevant items.",
+			"Return ONLY a valid JSON object in this exact shape:",
+			'{"pruneSkills":[],"pruneTools":[]}',
+			"List only items to REMOVE; empty lists keep everything. Do not include an explanation or reasoning. Do not wrap in markdown.",
 			"",
 			"{{STRATEGY_INSTRUCTION}}",
 		].join("\n");

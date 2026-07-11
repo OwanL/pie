@@ -88,7 +88,9 @@ export function MessageItemShell({
       data-editing={isEditing ? 'true' : undefined}
       data-streaming={isCurrentlyStreaming ? 'true' : undefined}
       onClick={handleMessageClick}
-      title={isClickableUserMsg ? 'Click to edit' : undefined}
+      title={status === 'queued'
+        ? 'Waiting for the current tool calls to finish; this message will be injected before the next model response.'
+        : isClickableUserMsg ? 'Click to edit' : undefined}
     >
       {children}
     </div>

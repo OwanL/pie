@@ -15,6 +15,13 @@
 - Session-scoped backend events must include `sessionPath`.
 - Missing `sessionPath` is treated as a protocol defect.
 
+## Backend Failure Recovery
+
+- Backend JSONL records share a 20 MiB byte limit. An overlong stdout record is a fatal transport fault: the host terminates the backend rather than continuing with potentially desynchronized state. Overlong stdin records are discarded through LF; when the bounded preview contains a request ID, the backend returns a correlated `REQUEST_TOO_LARGE` response. Subsequent requests remain readable.
+- Intentional stops do not produce public unexpected-exit events, but an intentional stop during startup still rejects that child’s readiness promise. Process generations prevent an old exit from clearing a replacement. Backend restart is manual; there is no automatic restart.
+- Affected session paths are deduplicated. Crash cleanup interrupts streaming messages and queued user messages, terminalizes running tools, and clears pending extension-UI, retry, wait, interrupt, and queued transient state even when no transcript is loaded.
+- The short exit notice contains the interrupted-session count and reliable activity classification; raw stderr is exposed only as `noticeRaw` with `noticeKind: backend-exit`.
+
 ## Session Cleanup
 
 - Closing or invalidating a session clears transcript state, alias state, current-turn state, busy dedup state, pending composer inputs, and queued per-session operations.
@@ -39,6 +46,8 @@
 
 - Lifecycle requests (`create`, `open`) are serialized through a host lifecycle queue.
 - Session mutations (`send`, `edit`, `truncateAfter`, `interrupt`) are serialized per session path.
+- `message.interrupt` is an abort-completion barrier: its RPC resolves only after `session.abort()` settles (or rejects after the bounded teardown watchdog). While it is pending, `runningSessionPaths` and `interruptInFlightBySession` keep the composer in `Stopping…`; button and keyboard submission are blocked so stop→send cannot accidentally enter the dying turn as a queued follow-up. Interrupting an already-idle session is an idempotent success to tolerate host/backend boundary races.
+- Editing has restart semantics. `EditRpc` performs idempotent interrupt → truncate → send inside one serialized session operation, so editing a prior message cannot race a live assistant turn.
 - Optimistic UI writes must be reversible when the authoritative operation fails.
 - The EffectRunner routes session-scoped RPC effects through `enqueueLifecycle → enqueueSessionOperation(sessionPath, ...)` to guarantee FIFO ordering with respect to other session operations.
 - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle(...)` directly (no inner session queue).

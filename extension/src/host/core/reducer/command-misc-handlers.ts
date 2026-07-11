@@ -7,17 +7,19 @@ import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 import { BACKEND_READY_TIMEOUT_MS } from '../../../shared/backend-ready-timeout.js';
+import { QUEUED_DWELL_HARD_MS } from '../../../shared/queued-dwell.js';
 
 export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 'Interrupt' }>): ReducerResult {
-  // Copilot/Codex-style immediate stop: take effect INSTANTLY in the reducer,
-  // without waiting for the async `session.abort()` to settle. The optimistic
-  // writes mirror what `InterruptResult{ok:true}` will confirm a moment later,
-  // so the user SEES the interrupt immediately:
+  // Stop takes effect INSTANTLY in the reducer while remaining truthful about
+  // teardown. The partial reply is frozen immediately, but busy remains set
+  // until the abort-completion barrier returns, so the user sees Stopping… and
+  // cannot race a new send into the dying turn:
   //  - `interruptInFlightBySession` is set: the in-flight-abort gate in
   //    `handleMessageDelta` / `handleMessageThinking` drops late deltas as
   //    pure no-ops during the abort window.
-  //  - `runningSessionPaths` is cleared: the session shows idle (no Stop button)
-  //    before the backend abort resolves.
+  //  - `runningSessionPaths` deliberately stays set until InterruptResult: the
+  //    composer remains in a truthful, disabled "Stopping…" state and a new
+  //    send cannot race into the still-running backend turn as a follow-up.
   //  - Streaming assistant messages are marked `interrupted`: this gates
   //    appending via the `status !== 'interrupted'` check in the delta/thinking
   //    handlers (defense-in-depth alongside the flag gate) and renders the
@@ -30,9 +32,6 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
   // the click and the abort).
   const nextState = produce(state, (draft) => {
     draft.sessions.interruptInFlightBySession[cmd.sessionPath] = true;
-    draft.sessions.runningSessionPaths = draft.sessions.runningSessionPaths.filter(
-      (p: string) => p !== cmd.sessionPath,
-    );
     delete draft.pending.prepassBySession[cmd.sessionPath];
     const list = draft.transcript.bySession[cmd.sessionPath];
     if (list) {
@@ -56,6 +55,9 @@ export function handleClearQueue(state: ArchState, cmd: Extract<Command, { kind:
   // `runningSessionPaths` and does NOT interrupt the current turn. Also drops
   // any `pending.ops`/`pending.promoted` entries flagged `queued` for this
   // session so a later `QueuedDelivered` cannot re-promote a cleared message.
+  // Handoff §F: also clears the dwell entries and cancels their watchdog timers
+  // so a cleared queued message is never left immortal nor nagged post-clear.
+  const clearedLocalIds = (state.pending.queuedDwellBySession[cmd.sessionPath] ?? []).map((e) => e.localId);
   const nextState = produce(state, (draft) => {
     const list = draft.transcript.bySession[cmd.sessionPath];
     if (list) {
@@ -69,11 +71,13 @@ export function handleClearQueue(state: ArchState, cmd: Extract<Command, { kind:
     for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
       if (op.queued && op.sessionPath === cmd.sessionPath) delete draft.pending.promoted[corrId];
     }
+    delete draft.pending.queuedDwellBySession[cmd.sessionPath];
   });
-  return {
-    state: nextState,
-    effects: [{ kind: 'ClearQueueRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
-  };
+  const effects = [
+    { kind: 'ClearQueueRpc' as const, corrId: cmd.corrId, sessionPath: cmd.sessionPath },
+    ...clearedLocalIds.map((localId) => ({ kind: 'CancelQueuedDwellWatchdog' as const, corrId: cmd.corrId, localId })),
+  ];
+  return { state: nextState, effects };
 }
 
 export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send' }>): ReducerResult {
@@ -185,6 +189,14 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         startedAt: cmd.timestamp,
         queued: true,
       };
+      // Handoff §F: track this queued message's dwell from the (pure) command
+      // timestamp and arm a per-localId watchdog. The watchdog marks the entry
+      // actionable on the hard threshold; it does NOT interrupt the in-flight
+      // turn. Cleared on delivery/clear/interrupt/rollback/restart.
+      draft.pending.queuedDwellBySession[cmd.sessionPath] = [
+        ...(draft.pending.queuedDwellBySession[cmd.sessionPath] ?? []),
+        { localId: cmd.localId, enqueuedAt: cmd.timestamp, watchdogFired: false, abandoned: false },
+      ];
       delete draft.composer.draftTextBySession[cmd.sessionPath];
       delete draft.composer.pendingComposerInputsBySession[cmd.sessionPath];
     });
@@ -202,6 +214,8 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
           userParts: cmd.userParts,
           priorPruningMode: cmd.priorPruningMode,
         },
+        // Handoff §F: arm the dwell watchdog for this queued message.
+        { kind: 'StartQueuedDwellWatchdog', corrId: cmd.corrId, sessionPath: cmd.sessionPath, localId: cmd.localId, timeoutMs: QUEUED_DWELL_HARD_MS },
       ],
     };
   }

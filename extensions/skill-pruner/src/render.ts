@@ -27,13 +27,14 @@ export const pruningResultRenderer = {
 		const tokensSaved = details.skillTokensSaved + details.toolTokensSaved;
 		const tokenNote = tokensSaved > 0 ? ` · Saved ~${tokensSaved} tokens` : "";
 		const latencyNote = formatLatencyNote(details.prepassLatencyMs);
+		const cacheNote = details.cacheHit ? " · cached" : "";
 		const hasError = !!details.prepassError;
 		const errorNote = hasError ? ` · ${details.prepassError}` : "";
 
 		if (!expanded) {
 			const compact = hasError
 				? `${modeLabel}${theme.fg("error", "Pruning error")}${errorNote}`
-				: `${modeLabel}${parts.join(", ")}${tokenNote}${latencyNote}`;
+				: `${modeLabel}${parts.join(", ")}${tokenNote}${latencyNote}${cacheNote}`;
 			const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(compact, 0, 0));
 			return box;
@@ -62,6 +63,7 @@ export const pruningResultRenderer = {
 		if (latencyNote) {
 			lines.push(theme.fg("dim", `  Prepass latency: ${details.prepassLatencyMs}ms`));
 		}
+		if (details.cacheHit) lines.push(theme.fg("dim", "  Prepass: cached"));
 
 		const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
 		const header = hasError ? "Pruning Results (prepass failed — kept all)" : "Pruning Results";

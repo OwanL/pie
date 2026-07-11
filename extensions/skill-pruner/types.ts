@@ -28,6 +28,9 @@ export interface ToolPruningConfig {
  * whole map.
  */
 export interface PrepassConfig {
+	/** Optional maximum scorer output tokens. Disabled by default because
+	 * reasoning tokens count against this budget on some providers. */
+	maxOutputTokens?: number;
 	/**
 	 * Per-thinking-level timeout ceiling (ms) for ONE prepass model call.
 	 * These are ceilings, not waits: a call that completes early returns
@@ -39,7 +42,8 @@ export interface PrepassConfig {
 	/**
 	 * Max transport-level retries (5xx / 429 / network) per thinking-level
 	 * attempt, with exponential backoff between them. `0` disables prepass-
-	 * level transport retrying (pi-ai's own `maxRetries` is still forwarded).
+	 * level transport retrying. pi-ai transport retries are always disabled to
+	 * avoid nested retry amplification.
 	 */
 	maxTransportRetries?: number;
 	/**
@@ -64,6 +68,8 @@ export interface PruningConfig {
 	skills: SkillPruningConfig;
 	tools?: ToolPruningConfig;
 	prepass?: PrepassConfig;
+	/** Skip the LLM and keep all when the assembled prepass input is smaller than this. Disabled by default. */
+	autoSkipBelowTokens?: number | null;
 }
 
 export interface PruningResult {
@@ -97,6 +103,8 @@ export interface PruningResult {
 	prepassError?: string;
 	/** Human-readable explanation of why the pruner kept a category instead of trusting the model. */
 	prepassSafeguardReason?: string;
+	/** True when a successful prior per-session prepass result was reused. */
+	cacheHit?: boolean;
 }
 
 export interface PruningDecision {
@@ -121,6 +129,8 @@ export interface PruningDecision {
 	originalToolBlockTokens?: number;
 	/** True when the prepass response was unreadable as JSON → kept all (parse failure). */
 	keptAllDueToParseFailure?: boolean;
+	/** True when this decision reused the latest successful per-session prepass. */
+	cacheHit?: boolean;
 	/** Provider-reported input tokens for the prepass LLM call (when the provider returns usage; often absent for github-copilot). */
 	prepassInputTokens?: number;
 	/** Provider-reported output tokens for the prepass LLM call. */

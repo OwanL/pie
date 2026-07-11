@@ -9,7 +9,7 @@ import { CollapsibleChevron } from './chevron';
 import { Tooltip } from './tooltip';
 
 interface ModelPickerProps {
-  /** Current selected model id. */
+  /** Current selected model spec: either `id` or `provider/id` (when the caller can disambiguate duplicates). */
   value: string;
   /** Label shown on the closed trigger. */
   label: string;
@@ -19,8 +19,8 @@ interface ModelPickerProps {
   title: string;
   /** Picker entries to display. */
   entries: ModelPickerEntry[];
-  /** Called when the user selects a model. */
-  onChange: (modelId: string) => void;
+  /** Called when the user selects a model; receives `provider/id` so callers can route unambiguously even when the same id exists under multiple providers. */
+  onChange: (modelSpec: string) => void;
   /** Optional compact width for use inside settings rows. */
   compact?: boolean;
   /** Which direction the dropdown opens. Default 'up'. */
@@ -268,7 +268,7 @@ function useListKeyDown(
           break;
         case 'select': {
           const entry = entries[activeIndex];
-          if (entry) handleSelect(entry.model.id);
+          if (entry) handleSelect(`${entry.model.provider}/${entry.model.id}`);
           break;
         }
       }
@@ -297,7 +297,12 @@ function useModelPicker({
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
   const idBase = useId();
   const listId = `${idBase}-list`;
-  const selectedIndex = entries.findIndex((e) => e.model.id === value);
+  // Match the selected row by `provider/id` when `value` carries a provider
+  // prefix (lets callers disambiguate duplicate ids across providers), falling
+  // back to a bare-id match.
+  const selectedIndex = entries.findIndex(
+    (e) => `${e.model.provider}/${e.model.id}` === value || e.model.id === value,
+  );
 
   const filteredEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -330,7 +335,7 @@ function useModelPicker({
   }, []);
 
   const activeDescendant =
-    activeIndex >= 0 ? `${idBase}-option-${filteredEntries[activeIndex]?.model.id}` : undefined;
+    activeIndex >= 0 ? `${idBase}-option-${filteredEntries[activeIndex]?.model.provider}-${filteredEntries[activeIndex]?.model.id}` : undefined;
 
   return {
     open,
@@ -423,7 +428,7 @@ function ModelPickerRow({
 }: ModelPickerRowProps) {
   return (
     <div
-      key={entry.model.id}
+      key={`${entry.model.provider}/${entry.model.id}`}
       id={optionId}
       ref={setItemRef}
       class={getRowClass(isSelected, isActive, entry.ineligible)}
@@ -521,12 +526,12 @@ function ModelPickerDropdown({
           <div class="model-picker-empty">{`No models match "${query}"`}</div>
         ) : (
           entries.map((entry, i) => {
-            const isSelected = entry.model.id === value;
+            const isSelected = `${entry.model.provider}/${entry.model.id}` === value || entry.model.id === value;
             const isActive = i === activeIndex;
-            const optionId = `${idBase}-option-${entry.model.id}`;
+            const optionId = `${idBase}-option-${entry.model.provider}-${entry.model.id}`;
             return (
               <ModelPickerRow
-                key={entry.model.id}
+                key={`${entry.model.provider}/${entry.model.id}`}
                 entry={entry}
                 isSelected={isSelected}
                 isActive={isActive}
@@ -536,7 +541,7 @@ function ModelPickerDropdown({
                 onMouseDown={(e) => {
                   // prevent focus loss so the item is clicked properly
                   e.preventDefault();
-                  handleSelect(entry.model.id);
+                  handleSelect(`${entry.model.provider}/${entry.model.id}`);
                 }}
               />
             );

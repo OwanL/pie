@@ -67,18 +67,14 @@ export default function (pi: ExtensionAPI) {
     name: 'session_review',
     label: 'Session review',
     description:
-      'Evaluate and review the currently-open sessions in the app: list open sessions with their review status, read a session\'s inputs/outputs transcript, and record a done/rating/completion/reason review. Multi-reviewer provenance (reviewerBuckets/reviewerCount) is captured when provided. Use the evaluate-sessions skill for the full rubric and flow.',
+      'List open app sessions, read their transcripts, and record a done/rating/completion review. `done: true` closes the tab. Use only for explicit session-evaluation tasks; the evaluate-sessions skill contains the rubric.',
     promptSnippet:
-      'List/read/review the app\'s currently-open sessions. listOpen shows open sessions + review status; getTranscript reads a session JSONL; setReview records done + 1–5 rating + completion (fully/partial/setback) + reason, and captures multi-reviewer provenance (reviewerBuckets/reviewerCount) when provided.',
+      'List, inspect, and record reviews for currently open app sessions.',
     promptGuidelines: [
-      'Call listOpen first to see which sessions are currently open and which are already done.',
-      'For each non-done open session, call getTranscript to read its inputs/outputs, judge completeness against the user\'s last intent, then call setReview with done + a 1–5 rating + completion (fully/partial/setback) + reason.',
-      'Before finalizing a session\'s review, use the ask_user tool to check with the user — present your evaluation (completion + proposed rating + reason) and confirm their take. Adjust based on their reply.',
-      'completion: fully = task completed; partial = work done but unresolved; setback = left things worse (regression/failed approach worth revisiting).',
-      "Only mark a session done when its task is genuinely complete or conclusively stopped — never mark an in-progress/uncertain session done. Recording done=true closes the session's tab (the same close path a user takes, pinned tabs included) to clean up the tab once the host refreshes; a partial/setback review keeps the tab open.",
-      'Pinned tabs (marked 📌 / (pinned) in listOpen) are intentionally kept by the user — leave them alone and do not review or close them unless the user explicitly asks.',
-      'Report a final summary table (session → done/rating/completion) after reviewing all sessions.',
-      'When using multi-reviewer evaluation, pass `reviewerBuckets` (e.g. ["medium","small"]) and `reviewerCount` on setReview so analytics can distinguish multi-reviewer agent reviews from single-shot ones.',
+      'Call `listOpen` first, skip pinned or already-reviewed sessions unless explicitly asked, then use `getTranscript` before judging a session.',
+      'Check the proposed review with the user before `setReview`. Mark done only when work is complete or conclusively stopped; done=true closes the tab.',
+      'Use fully for completed work, partial for unresolved work, and setback only when the session left things worse. Include reviewer provenance only when reviewers actually contributed.',
+      'Report a concise final summary after processing the requested sessions.',
     ],
     parameters: sessionReviewSchema,
 

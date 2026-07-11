@@ -19,6 +19,8 @@ export interface SessionTokenUsageSummary {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  /** Sum of provider-reported reasoning tokens (a subset of `outputTokens`). */
+  reasoningTokens: number;
   /** Number of assistant turns that contributed usage data. */
   reportedTurnCount: number;
   /** Usage from the most recent assistant turn that reported it. */
@@ -31,6 +33,7 @@ export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenU
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
   let totalTokens = 0;
+  let reasoningTokens = 0;
   let reportedTurnCount = 0;
   let lastTurn: AssistantUsage | null = null;
 
@@ -42,6 +45,7 @@ export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenU
     cacheReadTokens += usage.cacheReadTokens;
     cacheWriteTokens += usage.cacheWriteTokens;
     totalTokens += usage.totalTokens;
+    reasoningTokens += usage.reasoningTokens ?? 0;
     reportedTurnCount += 1;
     lastTurn = usage;
   }
@@ -52,6 +56,7 @@ export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenU
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
+    reasoningTokens,
     reportedTurnCount,
     lastTurn,
   };
@@ -82,6 +87,9 @@ export function buildSessionTokenIndicator(
     `  Input:  ${formatReadableTokens(summary.inputTokens)}`,
     `  Output: ${formatReadableTokens(summary.outputTokens)}`,
   ];
+  if (summary.reasoningTokens > 0) {
+    tooltipLines.push(`  Reasoning (included in output): ${formatReadableTokens(summary.reasoningTokens)}`);
+  }
   if (summary.cacheReadTokens > 0 || summary.cacheWriteTokens > 0) {
     tooltipLines.push(
       `  Cache read:  ${formatReadableTokens(summary.cacheReadTokens)}`,
@@ -610,7 +618,7 @@ export function buildSessionCostIndicator(
     const liveCosts = pricing ? costBreakdownFromUsage(liveEstimate, pricing) : null;
     tooltipLines.push(
       '',
-      `Live turn estimate: ${pricing ? formatCostDetail(liveCost) : 'unavailable (no pricing)'}`,
+      `Live turn estimate: ${pricing ? formatCostDetail(liveCost) : 'unavailable (no pricing)'}`, 
       `  Input:  ${liveCosts ? formatCostDetail(liveCosts.input) : 'unpriced'} (${formatCostTokens(liveEstimate.inputTokens)})`,
       `  Output: ${liveCosts ? formatCostDetail(liveCosts.output) : 'unpriced'} (${formatCostTokens(liveEstimate.outputTokens)})`,
     );

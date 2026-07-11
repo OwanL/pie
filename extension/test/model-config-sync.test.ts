@@ -89,7 +89,7 @@ test('generate() is a pure function: same source + settings => same output', asy
   assert.deepStrictEqual(a, b, 'generate() is not deterministic');
 });
 
-test('settings.json merge preserves the user model choice and overwrites only retry/pruning', async () => {
+test('settings.json merge preserves user-selected chat and pruning models while overwriting retry', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);
   // Synthesize a settings base with extra fields that must survive the merge.
@@ -117,11 +117,11 @@ test('settings.json merge preserves the user model choice and overwrites only re
   assert.equal(merged.defaultModel, 'OLD');
   assert.equal(merged.defaultProvider, 'OLD');
   assert.equal(merged.defaultThinkingLevel, 'OLD');
-  // retry + pruning.{model,provider,thinkingLevel} are re-derived from models.yaml.
+  // Retry is centrally derived, but pruning selection is a runtime user preference.
   assert.deepEqual(merged.retry, (source as { retry: unknown }).retry);
-  assert.equal(pruning.model, (source as { pruning: { model: string } }).pruning.model);
-  assert.equal(pruning.provider, (source as { pruning: { provider: string } }).pruning.provider);
-  assert.equal(pruning.thinkingLevel, (source as { pruning: { thinkingLevel: string } }).pruning.thinkingLevel);
+  assert.equal(pruning.model, 'OLD');
+  assert.equal(pruning.provider, 'OLD');
+  assert.equal(pruning.thinkingLevel, 'OLD');
   // Non-model fields preserved.
   assert.equal(merged.httpIdleTimeoutMs, 999);
   assert.deepEqual(merged.packages, ['npm:foo@1.0.0']);
@@ -138,17 +138,23 @@ test('settings.json ends with a trailing newline (sync-models writes one)', asyn
   assert.ok(text.endsWith('\n'), 'settings.json should end with a trailing newline (sync-models appends \\n to JSON.stringify output)');
 });
 
-test('settings.json merge seeds defaultModel/Provider/ThinkingLevel from models.yaml only when absent', async () => {
+test('settings.json merge seeds user-owned chat and pruning selections only when absent', async () => {
   const mod = await loadSyncModule();
-  const source = mod.loadSource(repoRoot);
-  // A fresh settings base lacking the user-owned model keys gets them seeded
-  // from models.yaml `defaults`; present values are kept as-is.
+  const source = mod.loadSource(repoRoot) as {
+    defaults: { model: string; provider: string; thinkingLevel: string };
+    pruning: { model: string; provider: string; thinkingLevel: string };
+  };
   const base = {
     retry: { enabled: false, maxRetries: 0, baseDelayMs: 0, provider: { maxRetries: 0, maxRetryDelayMs: 0 } },
-    pruning: { model: 'x', provider: 'x', thinkingLevel: 'low' },
+    pruning: { tools: { ceiling: 7 } },
   };
   const merged = mod.generate(source, base).settingsJson as Record<string, unknown>;
-  assert.equal(merged.defaultModel, (source as { defaults: { model: string } }).defaults.model);
-  assert.equal(merged.defaultProvider, (source as { defaults: { provider: string } }).defaults.provider);
-  assert.equal(merged.defaultThinkingLevel, (source as { defaults: { thinkingLevel: string } }).defaults.thinkingLevel);
+  const pruning = merged.pruning as Record<string, unknown>;
+  assert.equal(merged.defaultModel, source.defaults.model);
+  assert.equal(merged.defaultProvider, source.defaults.provider);
+  assert.equal(merged.defaultThinkingLevel, source.defaults.thinkingLevel);
+  assert.equal(pruning.model, source.pruning.model);
+  assert.equal(pruning.provider, source.pruning.provider);
+  assert.equal(pruning.thinkingLevel, source.pruning.thinkingLevel);
+  assert.deepEqual(pruning.tools, { ceiling: 7 });
 });

@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { memo } from 'preact/compat';
+import { lazy, memo, Suspense } from 'preact/compat';
 import type {
   ViewState,
   ChatMessage,
@@ -10,7 +10,6 @@ import type {
 } from '../../shared/protocol';
 import { FileChangesPanel } from './file-changes-panel';
 import { LoadingIndicator } from './components/loading-indicator';
-import { TranscriptHost } from './transcript/transcript-host';
 import type { PanelSurface } from './panel-state';
 import type { AppHandlers } from './use-app-handlers';
 
@@ -43,6 +42,16 @@ export interface PanelMainProps {
   /** Wired to the agent-reply pruning chip's Cancel button (Brief F). */
   onCancelPrepass: () => void;
 }
+
+// Transcript rendering pulls in markdown sanitizing, syntax grammars, YAML,
+// and the virtualizer. Keep that large dependency graph out of the entry chunk
+// so the tab/session chrome can paint while the transcript chunk is fetched and
+// parsed. Vite caches the module after its first load, so tab switches do not
+// repeat the network or module-evaluation cost.
+const TranscriptHost = lazy(async () => {
+  const module = await import('./transcript/transcript-host');
+  return { default: module.TranscriptHost };
+});
 
 export const PanelMain = memo(function PanelMain({
   panelSurface,
@@ -105,6 +114,7 @@ export const PanelMain = memo(function PanelMain({
           <LoadingIndicator status={loadingStatus} />
         </div>
       ) : (
+        <Suspense fallback={<div class="empty-state empty-state--loading"><LoadingIndicator status="Loading conversation" /></div>}>
         <TranscriptHost
           openTabPaths={openTabPaths}
           activeSessionPath={activeSessionPath}
@@ -129,6 +139,7 @@ export const PanelMain = memo(function PanelMain({
           postMessage={postMessage}
           onCancelPrepass={onCancelPrepass}
         />
+        </Suspense>
       )}
       </div>
     </div>

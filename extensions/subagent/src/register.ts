@@ -26,7 +26,7 @@ import { SubagentParams, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../sche
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 
-const THINKING_LEVEL_HINT = "Optional thinkingLevel: 'minimal', 'low', 'medium', 'high', 'xhigh'.";
+const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, high, or xhigh.";
 const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
 
 /** Root of the pi-config repo, resolved from this extension's known position.
@@ -51,11 +51,9 @@ function buildDescription(disabled = false): string {
 	}
 
 	const lines = [
-		"Delegate tasks to specialized subagents with isolated context.",
-		"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-		'The "agent" field must be an exact discovered agent name, not a scope keyword like "user", "project", or "both".',
-		"Agents are discovered from the user scope (~/.pi/agent/agents, or PI_CODING_AGENT_DIR) and project-local agents/ dirs (nearest agents/ walking up from the cwd). If no user-scope agents are configured, project agents are used automatically.",
-		'Pass agentScope: "user", "project", or "both" to control the discovery scope explicitly.',
+		"Delegate a concrete task to a specialized agent with isolated context.",
+		"Use single mode normally, parallel only for independent tasks, or chain when one result feeds the next through {previous}.",
+		'The agent field must be an exact discovered name; agentScope ("user", "project", or "both") separately controls discovery.',
 		BUCKET_GUIDANCE,
 	];
 
@@ -80,12 +78,12 @@ function buildPromptSnippet(disabled = false): string {
 		const agents = discoverAgentsForDescription();
 		if (agents.length > 0) {
 			const names = agents.map((a) => a.name).join(", ");
-			return `Delegate tasks to specialized subagents with isolated context. Available agents: ${names}. Subagents can delegate further to keep contexts focused. ${BUCKET_GUIDANCE}`;
+			return `Delegate concrete, separable work to an isolated agent. Available agents: ${names}. ${BUCKET_GUIDANCE}`;
 		}
 	} catch {
 		/* ignore */
 	}
-	return `Delegate tasks to specialized subagents with isolated context. Subagents can delegate further to keep contexts focused. ${BUCKET_GUIDANCE}`;
+	return `Delegate concrete, separable work to an isolated agent. ${BUCKET_GUIDANCE}`;
 }
 
 /** Check whether subagent execution is disabled via flag or env var. */

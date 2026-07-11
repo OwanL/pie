@@ -626,8 +626,10 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   }));
 
   assert.match(fallbackHtml, /tool-call-subagent/);
-  assert.match(fallbackHtml, /reviewer: Inspect regression/);
-  assert.doesNotMatch(fallbackHtml, /subagent-agent-name/);
+  assert.match(fallbackHtml, /subagent-agent-name/);
+  assert.match(fallbackHtml, /reviewer/);
+  assert.match(fallbackHtml, /status-chip-failed/);
+  assert.match(fallbackHtml, /Subagent failed before reporting child results/);
 
   const parallelHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({

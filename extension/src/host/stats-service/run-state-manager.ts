@@ -163,6 +163,7 @@ export class SessionRunStateManager {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      auxiliaryLlmUsage: [],
       tokenReportedTurnCount: 0,
       lastTurnUsage: null,
       turnThroughputSamples: [],

@@ -221,6 +221,21 @@ test('steady streaming growth: auto-follow stays engaged and tracks the bottom',
   }
 });
 
+test('manual scroll-up stops the follow rAF even while the agent is busy', () => {
+  mountProbe(true);
+  settle();
+
+  scrollTopValue -= 100;
+  el.dispatchEvent(new Event('scroll'));
+  assert.equal(capture.r!.autoFollowRef.current, false, 'manual upward movement disengages follow');
+
+  // Flush the one callback scheduled by the restarted effect. It must not
+  // enqueue another merely because busy=true; that no-op 60fps loop made
+  // manual scrolling compete for main-thread time during active turns.
+  act(() => flushFrames(1));
+  assert.equal(rafMap.size, 0, 'no follow frame remains queued while scrolled up');
+});
+
 test('large burst growth (>snap threshold): auto-follow snaps and stays engaged', () => {
   mountProbe(true);
   settle();

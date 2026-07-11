@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../src/backend/session-event-handler';
+import {
+  handleSdkSessionEvent,
+  summarizeToolResult,
+  type BackendSessionEventHandlerDeps,
+} from '../src/backend/session-event-handler';
 import type { SdkSessionEvent } from '../src/backend/sdk';
 import type { SessionContext } from '../src/backend/server-types';
 
@@ -186,6 +190,19 @@ test('streaming deltas and tool progress do not recompute context usage (avoids 
     },
   } as SdkSessionEvent);
   assert.ok(getContextUsageChangedCount() > beforeDeltas, 'message_end recomputes context usage');
+});
+
+test('failed tool summaries include a bounded sanitized reason and result shape', () => {
+  const summary = summarizeToolResult({
+    content: [{ type: 'text', text: 'spawn failed: api_key=super-secret\nCommand exited with code 2' }],
+    details: { exitCode: 2 },
+  });
+  assert.deepEqual(summary, {
+    resultType: 'object',
+    resultLen: 126,
+    resultKeys: ['content', 'details'],
+    errorSummary: 'spawn failed: api_key=[redacted] Command exited with code 2',
+  });
 });
 
 test('tool execution events emit progress only when an active assistant message exists', () => {

@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Standalone local analytics transforms and dashboard build for pie run analytics.",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.16.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

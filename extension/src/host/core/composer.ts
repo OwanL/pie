@@ -10,7 +10,7 @@ import type {
 } from '../../shared/protocol';
 import { modelSupportsInputKind } from './model-capability';
 import type { GetArchState } from './model-capability';
-import { ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_INPUT_BYTES } from '../../shared/image-constraints';
+import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../../shared/image-constraints';
 
 import type { Event } from './events';
 
@@ -65,6 +65,21 @@ export function validateAndMaterializeComposerInput(
     }
     if (inputDraft.sizeBytes > MAX_IMAGE_INPUT_BYTES) {
       dispatchArchEvent({ kind: 'NoticeShown', notice: `Cannot attach image: exceeds the ${MAX_IMAGE_INPUT_BYTES} byte limit.` });
+      scheduleRender();
+      return null;
+    }
+    if (decodedBase64ByteLength(inputDraft.dataBase64) > MAX_IMAGE_INPUT_BYTES) {
+      dispatchArchEvent({ kind: 'NoticeShown', notice: `Cannot attach image: decoded data exceeds the ${MAX_IMAGE_INPUT_BYTES} byte limit.` });
+      scheduleRender();
+      return null;
+    }
+    const existingImageBytes = (getArchState().composer.pendingComposerInputsBySession[sessionPath] ?? [])
+      .reduce((total, input) => total + (input.kind === 'imageBlob'
+        ? Math.max(input.sizeBytes, decodedBase64ByteLength(input.dataBase64))
+        : 0), 0);
+    const rawInputBytes = Math.max(inputDraft.sizeBytes, decodedBase64ByteLength(inputDraft.dataBase64));
+    if (existingImageBytes + rawInputBytes > MAX_AGGREGATE_IMAGE_INPUT_BYTES) {
+      dispatchArchEvent({ kind: 'NoticeShown', notice: `Cannot attach image: aggregate image size exceeds the ${MAX_AGGREGATE_IMAGE_INPUT_BYTES} byte limit.` });
       scheduleRender();
       return null;
     }

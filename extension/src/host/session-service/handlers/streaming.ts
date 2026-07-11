@@ -247,6 +247,7 @@ export function onQueuedDelivered(payload: QueuedDeliveredPayload, deps: Handler
     kind: 'QueuedDelivered',
     sessionPath,
     text: payload.text,
+    localId: payload.localId,
   });
 }
 

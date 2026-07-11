@@ -9,10 +9,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { JSDOM } from 'jsdom';
 
-import { installDom } from './_helpers/dom';
-
-installDom();
+// DOMPurify explicitly supports jsdom for server-side sanitization. happy-dom
+// is used by the component suite, but its HTML parser currently strips benign
+// wrapper elements while retaining <script>, making a sanitizer test both
+// misleading and unsafe. Keep this security-sensitive seam on the supported
+// DOM implementation.
+const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost' });
+for (const [key, value] of Object.entries({
+  window: dom.window,
+  document: dom.window.document,
+  navigator: dom.window.navigator,
+  Node: dom.window.Node,
+  Element: dom.window.Element,
+  HTMLElement: dom.window.HTMLElement,
+})) {
+  Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+}
 
 async function readTranscriptCss() {
   return readFile(new URL('../src/webview/panel/styles/transcript.css', import.meta.url), 'utf8');

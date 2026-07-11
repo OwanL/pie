@@ -47,6 +47,21 @@ function parseRequestClass(value: string | undefined | null): ProviderGateReques
 	return 'default';
 }
 
+/** Parse an HTTP `Retry-After` header into seconds. Accepts either a non-negative
+ *  integer (delta seconds) or an HTTP-date (absolute); returns `undefined` for
+ *  an absent/unparseable header. Shared by the account-suspension fallback and
+ *  the transient 429 path so both honour the same server-directed backoff. */
+function parseRetryAfterSeconds(header: string | null | undefined): number | undefined {
+	if (!header) return undefined;
+	const n = Number(header);
+	if (Number.isFinite(n)) return n;
+	const httpDate = Date.parse(header);
+	if (Number.isFinite(httpDate)) {
+		return Math.max(1, Math.ceil((httpDate - Date.now()) / 1000));
+	}
+	return undefined;
+}
+
 /** Per-provider concurrency configuration. */
 export interface ProviderConcurrencyConfig {
 	/** Provider name (matches the `providers.<name>` key in models.json). */
@@ -69,6 +84,18 @@ export interface ProviderConcurrencyConfig {
 	 *  cannot hold a concurrency slot indefinitely. 0 = use the gate-wide
 	 *  default (passed to `install`). */
 	headerWaitSeconds?: number;
+	/** Consecutive transient failures (5xx / transport / header timeout /
+	 *  rate-limit-without-Retry-After) that trip the transient circuit breaker
+	 *  into the OPEN state. Defaults to 3. 0 disables the transient breaker
+	 *  (failures still surface to the caller, but no shared open/probe). */
+	breakerFailureThreshold?: number;
+	/** Base cooldown (seconds) the transient breaker stays OPEN after tripping.
+	 *  Doubles on each consecutive open (exponential backoff), capped by
+	 *  `breakerMaxOpenSeconds`. Defaults to 30. */
+	breakerOpenSeconds?: number;
+	/** Hard cap (seconds) on the transient breaker OPEN cooldown — bounds both
+	 *  the exponential backoff and a server-directed Retry-After. Defaults to 300. */
+	breakerMaxOpenSeconds?: number;
 }
 
 /** Per-provider live metrics (for the status bar / aggregate stats). */
@@ -90,6 +117,17 @@ export interface ProviderGateMetrics {
 	pausedUntilMs: number;
 	/** Consecutive pause events (backoff escalation count). */
 	strikeCount: number;
+	/** Transient circuit-breaker state. `closed` = healthy; `open` = short-
+	 *  circuiting requests until the cooldown elapses; `half-open` = a single
+	 *  probe request is admitted to test recovery. Distinct from `paused`
+	 *  (which reflects the hard, body-driven account-suspension breaker). */
+	breakerState: 'closed' | 'open' | 'half-open';
+	/** Epoch-ms until which the transient breaker is OPEN (0 when closed/half-open). */
+	breakerOpenUntilMs: number;
+	/** Consecutive transient failures since the last success (reset on close). */
+	transientFailures: number;
+	/** True when a half-open probe request is in flight (only one at a time). */
+	breakerProbeInFlight: boolean;
 }
 
 /** Per-provider circuit-breaker state (account-pause detection). */
@@ -98,6 +136,28 @@ interface AccountPauseState {
 	pausedUntil: number;
 	/** Number of consecutive pause events (for backoff escalation). */
 	strikeCount: number;
+}
+
+/** Per-provider transient circuit-breaker state. Distinct from the account-
+ *  pause breaker (a hard, body-driven suspension window with a known
+ *  reactivation timestamp): this breaker trips on bounded transient failures
+ *  (5xx bursts, transport errors, header timeouts, rate-limit 429s) and
+ *  recovers via a half-open probe so a provider-wide outage does not cause a
+ *  retry storm across parallel children. See `HANDOFF_SUBAGENT_PROVIDER_
+ *  RESILIENCE.md` §E (provider circuit breaking and failover). */
+interface TransientBreakerState {
+	status: 'closed' | 'open' | 'half-open';
+	/** Epoch-ms until which the breaker is OPEN (0 when closed/half-open). */
+	openUntil: number;
+	/** Consecutive transient failures since the last success (reset on close). */
+	consecutiveFailures: number;
+	/** True when a half-open probe request is in flight (only one at a time). */
+	probeInFlight: boolean;
+	/** Consecutive OPEN events (for exponential backoff). Reset on a successful
+	 *  close (probe success). */
+	openCount: number;
+	/** Reason the breaker last opened (for metrics/error text). */
+	reason: string;
 }
 
 /** A concurrency slot with optional afterburn sticky-hold. */
@@ -129,10 +189,31 @@ class ProviderPool {
 	readonly queueWaitMs: number;
 	private waiters: QueuedWaiter[] = [];
 	private circuitBreaker: AccountPauseState = { pausedUntil: 0, strikeCount: 0 };
+	/** Transient circuit breaker (5xx/transport/header/rate-limit). Separate
+	 *  from `circuitBreaker` (account suspension) — see `TransientBreakerState`. */
+	private transient: TransientBreakerState = {
+		status: 'closed',
+		openUntil: 0,
+		consecutiveFailures: 0,
+		probeInFlight: false,
+		openCount: 0,
+		reason: '',
+	};
 	/** Monotonic enqueue counter — preserves FIFO within a priority band. */
 	private waiterSeq = 0;
+	readonly breakerThreshold: number;
+	readonly breakerOpenMs: number;
+	readonly breakerMaxOpenMs: number;
 
-	constructor(readonly provider: string, readonly maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number) {
+	constructor(
+		readonly provider: string,
+		readonly maxConcurrent: number,
+		afterburnSeconds: number,
+		queueWaitSeconds: number,
+		breakerFailureThreshold?: number,
+		breakerOpenSeconds?: number,
+		breakerMaxOpenSeconds?: number,
+	) {
 		this.slots = Array.from({ length: Math.max(1, maxConcurrent) }, (_, i) => ({
 			index: i,
 			inFlight: false,
@@ -141,6 +222,10 @@ class ProviderPool {
 		}));
 		this.afterburnMs = Math.max(0, afterburnSeconds) * 1000;
 		this.queueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+		this.breakerThreshold = Math.max(0, breakerFailureThreshold ?? 3);
+		this.breakerOpenMs = Math.max(0, (breakerOpenSeconds ?? 30)) * 1000;
+		const maxOpenS = Math.max(0, breakerMaxOpenSeconds ?? 300);
+		this.breakerMaxOpenMs = Math.max(this.breakerOpenMs, maxOpenS * 1000);
 	}
 
 	get activeRequests(): number {
@@ -199,6 +284,139 @@ class ProviderPool {
 		if (this.circuitBreaker.strikeCount > 0) {
 			this.circuitBreaker = { pausedUntil: 0, strikeCount: 0 };
 		}
+	}
+
+	// ── Transient circuit breaker (5xx / transport / header / rate-limit) ──────
+
+	/** Admit a request through the transient breaker. Returns `null` if the
+	 *  request may proceed (and marks a probe in flight if it transitioned
+	 *  open→half-open); otherwise returns the ms the caller should wait before
+	 *  retrying — the breaker is OPEN and short-circuiting, or a half-open probe
+	 *  is already in flight.
+	 *
+	 *  Called before a concurrency slot is acquired so a blocked request does
+	 *  not consume a slot or queue behind healthy traffic. */
+	admitTransient(): number | null {
+		const t = this.transient;
+		if (t.status === 'closed') return null;
+		const now = Date.now();
+		if (t.status === 'open') {
+			if (now < t.openUntil) return t.openUntil - now;
+			// Cooldown elapsed → admit a single probe to test recovery.
+			t.status = 'half-open';
+			t.probeInFlight = true;
+			return null;
+		}
+		// half-open
+		if (t.probeInFlight) {
+			// Another probe is already testing the provider — block this one
+			// with a short wait so callers back off until the probe resolves.
+			return Math.min(this.breakerOpenMs, 1000);
+		}
+		t.probeInFlight = true;
+		return null;
+	}
+
+	/** Record a successful response. Closes the breaker if a probe was in
+	 *  flight; otherwise just resets the consecutive-failure streak (a success
+	 *  breaks the failure chain in the closed state). */
+	recordTransientSuccess(): void {
+		const t = this.transient;
+		if (t.status === 'half-open' && t.probeInFlight) {
+			this.transient = {
+				status: 'closed',
+				openUntil: 0,
+				consecutiveFailures: 0,
+				probeInFlight: false,
+				openCount: 0,
+				reason: '',
+			};
+			return;
+		}
+		if (t.status === 'closed') {
+			t.consecutiveFailures = 0;
+		}
+	}
+
+	/** Record a transient failure. Trips the breaker OPEN when the consecutive
+	 *  failure count reaches the threshold, or immediately when the server
+	 *  directed a backoff via Retry-After (429) — respecting that guidance
+	 *  provider-wide so parallel children do not storm a throttled provider.
+	 *  If a probe was in flight, re-opens with escalated backoff. */
+	recordTransientFailure(opts: { reason: string; retryAfterSeconds?: number }): void {
+		const t = this.transient;
+		const now = Date.now();
+
+		if (t.status === 'half-open' && t.probeInFlight) {
+			// Probe failed → re-open with backoff (or Retry-After if larger).
+			t.probeInFlight = false;
+			t.consecutiveFailures++;
+			this.openTransient(now, opts.reason, opts.retryAfterSeconds);
+			return;
+		}
+
+		if (t.status === 'closed') {
+			t.consecutiveFailures++;
+			// 429 with Retry-After: respect the server-directed backoff → open now.
+			if (opts.retryAfterSeconds !== undefined) {
+				this.openTransient(now, opts.reason, opts.retryAfterSeconds);
+				return;
+			}
+			if (this.breakerThreshold > 0 && t.consecutiveFailures >= this.breakerThreshold) {
+				this.openTransient(now, opts.reason, undefined);
+			}
+			return;
+		}
+
+		// status === 'open' — a request only reaches the fetch path when the
+		// breaker is closed or a probe is in flight (handled above). Defensively
+		// extend the cooldown if a Retry-After was given so a later signal never
+		// shrinks the open window.
+		if (opts.retryAfterSeconds !== undefined) {
+			const candidate = now + Math.min(Math.max(1, opts.retryAfterSeconds) * 1000, this.breakerMaxOpenMs);
+			if (candidate > t.openUntil) t.openUntil = candidate;
+		}
+	}
+
+	/** Transition the breaker to OPEN with a cooldown. Honours a server-directed
+	 *  `retryAfterSeconds` directly (clamped to the max); otherwise applies
+	 *  exponential backoff `baseOpenMs * 2^(openCount-1)`, capped. Keeps the
+	 *  LONGER of the new cooldown and any existing window so repeated opens
+	 *  never shrink the backoff. */
+	private openTransient(now: number, reason: string, retryAfterSeconds: number | undefined): void {
+		const t = this.transient;
+		t.status = 'open';
+		t.reason = reason;
+		t.openCount++;
+		let cooldownMs: number;
+		if (retryAfterSeconds !== undefined) {
+			cooldownMs = Math.min(Math.max(1, retryAfterSeconds) * 1000, this.breakerMaxOpenMs);
+		} else {
+			const exp = t.openCount - 1;
+			cooldownMs = Math.min(this.breakerOpenMs * 2 ** exp, this.breakerMaxOpenMs);
+		}
+		const candidate = now + cooldownMs;
+		if (candidate > t.openUntil) t.openUntil = candidate;
+	}
+
+	/** Epoch-ms until which the transient breaker is OPEN (0 when not open). */
+	transientOpenUntilMs(): number {
+		return this.transient.openUntil;
+	}
+
+	/** Current transient breaker status (for metrics). */
+	transientStatus(): 'closed' | 'open' | 'half-open' {
+		return this.transient.status;
+	}
+
+	/** Consecutive transient failures since the last success (for metrics). */
+	transientFailureCount(): number {
+		return this.transient.consecutiveFailures;
+	}
+
+	/** True when a half-open probe is in flight (for metrics). */
+	transientProbeInFlight(): boolean {
+		return this.transient.probeInFlight;
 	}
 
 	private now(): number {
@@ -400,6 +618,46 @@ export class ProviderGateHeaderTimeoutError extends Error {
 	}
 }
 
+/** Raised when the transient circuit breaker is OPEN (or a half-open probe is
+ *  already in flight) and short-circuits a request before it acquires a slot.
+ *  This is a retryable condition — the SDK retry classifier matches `503` /
+ *  `service unavailable` in the message, so the turn backs off and retries
+ *  once the breaker recovers (via a half-open probe). `retryAfterMs` carries
+ *  the breaker's remaining cooldown for callers that honour an explicit backoff.
+ *  Distinct from `ProviderGatePauseError` (the hard, body-driven account-
+ *  suspension breaker): a transient open recovers via a probe, not a fixed
+ *  reactivation timestamp. */
+export class ProviderGateTransientPauseError extends Error {
+	readonly isRetryable = true;
+	readonly httpStatus = 503;
+	constructor(provider: string, retryAfterMs: number) {
+		const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+		super(
+			`Provider "${provider}" circuit breaker open (503 service unavailable): too many recent transient failures. Retry after ~${seconds}s.`,
+		);
+		this.name = 'ProviderGateTransientPauseError';
+	}
+}
+
+/** Raised for authentication / permission failures (HTTP 401, or 403 that is
+ *  NOT an account suspension). Actionable and NON-retriable: the SDK retry
+ *  classifier does not match its message (no `429`/`5xx`/`rate limit`/
+ *  `timeout`/`connection` triggers), so the turn surfaces the error immediately
+ *  instead of retrying the same bad credentials. Does NOT trip the transient
+ *  circuit breaker — a credential/permission problem is not a provider outage,
+ *  and suppressing it behind an open breaker would hide the actionable cause. */
+export class ProviderGateAuthError extends Error {
+	readonly isRetryable = false;
+	readonly httpStatus: number;
+	constructor(provider: string, status: number) {
+		super(
+			`Provider "${provider}" rejected the request: authentication or permission failed (HTTP ${status}). Check the API key and provider account permissions.`,
+		);
+		this.name = 'ProviderGateAuthError';
+		this.httpStatus = status;
+	}
+}
+
 // ── Provider Gate (singleton) ─────────────────────────────────────────────────
 
 /**
@@ -560,6 +818,9 @@ export class ProviderGate {
 				cfg.maxConcurrentRequests,
 				cfg.afterburnSeconds ?? 0,
 				cfg.queueWaitSeconds ?? 30,
+				cfg.breakerFailureThreshold,
+				cfg.breakerOpenSeconds,
+				cfg.breakerMaxOpenSeconds,
 			);
 			const headerWaitMs = (cfg.headerWaitSeconds ?? 0) > 0
 				? cfg.headerWaitSeconds! * 1000
@@ -646,6 +907,15 @@ export class ProviderGate {
 			throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 		}
 
+		// Transient circuit breaker: short-circuit if OPEN (or a probe is in
+		// flight). A non-null return is the ms the caller should back off for.
+		// Admitting a probe transitions open→half-open and is marked in flight
+		// so concurrent requests block until the probe resolves.
+		const transientBlockMs = pool.admitTransient();
+		if (transientBlockMs !== null) {
+			throw new ProviderGateTransientPauseError(config.provider, transientBlockMs);
+		}
+
 		// Acquire a concurrency slot.
 		const slotIndex = await pool.acquire(sessionId, signal, requestClass);
 
@@ -664,13 +934,51 @@ export class ProviderGate {
 				return pauseInfo.reconstructed;
 			}
 
-			// Non-OK response — release slot and return.
+			// Auth / permission failure (401, or 403 that is NOT a suspension).
+			// Actionable + non-retried; does not trip the transient breaker
+			// (a credential problem is not a provider outage). Slot release is
+			// handled by the catch below.
+			if (response.status === 401 || response.status === 403) {
+				throw new ProviderGateAuthError(config.provider, response.status);
+			}
+
+			// Transient 429 rate-limit (non-suspension).
+			if (response.status === 429) {
+				const retryAfter = parseRetryAfterSeconds(response.headers.get('retry-after'));
+				if (retryAfter !== undefined) {
+					// Respect the server-directed backoff: open the transient
+					// breaker for the Retry-After window so parallel children (and
+					// an over-eager SDK retry) back off. The 429 response is still
+					// returned so the SDK applies its own retry policy; the open
+					// breaker enforces the backoff across the process regardless.
+					pool.recordTransientFailure({ reason: '429 rate limit (Retry-After)', retryAfterSeconds: retryAfter });
+					pool.release(slotIndex, sessionId, false);
+					return response;
+				}
+				// No Retry-After — feed the counter; the SDK retries per its
+				// own policy, and a tripped breaker short-circuits later attempts.
+				pool.recordTransientFailure({ reason: '429 rate limit (no Retry-After)' });
+				pool.release(slotIndex, sessionId, false);
+				return response;
+			}
+
+			// 5xx burst / 408 Request Timeout — transient. Feed the counter and
+			// return the response so the SDK can retry; a tripped breaker will
+			// short-circuit the SDK's next attempt (storm prevention).
+			if (response.status >= 500 || response.status === 408) {
+				pool.recordTransientFailure({ reason: `HTTP ${response.status}` });
+				pool.release(slotIndex, sessionId, false);
+				return response;
+			}
+
+			// Other non-OK 4xx — not breaker-relevant. Release and return.
 			if (!response.ok) {
 				pool.release(slotIndex, sessionId, false);
 				return response;
 			}
 
-			// Success.
+			// Success (2xx).
+			pool.recordTransientSuccess();
 			pool.clearPause();
 
 			// If the response has a body, wrap it to release the slot on
@@ -683,6 +991,22 @@ export class ProviderGate {
 			pool.release(slotIndex, sessionId, true);
 			return response;
 		} catch (error) {
+			// Header-timeout and transport failures are transient — feed the
+			// breaker (re-opens if a probe was in flight). User aborts and the
+			// auth/account-pause/transient-pause errors thrown above are NOT
+			// transient failures and must not move the breaker.
+			if (
+				!(error instanceof ProviderGateAbortError) &&
+				!(error instanceof ProviderGateAuthError) &&
+				!(error instanceof ProviderGatePauseError) &&
+				!(error instanceof ProviderGateTransientPauseError)
+			) {
+				if (error instanceof ProviderGateHeaderTimeoutError) {
+					pool.recordTransientFailure({ reason: 'header timeout' });
+				} else {
+					pool.recordTransientFailure({ reason: 'transport error' });
+				}
+			}
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
@@ -811,18 +1135,7 @@ export class ProviderGate {
 
 		// Fallback to the HTTP Retry-After header (seconds or HTTP-date).
 		if (retryAfterSeconds === undefined) {
-			const ra = response.headers.get('retry-after');
-			if (ra) {
-				const n = Number(ra);
-				if (Number.isFinite(n)) {
-					retryAfterSeconds = n;
-				} else {
-					const httpDate = Date.parse(ra);
-					if (Number.isFinite(httpDate)) {
-						retryAfterSeconds = Math.max(1, Math.ceil((httpDate - Date.now()) / 1000));
-					}
-				}
-			}
+			retryAfterSeconds = parseRetryAfterSeconds(response.headers.get('retry-after'));
 		}
 
 		// Final fallback: bounded cooldown.
@@ -943,6 +1256,10 @@ export class ProviderGate {
 				paused: entry.pool.isPaused(),
 				pausedUntilMs: entry.pool.pausedUntilMs(),
 				strikeCount: entry.pool.strikeCount(),
+				breakerState: entry.pool.transientStatus(),
+				breakerOpenUntilMs: entry.pool.transientOpenUntilMs(),
+				transientFailures: entry.pool.transientFailureCount(),
+				breakerProbeInFlight: entry.pool.transientProbeInFlight(),
 			});
 		}
 		return result.sort((a, b) => a.provider.localeCompare(b.provider));
@@ -961,6 +1278,9 @@ export class ProviderGate {
 					afterburnSeconds?: number;
 					queueWaitSeconds?: number;
 					headerWaitSeconds?: number;
+					breakerFailureThreshold?: number;
+					breakerOpenSeconds?: number;
+					breakerMaxOpenSeconds?: number;
 				};
 			}>;
 		},
@@ -978,6 +1298,9 @@ export class ProviderGate {
 				afterburnSeconds: cc.afterburnSeconds ?? 0,
 				queueWaitSeconds: cc.queueWaitSeconds ?? 30,
 				headerWaitSeconds: cc.headerWaitSeconds,
+				breakerFailureThreshold: cc.breakerFailureThreshold,
+				breakerOpenSeconds: cc.breakerOpenSeconds,
+				breakerMaxOpenSeconds: cc.breakerMaxOpenSeconds,
 			});
 		}
 		return configs;

@@ -150,10 +150,11 @@ for (const config of PACKAGE_CONFIGS) {
 }
 
 function printHelp() {
-  console.log(`Usage: npm run test -- [--package <id>] [--list]\n\n` +
+  console.log(`Usage: npm run test -- [--package <id>] [--fast] [--list]\n\n` +
     `Runs package tests in isolation with concise output and package-level coverage gates.\n\n` +
     `Options:\n` +
     `  --package <id>   Run only the selected package. Repeatable.\n` +
+    `  --fast           Developer loop: parallel test files, skip coverage collection/gates.\n` +
     `  --list           Print available package ids.\n` +
     `  --help           Show this help.\n`);
 }
@@ -170,6 +171,7 @@ function parseArgs(argv) {
   const selected = [];
   let listOnly = false;
   let helpOnly = false;
+  let fast = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -179,6 +181,10 @@ function parseArgs(argv) {
     }
     if (arg === '--list') {
       listOnly = true;
+      continue;
+    }
+    if (arg === '--fast') {
+      fast = true;
       continue;
     }
     if (arg === '--package') {
@@ -197,7 +203,7 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  return { selected, listOnly, helpOnly };
+  return { selected, listOnly, helpOnly, fast };
 }
 
 function resolveSelectedPackages(selectedIds) {
@@ -309,7 +315,7 @@ function summarizeCoverageFailures(config, coverage) {
   return failures;
 }
 
-function buildTestArgs(config) {
+function buildTestArgs(config, fast = false) {
   // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
   // resolution / path aliases. Only the subagent package sets this today: its
   // schema test needs the `paths` aliases in extensions/subagent/tsconfig.json
@@ -320,7 +326,10 @@ function buildTestArgs(config) {
     'tsx',
     ...tsxConfigArgs,
     '--test',
-    '--test-concurrency=1',
+    // Full verification is serialized for deterministic shared-env fixtures.
+    // Fast mode lets node:test parallelize independent test files, which is
+    // substantially quicker for the 2k+ extension suite.
+    ...(fast ? [] : ['--test-concurrency=1']),
     // Some test files leave an unreferenced handle (a lingering timer /
     // interval / abort controller in an imported module's top-level scope)
     // that keeps the event loop alive after every test has resolved. Node's
@@ -331,9 +340,9 @@ function buildTestArgs(config) {
     // backend-session-event-handler.test.ts 63s -> 3s). It does not mask
     // failures — tests already pass/fail before the hang.
     '--test-force-exit',
-    '--experimental-test-coverage',
+    ...(fast ? [] : ['--experimental-test-coverage']),
     `--test-reporter=${reporterSpecifier}`,
-    ...config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`),
+    ...(fast ? [] : config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`)),
     ...config.testGlobs,
   ];
 }
@@ -413,14 +422,14 @@ function runChildProcess(command, args, cwd) {
   });
 }
 
-async function runPackage(config) {
-  const args = buildTestArgs(config);
+async function runPackage(config, fast = false) {
+  const args = buildTestArgs(config, fast);
   const rawResult = await runChildProcess(npxCommand, args, config.cwd);
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
   const coverage = report?.coverage ?? null;
   const failures = report?.failures ?? [];
-  const coverageFailures = summarizeCoverageFailures(config, coverage);
+  const coverageFailures = fast ? [] : summarizeCoverageFailures(config, coverage);
 
   const hasTestFailures = Boolean(summary && (!summary.success || (summary.counts?.failed ?? 0) > 0 || failures.length > 0));
   const hasInfrastructureFailure = !summary || rawResult.signal !== null || (rawResult.exitCode !== 0 && !hasTestFailures);
@@ -528,7 +537,7 @@ async function main() {
     return;
   }
 
-  const results = await Promise.all(selectedPackages.map((config) => runPackage(config)));
+  const results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast)));
   for (const result of results) {
     printPackageResult(result);
   }

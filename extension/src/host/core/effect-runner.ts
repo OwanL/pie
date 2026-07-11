@@ -49,6 +49,8 @@ import type {
   DrainBackendReadyQueueEffect,
   StartBackendReadyWatchdogEffect,
   CancelBackendReadyWatchdogEffect,
+  StartQueuedDwellWatchdogEffect,
+  CancelQueuedDwellWatchdogEffect,
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
@@ -317,6 +319,9 @@ export class EffectRunner {
    * cleared by `CancelBackendReadyWatchdog` / `DrainBackendReadyQueue` / fire. */
   private backendReadyWatchdog: TimerHandle | null = null;
 
+  /** Per-message queued dwell watchdogs, keyed by optimistic localId. */
+  private queuedDwellWatchdogs = new Map<string, TimerHandle>();
+
   /** Per-corrId in-flight send/edit context: the post-ack send-timer + the
    *  abort controller (Brief E cancels an in-flight `message.send` on
    *  interrupt). Keyed by corrId, with a `sessionPath → corrId` index for
@@ -395,6 +400,8 @@ export class EffectRunner {
       DrainBackendReadyQueue: (e) => this.handleDrainBackendReadyQueue(e),
       StartBackendReadyWatchdog: (e) => this.handleStartBackendReadyWatchdog(e),
       CancelBackendReadyWatchdog: (e) => this.handleCancelBackendReadyWatchdog(e),
+      StartQueuedDwellWatchdog: (e) => this.handleStartQueuedDwellWatchdog(e),
+      CancelQueuedDwellWatchdog: (e) => this.handleCancelQueuedDwellWatchdog(e),
       // ── Send-timer (Brief B): clear the post-ack send-timer at the commit
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
@@ -546,11 +553,17 @@ export class EffectRunner {
     const { backend, queues, dispatch, service } = this.deps;
     void queues.enqueueLifecycle(async () => {
       try {
-        await backend.request('settings.set', {
+        const setParams: Record<string, unknown> = {
           sessionPath: effect.sessionPath,
           defaultModel: effect.modelSettings.defaultModel,
           defaultThinkingLevel: effect.modelSettings.defaultThinkingLevel,
-        });
+        };
+        // Only forward defaultProvider when set — avoids sending a stray
+        // undefined key and keeps the wire payload minimal.
+        if (effect.modelSettings.defaultProvider) {
+          setParams.defaultProvider = effect.modelSettings.defaultProvider;
+        }
+        await backend.request('settings.set', setParams);
         service.bumpSessionDataEpoch(effect.sessionPath);
         service.onModelConfigChanged(effect.sessionPath, effect.modelSettings.defaultModel, effect.modelSettings.defaultThinkingLevel);
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
@@ -713,6 +726,27 @@ export class EffectRunner {
    *  no result, synchronous. */
   private handleCancelBackendReadyWatchdog(_effect: CancelBackendReadyWatchdogEffect): void {
     this.clearBackendReadyWatchdog();
+  }
+
+  private handleStartQueuedDwellWatchdog(effect: StartQueuedDwellWatchdogEffect): void {
+    const existing = this.queuedDwellWatchdogs.get(effect.localId);
+    if (existing) this.timer.cancel(existing);
+    const timer = this.timer.schedule(() => {
+      this.queuedDwellWatchdogs.delete(effect.localId);
+      this.deps.dispatchEvent({
+        kind: 'QueuedDwellWatchdogFired',
+        sessionPath: effect.sessionPath,
+        localId: effect.localId,
+      });
+    }, effect.timeoutMs);
+    this.queuedDwellWatchdogs.set(effect.localId, timer);
+  }
+
+  private handleCancelQueuedDwellWatchdog(effect: CancelQueuedDwellWatchdogEffect): void {
+    const timer = this.queuedDwellWatchdogs.get(effect.localId);
+    if (!timer) return;
+    this.timer.cancel(timer);
+    this.queuedDwellWatchdogs.delete(effect.localId);
   }
 
   /** `HydrateModel` — IIFE; `service.hydrateModelState(sessionPath)`. No
@@ -1028,6 +1062,8 @@ export class EffectRunner {
   /** Dispose of the runner's resources (called on shutdown). */
   dispose(): void {
     this.clearBackendReadyWatchdog();
+    for (const timer of this.queuedDwellWatchdogs.values()) this.timer.cancel(timer);
+    this.queuedDwellWatchdogs.clear();
     for (const send of this.inFlightSends.values()) {
       send.disposed = true;
       if (send.timer) this.timer.cancel(send.timer);
@@ -1162,6 +1198,12 @@ export class EffectRunner {
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
           statsService.onMessageEdited(effect.sessionPath, effect.messageId);
           statsService.prepareForSend(effect.sessionPath, []);
+          // Editing is restart semantics, not a mutation racing a live turn.
+          // message.interrupt is idempotent and now acknowledges only after the
+          // abort settles, so this forms a strict stop → truncate → send barrier.
+          await backend.request('message.interrupt', {
+            sessionPath: effect.sessionPath,
+          }, { signal: send.abort.signal });
           await backend.request('session.truncateAfter', {
             sessionPath: effect.sessionPath,
             entryId: effect.messageId,

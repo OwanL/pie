@@ -7,6 +7,7 @@ import {
   isImageMimeType,
   looksLikeBlobFile,
   resolveFilePath,
+  type RasterImageCodec,
 } from './files';
 import {
   basename,
@@ -49,6 +50,7 @@ export function canAcceptComposerTransfer(dataTransfer: DataTransferLike | null 
 export async function extractComposerInputs(
   dataTransfer: DataTransferLike | null | undefined,
   source: ComposerTransferSource,
+  imageCodec?: RasterImageCodec,
 ): Promise<ComposerTransferExtraction> {
   if (!dataTransfer) {
     return { inputs: [], unsupportedInputs: [], rejectedFiles: [] };
@@ -74,7 +76,7 @@ export async function extractComposerInputs(
 
   const files = extractTransferFiles(dataTransfer);
   for (const file of files) {
-    const imageInput = await fileToImageInput(file, source);
+    const imageInput = await fileToImageInput(file, source, imageCodec);
     if (imageInput) {
       inputs.push(imageInput);
       continue;

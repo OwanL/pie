@@ -13,7 +13,7 @@ export type {
 } from '../../shared/tool-analysis-kinds.js';
 
 import type {
-  AssistantUsage, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
+  AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
   RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
@@ -22,7 +22,7 @@ import type {
 } from '../../shared/run-analytics-contracts.js';
 
 export type {
-  AssistantUsage, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
+  AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
   RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,

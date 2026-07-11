@@ -68,7 +68,35 @@ function isIdle(result: SubagentSingleResult): boolean {
   const hasMessages = Array.isArray(result.messages) && result.messages.length > 0;
   const hasStreamingText = !!result.streamingText?.trim();
   const hasRunningTools = (result.runningTools?.length ?? 0) > 0;
-  return !hasMessages && !hasStreamingText && !hasRunningTools;
+  // A real lifecycle update means the child has started. Only an explicitly
+  // local queue remains visually idle; provider waits must not masquerade as
+  // unexplained inactivity.
+  const awaitingLocalCapacity = result.activityPhase == null || result.activityPhase === 'queued';
+  return !hasMessages && !hasStreamingText && !hasRunningTools && awaitingLocalCapacity;
+}
+
+function formatActivityDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
+}
+
+function subagentActivitySummary(result: SubagentSingleResult): string | undefined {
+  if (!isRunning(result) || !result.activityPhase) return undefined;
+  const labels: Record<string, string> = {
+    queued: 'Queued locally',
+    preparing: 'Preparing session',
+    waiting_provider: 'Waiting for provider',
+    streaming: 'Provider streaming',
+    running_tool: 'Running tool',
+    retry_wait: 'Waiting to retry provider',
+  };
+  const label = labels[result.activityPhase];
+  if (!label) return undefined;
+  const elapsed = result.activitySince ? formatActivityDuration(Date.now() - result.activitySince) : undefined;
+  const budget = result.inactivityBudgetMs ? formatActivityDuration(result.inactivityBudgetMs) : undefined;
+  return [label, result.activityDetail, elapsed && `${elapsed} elapsed`, budget && `${budget} stall limit`]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function isFailed(result: SubagentSingleResult): boolean {
@@ -347,6 +375,7 @@ function SubagentSingleBlock({
   const summary = summarizeSingleResult(singleResult);
   const status = singleResultStatus(singleResult, toolCall.status, multipleResults);
   const errorDetail = status === 'failed' ? subagentErrorDetail(singleResult) : undefined;
+  const activitySummary = subagentActivitySummary(singleResult);
 
   // Check if this subagent has a pending ask_user request (for blinking indicator).
   const askUserCtx = useContext(AskUserContext);
@@ -441,7 +470,8 @@ function SubagentSingleBlock({
         <div class="flex min-w-0 flex-1 items-center gap-[7px]">
           <span class="subagent-agent-name transcript-header-title-mono">{singleResult.agent}</span>
           <PrimaryMeta result={singleResult} />
-          {!open && summary && <span class="subagent-header-summary transcript-header-summary-mono">{summary}</span>}
+          {activitySummary && <span class="subagent-header-summary transcript-header-summary-subtle" title={activitySummary}>{activitySummary}</span>}
+          {!activitySummary && !open && summary && <span class="subagent-header-summary transcript-header-summary-mono">{summary}</span>}
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />

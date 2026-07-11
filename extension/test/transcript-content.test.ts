@@ -115,6 +115,44 @@ test('appendAssistantParts preserves boundaries when requested and tool results 
   applyToolResultToParts(target.parts, 'missing', 'ignored', 'failed');
 });
 
+test('usageFromMessage preserves reasoning as an output subset without double-counting it', () => {
+  assert.deepEqual(usageFromMessage({
+    role: 'assistant',
+    usage: {
+      prompt_tokens: 100,
+      completion_tokens: 1_000,
+      total_tokens: 1_100,
+      completion_tokens_details: { reasoning_tokens: 800 },
+    },
+  }), {
+    inputTokens: 100,
+    outputTokens: 1_000,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 1_100,
+    reasoningTokens: 800,
+  });
+
+  const clamped = usageFromMessage({
+    role: 'assistant',
+    usage: { input: 10, output: 20, reasoning_tokens: 50 },
+  });
+  assert.equal(clamped?.reasoningTokens, 20);
+  assert.equal(clamped?.totalTokens, 30, 'reasoning is already included in output');
+
+  assert.deepEqual(addAssistantUsage(
+    { inputTokens: 1, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 11, reasoningTokens: 7 },
+    { inputTokens: 2, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 7, reasoningTokens: 3 },
+  ), {
+    inputTokens: 3,
+    outputTokens: 15,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 18,
+    reasoningTokens: 10,
+  });
+});
+
 test('assistantStatus, usage helpers, and systemMessage normalize edge cases', () => {
   const aborted: MessageLike = { role: 'assistant', stopReason: 'aborted' };
   const errored: MessageLike = { role: 'assistant', stopReason: 'error' };

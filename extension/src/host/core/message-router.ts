@@ -584,6 +584,7 @@ export class MessageRouter {
         sessionPath: msg.sessionPath || '',
         modelSettings: {
           defaultModel: msg.defaultModel,
+          defaultProvider: msg.defaultProvider,
           defaultThinkingLevel: msg.defaultThinkingLevel,
         },
       },

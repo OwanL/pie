@@ -56,8 +56,7 @@ interface DayAccumulator {
   runCount: number;
 }
 
-/** A per-turn sample for today's intraday cost series (cost distributed across
- *  the run's today-samples proportional to output tokens). */
+/** A timestamped sample for today's intraday cost series. */
 interface TodayCostSample {
   ms: number;
   provider: string;
@@ -65,12 +64,26 @@ interface TodayCostSample {
   cost: number;
 }
 
-/** A per-turn sample for today's intraday output-token series. */
+/** A timestamped sample for today's intraday output-token series. */
 interface TodayTokenSample {
   ms: number;
   provider: string;
   model: string;
   tokens: number;
+}
+
+interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+interface AttributedUsage extends TokenCounts {
+  model: string;
+  provider: string;
+  occurredAtMs: number;
+  cost: number;
 }
 
 /** Per-hour throughput accumulator for today's intraday throughput chart. */
@@ -193,6 +206,174 @@ function costFromTokens(
     + (cacheReadTokens / 1_000_000) * pricing.cacheRead
     + (cacheWriteTokens / 1_000_000) * pricing.cacheWrite
   );
+}
+
+function usageTotal(usage: TokenCounts): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
+
+function subtractUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
+  return {
+    inputTokens: Math.max(0, left.inputTokens - right.inputTokens),
+    outputTokens: Math.max(0, left.outputTokens - right.outputTokens),
+    cacheReadTokens: Math.max(0, left.cacheReadTokens - right.cacheReadTokens),
+    cacheWriteTokens: Math.max(0, left.cacheWriteTokens - right.cacheWriteTokens),
+  };
+}
+
+function usageForModel(
+  model: string,
+  occurredAtMs: number,
+  counts: TokenCounts,
+  pricingMap: Map<string, ModelPricingRecord[]>,
+): AttributedUsage {
+  const pricing = pricingForModel(model === 'unknown' ? undefined : model, pricingMap);
+  return {
+    ...counts,
+    model,
+    provider: providerForModel(model === 'unknown' ? undefined : model, pricingMap),
+    occurredAtMs,
+    cost: costFromTokens(
+      counts.inputTokens,
+      counts.outputTokens,
+      counts.cacheReadTokens,
+      counts.cacheWriteTokens,
+      pricing,
+    ),
+  };
+}
+
+/**
+ * Build canonical billable usage for a run. Parent-turn and pruning-prepass
+ * usage are direct. Subagent totals come from the existing ToolUsageRollup;
+ * auxiliary samples only split those totals by actual child model/time, so
+ * they cannot double-count usage or the forwarded throughput samples.
+ */
+function attributedRunUsage(
+  run: RunSnapshot,
+  pricingMap: Map<string, ModelPricingRecord[]>,
+  fallbackMs: number,
+): AttributedUsage[] {
+  const runModel = run.modelId ?? 'unknown';
+  const usage: AttributedUsage[] = [usageForModel(runModel, fallbackMs, {
+    inputTokens: run.inputTokens,
+    outputTokens: run.outputTokens,
+    cacheReadTokens: run.cacheReadTokens,
+    cacheWriteTokens: run.cacheWriteTokens,
+  }, pricingMap)];
+  const auxiliary = run.auxiliaryLlmUsage ?? [];
+  const seen = new Set<string>();
+
+  for (const sample of auxiliary) {
+    if (sample.kind !== 'skill_pruning_prepass') continue;
+    const dedupKey = `${sample.kind}:${sample.sourceId}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    const counts = {
+      inputTokens: sample.inputTokens,
+      outputTokens: sample.outputTokens,
+      cacheReadTokens: sample.cacheReadTokens,
+      cacheWriteTokens: sample.cacheWriteTokens,
+    };
+    if (usageTotal(counts) === 0) continue;
+    const occurredAtMs = Date.parse(sample.occurredAt);
+    usage.push(usageForModel(
+      sample.modelId ?? runModel,
+      Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
+      counts,
+      pricingMap,
+    ));
+  }
+
+  let remaining: TokenCounts = {
+    inputTokens: run.toolUsage?.subagentInputTokens ?? 0,
+    outputTokens: run.toolUsage?.subagentOutputTokens ?? 0,
+    cacheReadTokens: run.toolUsage?.subagentCacheReadTokens ?? 0,
+    cacheWriteTokens: run.toolUsage?.subagentCacheWriteTokens ?? 0,
+  };
+  for (const sample of auxiliary) {
+    if (sample.kind !== 'subagent' || usageTotal(remaining) === 0) continue;
+    const dedupKey = `${sample.kind}:${sample.sourceId}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    const counts: TokenCounts = {
+      inputTokens: Math.min(remaining.inputTokens, sample.inputTokens),
+      outputTokens: Math.min(remaining.outputTokens, sample.outputTokens),
+      cacheReadTokens: Math.min(remaining.cacheReadTokens, sample.cacheReadTokens),
+      cacheWriteTokens: Math.min(remaining.cacheWriteTokens, sample.cacheWriteTokens),
+    };
+    if (usageTotal(counts) === 0) continue;
+    const occurredAtMs = Date.parse(sample.occurredAt);
+    usage.push(usageForModel(
+      sample.modelId ?? runModel,
+      Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
+      counts,
+      pricingMap,
+    ));
+    remaining = subtractUsage(remaining, counts);
+  }
+
+  if (usageTotal(remaining) > 0) {
+    // Historical snapshots have aggregate subagent totals but no attribution
+    // samples. A unique non-parent throughput model is the best available child
+    // attribution; otherwise conservatively fall back to the parent run model.
+    const hintedModels = new Set(
+      run.turnThroughputSamples
+        .map((sample) => sample.modelId)
+        .filter((modelId): modelId is string => !!modelId && modelId !== run.modelId),
+    );
+    const fallbackModel = hintedModels.size === 1 ? [...hintedModels][0]! : runModel;
+    usage.push(usageForModel(fallbackModel, fallbackMs, remaining, pricingMap));
+  }
+
+  return usage;
+}
+
+function distributeUsageForSeries(
+  run: RunSnapshot,
+  usage: AttributedUsage[],
+  fallbackMs: number,
+  includeSample: (ms: number) => boolean,
+): { cost: TodayCostSample[]; tokens: TodayTokenSample[] } {
+  const groups = new Map<string, AttributedUsage>();
+  for (const item of usage) {
+    const current = groups.get(item.model);
+    if (!current) {
+      groups.set(item.model, { ...item });
+      continue;
+    }
+    current.inputTokens += item.inputTokens;
+    current.outputTokens += item.outputTokens;
+    current.cacheReadTokens += item.cacheReadTokens;
+    current.cacheWriteTokens += item.cacheWriteTokens;
+    current.cost += item.cost;
+    current.occurredAtMs = Math.max(current.occurredAtMs, item.occurredAtMs);
+  }
+
+  const cost: TodayCostSample[] = [];
+  const tokens: TodayTokenSample[] = [];
+  for (const group of groups.values()) {
+    const samples = run.turnThroughputSamples
+      .map((sample) => ({ sample, ms: Date.parse(sample.endedAt) }))
+      .filter(({ sample, ms }) => !Number.isNaN(ms)
+        && includeSample(ms)
+        && (sample.modelId ?? run.modelId ?? 'unknown') === group.model);
+    const sampleOutput = samples.reduce((sum, entry) => sum + entry.sample.outputTokens, 0);
+    if (samples.length === 0) {
+      const ms = includeSample(group.occurredAtMs) ? group.occurredAtMs : fallbackMs;
+      if (group.cost > 0) cost.push({ ms, provider: group.provider, model: group.model, cost: group.cost });
+      if (group.outputTokens > 0) tokens.push({ ms, provider: group.provider, model: group.model, tokens: group.outputTokens });
+      continue;
+    }
+    for (const entry of samples) {
+      const share = sampleOutput > 0
+        ? entry.sample.outputTokens / sampleOutput
+        : 1 / samples.length;
+      if (group.cost > 0) cost.push({ ms: entry.ms, provider: group.provider, model: group.model, cost: group.cost * share });
+      if (group.outputTokens > 0) tokens.push({ ms: entry.ms, provider: group.provider, model: group.model, tokens: group.outputTokens * share });
+    }
+  }
+  return { cost, tokens };
 }
 
 /** Local calendar date (`YYYY-MM-DD`) for a millisecond epoch timestamp.
@@ -341,61 +522,49 @@ function accumulateRuns(
 
   for (const run of runs) {
     if (run.sessionPath) sessionPaths.add(run.sessionPath);
-    const provider = providerForModel(run.modelId, pricingMap);
-    const pricing = pricingForModel(run.modelId, pricingMap);
-    const acc = providerAcc(provider);
+    const dayMs = runDayMs(run);
+    const usage = attributedRunUsage(run, pricingMap, dayMs);
+    const runCost = usage.reduce((sum, item) => sum + item.cost, 0);
+    const runInputTokens = usage.reduce((sum, item) => sum + item.inputTokens, 0);
+    const runOutputTokens = usage.reduce((sum, item) => sum + item.outputTokens, 0);
 
-    const cost = costFromTokens(
-      run.inputTokens,
-      run.outputTokens,
-      run.cacheReadTokens,
-      run.cacheWriteTokens,
-      pricing,
-    );
+    for (const item of usage) {
+      const acc = providerAcc(item.provider);
+      acc.cost += item.cost;
+      acc.inputTokens += item.inputTokens;
+      acc.outputTokens += item.outputTokens;
+      acc.cacheReadTokens += item.cacheReadTokens;
+      acc.cacheWriteTokens += item.cacheWriteTokens;
+      totalCost += item.cost;
+      totalInputTokens += item.inputTokens;
+      totalOutputTokens += item.outputTokens;
+      totalCacheReadTokens += item.cacheReadTokens;
+      totalCacheWriteTokens += item.cacheWriteTokens;
+    }
 
-    acc.cost += cost;
-    acc.inputTokens += run.inputTokens;
-    acc.outputTokens += run.outputTokens;
-    acc.cacheReadTokens += run.cacheReadTokens;
-    acc.cacheWriteTokens += run.cacheWriteTokens;
-
-    totalCost += cost;
-    totalInputTokens += run.inputTokens;
-    totalOutputTokens += run.outputTokens;
-    totalCacheReadTokens += run.cacheReadTokens;
-    totalCacheWriteTokens += run.cacheWriteTokens;
-
-    // Throughput: completed turns with measurable generation time only.
-    // Interrupted/error turns are excluded so a rate-limited/failed turn doesn't
-    // drag the average (their tokens are near-zero and durations unreliable).
-    // Attribution is per-sample by the sample's own model (falling back to the
-    // run's model), so subagent work is credited to the model it actually ran on.
-    if (run.turnThroughputSamples.length > 0) {
-      for (const sample of run.turnThroughputSamples) {
-        if (sample.status !== 'completed') continue;
-        if (sample.generationDurationMs <= 0) continue;
-        const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
-        const sampleAcc = providerAcc(sampleProvider);
-        // All-time per-provider throughput.
-        sampleAcc.throughputOutputTokens += sample.outputTokens;
-        sampleAcc.throughputGenerationMs += sample.generationDurationMs;
-        sampleAcc.sampleCount += 1;
-        totalThroughputOutputTokens += sample.outputTokens;
-        totalThroughputGenerationMs += sample.generationDurationMs;
-        // Per-day throughput (by sample end-date) for "today's throughput".
-        const sampleMs = Date.parse(sample.endedAt);
-        if (!Number.isNaN(sampleMs)) {
-          const sampleDate = localDateString(sampleMs);
-          const tAcc = dayThroughput(sampleDate, sampleProvider);
-          tAcc.outputTokens += sample.outputTokens;
-          tAcc.generationDurationMs += sample.generationDurationMs;
-          tAcc.sampleCount += 1;
-        }
+    // Throughput is derived only from completed turn samples. Auxiliary usage
+    // affects billable token/cost totals but never creates a second throughput
+    // observation; forwarded subagent samples are already present here once.
+    for (const sample of run.turnThroughputSamples) {
+      if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
+      const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+      const sampleAcc = providerAcc(sampleProvider);
+      sampleAcc.throughputOutputTokens += sample.outputTokens;
+      sampleAcc.throughputGenerationMs += sample.generationDurationMs;
+      sampleAcc.sampleCount += 1;
+      totalThroughputOutputTokens += sample.outputTokens;
+      totalThroughputGenerationMs += sample.generationDurationMs;
+      const sampleMs = Date.parse(sample.endedAt);
+      if (!Number.isNaN(sampleMs)) {
+        const tAcc = dayThroughput(localDateString(sampleMs), sampleProvider);
+        tAcc.outputTokens += sample.outputTokens;
+        tAcc.generationDurationMs += sample.generationDurationMs;
+        tAcc.sampleCount += 1;
       }
     }
 
-    // Day cost bucket (local, by run day).
-    const dayMs = runDayMs(run);
+    // Daily cost/token buckets retain the existing run-end calendar semantics,
+    // while each usage slice keeps its own provider/model attribution.
     if (!Number.isNaN(dayMs)) {
       const date = localDateString(dayMs);
       let day = byDay.get(date);
@@ -403,99 +572,83 @@ function accumulateRuns(
         day = { date, byProvider: new Map(), byModel: new Map(), runCount: 0 };
         byDay.set(date, day);
       }
-      let dayAcc = day.byProvider.get(provider);
-      if (!dayAcc) {
-        dayAcc = createProviderAccumulator(provider);
-        day.byProvider.set(provider, dayAcc);
+      for (const item of usage) {
+        let dayAcc = day.byProvider.get(item.provider);
+        if (!dayAcc) {
+          dayAcc = createProviderAccumulator(item.provider);
+          day.byProvider.set(item.provider, dayAcc);
+        }
+        dayAcc.cost += item.cost;
+        dayAcc.inputTokens += item.inputTokens;
+        dayAcc.outputTokens += item.outputTokens;
+        dayAcc.cacheReadTokens += item.cacheReadTokens;
+        dayAcc.cacheWriteTokens += item.cacheWriteTokens;
+        day.byModel.set(item.model, (day.byModel.get(item.model) ?? 0) + item.cost);
       }
-      dayAcc.cost += cost;
-      dayAcc.inputTokens += run.inputTokens;
-      dayAcc.outputTokens += run.outputTokens;
-      dayAcc.cacheReadTokens += run.cacheReadTokens;
-      dayAcc.cacheWriteTokens += run.cacheWriteTokens;
       day.runCount += 1;
-      const runModel = run.modelId ?? 'unknown';
-      day.byModel.set(runModel, (day.byModel.get(runModel) ?? 0) + cost);
 
-      // Run-count buckets (by run day).
       if (date === todayDate) {
         todayRunCount += 1;
-        todayInputTokens += run.inputTokens;
-        todayOutputTokens += run.outputTokens;
+        todayInputTokens += runInputTokens;
+        todayOutputTokens += runOutputTokens;
         todayToolCallCount += run.toolUsage?.totalCount ?? 0;
         todayTouchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
 
-        // Intraday series: collect per-turn samples that ended today (local)
-        // for the today cost/token/throughput charts. Cost is distributed across
-        // the run's today-samples proportional to output tokens so the series
-        // sums to the run's cost (reconciles with todayCost).
-        const runTodaySamples: { ms: number; provider: string; model: string; out: number }[] = [];
+        const series = distributeUsageForSeries(
+          run,
+          usage,
+          dayMs,
+          (ms) => localDateString(ms) === todayDate,
+        );
+        todayCostSamples.push(...series.cost);
+        todayTokenSamples.push(...series.tokens);
+
         for (const sample of run.turnThroughputSamples) {
           const sMs = Date.parse(sample.endedAt);
-          if (Number.isNaN(sMs)) continue;
-          if (localDateString(sMs) !== todayDate) continue;
+          if (Number.isNaN(sMs) || localDateString(sMs) !== todayDate) continue;
+          if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
           const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
           const sModel = sample.modelId ?? run.modelId ?? 'unknown';
-          runTodaySamples.push({ ms: sMs, provider: sProvider, model: sModel, out: sample.outputTokens });
-          todayTokenSamples.push({ ms: sMs, provider: sProvider, model: sModel, tokens: sample.outputTokens });
-          if (sample.status === 'completed' && sample.generationDurationMs > 0) {
-            // Bucket by LOCAL hour (not UTC hour) so fractional timezones
-            // (UTC+5:30, +9:30, …) align to local-hour boundaries.
-            const hourDate = new Date(sMs);
-            hourDate.setMinutes(0, 0, 0);
-            const hourMs = hourDate.getTime();
-            let hour = todayThroughputByHour.get(hourMs);
-            if (!hour) {
-              hour = { byProvider: new Map(), byModel: new Map() };
-              todayThroughputByHour.set(hourMs, hour);
-            }
-            let p = hour.byProvider.get(sProvider);
-            if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
-            p.out += sample.outputTokens;
-            p.genMs += sample.generationDurationMs;
-            let m = hour.byModel.get(sModel);
-            if (!m) { m = { out: 0, genMs: 0 }; hour.byModel.set(sModel, m); }
-            m.out += sample.outputTokens;
-            m.genMs += sample.generationDurationMs;
+          const hourDate = new Date(sMs);
+          hourDate.setMinutes(0, 0, 0);
+          const hourMs = hourDate.getTime();
+          let hour = todayThroughputByHour.get(hourMs);
+          if (!hour) {
+            hour = { byProvider: new Map(), byModel: new Map() };
+            todayThroughputByHour.set(hourMs, hour);
           }
-        }
-        if (runTodaySamples.length > 0) {
-          const totalOut = runTodaySamples.reduce((s, x) => s + x.out, 0);
-          for (const s of runTodaySamples) {
-            const share = totalOut > 0 ? (cost * s.out) / totalOut : cost / runTodaySamples.length;
-            todayCostSamples.push({ ms: s.ms, provider: s.provider, model: s.model, cost: share });
-          }
-        } else if (cost > 0) {
-          // No today-samples (unsampled run, or all samples pre-midnight):
-          // place the full run cost at the run's end time so it still appears.
-          // Zero-cost runs are skipped so an open free-model run doesn't churn
-          // the series signature with a shifting updatedAt timestamp.
-          todayCostSamples.push({ ms: dayMs, provider, model: run.modelId ?? 'unknown', cost });
+          let p = hour.byProvider.get(sProvider);
+          if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
+          p.out += sample.outputTokens;
+          p.genMs += sample.generationDurationMs;
+          let m = hour.byModel.get(sModel);
+          if (!m) { m = { out: 0, genMs: 0 }; hour.byModel.set(sModel, m); }
+          m.out += sample.outputTokens;
+          m.genMs += sample.generationDurationMs;
         }
       }
       if (weekDates.has(date)) weekRunCount += 1;
     }
 
-    // Track the most-recent run by its end timestamp (finalizedAt else updatedAt
-    // else startedAt). Open (in-flight) runs are included so the bar reflects a
-    // run that just started, but a finalized run with a later endedAt wins.
-    const endedMs = runDayMs(run);
-    if (!Number.isNaN(endedMs) && endedMs > lastRunEndedMs) {
-      lastRunEndedMs = endedMs;
-      lastRunTurnSeries = run.turnThroughputSamples
-        .map((s) => ({ ms: Date.parse(s.endedAt), outputTokens: s.outputTokens }))
-        .filter((t) => !Number.isNaN(t.ms))
+    // Track the most-recent run by its end timestamp. Its token sparkline is
+    // normalized to canonical usage, so prepass/subagent output is included
+    // without counting forwarded child throughput samples twice.
+    if (!Number.isNaN(dayMs) && dayMs > lastRunEndedMs) {
+      lastRunEndedMs = dayMs;
+      const series = distributeUsageForSeries(run, usage, dayMs, () => true);
+      lastRunTurnSeries = series.tokens
+        .map((sample) => ({ ms: sample.ms, outputTokens: sample.tokens }))
         .sort((a, b) => a.ms - b.ms);
       lastRun = {
-        cost,
+        cost: runCost,
         durationMs: run.busyDurationMs ?? 0,
         modelId: run.modelId ?? null,
-        provider,
+        provider: providerForModel(run.modelId, pricingMap),
         outcome: run.outcome ?? null,
         startedAt: run.startedAt,
         endedAt: run.finalizedAt ?? run.updatedAt,
-        inputTokens: run.inputTokens,
-        outputTokens: run.outputTokens,
+        inputTokens: runInputTokens,
+        outputTokens: runOutputTokens,
         turnSeries: lastRunTurnSeries,
       };
     }

@@ -709,6 +709,27 @@ export interface QueuedDeliveredEvent {
   kind: 'QueuedDelivered';
   sessionPath: string;
   text: string;
+  /** The optimistic message ID of the delivered queued message, when the
+   *  backend correlated it (handoff §F). Present when the backend's
+   *  `queuedLocalIds` FIFO queue had an entry to shift; absent for a legacy
+   *  host or a clear/interrupt race. The reducer matches truthfully by
+   *  `localId` when present, else falls back to FIFO (earliest 'queued'). */
+  localId?: string;
+}
+
+/** The queued-message dwell watchdog fired (handoff §F): a queued steering/
+ *  followUp message has waited past the hard dwell threshold without being
+ *  delivered. Dispatched by the EffectRunner's per-localId timer (armed on the
+ *  Send-while-busy path). The reducer marks the dwell entry `watchdogFired`
+ *  (actionable) and emits a `Log` (warn) so the stuck queue is observable. It
+ *  does NOT interrupt the in-flight turn — healthy tools are not auto-stopped
+ *  just because a follow-up was queued; the user is offered Stop/Remove via the
+ *  existing Interrupt/ClearQueue commands. Cleared (with the entry) on
+ *  delivery/clear/interrupt/restart. */
+export interface QueuedDwellWatchdogFiredEvent {
+  kind: 'QueuedDwellWatchdogFired';
+  sessionPath: string;
+  localId: string;
 }
 
 /** The SDK began an auto-retry attempt (transient provider error). The
@@ -773,6 +794,7 @@ export type BackendEvent =
   | SessionOpenedEvent
   | SessionClosedEvent
   | QueuedDeliveredEvent
+  | QueuedDwellWatchdogFiredEvent
   | RetryStartedEvent
   | RetryEndedEvent
   | RetryStuckEvent;

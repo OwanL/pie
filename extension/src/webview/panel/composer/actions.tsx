@@ -109,12 +109,12 @@ export function ComposerActions({
         <button
           class="action-btn primary"
           type="button"
-          title={busy ? 'Queue (Enter) — runs after the current turn' : 'Send (Enter)'}
+          title={interrupting ? 'Wait for the current stop to finish' : busy ? 'Queue (Enter) — runs after the current turn' : 'Send (Enter)'}
           onClick={sendCurrentText}
-          disabled={!canSend}
-          aria-label={busy ? 'Queue message' : 'Send message'}
+          disabled={!canSend || interrupting}
+          aria-label={interrupting ? 'Waiting for stop' : busy ? 'Queue message' : 'Send message'}
         >
-          {busy ? 'Queue' : 'Send'}
+          {interrupting ? 'Waiting…' : busy ? 'Queue' : 'Send'}
         </button>
       </div>
     </div>

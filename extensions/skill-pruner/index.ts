@@ -11,8 +11,10 @@ import {
 	setCompleteFnOverride,
 	getRecoveredTools,
 	clearRecoveredToolsForTesting,
+	clearPrunedToolsForTesting,
 } from "./src/state.js";
 import register from "./src/register.js";
+import { clearPrepassCacheForTesting, setPrepassCacheNowForTesting } from "./src/prepass-cache.js";
 import {
 	clonePruningConfig,
 	ensureCopilotHeaders,
@@ -23,7 +25,7 @@ import {
 
 export default register;
 export { SKILLS_BLOCK_RE, MIN_PROMPT_LENGTH };
-export { getRecoveredTools, clearRecoveredToolsForTesting };
+export { getRecoveredTools, clearRecoveredToolsForTesting, clearPrepassCacheForTesting, setPrepassCacheNowForTesting };
 
 // Test seams: setters exported from state module
 export function setConfigForTesting(nextConfig: import("./types.js").PruningConfig | null): void {
@@ -38,6 +40,9 @@ export function resetForTesting(): void {
 	setSetActiveToolsOverride(null);
 	setPiApi(null);
 	clearRecoveredToolsForTesting();
+	clearPrunedToolsForTesting();
+	clearPrepassCacheForTesting();
+	setPrepassCacheNowForTesting(null);
 }
 
 export function __setFormatter(fn: ((skills: Skill[]) => string) | null): void {

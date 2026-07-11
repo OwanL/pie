@@ -41,6 +41,10 @@ function finiteOrNull(value: unknown): number | null {
   return Number.isFinite(value) && typeof value === 'number' ? value : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 interface SessionRunTrackerOptions {
   getArchState: GetArchState;
   dispatchArchEvent: DispatchArchEvent;
@@ -132,6 +136,45 @@ export class SessionRunTracker {
       run.updatedAt = this.runState.isoNow();
       this.runState.persist();
     }
+  }
+
+  /** Record the skill-pruning prepass call carried by its CustomMessage. */
+  onSkillPruningUsage(
+    sessionPath: string,
+    messageId: string,
+    occurredAt: string,
+    details: unknown,
+  ): void {
+    const run = this.runState.sessions.get(sessionPath)?.currentRun;
+    if (!run || !messageId || !isRecord(details)) {
+      return;
+    }
+
+    const inputTokens = toNonNegativeInt(details.prepassInputTokens);
+    const outputTokens = toNonNegativeInt(details.prepassOutputTokens);
+    const cacheReadTokens = toNonNegativeInt(details.prepassCacheReadTokens);
+    const cacheWriteTokens = toNonNegativeInt(details.prepassCacheWriteTokens);
+    if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
+      return;
+    }
+
+    const samples = run.auxiliaryLlmUsage ?? [];
+    if (samples.some((sample) => sample.kind === 'skill_pruning_prepass' && sample.sourceId === messageId)) {
+      return;
+    }
+
+    run.auxiliaryLlmUsage = [...samples, {
+      kind: 'skill_pruning_prepass',
+      sourceId: messageId,
+      occurredAt: occurredAt || this.runState.isoNow(),
+      modelId: typeof details.prepassModel === 'string' && details.prepassModel ? details.prepassModel : undefined,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+    }];
+    run.updatedAt = this.runState.isoNow();
+    this.runState.persist();
   }
 
   onAssistantTurnEnded(
@@ -257,7 +300,7 @@ export class SessionRunTracker {
     }
 
     if (analysis.subagentCallCount > 0) {
-      this.recordSubagentUsage(run, analysis);
+      this.recordSubagentUsage(run, analysis, toolCall);
       this.recordSubagentThroughput(run, toolCall);
     }
 
@@ -338,8 +381,8 @@ export class SessionRunTracker {
     }
   }
 
-  /** Roll up sub-agent call/task counts and score dimensions. */
-  private recordSubagentUsage(run: RunSnapshot, analysis: ToolCallAnalysis): void {
+  /** Roll up sub-agent call/task counts, score dimensions, and usage attribution. */
+  private recordSubagentUsage(run: RunSnapshot, analysis: ToolCallAnalysis, toolCall: ToolCall): void {
     run.toolUsage.subagentCallCount += analysis.subagentCallCount;
     run.toolUsage.subagentTaskCount += analysis.subagentTaskCount;
     run.toolUsage.subagentAgentNames = appendUnique(
@@ -355,13 +398,49 @@ export class SessionRunTracker {
       dst.count += src.count;
       dst.max   = Math.max(dst.max, src.max);
     }
-    // Attribute the spawned sub-agent sessions' token usage into the parent
-    // run so inputTokens/outputTokens/estimatedCostUsd no longer under-report
-    // true cost whenever subagents spawn.
+    // These are the canonical subagent totals. Aggregate accounting adds them
+    // to parent-turn usage; auxiliary samples below only preserve the actual
+    // child model and timestamp and must not be counted a second time.
     run.toolUsage.subagentInputTokens += analysis.subagentInputTokens;
     run.toolUsage.subagentOutputTokens += analysis.subagentOutputTokens;
     run.toolUsage.subagentCacheReadTokens += analysis.subagentCacheReadTokens;
     run.toolUsage.subagentCacheWriteTokens += analysis.subagentCacheWriteTokens;
+
+    const renderable = getRenderableSubagentResult(toolCall.result);
+    if (!renderable) {
+      return;
+    }
+    const samples = run.auxiliaryLlmUsage ?? [];
+    const additions = renderable.results.flatMap((result, index) => {
+      const usage = result.usage;
+      if (!usage) {
+        return [];
+      }
+      const inputTokens = toNonNegativeInt(usage.input);
+      const outputTokens = toNonNegativeInt(usage.output);
+      const cacheReadTokens = toNonNegativeInt(usage.cacheRead);
+      const cacheWriteTokens = toNonNegativeInt(usage.cacheWrite);
+      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
+        return [];
+      }
+      const endedTimes = (result.turnThroughputSamples ?? [])
+        .map((sample) => Date.parse(sample.endedAt))
+        .filter((ms) => !Number.isNaN(ms));
+      const occurredAt = endedTimes.length > 0
+        ? new Date(Math.max(...endedTimes)).toISOString()
+        : this.runState.isoNow();
+      return [{
+        kind: 'subagent' as const,
+        sourceId: `${toolCall.id}:${index}`,
+        occurredAt,
+        modelId: result.model ?? result.selectedModel,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+      }];
+    });
+    run.auxiliaryLlmUsage = [...samples, ...additions];
   }
 
   /** Forward nested subagent per-turn throughput into the parent run snapshot. */

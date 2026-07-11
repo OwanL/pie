@@ -77,6 +77,13 @@ export interface SessionContext {
    *  the context so `auto_retry_end` / `agent_end willRetry:false` can clear it
    *  without re-implementing the timer lookup. */
   willRetryWatchdogClear?: () => void;
+  /** Handoff §F: per-session FIFO queue of host-side optimistic `localId`s for
+   *  steering/followUp messages that have been queued but not yet delivered.
+   *  Pushed on successful `steer()`/`followUp()` in `handleMessageSend`; shifted
+   *  on each user-role `message_start` so the backend can correlate delivery
+   *  back to the exact optimistic message. Cleared on interrupt/clearQueue.
+   *  Absent/empty → fall back to FIFO matching in the host reducer. */
+  queuedLocalIds?: string[];
 }
 
 export interface SessionPromptState {

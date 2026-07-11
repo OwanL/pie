@@ -209,26 +209,26 @@ export function generateModelProfilesYaml(source) {
 
 /** Read-modify-write merge of settings.json.
  *
- *  `defaultModel` / `defaultProvider` / `defaultThinkingLevel` are USER-OWNED:
- *  the running backend persists the user's selected model to settings.json, so
- *  sync only SEEDS them from models.yaml `defaults` when absent — it never
- *  clobbers a user's choice (which would reset the selected model on every
- *  `npm run sync-models`). `retry` and `pruning.{model,provider,thinkingLevel}`
- *  remain derived from models.yaml. The legacy `proxy` block (if still
- *  present from a previous version) is stripped — provider concurrency now
- *  lives in models.yaml `providers.<p>.concurrency`. */
+ *  Chat-model and pruning-model selections are USER-OWNED: the settings UI
+ *  persists them to settings.json. Sync only SEEDS missing selections from
+ *  models.yaml; it never clobbers an existing user choice. `retry` remains
+ *  centrally derived. The legacy `proxy` block (if still present from a
+ *  previous version) is stripped — provider concurrency now lives in
+ *  models.yaml `providers.<p>.concurrency`. */
 export function generateSettings(source, existingSettings) {
   const s = JSON.parse(JSON.stringify(existingSettings));
-  if (typeof s.defaultModel !== 'string' || s.defaultModel.length === 0) s.defaultModel = source.defaults.model;
-  if (typeof s.defaultProvider !== 'string' || s.defaultProvider.length === 0) s.defaultProvider = source.defaults.provider;
-  if (typeof s.defaultThinkingLevel !== 'string' || s.defaultThinkingLevel.length === 0) s.defaultThinkingLevel = source.defaults.thinkingLevel;
+  const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
+  if (!isNonEmptyString(s.defaultModel)) s.defaultModel = source.defaults.model;
+  if (!isNonEmptyString(s.defaultProvider)) s.defaultProvider = source.defaults.provider;
+  if (!isNonEmptyString(s.defaultThinkingLevel)) s.defaultThinkingLevel = source.defaults.thinkingLevel;
   s.retry = JSON.parse(JSON.stringify(source.retry));
-  s.pruning = {
-    ...(s.pruning && typeof s.pruning === 'object' ? s.pruning : {}),
-    model: source.pruning.model,
-    provider: source.pruning.provider,
-    thinkingLevel: source.pruning.thinkingLevel,
-  };
+
+  const pruning = s.pruning && typeof s.pruning === 'object' ? s.pruning : {};
+  if (!isNonEmptyString(pruning.model)) pruning.model = source.pruning.model;
+  if (!isNonEmptyString(pruning.provider)) pruning.provider = source.pruning.provider;
+  if (!isNonEmptyString(pruning.thinkingLevel)) pruning.thinkingLevel = source.pruning.thinkingLevel;
+  s.pruning = pruning;
+
   // Strip legacy proxy block — replaced by host-side provider gate.
   delete s.proxy;
   return s;

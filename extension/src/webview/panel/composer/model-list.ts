@@ -89,7 +89,11 @@ export function orderModelsForPicker(models: ModelInfo[]): ModelPickerEntry[] {
     const ratingText = hasProfile && aggregate >= 0 ? `${aggregate}/${RATING_MAX}` : 'unrated';
     const prefix = ineligible ? '⚠ ' : '';
 
-    const dropdownLabel = `${prefix}${model.name}`;
+    // Prefix the dropdown label with the provider id so models that exist under
+    // multiple providers (e.g. gpt-5.5 under both github-copilot and openai-codex)
+    // are unambiguous in the picker. The closed toolbar trigger keeps the compact
+    // stripped name (see selectedLabel below).
+    const dropdownLabel = `${prefix}${model.provider} · ${model.name}`;
     const selectedLabel = `${prefix}${stripProviderPrefix(model.name)}`;
 
     const titleParts = [`${model.name} — rating ${ratingText}`];

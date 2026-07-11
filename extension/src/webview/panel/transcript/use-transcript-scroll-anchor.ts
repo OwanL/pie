@@ -99,12 +99,10 @@ export function useTranscriptScrollAnchor({
       const candidates = buildCandidates(virtualizer.getVirtualItems());
       const delta = resolveScrollAnchorDelta(prev, candidates, el.scrollTop);
       if (delta !== null && Math.abs(delta) >= RESTORE_EPSILON_PX) {
-        // Force instant scroll: the `.transcript` rule in styles/index.css sets
-        // `scroll-behavior: smooth`, so an unguarded `scrollTop` write would
-        // animate (~300ms) instead of pinning the anchor row. Save/override/
-        // restore inline `scroll-behavior` the same way `scrollToBottom` does,
-        // wrapped in try/finally so the saved value is always restored (manual
-        // scroll keeps its smooth feel).
+        // Force an instant restore even if a theme or future style adds smooth
+        // scrolling. Save/override/restore inline `scroll-behavior` the same
+        // way `scrollToBottom` does, wrapped in try/finally so the prior value
+        // is always restored.
         const prior = el.style.scrollBehavior;
         try {
           el.style.scrollBehavior = 'auto';

@@ -183,7 +183,12 @@ function within<T>(ms: number, p: Promise<T>): Promise<T> {
 test("execute(): a dispatch that never settles is force-settled within PIE_SUBAGENT_SETTLEMENT_MS and returns a loud error toolResult", async () => {
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50"; // tiny net
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0"; // skip grace → synthesize immediately
-	setMockBehavior(hangingPromptBehavior());
+	setMockBehavior({
+		onPrompt: (emit: (event: unknown) => void) => {
+			emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "partial progress" } });
+			return new Promise<void>(() => {});
+		},
+	});
 
 	const response = await within(2000, execute(
 		"tool-settle-1",
@@ -201,6 +206,9 @@ test("execute(): a dispatch that never settles is force-settled within PIE_SUBAG
 	// (which arrives during the grace window after the settlement abort). Both
 	// are acceptable "loud" outcomes — what matters is execute() returned.
 	assert.match(text, /force-settled|settle|abort/i);
+	assert.equal(response.details.results.length, 1);
+	assert.equal(response.details.results[0]?.streamingText, "partial progress");
+	assert.equal(response.details.results[0]?.exitCode, 1);
 });
 
 test("execute(): parent abort still works when the settlement net is disabled (settlementMs=0) — the net is not the primary fix", async () => {

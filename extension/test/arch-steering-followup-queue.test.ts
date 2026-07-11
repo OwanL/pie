@@ -58,8 +58,8 @@ function sendResult(corrId: string, ok: boolean, queued?: boolean, error?: strin
   return { kind: 'SendResult', corrId, sessionPath: SESSION, ok, queued, error };
 }
 
-function queuedDelivered(text = 'hello'): Event {
-  return { kind: 'QueuedDelivered', sessionPath: SESSION, text };
+function queuedDelivered(text = 'hello', localId?: string): Event {
+  return { kind: 'QueuedDelivered', sessionPath: SESSION, text, localId };
 }
 
 function clearQueueCmd(corrId = 'cq'): Event {
@@ -118,6 +118,29 @@ test('QueuedDelivered: promotes the earliest queued message to completed and dro
   assert.equal(out.state.pending.promoted['c1'], undefined, 'promoted snapshot dropped at delivery');
 });
 
+test('QueuedDelivered: correlated localId promotes the exact queued message', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  out = reducer(out.state, sendResult('c1', true, true));
+  out = reducer(out.state, sendCmd('c2', SESSION, 'second'));
+  out = reducer(out.state, sendResult('c2', true, true));
+
+  out = reducer(out.state, queuedDelivered('second', 'local:c2'));
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.status, 'queued');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[1]?.status, 'completed');
+  assert.ok(out.state.pending.promoted['c1']);
+  assert.equal(out.state.pending.promoted['c2'], undefined);
+  assert.ok(out.effects.some((effect) => effect.kind === 'CancelQueuedDwellWatchdog'));
+});
+
+test('Queued dwell watchdog marks the message actionable without interrupting the active turn', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  assert.ok(out.effects.some((effect) => effect.kind === 'StartQueuedDwellWatchdog'));
+  out = reducer(out.state, { kind: 'QueuedDwellWatchdogFired', sessionPath: SESSION, localId: 'local:c1' });
+  assert.equal(out.state.pending.queuedDwellBySession[SESSION]?.[0]?.watchdogFired, true);
+  assert.deepEqual(out.state.sessions.runningSessionPaths, [SESSION]);
+  assert.ok(out.effects.some((effect) => effect.kind === 'Log'));
+});
+
 test('QueuedDelivered: with multiple queued messages, promotes them in FIFO order (earliest first)', () => {
   let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
   out = reducer(out.state, sendResult('c1', true, true));
@@ -172,6 +195,8 @@ test('SendResult{ok:false} for a queued send: removes the queued message, fires 
 
   assert.equal(out.state.transcript.bySession[SESSION]?.length, 0, 'queued message rolled back on pre-ack failure');
   assert.equal(out.state.pending.ops['c1'], undefined);
+  assert.equal(out.state.pending.queuedDwellBySession[SESSION]?.length ?? 0, 0);
+  assert.ok(out.effects.some((e) => e.kind === 'CancelQueuedDwellWatchdog'));
   // The original turn is still running — runningSessionPaths MUST be preserved.
   assert.deepEqual(out.state.sessions.runningSessionPaths, [SESSION]);
   // A sendRejected imperative fires so the webview restores the draft.

@@ -1,6 +1,6 @@
 import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, RuntimePrefsSetParams, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection } from '../shared/protocol';
 import { ALL_NESTED_BUCKETS_ALLOWED } from '../shared/protocol';
-import { ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
+import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
 import { BackendError } from './server-io';
 
@@ -48,6 +48,12 @@ export interface MessageSendParams {
   sessionPath: string;
   text: string;
   inputs: ComposerInput[];
+  /** Host-side optimistic message ID for this send. For queued (steering/
+   *  followUp) messages the backend mirrors the SDK's FIFO drain order in
+   *  `SessionContext.queuedLocalIds` and echoes the ID back in
+   *  `message.queuedDelivered` so the host can promote the exact message.
+   *  Optional for backward compatibility with older hosts. */
+  localId?: string;
 }
 
 export interface SessionCreateParams {
@@ -269,6 +275,9 @@ function validateImageBlobInput(method: string, index: number, id: string, kind:
   if (typeof dataBase64 !== 'string' || !dataBase64.trim()) {
     fail(method, `inputs[${index}].dataBase64 must be a non-empty string`);
   }
+  if (decodedBase64ByteLength(dataBase64) > MAX_IMAGE_INPUT_BYTES) {
+    fail(method, `inputs[${index}] decoded data exceeds the ${MAX_IMAGE_INPUT_BYTES} byte image limit`);
+  }
   const source = readAllowedString(method, `inputs[${index}].source`, input['source'], ['paste', 'drop']);
   const width = readOptionalPositiveNumber(method, `inputs[${index}].width`, input['width']);
   const height = readOptionalPositiveNumber(method, `inputs[${index}].height`, input['height']);
@@ -310,13 +319,27 @@ export function validateMessageSend(params: unknown): MessageSendParams {
       fail('message.send', 'inputs must be an array when provided');
     }
     inputs = rawInputs.map((input, index) => validateComposerInput(input, index));
+    const aggregateImageBytes = inputs.reduce(
+      (total, input) => total + (input.kind === 'imageBlob'
+        ? Math.max(input.sizeBytes, decodedBase64ByteLength(input.dataBase64))
+        : 0),
+      0,
+    );
+    if (aggregateImageBytes > MAX_AGGREGATE_IMAGE_INPUT_BYTES) {
+      fail('message.send', `image inputs exceed the ${MAX_AGGREGATE_IMAGE_INPUT_BYTES} byte aggregate limit`);
+    }
   }
 
   if (!text.trim() && inputs.length === 0) {
     fail('message.send', 'requires non-empty text or at least one input');
   }
 
-  return { text: text as string, sessionPath: sp as string, inputs };
+  const localId = (params as Record<string, unknown>)['localId'];
+  if (localId !== undefined && typeof localId !== 'string') {
+    fail('message.send', 'localId must be a string when provided');
+  }
+
+  return { text: text as string, sessionPath: sp as string, inputs, localId };
 }
 
 export interface SettingsSetParams extends Partial<ModelSettings> {
@@ -548,6 +571,11 @@ export function validateSettingsSet(params: unknown): SettingsSetParams {
   if (dm !== undefined) {
     if (typeof dm !== 'string') fail('settings.set', 'defaultModel must be a string');
     out.defaultModel = dm;
+  }
+  const dp = (params as Record<string, unknown>)['defaultProvider'];
+  if (dp !== undefined) {
+    if (typeof dp !== 'string' || !dp) fail('settings.set', 'defaultProvider must be a non-empty string when provided');
+    out.defaultProvider = dp;
   }
   const dt = (params as Record<string, unknown>)['defaultThinkingLevel'];
   if (dt !== undefined) {

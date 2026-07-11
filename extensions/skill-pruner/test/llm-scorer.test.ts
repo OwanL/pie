@@ -42,6 +42,9 @@ test("buildPruningSystemPrompt always includes core rules", () => {
 	assert.ok(prompt.includes("relevance curator"));
 	assert.ok(prompt.includes("JSON object"));
 	assert.ok(prompt.includes("Do not wrap in markdown"));
+	assert.ok(prompt.includes('{"pruneSkills":[],"pruneTools":[]}'));
+	assert.match(prompt, /do not include an explanation or reasoning/i);
+	assert.ok(!prompt.includes('{"reasoning"'));
 	assert.ok(prompt.includes("REMOVE"), "prompt must frame the task as removal (prune-list)");
 });
 

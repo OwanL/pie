@@ -646,7 +646,7 @@ export class PieExtension implements vscode.Disposable {
     // pickStable / memo barriers — unchanged slices stay referentially stable
     // across posts.
     const projected = selectViewState(this.archState);
-    return {
+    const viewState: ViewState = {
       ...projected,
       tokenRateBySession: this.tokenRateService.getRates(),
       aggregateStats: this.aggregateStatsService.getAggregateStats(),
@@ -655,6 +655,28 @@ export class PieExtension implements vscode.Disposable {
       // `tokenRateBySession` so the pure projection stays service-free.
       deferredTriggers: this.service.getDeferredTriggers(),
     };
+    this.checkForPromise(viewState);
+    return viewState;
+  }
+
+  /** Temporary diagnostic: detect Promise values in the ViewState before posting. */
+  private checkForPromise(state: unknown, path = 'ViewState', seen = new Set<unknown>()): void {
+    if (state instanceof Promise) {
+      auditLog('extension-host', 'buildViewState.promiseDetected', { path });
+      return;
+    }
+    if (state == null || typeof state !== 'object') return;
+    if (seen.has(state)) return;
+    seen.add(state);
+    if (Array.isArray(state)) {
+      for (let i = 0; i < state.length; i += 1) {
+        this.checkForPromise(state[i], `${path}[${i}]`, seen);
+      }
+    } else {
+      for (const [key, value] of Object.entries(state)) {
+        this.checkForPromise(value, `${path}.${key}`, seen);
+      }
+    }
   }
 
   private scheduleRender(): void {

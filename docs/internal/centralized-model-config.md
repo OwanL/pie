@@ -1,7 +1,7 @@
 # Centralized Model Configuration
 
-> **Status:** Implemented. `models.yaml` is the single source of truth; `npm run sync-models` regenerates `models.json`, `model-profiles.yaml`, `proxy/litellm_config.yaml`, and merges model fields into `settings.json`. Drift is pinned by `extension/test/model-config-sync.test.ts`. This doc remains as the design rationale; see `README.md` (Model Configuration) and `AGENTS.md` for the authoritative user-facing usage.
-> **Decisions (confirmed with owner):** Codegen approach · YAML source + JSON Schema · scope includes `settings.json` model fields.
+> **Status:** Implemented, with later architecture changes. `models.yaml` owns the provider catalog and seed defaults; `npm run sync-models` regenerates `models.json` and `model-profiles.yaml`, then merges centrally-owned fields into `settings.json`. Active chat and pruning selections are runtime user preferences: sync seeds missing values but preserves existing choices. The historical proxy sections below are retained as design rationale; see `README.md` and `AGENTS.md` for current usage.
+> **Current ownership:** Codegen owns catalog data and retry policy. The settings UI owns active chat/pruning model, provider, and thinking-level selections.
 
 ## 1. Problem
 
@@ -288,9 +288,9 @@ exact generated structure so no reader changes are needed.
 | `defaults.provider` | — | — | — | `defaultProvider` |
 | `defaults.thinkingLevel` | — | — | — | `defaultThinkingLevel` |
 | `retry.*` | — | — | — | `retry.*` (whole object, overwritten) |
-| `pruning.model` | — | — | — | `pruning.model` |
-| `pruning.provider` | — | — | — | `pruning.provider` |
-| `pruning.thinkingLevel` | — | — | — | `pruning.thinkingLevel` |
+| `pruning.model` | — | — | — | seeds `pruning.model` when absent |
+| `pruning.provider` | — | — | — | seeds `pruning.provider` when absent |
+| `pruning.thinkingLevel` | — | — | — | seeds `pruning.thinkingLevel` when absent |
 | `proxy.routerSettings.*` | — | — | `router_settings.*` | — |
 | `proxy.litellmSettings.*` | — | — | `litellm_settings.*` | — |
 | `proxy.generalSettings.masterKeyEnv` | — | — | `general_settings.master_key: os.environ/<ENV>` | — |
@@ -388,11 +388,9 @@ npm run sync-models -- --verbose # print what changed per file
    - `proxy/litellm_config.yaml` — top-level `model_list`, `router_settings`,
      `litellm_settings`, `general_settings` per §4. Emit a generated-file header comment
      preserving the key operational notes (timeout warning, master_key explanation).
-   - `settings.json` — **read-modify-write merge**: read existing settings.json, overwrite
-     only `defaultModel`, `defaultProvider`, `defaultThinkingLevel`, `retry`, `pruning.model`,
-     `pruning.provider`, `pruning.thinkingLevel`. **Preserve** everything else
-     (`httpIdleTimeoutMs`, `packages`, `lastChangelogVersion`, `subagent`, `sessionDir`,
-     `pruning.tools`).
+   - `settings.json` — **read-modify-write merge**: overwrite centrally-owned `retry`, seed
+     missing chat/pruning selections from `models.yaml`, and preserve existing user selections
+     plus all unrelated runtime settings.
 4. **Write** each file only if content changed (compare to existing; skip writes that are
    no-ops to avoid touching mtimes — `subagent-profiles.ts` caches by mtime).
 5. **Report** a summary: which files updated, which unchanged, any warnings.
@@ -419,16 +417,14 @@ modifies at runtime (`lastChangelogVersion`) and that users edit independently (
 ```js
 // Pseudocode
 const settings = JSON.parse(read('settings.json'));
-settings.defaultModel = source.defaults.model;
-settings.defaultProvider = source.defaults.provider;
-settings.defaultThinkingLevel = source.defaults.thinkingLevel;
+settings.defaultModel ||= source.defaults.model;
+settings.defaultProvider ||= source.defaults.provider;
+settings.defaultThinkingLevel ||= source.defaults.thinkingLevel;
 settings.retry = source.retry;                          // whole-object overwrite
-settings.pruning = {
-  ...settings.pruning,                                  // preserve pruning.tools
-  model: source.pruning.model,
-  provider: source.pruning.provider,
-  thinkingLevel: source.pruning.thinkingLevel,
-};
+settings.pruning ??= {};
+settings.pruning.model ||= source.pruning.model;
+settings.pruning.provider ||= source.pruning.provider;
+settings.pruning.thinkingLevel ||= source.pruning.thinkingLevel;
 write('settings.json', JSON.stringify(settings, null, 2));
 ```
 
@@ -528,7 +524,7 @@ git diff --stat                    # should show only the 4 derived files + bann
 | Sync script has a bug that corrupts a derived file | Medium | High | Step 3 (semantic diff against current files) catches this before merge. Sync-consistency test catches it after. |
 | Someone edits a derived file directly (bypassing sync) | Medium | Medium | Generated-file banner + sync-consistency test (`--check`) fails CI. |
 | `overrideOnly` flag mis-set, model lands in wrong models.json collection | Low | Medium | Schema can warn if `overrideOnly: true` but model has `api`/`compat` (contradictory). Reviewer catches in PR. |
-| settings.json merge clobbers a runtime-modified field (`lastChangelogVersion`) | Low | High | Merge only touches the 7 model-related keys; everything else preserved. Test asserts preservation. |
+| settings.json merge clobbers a runtime user choice | Low | High | Chat/pruning selections are seeded only when absent; preservation and fresh-settings behavior are both tested. |
 | Generated `model-profiles.yaml` loses the section comments ("=== COPILOT MODELS ===") | Low | Low | Source YAML keeps comments for organization; generated file is pure data with a banner. Acceptable tradeoff. |
 | `litellm_config.yaml` loses operational notes (timeout warning) | Low | Medium | Sync script emits a static notes block hardcoded in the script (not from models.yaml). |
 | Future LiteLLM schema changes require new fields | Low | Low | Add fields to `proxy.*` in models.yaml + extend generation. Single edit point makes this trivial. |

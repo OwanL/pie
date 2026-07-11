@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
 # Bootstrap the pie portable coding-agent configuration on macOS / Linux.
 #
-# Mirrors the essentials of install.ps1:
-#   1. Sets PI_CODING_AGENT_DIR to point at this repo (user shell rc).
-#   2. Migrates legacy ~/.pi/agent/auth.json into the repo if missing.
-#   3. Verifies node / npm are present.
-#   5. Installs `pi` (@earendil-works/pi-coding-agent) globally if the CLI is
-#      missing, then runs `pi update` to restore packages.
-#   5. Prints next steps.
-#
-# This is intentionally simpler than install.ps1 — full feature parity
-# (session migration, sessionDir repair, settings.json patching) is tracked in
-# TODO.md.
+# Mirrors install.ps1: pins the toolchain and CLI, relocates credentials,
+# keeps sessions in a machine-local checkout store, restores packages, writes
+# VS Code settings, and builds/installs the extension when the code CLI exists.
 #
 # Run once after cloning:
 #   chmod +x install.sh
@@ -86,14 +78,46 @@ require_cmd() {
   fi
 }
 
-require_cmd node "Install Node.js 20+ from https://nodejs.org/"
+require_cmd node "Install the exact version in .node-version from https://nodejs.org/"
 require_cmd npm  "npm ships with Node.js"
 
-node_major="$(node -p 'process.versions.node.split(".")[0]')"
-if (( node_major < 20 )); then
-  echo "ERROR: Node.js 20+ required, found $(node -v)" >&2
+pinned_node="$(tr -d '[:space:]v' < "$repo_root/.node-version")"
+actual_node="$(node -p 'process.versions.node')"
+if [[ "$actual_node" != "$pinned_node" ]]; then
+  echo "ERROR: Node.js $pinned_node required for reproducible installs, found $actual_node. Use .nvmrc/.node-version." >&2
   exit 1
 fi
+pinned_npm="$(node -p 'require(process.argv[1]).packageManager.replace(/^npm@/, "")' "$repo_root/package.json")"
+actual_npm="$(npm --version)"
+if [[ "$actual_npm" != "$pinned_npm" ]]; then
+  echo "==> Installing pinned npm@$pinned_npm (found $actual_npm)"
+  npm install -g "npm@$pinned_npm"
+fi
+pinned_pi="$(node "$repo_root/scripts/lib/sdk-version.mjs")"
+
+# Keep session history local to this checkout and migrate legacy stores safely.
+session_dir="$repo_root/data/outcomes/sessions"
+export PI_CODING_AGENT_SESSION_DIR="$session_dir"
+persist_session_env_var() {
+  local rc="$1"
+  local line="export PI_CODING_AGENT_SESSION_DIR=\"$session_dir\""
+  if [[ -f "$rc" ]] && grep -Fq "PI_CODING_AGENT_SESSION_DIR=" "$rc"; then
+    node -e '
+      const fs = require("fs");
+      const [file, replacement] = process.argv.slice(1);
+      const source = fs.readFileSync(file, "utf8");
+      fs.writeFileSync(file, source.replace(/^export PI_CODING_AGENT_SESSION_DIR=.*$/m, replacement));
+    ' "$rc" "$line"
+    echo "==> Updated PI_CODING_AGENT_SESSION_DIR in $rc"
+    return
+  fi
+  printf '\n# Added by pi-config install.sh (machine-local sessions)\n%s\n' "$line" >> "$rc"
+}
+case "${SHELL##*/}" in
+  zsh)  persist_session_env_var "$HOME/.zshrc" ;;
+  bash) persist_session_env_var "$HOME/.bashrc" ;;
+esac
+node "$repo_root/scripts/migrate-local-sessions.mjs"
 
 # Rewrite absolute extension paths in settings.json that point into another
 # machine's npm global node_modules tree (settings.json is git-tracked, so a
@@ -160,26 +184,21 @@ resolve_pi() {
 }
 
 PI_BIN="$(resolve_pi)" || true
-if [[ -z "$PI_BIN" ]]; then
-  echo "==> 'pi' CLI not found; installing @earendil-works/pi-coding-agent globally"
-  npm install -g @earendil-works/pi-coding-agent || {
-    echo "ERROR: Failed to install @earendil-works/pi-coding-agent globally." >&2
-    echo "       Install manually: npm i -g @earendil-works/pi-coding-agent" >&2
+installed_pi=""
+if [[ -n "$PI_BIN" ]]; then installed_pi="$("$PI_BIN" --version 2>/dev/null || true)"; fi
+if [[ -z "$PI_BIN" || "$installed_pi" != "$pinned_pi" ]]; then
+  echo "==> Installing pinned @earendil-works/pi-coding-agent@$pinned_pi (found '$installed_pi')"
+  npm install -g "@earendil-works/pi-coding-agent@$pinned_pi" || {
+    echo "ERROR: Failed to install pinned pi CLI $pinned_pi." >&2
     exit 1
   }
   PI_BIN="$(resolve_pi)" || true
-  if [[ -z "$PI_BIN" ]]; then
-    echo "ERROR: @earendil-works/pi-coding-agent installed but 'pi' could not be resolved on PATH or under the npm prefix." >&2
-    echo "       Open a new terminal and re-run, or install manually." >&2
-    exit 1
-  fi
-  echo "==> Installed pi to '$PI_BIN'"
+  [[ -n "$PI_BIN" ]] || { echo "ERROR: pi installed but could not be resolved." >&2; exit 1; }
+else
+  echo "==> pi CLI is pinned at $pinned_pi"
 fi
 
-# Restore pi packages from settings.json.
-echo "==> Running 'pi update' to restore packages from settings.json"
-"$PI_BIN" update || echo "WARN: 'pi update' exited non-zero; continue manually if needed"
-
+# Relocate credentials before executing any third-party pi package code.
 # ── Relocate auth.json out of the working tree ─────────────────────────────────
 # See docs/internal/SECRET_AND_STORAGE_RELOCATION_PLAN.md Phase 2.
 auth_dir_env="${PI_CODING_AGENT_AUTH_DIR:-}"
@@ -294,6 +313,10 @@ elif [[ -f "$in_tree_auth" && -n "$auth_dir_env" ]]; then
   echo "    (in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR)"
 fi
 
+# Restore packages without updating the pinned pi CLI itself.
+echo "==> Running 'pi update --extensions' to restore packages from settings.json"
+"$PI_BIN" update --extensions || echo "WARN: 'pi update --extensions' exited non-zero; continue manually if needed"
+
 # ── Write pie.agentDir to VS Code User settings ───────────────────────────────
 # The extension host reads pie.agentDir and forwards it to the backend as
 # PI_CODING_AGENT_DIR. This is necessary because VS Code only picks up new
@@ -330,6 +353,28 @@ for vs_settings_dir in "${vs_settings_dirs[@]}"; do
   fi
 done
 
+# Build/package/install the extension from its tracked lockfile.
+echo "==> Building pie VS Code extension"
+vsix=""
+if (
+  cd "$repo_root/extension"
+  npm ci
+  npm run build
+  npm run package
+); then
+  vsix="$(find "$repo_root/extension" -maxdepth 1 -name 'pie-*.vsix' -type f -print | sort | tail -1)"
+else
+  echo "WARN: Extension build failed. Close VS Code if it is using files under extension/node_modules, then re-run." >&2
+fi
+code_cli=""
+if command -v code >/dev/null 2>&1; then code_cli="$(command -v code)";
+elif command -v code-insiders >/dev/null 2>&1; then code_cli="$(command -v code-insiders)"; fi
+if [[ -n "$code_cli" && -n "$vsix" ]]; then
+  "$code_cli" --install-extension "$vsix" --force || echo "WARN: VS Code extension install failed; install $vsix manually" >&2
+elif [[ -n "$vsix" ]]; then
+  echo "WARN: VS Code CLI unavailable; install $vsix manually" >&2
+fi
+
 cat <<EOM
 
 ==> Done.
@@ -341,10 +386,8 @@ Resolved storage paths:
 Next steps:
   - Open a new shell (or 'source' your shell rc) so environment variables take effect.
   - Read SECURITY.md before sharing this checkout with anyone.
-  - To build the pie VS Code extension from source:
-      cd extension && npm install && npm run build
-  - Cross-platform feature parity with install.ps1 is tracked in
-    TODO.md.
+  - Run npm run doctor to verify machine-local paths and pinned versions.
+  - Session transcripts stay on this machine and must not be cloud-synced.
 EOM
 
 # ── Post-install readiness check ─────────────────────────────────────

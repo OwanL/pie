@@ -76,6 +76,20 @@ export interface SingleResult {
 	step?: number;
 	/** Tool names currently executing in this subagent (cleared when tool finishes). */
 	runningTools?: string[];
+	/** Current lifecycle phase while the child is running. This deliberately
+	 * remains in partial tool-result details so the parent UI can distinguish a
+	 * provider wait from useful streaming/tool work or a local queue. */
+	activityPhase?: "queued" | "preparing" | "waiting_provider" | "streaming" | "running_tool" | "retry_wait" | "completed" | "failed" | "cancelled" | "orphaned_cleanup";
+	/** Human-readable detail for the current phase (for example the active tool). */
+	activityDetail?: string;
+	/** Epoch milliseconds at which this phase began. */
+	activitySince?: number;
+	/** Epoch milliseconds at which credible progress was last observed. */
+	lastProgressAt?: number;
+	/** Inactivity budget for this phase. Generous provider budgets remain valid;
+	 * exposing them makes a slow/unreliable provider observable rather than
+	 * falsely looking crashed. */
+	inactivityBudgetMs?: number;
 	/** The model actually chosen by bucket selection. */
 	selectedModel?: string;
 	/** Thinking level applied to this run. */
