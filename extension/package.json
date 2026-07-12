@@ -148,6 +148,9 @@
     "watch": "node ./scripts/build.mjs --watch",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:ask-user": "tsc --noEmit -p ../extensions/ask-user/tsconfig.json",
+    "typecheck:cwd-skills": "tsc --noEmit -p ../extensions/cwd-skills/tsconfig.json",
+    "typecheck:safeguard": "tsc --noEmit -p ../extensions/safeguard/tsconfig.json",
     "typecheck:skill-pruner": "tsc --noEmit -p ../extensions/skill-pruner/tsconfig.json",
     "typecheck:web-access-compat": "tsc --noEmit -p ../extensions/web-access-compat/tsconfig.json",
     "typecheck:warm-bash": "tsc --noEmit -p ../extensions/warm-bash/tsconfig.json",
@@ -155,7 +158,7 @@
     "typecheck:session-reviewer": "tsc --noEmit -p ../extensions/session-reviewer/tsconfig.json",
     "typecheck:session-changes": "tsc --noEmit -p ../extensions/session-changes/tsconfig.json",
     "typecheck:deferred-triggers": "tsc --noEmit -p ../extensions/deferred-triggers/tsconfig.json",
-    "test": "tsx --test ./test/**/*.test.ts",
+    "test": "node ../scripts/run-tests.mjs --fast --package extension",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
     "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"
   },

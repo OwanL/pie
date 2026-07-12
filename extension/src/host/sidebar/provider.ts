@@ -18,6 +18,7 @@ import { resolveWebviewHtml, getWebviewRoots } from '../webview/assets';
 import { SidebarHotReloader } from './hot-reloader';
 import { StateAppliedWatchdog } from './state-applied-watchdog';
 import { WebviewReadinessProbe } from './readiness-probe';
+import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
 import type {
   HostToWebviewMessage,
   ViewState,
@@ -188,7 +189,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           if (payload.renderError) {
             bootLog('sidebar-provider', 'webview.renderError', { error: payload.renderError });
           }
-          this.watchdog.recordStateApplied(msg.payload.revision);
+          const signatureMatches = msg.payload.renderSignature === msg.payload.domRenderSignature;
+          this.watchdog.recordStateApplied(
+            msg.payload.revision,
+            signatureMatches ? msg.payload.domRenderSignature : null,
+          );
         }
 
         if (!this.webviewReady) {
@@ -233,16 +238,8 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         this.onMessage(msg);
       } catch (err) {
         appendPieError('webview', 'onDidReceiveMessage prelude failed', err);
-        // If the failed message was a stateApplied ack, record its revision so
-        // the StateAppliedWatchdog doesn't hang waiting for an ack we failed
-        // to process (it would otherwise resnapshot/reload after a timeout).
-        if (msg.type === 'stateApplied') {
-          const payload = msg.payload as any;
-          const revision = payload?.revision;
-          if (typeof revision === 'number') {
-            this.watchdog.recordStateApplied(revision);
-          }
-        }
+        // Do not acknowledge a stateApplied message that failed processing.
+        // The watchdog must retain ownership and recover by resnapshot/reload.
       }
     });
 
@@ -487,7 +484,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         this.syncState = reconcilePostedMessageDelivery(this.syncState, message, delivered);
         if (delivered && message.type === 'state') {
           recordSnapshotPost();
-          this.watchdog.armStateAppliedWatchdog(message.revision);
+          this.watchdog.armStateAppliedWatchdog(message.revision, transcriptRenderSignature(message.state));
         }
         if (!delivered) {
           bootLog('sidebar-provider', 'message.deliveryFailed', {
@@ -565,7 +562,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
           });
         }
         recordSnapshotPost();
-        this.watchdog.armStateAppliedWatchdog(message.revision);
+        this.watchdog.armStateAppliedWatchdog(message.revision, transcriptRenderSignature(message.state));
       } else {
         bootLog('sidebar-provider', 'readinessProbe.notDelivered', {
           hostInstanceId: this.hostInstanceId,

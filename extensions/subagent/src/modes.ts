@@ -29,6 +29,7 @@ import { getMaxConcurrency, getMaxParallelTasks } from "./concurrency-limit.js";
 import { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, type SelectionContext } from "./selection.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import type { ThinkingLevel } from "../bucket-selector.js";
+import { toErrorMessage } from "../../../shared/error-message.js";
 
 type Mode = "single" | "parallel" | "chain";
 type MakeDetails = (mode: Mode, results: SingleResult[]) => SubagentDetails;
@@ -42,8 +43,11 @@ function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
-/** Placeholder result representing a task that has not yet finished. */
+/** Placeholder for a parallel task waiting behind this tool call's worker
+ * limit. It is emitted alongside the first active child, so it must explain
+ * why it has no transcript yet instead of presenting an empty card. */
 function createPendingResult(agent: string, task: string, step?: number): SingleResult {
+	const now = Date.now();
 	return {
 		agent,
 		agentSource: "unknown",
@@ -52,6 +56,10 @@ function createPendingResult(agent: string, task: string, step?: number): Single
 		messages: [],
 		stderr: "",
 		usage: emptyUsage(),
+		activityPhase: "queued",
+		activityDetail: "waiting for parallel worker slot",
+		activitySince: now,
+		lastProgressAt: now,
 		step,
 	};
 }
@@ -73,14 +81,9 @@ function createErrorResult(agent: string, task: string, errorMessage: string, st
 
 /** Placeholder result for a task that was never started because the parent
  *  aborted while it was queued behind `mapWithConcurrencyLimit`. This is the
- *  "scout :2" case: the worker never entered `runSingleAgent`, so there's no
- *  `onAbort` handler, no `child.abort.invoked` log, and no `session.abort()`
- *  call. Returning this placeholder from the worker slot lets
- *  `Promise.all(workers)` settle promptly when the parent aborts — without it,
- *  the queued task would start `runSingleAgent` with an already-aborted signal,
- *  hitting the `parentAlreadyAborted` branch where `createSession` and
- *  `runPrompt()` run without `raceAbort` and can hang a dead proxy
- *  indefinitely (30-min settlement timer is the only escape). */
+ *  "scout :2" case: the worker never entered `runSingleAgent`, so there is no
+ *  child session to abort or dispose. Returning this placeholder lets
+ *  `Promise.all(workers)` settle promptly and makes the skipped task explicit. */
 function createAbortedPlaceholderResult(agent: string, task: string, step?: number): SingleResult {
 	return {
 		agent,
@@ -117,8 +120,10 @@ interface RunWithModelRetryArgs {
 	childDepth: number;
 	/** Build a fresh runtime context for the attempt. */
 	buildRuntime: () => SubagentRuntimeContext;
+	/** Parent/tool signal. Once aborted, no fallback attempt may start. */
+	signal: AbortSignal;
 	/** Execute one attempt with the resolved model; returns the raw result. */
-	runAttempt: (resolved: ReturnType<typeof resolveModel>) => Promise<SingleResult>;
+	runAttempt: (resolved: Awaited<ReturnType<typeof resolveModel>>) => Promise<SingleResult>;
 }
 
 interface ModelRetryOutcome {
@@ -132,6 +137,8 @@ interface ModelRetryOutcome {
  */
 async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<ModelRetryOutcome> {
 	let result: SingleResult | undefined;
+	let retryCount = 0;
+	let lastFailedModel: string | undefined;
 
 	for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt++) {
 		const resolved = await resolveModel(
@@ -146,12 +153,18 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<ModelRetr
 		result = await subagentRuntime.run(args.buildRuntime(), () => args.runAttempt(resolved));
 		attachSelectionMetadata(result, resolved);
 
+		// Stop is terminal. Never launch a fresh fallback session after the
+		// just-finished attempt observed parent cancellation. The old retry path
+		// spawned new provider work after interrupt, making a queued child appear
+		// to start working only after the user pressed Stop.
+		if (args.signal.aborted) break;
+
 		const failure = isModelFailure(result, resolved.modelOverride, !!args.selectionCtx.bucketAssignments);
 		if (!failure || attempt >= MAX_MODEL_RETRIES) break;
 
 		args.excludeModels.add(resolved.modelOverride!);
-		result.failedModel = resolved.modelOverride;
-		result.retryCount = attempt + 1;
+		lastFailedModel = resolved.modelOverride;
+		retryCount++;
 
 		const next = await resolveModel(
 			args.agent,
@@ -165,6 +178,10 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<ModelRetr
 		if (!next.modelOverride || args.excludeModels.has(next.modelOverride)) break;
 	}
 
+	if (retryCount > 0) {
+		result!.failedModel = lastFailedModel;
+		result!.retryCount = retryCount;
+	}
 	return { result: result! };
 }
 
@@ -215,11 +232,14 @@ export async function executeSingleMode(
 		activeModelId: ctx.model?.id ?? "",
 		selectionCtx,
 		childDepth: runtimeCtx.depth + 1,
+		signal,
 		buildRuntime: () => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, params.agent!],
 			canSpawn: singleAgent.canSpawn,
 			budget: runtimeCtx.budget,
+			keptSkills: runtimeCtx.keptSkills,
+			processPermitScope: runtimeCtx.processPermitScope,
 		}),
 		runAttempt: (resolved) => {
 			const sel = resolved.selection ?? {
@@ -287,38 +307,48 @@ export async function executeParallelMode(
 
 	const allResults = createPendingResultsForTasks(params.tasks!);
 	const emitParallelUpdate = makeParallelUpdateEmitter(allResults, makeDetails, onUpdate);
+	// Publish real placeholders immediately. Without this first update the host
+	// reconstructs generic "waiting for parallel task dispatch" cards from tool
+	// input, which can remain visible while workers are already loading.
+	emitParallelUpdate();
 
 	// Pass the parent abort signal to `mapWithConcurrencyLimit` so queued
 	// workers (the "scout :2" case — still waiting for a free slot when the
-	// parent aborts) skip their item instead of entering `runSingleAgent`
-	// with an already-aborted signal. Without this, scout :2 would hit the
-	// `parentAlreadyAborted` branch where `createSession` and `runPrompt()`
-	// run without `raceAbort` — a hung SDK/dead proxy then dangles the worker
-	// until the 30-min settlement timer fires. Skipped slots get an explicit
-	// "skipped" result below so the final formatted output is complete.
+	// parent aborts) skip their item instead of entering child setup. Skipped
+	// slots get an explicit result below so the final output is complete.
 	const results = await mapWithConcurrencyLimit(
 		params.tasks!,
 		getMaxConcurrency(),
-		(t, index) =>
-			runParallelTask(t, index, {
-				ctx,
-				agents,
-				signal,
-				selectionCtx,
-				runtimeCtx,
-				makeDetails,
-				allResults,
-				emitUpdate: emitParallelUpdate,
-				checkSessionLimit,
-				// Mirror the webview's SubagentCallContext: it uses `${id}:${index}` only
-				// when multiple results render (results.length > 1). A single-task
-				// parallel call renders as one block with the bare id, so stamp bare to
-				// match — otherwise the inline ask_user prompt never finds its request.
-				_toolCallId: params.tasks!.length > 1 ? `${_toolCallId}:${index}` : _toolCallId,
-				parentUiBridge,
-				parentSessionId,
-				allToolNames,
-			}),
+		async (t, index) => {
+			try {
+				return await runParallelTask(t, index, {
+					ctx,
+					agents,
+					signal,
+					selectionCtx,
+					runtimeCtx,
+					makeDetails,
+					allResults,
+					emitUpdate: emitParallelUpdate,
+					checkSessionLimit,
+					// Mirror the webview's SubagentCallContext: it uses `${id}:${index}` only
+					// when multiple results render (results.length > 1). A single-task
+					// parallel call renders as one block with the bare id.
+					_toolCallId: params.tasks!.length > 1 ? `${_toolCallId}:${index}` : _toolCallId,
+					parentUiBridge,
+					parentSessionId,
+					allToolNames,
+				});
+			} catch (error) {
+				// One orchestration bug must not abandon already-running siblings.
+				// Convert it into this task's terminal result and let all workers settle.
+				const failed = createErrorResult(t.agent, t.task, toErrorMessage(error));
+				failed.stderr = failed.errorMessage ?? "";
+				allResults[index] = failed;
+				emitParallelUpdate();
+				return failed;
+			}
+		},
 		signal,
 	);
 
@@ -395,11 +425,14 @@ async function runParallelTask(
 		activeModelId: ctx.model?.id ?? "",
 		selectionCtx,
 		childDepth: runtimeCtx.depth + 1,
+		signal,
 		buildRuntime: () => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, t.agent],
 			canSpawn: parallelAgent.canSpawn,
 			budget: runtimeCtx.budget,
+			keptSkills: runtimeCtx.keptSkills,
+			processPermitScope: runtimeCtx.processPermitScope,
 		}),
 		runAttempt: (resolved) => {
 			const sel = resolved.selection ?? {
@@ -551,11 +584,14 @@ export async function executeChainMode(
 			activeModelId: ctx.model?.id ?? "",
 			selectionCtx,
 			childDepth: runtimeCtx.depth + 1,
+			signal,
 			buildRuntime: () => ({
 				depth: runtimeCtx.depth + 1,
 				trail: [...runtimeCtx.trail, step.agent],
 				canSpawn: chainAgent.canSpawn,
 				budget: runtimeCtx.budget,
+				keptSkills: runtimeCtx.keptSkills,
+				processPermitScope: runtimeCtx.processPermitScope,
 			}),
 			runAttempt: (resolved) => {
 				const sel = resolved.selection ?? {

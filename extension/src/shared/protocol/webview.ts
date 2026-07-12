@@ -1,6 +1,6 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
-import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
+import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus, QueuedDwellEntry } from './sessions.js';
 import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
@@ -16,6 +16,8 @@ export interface ExtensionUIRequestBase {
   subagentCallId?: string;
   /** When set, links this request to the running tool call that issued it (main-agent ask_user, etc.). */
   toolCallId?: string;
+  /** Optional dialog timeout in milliseconds. The webview shows a countdown and auto-cancels. */
+  timeout?: number;
 }
 
 /** A pending extension UI request (backend → host → webview). */
@@ -42,6 +44,10 @@ export interface StateAppliedPayload {
   systemPromptCount: number;
   domTranscriptLoaderPresent: boolean;
   domTabsConnectingPresent: boolean;
+  /** Signature expected from the accepted snapshot. */
+  renderSignature: string;
+  /** Signature read from the committed transcript DOM. */
+  domRenderSignature: string | null;
 }
 
 /** The full view state sent from the extension host to the webview. */
@@ -173,6 +179,10 @@ export interface ViewState {
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
   /** First pending extension UI request for the active session, or null (for bottom-bar prompt). */
   pendingExtensionUIRequest: ExtensionUIRequestPayload | null;
+  /** Per-session queued-message dwell state for the active session (handoff §F).
+   *  Empty when no messages are queued. The webview surfaces an actionable
+   *  warning when any entry has `watchdogFired`. */
+  queuedDwell: QueuedDwellEntry[];
   /** Currently-active (registered, not yet fired/cancelled) deferred triggers
    *  across ALL sessions, projected host-side from the `DeferredTriggerRegistry`.
    *  The webview renders a waiting-trigger segment in the bottom status strip
@@ -258,6 +268,7 @@ export type WebviewToHostMessage =
   | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; inputs?: ComposerInput[]; localId?: string }
   | { type: 'interrupt'; sessionPath: string }
   | { type: 'clearQueue'; sessionPath: string }
+  | { type: 'rearmQueuedDwellWatchdog'; sessionPath: string; localId: string }
   | { type: 'newSession' }
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string }

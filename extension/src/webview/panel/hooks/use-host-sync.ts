@@ -24,6 +24,7 @@ import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
 import { webviewLog } from '../utils/log';
+import { transcriptRenderSignature } from '../../../shared/transcript-render-signature';
 
 export const EMPTY_VIEW_STATE: ViewState = {
   sessions: [],
@@ -43,6 +44,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
   deferredTriggers: [],
+  queuedDwell: [],
   busy: false,
   retryStatus: null,
   waitingForSlot: null,
@@ -164,6 +166,7 @@ function useHydrateViewState() {
       toolResultPruningSettings,
       pruningCatalog,
       availableModels,
+      queuedDwell: raw.queuedDwell ?? [],
     };
   }, []);
 }
@@ -208,6 +211,7 @@ interface PendingStateApplied {
   openTabCount: number;
   transcriptCount: number;
   systemPromptCount: number;
+  renderSignature: string;
 }
 
 function useStateAppliedDiagnostics(
@@ -234,6 +238,8 @@ function useStateAppliedDiagnostics(
         openTabCount: pendingStateApplied.openTabCount,
         transcriptCount: pendingStateApplied.transcriptCount,
         systemPromptCount: pendingStateApplied.systemPromptCount,
+        renderSignature: pendingStateApplied.renderSignature,
+        domRenderSignature: document.querySelector<HTMLElement>('[data-render-signature]')?.dataset.renderSignature ?? null,
         domTranscriptLoaderPresent: document.querySelector('.transcript-loading') !== null,
         domTabsConnectingPresent: document.querySelector('.session-tabs-connecting') !== null,
       },
@@ -412,6 +418,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
     openTabCount: m.state.openTabPaths.length,
     transcriptCount: m.state.transcript.length,
     systemPromptCount: m.state.systemPrompts.length,
+    renderSignature: transcriptRenderSignature(m.state),
   });
 }
 

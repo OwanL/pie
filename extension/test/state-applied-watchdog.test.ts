@@ -146,6 +146,23 @@ test('recordStateApplied does not clear the pending watchdog when ack revision <
     timers.restore();
   }
 });
+
+test('recordStateApplied rejects an ack whose committed transcript signature is stale', () => {
+  const timers = useFakeTimers();
+  try {
+    const watchdog = new StateAppliedWatchdog(fakeDeps());
+    watchdog.armStateAppliedWatchdog(21, 'expected-tail');
+    watchdog.recordStateApplied(21, 'stale-tail');
+    assert.equal(watchdog.getPendingStateAppliedRevision(), 21);
+    assert.equal(timers.pendingCount(), 1, 'semantic mismatch keeps recovery armed');
+
+    watchdog.recordStateApplied(21, 'expected-tail');
+    assert.equal(watchdog.getPendingStateAppliedRevision(), null);
+    assert.equal(timers.pendingCount(), 0, 'matching rendered state acknowledges revision');
+  } finally {
+    timers.restore();
+  }
+});
 // ─── Bounded resnapshot escalation while streaming ────────────────────────
 // The watchdog must not suppress a force-reload *indefinitely* while a session
 // is running. After RESNAPSHOT_MAX_RETRIES unacked resnapshots it escalates to a

@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../agents.js";
 import { SubagentParams, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
+import type { Static } from "@mariozechner/pi-ai";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 
@@ -53,7 +54,7 @@ function buildDescription(disabled = false): string {
 	const lines = [
 		"Delegate a concrete task to a specialized agent with isolated context.",
 		"Use single mode normally, parallel only for independent tasks, or chain when one result feeds the next through {previous}.",
-		'The agent field must be an exact discovered name; agentScope ("user", "project", or "both") separately controls discovery.',
+		"Agents are discovered automatically from both user and project directories; project-local agents require user confirmation before they run.",
 		BUCKET_GUIDANCE,
 	];
 
@@ -72,18 +73,22 @@ function buildDescription(disabled = false): string {
 
 function buildPromptSnippet(disabled = false): string {
 	if (disabled) {
-		return "DISABLED: Sub agents are disabled. Do not call the subagent tool — it will return an error.";
+		return "DISABLED: Sub agents are disabled.";
 	}
-	try {
-		const agents = discoverAgentsForDescription();
-		if (agents.length > 0) {
-			const names = agents.map((a) => a.name).join(", ");
-			return `Delegate concrete, separable work to an isolated agent. Available agents: ${names}. ${BUCKET_GUIDANCE}`;
-		}
-	} catch {
-		/* ignore */
+	return "Delegate concrete, separable work to a discovered agent (single/parallel/chain); see description for available agents and bucket guidance.";
+}
+
+/**
+ * Compatibility shim for resumed sessions and old transcripts that still pass
+ * the removed `agentScope` parameter. It is stripped here so the rest of the
+ * tool works against the current schema, while discovery remains automatic.
+ */
+function prepareSubagentArguments(raw: unknown): Static<typeof SubagentParams> {
+	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+		const { agentScope: _ignored, ...rest } = raw as Record<string, unknown>;
+		return rest as Static<typeof SubagentParams>;
 	}
-	return `Delegate concrete, separable work to an isolated agent. ${BUCKET_GUIDANCE}`;
+	return {} as Static<typeof SubagentParams>;
 }
 
 /** Check whether subagent execution is disabled via flag or env var. */
@@ -112,6 +117,7 @@ export default function (pi: ExtensionAPI) {
 		description: buildDescription(disabled),
 		promptSnippet: buildPromptSnippet(disabled),
 		parameters: SubagentParams,
+		prepareArguments: prepareSubagentArguments,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			return execute(_toolCallId, params, signal, onUpdate, ctx, pi, isDisabledFn);

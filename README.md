@@ -198,7 +198,13 @@ See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local sta
 # from repo root; Node 24+ recommended because this includes analysis/
 npm run test
 
-# fast developer loop (parallel files, no coverage instrumentation)
+# tight loop: run only named files
+npm run test:file -- extension/test/activity-tail.test.ts
+
+# run fast suites for packages touched in the working tree
+npm run test:changed
+
+# fast package loop (parallel files, no coverage instrumentation)
 npm run test:fast -- --package extension
 
 # full verification scoped to one package
@@ -206,7 +212,9 @@ npm run test -- --package extension
 npm run test -- --package subagent
 ```
 
-`npm run test` is the canonical repo-wide verification runner. It runs each package in isolation and enforces package-level line/branch coverage gates. Use `npm run test:fast -- --package <id>` while iterating; it skips coverage and lets independent test files run in parallel, then run the full scoped command before merging.
+`npm run test` is the canonical repo-wide coverage runner. `npm run check` combines generated-config drift, parallel incremental typechecks, lint, and changed-package tests; `npm run verify` performs the full local release gate and reuses its completed typecheck during the build. Use `test:file` while iterating and the full scoped or repo-wide command before finishing a change.
+
+Test and typecheck children have a 20-minute watchdog that kills the complete process tree on timeout or runner interruption (including `taskkill /T /F` on Windows). Override it with `PIE_TEST_PROCESS_TIMEOUT_MS`; set `0` only to disable it explicitly.
 
 ### Build the pie VS Code extension
 
@@ -218,9 +226,10 @@ npm run build      # builds and syncs into the installed extension
 
 Useful extension commands:
 
-- `npm run watch` — incremental rebuild for UI work
+- `npm run watch` — incremental Vite rebuilds plus a concurrent TypeScript watch
+- `npm run watch -- --skip-typecheck` — Vite-only watch when typechecking elsewhere
 - `npm run test` — unit tests
-- `npm run typecheck` — type-only check
+- `npm run typecheck` — incremental type-only check
 - `npm run package` — produce a `.vsix`
 
 ### Run the analytics workspace

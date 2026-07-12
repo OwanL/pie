@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { findTestBash } from './test-shell.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const autoPruneUrl = pathToFileURL(path.resolve(__dirname, '../src/auto-prune.ts')).href;
@@ -37,23 +38,6 @@ type CreateOps = (o: CreateOpsOpts) => AnyOps;
 async function loadOps(): Promise<CreateOps> {
   const m = await import(opsUrl);
   return m.createWarmBashOperations as unknown as CreateOps;
-}
-
-/** Locate bash for the find-correctness + GNU-probe tests (mirrors warm-pool.test.ts). */
-function findBash(): string {
-  const explicit = process.env.PI_SHELL?.trim();
-  if (explicit && fs.existsSync(explicit)) return explicit;
-  if (process.env.SHELL && fs.existsSync(process.env.SHELL)) return process.env.SHELL;
-  if (process.platform === 'win32') {
-    const where = spawnSync('where', ['bash.exe'], { encoding: 'utf8' });
-    const found = where.stdout?.split(/\r?\n/).map((s) => s.trim()).find((p) => p && fs.existsSync(p));
-    if (found) return found;
-    const pf = process.env.ProgramFiles;
-    if (pf && fs.existsSync(`${pf}\\Git\\bin\\bash.exe`)) return `${pf}\\Git\\bin\\bash.exe`;
-  } else {
-    if (fs.existsSync('/bin/bash')) return '/bin/bash';
-  }
-  return 'bash';
 }
 
 const EXCLUDE_FLAGS =
@@ -465,7 +449,7 @@ describe('warm-bash auto-prune: splitter & edge-case robustness', () => {
 
 describe('warm-bash auto-prune: find correctness (real temp tree, GNU find)', () => {
   let rewrite: Rewrite;
-  const BASH = findBash();
+  const BASH = findTestBash();
   let tmp: string;
 
   test.before(async () => {
@@ -559,7 +543,7 @@ describe('warm-bash auto-prune: env-gate is an opts field (live-toggleable, same
 describe('warm-bash auto-prune: GNU-grep probe', () => {
   test('probeGnuGrep returns a boolean without throwing', async () => {
     const probe = await loadProbe();
-    const r = probe(findBash());
+    const r = probe(findTestBash());
     assert.equal(typeof r, 'boolean');
   });
 });

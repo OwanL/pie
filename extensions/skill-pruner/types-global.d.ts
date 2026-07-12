@@ -22,6 +22,7 @@ declare module "@earendil-works/pi-coding-agent" {
   export type ToolInfo = any;
   export type ExtensionAPI = any;
   export type BeforeAgentStartEvent = any;
+  export type InputEvent = any;
   export type ToolCallEvent = any;
   export const formatSkillsForPrompt: any;
 }

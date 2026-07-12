@@ -35,6 +35,7 @@ const CRITICAL_FIELDS: FieldSpec[] = [
   { path: 'fileChanges', type: 'array' },
   { path: 'readFilePaths', type: 'array' },
   { path: 'pendingComposerInputs', type: 'array' },
+  { path: 'queuedDwell', type: 'array' },
 ];
 
 function getNestedValue(obj: any, path: string): unknown {

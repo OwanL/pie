@@ -69,7 +69,7 @@ test('EffectRunner routes InterruptRpc through enqueueLifecycle → enqueueSessi
   assert.equal(events[0]?.ok, true);
 });
 
-test('EffectRunner CreateSession issues session.create (with the pre-minted token) on the lifecycle queue and dispatches CreateSessionResult{ok:true}', async () => {
+test('EffectRunner CreateSession bypasses unrelated lifecycle work and dispatches CreateSessionResult{ok:true}', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
 
@@ -85,10 +85,11 @@ test('EffectRunner CreateSession issues session.create (with the pre-minted toke
 
   // The reducer already did the optimistic tab setup; the service already
   // minted the selection token (before the reducer activated the pending tab).
-  // The runner only issues the backend session.create RPC, serialized on the
-  // lifecycle queue, carrying that token.
-  assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
+  // A fresh session has no ordering dependency on existing-session work, so
+  // the request bypasses the global lifecycle queue and carries the token.
+  assert.equal(calls.some((c) => c.kind === 'lifecycle'), false);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.create', params: { cwd: '/w', selectionToken: 'tok-1' } });
+  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'CreateSessionResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.sessionPath, '/__pending__:new');
@@ -126,6 +127,7 @@ test('EffectRunner OpenSession issues session.open (with the pre-minted token) o
   // lifecycle queue, carrying that token — mirroring CreateSession.
   assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.open', params: { sessionPath: '/existing', selectionToken: 'tok', transcript: 'tail' } });
+  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'OpenSessionResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.sessionPath, '/existing');
@@ -180,6 +182,7 @@ test('EffectRunner DuplicateSession issues session.duplicate (with the SOURCE pa
   // pending copy path) + the token — mirroring CreateSession/OpenSession.
   assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.duplicate', params: { sessionPath: '/src', selectionToken: 'tok-d' } });
+  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'DuplicateSessionResult');
   assert.equal(events[0]?.ok, true);
   // The pending COPY path is echoed back on the result (not the source path).
@@ -1390,7 +1393,7 @@ test('EffectRunner clears WaitingForSlotShown on commit (ClearSendTimer) and on 
   // Advance past the hard ceiling so the next fire is a genuine FIRE (not re-arm).
   const realNow = Date.now;
   const base = Date.now();
-  let now = base + MODEL_START_HARD_CEILING_MS + 1;
+  const now = base + MODEL_START_HARD_CEILING_MS + 1;
   Date.now = () => now;
   try {
     timers2.runAll(); // fire → PreflightFailed + WaitingForSlotCleared

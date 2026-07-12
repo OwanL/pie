@@ -154,10 +154,13 @@ test('QueuedDelivered: with multiple queued messages, promotes them in FIFO orde
   assert.equal(list?.[0]?.id, 'local:c1');
   assert.equal(list?.[1]?.id, 'local:c2');
 
-  // First delivery promotes the EARLIEST (c1), not c2.
+  // First delivery promotes the EARLIEST (c1), not c2, and relocates it to
+  // the authoritative delivery boundary at the transcript tail.
   out = reducer(out.state, queuedDelivered('first'));
-  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.status, 'completed');
-  assert.equal(out.state.transcript.bySession[SESSION]?.[1]?.status, 'queued');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.status, 'queued');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.id, 'local:c2');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[1]?.status, 'completed');
+  assert.equal(out.state.transcript.bySession[SESSION]?.[1]?.id, 'local:c1');
   assert.equal(out.state.pending.promoted['c1'], undefined);
   assert.ok(out.state.pending.promoted['c2'], 'second queued message still has its rollback snapshot');
 });

@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
@@ -8,6 +9,7 @@ import {
   type BusyChangedPayload,
   type ContextUsageChangedPayload,
   type ContextWindowUsage,
+  type MessageAbortedPayload,
   type ModelSettings,
   type RequestEnvelope,
   type SessionListChangedPayload,
@@ -145,6 +147,8 @@ export class BackendServer {
   private authStorage: unknown;
   private viewedSessionPath?: string;
   private readonly sessionContexts = new Map<string, SessionContext>();
+  /** Deduplicates concurrent opens/preloads for the same cold session. */
+  private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
@@ -292,6 +296,8 @@ export class BackendServer {
     const existing = this.sessionContexts.get(context.sessionPath);
     if (existing) {
       context.busySeq = existing.busySeq;
+      existing.willRetryWatchdogClear?.();
+      existing.uiBridge?.cancelAll();
       existing.unsubscribe();
       await existing.runtime.dispose();
     }
@@ -367,7 +373,20 @@ export class BackendServer {
       return existing;
     }
 
-    return await this.createSessionContext(this.sdk.SessionManager.open(sessionPath), 'resume');
+    const pending = this.pendingSessionContexts.get(sessionPath);
+    if (pending) {
+      return await pending;
+    }
+
+    const creation = this.createSessionContext(this.sdk.SessionManager.open(sessionPath), 'resume');
+    this.pendingSessionContexts.set(sessionPath, creation);
+    try {
+      return await creation;
+    } finally {
+      if (this.pendingSessionContexts.get(sessionPath) === creation) {
+        this.pendingSessionContexts.delete(sessionPath);
+      }
+    }
   }
 
   private ensureDisplayTranscriptCache(context: SessionContext) {
@@ -682,7 +701,16 @@ export class BackendServer {
       backendTrace('modelSettings', 'readExisting.failed', { level: 'warn', error: toErrorMessage(error) });
     }
     const merged = { ...existing, ...updates };
-    await fs.writeFile(settingsPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+    // Publish the complete JSON in one rename so concurrent session creation
+    // never observes the truncate/write window of writeFile(settingsPath).
+    // The unique sibling also allows overlapping backend instances safely.
+    const tempPath = `${settingsPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(tempPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+      await fs.rename(tempPath, settingsPath);
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    }
     return await this.readModelSettings();
   }
 
@@ -795,7 +823,63 @@ export class BackendServer {
       emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
       emitSessionOpened: (sessionPath, selectionToken) => this.emitSessionOpened(sessionPath, selectionToken),
       emitSessionListChanged: () => this.emitSessionListChanged(),
+      recoverStuckSession: (sessionContext, reason) => {
+        void this.recoverStuckSession(sessionContext, reason);
+      },
     }, context, event);
+  }
+
+  /**
+   * Provider/SDK abort hooks are best-effort, but host-visible state is always
+   * reconciled after a bounded grace. A dead retry must not leave the
+   * transcript and status indicators busy forever.
+   */
+  private async recoverStuckSession(context: SessionContext, reason: string): Promise<void> {
+    const active = context.activeRequest;
+    if (!active) {
+      this.emitBusyChanged(context, false);
+      return;
+    }
+
+    const requestId = active.id;
+    const messageId = active.lastAssistantMessageId ?? active.currentMessageId;
+    context.willRetryWatchdogClear?.();
+    context.willRetryWatchdogClear = undefined;
+    context.uiBridge?.cancelAll();
+    context.session.clearQueue();
+    context.queuedLocalIds = [];
+    context.session.abortRetry?.();
+    context.session.abortCompaction?.();
+    context.session.abortBranchSummary?.();
+    context.session.abortBash?.();
+
+    const abort = Promise.resolve(context.session.abort()).catch((error) => {
+      backendWarn('backend-session', 'retry-stuck abort failed', {
+        sessionPath: context.sessionPath,
+        requestId,
+        error: toErrorMessage(error),
+      });
+    });
+    await Promise.race([
+      abort,
+      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+    ]);
+
+    // A normal agent_end may have won the race and already finalized it.
+    if (context.activeRequest?.id !== requestId) return;
+    context.activeRequest = undefined;
+    this.emit('message.aborted', {
+      requestId,
+      sessionPath: context.sessionPath,
+      messageId,
+      userInitiated: false,
+      reason,
+    } satisfies MessageAbortedPayload);
+    this.emitBusyChanged(context, false);
+    await Promise.allSettled([
+      this.emitSessionOpened(context.sessionPath),
+      this.emitSessionListChanged(),
+    ]);
   }
 
   async dispose(): Promise<void> {
@@ -806,6 +890,8 @@ export class BackendServer {
     this.stopReviewWatcher = undefined;
 
     for (const context of contexts) {
+      context.willRetryWatchdogClear?.();
+      context.uiBridge?.cancelAll();
       context.unsubscribe();
       await context.runtime.dispose();
     }

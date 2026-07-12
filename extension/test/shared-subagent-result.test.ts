@@ -134,7 +134,14 @@ test('running tool call with no result synthesizes a single placeholder from age
   };
   assert.deepEqual(getRenderableSubagentResultFromToolCall(toolCall), {
     mode: 'single',
-    results: [{ agent: 'scout', task: 'find files', exitCode: -1, messages: [] }],
+    results: [{
+      agent: 'scout',
+      task: 'find files',
+      exitCode: -1,
+      messages: [],
+      activityPhase: 'preparing',
+      activityDetail: 'waiting for subagent runtime status',
+    }],
   });
 });
 
@@ -165,6 +172,10 @@ test('running tool call with input.tasks synthesizes a parallel placeholder per 
   assert.equal(out.results[0]!.agent, 'a');
   assert.equal(out.results[1]!.agent, 'b');
   assert.equal(out.results[0]!.exitCode, -1);
+  assert.deepEqual(out.results.map((result) => [result.activityPhase, result.activityDetail]), [
+    ['queued', 'waiting for parallel task dispatch'],
+    ['queued', 'waiting for parallel task dispatch'],
+  ]);
 });
 
 test('running tool call with input.chain synthesizes a chain placeholder from the first step', () => {

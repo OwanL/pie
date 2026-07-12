@@ -53,6 +53,12 @@ export interface SingleResult {
 	usage: UsageStats;
 	/** The model the subagent session actually ran with. */
 	model?: string;
+	/** Provider that owns the selected model. Kept separate from `model` because
+	 * model ids are not guaranteed to include a provider prefix. */
+	provider?: string;
+	/** Maximum context window of the selected model. Paired with
+	 * `usage.contextTokens` for per-child context telemetry in the parent UI. */
+	contextWindow?: number;
 	stopReason?: string;
 	errorMessage?: string;
 	/** Streaming text accumulated from in-progress assistant turn, available while running. */
@@ -104,6 +110,12 @@ export interface SingleResult {
 	failedModel?: string;
 	/** How many fallback attempts were made before this result (0 = first try). */
 	retryCount?: number;
+	/** Classified provider/SDK failure metadata. Model failover is permitted only
+	 * when the class is transient and replaying the turn is side-effect-safe. */
+	failureClass?: "transport" | "timeout" | "rate_limit" | "server_error" | "auth" | "abort" | "unknown";
+	retryable?: boolean;
+	replaySafety?: "safe" | "partial_output" | "tool_side_effect" | "terminal";
+	retryAfterMs?: number;
 	/** Diagnostic when a requested model could not be resolved and execution fell back. */
 	modelResolutionDiagnostic?: string;
 	/** Diagnostic when a nested subagent's requested bucket was not allowed and

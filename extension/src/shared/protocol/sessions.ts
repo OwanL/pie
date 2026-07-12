@@ -208,6 +208,15 @@ export interface MessageThinkingPayload {
   thinking: string;
 }
 
+export interface MessageToolCallDeltaPayload {
+  requestId: string;
+  sessionPath: string;
+  messageId: string;
+  toolCallId: string;
+  name: string;
+  delta: string;
+}
+
 export interface ToolStartedPayload {
   requestId: string;
   sessionPath: string;

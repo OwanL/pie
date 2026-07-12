@@ -38,7 +38,8 @@ export type Call =
   | { kind: 'showWarningModal'; message: string; confirmChoice: string }
   | { kind: 'bumpEpoch'; sessionPath: string }
   | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string }
-  | { kind: 'handleSelectionFailure'; token: string; notice: string };
+  | { kind: 'handleSelectionFailure'; token: string; notice: string }
+  | { kind: 'applySessionOpened'; payload: unknown };
 
 export interface MakeEffectRunnerDepsOpts {
   /** Custom request implementation. Ignored when `backend` is supplied. */
@@ -169,6 +170,9 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     async setToolResultPruningSettings() {},
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
+    },
+    applySessionOpened(payload) {
+      calls.push({ kind: 'applySessionOpened', payload });
     },
     getOpenTranscriptMode() {
       return 'tail' as const;

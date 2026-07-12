@@ -291,9 +291,14 @@ a declared tier. The pipeline short-circuits on `read` results
   1. `ls -l`/`-la` → names + dir/file marker (toolName `ls` gives structured
      input; for bash `ls`, parse `input.command`).
   2. `git log` (verbose) → oneline + short hash.
-  3. Tabular command output (`ps`, `docker ps`, `kubectl`, `df`) → drop
+  3. grep/rg `path:line:content` → group by path (path once, matches indented).
+  4. Consecutive duplicate lines (builds, pings, polls) → collapse 3+ identical
+     non-severity lines to one + count marker.
+  5. Progress noise (spinners, progress bars) → drop frames that carry no
+     stable information, keep severity lines.
+  6. Tabular command output (`ps`, `docker ps`, `kubectl`, `df`) → drop
      low-value columns, detected by whitespace alignment, not command.
-  4. Stack traces → dedupe repeated frames, strip timestamps.
+  7. Stack traces → dedupe repeated frames, strip timestamps.
 
 Rules are composable: each is a separate `tool_result` handler (chained by pi),
 or one handler with an internal pipeline. Order matters (lossless before lossy;
@@ -353,7 +358,9 @@ restate or re-own it.
 | Pretty JSON/XML | lossless | minify | validate-then-minify; 40-60% off typical |
 | `ls -l`/`-la` | lossy+recall | names + dir/file | `toolName==="ls"` structured input; bash `ls` parse command |
 | `git log` verbose | lossy+recall | oneline + short hash | |
-| grep/rg `path:line:content` | lossy+recall | group by path (path once, matches indented) | args-gate on grep-family + shape-confirm (≥60% pathy lines); pipelines allowed; ~26% off grep output |
+| grep/rg `path:line:content` | lossy+recall | group by path (path once, matches indented) | args-gate on grep-family + shape-confirm (≥60% pathy lines); pipelines allowed; includes structured `grep` tool; ~26% off grep output |
+| Duplicate consecutive lines | lossy+recall | collapse 3+ identical non-severity lines to one + count | long builds, pings, polls; severity lines preserved |
+| Progress noise | lossy+recall | drop spinner / progress-bar frames | Braille blocks, block glyphs, bracketed `%` bars; severity lines preserved |
 | Tabular (`ps`, `docker ps`, `kubectl`, `df`) | lossy+recall | drop low-value columns | detect by whitespace alignment |
 | Stack traces | lossy+recall | dedupe frames, strip timestamps | fiddly; conservative |
 

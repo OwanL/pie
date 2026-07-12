@@ -168,3 +168,37 @@ test('finishing a selection request cancels its timeout watchdog', async () => {
 
   state.resetRuntimeState();
 });
+
+test('a superseded selection timeout cleans up silently without overwriting the current tab notice', () => {
+  let archState = createInitialArchState();
+  const getArchState = () => archState;
+  const dispatchArch = (event: Event) => {
+    const result = reducer(archState, event);
+    archState = result.state;
+  };
+  const state = new SessionServiceState(
+    createExtensionContext(),
+    { request: async () => undefined } as any,
+    () => undefined,
+    getArchState,
+    dispatchArch,
+    15,
+  );
+
+  const staleToken = state.beginSelectionRequest('/workspace/session-a.jsonl', undefined, true);
+  tickFakeTimers(5);
+  const currentToken = state.beginSelectionRequest('/workspace/session-b.jsonl', undefined, true);
+
+  // Only the first request has crossed its deadline. It must still be removed
+  // so it cannot leak indefinitely, but it no longer owns the global notice.
+  tickFakeTimers(11);
+  assert.equal(state.getSelectionRequest(staleToken), null);
+  assert.notEqual(state.getSelectionRequest(currentToken), null);
+  assert.equal(state.isCurrentSelectionToken(currentToken), true);
+  assert.equal(getArchState().settings.notice, null);
+
+  // The current request remains entitled to surface its own failure.
+  tickFakeTimers(5);
+  assert.match(getArchState().settings.notice ?? '', /Timed out waiting to open session/);
+  state.resetRuntimeState();
+});

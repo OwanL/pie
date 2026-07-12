@@ -31,9 +31,9 @@ test('build script builds everything with Vite', async () => {
   const buildScript = await readFile(new URL('../scripts/build.mjs', import.meta.url), 'utf8');
 
   assert.match(buildScript, /function runViteBuild\(/);
-  assert.match(buildScript, /npx vite build/);
+  assert.match(buildScript, /node_modules', 'vite', 'bin', 'vite\.js'/);
+  assert.match(buildScript, /await Promise\.all\(\[/);
   assert.match(buildScript, /function runViteWatch\(/);
-  assert.match(buildScript, /npx vite build --watch --mode \$\{mode\}/);
   assert.match(buildScript, /const nodeViteProcess = runViteWatch\('node'\)/);
   assert.doesNotMatch(buildScript, /import esbuild from 'esbuild'/);
   assert.doesNotMatch(buildScript, /esbuild\.build\(/);

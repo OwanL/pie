@@ -143,17 +143,17 @@ test("buildUnknownAgentError suggests correct name on case mismatch", () => {
 
 test("buildUnknownAgentError detects 'user' as scope keyword", () => {
 	const err = buildUnknownAgentError("user", MOCK_AGENTS);
-	assert.match(err, /agentScope value, not an agent name/);
+	assert.match(err, /not an available agent name/);
 });
 
 test("buildUnknownAgentError detects 'project' as scope keyword", () => {
 	const err = buildUnknownAgentError("project", MOCK_AGENTS);
-	assert.match(err, /agentScope value, not an agent name/);
+	assert.match(err, /not an available agent name/);
 });
 
 test("buildUnknownAgentError detects 'both' as scope keyword", () => {
 	const err = buildUnknownAgentError("both", MOCK_AGENTS);
-	assert.match(err, /agentScope value, not an agent name/);
+	assert.match(err, /not an available agent name/);
 });
 
 test("buildUnknownAgentError includes worker hint when worker exists", () => {
@@ -181,7 +181,7 @@ test("buildUnknownAgentError: empty agents list", () => {
 
 test("buildUnknownAgentError: scope keyword with empty agents still detected", () => {
 	const err = buildUnknownAgentError("user", EMPTY_AGENTS);
-	assert.match(err, /agentScope value, not an agent name/);
+	assert.match(err, /not an available agent name/);
 });
 
 test("buildUnknownAgentError: exact name that exists but scope keyword collision", () => {
@@ -206,6 +206,11 @@ test("buildUnknownAgentError: whitespace-only agent name", () => {
 test("buildUnknownAgentError: empty string agent name", () => {
 	const err = buildUnknownAgentError("", MOCK_AGENTS);
 	assert.match(err, /Unknown agent/);
+});
+
+test("buildUnknownAgentError: scope keyword message no longer references agentScope", () => {
+	const err = buildUnknownAgentError("both", MOCK_AGENTS);
+	assert.doesNotMatch(err, /agentScope/);
 });
 
 // ============================================================
@@ -251,7 +256,7 @@ test("createInvalidAgentResult: task can be empty string", () => {
 
 test("createInvalidAgentResult: result for scope keyword misuse includes specific error", () => {
 	const result = createInvalidAgentResult("both", "do work", MOCK_AGENTS);
-	assert.match(result.stderr, /agentScope value, not an agent name/);
+	assert.match(result.stderr, /not an available agent name/);
 });
 
 // ============================================================

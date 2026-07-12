@@ -509,3 +509,34 @@ export function handleSetToolResultPruningSettings(state: ArchState, cmd: Extrac
     ],
   };
 }
+
+/** Handoff §F: the user clicked "Keep waiting" on a queued-message dwell
+ *  warning. Reset the entry's `watchdogFired` flag and re-arm the host-side
+ *  per-localId watchdog so the threshold is bounded through host state — the
+ *  banner hides only because the state changed, not because the webview hid it
+ *  locally. No-op if the entry is gone or already abandoned (terminal). */
+export function handleRearmQueuedDwellWatchdog(
+  state: ArchState,
+  cmd: Extract<Command, { kind: 'RearmQueuedDwellWatchdog' }>,
+): ReducerResult {
+  const entry = state.pending.queuedDwellBySession[cmd.sessionPath]?.find((e) => e.localId === cmd.localId);
+  if (!entry || entry.abandoned) {
+    return { state, effects: [] };
+  }
+  const nextState = produce(state, (draft) => {
+    const target = draft.pending.queuedDwellBySession[cmd.sessionPath]?.find((e) => e.localId === cmd.localId);
+    if (target) target.watchdogFired = false;
+  });
+  return {
+    state: nextState,
+    effects: [
+      {
+        kind: 'StartQueuedDwellWatchdog',
+        corrId: cmd.corrId,
+        sessionPath: cmd.sessionPath,
+        localId: cmd.localId,
+        timeoutMs: QUEUED_DWELL_HARD_MS,
+      },
+    ],
+  };
+}

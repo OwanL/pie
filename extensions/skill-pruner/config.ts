@@ -32,7 +32,7 @@ export const DEFAULT_CONFIG: PruningConfig = {
 	// retry budgets in src/prepass.ts apply. Populated only when the user
 	// supplies a `pruning.prepass` block.
 	prepass: undefined,
-	autoSkipBelowTokens: null,
+	autoSkipBelowTokens: 1200,
 };
 
 const VALID_MODES = new Set<PruningMode>(["auto", "off", "shadow"]);
@@ -224,12 +224,13 @@ export function loadConfig(
 
 	if (raw.autoSkipBelowTokens === null) {
 		config.autoSkipBelowTokens = null;
-	} else {
-		assignPositiveInteger(
-			raw.autoSkipBelowTokens,
-			(value) => { config.autoSkipBelowTokens = value; },
-			"invalid pruning.autoSkipBelowTokens; must be a positive integer or null; disabling",
-		);
+	} else if (raw.autoSkipBelowTokens !== undefined) {
+		if (isPositiveInteger(raw.autoSkipBelowTokens)) {
+			config.autoSkipBelowTokens = raw.autoSkipBelowTokens;
+		} else {
+			config.autoSkipBelowTokens = null;
+			warn("invalid pruning.autoSkipBelowTokens; must be a positive integer or null; disabling");
+		}
 	}
 
 	assignNonEmptyString(

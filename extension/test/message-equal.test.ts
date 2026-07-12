@@ -161,6 +161,14 @@ test('detects toolCalls array growth', () => {
   assert.equal(chatMessageEqual(a, b), false);
 });
 
+test('detects a growing transient tool-call draft', () => {
+  const a = makeBaseMessage();
+  a.draftingToolCall = { id: 'tc-2', name: 'bash', argumentsText: '{"command":' };
+  const b = freshClone(a);
+  b.draftingToolCall!.argumentsText += '"npm test"}';
+  assert.equal(chatMessageEqual(a, b), false);
+});
+
 test('detects userParts difference (structured user input)', () => {
   const a: ChatMessage = { ...makeBaseMessage(), role: 'user', userParts: [{ kind: 'text', text: 'hi' }] };
   const b = freshClone(a);

@@ -77,6 +77,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
       const canonical = list.find((m: ChatMessage) => m.id === canonicalMessageId);
       if (canonical) {
         appendContinuationSeparator(canonical);
+        canonical.draftingToolCall = undefined;
         if (modelId) canonical.modelId = modelId;
         if (thinkingLevel) canonical.thinkingLevel = thinkingLevel;
         canonical.status = 'streaming';
@@ -85,6 +86,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
       // Non-alias: check if message already exists (update metadata only)
       const existing = list.find((m: ChatMessage) => m.id === messageId);
       if (existing) {
+        existing.draftingToolCall = undefined;
         if (modelId) existing.modelId = modelId;
         if (thinkingLevel) existing.thinkingLevel = thinkingLevel;
       } else {
@@ -179,6 +181,35 @@ export function handleMessageThinking(state: ArchState, event: Extract<Event, { 
   return { state: nextState, effects: [] };
 }
 
+export function handleMessageToolCallDelta(state: ArchState, event: Extract<Event, { kind: 'MessageToolCallDelta' }>): ReducerResult {
+  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
+    return { state, effects: [] };
+  }
+  const messageId = resolveAlias(state, event.messageId);
+  const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
+  const nextState = produce(state, (draft) => {
+    const list = draft.transcript.bySession[event.sessionPath];
+    if (!list) return;
+    const message =
+      cachedIndex !== undefined && list[cachedIndex]?.id === messageId
+        ? list[cachedIndex]
+        : list.find((m: ChatMessage) => m.id === messageId);
+    if (message && message.status !== 'completed' && message.status !== 'interrupted') {
+      const previous = message.draftingToolCall;
+      message.draftingToolCall = {
+        id: event.toolCallId,
+        name: event.name,
+        argumentsText: previous?.id === event.toolCallId
+          ? previous.argumentsText + event.delta
+          : event.delta,
+      };
+      message.status = 'streaming';
+    }
+  });
+
+  return { state: nextState, effects: [] };
+}
+
 export function handleToolCall(state: ArchState, event: Extract<Event, { kind: 'ToolCall' }>): ReducerResult {
   const messageId = resolveAlias(state, event.messageId);
   const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
@@ -190,6 +221,7 @@ export function handleToolCall(state: ArchState, event: Extract<Event, { kind: '
         ? list[cachedIndex]
         : list.find((m: ChatMessage) => m.id === messageId);
     if (message) {
+      message.draftingToolCall = undefined;
       upsertAssistantToolCall(message, event.toolCall);
     }
   });
@@ -210,6 +242,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
       const canonical = list.find((m: ChatMessage) => m.id === messageId);
       if (canonical) {
         canonical.status = normalizedMessage.status;
+        canonical.draftingToolCall = undefined;
         if (normalizedMessage.modelId) canonical.modelId = normalizedMessage.modelId;
         if (normalizedMessage.thinkingLevel) canonical.thinkingLevel = normalizedMessage.thinkingLevel;
         if (normalizedMessage.durationMs !== undefined) {
@@ -266,6 +299,7 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
     );
     if (message) {
       message.status = 'interrupted';
+      message.draftingToolCall = undefined;
       if (!event.userInitiated && event.reason && !message.errorDetail) {
         message.errorDetail = stripReqIds(event.reason);
       }
@@ -275,7 +309,7 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
   return { state: nextState, effects: [] };
 }
 
-export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {
+export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'MessageToolCallDelta' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {
   switch (event.kind) {
     case 'MessageStarted':
       return handleMessageStarted(state, event);
@@ -283,6 +317,8 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
       return handleMessageDelta(state, event);
     case 'MessageThinking':
       return handleMessageThinking(state, event);
+    case 'MessageToolCallDelta':
+      return handleMessageToolCallDelta(state, event);
     case 'ToolCall':
       return handleToolCall(state, event);
     case 'MessageFinished':
@@ -344,7 +380,15 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
   }
   const localId = list[idx].id;
   const nextState = produce(state, (draft) => {
-    draft.transcript.bySession[event.sessionPath][idx].status = 'completed';
+    const transcript = draft.transcript.bySession[event.sessionPath];
+    // The optimistic message was appended when it was queued. Tool results and
+    // assistant segments may have arrived after it while it waited, so merely
+    // changing its status leaves it at the wrong point in the conversation.
+    // Delivery is the authoritative transcript boundary: move it to the tail so
+    // the next assistant segment follows the steering message chronologically.
+    const [delivered] = transcript.splice(idx, 1);
+    delivered.status = 'completed';
+    transcript.push(delivered);
     for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
       if (op.queued && op.localId === localId) delete draft.pending.promoted[corrId];
     }

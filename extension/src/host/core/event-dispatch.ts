@@ -11,6 +11,7 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  MessageToolCallDeltaPayload,
   OperationalErrorPayload,
   PreflightFailedPayload,
   QueuedDeliveredPayload,
@@ -35,6 +36,7 @@ import {
   isMessageFinishedPayload,
   isMessageStartedPayload,
   isMessageThinkingPayload,
+  isMessageToolCallDeltaPayload,
   isOperationalErrorPayload,
   isPreflightFailedPayload,
   isQueuedDeliveredPayload,
@@ -55,6 +57,7 @@ export interface SessionBackendEventHandlers {
   onMessageStarted(payload: MessageStartedPayload): void;
   onMessageDelta(payload: MessageDeltaPayload): void;
   onMessageThinking(payload: MessageThinkingPayload): void;
+  onMessageToolCallDelta(payload: MessageToolCallDeltaPayload): void;
   onToolStarted(payload: ToolStartedPayload): void;
   onToolFinished(payload: ToolFinishedPayload): void;
   onToolProgress(payload: ToolProgressPayload): void;
@@ -116,6 +119,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'message.thinking':
       dispatch(event, isMessageThinkingPayload, handlers.onMessageThinking);
+      return;
+    case 'message.toolCallDelta':
+      dispatch(event, isMessageToolCallDeltaPayload, handlers.onMessageToolCallDelta);
       return;
     case 'tool.started':
       dispatch(event, isToolStartedPayload, handlers.onToolStarted);

@@ -13,6 +13,7 @@ function createHandlers() {
     onMessageStarted: (payload) => calls.push({ name: 'message.started', payload }),
     onMessageDelta: (payload) => calls.push({ name: 'message.delta', payload }),
     onMessageThinking: (payload) => calls.push({ name: 'message.thinking', payload }),
+    onMessageToolCallDelta: (payload) => calls.push({ name: 'message.toolCallDelta', payload }),
     onToolStarted: (payload) => calls.push({ name: 'tool.started', payload }),
     onToolFinished: (payload) => calls.push({ name: 'tool.finished', payload }),
     onToolProgress: (payload) => calls.push({ name: 'tool.progress', payload }),
@@ -113,6 +114,22 @@ test('dispatchSessionBackendEvent drops a malformed message.aborted payload', ()
   dispatchSessionBackendEvent({ event: 'message.aborted', payload }, handlers);
 
   assert.deepEqual(calls, []);
+});
+
+test('dispatchSessionBackendEvent routes tool-call draft deltas', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    requestId: 'req-1',
+    sessionPath: '/workspace/session.jsonl',
+    messageId: 'assistant-1',
+    toolCallId: 'tc-1',
+    name: 'bash',
+    delta: '{"command":',
+  };
+
+  dispatchSessionBackendEvent({ event: 'message.toolCallDelta', payload }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'message.toolCallDelta', payload }]);
 });
 
 test('dispatchSessionBackendEvent routes operational-error payloads', () => {

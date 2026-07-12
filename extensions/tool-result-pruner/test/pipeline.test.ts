@@ -16,7 +16,7 @@ type Event = {
   isError: boolean;
   details: unknown;
 };
-type Config = { enabled: boolean; profile: string; rules: { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean }; tools?: string[] | null };
+type Config = { enabled: boolean; profile: string; rules: { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean; duplicateCollapse: boolean; progressNoise: boolean }; tools?: string[] | null };
 type Patch = { content?: ToolContent[]; details?: unknown; isError?: boolean };
 type PruningMeta = { rules: string[]; beforeText: string; afterText: string; losslessText: string; markers: string[]; recallRules: string[] };
 type PipelineResult = { patch: Patch; meta: PruningMeta } | null;
@@ -35,7 +35,7 @@ function ev(over: Partial<Event>): Event {
   };
 }
 
-const ENABLED: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true }, tools: null };
+const ENABLED: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true }, tools: null };
 
 describe('pipeline guards', () => {
   let runPipeline: PipelineModule['runPipeline'];
@@ -45,7 +45,7 @@ describe('pipeline guards', () => {
   });
 
   test('disabled config → no-op', () => {
-    const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m' }] }), { enabled: false, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true }, tools: null });
+    const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m' }] }), { enabled: false, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true }, tools: null });
     assert.equal(out, null);
   });
 
@@ -139,7 +139,7 @@ describe('pipeline rule toggles', () => {
 
   test('a disabled rule is skipped entirely (never fires)', () => {
     // ANSI + trailing ws: with ansi disabled, only trim-trailing-whitespace fires.
-    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false } };
+    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false } };
     const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), cfg);
     assert.ok(out);
     // ANSI escapes are preserved (ansi-strip skipped); trailing ws stripped.
@@ -148,7 +148,7 @@ describe('pipeline rule toggles', () => {
   });
 
   test('an enabled rule fires normally', () => {
-    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: false, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false } };
+    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: false, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false } };
     const out = runPipeline(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), cfg);
     assert.ok(out);
     // Only ansi-strip fires (whitespace disabled); trailing ws preserved.
@@ -157,7 +157,7 @@ describe('pipeline rule toggles', () => {
   });
 
   test('disabling json minify keeps pretty JSON intact', () => {
-    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: false, lsLong: false, gitLog: false, grepGroup: false } };
+    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: false, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false } };
     const pretty = '{\n  "a": 1\n}';
     const out = runPipeline(ev({ content: [{ type: 'text', text: pretty }] }), cfg);
     assert.equal(out, null);
@@ -220,7 +220,7 @@ describe('pipeline lossy tier', () => {
   });
 
   test('lossy rules do NOT fire under the security profile (lossless still runs)', () => {
-    const sec: Config = { enabled: true, profile: 'security', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true }, tools: null };
+    const sec: Config = { enabled: true, profile: 'security', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true }, tools: null };
     const out = runPipeline(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L }] }), sec);
     // LS_L has no lossless-opportunity (no ANSI/extra ws/blank-run/JSON), so
     // under security (lossy off) nothing fires → null.
@@ -228,7 +228,7 @@ describe('pipeline lossy tier', () => {
   });
 
   test('a disabled lossy rule does not fire (toggle gate)', () => {
-    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false } };
+    const cfg: Config = { enabled: true, profile: 'default', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false } };
     const out = runPipeline(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L }] }), cfg);
     assert.equal(out, null);
   });

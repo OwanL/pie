@@ -657,6 +657,7 @@
    is the bundled :root default (2 rows × 18px) used before the effect runs. */
 :root {
   --activity-tail-content-min-height: 36px;
+  --subagent-preview-content-min-height: 36px;
 }
 
 .turn-activity-tail-content {
@@ -669,6 +670,12 @@
   overflow: hidden;
 }
 
+/* Collapsed subagent cards reserve their own independent row count for the
+   live streaming-text preview (driven by the `subagentPreviewLines` pref). */
+.subagent-live-preview .turn-activity-tail-content {
+  height: var(--subagent-preview-content-min-height);
+}
+
 /* Flowing content body: source newlines are collapsed and the text wraps to
    fill the reserved width, so the limited preview rows carry as much of the
    recent tail as possible instead of clipping each source line at the right
@@ -676,7 +683,7 @@
    stay pinned to the bottom and wrapped overflow scrolls off the top — and so
    the visible rows never shift when the wrapped height changes (bottom-
    anchoring is immune to the height wobble a char-budgeted window used to
-   cause). `useTailConsoleScroll` (see turn-activity-tail.tsx) drives a small
+   cause). `useTailConsoleScroll` (see activity-tail-preview.tsx) drives a small
    push animation on the `transform` when a new row wraps: the block is nudged
    down one row-height (no transition) then glided back up over ~150ms, which
    scrolls every row up by one row-height — oldest off the top, newest in at

@@ -121,6 +121,8 @@ export interface TranscriptHostProps {
   onCancelPrepass?: () => void;
   /** Optional session key; falls back to activeSessionPath when omitted. */
   sessionKey?: string | null;
+  /** Host snapshot signature used by state-applied semantic acknowledgement. */
+  renderSignature: string;
 }
 
 export function TranscriptHost({
@@ -147,6 +149,7 @@ export function TranscriptHost({
   onContextMenu,
   onCancelPrepass,
   postMessage,
+  renderSignature,
 }: TranscriptHostProps) {
   // Wrap the callbacks from the parent with postMessage so they carry
   // the active session path as part of the control message.
@@ -164,7 +167,11 @@ export function TranscriptHost({
   });
 
   return (
-    <div class="transcript-host" style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column">
+    <div
+      class="transcript-host"
+      data-render-signature={renderSignature}
+      style="position:relative;flex:1;min-height:0;display:flex;flex-direction:column"
+    >
       {activeSessionPath && openTabPaths.includes(activeSessionPath) && (
         <TranscriptSurface
           sessionPath={activeSessionPath}

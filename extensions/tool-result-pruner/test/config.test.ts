@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
 
-type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean };
+type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean; duplicateCollapse: boolean; progressNoise: boolean };
 type Config = { enabled: boolean; profile: string; rules: RuleToggles; tools: string[] | null };
 type ConfigModule = {
   loadConfig: (settingsPath?: string) => Config;
@@ -34,7 +34,7 @@ describe('config loader', () => {
       const cfg = mod.loadConfig(tmp);
       assert.equal(cfg.enabled, true);
       assert.equal(cfg.profile, 'default');
-      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true });
+      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true });
     } finally {
       rmSync(tmp);
     }
@@ -48,7 +48,7 @@ describe('config loader', () => {
       const cfg = mod.loadConfig(tmp);
       assert.equal(cfg.enabled, false);
       assert.equal(cfg.profile, 'security');
-      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true });
+      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true });
     } finally {
       rmSync(tmp);
     }
@@ -62,7 +62,7 @@ describe('config loader', () => {
     try {
       mod.resetConfigCache();
       const cfg = mod.loadConfig(tmp);
-      assert.deepEqual(cfg.rules, { ansi: false, whitespace: true, blankRun: false, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true });
+      assert.deepEqual(cfg.rules, { ansi: false, whitespace: true, blankRun: false, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true });
     } finally {
       rmSync(tmp);
     }
@@ -85,6 +85,8 @@ describe('config loader', () => {
       assert.equal(cfg.rules.lsLong, true);
       assert.equal(cfg.rules.gitLog, true);
       assert.equal(cfg.rules.grepGroup, true);
+      assert.equal(cfg.rules.duplicateCollapse, true);
+      assert.equal(cfg.rules.progressNoise, true);
     } finally {
       rmSync(tmp);
     }
@@ -96,7 +98,7 @@ describe('config loader', () => {
     try {
       mod.resetConfigCache();
       const cfg = mod.loadConfig(tmp);
-      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true });
+      assert.deepEqual(cfg.rules, { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true });
     } finally {
       rmSync(tmp);
     }
@@ -131,7 +133,7 @@ describe('config loader', () => {
       // Mutate file content but keep mtime within same ms tick is racy; instead
       // verify second call returns same value without re-reading by checking
       // override persistence: set override, then loadConfig ignores disk.
-      mod.setConfigOverrideForTesting({ enabled: true, profile: 'security', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true }, tools: null });
+      mod.setConfigOverrideForTesting({ enabled: true, profile: 'security', rules: { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true }, tools: null });
       const b = mod.loadConfig(tmp);
       assert.equal(b.enabled, true);
       assert.equal(b.profile, 'security');

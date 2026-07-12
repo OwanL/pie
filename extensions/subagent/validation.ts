@@ -23,7 +23,13 @@ export function buildUnknownAgentError(agentName: string, agents: AgentConfig[])
 		: "";
 
 	if (AGENT_SCOPE_VALUES.has(agentName as AgentScope)) {
-		return `Invalid agent name: "${agentName}". "${agentName}" is an agentScope value, not an agent name. Set agentScope separately and choose an exact agent name.${workerHint} Available agents: ${available}.`;
+		// The legacy `agentScope` values are not valid agent names. When an agent
+		// happens to be named after one of these values, call out the collision
+		// explicitly; otherwise keep the message free of the removed parameter name.
+		if (agents.some((a) => a.name === agentName)) {
+			return `Invalid agent name: "${agentName}". "${agentName}" is an agentScope value, not an agent name. Choose an exact agent name.${workerHint} Available agents: ${available}.`;
+		}
+		return `Invalid agent name: "${agentName}". "${agentName}" is not an available agent name. Choose an exact agent name.${workerHint} Available agents: ${available}.`;
 	}
 
 	if (suggestion && suggestion !== agentName) {

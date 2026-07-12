@@ -4,6 +4,14 @@ import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload } from '../s
 
 interface PendingRequest {
   resolve: (response: ExtensionUIResponsePayload) => void;
+  subagentCallId?: string;
+}
+
+interface DialogOptions {
+  signal?: AbortSignal;
+  timeout?: number;
+  subagentCallId?: string;
+  toolCallId?: string;
 }
 
 export interface ExtensionUIBridgeEmitter {
@@ -25,26 +33,26 @@ export class ExtensionUIBridge {
     this.emit = emit;
   }
 
-  async confirm(title: string, message: string, _opts?: { subagentCallId?: string; toolCallId?: string }): Promise<boolean> {
+  async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'confirm', title, message, sessionPath: this.sessionPath, subagentCallId: _opts?.subagentCallId, toolCallId: _opts?.toolCallId };
-    const response = await this.emitAndAwait(id, payload);
+    const payload: ExtensionUIRequestPayload = { id, method: 'confirm', title, message, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
+    const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return false;
     return response.confirmed ?? false;
   }
 
-  async select(title: string, options: string[], _opts?: { subagentCallId?: string; toolCallId?: string }): Promise<string | undefined> {
+  async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, sessionPath: this.sessionPath, subagentCallId: _opts?.subagentCallId, toolCallId: _opts?.toolCallId };
-    const response = await this.emitAndAwait(id, payload);
+    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
+    const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return undefined;
     return response.value;
   }
 
-  async input(title: string, placeholder?: string, _opts?: { subagentCallId?: string; toolCallId?: string }): Promise<string | undefined> {
+  async input(title: string, placeholder?: string, opts?: DialogOptions): Promise<string | undefined> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'input', title, placeholder, sessionPath: this.sessionPath, subagentCallId: _opts?.subagentCallId, toolCallId: _opts?.toolCallId };
-    const response = await this.emitAndAwait(id, payload);
+    const payload: ExtensionUIRequestPayload = { id, method: 'input', title, placeholder, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
+    const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return undefined;
     return response.value;
   }
@@ -69,12 +77,20 @@ export class ExtensionUIBridge {
   resolveRequest(response: ExtensionUIResponsePayload): void {
     const pending = this.pending.get(response.id);
     if (!pending) return;
-    this.pending.delete(response.id);
     pending.resolve(response);
   }
 
+  /** Cancel only dialogs owned by one subagent call. A child timeout must not
+   * dismiss sibling prompts from the same parallel parent tool call. */
+  cancelSubagent(subagentCallId: string): void {
+    for (const [id, pending] of this.pending) {
+      if (pending.subagentCallId !== subagentCallId) continue;
+      pending.resolve({ id, cancelled: true });
+    }
+  }
+
   /**
-   * Cancel all pending requests (e.g. on session abort).
+   * Cancel all pending requests (e.g. on whole-session abort).
    */
   cancelAll(): void {
     for (const [id, pending] of this.pending) {
@@ -86,9 +102,28 @@ export class ExtensionUIBridge {
   private emitAndAwait(
     id: string,
     payload: ExtensionUIRequestPayload,
+    opts?: DialogOptions,
   ): Promise<ExtensionUIResponsePayload> {
     return new Promise<ExtensionUIResponsePayload>((resolve) => {
-      this.pending.set(id, { resolve });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => finish({ id, cancelled: true });
+      const finish = (response: ExtensionUIResponsePayload) => {
+        if (!this.pending.delete(id)) return;
+        if (timer) clearTimeout(timer);
+        opts?.signal?.removeEventListener('abort', onAbort);
+        resolve(response);
+      };
+
+      this.pending.set(id, { resolve: finish, subagentCallId: payload.subagentCallId });
+      if (opts?.signal?.aborted) {
+        finish({ id, cancelled: true });
+        return;
+      }
+      opts?.signal?.addEventListener('abort', onAbort, { once: true });
+      if (opts?.timeout && opts.timeout > 0) {
+        timer = setTimeout(() => finish({ id, cancelled: true }), opts.timeout);
+        timer.unref?.();
+      }
       this.emit('extension_ui.request', payload);
     });
   }

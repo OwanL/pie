@@ -4,6 +4,12 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  abortOnProcessSignals,
+  resolveChildProcessTimeoutMs,
+  watchChildProcess,
+  withProcessTreeIsolation,
+} from './lib/process-watchdog.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -330,16 +336,6 @@ function buildTestArgs(config, fast = false) {
     // Fast mode lets node:test parallelize independent test files, which is
     // substantially quicker for the 2k+ extension suite.
     ...(fast ? [] : ['--test-concurrency=1']),
-    // Some test files leave an unreferenced handle (a lingering timer /
-    // interval / abort controller in an imported module's top-level scope)
-    // that keeps the event loop alive after every test has resolved. Node's
-    // test runner then blocks for ~60s waiting on the idle event loop before
-    // exiting. --test-force-exit makes the runner call process.exit() as soon
-    // as the test results are final, which removes that idle-wait entirely
-    // (measured: extension suite 231s -> ~170s; the single worst file
-    // backend-session-event-handler.test.ts 63s -> 3s). It does not mask
-    // failures — tests already pass/fail before the hang.
-    '--test-force-exit',
     ...(fast ? [] : ['--experimental-test-coverage']),
     `--test-reporter=${reporterSpecifier}`,
     ...(fast ? [] : config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`)),
@@ -393,18 +389,28 @@ function resolveCommandInvocation(command, args) {
   return { command, args };
 }
 
-function runChildProcess(command, args, cwd) {
+function runChildProcess(command, args, cwd, signal) {
   return new Promise((resolve, reject) => {
     const invocation = resolveCommandInvocation(command, args);
-    const child = spawn(invocation.command, invocation.args, {
+    const child = spawn(invocation.command, invocation.args, withProcessTreeIsolation({
       cwd,
       env: { ...process.env, FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-    });
+    }));
 
     let stdout = '';
     let stderr = '';
+    const timeoutMs = resolveChildProcessTimeoutMs();
+    const watchdog = watchChildProcess(child, {
+      timeoutMs,
+      signal,
+      label: `${path.basename(cwd)} tests`,
+      onTerminate: ({ reason }) => {
+        const detail = reason === 'timeout' ? ` after ${timeoutMs}ms` : '';
+        stderr += `\nTest process ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; killed process tree.\n`;
+      },
+    });
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -415,16 +421,27 @@ function runChildProcess(command, args, cwd) {
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.on('error', reject);
-    child.on('close', (exitCode, signal) => {
-      resolve({ exitCode: exitCode ?? 0, signal, stdout, stderr });
+    child.on('error', (error) => {
+      watchdog.cleanup();
+      reject(error);
+    });
+    child.on('close', (exitCode, closeSignal) => {
+      watchdog.cleanup();
+      resolve({
+        exitCode: watchdog.timedOut || watchdog.aborted ? 1 : (exitCode ?? 0),
+        signal: closeSignal,
+        stdout,
+        stderr,
+        timedOut: watchdog.timedOut,
+        aborted: watchdog.aborted,
+      });
     });
   });
 }
 
-async function runPackage(config, fast = false) {
+async function runPackage(config, fast = false, signal) {
   const args = buildTestArgs(config, fast);
-  const rawResult = await runChildProcess(npxCommand, args, config.cwd);
+  const rawResult = await runChildProcess(npxCommand, args, config.cwd, signal);
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
   const coverage = report?.coverage ?? null;
@@ -432,7 +449,7 @@ async function runPackage(config, fast = false) {
   const coverageFailures = fast ? [] : summarizeCoverageFailures(config, coverage);
 
   const hasTestFailures = Boolean(summary && (!summary.success || (summary.counts?.failed ?? 0) > 0 || failures.length > 0));
-  const hasInfrastructureFailure = !summary || rawResult.signal !== null || (rawResult.exitCode !== 0 && !hasTestFailures);
+  const hasInfrastructureFailure = !summary || rawResult.signal !== null || rawResult.timedOut || rawResult.aborted || (rawResult.exitCode !== 0 && !hasTestFailures);
   const passed = !hasInfrastructureFailure && !hasTestFailures && coverageFailures.length === 0;
 
   return {
@@ -480,6 +497,11 @@ function printPackageResult(result) {
     }
     if (rawResult.signal) {
       console.log(indent(`- terminated by signal ${rawResult.signal}`, '    '));
+    }
+    if (rawResult.timedOut) {
+      console.log(indent('- test-process watchdog expired; full process tree was killed', '    '));
+    } else if (rawResult.aborted) {
+      console.log(indent('- runner was interrupted; full process tree was killed', '    '));
     }
   }
 }
@@ -537,7 +559,13 @@ async function main() {
     return;
   }
 
-  const results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast)));
+  const processAbort = abortOnProcessSignals();
+  let results;
+  try {
+    results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast, processAbort.signal)));
+  } finally {
+    processAbort.dispose();
+  }
   for (const result of results) {
     printPackageResult(result);
   }

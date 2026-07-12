@@ -1,11 +1,9 @@
 /**
- * Settlement-net tests (Slice B): `execute()` MUST always return within
- * `PIE_SUBAGENT_SETTLEMENT_MS`, even if a downstream phase (here: a prompt that
- * never resolves and ignores abort) hangs forever. This is the last-resort net
- * that guarantees the parent session can never dangle — the structural fixes
- * (abort propagation, abortable concurrency) are the primary hang defence; the
- * net exists so a future bug reintroducing an unbounded wait still can't hang
- * the parent.
+ * Settlement-net tests (Slice B): `execute()` MUST return after
+ * `PIE_SUBAGENT_SETTLEMENT_MS` without credible progress, even if a downstream
+ * phase (here: a prompt that never resolves and ignores abort) hangs forever.
+ * Progress renews the inactivity deadline, so this last-resort net bounds a
+ * silent dispatch without imposing a total-runtime cap on productive work.
  *
  * Approach: register an ESM resolve hook (same technique as modes.test.ts) that
  * redirects `@mariozechner/pi-coding-agent` to an in-memory mock whose `prompt`
@@ -18,6 +16,7 @@
 
 import test, { afterEach, after } from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import Module from "node:module";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +44,11 @@ const MOCK_SDK_SOURCE = [
 	"      if (b && b.onPrompt) { await b.onPrompt(function(ev){ for (const l of listeners) l(ev); }, p); return; }",
 	"      await new Promise(function(r){ release = r; });",
 	"    },",
-	"    async abort(){ if (release) release(); },",
+	"    async abort(){",
+	"      const b = globalThis.__MOCK_SDK_BEHAVIOR__;",
+	"      if (b && b.onAbort) { await b.onAbort(); return; }",
+	"      if (release) release();",
+	"    },",
 	"    dispose(){}",
 	"  };",
 	"  return { session: session };",
@@ -91,6 +94,8 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
 	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
+	"PIE_SUBAGENT_MAX_CONCURRENCY",
+	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
 	"PI_SUBAGENT_TIMEOUT_MS",
@@ -129,7 +134,13 @@ after(() => {
 function setMockBehavior(b: unknown): void {
 	(globalThis as { __MOCK_SDK_BEHAVIOR__?: unknown }).__MOCK_SDK_BEHAVIOR__ = b;
 }
-afterEach(() => setMockBehavior(undefined));
+afterEach(() => {
+	setMockBehavior(undefined);
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
+	delete process.env.PIE_SUBAGENT_MAX_CONCURRENCY;
+	delete process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "200";
+});
 
 function makeCtx(): unknown {
 	return {
@@ -154,18 +165,6 @@ function hangingPromptBehavior(): { onPrompt: () => Promise<void> } {
 	};
 }
 
-/** A prompt that hangs until `abort()` resolves it (the default mock branch:
- *  `release` is set so `abort()` can unblock it). Used to verify the parent
- *  abort path still works when the settlement net is disabled — the net must
- *  NOT be the only escape, the structural abort fix must work on its own. */
-function abortablePromptBehavior(): Record<string, never> {
-	// No `onPrompt` → mock falls through to `await new Promise(r => release = r)`,
-	// which `abort()` resolves. Returns an empty object so setMockBehavior still
-	// flips the global (unset behavior would use the same default branch, but
-	// being explicit avoids relying on test ordering).
-	return {};
-}
-
 /** Reject if the promise hasn't settled within `ms` — proves "returns in time". */
 function within<T>(ms: number, p: Promise<T>): Promise<T> {
 	return Promise.race([
@@ -176,11 +175,15 @@ function within<T>(ms: number, p: Promise<T>): Promise<T> {
 	]);
 }
 
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-test("execute(): a dispatch that never settles is force-settled within PIE_SUBAGENT_SETTLEMENT_MS and returns a loud error toolResult", async () => {
+test("execute(): a dispatch that never reports progress is force-settled after PIE_SUBAGENT_SETTLEMENT_MS of inactivity", async () => {
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50"; // tiny net
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0"; // skip grace → synthesize immediately
 	setMockBehavior({
@@ -211,9 +214,80 @@ test("execute(): a dispatch that never settles is force-settled within PIE_SUBAG
 	assert.equal(response.details.results[0]?.exitCode, 1);
 });
 
-test("execute(): parent abort still works when the settlement net is disabled (settlementMs=0) — the net is not the primary fix", async () => {
+test("execute(): high configured concurrency does not weaken bounded settlement", async () => {
+	// Correctness must not depend on reducing concurrency to 2. Exercise the
+	// maximum supported local cap with several completely silent children.
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "16";
+	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "16";
+	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "16";
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	setMockBehavior(hangingPromptBehavior());
+
+	const tasks = Array.from({ length: 4 }, (_, index) => ({
+		agent: "worker",
+		task: `silent work ${index + 1}`,
+	}));
+	const response = await within(2000, execute(
+		"tool-settle-high-concurrency",
+		{ tasks } as never,
+		new AbortController().signal,
+		() => undefined,
+		makeCtx() as never,
+		{ getAllTools: () => [] } as never,
+		() => false,
+	));
+
+	assert.equal(response.isError, true);
+	assert.equal(response.details.results.length, 4);
+	assert.ok(response.details.results.every((result) => result.exitCode === 1));
+});
+
+test("execute(): periodic credible progress renews the inactivity deadline", async () => {
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "80";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	setMockBehavior({
+		onPrompt: async (emit: (event: unknown) => void) => {
+			// Total runtime exceeds 80ms, but every idle gap is well below it. A
+			// fixed wall-clock deadline would force-settle this productive run.
+			for (const delta of ["still ", "working ", "normally "]) {
+				await sleep(30);
+				emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
+			}
+			await sleep(30);
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done after sustained progress" }],
+					usage: { input: 1, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 5, cost: { total: 0 } },
+					model: "m",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const response = await within(2000, execute(
+		"tool-settle-renew",
+		{ agent: "worker", task: "do long productive work" } as never,
+		new AbortController().signal,
+		() => undefined,
+		makeCtx() as never,
+		{ getAllTools: () => [] } as never,
+		() => false,
+	));
+
+	assert.equal(response.isError, undefined);
+	assert.equal((response.content?.[0] as { text?: string } | undefined)?.text, "done after sustained progress");
+});
+
+test("execute(): parent abort settles even when child abort never resolves and the settlement net is disabled", async () => {
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0"; // net OFF
-	setMockBehavior(abortablePromptBehavior()); // prompt hangs but responds to abort
+	setMockBehavior({
+		onPrompt: () => new Promise<void>(() => {}),
+		onAbort: () => new Promise<void>(() => {}),
+	});
 
 	const controller = new AbortController();
 	const responseP = execute(
@@ -226,13 +300,53 @@ test("execute(): parent abort still works when the settlement net is disabled (s
 		() => false,
 	);
 	// Abort shortly after dispatch starts; with the net off this is the only
-	// way out, and the runner's pre-spawn/prompt abort path must settle it.
+	// way out. The prompt race must settle independently of session.abort().
 	setTimeout(() => controller.abort(), 30);
 	const response = await within(2000, responseP);
 
 	assert.equal(response.isError, true);
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
 	assert.match(text, /abort/i);
+});
+
+test("execute(): AbortSignal.any fallback removes parent listeners after normal settlement", async () => {
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "500";
+	setMockBehavior({
+		onPrompt: (emit: (event: unknown) => void) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+	const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+	Object.defineProperty(AbortSignal, "any", { configurable: true, writable: true, value: undefined });
+	const parent = new AbortController();
+	const baseline = getEventListeners(parent.signal, "abort").length;
+	try {
+		for (let i = 0; i < 15; i++) {
+			const response = await within(2000, execute(
+				`tool-listener-${i}`,
+				{ agent: "worker", task: "do work" } as never,
+				parent.signal,
+				() => undefined,
+				makeCtx() as never,
+				{ getAllTools: () => [] } as never,
+				() => false,
+			));
+			assert.equal(response.isError, undefined);
+		}
+		assert.equal(getEventListeners(parent.signal, "abort").length, baseline);
+	} finally {
+		if (descriptor) Object.defineProperty(AbortSignal, "any", descriptor);
+		else delete (AbortSignal as { any?: unknown }).any;
+	}
 });
 
 test("execute(): a normally-completing dispatch is unaffected by the settlement net (returns the real result, not force-settled)", async () => {

@@ -269,6 +269,25 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
         );
       })}
 
+      <UiGroupLabel label="Preview" />
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Collapsed preview rows</span>
+          <span class="toolbar-settings-ui-control-value">{prefs.subagentPreviewLines}</span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min="1"
+          max="12"
+          step="1"
+          value={prefs.subagentPreviewLines}
+          onInput={(e) => onSetPrefs({ subagentPreviewLines: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Collapsed subagent preview rows"
+        />
+        <div class="toolbar-settings-item-hint">Rows reserved for live streaming output on collapsed subagent cards. When the child has no visible stream yet, the rows show pending….</div>
+      </div>
+
       <UiGroupLabel label="Nesting" />
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
@@ -311,7 +330,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
       </div>
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Max in-flight</span>
+          <span class="toolbar-settings-ui-control-label">Max active trees</span>
           <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxInflight}</span>
         </div>
         <input
@@ -322,9 +341,9 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
           step="1"
           value={prefs.subagentMaxInflight}
           onInput={(e) => onSetPrefs({ subagentMaxInflight: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Max concurrent in-flight subagent sessions"
+          aria-label="Max concurrent root subagent trees"
         />
-        <div class="toolbar-settings-item-hint">Global cap on concurrent subagent sessions across all tool calls in the process.</div>
+        <div class="toolbar-settings-item-hint">Global cap on independent root subagent trees across all sessions. Nested descendants borrow their root's permit, so this throttle cannot deadlock recursive delegation.</div>
       </div>
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">

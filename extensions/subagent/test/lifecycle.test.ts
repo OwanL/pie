@@ -19,6 +19,27 @@ test("ChildLifecycle renews the current phase lease on credible progress", () =>
 	assert.equal(lifecycle.checkLease()?.phase, "streaming");
 });
 
+test("ChildLifecycle keeps phase age while repeated same-phase events renew progress", () => {
+	let now = 1_000;
+	const snapshots: Array<{ phaseStartedAt: number; lastProgressAt: number }> = [];
+	const lifecycle = new ChildLifecycle(
+		"attempt-stream",
+		config(),
+		() => now,
+		(snapshot) => snapshots.push(snapshot),
+	);
+	lifecycle.transition("streaming", { type: "first-delta" });
+	now = 4_000;
+	lifecycle.transition("streaming", { type: "next-delta" });
+	assert.deepEqual(snapshots.at(-1), {
+		phase: "streaming",
+		detail: undefined,
+		phaseStartedAt: 1_000,
+		lastProgressAt: 4_000,
+		budgetMs: DEFAULT_LIVENESS_CONFIG.streamIdleMs,
+	});
+});
+
 test("ChildLifecycle publishes phase, detail, timing, and generous inactivity budget", () => {
 	let now = 1_000;
 	const snapshots: Array<{ phase: string; detail?: string; phaseStartedAt: number; lastProgressAt: number; budgetMs?: number }> = [];
@@ -51,3 +72,21 @@ test("ChildLifecycle terminal compare-and-set ignores late progress and transiti
 	assert.equal(lifecycle.phase, "cancelled");
 	assert.equal(releases, 1);
 });
+
+for (const scenario of [
+	{ name: "success", settle: (lifecycle: ChildLifecycle) => lifecycle.finish({} as never) },
+	{ name: "failure", settle: (lifecycle: ChildLifecycle) => lifecycle.fail(new Error("provider failed")) },
+	{ name: "timeout", settle: (lifecycle: ChildLifecycle) => lifecycle.fail(new Error("phase timeout")) },
+	{ name: "late-session cleanup", settle: (lifecycle: ChildLifecycle) => lifecycle.markOrphaned(new Error("late session")) },
+] as const) {
+	test(`ChildLifecycle releases its permit exactly once on ${scenario.name}`, () => {
+		let releases = 0;
+		const lifecycle = new ChildLifecycle(`attempt-${scenario.name}`, config());
+		lifecycle.setRelease(() => { releases++; });
+		assert.equal(scenario.settle(lifecycle), true);
+		assert.equal(lifecycle.cancel("late cancel"), false);
+		assert.equal(lifecycle.fail(new Error("late failure")), false);
+		assert.equal(lifecycle.markOrphaned(new Error("late cleanup")), false);
+		assert.equal(releases, 1);
+	});
+}

@@ -125,11 +125,12 @@ function config(overrides: Partial<PruningConfig["skills"]> = {}, mode: PruningC
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
+type BeforeAgentStartReturn = { systemPrompt?: string; message?: any } | undefined;
+
 type RegisterResult = {
 	handlers: Map<string, Handler>;
 	registeredTools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
 	registeredRenderers: Map<string, (...args: any[]) => any>;
-	sentMessages: any[];
 };
 
 function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-")), "pruning.jsonl")): RegisterResult {
@@ -141,7 +142,6 @@ function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync
 	const handlers = new Map<string, Handler>();
 	const registeredTools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }> = new Map();
 	const registeredRenderers = new Map<string, (...args: any[]) => any>();
-	const sentMessages: any[] = [];
 	const pi = {
 		on(eventName: string, handler: Handler) {
 			handlers.set(eventName, handler);
@@ -157,17 +157,16 @@ function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync
 		getAllTools: () => [] as ToolInfo[],
 		getActiveTools: () => [] as string[],
 		setActiveTools: (_names: string[]) => {},
-		sendMessage: (message: any) => { sentMessages.push(message); },
 	} as unknown as ExtensionAPI;
 	skillPruner(pi);
-	return { handlers, registeredTools, registeredRenderers, sentMessages };
+	return { handlers, registeredTools, registeredRenderers };
 }
 
 function systemPrompt(skills: Skill[]): string {
 	return `Base prompt.${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16`;
 }
 
-async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string) {
+async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string, sessionId = "session-1"): Promise<BeforeAgentStartReturn> {
 	const handler = handlers.get("before_agent_start");
 	assert.ok(handler, "before_agent_start handler registered");
 	return await handler({
@@ -179,7 +178,7 @@ async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: strin
 			skills,
 			contextFiles: [{ path: "AGENTS.md", content: "Project context" }],
 		},
-	}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-1" } });
+	}, { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } }) as BeforeAgentStartReturn;
 }
 
 /** Create a mock LLM completion function that returns a fixed prune-list response. */
@@ -209,7 +208,7 @@ test("discretion mode: LLM prunes a subset → only those skills removed", async
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -225,7 +224,7 @@ test("empty prune lists for both skills and tools → keep all", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: [], pruneTools: [] }));
 	try {
 		const { handlers } = register(config({ pinned: ["frontend-design"] }));
-		const result = await runBeforeAgentStart(handlers, "simple question", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "simple question", realisticSkills);
 
 		// Empty prune lists = nothing to remove = keep everything (the aligned
 		// default; previously an empty inclusion list pruned everything).
@@ -250,7 +249,7 @@ test("empty skill prune-list with non-empty tool prune-list keeps all skills (mi
 			getActiveTools: () => mockToolInfo.map((t) => t.name),
 			setActiveTools: () => {},
 		});
-		const result = await runBeforeAgentStart(handlers, "simple question", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "simple question", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -267,7 +266,7 @@ test("phantom pinned skill (not in visible skills) does not trigger fail-open", 
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config({ pinned: ["nonexistent-skill"] }));
-		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills);
 
 		// The pinned skill doesn't exist in the session, so it should be ignored.
 		// The LLM's prune of duckdb/frontend should still be honored.
@@ -283,7 +282,7 @@ test("ceiling is guidance only: pruning nothing keeps all skills even above the 
 	__setCompleteFn(mockCompleteFn({ pruneSkills: [], pruneTools: [] }));
 	try {
 		const { handlers } = register(config({ ceiling: 2 }));
-		const result = await runBeforeAgentStart(handlers, "do everything", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "do everything", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		// 3 skills, ceiling 2, but the LLM pruned nothing → keep all 3 (no hard clamp).
@@ -298,7 +297,7 @@ test("pinned skills protected even when the LLM tries to prune them", async () =
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["code-simplification", "frontend-design"] }));
 	try {
 		const { handlers } = register(config({ pinned: ["code-simplification"] }));
-		const result = await runBeforeAgentStart(handlers, "query optimization", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "query optimization", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -324,7 +323,7 @@ test("alwaysKeep skills and tools protected even when the LLM prunes them", asyn
 			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
 		});
 
-		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills);
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>frontend-design<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
@@ -357,12 +356,13 @@ test("empty prepass response retries with minimal reasoning before failing open"
 			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
 		});
 
-		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills);
 		assert.deepEqual(reasoningLevels, ["high", "minimal"]);
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
-		assert.equal(result?.message?.content.startsWith("Kept"), true);
+		const feedback = result?.message;
+		assert.equal(feedback?.content.startsWith("Kept"), true);
 		assert.ok(setActiveToolsCalls[0].includes("read"));
 		assert.ok(setActiveToolsCalls[0].includes("edit"));
 		assert.ok(!setActiveToolsCalls[0].includes("web_search"));
@@ -385,7 +385,7 @@ test("thrown prepass errors also retry with minimal reasoning", async () => {
 		const cfg = config();
 		cfg.thinkingLevel = "high";
 		const { handlers } = register(cfg);
-		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills);
 		assert.deepEqual(reasoningLevels, ["high", "minimal"]);
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -402,7 +402,7 @@ test("LLM failure → graceful fallback (all skills included)", async () => {
 	console.warn = (m?: unknown) => { warnings.push(String(m)); };
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -508,7 +508,7 @@ test("shadow mode leaves prompt unchanged and logs decision", async () => {
 	try {
 		const { handlers } = register(config({}, "shadow"), logPath);
 		const originalPrompt = systemPrompt(realisticSkills);
-		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills, originalPrompt) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills, originalPrompt);
 
 		assert.equal(result?.systemPrompt, originalPrompt);
 		await flushLog();
@@ -592,7 +592,7 @@ test("disabled skill excluded from LLM consideration", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: [] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "alpha beta", allSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "alpha beta", allSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.doesNotMatch(result.systemPrompt, /<name>disabled-helper<\/name>/);
@@ -603,12 +603,19 @@ test("disabled skill excluded from LLM consideration", async () => {
 	}
 });
 
-test("no input handler is registered — the turn continues automatically after the pruning message", async () => {
+test("queued steering messages bypass the pruning prepass", async () => {
 	const { handlers } = register(config());
-	// The pruning-result message is shown and the agent proceeds on its own. An
-	// input handler that only returns { action: "continue" } is a no-op (the SDK
-	// runner treats "continue" as passthrough), so none is registered.
-	assert.equal(handlers.has("input"), false);
+	const input = handlers.get("input");
+	assert.ok(input);
+	assert.deepEqual(await input({
+		type: "input",
+		text: "small correction",
+		source: "rpc",
+		streamingBehavior: "steer",
+	}, {}), { action: "continue" });
+
+	const result = await runBeforeAgentStart(handlers, "small correction", realisticSkills);
+	assert.equal(result, undefined, "queued steering must not run the prepass or return a message");
 });
 
 test("unexpected prepass error (registry throw) fails open: nothing pruned, error surfaced", async () => {
@@ -635,7 +642,7 @@ test("unexpected prepass error (registry throw) fails open: nothing pruned, erro
 			cwd: "/repo",
 			sessionManager: { getSessionId: () => "session-1" },
 			modelRegistry: { find: () => { throw new Error("registry boom"); } },
-		}) as { systemPrompt?: string; message?: any } | undefined;
+		}) as BeforeAgentStartReturn;
 
 		// Fail-open: every skill is still in the prompt, no tools were pruned.
 		assert.ok(result?.systemPrompt);
@@ -643,11 +650,12 @@ test("unexpected prepass error (registry throw) fails open: nothing pruned, erro
 		assert.match(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
 		assert.match(result.systemPrompt, /<name>frontend-design<\/name>/);
 		assert.equal(setActiveToolsCalls.length, 0, "no tools pruned on prepass failure");
-		// The error is surfaced transparently in the pruning-result message.
-		assert.ok(result.message, "error surfaced as a feedback message");
-		assert.match(String(result.message.details.prepassError), /registry boom/);
-		assert.deepEqual(result.message.details.excludedSkills, []);
-		assert.deepEqual(result.message.details.excludedTools, []);
+		// The error is surfaced transparently as a pruning-result message.
+		const feedback = result?.message;
+		assert.ok(feedback, "error surfaced as a feedback message");
+		assert.match(String(feedback.details.prepassError), /registry boom/);
+		assert.deepEqual(feedback.details.excludedSkills, []);
+		assert.deepEqual(feedback.details.excludedTools, []);
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
@@ -725,7 +733,7 @@ test("always-keep / pinned skills and tools are never sent to the prepass", asyn
 			getActiveTools: () => mockToolInfo.map((t) => t.name),
 			setActiveTools: () => {},
 		});
-		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor code", realisticSkills);
 
 		// Prunable candidates are still presented to the model...
 		assert.ok(capturedUserMessage.includes("duckdb-query-optimization"), "prunable skill is a candidate");
@@ -918,6 +926,26 @@ test("request_tool execute enables a pruned tool and logs the recovery", async (
 	}
 });
 
+test("request_tool without a name lists recoverable tools", async () => {
+	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
+	const toolDef = registeredTools.get("request_tool");
+	assert.ok(toolDef);
+
+	__setToolSeams({
+		getAllTools: () => mockToolInfo as any[],
+		getActiveTools: () => ["read", "edit", "bash"],
+		setActiveTools: () => {},
+	});
+
+	try {
+		const result = await toolDef.execute("call-list", {}, undefined, undefined, undefined) as any;
+		assert.match(result.content[0].text, /Recoverable tools:/);
+		assert.match(result.content[0].text, /web_search/);
+	} finally {
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
 test("request_tool execute returns error for unknown tool name", async () => {
 	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
 	const toolDef = registeredTools.get("request_tool");
@@ -956,15 +984,16 @@ test("request_tool execute returns message when tool is already active", async (
 	}
 });
 
-test("UI feedback message is returned in event result when skills are pruned", async () => {
+test("UI feedback message is returned when skills are pruned", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
-		assert.ok(result?.message, "should return a feedback message in event result");
-		assert.equal(result.message.customType, "pruning-result");
-		assert.equal(result.message.display, true);
-		const details = result.message.details;
+		const result = await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills);
+		const feedback = result?.message;
+		assert.ok(feedback, "should return a feedback message");
+		assert.equal(feedback.customType, "pruning-result");
+		assert.equal(feedback.display, true);
+		const details = feedback.details;
 		assert.ok(details.excludedSkills.length > 0);
 		assert.ok(details.includedSkills.length > 0);
 		assert.equal(details.mode, "auto");
@@ -984,11 +1013,12 @@ test("identical second prompt reuses prepass and marks feedback plus JSONL as ca
 	try {
 		const { handlers } = register(config(), logPath);
 		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
-		const second = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills) as { message?: any };
+		const secondResult = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
 		assert.equal(calls, 1);
-		assert.equal(second.message.details.cacheHit, true);
-		assert.match(second.message.content, /· cached/);
-		assert.equal(second.message.details.prepassLatencyMs, 0);
+		const secondEntry = secondResult?.message;
+		assert.equal(secondEntry.details.cacheHit, true);
+		assert.match(secondEntry.content, /· cached/);
+		assert.equal(secondEntry.details.prepassLatencyMs, 0);
 		await flushLog();
 		const decisions = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 		assert.equal(decisions.at(-1).cacheHit, true);
@@ -996,6 +1026,59 @@ test("identical second prompt reuses prepass and marks feedback plus JSONL as ca
 	} finally {
 		__setCompleteFn(null);
 		setLogPathForTesting(null);
+	}
+});
+
+test("cross-session cache: a second session reuses the first session's exact decision without an LLM call", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config());
+		// Session 1: runs the prepass (LLM call) and caches it cross-session.
+		const first = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills, undefined, "session-1");
+		assert.equal(calls, 1);
+		assert.ok(first?.systemPrompt);
+		assert.match(first.systemPrompt, /<name>code-simplification<\/name>/);
+		assert.doesNotMatch(first.systemPrompt, /<name>frontend-design<\/name>/);
+
+		// Session 2: same prompt + same catalog → cross-session exact hit. The
+		// per-session cache misses (different sessionId), so the cross-session
+		// cache supplies the decision — no second LLM call.
+		const second = await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills, undefined, "session-2");
+		assert.equal(calls, 1, "session 2 must reuse the cross-session cache without an LLM call");
+		assert.ok(second?.systemPrompt);
+		assert.match(second.systemPrompt, /<name>code-simplification<\/name>/);
+		assert.doesNotMatch(second.systemPrompt, /<name>frontend-design<\/name>/);
+		const feedback = second?.message;
+		assert.equal(feedback.details.cacheHit, true);
+		assert.equal(feedback.details.prepassLatencyMs, 0);
+	} finally {
+		__setCompleteFn(null);
+	}
+});
+
+test("cross-session cache: a continuation prompt in a second session does NOT reuse the first session's decision", async () => {
+	// Privacy: "continue" is context-dependent. Session 2's "continue" must not
+	// pull in session 1's cross-session-cached decision (which was for a
+	// different prompt). It must run its own prepass.
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config());
+		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills, undefined, "session-1");
+		assert.equal(calls, 1);
+		// Session 2 sends "continue" — not an exact match for session 1's prompt, so
+		// the cross-session cache (exact-only) must miss and run a fresh prepass.
+		await runBeforeAgentStart(handlers, "continue", realisticSkills, undefined, "session-2");
+		assert.equal(calls, 2, "continuation prompts must not hit the cross-session cache");
+	} finally {
+		__setCompleteFn(null);
 	}
 });
 
@@ -1034,10 +1117,11 @@ test("feedback message returned even when nothing is pruned (LLM prunes nothing)
 	__setCompleteFn(mockCompleteFn({ pruneSkills: [], pruneTools: [] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "do everything", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
-		assert.ok(result?.message, "feedback message always returned for transparency");
-		assert.equal(result.message.customType, "pruning-result");
-		assert.equal(result.message.details.excludedSkills.length, 0);
+		const result = await runBeforeAgentStart(handlers, "do everything", realisticSkills);
+		const feedback = result?.message;
+		assert.ok(feedback, "feedback message always returned for transparency");
+		assert.equal(feedback.customType, "pruning-result");
+		assert.equal(feedback.details.excludedSkills.length, 0);
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -1130,11 +1214,12 @@ test("message renderer with no details renders raw content", async () => {
 test("no completeFn available → error message returned (no prompt modification)", async () => {
 	__setCompleteFn(null);
 	const { handlers } = register(config());
-	const result = await runBeforeAgentStart(handlers, "Refactor code", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
-	assert.ok(result?.message, "should return an error message");
-	assert.equal(result.message.customType, "pruning-result");
-	assert.ok(String(result.message.content).includes("No completion function available"));
-	assert.equal(result.systemPrompt, undefined);
+	const result = await runBeforeAgentStart(handlers, "Refactor code", realisticSkills);
+	const feedback = result?.message;
+	assert.ok(feedback, "should return an error message");
+	assert.equal(feedback.customType, "pruning-result");
+	assert.ok(String(feedback.content).includes("No completion function available"));
+	assert.equal(result?.systemPrompt, undefined);
 });
 
 test("github-copilot model without headers: copilot headers injected via model registry", async () => {
@@ -1242,4 +1327,26 @@ test("LLM pruning records the kept subset for subagent inheritance", async () =>
 		clearKeptSkills("session-1");
 		__setCompleteFn(null);
 	}
+});
+
+test("context handler filters pruning-result custom messages before provider calls", async () => {
+	const { handlers } = register(config());
+	const contextHandler = handlers.get("context");
+	assert.ok(contextHandler, "context handler registered");
+
+	const messages = [
+		{ role: "user", content: "hello" },
+		{ role: "custom", customType: "pruning-result", content: "Kept 1/3 skills" },
+		{ role: "assistant", content: "ok" },
+		{ role: "custom", customType: "other", content: "keep me" },
+		{ role: "custom", customType: "pruning-result", content: "cached" },
+	];
+
+	const result = await contextHandler({ type: "context", messages }, { cwd: "/repo" }) as { messages: Array<{ role: string; customType?: string }> } | undefined;
+	assert.ok(result && Array.isArray(result.messages), "handler returns filtered messages");
+	assert.equal(result.messages.length, 3);
+	assert.ok(result.messages.some((m) => m.role === "user"));
+	assert.ok(result.messages.some((m) => m.role === "assistant"));
+	assert.ok(result.messages.some((m) => m.role === "custom" && m.customType === "other"));
+	assert.ok(!result.messages.some((m) => m.role === "custom" && m.customType === "pruning-result"));
 });

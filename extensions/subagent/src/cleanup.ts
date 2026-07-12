@@ -49,6 +49,7 @@ export class OrphanCleanupRegistry {
 	private maxSize: number;
 	private retentionMs: number;
 	private retryIntervalsMs: number[];
+	private attemptTimeoutMs: number;
 	private timers = new Set<ReturnType<typeof setTimeout>>();
 	private cleanupTasks = new Map<string, OrphanCleanupTask>();
 	private drained = false;
@@ -57,10 +58,14 @@ export class OrphanCleanupRegistry {
 		maxSize?: number;
 		retentionMs?: number;
 		retryIntervalsMs?: number[];
+		/** Bound for each detached cleanup attempt. A cleanup task that never
+		 * settles must not stop later retries or hang backend shutdown. */
+		attemptTimeoutMs?: number;
 	}) {
 		this.maxSize = options?.maxSize ?? 100;
 		this.retentionMs = options?.retentionMs ?? 60 * 60 * 1000;
 		this.retryIntervalsMs = options?.retryIntervalsMs ?? [5_000, 30_000, 120_000];
+		this.attemptTimeoutMs = Math.max(1, options?.attemptTimeoutMs ?? 5_000);
 	}
 
 	/** Register a session that exceeded its abort/dispose grace. */
@@ -86,9 +91,8 @@ export class OrphanCleanupRegistry {
 	recordError(attemptId: string, error: unknown): void {
 		const rec = this.orphans.get(attemptId);
 		if (!rec) return;
-		rec.abortAttempts++;
 		rec.lastError = String(error ?? "unknown");
-		if (rec.abortAttempts <= this.retryIntervalsMs.length) {
+		if (rec.abortAttempts < this.retryIntervalsMs.length) {
 			this.scheduleRetry(attemptId);
 		}
 	}
@@ -156,37 +160,50 @@ export class OrphanCleanupRegistry {
 	}
 
 	private scheduleRetry(attemptId: string): void {
-		if (this.drained) return;
+		if (this.drained || this.retryIntervalsMs.length === 0) return;
 		const rec = this.orphans.get(attemptId);
-		if (!rec || rec.cleanupCompletedAt) return;
-		const idx = Math.min(rec.abortAttempts, this.retryIntervalsMs.length - 1);
-		const delay = this.retryIntervalsMs[idx];
+		if (!rec || rec.cleanupCompletedAt || rec.abortAttempts >= this.retryIntervalsMs.length) return;
+		const delay = this.retryIntervalsMs[rec.abortAttempts];
 		const timer = setTimeout(() => {
 			this.timers.delete(timer);
 			const task = this.cleanupTasks.get(attemptId);
 			if (!task) return;
-			void task().then(
-				() => this.recordCompleted(attemptId),
-				(error) => this.recordError(attemptId, error),
-			);
+			void this.runCleanupAttempt(attemptId, task);
 		}, delay);
 		timer.unref?.();
 		this.timers.add(timer);
 	}
 
-	/** Run any pending cleanup tasks supplied by callers. */
+	private async runCleanupAttempt(attemptId: string, task: OrphanCleanupTask): Promise<void> {
+		const rec = this.orphans.get(attemptId);
+		if (!rec || rec.cleanupCompletedAt) return;
+		rec.abortAttempts++;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await Promise.race([
+				Promise.resolve().then(task),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error(`orphan cleanup attempt exceeded ${this.attemptTimeoutMs}ms`)), this.attemptTimeoutMs);
+				}),
+			]);
+			this.recordCompleted(attemptId);
+		} catch (err) {
+			this.recordError(attemptId, err);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	}
+
+	/** Run pending cleanup tasks concurrently; each attempt is independently
+	 * bounded so one broken provider socket cannot hang shutdown or later orphans. */
 	async runPendingCleanups(taskFor: (attemptId: string) => OrphanCleanupTask | undefined): Promise<void> {
+		const attempts: Promise<void>[] = [];
 		for (const [attemptId, rec] of this.orphans) {
 			if (rec.cleanupCompletedAt) continue;
 			const task = taskFor(attemptId);
-			if (!task) continue;
-			try {
-				await task();
-				this.recordCompleted(attemptId);
-			} catch (err) {
-				this.recordError(attemptId, err);
-			}
+			if (task) attempts.push(this.runCleanupAttempt(attemptId, task));
 		}
+		await Promise.all(attempts);
 	}
 }
 
@@ -219,23 +236,28 @@ export async function boundedAbort(
 	registry: OrphanCleanupRegistry = orphanRegistry,
 ): Promise<void> {
 	let completed = false;
+	let graceTimer: ReturnType<typeof setTimeout> | undefined;
+	const cleanupTask = async () => {
+		await abortFn();
+		disposeFn();
+	};
 	try {
 		await Promise.race([
 			Promise.resolve()
-				.then(() => abortFn())
-				.then(() => disposeFn())
+				.then(cleanupTask)
 				.then(() => {
 					completed = true;
 				}),
 			new Promise<void>((_, reject) => {
-				const t = setTimeout(() => reject(new Error("abort/dispose grace exceeded")), graceMs);
-				t.unref?.();
+				graceTimer = setTimeout(() => reject(new Error("abort/dispose grace exceeded")), graceMs);
 			}),
 		]);
 	} catch {
-		// Detach local settlement from remote teardown.
-		registry.register({ ...metadata, detachedAt: Date.now() });
+		// Detach local settlement from remote teardown, but retain a bounded retry
+		// task; a record with no task can never clean itself up.
+		registry.register({ ...metadata, attemptId, detachedAt: Date.now() }, cleanupTask);
 	} finally {
+		if (graceTimer) clearTimeout(graceTimer);
 		// Always attempt disposal even if abort raced; ignore errors.
 		try {
 			disposeFn();

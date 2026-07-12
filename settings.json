@@ -1,6 +1,6 @@
 {
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "low",
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
@@ -17,7 +17,7 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "gpt-5.3-codex-spark",
+    "model": "gpt-5.4-mini",
     "provider": "openai-codex",
     "thinkingLevel": "off",
     "skills": {

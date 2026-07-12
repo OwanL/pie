@@ -86,6 +86,21 @@ test('confirm: forwards toolCallId when provided', async () => {
   assert.equal(await pending, true);
 });
 
+test('confirm: forwards timeout and auto-cancels without a host response', async () => {
+  const { bridge, captured } = makeBridge();
+  const pending = bridge.confirm('t', 'm', { timeout: 10 });
+  assert.equal(captured[0].payload.timeout, 10);
+  assert.equal(await pending, false);
+});
+
+test('confirm: abort signal cancels the pending request', async () => {
+  const { bridge } = makeBridge();
+  const controller = new AbortController();
+  const pending = bridge.confirm('t', 'm', { signal: controller.signal });
+  controller.abort();
+  assert.equal(await pending, false);
+});
+
 // ─── select ──────────────────────────────────────────────────────────────────
 
 test('select: emits options and returns the chosen value', async () => {
@@ -190,6 +205,17 @@ test('resolveRequest: resolving the same id twice is safe (second is a no-op)', 
 // `{ cancelled: true }`, which makes confirm→false, select/input→undefined.
 // These tests assert the real (resolve-based) behaviour; flagged as a
 // spec/implementation mismatch, not a code bug.
+
+test('cancelSubagent: cancels only the matching parallel child request', async () => {
+  const { bridge, captured } = makeBridge();
+  const childA = bridge.confirm('a', 'm', { subagentCallId: 'parent:0' });
+  const childB = bridge.confirm('b', 'm', { subagentCallId: 'parent:1' });
+
+  bridge.cancelSubagent('parent:0');
+  assert.equal(await childA, false);
+  bridge.resolveRequest({ id: captured[1].payload.id, confirmed: true });
+  assert.equal(await childB, true);
+});
 
 test('cancelAll: pending confirm resolves to false', async () => {
   const { bridge } = makeBridge();

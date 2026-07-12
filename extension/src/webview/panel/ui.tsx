@@ -18,6 +18,7 @@ import type {
   PruningResult,
   PruningSettings,
   ProviderGateStats,
+  QueuedDwellEntry,
   RetryStatus,
   SystemPromptEntry,
   ThinkingLevel,
@@ -32,6 +33,7 @@ import { ComposerToolbar } from './composer/toolbar';
 import { getComposerRunControls } from './session-tabs/run-state';
 import { cx } from './utils/cx';
 import { ComposerActions } from './composer/actions';
+import { QueuedDwellBanner } from './composer/queued-dwell-banner';
 import {
   useComposerIndicators,
   useComposerInput,
@@ -97,6 +99,8 @@ interface ComposerProps {
    *  the mark-done button with an explanatory tooltip (the trigger must be
    *  cancelled first, from the status strip). */
   activeSessionHasDeferredTriggers?: boolean;
+  /** Handoff §F: active session queued-message dwell state. */
+  queuedDwell: QueuedDwellEntry[];
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
@@ -145,6 +149,7 @@ function ComposerView({
   onSetToolResultPruningSettings,
   onMarkComplete,
   activeSessionHasDeferredTriggers,
+  queuedDwell,
   sendRetryDraftRef,
 }: ComposerProps) {
   const composerAreaRef = useRef<HTMLDivElement>(null);
@@ -288,6 +293,14 @@ function ComposerView({
         tokenRateIndicator={tokenRateIndicator}
         runStatus={runControls.status}
         onModelChange={onModelChange}
+      />
+
+      <QueuedDwellBanner
+        queuedDwell={queuedDwell}
+        sessionPath={sessionPath}
+        onInterrupt={onInterrupt}
+        onClearQueue={onClearQueue}
+        postMessage={postMessage}
       />
 
       <div

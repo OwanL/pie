@@ -29,9 +29,13 @@ export interface SdkSessionEvent {
     usage?: MessageLike['usage'];
   };
   assistantMessageEvent?: {
-    type: 'text_delta' | 'thinking_delta' | string;
+    type: 'text_delta' | 'thinking_delta' | 'toolcall_start' | 'toolcall_delta' | string;
     delta?: string;
     thinking?: string;
+    contentIndex?: number;
+    partial?: {
+      content?: Array<{ type?: string; id?: string; name?: string }>;
+    };
   };
   toolCallId?: string;
   toolName?: string;

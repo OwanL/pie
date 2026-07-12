@@ -243,9 +243,6 @@ async function handleRuntimePrefsSet(
   if (params.bashWarmupTimeoutMs !== undefined) {
     process.env['PIE_BASH_WARMUP_TIMEOUT_MS'] = String(params.bashWarmupTimeoutMs);
   }
-  if (params.bashAcquireTimeoutMs !== undefined) {
-    process.env['PIE_BASH_ACQUIRE_TIMEOUT_MS'] = String(params.bashAcquireTimeoutMs);
-  }
   if (params.bashDefaultTimeout !== undefined) {
     process.env['PIE_BASH_DEFAULT_TIMEOUT'] = String(params.bashDefaultTimeout);
   }

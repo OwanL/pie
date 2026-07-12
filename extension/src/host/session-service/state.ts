@@ -259,7 +259,13 @@ export class SessionServiceState {
       });
     }
 
-    this.dispatchArch({ kind: 'NoticeShown', notice });
+    // A superseded request still owns its operation cleanup, but it no longer
+    // owns user-visible selection state. Surfacing its timeout/rejection would
+    // overwrite the current tab with a stale global notice (for example, when
+    // rapid tab switches queue multiple slow session.open calls).
+    if (ownsSelection) {
+      this.dispatchArch({ kind: 'NoticeShown', notice });
+    }
     this.assertSelectionInvariant('handleSelectionFailure');
     this.scheduleRender();
   }

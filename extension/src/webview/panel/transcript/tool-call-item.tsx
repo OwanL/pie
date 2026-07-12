@@ -3,7 +3,6 @@
 
 import { useContext, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
 import type { ChatPrefs, ToolCall } from '../../../shared/protocol';
-import { summarizeSubagentToolCallInput } from '../../../shared/tool-call-analysis';
 import { shouldOpenSubagentContextMenu } from './interactions';
 import { handleTranscriptClick } from './transcript-click-handler';
 import { getToolCallContextType } from '../chat-prefs';
@@ -34,6 +33,8 @@ import { getToolRenderer } from './registry';
 import { useCollapsibleOpen } from './use-collapsible-open';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
+import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
+import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-tail-preview';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -59,44 +60,55 @@ function isRunning(result: SubagentSingleResult): boolean {
   return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
 }
 
-/** A subagent that has been dispatched but hasn't started executing yet — the
- *  synthesized placeholder before any messages, streaming text, or nested
- *  tool calls have arrived. Renders with a muted "waiting" treatment so queued
- *  agents (e.g. not-yet-started parallel members) recede behind active ones. */
-function isIdle(result: SubagentSingleResult): boolean {
-  if (result.exitCode !== -1) return false;
-  const hasMessages = Array.isArray(result.messages) && result.messages.length > 0;
-  const hasStreamingText = !!result.streamingText?.trim();
-  const hasRunningTools = (result.runningTools?.length ?? 0) > 0;
-  // A real lifecycle update means the child has started. Only an explicitly
-  // local queue remains visually idle; provider waits must not masquerade as
-  // unexplained inactivity.
-  const awaitingLocalCapacity = result.activityPhase == null || result.activityPhase === 'queued';
-  return !hasMessages && !hasStreamingText && !hasRunningTools && awaitingLocalCapacity;
-}
-
 function formatActivityDuration(ms: number): string {
   if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
 }
 
-function subagentActivitySummary(result: SubagentSingleResult): string | undefined {
-  if (!isRunning(result) || !result.activityPhase) return undefined;
+function compactTelemetryNumber(value: number): string {
+  if (value < 1_000) return String(Math.round(value));
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+function formatContextPercent(tokens: number, contextWindow: number): string {
+  const percent = (tokens / contextWindow) * 100;
+  return `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
+}
+
+interface SubagentActivity {
+  label: string;
+  detail?: string;
+  elapsed?: string;
+  diagnostic: string;
+}
+
+export function subagentActivity(result: SubagentSingleResult, now: number): SubagentActivity | undefined {
+  if (!isRunning(result)) return undefined;
   const labels: Record<string, string> = {
-    queued: 'Queued locally',
-    preparing: 'Preparing session',
+    queued: 'Waiting for concurrency',
+    preparing: 'Starting',
     waiting_provider: 'Waiting for provider',
-    streaming: 'Provider streaming',
+    streaming: 'Generating',
     running_tool: 'Running tool',
-    retry_wait: 'Waiting to retry provider',
+    retry_wait: 'Retrying provider',
   };
-  const label = labels[result.activityPhase];
+  const label = result.activityPhase
+    ? labels[result.activityPhase]
+    : 'Starting';
   if (!label) return undefined;
-  const elapsed = result.activitySince ? formatActivityDuration(Date.now() - result.activitySince) : undefined;
+  const runningTools = result.runningTools?.filter(Boolean).join(', ');
+  const detail = result.activityPhase === 'running_tool' && runningTools
+    ? runningTools
+    : result.activityPhase === 'waiting_provider' && result.provider
+      ? result.provider
+      : result.activityDetail ?? (!result.activityPhase ? 'waiting for first status update' : undefined);
+  const elapsed = result.activitySince ? formatActivityDuration(now - result.activitySince) : undefined;
   const budget = result.inactivityBudgetMs ? formatActivityDuration(result.inactivityBudgetMs) : undefined;
-  return [label, result.activityDetail, elapsed && `${elapsed} elapsed`, budget && `${budget} stall limit`]
+  const diagnostic = [label, detail, elapsed && `${elapsed} in this state`, budget && `${budget} stall limit`]
     .filter(Boolean)
     .join(' · ');
+  return { label, detail, elapsed, diagnostic };
 }
 
 function isFailed(result: SubagentSingleResult): boolean {
@@ -172,6 +184,50 @@ function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
   );
 }
 
+/** Runtime telemetry uses otherwise-empty header space. Context pressure is
+ * highest priority; output, last-turn throughput, and retries progressively
+ * disappear at narrow widths via CSS. Full precision remains in the tooltip. */
+function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
+  const usage = result.usage;
+  const contextTokens = usage?.contextTokens;
+  const contextWindow = result.contextWindow;
+  const hasContext = typeof contextTokens === 'number' && contextTokens > 0
+    && typeof contextWindow === 'number' && contextWindow > 0;
+  const latestThroughput = result.turnThroughputSamples
+    ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens >= 0)
+    .at(-1);
+  const tokensPerSecond = latestThroughput
+    ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)
+    : undefined;
+  const hasOutput = typeof usage?.output === 'number' && usage.output > 0;
+  const hasRetries = typeof result.retryCount === 'number' && result.retryCount > 0;
+  if (!hasContext && !hasOutput && tokensPerSecond == null && !hasRetries) return null;
+
+  const cacheTokens = (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
+  const title = [
+    hasContext ? `Context: ${contextTokens!.toLocaleString()} / ${contextWindow!.toLocaleString()} tokens (${formatContextPercent(contextTokens!, contextWindow!)})` : undefined,
+    usage ? `Usage: ${usage.input.toLocaleString()} input, ${usage.output.toLocaleString()} output, ${cacheTokens.toLocaleString()} cached` : undefined,
+    tokensPerSecond != null ? `Latest completed generation: ${tokensPerSecond.toFixed(1)} tokens/s` : undefined,
+    usage?.cost ? `Cost: $${usage.cost.toFixed(4)}` : undefined,
+    usage?.turns ? `${usage.turns} completed ${usage.turns === 1 ? 'turn' : 'turns'}` : undefined,
+    hasRetries ? `${result.retryCount} provider ${result.retryCount === 1 ? 'retry' : 'retries'}` : undefined,
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
+      {hasContext && (
+        <span class="subagent-telemetry-item subagent-telemetry-context">
+          ctx {compactTelemetryNumber(contextTokens!)} / {compactTelemetryNumber(contextWindow!)}
+          <span class="subagent-telemetry-percent"> {formatContextPercent(contextTokens!, contextWindow!)}</span>
+        </span>
+      )}
+      {hasOutput && <span class="subagent-telemetry-item subagent-telemetry-output">out {compactTelemetryNumber(usage!.output)}</span>}
+      {tokensPerSecond != null && <span class="subagent-telemetry-item subagent-telemetry-rate">last {tokensPerSecond.toFixed(1)} tok/s</span>}
+      {hasRetries && <span class="subagent-telemetry-item subagent-telemetry-retries">retry {result.retryCount}</span>}
+    </span>
+  );
+}
+
 /** Status indicator chip at the right side of the header. */
 function StatusIndicator({ status, errorDetail }: { status: 'idle' | 'running' | 'failed' | 'completed'; errorDetail?: string }) {
   if (status !== 'failed') return null;
@@ -187,25 +243,31 @@ function StatusIndicator({ status, errorDetail }: { status: 'idle' | 'running' |
   );
 }
 
-function singleResultStatus(
+export function singleResultStatus(
   result: SubagentSingleResult,
   toolCallStatus: ToolCall['status'],
   multipleResults: boolean,
 ): 'idle' | 'running' | 'failed' | 'completed' {
+  // The outer tool lifecycle is authoritative once terminal. Older or raced
+  // child results can retain a stale runningTools entry even though execution
+  // has finished; do not leave those cards visually running forever.
+  if (toolCallStatus !== 'running') {
+    if (
+      toolCallStatus === 'failed'
+      || result.exitCode !== 0
+      || result.stopReason === 'error'
+      || result.stopReason === 'aborted'
+    ) return 'failed';
+    return 'completed';
+  }
   if (isFailed(result)) return 'failed';
   if (isRunning(result)) {
     // A running call that has produced no activity yet is "idle" (queued /
-    // not started), unless the tool call itself has already failed.
-    if (isIdle(result) && toolCallStatus !== 'failed') return 'idle';
-    return toolCallStatus === 'failed' ? 'failed' : 'running';
+    // not started).
+    if (isIdle(result)) return 'idle';
+    return 'running';
   }
-  if (!multipleResults && toolCallStatus === 'running') return 'running';
-  if (!multipleResults && toolCallStatus === 'failed') return 'failed';
-  return 'completed';
-}
-
-function summarizeSingleResult(result: SubagentSingleResult): string | null {
-  return summarizeSubagentToolCallInput({ task: result.task });
+  return multipleResults ? 'completed' : 'running';
 }
 
 interface SubagentSingleBlockProps {
@@ -372,10 +434,27 @@ function SubagentSingleBlock({
     ? `subagent:${toolCall.id}-${index}`
     : `subagent:${toolCall.id}`;
   const [open, setOpen] = useCollapsibleOpen(collapsibleKey, prefs.autoExpandSubagentCalls);
-  const summary = summarizeSingleResult(singleResult);
   const status = singleResultStatus(singleResult, toolCall.status, multipleResults);
   const errorDetail = status === 'failed' ? subagentErrorDetail(singleResult) : undefined;
-  const activitySummary = subagentActivitySummary(singleResult);
+  // Lifecycle events do not necessarily arrive every second. Tick locally so
+  // elapsed time remains visibly alive during concurrency/provider waits and
+  // active streaming alike (queued children have the visual `idle` status).
+  const [activityNow, setActivityNow] = useState(Date.now());
+  useEffect(() => {
+    if (!isRunning(singleResult)) return;
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [status, singleResult.activityPhase, singleResult.activitySince]);
+  const activity = subagentActivity(singleResult, activityNow);
+  // Collapsed cards keep a compact task/live-output preview. Expanded cards
+  // already show the full child transcript, so repeating the preview there is
+  // redundant.
+  const previewTail = subagentPreviewTail(
+    singleResult,
+    prefs.subagentPreviewLines ?? ACTIVITY_TAIL_MAX_LINES,
+    status === 'running' || status === 'idle',
+  );
 
   // Check if this subagent has a pending ask_user request (for blinking indicator).
   const askUserCtx = useContext(AskUserContext);
@@ -467,15 +546,33 @@ function SubagentSingleBlock({
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
-        <div class="flex min-w-0 flex-1 items-center gap-[7px]">
+        <div class="subagent-header-content">
           <span class="subagent-agent-name transcript-header-title-mono">{singleResult.agent}</span>
+          {activity && (
+            <span class={cx('subagent-activity', status === 'idle' && 'subagent-activity-idle')} title={activity.diagnostic} aria-label={activity.diagnostic}>
+              <span class="subagent-activity-dot" aria-hidden="true" />
+              <span class="subagent-activity-label">{activity.label}{activity.elapsed ? ` ${activity.elapsed}` : ''}</span>
+              {activity.detail && <span class="subagent-activity-detail">{activity.detail}</span>}
+            </span>
+          )}
+          {!activity && status === 'idle' && (
+            <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
+          )}
           <PrimaryMeta result={singleResult} />
-          {activitySummary && <span class="subagent-header-summary transcript-header-summary-subtle" title={activitySummary}>{activitySummary}</span>}
-          {!activitySummary && !open && summary && <span class="subagent-header-summary transcript-header-summary-mono">{summary}</span>}
+          <RuntimeTelemetry result={singleResult} />
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
       </div>
+      {previewTail && !renderBody && (
+        <div
+          class="subagent-live-preview"
+          role="status"
+          aria-label={`${singleResult.agent} live output`}
+        >
+          <TurnActivityTailBody tail={previewTail} />
+        </div>
+      )}
       {renderBody && (
         <div
           class="collapsible-body-wrap"
@@ -540,19 +637,23 @@ function SubagentBlock({
     return (
       <div class="subagent-parallel-group">
         {result.results.map((singleResult, index) => (
-          <SubagentSingleBlock
-            key={index}
-            singleResult={singleResult}
-            toolCall={toolCall}
-            index={index}
-            prefs={prefs}
-            workingDirectory={workingDirectory}
-            onOpenFile={onOpenFile}
-            onContextMenu={onContextMenu}
-            onNestedContextMenu={onNestedContextMenu}
-            renderToolCall={renderToolCall}
-            multipleResults
-          />
+          // Each child is wrapped so a per-child connector strip (the left spine
+          // + horizontal tick) can mark it as a member of this parallel call —
+          // the card itself clips overflow, so the connector lives on the wrapper.
+          <div class="subagent-parallel-child" key={index}>
+            <SubagentSingleBlock
+              singleResult={singleResult}
+              toolCall={toolCall}
+              index={index}
+              prefs={prefs}
+              workingDirectory={workingDirectory}
+              onOpenFile={onOpenFile}
+              onContextMenu={onContextMenu}
+              onNestedContextMenu={onNestedContextMenu}
+              renderToolCall={renderToolCall}
+              multipleResults
+            />
+          </div>
         ))}
       </div>
     );

@@ -47,7 +47,6 @@ test("SubagentParams is a JSON-Schema object with all top-level fields optional"
 		"task",
 		"tasks",
 		"chain",
-		"agentScope",
 		"confirmProjectAgents",
 		"cwd",
 		"bucket",
@@ -61,7 +60,7 @@ test("SubagentParams is a JSON-Schema object with all top-level fields optional"
 test("SubagentParams enum fields carry the allowed values", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket?.enum, ["small", "medium", "frontier"]);
-	assert.deepEqual(props.agentScope?.enum, ["user", "project", "both"]);
+	assert.equal(props.agentScope, undefined, "agentScope was removed from the public schema");
 	assert.deepEqual(props.thinkingLevel?.enum, ["minimal", "low", "medium", "high", "xhigh"]);
 });
 
@@ -94,7 +93,6 @@ test("SubagentParams accepts a valid single-mode params object", () => {
 	const validSingle = {
 		agent: "worker",
 		task: "do work",
-		agentScope: "user",
 		confirmProjectAgents: true,
 		cwd: "/repo",
 		bucket: "medium",
@@ -129,13 +127,13 @@ test("SubagentParams rejects malformed params objects", () => {
 	};
 	assert.equal(Value.Check(SubagentParams, badBucket), false, "invalid bucket value should fail");
 
-	// agentScope outside the allowed enum
-	const badScope = {
+	// agentScope was removed from the public schema
+	const withRemovedScope = {
 		agent: "worker",
 		task: "do work",
-		agentScope: "everywhere",
+		agentScope: "user",
 	};
-	assert.equal(Value.Check(SubagentParams, badScope), false, "invalid agentScope value should fail");
+	assert.equal(Value.Check(SubagentParams, withRemovedScope), false, "removed agentScope field should fail schema validation");
 
 	// confirmProjectAgents not boolean
 	const badConfirm = {

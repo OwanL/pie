@@ -48,6 +48,12 @@ export interface SubagentUsageSummary {
   cacheRead: number;
   /** Cumulative cache-write tokens consumed by this sub-agent session. */
   cacheWrite: number;
+  /** Context occupied by the most recent provider turn. */
+  contextTokens?: number;
+  /** Cumulative attributed cost in provider billing units (normally USD). */
+  cost?: number;
+  /** Completed assistant turns in this child session. */
+  turns?: number;
 }
 
 export interface SubagentSingleResult {
@@ -58,6 +64,10 @@ export interface SubagentSingleResult {
   messages: RawMessage[];
   /** The model the subagent session actually ran with. */
   model?: string;
+  /** Provider that owns the selected model. */
+  provider?: string;
+  /** Maximum context window of the selected model. */
+  contextWindow?: number;
   stderr?: string;
   stopReason?: string;
   errorMessage?: string;
@@ -135,7 +145,15 @@ function subagentSingleResultFallbackMarkdown(result: SubagentSingleResult): str
   return detail ? `${failureLabel}: ${detail}` : `${failureLabel}: agent failed before producing any output.`;
 }
 
-function placeholderSingleResult(agent: unknown, task: unknown, taskScores?: unknown): SubagentSingleResult | undefined {
+function placeholderSingleResult(
+  agent: unknown,
+  task: unknown,
+  taskScores?: unknown,
+  activity: Pick<SubagentSingleResult, 'activityPhase' | 'activityDetail'> = {
+    activityPhase: 'preparing',
+    activityDetail: 'waiting for subagent runtime status',
+  },
+): SubagentSingleResult | undefined {
   const agentName = typeof agent === 'string' ? agent.trim() : '';
   const taskText = typeof task === 'string' ? task.trim() : '';
   if (!agentName || !taskText) {
@@ -147,6 +165,7 @@ function placeholderSingleResult(agent: unknown, task: unknown, taskScores?: unk
     task: taskText,
     exitCode: -1,
     messages: [],
+    ...activity,
     ...(isRecord(taskScores) ? { taskScores: taskScores as Record<string, number> } : {}),
   };
 }
@@ -166,7 +185,12 @@ function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | un
 
   if (Array.isArray(input.tasks)) {
     const results = input.tasks
-      .map((task) => (isRecord(task) ? placeholderSingleResult(task.agent, task.task, task.taskScores ?? input.taskScores) : undefined))
+      .map((task) => (isRecord(task) ? placeholderSingleResult(
+        task.agent,
+        task.task,
+        task.taskScores ?? input.taskScores,
+        { activityPhase: 'queued', activityDetail: 'waiting for parallel task dispatch' },
+      ) : undefined))
       .filter((task): task is SubagentSingleResult => Boolean(task));
 
     if (results.length > 0) {

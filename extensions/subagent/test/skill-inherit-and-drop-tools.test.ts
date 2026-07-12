@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Model, ModelRegistry } from "@mariozechner/pi-coding-agent";
-import { runSingleAgent } from "../runner.js";
+import { runSingleAgent, subagentRuntime } from "../runner.js";
 import type { AgentConfig } from "../agents.js";
 import { recordKeptSkills, clearKeptSkills, readKeptSkills } from "../../../shared/pruned-skills.js";
 
@@ -171,6 +171,24 @@ test("runSingleAgent passes a skillsOverride that filters to the parent's kept-s
 	} finally {
 		clearKeptSkills(sessionId);
 	}
+});
+
+test("depth-2+ run inherits the async-local kept set without a parent session record", async () => {
+	const { sdk, state } = createCapturingSdk();
+	await subagentRuntime.run(
+		{ depth: 2, trail: ["worker", "worker"], keptSkills: ["tdd"], budget: { sessions: 2 } },
+		() => runSingleAgent(
+			process.cwd(), [makeAgent()], "worker", "nested work", undefined, undefined, undefined, undefined,
+			details, makeModelRegistry(), undefined, selection,
+			undefined, undefined, undefined, undefined, undefined,
+			{ sdk: sdk as any, timeoutMs: 0 },
+		),
+	);
+	const override = state.createResourceLoaderArgs[0].skillsOverride as
+		| ((base: { skills: Array<{ name: string }>; diagnostics: unknown[] }) => { skills: Array<{ name: string }>; diagnostics: unknown[] })
+		| undefined;
+	assert.equal(typeof override, "function");
+	assert.deepEqual(override!({ skills: [{ name: "tdd" }, { name: "librarian" }], diagnostics: [] }).skills, [{ name: "tdd" }]);
 });
 
 // --- pruned-skills store (shared/pruned-skills.ts) ---

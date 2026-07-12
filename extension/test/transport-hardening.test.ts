@@ -95,7 +95,7 @@ test('ordered stdout writer waits for callbacks and preserves order', async () =
   assert.deepEqual(written, ['{"n":1}\n', '{"n":2}\n', '{"n":3}\n']);
 });
 
-test('ordered stdout writer coalesces stale blocked tool progress without reordering critical events', async () => {
+test('ordered stdout writer prioritizes responses while preserving event order and coalescing progress', async () => {
   const written: string[] = [];
   const callbacks: Array<() => void> = [];
   const stream = new Writable({
@@ -121,10 +121,61 @@ test('ordered stdout writer coalesces stale blocked tool progress without reorde
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(written.map((line) => JSON.parse(line)), [
     { id: 'active', ok: true },
-    progress('latest'),
     { id: 'intervening', ok: true },
+    progress('latest'),
     { event: 'tool.finished', payload: { sessionPath: '/s', toolCallId: 't', status: 'completed' } },
   ]);
+});
+
+test('ordered stdout writer does not head-of-line block RPC responses behind a bulk event backlog', async () => {
+  const written: string[] = [];
+  const callbacks: Array<() => void> = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      written.push(chunk.toString());
+      callbacks.push(callback);
+    },
+  });
+  const writer = new OrderedJsonlWriter(stream, { maxQueuedBytes: 1024 * 1024 });
+
+  writer.write({ event: 'message.delta', payload: { sessionPath: '/s', delta: 'active' } });
+  for (let i = 0; i < 100; i += 1) {
+    writer.write({ event: 'message.delta', payload: { sessionPath: '/s', delta: String(i) } });
+  }
+  writer.write({ id: 'control', ok: true, result: { ok: true } });
+
+  callbacks.shift()!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(written[1]!), { id: 'control', ok: true, result: { ok: true } });
+
+  while (callbacks.length > 0) callbacks.shift()!();
+});
+
+test('event-lane saturation cannot consume reserved response capacity', async () => {
+  const written: string[] = [];
+  const callbacks: Array<() => void> = [];
+  const fatal: Error[] = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      written.push(chunk.toString());
+      callbacks.push(callback);
+    },
+  });
+  const writer = new OrderedJsonlWriter(stream, {
+    maxQueuedBytes: 120,
+    maxQueuedResponseBytes: 120,
+    onFatal: (error) => fatal.push(error),
+  });
+
+  writer.write({ event: 'message.delta', payload: { delta: 'active' } });
+  writer.write({ event: 'message.delta', payload: { delta: 'x'.repeat(50) } });
+  writer.write({ id: 'control', ok: true, result: 'y'.repeat(50) });
+  assert.equal(fatal.length, 0);
+
+  callbacks.shift()!();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(JSON.parse(written[1]!).id, 'control');
+  while (callbacks.length > 0) callbacks.shift()!();
 });
 
 test('ordered stdout writer fails before writing an oversized critical record', () => {
@@ -138,7 +189,7 @@ test('ordered stdout writer fails before writing an oversized critical record', 
   assert.equal(fatal.length, 1);
 });
 
-test('ordered stdout writer drops progress at saturation but fails explicitly on critical overflow', () => {
+test('ordered stdout writer drops progress at saturation but fails explicitly on critical event overflow', () => {
   const callbacks: Array<() => void> = [];
   const fatal: Error[] = [];
   const stream = new Writable({ write(_chunk, _encoding, callback) { callbacks.push(callback); } });
@@ -146,7 +197,7 @@ test('ordered stdout writer drops progress at saturation but fails explicitly on
   writer.write({ id: 'active', ok: true });
   writer.write({ event: 'tool.progress', payload: { sessionPath: '/s', toolCallId: 't', partialResult: 'x'.repeat(200) } });
   assert.equal(fatal.length, 0, 'droppable progress does not make saturation fatal');
-  assert.throws(() => writer.write({ id: 'critical', ok: false, error: { code: 'E', message: 'x'.repeat(200) } }), /queue overflow/);
+  assert.throws(() => writer.write({ event: 'error', payload: { message: 'x'.repeat(200) } }), /event queue overflow/);
   assert.equal(fatal.length, 1);
   callbacks.shift()?.();
 });

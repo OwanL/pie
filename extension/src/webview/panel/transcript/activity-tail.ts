@@ -228,6 +228,72 @@ function subagentSingleResultRunning(result: SubagentSingleResult): boolean {
   return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
 }
 
+function compactDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
+}
+
+function compactTokens(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+/** Dense lifecycle and run metadata rows used when a child has not produced
+ * visible output yet. These make the reserved preview rows useful during
+ * provider waits and retries instead of showing an empty blinking caret. */
+export function subagentDetailLines(result: SubagentSingleResult, now = Date.now()): string[] {
+  const phaseLabels: Record<string, string> = {
+    queued: 'Waiting for concurrency',
+    preparing: 'Starting subagent',
+    waiting_provider: 'Waiting for provider',
+    streaming: 'Generating response',
+    running_tool: 'Running tool',
+    retry_wait: 'Waiting to retry provider',
+  };
+  const phase = result.activityPhase
+    ? phaseLabels[result.activityPhase]
+    : (subagentSingleResultRunning(result) ? 'Waiting for status update' : undefined);
+  const stateFor = result.activitySince ? compactDuration(now - result.activitySince) : undefined;
+  const progressAgo = result.lastProgressAt ? compactDuration(now - result.lastProgressAt) : undefined;
+  const stallLimit = result.inactivityBudgetMs ? compactDuration(result.inactivityBudgetMs) : undefined;
+  const lifecycle = [
+    phase,
+    result.activityDetail,
+    stateFor && `${stateFor} in state`,
+    progressAgo && `${progressAgo} since progress`,
+    stallLimit && `${stallLimit} stall limit`,
+  ].filter(Boolean).join(' · ');
+
+  const model = result.selectedModel ?? result.model;
+  const usage = result.usage;
+  const cache = usage ? usage.cacheRead + usage.cacheWrite : 0;
+  const contextTokens = usage?.contextTokens;
+  const contextWindow = result.contextWindow;
+  const contextPercent = contextTokens && contextWindow
+    ? Math.round((contextTokens / contextWindow) * 100)
+    : undefined;
+  const latestThroughput = result.turnThroughputSamples
+    ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens >= 0)
+    .at(-1);
+  const tokensPerSecond = latestThroughput
+    ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)
+    : undefined;
+  const metadata = [
+    result.provider && !model?.startsWith(`${result.provider}/`) ? result.provider : undefined,
+    model,
+    result.thinkingLevel && result.thinkingLevel !== 'off' ? `thinking ${result.thinkingLevel}` : undefined,
+    contextTokens && contextWindow ? `context ${compactTokens(contextTokens)} / ${compactTokens(contextWindow)}${contextPercent != null ? ` (${contextPercent}%)` : ''}` : undefined,
+    usage ? `tokens ${compactTokens(usage.input)} in / ${compactTokens(usage.output)} out` : undefined,
+    cache > 0 ? `${compactTokens(cache)} cached` : undefined,
+    tokensPerSecond != null ? `last ${tokensPerSecond.toFixed(1)} tok/s` : undefined,
+    result.retryCount ? `${result.retryCount} ${result.retryCount === 1 ? 'retry' : 'retries'}` : undefined,
+    result.selectionPool?.length ? `${result.selectionPool.length} model candidates` : undefined,
+  ].filter(Boolean).join(' · ');
+
+  return [lifecycle, metadata].filter(Boolean);
+}
+
 /** One compact activity line describing what a running subagent is doing right now. */
 function subagentActivityLine(result: SubagentSingleResult, prefixAgent: boolean): string | null {
   const tools = result.runningTools?.filter(Boolean);
@@ -267,12 +333,31 @@ export function deriveSubagentTail(toolCall: ToolCall, lineBudget: number = ACTI
   const prefixAgent = running.length > 1;
   const all: string[] = [];
   for (const result of running) {
-    const line = subagentActivityLine(result, prefixAgent);
-    if (line) all.push(line);
-    if (all.length >= lineBudget) break;
+    const activityLine = subagentActivityLine(result, prefixAgent);
+    const hasConcreteActivity = Boolean(activityLine && activityLine !== '…' && !activityLine.endsWith(': …'));
+    if (hasConcreteActivity && activityLine) {
+      all.push(activityLine);
+    } else {
+      const details = subagentDetailLines(result);
+      // Parallel previews owe each child one row before spending scarce space
+      // on secondary metadata. Prefix diagnostics so their source stays clear.
+      if (prefixAgent && details[0]) all.push(`${result.agent}: ${details[0]}`);
+      else all.push(...details);
+    }
+  }
+  // A single child can use remaining rows for lifecycle/model diagnostics even
+  // while a concrete tool/output line occupies the first row.
+  if (
+    !prefixAgent
+    && all.length > 0
+    && !all.some((line) => line.includes(' in state'))
+    && Boolean(primary.activityPhase || primary.model || primary.selectedModel || primary.usage)
+  ) {
+    all.push(...subagentDetailLines(primary));
   }
 
-  const { lines, truncated } = clampLines(all, lineBudget);
+  const lines = all.slice(0, lineBudget);
+  const truncated = all.length > lineBudget;
 
   const label = primary.agent?.trim() || 'subagent';
   return {

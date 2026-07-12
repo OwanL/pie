@@ -138,6 +138,7 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'MessageAborted':
     case 'MessageDelta':
     case 'MessageThinking':
+    case 'MessageToolCallDelta':
     case 'ToolCall':
     case 'MessageFinished': {
       return handleStreamingEvent(state, event);

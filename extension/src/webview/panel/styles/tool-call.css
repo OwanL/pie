@@ -164,12 +164,111 @@
   background: var(--panel-control-hover);
 }
 
-.subagent-header-summary {
+.subagent-header-content {
+  display: flex;
   min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.subagent-header-summary {
+  min-width: 32px;
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Compact live state sits inline with the task. Detailed provider diagnostics
+   remain in the tooltip instead of claiming a permanent second row. */
+.subagent-activity {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--panel-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10.5px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.subagent-activity-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--panel-accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--panel-accent) 35%, transparent);
+  animation: subagent-activity-pulse 1.6s ease-out infinite;
+}
+
+.subagent-activity-label {
+  flex: 0 0 auto;
+}
+
+.subagent-activity-detail {
+  max-width: 150px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-activity-detail::before {
+  content: '·';
+  margin-right: 5px;
+  opacity: 0.55;
+}
+
+.subagent-activity-idle .subagent-activity-dot {
+  background: var(--panel-muted);
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes subagent-activity-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--panel-accent) 35%, transparent); }
+  65%, 100% { box-shadow: 0 0 0 5px transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-activity-dot { animation: none; }
+}
+
+/* Live child output appears only when there is something substantive to show.
+   It reuses the main transcript's bounded activity-tail renderer, giving a
+   running worker useful preview rows without reserving blank space. */
+.subagent-live-preview {
+  margin: 0 1px 1px;
+  padding: 5px 8px 6px;
+  border-top: 1px solid var(--panel-border-subtle);
+  border-radius: 0 0 calc(var(--panel-radius-md) - 1px) calc(var(--panel-radius-md) - 1px);
+  background: var(--panel-code-surface);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--panel-accent) 32%, transparent);
+  overflow: hidden;
+}
+
+.tool-call.tool-call-subagent:has(> .subagent-live-preview) .subagent-header[aria-expanded="false"] {
+  border-radius: var(--panel-radius-md) var(--panel-radius-md) 0 0;
+  box-shadow: none;
+}
+
+.subagent-live-preview .turn-activity-tail {
+  color: var(--panel-foreground-soft);
+}
+
+.subagent-live-preview .turn-activity-tail-label {
+  color: var(--panel-accent);
+}
+
+.subagent-live-preview .turn-activity-tail-content {
+  /* The shared user preference controls the output-row count. The composite
+     task row sits above it, inside this same connected worker surface. */
+  font-size: 11px;
 }
 
 .subagent-agent-name {
@@ -186,6 +285,59 @@
   gap: 6px;
   min-width: 0;
   flex: 0 0 auto;
+}
+
+/* Dense runtime telemetry consumes the remaining header width without pushing
+   the status or model off-screen. Context pressure is retained longest; lower
+   priority metrics are hidden progressively on narrow panels. */
+.subagent-runtime-telemetry {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--panel-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.subagent-telemetry-item {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel-code-surface) 68%, transparent);
+}
+
+.subagent-telemetry-context {
+  color: var(--panel-foreground-soft);
+}
+
+.subagent-telemetry-retries {
+  color: var(--panel-warning);
+}
+
+@media (max-width: 700px) {
+  .subagent-telemetry-rate,
+  .subagent-telemetry-output {
+    display: none;
+  }
+
+  .subagent-activity-detail {
+    max-width: 100px;
+  }
+}
+
+@media (max-width: 520px) {
+  .subagent-runtime-telemetry,
+  :where(.subagent-scores) {
+    display: none;
+  }
 }
 
 /* ── Subagent score bar ──────────────────────────────────────────────────── */
@@ -218,14 +370,37 @@
 .subagent-score-dim[data-score="5"] { opacity: 1.0;  color: var(--panel-accent); font-weight: 700; }
 
 /* ── Subagent parallel group ─────────────────────────────────────────────── */
-/* Left accent border visually connects independent parallel agent blocks */
+/* Left accent spine visually connects independent parallel agent blocks. Each
+   child also carries a horizontal connector tick (see
+   `.subagent-parallel-child::before`) so every member clearly belongs to the
+   same parallel call — not just an unrelated stack of cards. The connector
+   lives on the wrapper, not the card, because the card clips overflow. */
 
 .subagent-parallel-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding-left: 8px;
-  border-left: 2px solid color-mix(in srgb, var(--panel-accent) 16%, var(--panel-border));
+  gap: 4px;
+  padding-left: 12px;
+  border-left: 2px solid color-mix(in srgb, var(--panel-accent) 28%, var(--panel-border));
+}
+
+/* Per-child connector: a short horizontal tick bridging the group's left spine
+   to each card's header. Hosted on the wrapper because the card's
+   `overflow: clip` would otherwise cut a pseudo-element placed outside it. */
+.subagent-parallel-child {
+  position: relative;
+}
+
+.subagent-parallel-child::before {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 14px;
+  width: 12px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--panel-accent) 30%, var(--panel-border));
+  pointer-events: none;
 }
 
 /* ── Parallel tool-call group ────────────────────────────────────────────── */
@@ -842,6 +1017,10 @@
 .tool-call.tool-call-subagent.idle .subagent-header-summary,
 .tool-call.tool-call-subagent.idle .subagent-primary-meta {
   opacity: 0.5;
+}
+
+.tool-call.tool-call-subagent.idle .subagent-activity {
+  opacity: 0.65;
 }
 
 /* Running (started, actively working): a slow accent-tinted sheen sweeps

@@ -20,16 +20,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'ask_user',
     label: 'Ask user',
-    description:
-      'Ask the user a clarifying question with a few preset answers and an optional free-form reply. ' +
-      'Use when uncertain about intent, scope, trade-offs, or when a decision has material impact on direction. ' +
-      'Prefer asking early over guessing wrong and reworking.',
-    promptSnippet:
-      'Ask the user a clarifying question; pauses the agent until the user picks an option or types a reply.',
+    description: 'Ask one clarifying question with preset answers and an optional free-form reply.',
+    promptSnippet: 'Ask the user a clarifying question and wait for their reply.',
     promptGuidelines: [
-      'Use ask_user proactively when uncertain about intent, scope, or trade-offs — ambiguity resolved early saves rework.',
-      'Prefer offering 2–4 concrete options over open-ended questions, but allow free-form when the decision needs it.',
-      'Never use ask_user for status updates or to ask permission for already-described actions — just do them.',
+      'Use ask_user for material ambiguity, preferably with 2–4 options; never use it for status updates or needless permission.',
     ],
     parameters: askUserSchema,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {

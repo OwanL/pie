@@ -43,7 +43,7 @@ function makeCtx(confirmReturnValue: boolean, hasUI = true) {
 
 const projectAgent = makeAgent();
 const singleParams = (overrides: Partial<SubagentParams> = {}): SubagentParams =>
-	({ agent: "worker", task: "do thing", agentScope: "project", ...overrides }) as any;
+	({ agent: "worker", task: "do thing", ...overrides }) as any;
 
 test("readConfirmDefaultFromSettings returns undefined when the file is missing", async () => {
 	const tempDir = await mkdtemp(path.join(os.tmpdir(), "subagent-settings-"));
@@ -96,7 +96,6 @@ test("maybeApproveProjectAgents skips the prompt when the per-call flag is false
 		singleParams({ confirmProjectAgents: false }),
 		[projectAgent],
 		makeDiscovery("/repo/agents"),
-		"project",
 		"single",
 		ctx,
 	);
@@ -110,7 +109,6 @@ test("maybeApproveProjectAgents returns undefined (approved) when the user accep
 		singleParams({ confirmProjectAgents: true }),
 		[projectAgent],
 		makeDiscovery("/repo/agents"),
-		"project",
 		"single",
 		ctx,
 	);
@@ -124,7 +122,6 @@ test("maybeApproveProjectAgents returns an error response when the user declines
 		singleParams({ confirmProjectAgents: true }),
 		[projectAgent],
 		makeDiscovery("/repo/agents"),
-		"project",
 		"single",
 		ctx,
 	);
@@ -141,7 +138,6 @@ test("maybeApproveProjectAgents skips the prompt when no project agents are requ
 		singleParams({ confirmProjectAgents: true }),
 		[userAgent],
 		makeDiscovery("/repo/agents"),
-		"project",
 		"single",
 		ctx,
 	);
@@ -149,27 +145,26 @@ test("maybeApproveProjectAgents skips the prompt when no project agents are requ
 	assert.equal(confirmCalls.length, 0);
 });
 
-test("maybeApproveProjectAgents skips the prompt when hasUI is false", async () => {
+test("maybeApproveProjectAgents fails closed when confirmation is required without UI", async () => {
 	const { ctx, confirmCalls } = makeCtx(true, false);
 	const res = await maybeApproveProjectAgents(
 		singleParams({ confirmProjectAgents: true }),
 		[projectAgent],
 		makeDiscovery("/repo/agents"),
-		"project",
 		"single",
 		ctx,
 	);
-	assert.equal(res, undefined);
+	assert.equal(res?.isError, true);
+	assert.match((res!.content[0] as any).text, /cannot confirm|non-interactive/i);
 	assert.equal(confirmCalls.length, 0);
 });
 
-test("maybeApproveProjectAgents skips the prompt for user-only scope", async () => {
+test("maybeApproveProjectAgents skips the prompt when no project agents dir exists", async () => {
 	const { ctx, confirmCalls } = makeCtx(true);
 	const res = await maybeApproveProjectAgents(
 		singleParams({ confirmProjectAgents: true }),
 		[projectAgent],
 		makeDiscovery(null),
-		"user",
 		"single",
 		ctx,
 	);
@@ -179,7 +174,7 @@ test("maybeApproveProjectAgents skips the prompt for user-only scope", async () 
 
 test("maybeApproveProjectAgents suppresses the prompt when the settings.json default resolves to false", async (t) => {
 	// Reproduces what execute() does when the per-call flag is omitted: resolve the
-	// settings default via readConfirmDefaultFromSettings (an explicit path with a
+	// settings default via readSubagentConfirmDefaultFromSettings (an explicit path with a
 	// written `false`), then feed that resolved value into maybeApproveProjectAgents.
 	// This verifies the settings → suppression path without depending on the real
 	// repo settings.json (which happens to ship `false` today).
@@ -195,7 +190,6 @@ test("maybeApproveProjectAgents suppresses the prompt when the settings.json def
 			singleParams({ confirmProjectAgents: settingsDefault }),
 			[projectAgent],
 			makeDiscovery("/repo/agents"),
-			"project",
 			"single",
 			ctx,
 		);

@@ -4,7 +4,8 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
-import { TurnActivityBlock, TurnActivityTailBody, TAIL_RENDER_MAX_CHARS, streamContinues } from '../src/webview/panel/transcript/turn-activity-tail.tsx';
+import { TurnActivityBlock } from '../src/webview/panel/transcript/turn-activity-tail.tsx';
+import { TurnActivityTailBody, TAIL_RENDER_MAX_CHARS, streamContinues } from '../src/webview/panel/transcript/activity-tail-preview.tsx';
 import type { TurnActivityState } from '../src/webview/panel/transcript/activity';
 import {
   collapseSpaces,

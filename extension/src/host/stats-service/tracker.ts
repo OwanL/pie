@@ -90,6 +90,14 @@ export class SessionRunTracker {
     return this.runState.serializeSessions();
   }
 
+  getOpenRuns(): RunSnapshot[] {
+    const runs: RunSnapshot[] = [];
+    for (const state of this.runState.sessions.values()) {
+      if (state.currentRun) runs.push(state.currentRun);
+    }
+    return runs;
+  }
+
   prepareForSend(sessionPath: string, inputs: ComposerInput[]): string {
     const state = this.runState.getOrCreateSessionState(sessionPath);
 

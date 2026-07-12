@@ -8,6 +8,7 @@ import {
   rawMessagesToChatMessages,
   subagentSingleResultToChatMessages,
 } from '../src/webview/panel/transcript';
+import { singleResultStatus, subagentActivity } from '../src/webview/panel/transcript/tool-call-item';
 
 test('rawMessagesToChatMessages resolves subagent toolResult messages by toolCallId', () => {
   const messages = rawMessagesToChatMessages([
@@ -145,6 +146,56 @@ test('getRenderableSubagentResult falls back when a failed parallel dispatch has
   } as any), undefined);
 });
 
+test('running subagent placeholders stay visibly active before the first progress update', () => {
+  const result = {
+    agent: 'reviewer',
+    task: 'Inspect regression',
+    exitCode: -1 as const,
+    messages: [],
+  };
+  assert.equal(singleResultStatus(result, 'running', false), 'running');
+  assert.deepEqual(subagentActivity(result, 1_000), {
+    label: 'Starting',
+    detail: 'waiting for first status update',
+    elapsed: undefined,
+    diagnostic: 'Starting · waiting for first status update',
+  });
+});
+
+test('terminal tool status overrides stale child running-tool state', () => {
+  const staleCompleted = {
+    agent: 'reviewer',
+    task: 'Inspect regression',
+    exitCode: 0,
+    messages: [],
+    runningTools: ['bash'],
+  };
+  assert.equal(singleResultStatus(staleCompleted, 'completed', false), 'completed');
+
+  const staleFailed = { ...staleCompleted, exitCode: 1, stopReason: 'error' as const };
+  assert.equal(singleResultStatus(staleFailed, 'completed', false), 'failed');
+  assert.equal(singleResultStatus(staleCompleted, 'failed', false), 'failed');
+});
+
+test('explicitly queued subagents explain the concurrency wait while retaining the idle treatment', () => {
+  const result = {
+    agent: 'reviewer',
+    task: 'Inspect regression',
+    exitCode: -1,
+    messages: [],
+    activityPhase: 'queued' as const,
+    activityDetail: 'waiting for parallel worker slot',
+    activitySince: 1_000,
+  };
+  assert.equal(singleResultStatus(result, 'running', false), 'idle');
+  assert.deepEqual(subagentActivity(result, 16_000), {
+    label: 'Waiting for concurrency',
+    detail: 'waiting for parallel worker slot',
+    elapsed: '15s',
+    diagnostic: 'Waiting for concurrency · waiting for parallel worker slot · 15s in this state',
+  });
+});
+
 test('getRenderableSubagentResultFromToolCall synthesizes running single-mode state from input', () => {
   assert.deepEqual(
     getRenderableSubagentResultFromToolCall({
@@ -159,6 +210,8 @@ test('getRenderableSubagentResultFromToolCall synthesizes running single-mode st
         task: 'Inspect regression',
         exitCode: -1,
         messages: [],
+        activityPhase: 'preparing',
+        activityDetail: 'waiting for subagent runtime status',
       }],
     },
   );
@@ -223,6 +276,8 @@ test('getRenderableSubagentResultFromToolCall synthesizes fresh running chain-mo
         task: 'Plan the work',
         exitCode: -1,
         messages: [],
+        activityPhase: 'preparing',
+        activityDetail: 'waiting for subagent runtime status',
       }],
     },
   );

@@ -1,7 +1,7 @@
 import { defaultCreateId, defaultNow } from './helpers';
 import { appendPieLog } from '../util/pie-log';
 import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-analytics/query';
-import type { TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
+import type { RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
 import type {
   AssistantUsage,
   ComposerInput,
@@ -213,6 +213,18 @@ export class StatsService implements RunObserver {
     return this.storage.getStorageDir();
   }
 
+  /** Current in-memory runs for live aggregate updates; does not touch disk. */
+  getOpenRuns(): RunSnapshot[] {
+    return this.tracker.getOpenRuns();
+  }
+
+  /** Query the completed-data cache source without forcing pending analytics
+   * to flush. Intended for mtime-gated host rollups. */
+  async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
+    await this.start();
+    return await this.storage.queryPersistedRunAnalytics();
+  }
+
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
     await this.start();
     return await this.storage.exportRunAnalytics(targetPath);
@@ -224,6 +236,6 @@ export class StatsService implements RunObserver {
 
   async shutdown(): Promise<void> {
     this.tracker.finalizeOpenRunsForShutdown();
-    await this.flush();
+    await this.storage.dispose();
   }
 }

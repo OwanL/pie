@@ -2,7 +2,7 @@ import { watch as fsWatch } from 'node:fs';
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
@@ -129,24 +129,41 @@ function scheduleSyncToInstalledExtension() {
   }, 120);
 }
 
-function runViteBuild(args = '') {
-  console.log(`[build] Running Vite build ${args}...`.trim());
-  execSync(`npx vite build ${args}`.trim(), { cwd: rootDir, stdio: 'inherit' });
+const viteCli = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
+const tscCli = path.join(rootDir, 'node_modules', 'typescript', 'bin', 'tsc');
+
+function spawnLocalCli(cli, args, label) {
+  console.log(`[build] ${label}...`);
+  return spawn(process.execPath, [cli, ...args], {
+    cwd: rootDir,
+    stdio: 'inherit',
+    windowsHide: true,
+  });
+}
+
+function waitForChild(child, label) {
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${label} failed${signal ? ` with signal ${signal}` : ` with exit code ${code ?? 1}`}`));
+    });
+  });
+}
+
+function runViteBuild(args = []) {
+  const child = spawnLocalCli(viteCli, ['build', ...args], `Running Vite build ${args.join(' ')}`.trim());
+  return waitForChild(child, 'Vite build');
 }
 
 function runViteWatch(mode) {
-  console.log(`[build] Starting Vite watch (${mode})...`);
-  const child = spawn(`npx vite build --watch --mode ${mode}`, {
-    cwd: rootDir,
-    stdio: 'inherit',
-    shell: true,
-  });
+  const args = ['build', '--watch'];
+  if (mode) args.push('--mode', mode);
+  return spawnLocalCli(viteCli, args, `Starting Vite watch (${mode ?? 'webview'})`);
+}
 
-  child.on('error', (error) => {
-    console.error('[build] Vite watch process failed to start', error);
-  });
-
-  return child;
+function runTypecheckWatch() {
+  return spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json', '--watch', '--preserveWatchOutput'], 'Starting TypeScript watch');
 }
 
 function createBuiltWebviewWatcher() {
@@ -168,17 +185,13 @@ function createBuiltWebviewWatcher() {
 }
 
 async function typecheck() {
-  if (skipTypecheck) {
-    return;
-  }
+  if (skipTypecheck) return;
 
   try {
-    execSync('npx tsc --noEmit -p tsconfig.json', { cwd: rootDir, stdio: 'pipe' });
-  } catch (err) {
-    const output = err.stdout?.toString() || err.stderr?.toString() || '';
-    console.error('[build] TypeScript errors detected — fix before building:\n');
-    console.error(output);
-    console.error('\n[build] Use --skip-typecheck to bypass (not recommended).');
+    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json'], 'Running TypeScript check'), 'TypeScript check');
+  } catch (error) {
+    console.error(`\n[build] TypeScript errors detected — fix before building.\n${error instanceof Error ? error.message : String(error)}`);
+    console.error('[build] Use --skip-typecheck to bypass (not recommended).');
     process.exit(1);
   }
 }
@@ -189,8 +202,10 @@ async function buildOnce() {
 
   await typecheck();
 
-  runViteBuild('--mode node');
-  runViteBuild();
+  await Promise.all([
+    runViteBuild(['--mode', 'node', '--emptyOutDir=false']),
+    runViteBuild(),
+  ]);
   await writeSdkLocalManifest();
   await syncToInstalledExtension();
 }
@@ -201,6 +216,7 @@ if (watchMode) {
 
   const nodeViteProcess = runViteWatch('node');
   const webviewViteProcess = runViteWatch();
+  const typecheckProcess = skipTypecheck ? null : runTypecheckWatch();
   const builtWebviewWatcher = createBuiltWebviewWatcher();
 
   // Sync once after initial Node build; the webview watcher will handle subsequent changes.
@@ -216,6 +232,7 @@ if (watchMode) {
     builtWebviewWatcher.close();
     nodeViteProcess.kill();
     webviewViteProcess.kill();
+    typecheckProcess?.kill();
   };
 
   process.once('SIGINT', () => {

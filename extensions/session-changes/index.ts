@@ -99,14 +99,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_changes',
     label: 'Session changes',
-    description:
-      'Inspect files changed by a pi session. `list` returns a compact manifest with line churn; `diff` returns minified unified diffs for selected manifest paths. Defaults to the calling session and includes subagent-attributed edits.',
-    promptSnippet:
-      'Inspect this session\'s changed-file manifest and focused diffs. Defaults to your own session.',
+    description: 'List files changed by a pi session or return focused diffs for selected paths. Defaults to this session and includes subagent edits.',
+    promptSnippet: 'Inspect a session\'s changed-file manifest and focused diffs.',
     promptGuidelines: [
-      'Call `list` first, then `diff` with a `path` array from that manifest. Start with `context=0`; raise it or read the file when surrounding code is needed.',
-      'Use the manifest to separate this session\'s work from unrelated checkout changes. Subagent-attributed edits are included.',
-      'For created, untracked, non-git, or multi-commit files, the diff may be incomplete; read the current file when the result says so or the churn does not match.',
+      'Use session_changes list before diff to isolate this session; read files when generated or untracked-file diffs are incomplete.',
     ],
     parameters: sessionChangesSchema,
 

@@ -232,6 +232,13 @@ export class ChildLifecycle {
 	/** Transition to a new phase. Progress is implicit on transition. */
 	transition(next: ChildPhase, detail?: ProgressDetail): boolean {
 		if (this.terminal) return false;
+		// Repeated deltas report the same `streaming` phase. Treat those as
+		// progress, not fresh transitions, so "time in state" measures the whole
+		// generation instead of resetting to 0s on every token.
+		if (this._phase === next) {
+			this.progress(detail);
+			return true;
+		}
 		const now = this.nowFn();
 		this._phase = next;
 		this.activityDetail = detail?.description;

@@ -37,10 +37,12 @@ Sequential execution with `{previous}` placeholder for prior output:
 
 ## Agent Discovery
 
-- **User agents** (`~/.pi/agent/agents/`) — default scope
-- **Project agents** (`agents/`, project root) — opt-in via `agentScope: "both"` or `"project"`
+Agents are discovered automatically from both locations:
 
-Project agents require confirmation before running (security measure for untrusted repos).
+- **User agents** (`~/.pi/agent/agents/`)
+- **Project agents** (`agents/`, project root)
+
+Project agents require confirmation before running (security measure for untrusted repos). When confirmation is enabled but no UI is available, execution fails closed; explicitly set `confirmProjectAgents: false` only for a trusted repository.
 
 ## Model Buckets
 
@@ -93,6 +95,16 @@ A downgrade is recorded on the result as `bucketDowngradeReason`. All-true
 (the default) leaves behaviour unchanged. This is independent of "Always use
 parent model", which takes precedence (and skips bucket selection) when enabled.
 
+## Removed parameters
+
+The `agentScope` parameter has been removed from the public tool schema. Discovery is now automatic and always covers both user and project agent directories. The legacy field is stripped by `prepareArguments` for backward compatibility with old sessions and resumed transcripts, so existing calls that still include it continue to work.
+
+Project-local agents still require confirmation before running (see **Agent Discovery** above).
+
+## Validation errors
+
+Early failures — disabled subagents, depth/tree limits, unknown agents, multiple modes, or a caller `canSpawn` allowlist violation — surface as tool results with `isError: true`. Successful child sessions return normally and are not marked as errors, even when a sibling failed in parallel mode.
+
 ## Task Scores
 
 Optional hints for model selection:
@@ -138,20 +150,22 @@ that sub agents are unavailable. Any call returns:
 - Max depth: 3 (nested subagent calls) — configurable via `PIE_SUBAGENT_MAX_DEPTH`
   (set by the pie host from the settings menu; default 3).
 - Max subagent sessions per reply: 20 — bounds breadth within a single tool call.
-- Max parallel tasks: 8
-- Concurrency: 4
-- Tree-wide session budget: 50 — caps the total number of subagent sessions spawned
+- Max parallel tasks: 4 by default — configurable via `PIE_SUBAGENT_MAX_PARALLEL_TASKS`.
+- Per-call parallel concurrency: 2 by default — configurable via `PIE_SUBAGENT_MAX_CONCURRENCY`.
+- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
+- Tree-wide session budget: 10 — caps the total number of subagent sessions spawned
   across an *entire* nested tree (independent of the per-reply counter), so increased
   nesting can't run away on cost. Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
-  (default 50).
+  (default 10).
 
 ### `canSpawn` allowlist
 
 An agent's frontmatter may declare `canSpawn:` to restrict which agents it may
 spawn via the subagent tool. When omitted, the agent may spawn any agent; when
-present, only the listed agent names are permitted. This preserves invariants
-such as a read-only agent (e.g. `scout`) only being able to delegate to other
-read-only agents:
+present, only the listed agent names are permitted. An explicit empty list
+(`canSpawn: []`) makes the agent a leaf that cannot delegate at all. This
+preserves invariants such as a read-only agent (e.g. `scout`) only being able
+to delegate to other read-only agents:
 
 ```yaml
 ---
@@ -181,11 +195,10 @@ subagent sessions, as before). Behaviour:
   behaviour — all skills loaded).
 - An empty kept set is treated as keep-all (never strips the lot), matching the
   pruner's own keep-all safeguard.
-- **Depth-1 only.** Nested subagents (depth ≥ 2) resolve their parent session
-  id from the depth-1 subagent's in-memory session, which never had a kept set
-  recorded (the pruner skips subagent sessions), so they fall back to all
-  skills. Threading the inherited set through the runtime context for deeper
-  nesting is a tracked follow-up, not v1.
+- The selected set is threaded through the tree's async-local runtime context,
+  so depth-2+ children inherit the same main-turn selection. They do not widen
+  back to all skills merely because their immediate parent is an in-memory
+  subagent session (the pruner intentionally skips those sessions).
 
 ### Tools: user-configured drop list
 
@@ -207,8 +220,12 @@ only host-side tool override.
 ## Timeouts
 
 Subagents have **no short wall-clock deadline by default**. Productive work may
-continue beyond 15 minutes; provider header/stream watchdogs and the outer
-settlement net bound stalled phases. Parent cancellation remains immediate.
+continue indefinitely while it reports credible progress. Phase-specific
+provider/tool leases bound stalled phases, and an outer settlement inactivity
+net force-settles a completely silent dispatch after 12 minutes by default.
+Each progress update renews that outer deadline; `PIE_SUBAGENT_SETTLEMENT_MS`
+can override the inactivity budget or disable it with `0`. Parent cancellation
+remains immediate.
 
 Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
 optional absolute containment ceiling. Unset, empty, zero, negative, and

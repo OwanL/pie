@@ -328,7 +328,7 @@ describe('default bash timeout safeguard', () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
-		const input = { command: 'echo hello' };
+		const input: { command: string; timeout?: number } = { command: 'echo hello' };
 		await handler({ toolName: 'bash', input }, ctx);
 		assert.equal(input.timeout, 600, 'default timeout should be applied when omitted');
 	});
@@ -373,7 +373,7 @@ describe('default bash timeout safeguard', () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
-		const input = { command: 'rm -rf /' };
+		const input: { command: string; timeout?: number } = { command: 'rm -rf /' };
 		const result = await handler({ toolName: 'bash', input }, ctx) as any;
 		assert.equal(result?.block, true, 'rm -rf / must still be blocked');
 		assert.equal(input.timeout, 600, 'timeout default is applied even when blocked');
@@ -383,7 +383,7 @@ describe('default bash timeout safeguard', () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
-		const input = { command: 'rg TODO src/' };
+		const input: { command: string; timeout?: number } = { command: 'rg TODO src/' };
 		const result = await handler({ toolName: 'bash', input }, ctx);
 		assert.equal(result, undefined, 'benign command is allowed');
 		assert.equal(input.timeout, 600, 'allowed command still gets the default timeout');

@@ -34,6 +34,10 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
   assert.match(html, /toolbar-settings-ext-settings/);
   assert.match(html, /Always use parent model</);
 
+  // Preview control for collapsed subagent cards.
+  assert.match(html, /Collapsed preview rows</);
+  assert.match(html, /Rows reserved for live streaming output/);
+
   // Model buckets group + all three bucket labels + hints.
   assert.match(html, /Model buckets</);
   assert.match(html, /Haiku-class busywork</);
@@ -43,7 +47,7 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
   // Nesting + throughput controls.
   assert.match(html, /Nesting levels</);
   assert.match(html, /Tree session budget</);
-  assert.match(html, /Max in-flight</);
+  assert.match(html, /Max active trees</);
   assert.match(html, /Max concurrency</);
   assert.match(html, /Max parallel tasks</);
 });

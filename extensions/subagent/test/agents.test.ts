@@ -653,6 +653,30 @@ test("loadAgentsFromDir: no defaultScores in repo-level agents", async () => {
 	}
 });
 
+test("loadAgentsFromDir: an explicit empty canSpawn list blocks all delegation", async (t) => {
+	const { discoverAgents } = await import("../agents.js");
+	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-can-spawn-${Date.now()}`);
+	const agentsDir = path.join(tmpDir, "agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+
+	fs.writeFileSync(path.join(agentsDir, "leaf.md"), `---
+name: leaf
+description: Must not delegate
+canSpawn: []
+---
+body
+`);
+	t.after(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+	const result = discoverAgents(tmpDir, "project");
+	assert.equal(result.agents.length, 1);
+	assert.deepEqual(
+		result.agents[0].canSpawn,
+		[],
+		"an explicit empty allowlist must not be widened to unrestricted",
+	);
+});
+
 test("loadAgentsFromDir: empty tools string results in undefined tools", async (t) => {
 	const { discoverAgents } = await import("../agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-tools-${Date.now()}`);

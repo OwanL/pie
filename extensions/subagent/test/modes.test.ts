@@ -22,6 +22,7 @@ import {
 	buildChainStepFailureResponse,
 	checkChainPreFlight,
 } from "../src/modes.js";
+import { isModelFailure } from "../src/selection.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
 function usage(over: Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number; contextTokens: number }> = {}) {
@@ -378,11 +379,9 @@ test("executeSingleMode: trail loop short-circuits before runSingleAgent", async
 	assert.equal(called, false, "trail loop must not reach runSingleAgent");
 });
 
-test("executeSingleMode: model-failure retry excludes the failed model then breaks", async () => {
-	// alwaysParentModel=false + bucketAssignments={} (truthy) makes selectModel
-	// return the active model as a fallback; a failing run then triggers the
-	// retry branch in runWithModelRetry (excludeModels.add / failedModel /
-	// retryCount / next-resolve-then-break).
+test("executeSingleMode: an unclassified task/model error is not replayed on another model", async () => {
+	// A non-zero exit alone is not retry-safe. Without a transient provider
+	// classification, failover could duplicate prose or external tool effects.
 	let attempts = 0;
 	setMockBehavior({ onPrompt: async (emit: any) => { attempts++; emit(messageEnd("partial", "error")); } });
 	const r: any = await execSingle(
@@ -391,9 +390,93 @@ test("executeSingleMode: model-failure retry excludes the failed model then brea
 	);
 	assert.equal(r.isError, true);
 	assert.match(r.content[0].text, /Agent error: partial/);
-	assert.equal(attempts, 1, "runSingleAgent ran once before the retry break");
-	assert.equal(r.details.results[0].failedModel, "active-model");
-	assert.equal(r.details.results[0].retryCount, 1);
+	assert.equal(attempts, 1);
+	assert.equal(r.details.results[0].failedModel, undefined);
+	assert.equal(r.details.results[0].retryCount, undefined);
+});
+
+test("isModelFailure allows only transient, side-effect-safe failures", () => {
+	const base = result({ exitCode: 1, stopReason: "error" });
+	assert.equal(isModelFailure({ ...base, retryable: true, replaySafety: "safe" }, "model-a", true), true);
+	assert.equal(isModelFailure({ ...base, retryable: false, replaySafety: "terminal" }, "model-a", true), false);
+	assert.equal(isModelFailure({ ...base, retryable: true, replaySafety: "partial_output" }, "model-a", true), false);
+	assert.equal(isModelFailure({ ...base, retryable: true, replaySafety: "tool_side_effect" }, "model-a", true), false);
+});
+
+test("successful failover preserves retry metadata on the final result", async () => {
+	let attempts = 0;
+	setMockBehavior({
+		onPrompt: async (emit: any) => {
+			attempts++;
+			if (attempts === 1) {
+				const error = Object.assign(new Error("provider timed out"), { code: "ETIMEDOUT" });
+				throw error;
+			}
+			emit(messageEnd("recovered", "completed"));
+		},
+	});
+	const models = [
+		{ id: "model-a", provider: "test" },
+		{ id: "model-b", provider: "test" },
+	];
+	const ctx = {
+		...makeCtx(),
+		model: models[0],
+		modelRegistry: {
+			getAvailable: () => models,
+			getAll: () => models,
+			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+		},
+	};
+	const response: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
+		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
+		selCtx({ alwaysParentModel: false, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
+		"t-retry", undefined,
+	);
+	assert.equal(response.isError, undefined);
+	assert.equal(attempts, 2);
+	assert.equal(response.details.results[0].retryCount, 1);
+	assert.ok(response.details.results[0].failedModel);
+});
+
+test("executeSingleMode: parent abort is terminal and never starts a fallback model attempt", async () => {
+	const controller = new AbortController();
+	let attempts = 0;
+	setMockBehavior({
+		onPrompt: async () => {
+			attempts++;
+			controller.abort();
+			throw new Error("provider request aborted");
+		},
+	});
+	const models = [
+		{ id: "model-a", provider: "test" },
+		{ id: "model-b", provider: "test" },
+	];
+	const ctx = {
+		...makeCtx(),
+		model: models[0],
+		modelRegistry: {
+			getAvailable: () => models,
+			getAll: () => models,
+			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+		},
+	};
+	const selection = selCtx({
+		alwaysParentModel: false,
+		bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+	});
+
+	const r: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
+		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, controller.signal, selection, "t-abort", undefined,
+	);
+
+	assert.equal(r.isError, true);
+	assert.equal(attempts, 1, "Stop must not launch a fresh fallback session");
+	assert.equal(r.details.results[0].stopReason, "aborted");
+	assert.equal(r.details.results[0].retryCount, undefined);
 });
 
 // --- executeParallelMode ----------------------------------------------------
@@ -445,6 +528,14 @@ test("executeParallelMode: partial failure -> isError and onUpdate reports progr
 	assert.equal(r.isError, true);
 	assert.match(r.content[0].text, /Parallel: 1\/2 succeeded/);
 	assert.ok(updates.length >= 1, "onUpdate fired during the parallel run");
+	assert.deepEqual(
+		updates[0].details.results.map((result: any) => [result.activityPhase, result.activityDetail]),
+		[
+			["queued", "waiting for parallel worker slot"],
+			["queued", "waiting for parallel worker slot"],
+		],
+		"the first update must replace host-reconstructed placeholders before workers start",
+	);
 	assert.ok(
 		updates.some((u) => u.content[0].text.includes("done") && u.content[0].text.includes("running")),
 		"a running-progress update was emitted",

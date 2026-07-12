@@ -6,29 +6,39 @@ interface QueuedLine {
   line: string;
   bytes: number;
   progressKey?: string;
+  /** RPC acknowledgements are independent control traffic. They must not sit
+   * behind an arbitrarily large backlog of already-queued stream events. */
+  response: boolean;
 }
 
 export interface OrderedJsonlWriterOptions {
   /** Application-owned bytes waiting behind the active stream write. */
   maxQueuedBytes?: number;
+  /** Capacity reserved exclusively for correlated RPC responses. */
+  maxQueuedResponseBytes?: number;
   /** Production treats critical overflow/write failure as fatal. */
   onFatal?: (error: Error) => void;
 }
 
 /** Serializes writes while bounding application-owned backlog. Queued progress
- * for the same session/tool is stale by definition and is coalesced;
- * responses and terminal events are never dropped. */
+ * for the same session/tool is stale by definition and is coalesced. RPC
+ * responses use a priority lane (FIFO within that lane), so control-plane
+ * acknowledgements cannot be head-of-line blocked by queued stream events.
+ * The active stream write is never preempted and event/event order is retained. */
 export class OrderedJsonlWriter {
   private readonly queue: QueuedLine[] = [];
   private readonly maxQueuedBytes: number;
+  private readonly maxQueuedResponseBytes: number;
   private readonly onFatal: (error: Error) => void;
   private queuedBytes = 0;
+  private queuedResponseBytes = 0;
   private writing = false;
   private failed = false;
   private readonly terminalToolKeys = new Set<string>();
 
   constructor(private readonly stream: Writable, options: OrderedJsonlWriterOptions = {}) {
     this.maxQueuedBytes = options.maxQueuedBytes ?? 2 * JSONL_MAX_LINE_BYTES;
+    this.maxQueuedResponseBytes = options.maxQueuedResponseBytes ?? JSONL_MAX_LINE_BYTES;
     this.onFatal = options.onFatal ?? ((error) => {
       process.stderr.write(`${error.message}\n`);
       process.exitCode = 1;
@@ -43,6 +53,7 @@ export class OrderedJsonlWriter {
       line,
       bytes: Buffer.byteLength(line),
       progressKey: progressKey(value),
+      response: isResponseEnvelope(value),
     };
     if (entry.bytes > JSONL_MAX_LINE_BYTES) {
       if (entry.progressKey) return;
@@ -57,7 +68,8 @@ export class OrderedJsonlWriter {
       if (staleIndex >= 0) {
         const stale = this.queue[staleIndex]!;
         const replacementBytes = this.queuedBytes - stale.bytes + entry.bytes;
-        if (replacementBytes > this.maxQueuedBytes) return;
+        const replacementEventBytes = replacementBytes - this.queuedResponseBytes;
+        if (replacementEventBytes > this.maxQueuedBytes) return;
         // Replace at the original position: moving fresh progress to the tail
         // could place it after a terminal/response event already queued.
         this.queue[staleIndex] = entry;
@@ -66,16 +78,25 @@ export class OrderedJsonlWriter {
       }
     }
 
-    if (this.writing && this.queuedBytes + entry.bytes > this.maxQueuedBytes) {
-      if (entry.progressKey) return;
-      this.fail(
-        `Fatal JSONL stdout queue overflow (${this.queuedBytes + entry.bytes} > ${this.maxQueuedBytes} bytes).`,
-      );
+    if (this.writing) {
+      const eventBytes = this.queuedBytes - this.queuedResponseBytes;
+      if (entry.response && this.queuedResponseBytes + entry.bytes > this.maxQueuedResponseBytes) {
+        this.fail(
+          `Fatal JSONL stdout response queue overflow (${this.queuedResponseBytes + entry.bytes} > ${this.maxQueuedResponseBytes} bytes).`,
+        );
+      }
+      if (!entry.response && eventBytes + entry.bytes > this.maxQueuedBytes) {
+        if (entry.progressKey) return;
+        this.fail(
+          `Fatal JSONL stdout event queue overflow (${eventBytes + entry.bytes} > ${this.maxQueuedBytes} bytes).`,
+        );
+      }
     }
 
     if (terminalKey) this.terminalToolKeys.add(terminalKey);
     this.queue.push(entry);
     this.queuedBytes += entry.bytes;
+    if (entry.response) this.queuedResponseBytes += entry.bytes;
     this.pump();
   }
 
@@ -88,9 +109,17 @@ export class OrderedJsonlWriter {
 
   private pump(): void {
     if (this.writing || this.failed) return;
-    const entry = this.queue.shift();
+    // Preserve FIFO inside both classes, but drain responses before events.
+    // Responses are correlation-id addressed and the host already supports
+    // backend events arriving on either side of their acknowledgement. Events
+    // themselves remain strictly ordered, preserving transcript causality.
+    const responseIndex = this.queue.findIndex((queued) => queued.response);
+    const entry = responseIndex >= 0
+      ? this.queue.splice(responseIndex, 1)[0]
+      : this.queue.shift();
     if (!entry) return;
     this.queuedBytes -= entry.bytes;
+    if (entry.response) this.queuedResponseBytes -= entry.bytes;
     this.writing = true;
     this.stream.write(entry.line, (error?: Error | null) => {
       this.writing = false;
@@ -102,6 +131,14 @@ export class OrderedJsonlWriter {
       this.pump();
     });
   }
+}
+
+function isResponseEnvelope(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const envelope = value as { id?: unknown; ok?: unknown; event?: unknown };
+  return typeof envelope.id === 'string'
+    && typeof envelope.ok === 'boolean'
+    && envelope.event === undefined;
 }
 
 function toolKey(value: unknown, expectedEvent: string): string | undefined {

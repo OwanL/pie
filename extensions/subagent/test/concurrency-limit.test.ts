@@ -4,6 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { Semaphore, getMaxInflight, getMaxConcurrency, getMaxParallelTasks, DEFAULT_MAX_INFLIGHT } from "../src/concurrency-limit.js";
 import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "../types.js";
 
@@ -73,6 +74,23 @@ test("Semaphore: release is idempotent", async () => {
 	assert.ok(true);
 });
 
+test("Semaphore: dequeuing a waiter removes its abort listener", async () => {
+	const sem = new Semaphore(() => 1);
+	const held = await sem.acquire();
+	const controller = new AbortController();
+	const queued = sem.acquire(controller.signal);
+
+	assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+	held();
+	const releaseQueued = await queued;
+	assert.equal(
+		getEventListeners(controller.signal, "abort").length,
+		0,
+		"long-lived parent signals must not retain one listener per completed queued child",
+	);
+	releaseQueued();
+});
+
 test("Semaphore: capacity re-evaluated on each acquire", async () => {
 	let capacity = 1;
 	const sem = new Semaphore(() => capacity);
@@ -89,6 +107,42 @@ test("Semaphore: capacity re-evaluated on each acquire", async () => {
 	release();
 	await pending;
 	assert.equal(resolved, true);
+});
+
+test("Semaphore: raising capacity wakes existing waiters before a new caller", async () => {
+	let capacity = 1;
+	const sem = new Semaphore(() => capacity);
+	const held = await sem.acquire();
+	const order: number[] = [];
+	const queued = [2, 3].map((id) => sem.acquire().then((release) => { order.push(id); return release; }));
+	capacity = 4;
+	const newcomer = sem.acquire().then((release) => { order.push(4); return release; });
+	const releases = await Promise.all([...queued, newcomer]);
+	assert.deepEqual(order, [2, 3, 4]);
+	held();
+	for (const release of releases) release();
+});
+
+test("Semaphore: lowering capacity does not transfer released permits above the new cap", async () => {
+	let capacity = 2;
+	const sem = new Semaphore(() => capacity);
+	const first = await sem.acquire();
+	const second = await sem.acquire();
+	let thirdStarted = false;
+	const thirdPromise = sem.acquire().then((release) => {
+		thirdStarted = true;
+		return release;
+	});
+
+	capacity = 1;
+	first();
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(thirdStarted, false, "one existing holder still consumes the reduced capacity");
+
+	second();
+	const third = await thirdPromise;
+	assert.equal(thirdStarted, true);
+	third();
 });
 
 // ============================================================

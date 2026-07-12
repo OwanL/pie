@@ -13,7 +13,7 @@ import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
-import { onMessageDelta, onMessageThinking, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryStuck, onCompaction } from './handlers/streaming.js';
+import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryStuck, onCompaction } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
@@ -104,6 +104,7 @@ export class SessionServiceEvents {
       onMessageStarted: (payload) => onMessageStarted(payload, deps),
       onMessageDelta: (payload) => onMessageDelta(payload, deps),
       onMessageThinking: (payload) => onMessageThinking(payload, deps),
+      onMessageToolCallDelta: (payload) => onMessageToolCallDelta(payload, deps),
       onToolStarted: (payload) => onToolStarted(payload, deps),
       onToolFinished: (payload) => onToolFinished(payload, deps),
       onToolProgress: (payload) => onToolProgress(payload, deps),

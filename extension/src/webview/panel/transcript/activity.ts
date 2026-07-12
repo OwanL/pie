@@ -1,5 +1,7 @@
 import type { ChatMessage, ChatPrefs, PruningSettings, ToolCall } from '../../../shared/protocol';
 import { assistantPartsFromMessage, toolCallsFromMessageParts } from '../../../shared/chat-message-parts';
+import { normalizeToolCallName } from '../../../shared/tool-call-analysis';
+import { estimateTextTokens } from '../../../shared/tokenize';
 import { isPruningResultMessage } from './pruning';
 import {
   deriveMultiToolTail,
@@ -13,6 +15,7 @@ export const AGENT_ACTIVITY_LABELS = {
   preparing: 'preparing response',
   startingModel: 'starting model',
   responding: 'responding',
+  draftingTool: 'drafting tool call',
   runningTools: 'running tools',
   thinking: 'thinking',
 } as const;
@@ -25,8 +28,8 @@ export type AgentActivityLabel = typeof AGENT_ACTIVITY_LABELS[keyof typeof AGENT
  * Terminal states (interrupted, error) are owned by message status UI.
  */
 export interface TurnActivityState {
-  /** Primary phase identifier: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'runningTool' | 'streaming' */
-  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'runningTool' | 'streaming';
+  /** Primary in-flight phase identifier. */
+  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'draftingTool' | 'runningTool' | 'streaming';
   /** Human-readable label for this phase */
   label: string;
   /** Additional detail text (e.g., specific tool name, tool count) */
@@ -131,6 +134,20 @@ export function deriveTurnActivityState({
   if (assistant) {
     if (assistant.status === 'streaming') {
       const pendingModelLabel = formatModelLabel(assistant.modelId || pendingAssistantModelId, assistant.thinkingLevel || pendingAssistantThinkingLevel);
+      const draft = assistant.draftingToolCall;
+      if (draft) {
+        const tokens = estimateTextTokens(draft.argumentsText);
+        const toolName = draft.name || 'tool';
+        const tokenDetail = `${tokens} ${tokens === 1 ? 'token' : 'tokens'}`;
+        return {
+          phase: 'draftingTool',
+          label: `drafting ${toolName} call`,
+          detail: tokenDetail,
+          tone: 'active',
+          ariaLabel: `Agent is drafting a ${toolName} tool call, ${tokenDetail}`,
+          pendingModelLabel,
+        };
+      }
       const streaming = deriveStreamingTail(assistantPartsFromMessage(assistant), prefs.activityTailLines);
       if (streaming) {
         // `deriveStreamingTail` only surfaces reasoning (reply text is shown in
@@ -162,7 +179,13 @@ export function deriveTurnActivityState({
       if (runningTools.length === 1) {
         const tool = runningTools[0]!;
         const toolName = tool.name;
-        const derived = deriveRunningToolTail(tool, prefs.activityTailLines);
+        // Subagent calls already own rich live previews in their cards. Keep
+        // only the compact turn-level status strip rather than duplicating the
+        // child activity in bottom transcript preview rows.
+        const ownsInlinePreview = normalizeToolCallName(toolName) === 'subagent';
+        const derived = ownsInlinePreview
+          ? null
+          : deriveRunningToolTail(tool, prefs.activityTailLines);
         if (derived) {
           return {
             phase,
@@ -184,7 +207,11 @@ export function deriveTurnActivityState({
         };
       } else {
         const summary = `running ${runningTools.length} tools`;
-        const derived = deriveMultiToolTail(runningTools, prefs.activityTailLines);
+        // When any sibling is a subagent, its own card already previews the
+        // live child activity — suppress the duplicate bottom multi-tool
+        // preview rows, leaving only the compact status strip (label/detail).
+        const anySubagent = runningTools.some((tc) => normalizeToolCallName(tc.name) === 'subagent');
+        const derived = anySubagent ? null : deriveMultiToolTail(runningTools, prefs.activityTailLines);
         return {
           phase,
           label: summary,
@@ -192,7 +219,7 @@ export function deriveTurnActivityState({
           tone: 'active',
           ariaLabel: `Agent is ${summary}`,
           runningToolSummary: summary,
-          tail: derived.tail,
+          tail: derived?.tail,
         };
       }
     }

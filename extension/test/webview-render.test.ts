@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 
 import DOMPurify from 'dompurify';
 import { h } from 'preact';
@@ -358,6 +359,11 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.doesNotMatch(runningSubagentHtml, /status-chip-running/);
   assert.doesNotMatch(runningSubagentHtml, /status-chip-label">Running/);
   assert.doesNotMatch(runningSubagentHtml, /subagent-running-tool/);
+  // Expanded cards show the full child transcript without repeating the
+  // collapsed task/live-output preview above it.
+  assert.doesNotMatch(runningSubagentHtml, /subagent-live-preview/);
+  assert.doesNotMatch(runningSubagentHtml, /→ bash/);
+  assert.match(runningSubagentHtml, /subagent-messages/);
 
   const parallelSubagentHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -473,7 +479,8 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
     renderToolCall: () => null,
   }));
 
-  assert.match(collapsedHtml, /subagent-header-summary/);
+  assert.doesNotMatch(collapsedHtml, /subagent-header-summary/);
+  assert.match(collapsedHtml, /subagent-live-preview/);
   assert.match(collapsedHtml, /Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /reviewer: Inspect regression/);
   assert.match(collapsedHtml, /Creativity: 2\/5 \(default\)/);
@@ -557,6 +564,11 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
             exitCode: 0,
             messages: [],
             selectedModel: 'gpt-4.1:local',
+            provider: 'openai',
+            contextWindow: 200_000,
+            usage: { input: 51_000, output: 2_400, cacheRead: 38_600, cacheWrite: 0, cost: 0.1234, contextTokens: 51_000, turns: 2 },
+            turnThroughputSamples: [{ endedAt: '2026-01-01T12:34:56.000Z', outputTokens: 120, generationDurationMs: 10_000, status: 'completed', modelId: 'gpt-4.1:local' }],
+            retryCount: 1,
           }],
         },
       },
@@ -571,6 +583,14 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   assert.doesNotMatch(runningParentHtml, /status-chip-label">Running/);
   assert.doesNotMatch(runningParentHtml, /subagent-model-tag/);
   assert.match(runningParentHtml, /gpt-4\.1/);  // model now shown in header
+  assert.match(runningParentHtml, /Starting/);
+  assert.match(runningParentHtml, /waiting for first status update/);
+  assert.match(runningParentHtml, /subagent-runtime-telemetry/);
+  assert.match(runningParentHtml, /ctx 51k \/ 200k/);
+  assert.match(runningParentHtml, /26%/);
+  assert.match(runningParentHtml, /out 2\.4k/);
+  assert.match(runningParentHtml, /last 12\.0 tok\/s/);
+  assert.match(runningParentHtml, /retry 1/);
 
   const abortedHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
@@ -734,6 +754,146 @@ test('rendered parallel subagent cards keep per-child summaries and statuses whi
   assert.equal((html.match(/\btool-call\b[^>]*\btool-call-subagent\b[^>]*\bfailed\b/g) ?? []).length, 1);
   assert.equal((html.match(/status-chip-running/g) ?? []).length, 0);
   assert.equal((html.match(/status-chip-failed/g) ?? []).length, 1);
+});
+
+test('subagent card shows preview rows only while collapsed', async () => {
+  const { ToolCallItem } = await loadWebviewModules();
+
+  function runningSingle(): ToolCall {
+    return toolCall({
+      id: 'sub-running-expanded',
+      name: 'subagent',
+      status: 'running',
+      input: { agent: 'worker', task: 'Keep working' },
+      result: {
+        details: {
+          mode: 'single',
+          results: [{
+            agent: 'worker',
+            task: 'Keep working',
+            exitCode: 0,
+            messages: [],
+            runningTools: ['bash'],
+          }],
+        },
+      },
+    });
+  }
+
+  // Expanded + running: only the full child transcript renders.
+  const expandedRunningHtml = renderToString(h(ToolCallItem, {
+    toolCall: runningSingle(),
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: true },
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.doesNotMatch(expandedRunningHtml, /subagent-live-preview/);
+  assert.match(expandedRunningHtml, /subagent-messages/);
+  assert.match(expandedRunningHtml, /Keep working/);
+  assert.doesNotMatch(expandedRunningHtml, /→ bash/);
+
+  // Collapsed + running: the compact preview renders instead of the body.
+  const collapsedRunningHtml = renderToString(h(ToolCallItem, {
+    toolCall: runningSingle(),
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: false },
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.match(collapsedRunningHtml, /subagent-live-preview/);
+  assert.match(collapsedRunningHtml, /Running bash\.\.\./);
+  assert.doesNotMatch(collapsedRunningHtml, /pending\.\.\./);
+  assert.doesNotMatch(collapsedRunningHtml, /→ bash/);
+  assert.doesNotMatch(collapsedRunningHtml, /subagent-messages/);
+
+  const completed = toolCall({
+    id: 'sub-completed',
+    name: 'subagent',
+    status: 'completed',
+    input: { agent: 'reviewer', task: 'Inspect regression' },
+    result: {
+      details: {
+        mode: 'single',
+        results: [{
+          agent: 'reviewer',
+          task: 'Inspect regression',
+          exitCode: 0,
+          messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Looks good.' }] }],
+        }],
+      },
+    },
+  });
+  const completedExpandedHtml = renderToString(h(ToolCallItem, {
+    toolCall: completed,
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: true },
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.doesNotMatch(completedExpandedHtml, /subagent-live-preview/);
+  assert.match(completedExpandedHtml, /Inspect regression/);
+  assert.match(completedExpandedHtml, /subagent-messages/);
+
+  // Completed + collapsed retains the task preview without mounting the body.
+  const completedCollapsedHtml = renderToString(h(ToolCallItem, {
+    toolCall: completed,
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: false },
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+  assert.match(completedCollapsedHtml, /subagent-live-preview/);
+  assert.match(completedCollapsedHtml, /Inspect regression/);
+  assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);
+});
+
+test('parallel subagent children each get a connector-strip wrapper tying them to the call', async () => {
+  const { ToolCallItem } = await loadWebviewModules();
+
+  const html = renderToString(h(ToolCallItem, {
+    toolCall: toolCall({
+      id: 'sub-parallel-connector',
+      name: 'subagent',
+      status: 'completed',
+      input: { tasks: [{ agent: 'scout', task: 'A' }, { agent: 'reviewer', task: 'B' }] },
+      result: {
+        details: {
+          mode: 'parallel',
+          results: [
+            { agent: 'scout', task: 'A', exitCode: 0, messages: [{ role: 'assistant', content: [{ type: 'text', text: 'done A' }] }] },
+            { agent: 'reviewer', task: 'B', exitCode: 0, messages: [{ role: 'assistant', content: [{ type: 'text', text: 'done B' }] }] },
+          ],
+        },
+      },
+    }),
+    prefs: DEFAULT_CHAT_PREFS,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+
+  assert.match(html, /subagent-parallel-group/);
+  // Exactly one wrapper per parallel child.
+  assert.equal((html.match(/class="subagent-parallel-child"/g) ?? []).length, 2);
+  // Each child card still renders inside its wrapper.
+  assert.equal((html.match(/subagent-agent-name/g) ?? []).length, 2);
+});
+
+test('subagent parallel-group CSS draws a per-child connector strip to the spine', async () => {
+  const css = await readFile(new URL('../src/webview/panel/styles/tool-call.css', import.meta.url), 'utf8');
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*padding-left:\s*12px/);
+  assert.match(css, /\.subagent-parallel-group\s*\{[^}]*border-left:\s*2px/);
+  assert.match(css, /\.subagent-parallel-child\s*\{[^}]*position:\s*relative/);
+  // The connector tick bridges the spine gap to each card's header.
+  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*left:\s*-12px/);
+  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*width:\s*12px/);
+  assert.match(css, /\.subagent-parallel-child::before\s*\{[^}]*top:\s*14px/);
 });
 
 test('rendered SystemPromptMessage covers summary fallbacks, suppressed summaries, and token estimate branches', async () => {

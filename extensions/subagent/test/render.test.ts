@@ -233,7 +233,7 @@ test("renderSubagentCall: single mode renders compact one-line title, agent, sco
 	const text = allText(node);
 	assert.ok(text.includes("subagent "), "title present");
 	assert.ok(text.includes("worker"), "agent name present");
-	assert.ok(text.includes("[user]"), "default user scope present");
+	assert.ok(text.includes("[both]"), "default both scope present");
 	assert.ok(text.includes("summarize the code"), "task preview present");
 	assert.ok(!text.includes("\n"), "single call is one line");
 });
@@ -246,6 +246,7 @@ test("renderSubagentCall: respects an explicit agentScope", () => {
 test("renderSubagentCall: single with no agent/task shows placeholders", () => {
 	const text = allText(renderSubagentCall({}, theme(), {}));
 	assert.ok(text.includes("subagent "), "title still present");
+	assert.ok(text.includes("[both]"), "default both scope present");
 	assert.ok(text.includes("..."), "placeholder present for missing agent/task");
 });
 

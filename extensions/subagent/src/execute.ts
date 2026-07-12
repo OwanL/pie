@@ -6,7 +6,8 @@ import type { ExtensionAPI, ToolContext } from "@mariozechner/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseJsonOrThrow } from "../../../shared/error-message.js";
+import { parseJsonOrThrow, toErrorMessage } from "../../../shared/error-message.js";
+import { readKeptSkills } from "../../../shared/pruned-skills.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "../agents.js";
 import {
 	readRuntimeContext,
@@ -162,25 +163,25 @@ export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, 
 export type Mode = "single" | "parallel" | "chain";
 type ErrorResponse = { content: { type: "text"; text: string }[]; details: SubagentDetails; isError: true };
 
-/** Environment key for the last-resort settlement deadline (milliseconds).
+/** Environment key for the last-resort settlement inactivity budget
+ *  (milliseconds). Kept under its existing name for configuration compatibility.
  *  See {@link resolveSettlementMs}. */
 const SETTLEMENT_ENV = "PIE_SUBAGENT_SETTLEMENT_MS";
-/** Default settlement net: 30 minutes. This is a defense-in-depth last resort,
- *  NOT the primary hang fix — abort propagation (Slice A) and abortable
- *  concurrency (Slice A) handle the known hang classes structurally. The net
- *  exists so that even a future bug that reintroduces an unbounded wait can't
- *  dangle the parent session forever. */
-export const DEFAULT_SETTLEMENT_MS = 30 * 60 * 1000;
+/** Default settlement inactivity budget: 12 minutes. This is deliberately
+ *  longer than the normal provider/tool phase leases. Credible progress renews
+ *  it, so productive long-running children are not capped by total wall time;
+ *  a completely silent dispatch still cannot dangle the parent forever. */
+export const DEFAULT_SETTLEMENT_MS = 12 * 60 * 1000;
 
-/** Resolve the settlement deadline for a subagent tool call, in milliseconds.
+/** Resolve the settlement inactivity budget for a subagent tool call.
  *
  * Reads `PIE_SUBAGENT_SETTLEMENT_MS`:
  * - Unset/empty → {@link DEFAULT_SETTLEMENT_MS} (the net is ON by default).
  * - `0` → explicitly disabled (no net; only for debugging/emergency).
- * - A positive number → the deadline in ms.
+ * - A positive number → the renewable inactivity budget in ms.
  * - Invalid (NaN/negative) → {@link DEFAULT_SETTLEMENT_MS}.
  *
- * Returns the deadline in ms, or `0` to disable the net entirely.
+ * Returns the inactivity budget in ms, or `0` to disable the net entirely.
  */
 export function resolveSettlementMs(): number {
 	const raw = process.env[SETTLEMENT_ENV];
@@ -212,6 +213,28 @@ export function resolveSettlementGraceMs(): number {
 /** Sentinel resolved by the settlement timer when the dispatch hasn't returned. */
 const FORCE_SETTLE = Symbol("pie:subagent:force-settle");
 
+function combineSignals(left: AbortSignal, right: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+	if (typeof AbortSignal.any === "function") return { signal: AbortSignal.any([left, right]), cleanup: () => {} };
+	const controller = new AbortController();
+	const cleanup = () => {
+		left.removeEventListener("abort", onLeft);
+		right.removeEventListener("abort", onRight);
+	};
+	const abort = (source: AbortSignal) => {
+		if (!controller.signal.aborted) controller.abort(source.reason);
+		cleanup();
+	};
+	const onLeft = () => abort(left);
+	const onRight = () => abort(right);
+	if (left.aborted) abort(left);
+	else if (right.aborted) abort(right);
+	else {
+		left.addEventListener("abort", onLeft, { once: true });
+		right.addEventListener("abort", onRight, { once: true });
+	}
+	return { signal: controller.signal, cleanup };
+}
+
 /** Loud log for a settlement / hardening event. Mirrors the runner's `logLoud`
  *  shape so logs are uniformly grep-able under `source: "pie:subagent"`. Kept
  *  local to execute.ts to avoid a new cross-module import for one helper. */
@@ -219,8 +242,10 @@ function logLoud(event: string, details: Record<string, unknown>): void {
 	console.error(JSON.stringify({ source: "pie:subagent", event, ...details }));
 }
 
+const DEFAULT_AGENT_SCOPE: AgentScope = "both";
+
 /** Returns the standard response when the tool is disabled. */
-function disabledErrorResponse(params: SubagentParams): ErrorResponse {
+function disabledErrorResponse(): ErrorResponse {
 	return {
 		content: [
 			{
@@ -230,7 +255,7 @@ function disabledErrorResponse(params: SubagentParams): ErrorResponse {
 		],
 		details: {
 			mode: "single" as const,
-			agentScope: params.agentScope ?? "user",
+			agentScope: DEFAULT_AGENT_SCOPE,
 			projectAgentsDir: null,
 			results: [],
 		},
@@ -239,7 +264,7 @@ function disabledErrorResponse(params: SubagentParams): ErrorResponse {
 }
 
 /** Returns the standard response when subagents are disabled via maxDepth = 0. */
-function subagentsDisabledResponse(params: SubagentParams, maxDepth: number): ErrorResponse {
+function subagentsDisabledResponse(maxDepth: number): ErrorResponse {
 	return {
 		content: [
 			{
@@ -249,7 +274,7 @@ function subagentsDisabledResponse(params: SubagentParams, maxDepth: number): Er
 		],
 		details: {
 			mode: "single" as const,
-			agentScope: params.agentScope ?? "user",
+			agentScope: DEFAULT_AGENT_SCOPE,
 			projectAgentsDir: null,
 			results: [],
 		},
@@ -258,7 +283,7 @@ function subagentsDisabledResponse(params: SubagentParams, maxDepth: number): Er
 }
 
 /** Returns the standard response when subagent depth limit is reached. */
-function depthLimitResponse(agentScope: AgentScope, maxDepth: number): ErrorResponse {
+function depthLimitResponse(maxDepth: number): ErrorResponse {
 	return {
 		content: [
 			{
@@ -266,27 +291,7 @@ function depthLimitResponse(agentScope: AgentScope, maxDepth: number): ErrorResp
 				text: `Subagent depth limit reached (max ${maxDepth}). Cannot spawn further subagents.`,
 			},
 		],
-		details: { mode: "single", agentScope, projectAgentsDir: null, results: [] },
-		isError: true,
-	};
-}
-
-/** Returns the standard response when the caller's canSpawn allowlist blocks a requested agent. */
-function cannotSpawnResponse(
-	disallowed: string[],
-	mode: Mode,
-	agentScope: AgentScope,
-	projectAgentsDir: string | null,
-): ErrorResponse {
-	const listing = disallowed.map((n) => `"${n}"`).join(", ");
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`,
-			},
-		],
-		details: makeDetails(mode, [], agentScope, projectAgentsDir),
+		details: { mode: "single", agentScope: DEFAULT_AGENT_SCOPE, projectAgentsDir: null, results: [] },
 		isError: true,
 	};
 }
@@ -315,37 +320,17 @@ function createSessionLimitChecker(): () => string | undefined {
 	};
 }
 
-/** Returns a response when the caller provided zero or multiple execution modes. */
-function modeCountErrorResponse(
-	agents: AgentConfig[],
-	agentScope: AgentScope,
-	projectAgentsDir: string | null,
-): ErrorResponse {
+/** Throws when the caller provided zero or multiple execution modes.
+ *  Invalid executions throw so pi persists isError=true per the tool contract. */
+function throwModeCountError(agents: AgentConfig[]): never {
 	const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`,
-			},
-		],
-		details: makeDetails("single", [], agentScope, projectAgentsDir),
-		isError: true,
-	};
+	throw new Error(`Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`);
 }
 
-/** Returns a response when one or more requested agent names do not exist. */
-function invalidAgentsResponse(
-	invalidResults: SingleResult[],
-	mode: Mode,
-	agentScope: AgentScope,
-	projectAgentsDir: string | null,
-): ErrorResponse {
-	return {
-		content: [{ type: "text", text: summarizeInvalidAgentResults(invalidResults) }],
-		details: makeDetails(mode, invalidResults, agentScope, projectAgentsDir),
-		isError: true,
-	};
+/** Throws when one or more requested agent names do not exist.
+ *  Invalid executions throw so pi persists isError=true per the tool contract. */
+function throwInvalidAgents(invalidResults: SingleResult[]): never {
+	throw new Error(summarizeInvalidAgentResults(invalidResults));
 }
 
 /** Collect the unique agent names referenced by `params` (chain, tasks, or single). */
@@ -362,15 +347,17 @@ export async function maybeApproveProjectAgents(
 	params: SubagentParams,
 	agents: AgentConfig[],
 	discovery: ReturnType<typeof discoverAgents>,
-	agentScope: AgentScope,
 	mode: Mode,
 	ctx: ToolContext,
 ): Promise<ErrorResponse | undefined> {
-	if (
-		!(agentScope === "project" || agentScope === "both") ||
-		!(params.confirmProjectAgents ?? readSubagentConfirmDefault() ?? true) ||
-		!ctx.hasUI
-	) {
+	if (!(params.confirmProjectAgents ?? readSubagentConfirmDefault() ?? true)) {
+		return undefined;
+	}
+
+	// No project agents dir was discovered, so there is nothing repo-controlled to
+	// confirm. This also keeps unit tests that inject project-sourced agents
+	// without a real discovery dir from spuriously failing closed.
+	if (!discovery.projectAgentsDir) {
 		return undefined;
 	}
 
@@ -382,6 +369,16 @@ export async function maybeApproveProjectAgents(
 
 	const names = projectAgentsRequested.map((a) => a.name).join(", ");
 	const dir = discovery.projectAgentsDir ?? "(unknown)";
+	if (!ctx.hasUI) {
+		return {
+			content: [{
+				type: "text",
+				text: `Cannot confirm project-local agents (${names}) in a non-interactive mode. Re-run with UI, or explicitly set confirmProjectAgents: false only for a trusted repository.`,
+			}],
+			details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
+			isError: true,
+		};
+	}
 	const ok = await ctx.ui.confirm(
 		"Run project-local agents?",
 		`Agents: ${names}\nSource: ${dir}\n\nProject agents are repo-controlled. Only continue for trusted repositories.`,
@@ -390,7 +387,7 @@ export async function maybeApproveProjectAgents(
 
 	return {
 		content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
-		details: makeDetails(mode, [], agentScope, discovery.projectAgentsDir),
+		details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
 		isError: true,
 	};
 }
@@ -501,14 +498,12 @@ export async function execute(
 	_pi: ExtensionAPI,
 	isDisabled: () => boolean,
 ) {
-	if (isDisabled()) return disabledErrorResponse(params);
+	if (isDisabled()) return disabledErrorResponse();
 
-	const explicitScope = params.agentScope;
-	let agentScope: AgentScope = explicitScope ?? "user";
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
-	if (maxDepth === 0) return subagentsDisabledResponse(params, maxDepth);
-	if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(agentScope, maxDepth);
+	if (maxDepth === 0) return subagentsDisabledResponse(maxDepth);
+	if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(maxDepth);
 
 	// Seed the shared tree-wide session budget at the outermost call. Nested
 	// calls inherit it via the AsyncLocalStorage context (see modes.ts buildRuntime).
@@ -527,46 +522,46 @@ export async function execute(
 	if (params.cwd) discoveryCwds.push(params.cwd);
 	if (params.tasks) for (const t of params.tasks) if (t.cwd) discoveryCwds.push(t.cwd);
 	if (params.chain) for (const s of params.chain) if (s.cwd) discoveryCwds.push(s.cwd);
-	let discovery = discoverAgents(discoveryCwds, agentScope);
-	// Auto-escalate: when the caller relied on the default "user" scope and no
-	// agents were discovered (e.g. PI_CODING_AGENT_DIR unset and
-	// ~/.pi/agent/agents absent), retry with "both" so project-local agents
-	// (this repo's agents/) are found instead of failing with a silent
-	// "Available agents: none". A caller who explicitly passes agentScope is
-	// respected as-is — this only recovers the implicit-default case.
-	if (!explicitScope && discovery.agents.length === 0) {
-		const escalated = discoverAgents(discoveryCwds, "both");
-		if (escalated.agents.length > 0) {
-			discovery = escalated;
-			agentScope = "both";
-		}
-	}
+	const discovery = discoverAgents(discoveryCwds, DEFAULT_AGENT_SCOPE);
 	const agents = discovery.agents;
 	const validation = validateSubagentParams(params, agents);
 	if (!validation.ok) {
-		return modeCountErrorResponse(agents, agentScope, discovery.projectAgentsDir);
+		throwModeCountError(agents);
 	}
 	const { mode, invalidResults } = validation;
 
 	if (invalidResults.length > 0) {
-		return invalidAgentsResponse(invalidResults, mode, agentScope, discovery.projectAgentsDir);
+		throwInvalidAgents(invalidResults);
 	}
+
+	const approvalError = await maybeApproveProjectAgents(params, agents, discovery, mode, ctx);
+	if (approvalError) return approvalError;
+
+	const makeDetailsBound = (m: Mode, res: SingleResult[]) =>
+		makeDetails(m, res, DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir);
 
 	// Enforce the caller's canSpawn allowlist. The root caller (main agent) has
 	// no canSpawn → unrestricted. An agent with a canSpawn list may only spawn the
 	// named agents, preserving invariants such as read-only-only delegation.
+	// Returning an isError response (rather than throwing) keeps the error
+	// surfaced in the tool result the same way other dispatch-level guards do.
 	const callerCanSpawn = runtimeCtx.canSpawn;
 	const disallowed = disallowedByCanSpawn(callerCanSpawn, collectRequestedAgentNames(params));
 	if (disallowed.length > 0) {
-		return cannotSpawnResponse(disallowed, mode, agentScope, discovery.projectAgentsDir);
+		const listing = disallowed.map((n) => `"${n}"`).join(", ");
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: `Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`,
+				},
+			],
+			details: makeDetailsBound(mode, []),
+			isError: true,
+		};
 	}
 
-	const approvalError = await maybeApproveProjectAgents(params, agents, discovery, agentScope, mode, ctx);
-	if (approvalError) return approvalError;
-
 	const selectionCtx = setupModelSelection(ctx);
-	const makeDetailsBound = (m: Mode, res: SingleResult[]) =>
-		makeDetails(m, res, agentScope, discovery.projectAgentsDir);
 
 	// Resolve the parent (main) session id and the full tool-name set once per
 	// subagent tool call, so subagents can (a) inherit the main turn's pruned
@@ -574,6 +569,11 @@ export async function execute(
 	// user-configured drop-tools list subtracted from unrestricted agents.
 	// Both are defensive: undefined when unresolvable → today's behavior.
 	const parentSessionId = (ctx as { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.();
+	// Seed once from the main session, then modes.ts threads this immutable
+	// selection through AsyncLocalStorage for every deeper nested child.
+	if (runtimeCtx.keptSkills === undefined && parentSessionId) {
+		runtimeCtx.keptSkills = readKeptSkills(parentSessionId);
+	}
 	let allToolNames: string[] | undefined;
 	try {
 		allToolNames = _pi.getAllTools().map((t) => t.name);
@@ -582,18 +582,16 @@ export async function execute(
 	}
 
 	// Settlement net (last-resort, defense-in-depth): guarantee `execute()`
-	// ALWAYS returns within `settlementMs` even if a downstream phase (a future
-	// bug, an SDK that ignores abort, a dead provider stream the proxy didn't
-	// surface) hangs forever. This is NOT the primary hang fix — abort
-	// propagation (Slice A) + abortable concurrency (Slice A) + dead-stream
-	// surfacing at the proxy (Slice C) handle the known hang classes
-	// structurally. The net exists so the parent session can *never* dangle even
-	// if a future bug reintroduces an unbounded wait. On timeout it aborts the
+	// returns after a bounded period with NO credible progress even if a
+	// downstream phase (a future bug, an SDK that ignores abort, a dead provider
+	// stream the proxy didn't surface) hangs forever. This is NOT a total-runtime
+	// ceiling: preservingOnUpdate renews it whenever a child publishes progress,
+	// so a productive worker can run for 30+ minutes. On inactivity it aborts the
 	// run (so runner.ts can return its own abort result), then force-returns a
 	// synthesized error toolResult if the dispatch still doesn't settle.
 	// Retain the latest immutable progress snapshot at the execute boundary. If
-	// the last-resort settlement net fires, completed siblings and partial child
-	// output must survive; only children that are still running are terminalized.
+	// the net fires, completed siblings and partial child output must survive;
+	// only children that are still running are terminalized.
 	let latestDetails: SubagentDetails | undefined;
 	const captureDetails = (details: SubagentDetails | undefined): void => {
 		if (!details?.results) return;
@@ -608,9 +606,23 @@ export async function execute(
 			})),
 		};
 	};
+	let renewSettlementDeadline: (() => void) | undefined;
+	let acceptDispatchUpdates = true;
+	const deliverUpdate = (partial: Parameters<OnUpdateCallback>[0]): void => {
+		try { onUpdate?.(partial); } catch (error) {
+			logLoud("subagent progress delivery failed", { toolCallId: _toolCallId, error: String(error) });
+		}
+	};
 	const preservingOnUpdate: OnUpdateCallback = (partial) => {
+		if (!acceptDispatchUpdates) return;
 		captureDetails(partial.details);
-		onUpdate?.(partial);
+		// Mode/runner updates are emitted only for credible child activity:
+		// lifecycle transitions, model deltas, tool heartbeats/completion, or a
+		// sibling reaching a terminal result. Renew the OUTER inactivity net on
+		// those updates so productive work is never killed solely for running
+		// longer than the configured budget.
+		renewSettlementDeadline?.();
+		deliverUpdate(partial);
 	};
 	const fallbackResults = (cause: string): SingleResult[] => {
 		const requested = mode === "single"
@@ -675,10 +687,31 @@ export async function execute(
 	// abort propagates into runner.ts just like a user "Stop" (the runner's
 	// pre-spawn `raceAbort` and prompt-phase abort both honor it).
 	const settlementController = new AbortController();
-	const runSignal: AbortSignal =
-		typeof AbortSignal.any === "function"
-			? AbortSignal.any([signal, settlementController.signal])
-			: signal;
+	const combinedRunSignal = combineSignals(signal, settlementController.signal);
+	const runSignal = combinedRunSignal.signal;
+
+	let settlementTimer: NodeJS.Timeout | undefined;
+	let settlementDeadlineActive = true;
+	let lastSettlementProgressAt = Date.now();
+	let resolveSettlementDeadline!: (value: typeof FORCE_SETTLE) => void;
+	const settlementTimerPromise = new Promise<typeof FORCE_SETTLE>((resolve) => {
+		resolveSettlementDeadline = resolve;
+	});
+	const armSettlementDeadline = (): void => {
+		if (!settlementDeadlineActive) return;
+		if (settlementTimer) clearTimeout(settlementTimer);
+		lastSettlementProgressAt = Date.now();
+		settlementTimer = setTimeout(() => {
+			settlementTimer = undefined;
+			settlementDeadlineActive = false;
+			resolveSettlementDeadline(FORCE_SETTLE);
+		}, settlementMs);
+		// Allow the process to exit if this defense-in-depth timer is the only
+		// remaining handle. Normal completion clears it in the finally below.
+		settlementTimer.unref?.();
+	};
+	renewSettlementDeadline = armSettlementDeadline;
+	armSettlementDeadline();
 
 	const dispatchPromise = dispatchToMode(
 		mode,
@@ -696,16 +729,17 @@ export async function execute(
 		parentSessionId,
 		allToolNames,
 	);
-	// Swallow a late rejection from an orphaned dispatch so it never surfaces as
-	// an unhandled rejection after we've already returned a synthesized result.
-	dispatchPromise.catch(() => {});
-
-	let settlementTimer: NodeJS.Timeout | undefined;
-	const settlementTimerPromise: Promise<typeof FORCE_SETTLE> = new Promise((resolve) => {
-		settlementTimer = setTimeout(() => resolve(FORCE_SETTLE), settlementMs);
-		// Allow the process to exit even if the timer is still armed (defensive:
-		// the timer is cleared in the finally below on the normal path).
-		settlementTimer.unref?.();
+	// Observe a late rejection from an orphaned dispatch so it never surfaces as
+	// unhandled, but retain the root cause in diagnostics after force-settlement.
+	let forceSettlementTriggered = false;
+	void dispatchPromise.catch((error) => {
+		if (forceSettlementTriggered) {
+			logLoud("dispatch rejected after force-settle", {
+				toolCallId: _toolCallId,
+				mode,
+				error: toErrorMessage(error),
+			});
+		}
 	});
 
 	try {
@@ -721,18 +755,21 @@ export async function execute(
 		// Abort the run so runner.ts can return a proper abort result, then give
 		// the dispatch a short grace to surface that result (prefer the real
 		// abort result over a synthesized one). Loud-log + user-visible message.
-		const cause = `subagent settlement deadline exceeded (${settlementMs / 1000}s)`;
+		const idleMs = Math.max(0, Date.now() - lastSettlementProgressAt);
+		const cause = `subagent settlement inactivity deadline exceeded (${settlementMs / 1000}s without progress)`;
+		forceSettlementTriggered = true;
 		settlementController.abort(new Error(cause));
 		logLoud("subagent force-settled", {
 			toolCallId: _toolCallId,
 			mode,
-			stage: "settlement-deadline",
+			stage: "settlement-inactivity-deadline",
 			settlementMs,
+			idleMs,
 			cause,
 		});
-		onUpdate?.({
+		deliverUpdate({
 			content: [
-				{ type: "text", text: `⚠ Subagent force-settled: did not return within ${settlementMs / 1000}s. This is a bug — please report. See logs for [pie:subagent].` },
+				{ type: "text", text: `⚠ Subagent force-settled after ${settlementMs / 1000}s without progress. This is a bug — please report. See logs for [pie:subagent].` },
 			],
 			details: terminalDetails(cause),
 		});
@@ -762,13 +799,17 @@ export async function execute(
 			content: [
 				{
 					type: "text",
-					text: `Subagent did not settle within ${settlementMs / 1000}s and was force-settled. This is a bug — please report.`,
+					text: `Subagent made no progress for ${settlementMs / 1000}s and was force-settled. This is a bug — please report.`,
 				},
 			],
 			details: terminalDetails(cause),
 			isError: true,
 		};
 	} finally {
+		acceptDispatchUpdates = false;
+		renewSettlementDeadline = undefined;
+		settlementDeadlineActive = false;
 		if (settlementTimer) clearTimeout(settlementTimer);
+		combinedRunSignal.cleanup();
 	}
 }

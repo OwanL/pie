@@ -6,9 +6,6 @@ const READY_TOKEN = "__PI_READY__";
 /** Default warmup wait (ms) for a bash process to print the ready marker.
  *  Overridable via {@link WarmBashPool} opts (env: PIE_BASH_WARMUP_TIMEOUT_MS). */
 const DEFAULT_WARMUP_TIMEOUT_MS = 10_000;
-/** Default acquire wait (ms) for a ready worker when the pool is empty.
- *  Overridable via {@link WarmBashPool} opts (env: PIE_BASH_ACQUIRE_TIMEOUT_MS). */
-const DEFAULT_ACQUIRE_TIMEOUT_MS = 15_000;
 
 /** Live pool metrics surfaced to the host status strip via the stats registry. */
 export interface WarmBashPoolStats {
@@ -52,16 +49,13 @@ interface WarmWorker {
  * {@link refill} spawns up to it and {@link setTarget} kills excess idle when
  * the target is lowered, so the total idle bash process count is capped
  * process-wide regardless of how many sessions are open. If no warm worker
- * is ready, the caller falls back to a fresh `bash -c` (today's exact path),
- * so the pool can never make things slower. Bursts beyond the target are
- * served by on-demand warmups (single-use, killed after) — only IDLE is
- * capped, not concurrent running workers.
+ * is ready, `exec` fails immediately with {@link WarmExecError}; operations.ts
+ * then uses a fresh `bash -c`. Parallel bursts therefore retain the built-in
+ * executor's concurrency instead of queueing behind the idle target.
  */
 export class WarmBashPool {
   /** Ready warm workers, waiting to be consumed. */
   private items: WarmWorker[] = [];
-  /** Acquires that are blocked waiting for a warming worker to land. */
-  private waiters: Array<(w: WarmWorker | null) => void> = [];
   private inflight = 0;
   /** Children still warming — tracked so `dispose` can kill them promptly. */
   private warmingChildren = new Set<ChildProcess>();
@@ -70,7 +64,6 @@ export class WarmBashPool {
   private readonly shell: string;
   private readonly env: NodeJS.ProcessEnv;
   private readonly warmupTimeoutMs: number;
-  private readonly acquireTimeoutMs: number;
   private totalWarmupFailures = 0;
 
   constructor(opts: {
@@ -79,8 +72,6 @@ export class WarmBashPool {
     env?: NodeJS.ProcessEnv;
     /** Warmup wait (ms); 0 or omitted → {@link DEFAULT_WARMUP_TIMEOUT_MS}. */
     warmupTimeoutMs?: number;
-    /** Acquire wait (ms); 0 or omitted → {@link DEFAULT_ACQUIRE_TIMEOUT_MS}. */
-    acquireTimeoutMs?: number;
   }) {
     this.size = opts.size;
     this.env = opts.env ?? process.env;
@@ -88,16 +79,20 @@ export class WarmBashPool {
     this.warmupTimeoutMs = opts.warmupTimeoutMs && opts.warmupTimeoutMs > 0
       ? opts.warmupTimeoutMs
       : DEFAULT_WARMUP_TIMEOUT_MS;
-    this.acquireTimeoutMs = opts.acquireTimeoutMs && opts.acquireTimeoutMs > 0
-      ? opts.acquireTimeoutMs
-      : DEFAULT_ACQUIRE_TIMEOUT_MS;
     for (let i = 0; i < this.size; i++) this.refill();
   }
 
   async exec(opts: WarmExecOpts): Promise<{ exitCode: number | null }> {
-    // Ensure a replacement starts warming for the NEXT call before we consume one.
+    // The pool is an acceleration cache, not a concurrency gate. If every warm
+    // worker is busy, fail immediately so operations.ts uses the normal fresh
+    // spawn path. Waiting behind the idle target silently capped parallel bash
+    // calls and could strand them forever after a warmup failure.
+    const worker = this.items.shift();
+    if (!worker) {
+      this.refill();
+      throw new WarmExecError(this.disabled ? "pool-disposed" : "no-ready-worker");
+    }
     this.refill();
-    const worker = await this.acquire();
     try {
       return await worker.run(opts);
     } finally {
@@ -118,54 +113,18 @@ export class WarmBashPool {
     };
   }
 
-  /** Fast path: take a ready worker. Otherwise register as a waiter — the next
-   *  warmup to land resolves us directly (no double-buffering). Bounded by an
-   *  acquire timeout so a stuck warmup (e.g. bash unavailable) can never hang
-   *  the caller; on timeout it throws and operations falls back to a fresh spawn. */
-  private acquire(): Promise<WarmWorker> {
-    if (this.items.length > 0) return Promise.resolve(this.items.shift()!);
-    this.refill(); // ensure at least one warmup is in flight for this waiter
-    return new Promise<WarmWorker>((resolve, reject) => {
-      let resolver: ((w: WarmWorker | null) => void) | undefined;
-      const timer = setTimeout(() => {
-        const idx = this.waiters.indexOf(resolver!);
-        if (idx >= 0) this.waiters.splice(idx, 1);
-        reject(new WarmExecError("acquire-timeout"));
-      }, this.acquireTimeoutMs);
-      resolver = (w) => {
-        clearTimeout(timer);
-        if (w) resolve(w);
-        else if (this.disabled) reject(new WarmExecError("pool-disposed"));
-        // w === null && !disabled: a warmup failed transiently — `deliver`
-        // already triggered a replacement warmup; stay registered and wait
-        // (the timer is the backstop if warmups keep failing).
-      };
-      this.waiters.push(resolver);
-    });
-  }
-
-  /** Hand a freshly-warmed worker to a waiting acquire, else park it — unless
-   *  we're already at the idle target (e.g. target was lowered while this worker
-   *  was warming), in which case kill it so idle never exceeds the target. */
+  /** Park a freshly-warmed worker unless the idle target is already full. */
   private deliver(w: WarmWorker | null): void {
     if (this.disabled) {
       w?.kill();
       return;
     }
-    if (w && this.waiters.length > 0) {
-      // Active demand takes precedence over the idle cap — the worker is
-      // consumed immediately, so it never counts as idle.
-      this.waiters.shift()!(w);
-    } else if (w && this.items.length < this.size) {
+    if (w && this.items.length < this.size) {
       this.items.push(w);
     } else if (w) {
       // At/above the idle target (target was lowered while this was warming,
       // or a refill raced). Kill it rather than letting idle exceed the target.
       w.kill();
-    } else if (this.waiters.length > 0) {
-      // warmup failed with a waiter present — trigger a replacement, then the
-      // waiter re-acquires recursively.
-      this.refill();
     }
   }
 
@@ -213,9 +172,6 @@ export class WarmBashPool {
     this.items = [];
     for (const child of this.warmingChildren) killShellOnly(child);
     this.warmingChildren.clear();
-    // Reject waiters so callers fall back to a fresh spawn rather than hanging.
-    for (const waiter of this.waiters) waiter(null);
-    this.waiters = [];
   }
 
   /** Resolve once at least one warm worker is idle (or after timeout). Production
@@ -310,6 +266,10 @@ function waitReady(child: ChildProcess, warmupTimeoutMs: number): Promise<void> 
  */
 function runOnWorker(child: ChildProcess, opts: WarmExecOpts): Promise<{ exitCode: number | null }> {
   return new Promise((resolve, reject) => {
+    if (opts.signal?.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
     if (child.exitCode !== null || child.signalCode || child.stdin?.destroyed) {
       reject(new WarmExecError("worker-dead"));
       return;
@@ -395,7 +355,7 @@ function runOnWorker(child: ChildProcess, opts: WarmExecOpts): Promise<{ exitCod
 }
 
 /** Stream stdout to `emit`, stripping the trailing exit-marker line. */
-class MarkerStripper {
+export class MarkerStripper {
   private pending = Buffer.alloc(0);
   private readonly startNeedle: Buffer;
   private readonly fullRe: RegExp;
@@ -413,8 +373,11 @@ class MarkerStripper {
     for (;;) {
       const idx = this.pending.indexOf(this.startNeedle);
       if (idx === -1) {
-        // No marker start: emit everything except a tail that could be a partial prefix.
-        const safeLen = Math.max(0, this.pending.length - this.startNeedle.length);
+        // No marker start: emit everything except a tail that could be a partial
+        // prefix. A marker prefix of length L can start at the last L-1 bytes,
+        // so keep only those.
+        const keep = this.startNeedle.length - 1;
+        const safeLen = Math.max(0, this.pending.length - keep);
         if (safeLen > 0) {
           this.emit(this.pending.subarray(0, safeLen));
           this.pending = this.pending.subarray(safeLen);
@@ -431,8 +394,9 @@ class MarkerStripper {
         this.pending = Buffer.alloc(0);
         return;
       }
-      // Partial marker — hold and wait for more bytes.
-      this.pending = after;
+      // Partial marker — keep the leading \n and marker prefix so a later chunk
+      // can complete it. Do not skip the \n; it is part of the marker framing.
+      this.pending = this.pending.subarray(idx);
       return;
     }
   }

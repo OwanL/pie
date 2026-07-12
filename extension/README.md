@@ -68,7 +68,7 @@ The UI lives inside a VS Code sidebar panel and must feel like it belongs there:
 
 ## Local GUI development
 
-- Run `npm run watch` inside `extension/` while working on the sidebar UI.
+- Run `npm run watch` inside `extension/` while working on the sidebar UI. It runs both Vite watchers and `tsc --watch`; pass `-- --skip-typecheck` only when a separate typecheck watcher is already running.
 - The composer accepts pasted images and file drops when the selected model reports image support.
 - Screenshot/image paste is wired at the panel level, so pasting anywhere in the pie chat while it is focused attaches the image to the active composer.
 - Changes to files under `src/webview/panel/` are rebuilt by Vite automatically.

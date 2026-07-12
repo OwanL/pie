@@ -9,7 +9,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mapWithConcurrencyLimit, runSingleAgent } from "../runner.js";
+import { getEventListeners } from "node:events";
+import { mapWithConcurrencyLimit, runSingleAgent, subagentRuntime } from "../runner.js";
+import { inflightSemaphore } from "../src/concurrency-limit.js";
 import type { AgentConfig } from "../agents.js";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -24,7 +26,7 @@ function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 }
 
 function makeModelRegistry() {
-	const model = { id: "model-a", provider: "test" } as any;
+	const model = { id: "model-a", provider: "test", contextWindow: 128_000 } as any;
 	return {
 		getAvailable: () => [model],
 		getAll: () => [model],
@@ -34,14 +36,17 @@ function makeModelRegistry() {
 
 function createFakeSdk(options?: {
 	onPrompt?: (emit: (event: any) => void) => Promise<void>;
+	subscribeThrows?: boolean;
 }) {
 	const listeners: Array<(event: any) => void> = [];
 	let releasePrompt: (() => void) | undefined;
+	const state = { resourceReloadCalls: 0 };
 
 	const session = {
 		agent: { state: { model: { id: "session-model" } } },
 		extensionRunner: { setUIContext: () => undefined },
 		subscribe: (cb: (event: any) => void) => {
+			if (options?.subscribeThrows) throw new Error("subscribe setup failed");
 			listeners.push(cb);
 			return () => undefined;
 		},
@@ -64,12 +69,73 @@ function createFakeSdk(options?: {
 
 	const sdk = {
 		createSession: async () => ({ session }),
-		createResourceLoader: () => ({ reload: async () => undefined }),
+		createResourceLoader: () => ({
+			reload: async () => { state.resourceReloadCalls++; },
+		}),
 		createSessionManager: () => ({}),
 		getAgentDir: () => ".",
 	};
 
-	return { sdk };
+	return { sdk, state };
+}
+
+function runFakeAgent(
+	sdk: unknown,
+	onUpdate?: (partial: any) => void,
+	signal?: AbortSignal,
+	timeoutMs = 0,
+) {
+	return runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		signal,
+		onUpdate,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs },
+	);
+}
+
+function successfulFakeSdk() {
+	return createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+}
+
+async function within<T>(promise: Promise<T>, ms = 1_000): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(() => reject(new Error(`did not settle within ${ms}ms`)), ms);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 // ============================================================
@@ -402,6 +468,136 @@ test("mapWithConcurrencyLimit: single item with single concurrency", async () =>
 // SUBAGENT THROUGHPUT SAMPLES (Layer B)
 // ============================================================
 
+test("runSingleAgent keeps duplicate-name parallel tools distinct until each call id ends", async () => {
+	const snapshots: Array<{ tools: string[]; phase?: string }> = [];
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash" });
+			emit({ type: "tool_execution_start", toolCallId: "bash-2", toolName: "bash" });
+			emit({ type: "tool_execution_end", toolCallId: "bash-1", toolName: "bash" });
+			emit({
+				type: "message_end",
+				message: { role: "assistant", content: [], stopReason: "stop", usage: { output: 0 } },
+			});
+			emit({ type: "tool_execution_end", toolCallId: "bash-2", toolName: "bash" });
+		},
+	});
+	const result = await runFakeAgent(sdk, (partial) => {
+		const current = partial.details?.results?.[0];
+		if (current) snapshots.push({ tools: [...(current.runningTools ?? [])], phase: current.activityPhase });
+	});
+	assert.equal(result.exitCode, 0);
+	assert.ok(
+		snapshots.some((snapshot) => snapshot.phase === "running_tool" && snapshot.tools.length === 1 && snapshot.tools[0] === "bash"),
+		"ending one bash call must leave the sibling visible and the phase running_tool",
+	);
+});
+
+test("runSingleAgent contains progress callback failures", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_end", message: { role: "assistant", content: [], stopReason: "stop", usage: { output: 0 } } });
+		},
+	});
+	const result = await runFakeAgent(sdk, () => { throw new Error("UI bridge failed"); });
+	assert.equal(result.exitCode, 0);
+});
+
+test("post-create setup failure terminalizes and releases the process permit", async () => {
+	const previous = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
+	try {
+		const failed = await runFakeAgent(createFakeSdk({ subscribeThrows: true }).sdk);
+		assert.equal(failed.exitCode, 1);
+		assert.match(failed.errorMessage ?? "", /subscribe setup failed/);
+
+		const healthySdk = createFakeSdk({
+			onPrompt: async (emit) => emit({ type: "message_end", message: { role: "assistant", content: [], stopReason: "stop", usage: { output: 0 } } }),
+		}).sdk;
+		const followUp = await Promise.race([
+			runFakeAgent(healthySdk),
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("permit leaked after setup failure")), 500)),
+		]);
+		assert.equal(followUp.exitCode, 0);
+	} finally {
+		if (previous === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+		else process.env.PIE_SUBAGENT_MAX_INFLIGHT = previous;
+	}
+});
+
+test("nested runs borrow the ancestor tree permit instead of deadlocking at full capacity", async () => {
+	const previous = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
+	const releaseRoot = await inflightSemaphore.acquire();
+	try {
+		const { sdk } = successfulFakeSdk();
+		const result = await within(subagentRuntime.run(
+			{ depth: 2, trail: ["parent"], processPermitScope: {} },
+			() => runFakeAgent(sdk),
+		));
+		assert.equal(result.exitCode, 0);
+	} finally {
+		releaseRoot();
+		if (previous === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+		else process.env.PIE_SUBAGENT_MAX_INFLIGHT = previous;
+	}
+});
+
+test("root runs report queued before preparing without regressing after capacity is granted", async () => {
+	const previous = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
+	const releaseBlocker = await inflightSemaphore.acquire();
+	const phases: string[] = [];
+	let resolveQueued!: () => void;
+	const queued = new Promise<void>((resolve) => { resolveQueued = resolve; });
+	try {
+		const { sdk, state } = successfulFakeSdk();
+		const run = subagentRuntime.run(
+			{ depth: 1, trail: [] },
+			() => runFakeAgent(sdk, (partial) => {
+				const phase = partial.details?.results?.[0]?.activityPhase;
+				if (phase) phases.push(phase);
+				if (phase === "queued") resolveQueued();
+			}),
+		);
+		await within(queued);
+		assert.deepEqual(phases, ["queued"]);
+		assert.equal(state.resourceReloadCalls, 0, "queued roots must not perform resource setup before capacity is granted");
+		releaseBlocker();
+		const result = await within(run);
+		assert.equal(result.exitCode, 0);
+		assert.equal(state.resourceReloadCalls, 1);
+		const preparingIndex = phases.indexOf("preparing");
+		assert.ok(preparingIndex > phases.indexOf("queued"));
+		assert.equal(phases.slice(preparingIndex + 1).includes("queued"), false, `phase regressed to queued: ${phases.join(" -> ")}`);
+	} finally {
+		releaseBlocker();
+		if (previous === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+		else process.env.PIE_SUBAGENT_MAX_INFLIGHT = previous;
+	}
+});
+
+test("AbortSignal.any fallback removes parent listeners after successful nested runs", async () => {
+	const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+	Object.defineProperty(AbortSignal, "any", { configurable: true, writable: true, value: undefined });
+	const parent = new AbortController();
+	const baseline = getEventListeners(parent.signal, "abort").length;
+	try {
+		for (let i = 0; i < 20; i++) {
+			const { sdk } = successfulFakeSdk();
+			const result = await subagentRuntime.run(
+				{ depth: 1, trail: [] },
+				() => runFakeAgent(sdk, undefined, parent.signal, 1_000),
+			);
+			assert.equal(result.exitCode, 0);
+		}
+		assert.equal(getEventListeners(parent.signal, "abort").length, baseline);
+	} finally {
+		if (descriptor) Object.defineProperty(AbortSignal, "any", descriptor);
+		else delete (AbortSignal as { any?: unknown }).any;
+	}
+});
+
 test("runSingleAgent records a turnThroughputSample on message_start → message_end", async () => {
 	const { sdk } = createFakeSdk({
 		onPrompt: async (emit) => {
@@ -432,7 +628,7 @@ test("runSingleAgent records a turnThroughputSample on message_start → message
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
 		makeModelRegistry(),
 		undefined,
-		undefined,
+		{ modelId: "model-a", thinkingLevel: "high", bucket: "medium", pool: ["model-a"], fallback: false },
 		undefined,
 		undefined,
 		undefined,
@@ -442,6 +638,10 @@ test("runSingleAgent records a turnThroughputSample on message_start → message
 	);
 
 	assert.equal(result.exitCode, 0);
+	assert.equal(result.provider, "test");
+	assert.equal(result.contextWindow, 128_000);
+	assert.equal(result.thinkingLevel, "high");
+	assert.equal(result.usage.contextTokens, 52);
 	assert.equal(result.turnThroughputSamples?.length, 1);
 	const sample = result.turnThroughputSamples![0];
 	assert.equal(sample.outputTokens, 42);

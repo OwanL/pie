@@ -318,6 +318,15 @@ export interface MessageThinkingEvent {
   thinking: string;
 }
 
+export interface MessageToolCallDeltaEvent {
+  kind: 'MessageToolCallDelta';
+  sessionPath: string;
+  messageId: string;
+  toolCallId: string;
+  name: string;
+  delta: string;
+}
+
 export interface MessageAbortedEvent {
   kind: 'MessageAborted';
   sessionPath: string;
@@ -782,6 +791,7 @@ export type BackendEvent =
   | MessageAbortedEvent
   | MessageDeltaEvent
   | MessageThinkingEvent
+  | MessageToolCallDeltaEvent
   | ToolCallEvent
   | MessageFinishedEvent
   | BusyChangedEvent

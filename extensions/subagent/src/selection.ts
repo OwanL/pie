@@ -153,14 +153,22 @@ export function attachSelectionMetadata(result: SingleResult, resolved: Awaited<
 	}
 }
 
-/** Check if a subagent result represents a model-level failure that qualifies for retry. */
+/** Check if a subagent result represents a model-level failure that qualifies
+ * for failover. A non-zero exit is not enough: auth/client failures are
+ * terminal, and replay after partial output or any tool side effect can
+ * duplicate externally-visible work. */
 export function isModelFailure(
 	result: SingleResult,
 	modelOverride: string | undefined,
 	hasBucketAssignments: boolean,
 ): boolean {
 	return (
-		result.exitCode !== 0 && result.stopReason !== "aborted" && modelOverride !== undefined && hasBucketAssignments
+		result.exitCode !== 0 &&
+		result.stopReason !== "aborted" &&
+		modelOverride !== undefined &&
+		hasBucketAssignments &&
+		result.retryable === true &&
+		result.replaySafety === "safe"
 	);
 }
 

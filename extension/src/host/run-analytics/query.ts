@@ -1,6 +1,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { atomicWriteText } from '../shared/atomic-write';
+
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   coerceAgentReviewEntry,
@@ -146,16 +148,6 @@ export async function exportRunAnalyticsStore(
   };
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  const tmpPath = path.join(
-    path.dirname(targetPath),
-    `.${path.basename(targetPath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`,
-  );
-  try {
-    await fs.writeFile(tmpPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-    await fs.rename(tmpPath, targetPath);
-  } catch (error) {
-    await fs.unlink(tmpPath).catch(() => undefined);
-    throw error;
-  }
+  await atomicWriteText(targetPath, JSON.stringify(payload, null, 2) + '\n');
   return payload;
 }

@@ -361,7 +361,7 @@ function renderParallelResult(results: SingleResult[], expanded: boolean, theme:
 }
 
 export function renderSubagentCall(args: any, theme: Theme, _context: Ctx): RenderResult {
-	const scope: AgentScope = args.agentScope ?? "user";
+	const scope: AgentScope = args.agentScope ?? "both";
 	if (args.chain && args.chain.length > 0) return renderChainCall(args, scope, theme);
 	if (args.tasks && args.tasks.length > 0) return renderParallelCall(args, scope, theme);
 	return renderSingleCall(args, scope, theme);

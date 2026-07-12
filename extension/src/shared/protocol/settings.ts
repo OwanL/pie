@@ -180,8 +180,10 @@ export interface ChatPrefs {
    *  (independent of the per-reply cap). Default 10. Mirrored to the in-process
    *  subagent extension via PIE_SUBAGENT_MAX_TREE_SESSIONS. */
   subagentMaxTreeSessions: number;
-  /** Max concurrent in-flight subagent sessions across the whole process.
-   *  Default 2. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
+  /** Max concurrent root subagent trees across the whole process. Each root
+   *  holds one permit for its lifetime; nested descendants borrow that scope so
+   *  recursive delegation cannot deadlock. Default 2. Mirrored via
+   *  PIE_SUBAGENT_MAX_INFLIGHT. */
   subagentMaxInflight: number;
   /** Max concurrency within one parallel `tasks[]` array. Default 2.
    *  Mirrored via PIE_SUBAGENT_MAX_CONCURRENCY. */
@@ -208,9 +210,6 @@ export interface ChatPrefs {
    *  default (10000). Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000].
    *  A change rebuilds the shared warm pool on the next bash call. */
   bashWarmupTimeoutMs: number;
-  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
-   *  default (15000). Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
-  bashAcquireTimeoutMs: number;
   /** Default timeout (seconds) for bash commands that don't specify one.
    *  The upstream SDK default is 600s; this caps the worst-case hang for a
    *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
@@ -302,6 +301,11 @@ export interface ChatPrefs {
    *  bottom of a turn). Tools/subagents add one header row on top. Default 2
    *  reproduces the bundled 2-row (reasoning) / 3-row (tool) preview. */
   activityTailLines: number;
+  /** Content rows reserved in the collapsed subagent-card live preview.
+   *  Unlike the generic activity tail, this only shows the subagent's realtime
+   *  streaming text (or a literal `pending...` placeholder while running with
+   *  no visible stream yet). Default 2, range 1–12. */
+  subagentPreviewLines: number;
   /** Size (px) of the clickable user-message markers in the thin rail to the
    *  left of the transcript scrollbar. Each marker is a jump-to button; this
    *  controls the click-target height AND the visible dot size (the dot scales
@@ -370,7 +374,6 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   bashFastPath: true,
   bashShellPath: '',
   bashWarmupTimeoutMs: 0,
-  bashAcquireTimeoutMs: 0,
   bashDefaultTimeout: 60,
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
@@ -395,6 +398,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   providerToggles: {},
   providerConcurrency: {},
   activityTailLines: 2,
+  subagentPreviewLines: 2,
   uiMessageRailSize: 20,
   hideStatusStrip: false,
   hideTokenRate: false,
@@ -414,7 +418,7 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   provider: 'github-copilot',
   thinkingLevel: 'minimal',
   prepassTimeoutSec: null,
-  autoSkipBelowTokens: null,
+  autoSkipBelowTokens: 1200,
 };
 
 export interface ToolResultPruningRuleToggles {
@@ -625,9 +629,6 @@ export interface RuntimePrefsSetParams {
   /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
    *  default. Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000]. */
   bashWarmupTimeoutMs?: number;
-  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
-   *  default. Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
-  bashAcquireTimeoutMs?: number;
   /** Default timeout (seconds) for bash commands that don't specify one.
    *  Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
   bashDefaultTimeout?: number;
@@ -660,7 +661,6 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParam
     bashFastPath: prefs.bashFastPath,
     bashShellPath: prefs.bashShellPath,
     bashWarmupTimeoutMs: prefs.bashWarmupTimeoutMs,
-    bashAcquireTimeoutMs: prefs.bashAcquireTimeoutMs,
     bashDefaultTimeout: prefs.bashDefaultTimeout,
     subagentBuckets: prefs.subagentBuckets,
     subagentNestedAllowedBuckets: prefs.subagentNestedAllowedBuckets,

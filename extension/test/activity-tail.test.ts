@@ -245,6 +245,37 @@ test('deriveSubagentTail peeks into a running subagent and shows its running too
   assert.deepEqual(result.tail.lines, ['→ bash · read']);
 });
 
+test('deriveSubagentTail fills idle preview rows with lifecycle and model diagnostics', () => {
+  const now = Date.now();
+  const result = subagentResult() as any;
+  Object.assign(result.details.results[0], {
+    activityPhase: 'waiting_provider',
+    activityDetail: 'first token',
+    activitySince: now - 17_000,
+    lastProgressAt: now - 18_000,
+    inactivityBudgetMs: 120_000,
+    selectedModel: 'openai/gpt-5.2',
+    provider: 'openai',
+    contextWindow: 200_000,
+    thinkingLevel: 'high',
+    retryCount: 1,
+    selectionPool: ['openai/gpt-5.2', 'anthropic/claude-opus-4.1'],
+    usage: { input: 1250, output: 42, cacheRead: 1000, cacheWrite: 0, contextTokens: 50_000 },
+    turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:00.000Z', outputTokens: 100, generationDurationMs: 10_000, status: 'completed' }],
+  });
+  const toolCall = makeToolCall({
+    name: 'subagent',
+    status: 'running',
+    input: { agent: 'worker', task: 'fix the failing tests' },
+    result,
+  });
+
+  const tail = deriveSubagentTail(toolCall);
+  assert.ok(tail);
+  assert.match(tail.tail.lines[0]!, /Waiting for provider · first token · \d+s in state · \d+s since progress · 2m 0s stall limit/);
+  assert.equal(tail.tail.lines[1], 'openai/gpt-5.2 · thinking high · context 50k / 200k (25%) · tokens 1.3k in / 42 out · 1.0k cached · last 10.0 tok/s · 1 retry · 2 model candidates');
+});
+
 test('deriveSubagentTail falls back to the tail of streaming text when no tool is running', () => {
   const toolCall = makeToolCall({
     name: 'subagent',
@@ -360,6 +391,22 @@ test('deriveTurnActivityState attaches a reasoning tail while the model streams 
   assert.equal(state!.tail!.kind, 'reasoning');
 });
 
+test('deriveTurnActivityState identifies a streaming tool-call draft and reports its token count', () => {
+  const assistant = streamingAssistant([]);
+  assistant.draftingToolCall = {
+    id: 'tc-bash',
+    name: 'bash',
+    argumentsText: '{"command":"npm test"}',
+  };
+
+  const state = deriveFor([userMessage(), assistant]);
+  assert.ok(state);
+  assert.equal(state!.phase, 'draftingTool');
+  assert.equal(state!.label, 'drafting bash call');
+  assert.match(state!.detail!, /^\d+ tokens?$/);
+  assert.match(state!.ariaLabel, /^Agent is drafting a bash tool call, \d+ tokens?$/);
+});
+
 test('deriveTurnActivityState attaches a tool tail while bash is running', () => {
   const assistant: ChatMessage = {
     id: 'assistant-1',
@@ -403,7 +450,7 @@ test('deriveTurnActivityState omits a tail for a running ask_user (the prompt UI
   assert.equal(state!.tail, undefined);
 });
 
-test('deriveTurnActivityState attaches a subagent tail while a subagent runs', () => {
+test('deriveTurnActivityState omits the redundant bottom tail while a subagent card previews the run', () => {
   const assistant: ChatMessage = {
     id: 'assistant-1',
     role: 'assistant',
@@ -419,7 +466,56 @@ test('deriveTurnActivityState attaches a subagent tail while a subagent runs', (
   const state = deriveFor(transcript);
   assert.ok(state);
   assert.equal(state!.phase, 'runningTool');
-  assert.equal(state!.label, 'worker');
-  assert.ok(state!.tail);
-  assert.equal(state!.tail!.kind, 'subagent');
+  assert.equal(state!.label, 'running subagent');
+  assert.equal(state!.runningToolName, 'subagent');
+  assert.equal(state!.tail, undefined);
+});
+
+test('deriveTurnActivityState suppresses the multi-tool preview rows when any running tool is a subagent', () => {
+  // A parallel batch mixing a subagent with a plain tool: the subagent card
+  // already previews its own live child activity, so the bottom multi-tool
+  // preview rows are suppressed — but the compact status strip stays.
+  const assistant: ChatMessage = {
+    id: 'assistant-1',
+    role: 'assistant',
+    createdAt: '2026-05-16T00:00:00.000Z',
+    markdown: '',
+    status: 'completed',
+    parts: [
+      { kind: 'toolCall', toolCall: makeToolCall({ id: 'tc-sub', name: 'subagent', status: 'running', input: { agent: 'worker', task: 'fix it' }, result: subagentResult(['bash']) }) },
+      { kind: 'toolCall', toolCall: makeToolCall({ id: 'tc-bash', name: 'bash', status: 'running', input: { command: 'npm run test' }, result: { content: [{ type: 'text', text: 'running...' }], details: {} } }) },
+    ],
+    toolCalls: [],
+  } as unknown as ChatMessage;
+  const state = deriveFor([userMessage(), assistant]);
+  assert.ok(state);
+  assert.equal(state!.phase, 'runningTool');
+  assert.equal(state!.label, 'running 2 tools');
+  // The compact strip still carries the count and the tool-name detail.
+  assert.equal(state!.runningToolSummary, 'running 2 tools');
+  assert.equal(state!.detail, 'subagent, bash');
+  // ...but the duplicate multi-tool preview rows are gone.
+  assert.equal(state!.tail, undefined);
+});
+
+test('deriveTurnActivityState keeps the multi-tool preview rows when no running tool is a subagent', () => {
+  const assistant: ChatMessage = {
+    id: 'assistant-1',
+    role: 'assistant',
+    createdAt: '2026-05-16T00:00:00.000Z',
+    markdown: '',
+    status: 'completed',
+    parts: [
+      { kind: 'toolCall', toolCall: makeToolCall({ id: 'tc-bash', name: 'bash', status: 'running', input: { command: 'npm run test' }, result: { content: [{ type: 'text', text: 'running...' }], details: {} } }) },
+      { kind: 'toolCall', toolCall: makeToolCall({ id: 'tc-read', name: 'read', status: 'running', input: { path: 'a.ts' } }) },
+    ],
+    toolCalls: [],
+  } as unknown as ChatMessage;
+  const state = deriveFor([userMessage(), assistant]);
+  assert.ok(state);
+  assert.equal(state!.phase, 'runningTool');
+  assert.equal(state!.label, 'running 2 tools');
+  // No subagent in the batch → the multi-tool preview rows are still derived.
+  assert.ok(state!.tail, 'multi-tool tail still derived when no subagent is running');
+  assert.equal(state!.tail!.kind, 'tool');
 });

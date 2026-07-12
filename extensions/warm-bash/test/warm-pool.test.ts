@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { findTestBash } from './test-shell.js';
+import { MarkerStripper } from '../src/warm-pool.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const poolUrl = pathToFileURL(path.resolve(__dirname, '../src/warm-pool.ts')).href;
@@ -34,29 +36,12 @@ async function loadClassify() {
   return m.classify as (c: string) => { kind: 'simple' | 'shell'; rest: string };
 }
 
-/** Resolve a bash binary for the test (mirrors pi's getShellConfig fallbacks). */
-function findBash(): string {
-  const explicit = process.env.PI_SHELL?.trim();
-  if (explicit && existsSync(explicit)) return explicit;
-  if (process.env.SHELL && existsSync(process.env.SHELL)) return process.env.SHELL;
-  if (process.platform === 'win32') {
-    const where = spawnSync('where', ['bash.exe'], { encoding: 'utf8' });
-    const found = where.stdout?.split(/\r?\n/).map((s) => s.trim()).find((p) => p && existsSync(p));
-    if (found) return found;
-    const pf = process.env.ProgramFiles;
-    if (pf && existsSync(`${pf}\\Git\\bin\\bash.exe`)) return `${pf}\\Git\\bin\\bash.exe`;
-  } else {
-    if (existsSync('/bin/bash')) return '/bin/bash';
-  }
-  return 'bash';
-}
-
 /** Minimal fallback ops (fresh `bash -c`) for the operations-level tests. */
 function freshBashOps(): AnyOps {
   return {
     exec: (command, cwd, { onData, signal, timeout, env }) =>
       new Promise((resolve, reject) => {
-        const child = spawn(findBash(), ['-c', command], { cwd, env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+        const child = spawn(findTestBash(), ['-c', command], { cwd, env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         let timer: NodeJS.Timeout | undefined;
         if (timeout && timeout > 0) timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* */ } }, timeout * 1000);
         child.stdout?.on('data', onData);
@@ -75,7 +60,7 @@ function sink() {
   return { onData, text };
 }
 
-const BASH = findBash();
+const BASH = findTestBash();
 
 describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => {
   // Loaded dynamically (tsx) — typed loosely; the assertions guard behaviour.
@@ -232,6 +217,46 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
     }
   });
 
+  test('warm pool: an already-aborted call never starts a command', async () => {
+    const pool = await makePool();
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await assert.rejects(
+        pool.exec({ command: 'echo must-not-run', cwd: tmp, env: process.env, onData: () => {}, signal: controller.signal }),
+        /aborted/,
+      );
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('parallel overflow falls back immediately instead of queueing behind the warm idle target', async () => {
+    const pool = await makePool();
+    const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    let fallbackCalls = 0;
+    const fallbackOps: AnyOps = {
+      exec: async () => {
+        fallbackCalls++;
+        return { exitCode: 0 };
+      },
+    };
+    const ops = createOps({ pool, fastPathEnabled: false, fallbackOps, metrics });
+    try {
+      let firstDone = false;
+      const first = ops.exec('sleep 0.3 && echo warm', tmp, { onData: () => {} }).finally(() => { firstDone = true; });
+      assert.equal(pool.getStats().ready, 0, 'the first call synchronously consumes the only warm worker');
+      await ops.exec('echo overflow | cat', tmp, { onData: () => {} });
+      assert.equal(firstDone, false, 'overflow must not wait for the warm command to finish');
+      assert.equal(fallbackCalls, 1);
+      await first;
+      assert.equal(metrics.totalWarm, 1);
+      assert.equal(metrics.totalFallback, 1);
+    } finally {
+      pool.dispose();
+    }
+  });
+
   test('operations: shell command uses warm pool then falls back if unavailable', async () => {
     // pool=null forces the warm miss → fallback (fresh bash -c). Verifies the
     // degradation path produces correct output.
@@ -289,9 +314,9 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
     assert.equal(s.warming, 0);
   });
 
-  test('custom warmup + acquire timeouts are accepted (0 falls back to default)', async () => {
-    // 0 → default; just verify the pool constructs and runs with the overrides.
-    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env, warmupTimeoutMs: 0, acquireTimeoutMs: 0 });
+  test('custom warmup timeout is accepted (0 falls back to default)', async () => {
+    // 0 → default; just verify the pool constructs and runs with the override.
+    const pool = new Pool({ size: 1, shellPath: BASH, env: process.env, warmupTimeoutMs: 0 });
     try {
       await pool.ready();
       const { onData, text } = sink();
@@ -405,5 +430,69 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
     } finally {
       pool.dispose();
     }
+  });
+});
+
+describe('MarkerStripper', () => {
+  test('strips complete marker and parses exit code from a single chunk', () => {
+    const chunks: Buffer[] = [];
+    const stripper = new MarkerStripper('abc123', (b) => chunks.push(b));
+    stripper.push(Buffer.from('hello\n__PI_EXIT_abc123__42__\n'));
+    assert.equal(stripper.done, true);
+    assert.equal(stripper.exitCode, 42);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'hello');
+  });
+
+  test('strips marker split at every possible boundary and parses the exit code', () => {
+    const token = 'deadbeef';
+    const marker = `\n__PI_EXIT_${token}__7__\n`;
+    const data = `output line${marker}tail`;
+    for (let splitAt = 0; splitAt <= data.length; splitAt++) {
+      const chunks: Buffer[] = [];
+      const stripper = new MarkerStripper(token, (b) => chunks.push(b));
+      stripper.push(Buffer.from(data.slice(0, splitAt)));
+      // If the first chunk already contains the complete marker, skip the second push.
+      if (!stripper.done) {
+        stripper.push(Buffer.from(data.slice(splitAt)));
+      }
+      assert.equal(stripper.done, true, `splitAt=${splitAt}: must be done`);
+      assert.equal(stripper.exitCode, 7, `splitAt=${splitAt}: exit code`);
+      assert.equal(Buffer.concat(chunks).toString('utf8'), 'output line', `splitAt=${splitAt}: stripped output`);
+    }
+  });
+
+  test('multi-digit exit code is parsed correctly', () => {
+    const chunks: Buffer[] = [];
+    const stripper = new MarkerStripper('tok', (b) => chunks.push(b));
+    stripper.push(Buffer.from('x\n__PI_EXIT_tok__123__\n'));
+    assert.equal(stripper.exitCode, 123);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'x');
+  });
+
+  test('trailing data after the marker is ignored once done', () => {
+    const chunks: Buffer[] = [];
+    const stripper = new MarkerStripper('tok', (b) => chunks.push(b));
+    stripper.push(Buffer.from('hello\n__PI_EXIT_tok__0__\nignored'));
+    assert.equal(stripper.done, true);
+    assert.equal(stripper.exitCode, 0);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'hello');
+  });
+
+  test('flushRemaining emits an incomplete marker as data', () => {
+    const chunks: Buffer[] = [];
+    const stripper = new MarkerStripper('tok', (b) => chunks.push(b));
+    stripper.push(Buffer.from('data\n__PI_EXIT_tok__'));
+    assert.equal(stripper.done, false);
+    stripper.flushRemaining();
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'data\n__PI_EXIT_tok__');
+  });
+
+  test('output without a marker passes through unchanged', () => {
+    const chunks: Buffer[] = [];
+    const stripper = new MarkerStripper('tok', (b) => chunks.push(b));
+    stripper.push(Buffer.from('plain output\n'));
+    stripper.flushRemaining();
+    assert.equal(stripper.done, false);
+    assert.equal(Buffer.concat(chunks).toString('utf8'), 'plain output\n');
   });
 });

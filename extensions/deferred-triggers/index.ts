@@ -98,14 +98,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'defer_trigger',
     label: 'Defer / resume',
-    description:
-      'Defer the current task and auto-resume this session later when a trigger fires. Register one or more triggers (OR semantics: first to fire wins): a session finishing (specific path or any), a timer, or the user typing in this session. When a trigger fires, the host re-injects a wake-up message so you can re-evaluate and either complete the task or re-defer. Also supports cancel (one or all) and list.',
-    promptSnippet:
-      'Defer/resume: register a trigger to auto-resume this session later (when a session finishes, after a delay, or on user input).',
+    description: 'Register, list, or cancel triggers that resume this session after a timer, user input, or another session finishes. Registered triggers use OR semantics.',
+    promptSnippet: 'Wait for an asynchronous condition and resume this session when it fires.',
     promptGuidelines: [
-      'Use defer_trigger with action `register` when you need to wait for an async condition you cannot observe synchronously (e.g. "when all sessions finish", "in 5 minutes", "when the user types again"). Register the trigger, then end your turn; the host resumes you when it fires.',
-      'When resumed, re-evaluate the condition with your tools (e.g. `session_review` `listOpen`). Either complete the task now or call defer_trigger `register` again to keep waiting. Call defer_trigger `cancel` to abort a pending trigger.',
-      'Prefer specific triggers (a particular sessionPath, or a bounded timer) over broad ones to avoid needless wake-ups. `session_finished` never fires on this session\'s own completion, so to wait for "all sessions" register `session_finished` (any) and re-check on each wake-up.',
+      'After defer_trigger register, end the turn; on wake-up re-check the condition and complete or re-register. Prefer specific triggers; session_finished never fires for this session itself.',
     ],
     parameters: deferTriggerSchema,
 

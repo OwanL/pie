@@ -88,6 +88,15 @@ export interface ClearQueueCommand extends CommandBase {
   sessionPath: string;
 }
 
+/** Re-arm the per-localId queued-message dwell watchdog (handoff §F). The
+ *  reducer resets `watchdogFired` and emits a fresh `StartQueuedDwellWatchdog`
+ *  effect so the host timer (not a local webview hide) owns the next threshold. */
+export interface RearmQueuedDwellWatchdogCommand extends CommandBase {
+  kind: 'RearmQueuedDwellWatchdog';
+  sessionPath: string;
+  localId: string;
+}
+
 /** Truncate the transcript after a given message. */
 export interface TruncateAfterCommand extends CommandBase {
   kind: 'TruncateAfter';
@@ -287,6 +296,7 @@ export type Command =
   | EditCommand
   | InterruptCommand
   | ClearQueueCommand
+  | RearmQueuedDwellWatchdogCommand
   | TruncateAfterCommand
   | OpenSessionCommand
   | CreateSessionCommand

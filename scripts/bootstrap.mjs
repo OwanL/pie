@@ -38,4 +38,4 @@ run("npm", ["install", "-g", `@earendil-works/pi-coding-agent@${piVersion}`]);
 run("pi", ["update", "--extensions"]);
 run(process.execPath, ["scripts/sync-models.mjs", "--check"]);
 run("npm", ["run", "build"], `${repoRoot}/extension`);
-run(process.execPath, ["scripts/doctor.mjs"]);
+run(process.execPath, ["scripts/doctor.mjs", "--skip-model-check"]);

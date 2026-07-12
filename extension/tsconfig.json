@@ -4,6 +4,8 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/typecheck/extension.tsbuildinfo",
     "verbatimModuleSyntax": false,
     "target": "ES2021",
     "lib": ["ES2021", "DOM"],

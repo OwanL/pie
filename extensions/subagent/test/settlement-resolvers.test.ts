@@ -4,9 +4,8 @@
  * `settlement.test.ts` exercises the full `execute()` force-settle path
  * (setting the env vars and asserting the dispatch returns in time), but the
  * pure resolver functions `resolveSettlementMs` / `resolveSettlementGraceMs`
- * are never called directly there. This pins their input→output contract:
- * unset/empty → default, `0` → disabled, positive → honoured, invalid
- * (NaN/negative) → default.
+ * are never called directly there. This pins their input→output contract. The
+ * settlement value is a renewable inactivity budget, not total wall time.
  */
 
 import test from "node:test";
@@ -40,10 +39,10 @@ test.after(() => {
 // resolveSettlementMs
 // ---------------------------------------------------------------------------
 
-test("resolveSettlementMs: unset → DEFAULT_SETTLEMENT_MS (net ON by default)", () => {
+test("resolveSettlementMs: unset → 12-minute renewable inactivity budget", () => {
 	delete process.env.PIE_SUBAGENT_SETTLEMENT_MS;
 	assert.equal(resolveSettlementMs(), DEFAULT_SETTLEMENT_MS);
-	assert.equal(DEFAULT_SETTLEMENT_MS, 30 * 60 * 1000);
+	assert.equal(DEFAULT_SETTLEMENT_MS, 12 * 60 * 1000);
 });
 
 test("resolveSettlementMs: empty string → default", () => {

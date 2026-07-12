@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from "./toolchain.mjs";
 
 const ci = process.argv.includes("--ci");
+const skipModelCheck = process.argv.includes("--skip-model-check");
 let failures = 0;
 const ok = (message) => console.log(`  [ok] ${message}`);
 const fail = (message) => { failures++; console.error(`  [FAIL] ${message}`); };
@@ -39,8 +40,12 @@ else {
   else warn("empty auth.json exists at repo root; remove it after fully restarting VS Code");
 }
 
-const modelCheck = run(process.execPath, ["scripts/sync-models.mjs", "--check"]);
-modelCheck.status === 0 ? ok("generated model configuration is in sync") : fail(`model configuration drift: ${(modelCheck.stderr || modelCheck.stdout).trim()}`);
+if (skipModelCheck) {
+  ok("generated model configuration was checked by the caller");
+} else {
+  const modelCheck = run(process.execPath, ["scripts/sync-models.mjs", "--check"]);
+  modelCheck.status === 0 ? ok("generated model configuration is in sync") : fail(`model configuration drift: ${(modelCheck.stderr || modelCheck.stdout).trim()}`);
+}
 
 if (!ci) {
   const expectedAgent = normalize(repoRoot);

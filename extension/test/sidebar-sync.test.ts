@@ -35,6 +35,7 @@ const baseViewState: ViewState = {
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
   deferredTriggers: [],
+  queuedDwell: [],
   draftText: '',
   busy: false,
   retryStatus: null,

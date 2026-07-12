@@ -10,9 +10,10 @@
  *    `enqueueLifecycle(() => enqueueSessionOperation(sessionPath, do_rpc))` so
  *    they serialize correctly with legacy `send`/`edit` paths during the
  *    multi-phase migration.
- *  - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle`
- *    only (the session may not exist yet, so the inner per-session queue
- *    cannot be addressed).
+ *  - Existing-session lifecycle effects use `enqueueLifecycle` only (the
+ *    inner per-session queue may not be addressable yet). `CreateSession`
+ *    dispatches directly because it has no ordering dependency on unrelated
+ *    session work; selection tokens reconcile late responses.
  *  - `PersistTabs` and `Log` execute directly without queueing.
  *  - `PostImperative` sends an imperative message to the webview via the
  *    `postImperative` callback.
@@ -56,7 +57,7 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, SessionOpenedPayload, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
@@ -126,6 +127,10 @@ export interface SessionServiceLike {
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
   handleSelectionFailure(selectionToken: string, notice: string): void;
+  /** Reconcile the authoritative payload returned by create/open/duplicate.
+   * Backend events carry the same payload, but RPC responses have a priority
+   * transport lane so lifecycle completion cannot be starved by stream data. */
+  applySessionOpened(payload: SessionOpenedPayload): void;
   /** Decide whether a `session.open` for `sessionPath` can skip the
    *  transcript round-trip: returns `'skip'` when the host already has the
    *  session's transcript window loaded and the session is not actively
@@ -384,7 +389,7 @@ export class EffectRunner {
       ClearQueueRpc: (e) => this.runRpc(e),
       TruncateRpc: (e) => this.runRpc(e),
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
-      // ── Lifecycle kinds: `enqueueLifecycle`-only. ──
+      // ── Lifecycle kinds (existing sessions queue; fresh create is direct). ──
       OpenSession: (e) => this.runLifecycle(e),
       CreateSession: (e) => this.runLifecycle(e),
       DuplicateSession: (e) => this.runLifecycle(e),
@@ -1261,7 +1266,12 @@ export class EffectRunner {
           // First load and any running session get the full authoritative
           // snapshot.
           const transcript = service.getOpenTranscriptMode(effect.sessionPath);
-          await backend.request('session.open', { sessionPath: effect.sessionPath, selectionToken: effect.selectionToken, transcript });
+          const payload = await backend.request<SessionOpenedPayload>('session.open', {
+            sessionPath: effect.sessionPath,
+            selectionToken: effect.selectionToken,
+            transcript,
+          });
+          service.applySessionOpened(payload);
           dispatch({
             kind: 'OpenSessionResult',
             corrId: effect.corrId,
@@ -1295,7 +1305,11 @@ export class EffectRunner {
       // CreateSession.
       void queues.enqueueLifecycle(async () => {
         try {
-          await backend.request('session.duplicate', { sessionPath: effect.sourceSessionPath, selectionToken: effect.selectionToken });
+          const payload = await backend.request<SessionOpenedPayload>('session.duplicate', {
+            sessionPath: effect.sourceSessionPath,
+            selectionToken: effect.selectionToken,
+          });
+          service.applySessionOpened(payload);
           dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
         } catch (err) {
           service.handleSelectionFailure(effect.selectionToken, `Failed to duplicate session: ${toErrorMessage(err)}`);
@@ -1304,19 +1318,17 @@ export class EffectRunner {
       });
       return;
     }
-    // CreateSession: the reducer already did the optimistic tab setup; the
-    // runner owns the backend session.create RPC, serialized on the lifecycle
-    // queue (shared with open/close). The selection token was minted in
-    // service.createNewSession() BEFORE the reducer activated the pending tab,
-    // so handleSelectionFailure can restore the previous active path on
-    // failure. On failure handleSelectionFailure dispatches the reducer
-    // transitions that undo the optimistic setup (CloseTab / SelectSession-
-    // fallback / SessionScopeCleared / NoticeShown) — so the reducer's
-    // CreateSessionResult handler stays a no-op, matching the pre-migration
-    // recovery path.
-    void queues.enqueueLifecycle(async () => {
+    // A fresh session has no ordering dependency on work for existing sessions.
+    // The global lifecycle queue made + wait behind unrelated opens, sends, and
+    // model changes (several seconds in observed traces). Dispatch directly;
+    // the pre-minted selection token prevents a late response stealing focus.
+    void (async () => {
       try {
-        await backend.request('session.create', { cwd: effect.cwd, selectionToken: effect.selectionToken });
+        const payload = await backend.request<SessionOpenedPayload>('session.create', {
+          cwd: effect.cwd,
+          selectionToken: effect.selectionToken,
+        });
+        service.applySessionOpened(payload);
         dispatch({
           kind: 'CreateSessionResult',
           corrId: effect.corrId,
@@ -1333,7 +1345,7 @@ export class EffectRunner {
           error: toErrorMessage(err),
         });
       }
-    });
+    })();
   }
 }
 

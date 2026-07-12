@@ -26,53 +26,52 @@ const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium"
 	description: THINKING_LEVEL_GUIDANCE,
 }));
 
-const TaskItem = Type.Object({
-	agent: Type.String({
-		description:
-			'Exact agent name to invoke. This is not agentScope; do not pass "user", "project", or "both" unless those are real agent names.',
-	}),
-	task: Type.String({ description: "Task to delegate to the agent" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	bucket: BucketSchema,
-	thinkingLevel: ThinkingLevelSchema,
-});
-
-const ChainItem = Type.Object({
-	agent: Type.String({
-		description:
-			'Exact agent name to invoke. This is not agentScope; do not pass "user", "project", or "both" unless those are real agent names.',
-	}),
-	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	bucket: BucketSchema,
-	thinkingLevel: ThinkingLevelSchema,
-});
-
-const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
-	description:
-		'Which agent directories to search. This is separate from the agent field. Default: "user". Use "both" to include project-local agents.',
-	default: "user",
-});
-
-export const SubagentParams = Type.Object({
-	agent: Type.Optional(
-		Type.String({
-			description:
-				'Exact agent name to invoke for single mode. This is not agentScope; do not pass "user", "project", or "both" unless those are real agent names.',
+const TaskItem = Type.Object(
+	{
+		agent: Type.String({
+			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
 		}),
-	),
-	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
-	agentScope: Type.Optional(AgentScopeSchema),
-	confirmProjectAgents: Type.Optional(
-		Type.Boolean({
-			description:
-				"Prompt before running project-local agents. Default: true, unless overridden by the `subagent.confirmProjectAgents` setting in settings.json. A per-call value takes precedence over the setting.",
-			default: true,
+		task: Type.String({ description: "Task to delegate to the agent" }),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+		bucket: BucketSchema,
+		thinkingLevel: ThinkingLevelSchema,
+	},
+	{ additionalProperties: false },
+);
+
+const ChainItem = Type.Object(
+	{
+		agent: Type.String({
+			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
 		}),
-	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-	bucket: BucketSchema,
-	thinkingLevel: ThinkingLevelSchema,
-});
+		task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+		bucket: BucketSchema,
+		thinkingLevel: ThinkingLevelSchema,
+	},
+	{ additionalProperties: false },
+);
+
+export const SubagentParams = Type.Object(
+	{
+		agent: Type.Optional(
+			Type.String({
+				description: "Exact discovered agent name to invoke for single mode (e.g. 'worker', 'scout', 'reviewer').",
+			}),
+		),
+		task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
+		tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
+		chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+		confirmProjectAgents: Type.Optional(
+			Type.Boolean({
+				description:
+					"Prompt before running project-local agents. Default: true, unless overridden by the `subagent.confirmProjectAgents` setting in settings.json. A per-call value takes precedence over the setting.",
+				default: true,
+			}),
+		),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+		bucket: BucketSchema,
+		thinkingLevel: ThinkingLevelSchema,
+	},
+	{ additionalProperties: false },
+);

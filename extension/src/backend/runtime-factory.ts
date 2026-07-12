@@ -4,6 +4,7 @@
  */
 
 import { prepareContextFiles } from './context-files';
+import { backendInfo } from './log';
 import type { SdkModule, SdkSessionEvent, SdkSessionManager } from './sdk';
 
 /** Arguments the SDK passes into the runtime factory callback. */
@@ -19,6 +20,7 @@ interface RuntimeFactoryArgs {
 // and `SdkModule.AuthStorage.create` returns `unknown`, so a narrower type here would lie.
 export function createRuntimeFactory(sdk: SdkModule, authStorage: unknown, _startupCwd: string) {
   return async ({ cwd, agentDir, sessionManager, sessionStartEvent }: RuntimeFactoryArgs) => {
+    const startedAt = performance.now();
     // `SdkModule.createAgentSessionServices` returns `Promise<unknown>`; the
     // `Record<string, unknown>` narrowing is the minimal spread/assignment-compatible
     // shape required to forward `services` into `createAgentSessionFromServices`.
@@ -36,6 +38,7 @@ export function createRuntimeFactory(sdk: SdkModule, authStorage: unknown, _star
         }),
       },
     })) as Record<string, unknown>;
+    const servicesReadyAt = performance.now();
 
     // `SdkModule.createAgentSessionFromServices` returns `Promise<unknown>`; cast to
     // `Record<string, unknown>` only so the result can be spread below. No tighter
@@ -45,6 +48,13 @@ export function createRuntimeFactory(sdk: SdkModule, authStorage: unknown, _star
       sessionManager,
       sessionStartEvent,
     })) as Record<string, unknown>;
+    const completedAt = performance.now();
+    backendInfo('backend-session-startup', 'runtime.created', {
+      cwd,
+      servicesMs: Math.round(servicesReadyAt - startedAt),
+      sessionMs: Math.round(completedAt - servicesReadyAt),
+      totalMs: Math.round(completedAt - startedAt),
+    });
 
     return {
       ...created,

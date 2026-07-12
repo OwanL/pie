@@ -7,6 +7,9 @@
 - `session.create` and `session.open` carry a `selectionToken`.
 - `session.opened` may only activate a tab when its `selectionToken` still owns selection.
 - Stale `session.opened` payloads may refresh cached data, but they must not steal focus.
+- A superseded selection request retains responsibility for operation cleanup,
+  but its timeout/rejection is silent: only the current selection owner may
+  replace the global notice or choose a fallback tab.
 
 ## Session Routing
 
@@ -35,9 +38,15 @@
 - A full snapshot contains the currently loaded transcript window (`transcript`) plus explicit window metadata (`transcriptWindow`), not necessarily the entire historical transcript.
 - State-envelope revisions are global and advance on each full snapshot; they continue to detect host-instance counter resets in combination with `hostInstanceId`.
 - Every envelope carries `protocolVersion` matching `WEBVIEW_PROTOCOL_VERSION`.
+- A `stateApplied` acknowledgement is semantic, not revision-only: the host
+  compares its expected transcript-tail/activity signature with the signature
+  committed into the webview DOM. A stale visible transcript cannot clear the
+  watchdog merely because the renderer processed the envelope; it remains
+  dirty and follows the bounded resnapshot/force-reload recovery path.
 - Transport is snapshots-only. Full snapshots carry the complete ViewState. When the view is hidden or not ready, the host marks globalDirty; the next flush emits a full snapshot.
 - When visibility returns, the next host-to-webview sync is a full snapshot.
 - The webview clears overlay/transient UI when the host instance changes or the active session changes.
+- Streaming tool-call arguments are host-owned transcript state (`ChatMessage.draftingToolCall`). The backend forwards provider `toolcall_start`/`toolcall_delta` events, the host accumulates their raw argument text, and snapshots expose that transient draft so the activity indicator can name the tool and estimate drafted tokens. The authoritative `message.finished` replacement removes the draft before execution state takes over.
 - A busy `session.opened` refresh may update tab/session metadata, but it must not discard in-memory optimistic or streaming transcript state that is newer than the backend snapshot.
 - **Watchdog force-reload escalation while streaming is bounded, not indefinite.** The `StateAppliedWatchdog` first does revision-gated **resnapshots** (re-post the dirty snapshot) on missed acks — up to `RESNAPSHOT_MAX_RETRIES` retries, each re-arming the watchdog for the freshly-posted revision. This runs regardless of running count and is the self-healing path for a slow-but-functional webview (its acks reset the retry budget). Only after the resnapshot budget is exhausted does the watchdog escalate to a **force-reload**, and that escalation is now permitted *even while `runningCount > 0`* — previously the force-reload was suppressed *indefinitely* while any session was running, which trapped a hung renderer for the entire turn (the "transcript frozen until I reload the panel" symptom: the host keeps posting, the webview never renders, nothing short of a manual panel reload recovered it). A mid-stream reload does discard transient streaming state and can flash the "old + new at once" frame, but a bounded, throttled reload (`STATE_APPLIED_RELOAD_LIMIT` per `STATE_APPLIED_RELOAD_WINDOW_MS`) is strictly better than a freeze that lasts the whole turn. Do not raise `RESNAPSHOT_MAX_RETRIES` so high that a genuinely-hung renderer takes too long to recover, or lower it so far that a slow-but-functional webview gets reloaded mid-stream. Lowering streaming debounce (Brief G-enabled) and making webview revision/length-identity guards total remain the correct levers for the slow-but-functional case; the watchdog owns the genuinely-hung case.
 - **A stale `webviewReady=false` belief self-heals via `WebviewReadinessProbe`.** `canPostSnapshotToView()` gates posting on `hasView && webviewReady`, and `webviewReady` is the host's *belief*: it flips `false` on every webview reload (asset-version mismatch, hot reload, watchdog force-reload) and is restored only by an inbound `ready`/`refreshState` reaching the readiness setter. If that handshake does not restore it (a lost `ready`, or an asset-version reload loop whose handshake is consumed by the mismatch branch before the setter), the host marks `globalDirty` and posts nothing indefinitely — the agent advances host-side while the webview freezes on its last frame, recovered only when the user refocuses. The probe breaks that stall: while the view exists, readiness is believed false, and state is dirty, it periodically pushes the pending snapshot directly and adopts `postMessage`'s `delivered=true` as the readiness signal. Bounded by `READINESS_PROBE_MAX_ATTEMPTS`; a genuinely-unresponsive webview is left to the watchdog force-reload / visibility transitions. The probe's reload-skip is time-bounded: it bails for the first few ticks of a genuine reload (don't post to a renderer being replaced) but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale (a reload loop whose every `ready` is consumed by the asset-mismatch branch, or a lost `ready` from a renderer that never finished loading), force-clears it, and probes — otherwise the bail would trap the probe forever (`attempts` never increments on a reloading-skip) and, with the watchdog force-reload throttled rather than suppressed while streaming, leave the webview stuck for the throttle window until the probe self-healed it.
@@ -52,6 +61,25 @@
 - The EffectRunner routes session-scoped RPC effects through `enqueueLifecycle → enqueueSessionOperation(sessionPath, ...)` to guarantee FIFO ordering with respect to other session operations.
 - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle(...)` directly (no inner session queue).
 - Non-session effects (`PersistTabs`, `Log`) execute directly without queueing.
+- Backend stdout has separate ordered control and event lanes. Correlated RPC
+  responses drain ahead of queued stream events (FIFO within each lane), while
+  event/event order and the active OS write are never preempted. This prevents
+  bulk tool/stream output from starving lifecycle and persistence RPCs.
+- Concurrent cold opens/preloads for the same session share one in-flight
+  runtime creation. Slow SDK service initialization cannot build and replace
+  duplicate contexts for a single session path.
+- A retry that exceeds the backend's existing delay-plus-grace watchdog is
+  terminalized automatically: all exposed billable windows are aborted, SDK
+  teardown gets a bounded five-second grace, and the backend emits an
+  interrupted message plus `busy=false`. `RETRY_STUCK` is therefore a terminal
+  recovery event, never a warning that leaves the session busy indefinitely.
+
+## Queued Follow-up Liveness
+
+- A send accepted while its session is already running is tracked host-side in `pending.queuedDwellBySession[sessionPath]` by immutable `localId`, with `enqueuedAt`, `watchdogFired`, and `abandoned` state. The reducer arms one `StartQueuedDwellWatchdog` effect per queued message; delivery, rollback, interrupt, queue clearing, session cleanup, and backend restart cancel/remove that state.
+- The dwell watchdog is informational and never interrupts productive work automatically. When its hard threshold fires, the reducer marks only the matching entry actionable and projects the active session's entries as `ViewState.queuedDwell`.
+- The webview's queued-dwell banner is passive over host state. **Stop current turn** uses the existing interrupt barrier, **Remove queued** uses the existing queue-clear operation, and **Keep waiting** posts `rearmQueuedDwellWatchdog`; the host resets `watchdogFired` and starts a fresh bounded watchdog. The webview must not hide or re-arm the warning using local component state.
+- A late watchdog event for a delivered, abandoned, or removed `localId` is a no-op. Re-arming a missing/abandoned entry is also a no-op, so stale UI actions cannot revive terminal queue state.
 
 ## Reducer Purity
 

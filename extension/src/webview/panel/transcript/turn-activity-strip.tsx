@@ -8,6 +8,7 @@ export type TurnActivityStripTone = 'neutral' | 'accent' | 'warning' | 'error' |
 export type TurnActivityPhase =
   | 'streaming'
   | 'thinking'
+  | 'draftingTool'
   | 'runningTool'
   | 'preparing'
   | 'pruning'
@@ -41,6 +42,7 @@ export function activityToneToStripTone(
 export function activityPhaseHasRunningDot(phase: TurnActivityPhase): boolean {
   return phase === 'streaming'
     || phase === 'thinking'
+    || phase === 'draftingTool'
     || phase === 'runningTool'
     || phase === 'startingModel';
 }

@@ -462,6 +462,7 @@ test('stateApplied telemetry samples DOM after render commit', async () => {
   assert.equal(applied.payload.transcriptLoaded, true);
   assert.equal(applied.payload.domTranscriptLoaderPresent, false);
   assert.equal(applied.payload.domTabsConnectingPresent, false);
+  assert.equal(applied.payload.domRenderSignature, applied.payload.renderSignature);
 });
 
 test('sendRejected.inputs restores composer attachments immediately (inputsRestore override) and the next state snapshot confirms', () => {

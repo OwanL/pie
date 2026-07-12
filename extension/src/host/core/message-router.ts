@@ -112,6 +112,8 @@ export class MessageRouter {
         return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>);
       case 'clearQueue':
         return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>);
+      case 'rearmQueuedDwellWatchdog':
+        return this.onRearmQueuedDwellWatchdog(msg as Extract<WebviewToHostMessage, { type: 'rearmQueuedDwellWatchdog' }>);
 
       case 'openFilePicker':
         return await this.onOpenFilePicker();
@@ -385,6 +387,20 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'ClearQueue', corrId, sessionPath },
+    });
+  }
+
+  private onRearmQueuedDwellWatchdog(msg: Extract<WebviewToHostMessage, { type: 'rearmQueuedDwellWatchdog' }>): void {
+    const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
+    const localId = typeof msg.localId === 'string' ? msg.localId : null;
+    if (!sessionPath || !localId) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: rearmQueuedDwellWatchdog arrived without a sessionPath or localId.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'RearmQueuedDwellWatchdog', corrId, sessionPath, localId },
     });
   }
 

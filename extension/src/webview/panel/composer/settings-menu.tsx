@@ -150,7 +150,7 @@ const APPEARANCE_SETTING_LABELS = [
   'Base text size', 'Composer text size', 'Expanded section text size',
   'Sans-serif font', 'Monospace font',
 ];
-const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Acquire timeout', 'Fast path'];
+const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Fast path'];
 const PROVIDER_CONCURRENCY_LABELS = [
   'Max concurrent', 'Afterburn', 'Queue wait', 'Header wait',
 ];
@@ -160,8 +160,9 @@ const SKILL_PRUNER_SETTING_LABELS = [
   'Omitted tools (never pruned)',
 ];
 const SUBAGENT_SETTING_LABELS = [
-  'Subagent dropped tools', 'Subagent model buckets', 'Subagent nesting levels',
-  'Subagent tree session budget', 'Subagent max in-flight',
+  'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
+  'Subagent collapsed preview rows', 'Subagent nesting levels',
+  'Subagent tree session budget', 'Subagent max active trees',
   'Subagent max concurrency', 'Subagent max parallel tasks',
 ];
 const TOOL_RESULT_PRUNER_SETTING_LABELS = [

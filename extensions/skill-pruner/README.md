@@ -35,7 +35,7 @@ Add a `pruning` block to `settings.json`:
       "transportBackoffBaseMs": 1000,
       "oauthRaceBackoffMs": 1500
     },
-    "autoSkipBelowTokens": null,
+    "autoSkipBelowTokens": 1200,
     "skills": {
       "strategy": "discretion",
       "ceiling": 8,
@@ -62,7 +62,7 @@ Add a `pruning` block to `settings.json`:
 | `provider` | `"github-copilot"` | Provider for the scoring model |
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
 | `prepass` | _(built-in defaults)_ | Output, timeout, and manual retry budgets for the LLM prepass call; see [Prepass options](#prepass-options) |
-| `autoSkipBelowTokens` | `null` | When set to a positive integer, skip the LLM and keep all if the assembled prepass input (pruning system prompt + candidate user message) estimates below this threshold. Disabled by default |
+| `autoSkipBelowTokens` | `1200` | Skip the LLM and keep all when the assembled prepass input (system prompt plus candidates) is below this estimate. Set `null` to disable |
 
 ### Skills options
 
@@ -94,7 +94,7 @@ Tunable knobs for the LLM prepass call itself (timeouts + retry budgets). Every 
 | `transportBackoffBaseMs` | `1000` | Base (ms) for the exponential backoff between transport retries (`base * 2**(attempt-1)`). `0` retries immediately |
 | `oauthRaceBackoffMs` | `1500` | Backoff (ms) for the github-copilot OAuth-token race in `resolveAuth` (the prepass runs before the main agent's first call triggers the lazy OAuth refresh). `0` skips the re-resolve |
 
-The latest successful parse-valid result is cached per session for 30 minutes. It is reused only when the catalog/config/context fingerprint is unchanged and the next prompt is identical or is an explicit continuation/retry phrase such as `continue`, `go ahead`, `retry`, or `fix this`. Cache hits still apply selection, emit feedback and analytics, and are marked `cached`; arbitrary short prompts are never reused.
+The latest successful parse-valid result is cached per session for 30 minutes. It is reused only when the catalog/config/context fingerprint is unchanged and the next prompt is identical or is an explicit continuation/retry phrase such as `continue`, `go ahead`, `retry`, or `fix this`. Cache hits still apply selection, emit feedback and analytics, and are marked `cached`; arbitrary short prompts are never reused. A second, bounded LRU cache (max 64 entries) additionally reuses a prior session's decision across sessions, but only on an **exact** prompt + fingerprint match (whitespace-normalized) — never on continuation prompts, which are context-dependent. The per-session cache is consulted first (it owns continuation semantics); a cross-session hit is promoted to the per-session cache so this session's later continuations still reuse it.
 
 Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`, which emit encrypted reasoning tokens before the prune-list JSON):
 
@@ -126,4 +126,4 @@ A `pruning-result` custom message is rendered in the transcript showing what was
 ## Recovery
 
 - **Skills**: Use `/skill:name` on the next turn to explicitly include a skill
-- **Tools**: Call `request_tool({ toolName: "web_search" })` to re-enable a pruned tool for the remainder of the session (the recovery is logged to `data/pruning.jsonl`)
+- **Tools**: Call `request_tool({})` to list pruned tools, then `request_tool({ toolName: "<exact-tool-name>" })` to re-enable one for the remainder of the session; the recovery is logged to `data/pruning.jsonl`.

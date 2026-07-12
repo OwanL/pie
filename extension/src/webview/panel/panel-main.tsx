@@ -41,6 +41,7 @@ export interface PanelMainProps {
   openTabPaths: ViewState['openTabPaths'];
   /** Wired to the agent-reply pruning chip's Cancel button (Brief F). */
   onCancelPrepass: () => void;
+  renderSignature: string;
 }
 
 // Transcript rendering pulls in markdown sanitizing, syntax grammars, YAML,
@@ -80,6 +81,7 @@ export const PanelMain = memo(function PanelMain({
   workspaceCwd,
   openTabPaths,
   onCancelPrepass,
+  renderSignature,
 }: PanelMainProps) {
   return (
     <div class="panel-main">
@@ -138,6 +140,7 @@ export const PanelMain = memo(function PanelMain({
           onContextMenu={handlers.handleOpenContextMenu}
           postMessage={postMessage}
           onCancelPrepass={onCancelPrepass}
+          renderSignature={renderSignature}
         />
         </Suspense>
       )}

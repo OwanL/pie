@@ -5,6 +5,7 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  MessageToolCallDeltaPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
   RetryStartedPayload,
@@ -104,6 +105,10 @@ function armWillRetryWatchdog(
       graceMs: grace,
       requestId: context.activeRequest?.id,
     });
+    deps.recoverStuckSession?.(
+      context,
+      `The provider retry made no progress for ${windowMs}ms and was stopped automatically.`,
+    );
   }, windowMs);
   return () => {
     if (context.willRetryWatchdogTimer) {
@@ -183,7 +188,7 @@ function toolFailureText(result: unknown): string | undefined {
 
 function sanitizeFailureText(value: string): string {
   return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
     .replace(/\b(api[_-]?key|authorization|password|passwd|secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[redacted]')
     .replace(/\s+/g, ' ')
     .trim()
@@ -274,6 +279,8 @@ export interface BackendSessionEventHandlerDeps {
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void>;
   emitSessionListChanged(): Promise<void>;
+  /** Force a retry-stuck session to a terminal idle state. */
+  recoverStuckSession?(context: SessionContext, reason: string): void;
 }
 
 export function handleSdkSessionEvent(
@@ -387,6 +394,24 @@ export function handleSdkSessionEvent(
             messageId: context.activeRequest.currentMessageId,
             thinking: thinkingContent,
           } satisfies MessageThinkingPayload);
+        }
+      }
+
+      const toolCallEvent = event.assistantMessageEvent;
+      if (toolCallEvent?.type === 'toolcall_start' || toolCallEvent?.type === 'toolcall_delta') {
+        const contentIndex = toolCallEvent.contentIndex;
+        const content = contentIndex === undefined
+          ? undefined
+          : toolCallEvent.partial?.content?.[contentIndex];
+        if (content?.type === 'toolCall' && content.id && content.name) {
+          deps.emit('message.toolCallDelta', {
+            requestId: context.activeRequest.id,
+            sessionPath: context.sessionPath,
+            messageId: context.activeRequest.currentMessageId,
+            toolCallId: content.id,
+            name: content.name,
+            delta: toolCallEvent.type === 'toolcall_delta' ? toolCallEvent.delta ?? '' : '',
+          } satisfies MessageToolCallDeltaPayload);
         }
       }
 

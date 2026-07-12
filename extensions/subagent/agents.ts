@@ -130,7 +130,13 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 		}
 
 		const tools = parseToolsList(frontmatter.tools);
-		const canSpawn = parseToolsList(frontmatter.canSpawn);
+		// `canSpawn` is an allowlist, so presence matters independently of
+		// length: an explicit `canSpawn: []` means this is a leaf agent and must
+		// block every nested delegation. Collapsing [] to undefined would widen
+		// that policy to unrestricted.
+		const canSpawn = frontmatter.canSpawn === undefined
+			? undefined
+			: (parseToolsList(frontmatter.canSpawn) ?? []);
 
 		const { bucket, thinkingLevel } = parseBucketAndThinking(frontmatter.bucket, frontmatter.thinkingLevel);
 
@@ -141,7 +147,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			model: frontmatter.model,
 			bucket,
 			thinkingLevel,
-			canSpawn: canSpawn && canSpawn.length > 0 ? canSpawn : undefined,
+			canSpawn,
 			systemPrompt: body,
 			source,
 			filePath,

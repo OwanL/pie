@@ -32,18 +32,21 @@ interface EventHandlerHarness {
   emits: Array<{ event: string; payload?: unknown }>;
   busyEvents: boolean[];
   context: SessionContext;
+  recoveries: string[];
   deps: {
     emit: (event: string, payload?: unknown) => void;
     emitBusyChanged: (context: SessionContext, busy: boolean) => void;
     emitContextUsageChanged: (context: SessionContext) => void;
     emitSessionOpened: (sessionPath: string, selectionToken?: string) => Promise<void>;
     emitSessionListChanged: () => Promise<void>;
+    recoverStuckSession: (context: SessionContext, reason: string) => void;
   };
 }
 
 function createHarness(): EventHandlerHarness {
   const emits: Array<{ event: string; payload?: unknown }> = [];
   const busyEvents: boolean[] = [];
+  const recoveries: string[] = [];
   const context: SessionContext = {
     runtime: {} as SessionContext['runtime'],
     session: { isStreaming: true, model: { id: 'model-a' } } as SessionContext['session'],
@@ -57,12 +60,18 @@ function createHarness(): EventHandlerHarness {
     emits,
     busyEvents,
     context,
+    recoveries,
     deps: {
       emit: (event, payload) => { emits.push({ event, payload }); },
       emitBusyChanged: (_ctx, busy) => { busyEvents.push(busy); },
       emitContextUsageChanged: () => {},
       emitSessionOpened: async () => {},
       emitSessionListChanged: async () => {},
+      recoverStuckSession: (ctx, reason) => {
+        recoveries.push(reason);
+        ctx.activeRequest = undefined;
+        busyEvents.push(false);
+      },
     },
   };
 }
@@ -120,10 +129,9 @@ test('Bug 6: an `agent_end willRetry:true` that is never followed by a retry tur
   // Phase 2 fix: the watchdog fires after the grace window elapses.
   await sleep(120);
 
-  // activeRequest is STILL set (the watchdog only emits a notice — it does not
-  // force-clear activeRequest, because the retry might still complete late).
-  // The key fix is OBSERVABILITY: the user now sees a retry.stuck notice.
-  assert.equal(h.context.activeRequest?.id, 'req-willretry', 'activeRequest still set (watchdog emits notice, does not force-clear)');
+  assert.equal(h.context.activeRequest, undefined, 'stuck retry is terminalized instead of remaining busy forever');
+  assert.equal(h.busyEvents.at(-1), false, 'stuck retry recovery leaves the session idle');
+  assert.equal(h.recoveries.length, 1, 'recovery runs exactly once');
 
   const operationalErrors = h.emits.filter((e) => e.event === 'operational-error');
   const retryStuck = h.emits.filter((e) => e.event === 'retry.stuck');

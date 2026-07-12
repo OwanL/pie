@@ -109,11 +109,12 @@ function config(overrides: Partial<PruningConfig["skills"]> = {}, mode: PruningC
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
+type BeforeAgentStartReturn = { systemPrompt?: string; message?: any } | undefined;
+
 type RegisterResult = {
 	handlers: Map<string, Handler>;
 	registeredTools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
 	registeredRenderers: Map<string, (...args: any[]) => any>;
-	sentMessages: any[];
 };
 
 function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync(path.join(tmpdir(), "skill-pruner-modelsurface-")), "pruning.jsonl")): RegisterResult {
@@ -125,7 +126,6 @@ function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync
 	const handlers = new Map<string, Handler>();
 	const registeredTools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }> = new Map();
 	const registeredRenderers = new Map<string, (...args: any[]) => any>();
-	const sentMessages: any[] = [];
 	const pi = {
 		on(eventName: string, handler: Handler) { handlers.set(eventName, handler); },
 		registerMessageRenderer(customType: string, renderer: any) { registeredRenderers.set(customType, renderer); },
@@ -135,17 +135,16 @@ function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync
 		getAllTools: () => [] as ToolInfo[],
 		getActiveTools: () => [] as string[],
 		setActiveTools: (_names: string[]) => {},
-		sendMessage: (message: any) => { sentMessages.push(message); },
 	} as unknown as ExtensionAPI;
 	skillPruner(pi);
-	return { handlers, registeredTools, registeredRenderers, sentMessages };
+	return { handlers, registeredTools, registeredRenderers };
 }
 
 function systemPrompt(skills: Skill[]): string {
 	return `Base prompt.${testFormatSkillsForPrompt(skills)}\nCurrent date: 2026-05-16`;
 }
 
-async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string) {
+async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: string, skills: Skill[], overrideSystemPrompt?: string): Promise<BeforeAgentStartReturn> {
 	const handler = handlers.get("before_agent_start");
 	assert.ok(handler, "before_agent_start handler registered");
 	return await handler({
@@ -153,7 +152,7 @@ async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: strin
 		prompt,
 		systemPrompt: overrideSystemPrompt ?? systemPrompt(skills),
 		systemPromptOptions: { cwd: "/repo", skills, contextFiles: [{ path: "AGENTS.md", content: "Project context" }] },
-	}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-1" } });
+	}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-1" } }) as BeforeAgentStartReturn;
 }
 
 /** Create a mock LLM completion function that returns a fixed prune-list response. */
@@ -188,7 +187,7 @@ test("model prunes only unknown skill names → keeps all skills, no deviation r
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["nonexistent-skill"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -196,7 +195,8 @@ test("model prunes only unknown skill names → keeps all skills, no deviation r
 		assert.match(result.systemPrompt, /<name>frontend-design<\/name>/);
 
 		// Unknown prunes are silently ignored (nothing real to remove); not a deviation.
-		assert.equal(result?.message?.details?.prepassSafeguardReason, undefined);
+		const feedback = result?.message;
+		assert.equal(feedback?.details?.prepassSafeguardReason, undefined);
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -212,12 +212,13 @@ test("model prunes only unknown tool names → keeps all tools, no deviation rea
 			setActiveTools: () => {},
 		});
 
-		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 
 		const details = result?.message?.details;
 		assert.deepEqual(details.includedTools.sort(), allToolNames.slice().sort());
 		assert.equal(details.excludedTools.length, 0);
 		assert.equal(details.prepassSafeguardReason, undefined);
+		assert.ok(result?.message, "handler should return the feedback message");
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
@@ -228,7 +229,7 @@ test("model prunes every skill → fail-open keeps all skills and reports reason
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["code-simplification", "duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		// Pruning 100% of skills is almost always a misunderstanding → fail-open.
@@ -236,7 +237,7 @@ test("model prunes every skill → fail-open keeps all skills and reports reason
 		assert.match(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
 		assert.match(result.systemPrompt, /<name>frontend-design<\/name>/);
 
-		const details = result.message.details;
+		const details = result?.message?.details;
 		assert.ok(details.prepassSafeguardReason, "prepassSafeguardReason should be populated when pruning was overridden");
 		assert.ok(String(details.prepassSafeguardReason).includes("skill"), "reason should mention skills");
 	} finally {
@@ -254,13 +255,14 @@ test("model prunes every tool → fail-open keeps all tools and reports reason",
 			setActiveTools: () => {},
 		});
 
-		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 
 		const details = result?.message?.details;
 		assert.deepEqual(details.includedTools.sort(), allToolNames.slice().sort());
 		assert.equal(details.excludedTools.length, 0);
 		assert.ok(details.prepassSafeguardReason, "prepassSafeguardReason should be populated when pruning was overridden");
 		assert.ok(String(details.prepassSafeguardReason).includes("tool"), "reason should mention tools");
+		assert.ok(result?.message, "handler should return the feedback message");
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
@@ -271,13 +273,14 @@ test("model prunes a mix of known and unknown → known pruned, unknown ignored,
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "nonexistent-skill"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
 
-		assert.equal(result?.message?.details?.prepassSafeguardReason, undefined);
+		const feedback = result?.message;
+		assert.equal(feedback?.details?.prepassSafeguardReason, undefined);
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -332,13 +335,14 @@ test("model prunes a subset of skills → the rest are kept, no fail-open", asyn
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config({ ceiling: 5 }));
-		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>frontend-design<\/name>/);
-		assert.equal(result?.message?.details?.prepassSafeguardReason, undefined);
+		const feedback = result?.message;
+		assert.equal(feedback?.details?.prepassSafeguardReason, undefined);
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -348,7 +352,7 @@ test("pinned skill protected even when the model prunes it", async () => {
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["code-simplification", "frontend-design"] }));
 	try {
 		const { handlers } = register(config({ pinned: ["code-simplification"] }));
-		const result = await runBeforeAgentStart(handlers, "query optimization", realisticSkills) as { systemPrompt?: string } | undefined;
+		const result = await runBeforeAgentStart(handlers, "query optimization", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -393,7 +397,7 @@ test("model prunes tools but no tools config exists → tool intent silently dis
 			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
 		});
 
-		const result = await runBeforeAgentStart(handlers, "edit and run", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "edit and run", realisticSkills);
 
 		assert.ok(result?.systemPrompt);
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
@@ -439,13 +443,14 @@ test("shadow mode: model intent measured but not applied → feedback still repo
 		});
 
 		const originalPrompt = systemPrompt(realisticSkills);
-		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills, originalPrompt) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills, originalPrompt);
 
 		assert.equal(result?.systemPrompt, originalPrompt);
 		assert.equal(setActiveToolsCalls.length, 0);
 
-		assert.ok(result?.message);
-		const details = result.message.details;
+		const feedback = result?.message;
+		assert.ok(feedback);
+		const details = feedback.details;
 		assert.deepEqual(details.includedSkills, ["code-simplification"]);
 		assert.deepEqual(details.excludedSkills, ["duckdb-query-optimization", "frontend-design"]);
 		// read is a dep of kept edit -> protected; bash is a dep of pruned subagent -> pruned.
@@ -461,11 +466,13 @@ test("fail-open reason is absent when model intent is honored exactly", async ()
 	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
 	try {
 		const { handlers } = register(config());
-		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills);
 
-		assert.ok(result?.message);
-		const details = result.message.details;
+		const feedback = result?.message;
+		assert.ok(feedback);
+		const details = feedback.details;
 		assert.equal(details.prepassSafeguardReason, undefined, "no fail-open reason when model intent is honored");
+		assert.ok(result?.message, "handler should return the feedback message");
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -476,7 +483,7 @@ test("non-JSON prose response → kept all, prepassSafeguardReason notes parse f
 	__setCompleteFn(async () => ({ text: "I think code-simplification and read would both be useful here." }));
 	try {
 		const { handlers } = register(config(), logPath);
-		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills) as { systemPrompt?: string; message?: any } | undefined;
+		const result = await runBeforeAgentStart(handlers, "refactor", realisticSkills);
 
 		// Parse failure → keep-all (safe default); no names scraped out of prose.
 		assert.ok(result?.systemPrompt);

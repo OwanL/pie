@@ -34,6 +34,8 @@ Lossless ⇒ semantically identical, fewer bytes ⇒ **no recall stash needed**.
 | `ls-long` | `ls -l`/`-la` → names + `/` dir marker (drops perms/owner/size/time; keeps ` -> target` for symlinks) |
 | `git-log` | verbose `git log` → oneline + 7-char hash (drops author/date/body) |
 | `grep-group` | grep/rg `path:line:content` → group by path (each path printed once, matches indented); drops the repeated path prefix on every match line |
+| `duplicate-collapse` | Collapse 3+ identical consecutive non-severity lines to one + count marker (builds, pings, polls) |
+| `progress-noise` | Drop spinner / progress-bar frames (Braille blocks, block glyphs, bracketed `%` bars); keeps severity lines |
 
 Lossy ⇒ information is dropped, so a **recall stash is required** before the
 rewrite may enter history (§7.3): the pre-pruning text is written to a temp
@@ -42,15 +44,17 @@ and `details.pruning = { id, rawPath, rules }` records the contract. The agent
 recovers the raw by pointing the existing `read` tool at `rawPath` (the whole
 pipeline skips `read`, so recall is faithful).
 
-**Detection is args-as-signal** (§5 principle 2): lossy rules gate on the
-tool-call args (`input.command` for bash), not output shape, so they never
-mis-fire on other tabular output. `git log -p`/`--stat`/`--name-only`/… are
-**not** pruned — the agent explicitly requested diff content there, and
-dropping it would be tier-3 (silently lossy) territory. `grep-group` is the
-one hybrid rule: it args-gates on a grep-family invocation (rg/grep/git grep)
-**and** shape-confirms a strong majority of lines are `path:line:content` with
-a pathy first field (so arbitrary `word:number:text` tables are never grouped);
-unlike ls/git it allows pipelines (grep's shape survives `| head`, `| sort`).
+**Detection is args-as-signal** (§5 principle 2): `ls-long`, `git-log`, and
+`grep-group` gate on the tool-call args (`input.command` for bash), not output
+shape, so they never mis-fire on other tabular output. `git log
+-p`/`--stat`/`--name-only`/… are **not** pruned — the agent explicitly requested
+diff content there, and dropping it would be tier-3 (silently lossy) territory.
+`grep-group` is hybrid: it args-gates on a grep-family invocation (rg/grep/git
+grep) **and** shape-confirms a strong majority of lines are `path:line:content`
+with a pathy first field; it also groups output from pi's structured `grep`
+tool. `duplicate-collapse` and `progress-noise` are shape-based and run on any
+non-`read` tool output under the `default` profile; both keep severity lines
+and fall back to the original text when the rewrite would not actually shrink it.
 
 **Net-savings gate:** the fidelity marker has a real token cost (the recall
 path — ~15 tokens on Linux, ~30+ on Windows long-temp-path platforms). A lossy
@@ -124,7 +128,7 @@ The extension can also be turned off via the global toggle env var
 - `types.ts` — `ToolResultPruningConfig`, `Rule`, `RuleContext`, `Profile`,
   `PruningRecall`, `PruningMeta`.
 - `rules.ts` — the lossless rule implementations (ordered, §7.2).
-- `lossy-rules.ts` — the lossy-recoverable rules (`ls-long`, `git-log`, `grep-group`).
+- `lossy-rules.ts` — the lossy-recoverable rules (`ls-long`, `git-log`, `grep-group`, `duplicate-collapse`, `progress-noise`).
 - `pipeline.ts` — guards + lossless/lossy orchestration (lossy gated on profile
   + toggles; stash/marker delegated to `index.ts`).
 - `tokenize.ts` — BPE token counter (gpt-tokenizer cl100k_base, chars/4 fallback).

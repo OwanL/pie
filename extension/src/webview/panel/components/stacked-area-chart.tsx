@@ -12,9 +12,9 @@ import { colorFor } from './chart-colors';
  *
  * Two modes:
  *  - **`cumulative`** (today's cost / tokens): values grow through the day;
- *    rendered as adjacent stacked step-bars so the silhouette is a staircase
- *    ending at the headline total. A trailing "now" point (appended host-side)
- *    extends the area to the current moment.
+ *    rendered as continuous stacked step areas so the silhouette is a solid
+ *    staircase ending at the headline total. A trailing "now" point (appended
+ *    host-side) extends the area to the current moment.
  *  - **`rate`** (today's throughput / weekly daily cost / daily run count):
  *    per-bucket values rendered as spaced stacked bars.
  *
@@ -102,28 +102,53 @@ export function StackedAreaChart({
     return { ms: p.ms, total: y0, segs };
   });
 
-  const bars: JSX.Element[] = [];
-  for (let i = 0; i < pointSegs.length; i += 1) {
-    const ps = pointSegs[i]!;
-    const x0 = xFor(ps.ms);
-    const nextX = i < pointSegs.length - 1 ? xFor(pointSegs[i + 1]!.ms) : PAD_L + plotW;
-    const bw = mode === 'cumulative'
-      ? Math.max(0.5, nextX - x0)
-      : Math.min(16, (plotW / Math.max(1, pointSegs.length)) * 0.7);
-    const bx = mode === 'cumulative' ? x0 : x0 - bw / 2;
-    const dim = hoverIdx !== null && hoverIdx !== i;
-    for (const seg of ps.segs) {
-      if (seg.y1 - seg.y0 <= 0) continue;
-      bars.push(
-        <rect
-          x={bx}
-          y={yFor(seg.y1)}
-          width={bw}
-          height={yFor(seg.y0) - yFor(seg.y1)}
-          fill={colorFor(seg.provider)}
-          opacity={dim ? 0.4 : 0.92}
-        />,
-      );
+  const marks: JSX.Element[] = [];
+  if (mode === 'cumulative') {
+    // One path per provider avoids hairline seams between adjacent SVG rects.
+    // Trace the stepped upper boundary forward, then the lower boundary back.
+    for (let providerIdx = 0; providerIdx < model.providers.length; providerIdx += 1) {
+      const provider = model.providers[providerIdx]!;
+      const nonEmpty = pointSegs.some((p) => p.segs[providerIdx]!.y1 > p.segs[providerIdx]!.y0);
+      if (!nonEmpty) continue;
+
+      const first = pointSegs[0]!.segs[providerIdx]!;
+      let d = `M ${xFor(pointSegs[0]!.ms)} ${yFor(first.y1)}`;
+      for (let i = 0; i < pointSegs.length; i += 1) {
+        const edgeX = i < pointSegs.length - 1
+          ? xFor(pointSegs[i + 1]!.ms)
+          : PAD_L + plotW;
+        d += ` H ${edgeX}`;
+        if (i < pointSegs.length - 1) d += ` V ${yFor(pointSegs[i + 1]!.segs[providerIdx]!.y1)}`;
+      }
+      const last = pointSegs[pointSegs.length - 1]!.segs[providerIdx]!;
+      d += ` L ${PAD_L + plotW} ${yFor(last.y0)}`;
+      for (let i = pointSegs.length - 1; i >= 0; i -= 1) {
+        const x = xFor(pointSegs[i]!.ms);
+        d += ` H ${x}`;
+        if (i > 0) d += ` V ${yFor(pointSegs[i - 1]!.segs[providerIdx]!.y0)}`;
+      }
+      d += ' Z';
+      marks.push(<path key={provider} d={d} fill={colorFor(provider)} opacity="0.92" />);
+    }
+  } else {
+    for (let i = 0; i < pointSegs.length; i += 1) {
+      const ps = pointSegs[i]!;
+      const x = xFor(ps.ms);
+      const bw = Math.min(16, (plotW / Math.max(1, pointSegs.length)) * 0.7);
+      const dim = hoverIdx !== null && hoverIdx !== i;
+      for (const seg of ps.segs) {
+        if (seg.y1 - seg.y0 <= 0) continue;
+        marks.push(
+          <rect
+            x={x - bw / 2}
+            y={yFor(seg.y1)}
+            width={bw}
+            height={yFor(seg.y0) - yFor(seg.y1)}
+            fill={colorFor(seg.provider)}
+            opacity={dim ? 0.4 : 0.92}
+          />,
+        );
+      }
     }
   }
 
@@ -165,7 +190,7 @@ export function StackedAreaChart({
           stroke-width="0.5"
           stroke-dasharray="2 2"
         />
-        {bars}
+        {marks}
         {hp && (
           <line
             x1={xFor(hp.ms)}

@@ -10,6 +10,7 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  MessageToolCallDeltaPayload,
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
@@ -74,6 +75,23 @@ export function onMessageThinking(payload: MessageThinkingPayload, deps: Handler
     thinking: payload.thinking,
   });
   recordStreamEvent('thinking');
+}
+
+export function onMessageToolCallDelta(payload: MessageToolCallDeltaPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('message.toolCallDelta', payload.sessionPath);
+  if (!sessionPath) {
+    return;
+  }
+
+  deps.dispatchArch({
+    kind: 'MessageToolCallDelta',
+    sessionPath,
+    messageId: payload.messageId,
+    toolCallId: payload.toolCallId,
+    name: payload.name,
+    delta: payload.delta,
+  });
+  recordStreamEvent('delta');
 }
 
 export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDeps): void {

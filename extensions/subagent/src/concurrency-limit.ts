@@ -1,11 +1,12 @@
 /**
- * Process-wide concurrency gate for subagent sessions.
+ * Process-wide concurrency gate for root subagent trees.
  *
  * Multiple `subagent` tool calls in a single parent reply can each spawn their
  * own parallel batches. The per-batch `mapWithConcurrencyLimit` only throttles
- * one `tasks[]` array at a time, so a burst of parallel tool calls can still
- * open many concurrent SDK sessions. This module adds a global in-flight
- * semaphore around every `createAgentSession` call.
+ * one `tasks[]` array at a time, so a burst can still open many independent
+ * trees. Each root child holds one process permit for its complete lifetime;
+ * nested descendants borrow that ancestor scope so recursive delegation cannot
+ * deadlock while every process permit is held by a parent waiting on children.
  */
 
 import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "../types.js";
@@ -32,6 +33,7 @@ export class SemaphoreAbortError extends Error {
 interface Waiter {
 	resolve: (release: Release) => void;
 	reject: (error: unknown) => void;
+	removeAbortListener?: () => void;
 }
 
 /**
@@ -62,7 +64,7 @@ export class Semaphore {
 
 		const capacity = Math.max(0, Math.floor(this.capacityFn()));
 
-		if (this.inFlight < capacity) {
+		if (this.waiters.length === 0 && this.inFlight < capacity) {
 			this.inFlight++;
 			return this.makeRelease();
 		}
@@ -70,14 +72,32 @@ export class Semaphore {
 		return new Promise<Release>((resolve, reject) => {
 			const waiter: Waiter = { resolve, reject };
 			this.waiters.push(waiter);
-			if (!signal) return;
+			if (!signal) {
+				this.drainWaiters();
+				return;
+			}
 			const onAbort = () => {
 				const idx = this.waiters.indexOf(waiter);
-				if (idx >= 0) this.waiters.splice(idx, 1);
+				if (idx < 0) return;
+				this.waiters.splice(idx, 1);
+				waiter.removeAbortListener?.();
 				reject(new SemaphoreAbortError());
 			};
+			waiter.removeAbortListener = () => signal.removeEventListener("abort", onAbort);
 			signal.addEventListener("abort", onAbort, { once: true });
+			this.drainWaiters();
 		});
+	}
+
+	private drainWaiters(): void {
+		const capacity = Math.max(0, Math.floor(this.capacityFn()));
+		while (this.inFlight < capacity) {
+			const next = this.waiters.shift();
+			if (!next) return;
+			next.removeAbortListener?.();
+			this.inFlight++;
+			next.resolve(this.makeRelease());
+		}
 	}
 
 	private makeRelease(): Release {
@@ -86,26 +106,20 @@ export class Semaphore {
 			if (released) return;
 			released = true;
 			this.inFlight = Math.max(0, this.inFlight - 1);
-			const next = this.waiters.shift();
-			if (next) {
-				// Transfer the permit to the next waiter rather than leaving it
-				// free: `inFlight` was just decremented above, so incrementing it
-				// back to its prior value keeps the count correct. The waiter now
-				// owns a fresh `makeRelease()` handle whose own `release()` will
-				// eventually decrement `inFlight` when the caller is done.
-				this.inFlight++;
-				next.resolve(this.makeRelease());
-			}
+			// Fill every newly available slot. This matters when runtime settings
+			// raise capacity while callers are queued: the next acquire/release must
+			// wake the existing FIFO queue rather than letting new callers bypass it.
+			this.drainWaiters();
 		};
 	}
 }
 
-/** Environment key for the global in-flight subagent cap. */
+/** Environment key for the global active root-tree cap. */
 const MAX_INFLIGHT_ENV = "PIE_SUBAGENT_MAX_INFLIGHT";
-/** Default in-flight cap when no override is supplied. */
+/** Default active root-tree cap when no override is supplied. */
 export const DEFAULT_MAX_INFLIGHT = 2;
 
-/** Resolve the global in-flight subagent cap. */
+/** Resolve the global active root-tree cap. */
 export function getMaxInflight(): number {
 	const raw = process.env[MAX_INFLIGHT_ENV];
 	if (raw === undefined || raw === "") return DEFAULT_MAX_INFLIGHT;
@@ -129,5 +143,5 @@ export function getMaxParallelTasks(): number {
 	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : MAX_PARALLEL_TASKS;
 }
 
-/** Process-wide semaphore guarding entry to `createAgentSession`. */
+/** Process-wide semaphore guarding complete root-tree lifetimes. */
 export const inflightSemaphore = new Semaphore(() => getMaxInflight());

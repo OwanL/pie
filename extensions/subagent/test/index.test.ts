@@ -7,7 +7,7 @@
  * modes.test.ts (with a fake SDK). What is NOT covered there — and is unique
  * to `execute()` / `validateSubagentParams()` — is the front-door validation:
  * exactly-one-mode enforcement, unknown-agent detection (with suggestions and
- * the agentScope-keyword guard), the disabled short-circuit, and the
+ * the scope-keyword guard), the disabled short-circuit, and the
  * subagent-depth limit. Those guard-rails are exercised here against the REAL
  * exported functions, with no SDK and no LLM, so every case is sub-ms.
  */
@@ -124,12 +124,12 @@ test("validateSubagentParams: unknown agent in chain carries the 1-based step", 
 	assert.match(v.invalidResults[0].stderr, /Unknown agent.*ghost/);
 });
 
-test("validateSubagentParams: agentScope keyword used as an agent name triggers the scope-keyword error", () => {
+test("validateSubagentParams: scope keyword used as an agent name triggers the scope-keyword error", () => {
 	const v = validateSubagentParams({ agent: "both", task: "do work" } as any, MOCK_AGENTS);
 	assert.equal(v.ok, true);
 	if (!v.ok) return;
 	assert.equal(v.invalidResults.length, 1);
-	assert.match(v.invalidResults[0].stderr, /agentScope value, not an agent name/);
+	assert.match(v.invalidResults[0].stderr, /not an available agent name/);
 });
 
 // ============================================================
@@ -180,22 +180,23 @@ test("execute: depth >= MAX_DEPTH short-circuits with the depth-limit error", as
 test("execute: depth just below MAX_DEPTH passes the depth guard (reaches validation)", async (t) => {
 	// depth = MAX_DEPTH - 1 must NOT trip the guard. Execution proceeds to
 	// discoverAgents + validateSubagentParams; with an unknown agent and no
-	// project agents/ dir, validation fails on the unknown agent — proving we
+	// project agents/ dir, validation throws on the unknown agent — proving we
 	// got past the depth check (an off-by-one like `>` instead of `>=` would
 	// wrongly return the depth-limit message here).
 	const tmpDir = mkdtempSync(path.join(os.tmpdir(), "subagent-depth-allow-"));
 	t.after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
-	const res: any = await subagentRuntime.run({ depth: MAX_DEPTH - 1, trail: [] }, () =>
-		execute(
-			"tc1",
-			{ agent: "definitely-not-an-agent", task: "do work", agentScope: "project" } as any,
-			noSignal(),
-			noOpUpdate,
-			{ cwd: tmpDir } as any,
-			stubPi(),
-			() => false,
+	await assert.rejects(
+		subagentRuntime.run({ depth: MAX_DEPTH - 1, trail: [] }, () =>
+			execute(
+				"tc1",
+				{ agent: "definitely-not-an-agent", task: "do work" } as any,
+				noSignal(),
+				noOpUpdate,
+				{ cwd: tmpDir } as any,
+				stubPi(),
+				() => false,
+			),
 		),
+		/Unknown agent.*definitely-not-an-agent/,
 	);
-	assert.doesNotMatch(res.content[0].text, /depth limit/);
-	assert.match(res.content[0].text, /Unknown agent.*definitely-not-an-agent/);
 });

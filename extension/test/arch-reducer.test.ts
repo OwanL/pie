@@ -725,6 +725,42 @@ test('reducer: MessageThinking resolves alias and appends reasoning', () => {
   assert.equal(result.effects.length, 0);
 });
 
+test('reducer: MessageToolCallDelta accumulates transient tool arguments', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    transcript: {
+      ...initialArchState.transcript,
+      bySession: {
+        '/s': [{ id: 'm1', role: 'assistant' as const, createdAt: '', markdown: '', status: 'streaming' as const, parts: [], toolCalls: [] }],
+      },
+    },
+  };
+
+  const first = reducer(state, {
+    kind: 'MessageToolCallDelta',
+    sessionPath: '/s',
+    messageId: 'm1',
+    toolCallId: 'tool-1',
+    name: 'bash',
+    delta: '{"command":',
+  });
+  const second = reducer(first.state, {
+    kind: 'MessageToolCallDelta',
+    sessionPath: '/s',
+    messageId: 'm1',
+    toolCallId: 'tool-1',
+    name: 'bash',
+    delta: '"npm test"}',
+  });
+
+  const msg = second.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'm1');
+  assert.deepEqual(msg?.draftingToolCall, {
+    id: 'tool-1',
+    name: 'bash',
+    argumentsText: '{"command":"npm test"}',
+  });
+});
+
 test('reducer: ToolCall resolves alias and upserts tool call directly', () => {
   const state: ArchState = {
     ...initialArchState,
@@ -803,7 +839,7 @@ test('reducer: MessageFinished resolves alias and merges into canonical message'
     transcript: {
       ...initialArchState.transcript,
       bySession: {
-        '/s': [{ id: 'canonical-fin', role: 'assistant' as const, createdAt: '', markdown: 'streaming', status: 'streaming' as const, parts: [], toolCalls: [] }],
+        '/s': [{ id: 'canonical-fin', role: 'assistant' as const, createdAt: '', markdown: 'streaming', status: 'streaming' as const, parts: [], toolCalls: [], draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: '{"command":' } }],
       },
       windowBySession: { '/s': { totalCount: 1, loadedStart: 0, loadedEnd: 1, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true } },
     },
@@ -818,6 +854,7 @@ test('reducer: MessageFinished resolves alias and merges into canonical message'
   const canonical = result.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'canonical-fin');
   assert.ok(canonical, 'canonical message should still exist');
   assert.equal(canonical!.status, 'completed');
+  assert.equal(canonical!.draftingToolCall, undefined);
   assert.equal(result.effects.length, 0);
 });
 

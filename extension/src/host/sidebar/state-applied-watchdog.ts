@@ -50,6 +50,7 @@ export interface StateAppliedWatchdogDeps {
 export class StateAppliedWatchdog {
   private stateAppliedTimer?: ReturnType<typeof setTimeout>;
   private pendingStateAppliedRevision: number | null = null;
+  private pendingRenderSignature: string | null = null;
   private pendingStateAppliedArmedAt = 0;
   private lastStateAppliedRevision = -1;
   private lastStateAppliedAt = 0;
@@ -59,7 +60,20 @@ export class StateAppliedWatchdog {
 
   constructor(private readonly deps: StateAppliedWatchdogDeps) {}
 
-  recordStateApplied(revision: number): void {
+  recordStateApplied(revision: number, renderSignature?: string | null): void {
+    if (
+      this.pendingStateAppliedRevision !== null
+      && revision >= this.pendingStateAppliedRevision
+      && this.pendingRenderSignature !== null
+      && renderSignature !== this.pendingRenderSignature
+    ) {
+      appendPieLog('warn', 'sidebar-provider', 'state-applied semantic mismatch', {
+        revision,
+        expectedRenderSignature: this.pendingRenderSignature,
+        actualRenderSignature: renderSignature ?? null,
+      });
+      return;
+    }
     this.lastStateAppliedRevision = Math.max(this.lastStateAppliedRevision, revision);
     this.lastStateAppliedAt = Date.now();
 
@@ -80,14 +94,16 @@ export class StateAppliedWatchdog {
       this.stateAppliedTimer = undefined;
     }
     this.pendingStateAppliedRevision = null;
+    this.pendingRenderSignature = null;
   }
 
-  armStateAppliedWatchdog(revision: number): void {
+  armStateAppliedWatchdog(revision: number, renderSignature?: string): void {
     if (!this.deps.getWebviewReady() || !this.deps.getViewVisible()) {
       return;
     }
 
     this.pendingStateAppliedRevision = revision;
+    this.pendingRenderSignature = renderSignature ?? null;
     this.pendingStateAppliedArmedAt = Date.now();
     if (this.stateAppliedTimer !== undefined) {
       clearTimeout(this.stateAppliedTimer);

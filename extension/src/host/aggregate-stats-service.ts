@@ -27,13 +27,10 @@ import { toErrorMessage } from './util/error-message';
  *
  * ## Refresh model
  *
- * A {@link RECOMPUTE_MS} interval recomputes the disk-backed rollup (cost /
- * tokens / throughput). An mtime fast-path stats the JSONL + checkpoint files
- * and skips the full re-read when nothing has been persisted since the last
- * compute AND no session is currently running — so idle cost is ~two `stat`
- * calls per tick rather than re-parsing the whole run history. While sessions
- * are running, every tick recomputes (so live cost ticks up as turns land and
- * the live-tok/s aggregate stays fresh).
+ * A {@link RECOMPUTE_MS} interval refreshes the rollup. Completed runs are
+ * cached and re-read only when the JSONL/checkpoint mtime signature changes;
+ * current runs come directly from the in-memory tracker each tick. Thus active
+ * sessions stay live without forcing a persistence flush or full-history read.
  *
  * The live `tokensPerSecond` aggregate (sum of running sessions' rates) is read
  * from `TokenRateService.getRates()` each tick — cheap and always current.
@@ -61,6 +58,9 @@ export interface AggregateStatsServiceDeps {
   /** Called when the posted aggregate changed, so the host can schedule a
    *  debounced snapshot post to the webview. */
   onChanged: () => void;
+  /** File-system stat callback used by the cache-mutation detector. Defaults
+   *  to `fs.stat` in production; tests inject a mock to control mtime values. */
+  mtimeFn?: (path: string, cb: (err: NodeJS.ErrnoException | null, stats: { mtimeMs: number }) => void) => void;
 }
 
 /** Recompute interval. Trades responsiveness vs disk read frequency; the mtime
@@ -73,8 +73,10 @@ interface PricingCache {
 }
 
 interface DataSignature {
+  /** Mtime of the completed-run JSONL (the only file completed aggregates
+   *  depend on). The checkpoint (`open-runs.gen`) is deliberately excluded
+   *  so live checkpoint churn never forces a full completed-history reread. */
   snapshotsMtimeMs: number;
-  checkpointMtimeMs: number;
 }
 
 export class AggregateStatsService {
@@ -82,6 +84,7 @@ export class AggregateStatsService {
   private cached: AggregateStats = EMPTY_AGGREGATE_STATS;
   private pricingCache: PricingCache | null = null;
   private lastDataSignature: DataSignature | null = null;
+  private completedRunsCache: RunSnapshot[] = [];
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
   private started = false;
@@ -137,16 +140,20 @@ export class AggregateStatsService {
     const ratesBySession = this.deps.tokenRateService.getRates();
     const nowMs = Date.now();
 
-    // Disk-backed rollup. Skip the JSONL+checkpoint re-read when nothing has
-    // been persisted since the last compute AND nothing is running (a running
-    // session may be mid-turn with un-persisted samples; keep recomputing so
-    // live cost ticks up promptly as turns land).
+    // Refresh completed history only when persistence changed. Open runs are
+    // always sourced below from the tracker, so an active tick never calls the
+    // flush-before-query API or re-parses full history merely because it is active.
     const storageDir = this.deps.statsService.getStorageDir();
     const signature = await this.readDataSignature(storageDir);
-    const dataUnchanged = this.lastDataSignature !== null
+    const completedDataUnchanged = this.lastDataSignature !== null
       && signature !== null
-      && signaturesEqual(this.lastDataSignature, signature)
-      && runningSessionPaths.length === 0;
+      && signaturesEqual(this.lastDataSignature, signature);
+    if (!completedDataUnchanged) {
+      const { completedRuns } = await this.deps.statsService.queryPersistedRunAnalytics();
+      this.completedRunsCache = completedRuns;
+      this.lastDataSignature = signature;
+    }
+    const dataUnchanged = completedDataUnchanged && runningSessionPaths.length === 0;
 
     // Live warm-bash metrics from the backend (in-memory, same-process registry
     // read via RPC). Cheap; polled every tick so ready/warming counts stay
@@ -186,17 +193,10 @@ export class AggregateStatsService {
       };
     } else {
       const pricingMap = this.loadPricingCached();
-      const { completedRuns, openRuns } = await this.deps.statsService.queryRunAnalytics();
-      const runs: RunSnapshot[] = completedRuns;
-      // Open runs (in-flight) are not yet in the JSONL; include them so the
-      // live session's accumulating tokens/cost appear immediately.
-      for (const run of openRuns) {
-        if (run) runs.push(run);
-      }
+      const runs = [...this.completedRunsCache, ...this.deps.statsService.getOpenRuns()];
       next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession, openTabCount);
       next.warmBash = warmBash;
       next.providerGate = providerGate;
-      this.lastDataSignature = signature;
     }
 
     if (!aggregateEqual(this.cached, next)) {
@@ -207,28 +207,35 @@ export class AggregateStatsService {
     }
   }
 
-  /** Stats the JSONL + the checkpoint generation marker. The marker
-   *  (`open-runs.gen`) is rewritten on EVERY checkpoint write regardless of the
-   *  active A/B slot, so its mtime reliably signals an open-runs update (unlike
-   *  a hardcoded `open-runs.a.json`, whose mtime freezes once the slot flips to
-   *  B). Returns null only if the storage dir itself is unreadable. */
+  /** Mtime of the completed-run JSONL. The checkpoint (`open-runs.gen`) is
+   *  deliberately excluded so live checkpoint churn never forces a full
+   *  completed-history reread. Returns null only if the storage dir itself is
+   *  unreadable. */
   private async readDataSignature(storageDir: string): Promise<DataSignature | null> {
     try {
       const snapshotsPath = path.join(storageDir, 'run-snapshots.jsonl');
-      const genPath = path.join(storageDir, 'open-runs.gen');
-      const [snapshotsMtimeMs, checkpointMtimeMs] = await Promise.all([
-        mtimeMs(snapshotsPath),
-        mtimeMs(genPath),
-      ]);
-      // Both absent → treat as an empty store with a stable signature so the
+      const snapshotsMtimeMs = await this.statFile(snapshotsPath);
+      // Absent → treat as an empty store with a stable signature (-1) so the
       // fast-path engages (no point re-reading nothing).
-      return { snapshotsMtimeMs, checkpointMtimeMs };
+      return { snapshotsMtimeMs };
     } catch (error) {
       appendPieLog('debug', 'aggregate-stats', 'data signature read failed; retaining cached signature', {
         error: toErrorMessage(error),
       });
       return null;
     }
+  }
+
+  /** Resolve an `fs.stat` callback — production uses the module's `mtimeMs`,
+   *  tests may override via `deps.mtimeFn`. */
+  private statFile(path: string): Promise<number> {
+    const stat = this.deps.mtimeFn ?? ((p, cb) => mtimeMs(p).then((v) => cb(null, { mtimeMs: v }) as never));
+    return new Promise((resolve) => {
+      stat(path, (err, stats) => {
+        if (err) resolve(-1);
+        else resolve(stats.mtimeMs);
+      });
+    });
   }
 
   /** Load + cache the model pricing map by `models.json` mtime (mirror the
@@ -261,7 +268,8 @@ export class AggregateStatsService {
   }
 }
 
-function mtimeMs(filePath: string): Promise<number> {
+// Re-exported for the default `mtimeFn` fallback in `statFile`.
+export function mtimeMs(filePath: string): Promise<number> {
   return new Promise((resolve) => {
     fs.stat(filePath, (err, stats) => {
       if (err) {
@@ -277,7 +285,7 @@ function mtimeMs(filePath: string): Promise<number> {
 
 function signaturesEqual(a: DataSignature | null, b: DataSignature | null): boolean {
   if (!a || !b) return false;
-  return a.snapshotsMtimeMs === b.snapshotsMtimeMs && a.checkpointMtimeMs === b.checkpointMtimeMs;
+  return a.snapshotsMtimeMs === b.snapshotsMtimeMs;
 }
 
 /** Compact signature for an intraday series so the changed-gate can detect a

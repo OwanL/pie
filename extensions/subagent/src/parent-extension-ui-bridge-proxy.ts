@@ -23,6 +23,7 @@ export interface ParentBridge {
   input(title: string, placeholder?: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<string | undefined>;
   notify(message: string, type?: "info" | "warning" | "error", subagentCallId?: string): void;
   cancelAll(): void;
+  cancelSubagent?(subagentCallId: string): void;
 }
 
 export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
@@ -72,17 +73,20 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
     this.parentBridge.notify(message, type, this.subagentCallId);
   }
 
-  /**
-   * Cancel pending parent-bridge dialog requests. Called when the subagent is
-   * aborted (parent close / timeout) so an in-flight `ask_user` prompt does not
-   * hang — the parent bridge ignores the abort signal, so without this the
-   * pending promise would never settle. Delegates to the parent bridge's
-   * `cancelAll()`, which resolves outstanding requests as cancelled. While a
-   * subagent is running the parent agent loop is blocked awaiting its result,
-   * so the only outstanding parent-bridge requests are subagent-scoped.
-   */
+  /** Cancel only this child call's dialogs. Parallel siblings share the host
+   * bridge, so delegating to cancelAll() would incorrectly dismiss every
+   * sibling when one child times out. Nested proxies forward the innermost id. */
   cancelAll(): void {
-    this.parentBridge.cancelAll();
+    this.cancelSubagent(this.subagentCallId);
+  }
+
+  cancelSubagent(subagentCallId: string): void {
+    if (this.parentBridge.cancelSubagent) {
+      this.parentBridge.cancelSubagent(subagentCallId);
+    } else {
+      // Compatibility with older/non-pie bridge implementations.
+      this.parentBridge.cancelAll();
+    }
   }
 
   // ── TUI methods (no-ops for subagent sessions) ────────────────────────────

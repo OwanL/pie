@@ -4,6 +4,7 @@
 import { memo } from 'preact/compat';
 
 import type { ActiveRunSummary, SessionSummary } from '../../../shared/protocol';
+import { isPendingTabPath } from '../../../shared/tab-behavior';
 import { getSessionTabRunBadge } from './run-state';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 
@@ -63,6 +64,7 @@ export const SessionTab = memo(function SessionTab({
   const isActive = activePath === tabPath;
   const isAttention = !!hasPendingExtensionUIRequest;
   const isRunning = runningPathSet.has(tabPath);
+  const isPreparing = isPendingTabPath(tabPath);
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
@@ -85,9 +87,11 @@ export const SessionTab = memo(function SessionTab({
     : '';
   const title = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
-    : isUnreadFinished
-      ? `${label} (finished, unread)`
-      : label;
+    : isPreparing
+      ? `${label} (preparing in background — you can type or send now)`
+      : isUnreadFinished
+        ? `${label} (finished, unread)`
+        : label;
 
   // A pending deferred trigger blocks closing the tab and marking it done —
   // the trigger must be cancelled first (from the status strip) so it is not
@@ -131,7 +135,7 @@ export const SessionTab = memo(function SessionTab({
           </span>
         ) : (
           <>
-            {isRunning
+            {isRunning || isPreparing
               ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
               : isUnreadFinished
                 ? <span class="session-tab-finished" aria-hidden="true" />

@@ -95,6 +95,7 @@ function emptyViewState(): ViewState {
     showOutcomeDialog: false,
     pendingExtensionUIRequestsBySession: {},
     pendingExtensionUIRequest: null,
+    queuedDwell: [],
     deferredTriggers: [],
   };
 }

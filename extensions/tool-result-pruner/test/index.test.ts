@@ -10,7 +10,7 @@ const indexUrl = pathToFileURL(path.resolve(__dirname, '../index.ts')).href;
 const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
 const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 
-type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean };
+type RuleToggles = { ansi: boolean; whitespace: boolean; blankRun: boolean; jsonMinify: boolean; lsLong: boolean; gitLog: boolean; grepGroup: boolean; duplicateCollapse: boolean; progressNoise: boolean };
 type Config = { enabled: boolean; profile: string; rules: RuleToggles };
 type ToolContent = { type: 'text'; text: string };
 type Event = {
@@ -41,7 +41,7 @@ type LoggerModule = {
   flushLog: () => Promise<void>;
 };
 
-const ALL_ON: RuleToggles = { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true };
+const ALL_ON: RuleToggles = { ansi: true, whitespace: true, blankRun: true, jsonMinify: true, lsLong: true, gitLog: true, grepGroup: true, duplicateCollapse: true, progressNoise: true };
 const ENABLED: Config = { enabled: true, profile: 'default', rules: { ...ALL_ON } };
 
 function ev(over: Partial<Event>): Event {
@@ -157,7 +157,7 @@ describe('index handler (visibility badge + analytics)', () => {
     configMod.setConfigOverrideForTesting({
       enabled: true,
       profile: 'default',
-      rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false },
+      rules: { ansi: false, whitespace: true, blankRun: true, jsonMinify: true, lsLong: false, gitLog: false, grepGroup: false, duplicateCollapse: false, progressNoise: false },
     });
     const out = await handler(ev({ content: [{ type: 'text', text: '\u001B[31ma\u001B[0m   ' }] }), {});
     assert.ok(out);

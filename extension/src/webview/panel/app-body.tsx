@@ -23,6 +23,7 @@ import { BottomSection } from './bottom-section';
 import { useNoticeAction } from './use-notice-action';
 import { useChatPrefsCss } from './use-chat-prefs-css';
 import { useWarmupAudio } from './use-warmup-audio';
+import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
 
 export interface AppBodyProps {
   adapter: {
@@ -109,11 +110,12 @@ export function AppBody({ adapter }: AppBodyProps) {
     () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
     [viewState.sessions],
   );
+  const renderSignature = transcriptRenderSignature({ ...viewState, transcript: mergedTranscript });
 
   return (
     <NoticeContext.Provider value={derived.noticeValue}>
     <AskUserContext.Provider value={derived.askUserContextValue}>
-    <div id="app">
+    <div id="app" data-render-signature={renderSignature}>
       {viewState.showOutcomeDialog && viewState.activeSession && (
         <RunOutcomeDialog
           sessionLabel={viewState.activeSession.name}
@@ -200,6 +202,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         workspaceCwd={viewState.workspaceCwd}
         openTabPaths={viewState.openTabPaths}
         onCancelPrepass={handlers.handleInterrupt}
+        renderSignature={renderSignature}
       />
 
       <BottomSection
@@ -233,6 +236,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         activeRunSummary={viewState.activeRunSummary}
         tokenRateBySession={viewState.tokenRateBySession}
         activeSessionHasDeferredTriggers={derived.activeSessionHasDeferredTriggers}
+        queuedDwell={viewState.queuedDwell}
         handlers={handlers}
       />
 

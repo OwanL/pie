@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test ./test/**/*.test.ts",
+    "test": "node ../scripts/run-tests.mjs --fast --package analysis",
     "build-db": "tsx ./scripts/build-db.ts",
     "query": "tsx ./scripts/query.ts",
     "export-site-data": "tsx ./scripts/export-site-data.ts",

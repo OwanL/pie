@@ -259,9 +259,20 @@ describe("ParentExtensionUIBridgeProxy", () => {
       assert.equal(typeof (proxy as any).cancelAll, "function");
     });
 
-    it("delegates to the parent bridge's cancelAll", () => {
+    it("falls back to the parent bridge's cancelAll for older bridges", () => {
       proxy.cancelAll();
       assert.equal(mock.calls.cancelAll.length, 1);
+    });
+
+    it("uses scoped cancellation when the host bridge supports it", () => {
+      const ids: string[] = [];
+      const scoped = {
+        ...createMockParentBridge(),
+        cancelSubagent(id: string) { ids.push(id); },
+      };
+      new ParentExtensionUIBridgeProxy(scoped, CALL_ID).cancelAll();
+      assert.deepEqual(ids, [CALL_ID]);
+      assert.equal(scoped.calls.cancelAll.length, 0);
     });
   });
 });

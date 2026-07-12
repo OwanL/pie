@@ -106,6 +106,22 @@ test('activity-tail preview-rows pref is wired to a CSS var with a :root default
   assert.match(prefsCss, /activityTailLines,/);
 });
 
+test('subagent preview-rows pref uses an independent CSS var for collapsed cards', async () => {
+  const transcriptCss = await readStyleSource('transcript.css');
+  const prefsCss = await readWebviewSource('use-chat-prefs-css.ts');
+
+  assert.match(transcriptCss, /--subagent-preview-content-min-height:\s*36px/);
+  assert.match(
+    transcriptCss,
+    /\.subagent-live-preview\s+\.turn-activity-tail-content\s*\{[^}]*height:\s*var\(--subagent-preview-content-min-height\)/,
+  );
+  assert.match(
+    prefsCss,
+    /setProperty\(['"]--subagent-preview-content-min-height['"],\s*`\$\{subagentPreviewLines\s*\*\s*ACTIVITY_TAIL_ROW_HEIGHT_PX\}px`\)/,
+  );
+  assert.match(prefsCss, /subagentPreviewLines,/);
+});
+
 test('per-place font sizes and link/muted color prefs are wired to CSS vars', async () => {
   const indexCss = await readStyleSource('index.css');
   const transcriptCss = await readStyleSource('transcript.css');

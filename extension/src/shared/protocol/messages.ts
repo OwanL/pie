@@ -97,6 +97,13 @@ export interface ChatMessageToolCallPart {
   toolCall: ToolCall;
 }
 
+/** Transient provider output while a tool call's JSON arguments are streaming. */
+export interface DraftingToolCall {
+  id: string;
+  name: string;
+  argumentsText: string;
+}
+
 export type ChatMessagePart =
   | ChatMessageTextPart
   | ChatMessageReasoningPart
@@ -113,6 +120,8 @@ export interface ChatMessage {
   parts?: ChatMessagePart[];
   /** Accumulated reasoning/thinking content (only present on assistant messages from reasoning models). */
   thinking?: string;
+  /** Live-only tool-call draft; replaced by the authoritative call at message_end. */
+  draftingToolCall?: DraftingToolCall;
   /** Model id used for this assistant response, when the backend can determine it. */
   modelId?: string;
   /** Reasoning/thinking level used for this assistant response, when available. */

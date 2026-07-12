@@ -1,4 +1,4 @@
-import type { ExtensionAPI, BeforeAgentStartEvent, ToolCallEvent, Skill } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, BeforeAgentStartEvent, InputEvent, ToolCallEvent, Skill } from "@earendil-works/pi-coding-agent";
 import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "../logger.js";
 import {
 	setPiApi,
@@ -12,12 +12,14 @@ import {
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
 import { requestToolDefinition } from "./tools.js";
-import { getCodeVersion } from "./version.js";
+import { getCodeVersion, prewarmCodeVersion } from "./version.js";
 import { buildPruningSystemPrompt, buildPruningUserMessage } from "../llm-scorer.js";
 import {
 	buildPrepassFingerprint,
 	cacheSuccessfulPrepass,
+	cacheSuccessfulPrepassCrossSession,
 	getCachedPrepass,
+	getCachedPrepassCrossSession,
 } from "./prepass-cache.js";
 import { pruningResultRenderer } from "./render.js";
 import {
@@ -44,6 +46,12 @@ import {
 } from "./pruning.js";
 
 export default function register(pi: ExtensionAPI) {
+	// Asynchronously pre-warm the cached code version (git SHA) so the first
+	// `before_agent_start` doesn't pay the subprocess latency on the
+	// latency-critical prepass path. Fire-and-forget: no long-lived resource is
+	// started (a single bounded `exec`), and registration is not blocked.
+	prewarmCodeVersion();
+
 	// Capture pi API methods for tool introspection (available throughout the session).
 	setPiApi({
 		getAllTools: () => pi.getAllTools(),
@@ -51,16 +59,40 @@ export default function register(pi: ExtensionAPI) {
 		setActiveTools: (names) => pi.setActiveTools(names),
 	});
 
-	// --- Message renderer for pruning-result custom type ---
+	// Keep pruning telemetry as a custom message so the host can track prepass
+	// completion and usage, but remove it from every provider request below.
 	pi.registerMessageRenderer("pruning-result", (message: { content: string; details?: unknown }, { expanded }: { expanded: boolean }, theme: { bg: (key: string, child: unknown) => unknown; fg: (key: string, text: string) => string }) => {
 		return pruningResultRenderer.render(message, { expanded }, theme);
 	});
 
+	pi.on("context", (event: { messages: Array<{ role?: string; customType?: string }> }) => ({
+		messages: event.messages.filter((message) => message.role !== "custom" || message.customType !== "pruning-result"),
+	}));
+
 	// --- request_tool: recovery tool for pruned tools ---
 	pi.registerTool(requestToolDefinition);
 
+	// Inputs submitted while an agent is running are steering/continuation
+	// messages, not independent task pivots. Remember them so their eventual
+	// before_agent_start hook can preserve the current catalog without paying for
+	// another pruning prepass (or inserting a pruning-result transcript entry).
+	const queuedPrompts = new Map<string, number>();
+	pi.on("input", (event: InputEvent) => {
+		if (event.streamingBehavior) {
+			queuedPrompts.set(event.text, (queuedPrompts.get(event.text) ?? 0) + 1);
+		}
+		return { action: "continue" };
+	});
+
 	// --- before_agent_start: skill + tool pruning ---
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
+		const queuedCount = queuedPrompts.get(event.prompt) ?? 0;
+		if (queuedCount > 0) {
+			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
+			else queuedPrompts.set(event.prompt, queuedCount - 1);
+			return undefined;
+		}
+
 		const activeConfig = getConfig();
 		const skipInfo = shouldSkipPruning(event, activeConfig);
 		const sessionId = getSessionId(ctx);
@@ -175,14 +207,29 @@ export default function register(pi: ExtensionAPI) {
 
 			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
 			const continuationFingerprint = buildPrepassFingerprint(llmInput, activeConfig, false);
-			const cached = getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
+			let cached = getCachedPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint);
+			if (!cached) {
+				const crossSession = getCachedPrepassCrossSession(event.prompt, fingerprint);
+				if (crossSession) {
+					// Promote the cross-session exact hit to this session's per-session
+					// cache so subsequent continuation prompts ("continue") reuse it —
+					// preserving per-session continuation semantics. The cross-session
+					// hit was an EXACT match (prompt + fingerprint including recent
+					// conversation), so promoting it within the session is safe.
+					cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, crossSession);
+					cached = crossSession;
+				}
+			}
 			const completeFn = getCompleteFn(ctx);
 			if (!cached && !completeFn) {
 				pruningError = "No completion function available";
 				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 			} else {
 				const prepassResult = cached ?? await runPruningPrepass(ctx, llmInput, activeConfig, completeFn!);
-				if (!cached) cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, prepassResult);
+				if (!cached) {
+					cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, prepassResult);
+					cacheSuccessfulPrepassCrossSession(event.prompt, fingerprint, prepassResult);
+				}
 				prunedSkills = prepassResult.prunedSkills;
 				prunedTools = prepassResult.prunedTools;
 				pruningError = prepassResult.error;

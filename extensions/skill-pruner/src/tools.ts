@@ -5,19 +5,22 @@ import { recordToolRecovery } from "../logger.js";
 export const requestToolDefinition = {
 	name: "request_tool",
 	label: "Request Tool",
-	description: "Request a tool that was pruned from the current session. Use when you need a tool that is not currently available. The tool will be enabled for the remainder of the session.",
+	description: "List tools removed by the skill-pruner, or re-enable one for the rest of this session.",
+	promptSnippet: "List or re-enable tools removed by the skill-pruner.",
+	promptGuidelines: [
+		"Use request_tool when a tool needed for the task is unavailable; omit toolName to list recoverable tools, then pass the exact name to enable one.",
+	],
 	parameters: {
 		type: "object",
 		properties: {
 			toolName: {
 				type: "string",
-				description: "The name of the tool to enable (e.g. 'web_search', 'fetch_content')",
+				description: "Exact name of the pruned tool to re-enable. Omit to list recoverable tools.",
 			},
 		},
-		required: ["toolName"],
 	},
 	async execute(_toolCallId: string, params: Record<string, unknown>, _signal: AbortSignal, _onUpdate: () => void, ctx: unknown) {
-		const toolName = params.toolName as string;
+		const toolName = typeof params.toolName === "string" ? params.toolName.trim() : "";
 		const allTools = state.getAllToolsOverride
 			? state.getAllToolsOverride()
 			: getPiToolSeams().getAllTools();
@@ -26,6 +29,13 @@ export const requestToolDefinition = {
 			: getPiToolSeams().getActiveTools();
 
 		const knownNames = new Set(allTools.map((t) => t.name));
+		if (!toolName) {
+			const inactive = [...knownNames].filter((name) => !activeTools.includes(name)).sort();
+			const text = inactive.length > 0
+				? `Recoverable tools: ${inactive.join(", ")}`
+				: "No tools are currently pruned.";
+			return { content: [{ type: "text" as const, text }] };
+		}
 		if (!knownNames.has(toolName)) {
 			return { content: [{ type: "text" as const, text: `Unknown tool '${toolName}'. Available tools: ${[...knownNames].sort().join(", ")}` }], isError: true };
 		}
@@ -59,6 +69,6 @@ export const requestToolDefinition = {
 			/* ignore telemetry failures */
 		}
 
-		return { content: [{ type: "text" as const, text: `Tool '${toolName}' has been re-enabled and protected from re-pruning for this session. It becomes callable on the next turn (active-tool changes apply next turn); a same-turn call will still report not found.` }] };
+		return { content: [{ type: "text" as const, text: `Enabled '${toolName}' for subsequent turns.` }] };
 	},
 };

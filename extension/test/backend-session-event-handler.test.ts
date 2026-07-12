@@ -133,6 +133,59 @@ test('message_start and message_update emit assistant events and update request 
   assert.equal(getContextUsageChangedCount(), 2);
 });
 
+test('toolcall_start and toolcall_delta expose the live tool draft', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-tool-draft',
+      messageIndex: 0,
+      modelId: 'claude-test',
+      thinkingLevel: 'medium',
+      aborted: false,
+    },
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  const partial = {
+    content: [{ type: 'toolCall', id: 'tool-1', name: 'bash' }],
+  };
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update',
+    message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_start', contentIndex: 0, partial },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_update',
+    message: { role: 'assistant' },
+    assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 0, delta: '{"command":', partial },
+  });
+
+  assert.deepEqual(emitted.slice(1), [
+    {
+      event: 'message.toolCallDelta',
+      payload: {
+        requestId: 'req-tool-draft',
+        sessionPath: '/workspace/session.jsonl',
+        messageId: 'req-tool-draft:1',
+        toolCallId: 'tool-1',
+        name: 'bash',
+        delta: '',
+      },
+    },
+    {
+      event: 'message.toolCallDelta',
+      payload: {
+        requestId: 'req-tool-draft',
+        sessionPath: '/workspace/session.jsonl',
+        messageId: 'req-tool-draft:1',
+        toolCallId: 'tool-1',
+        name: 'bash',
+        delta: '{"command":',
+      },
+    },
+  ]);
+});
+
 test('streaming deltas and tool progress do not recompute context usage (avoids O(n) getBranch per token)', () => {
   // Regression: emitContextUsageChanged resolves the session branch
   // (sessionManager.getBranch()) to derive the context-window footprint.
@@ -454,16 +507,20 @@ test('agent_end with willRetry=true is a no-op (mid-retry: preserve activeReques
 
   handleSdkSessionEvent(deps, context, { type: 'agent_end', willRetry: true });
 
-  // Mid-retry agent_end must NOT finalize: activeRequest is preserved so the
-  // retry turn can stream (message_start/message_end are gated on it), busy
-  // stays true (no flicker, no premature session_finished trigger), and no
-  // session.opened / message.aborted is emitted.
-  assert.equal(context.activeRequest, activeRequest);
-  assert.deepEqual(busy, []);
-  assert.deepEqual(sessionOpened, []);
-  assert.equal(getListChangedCount(), 0);
-  assert.equal(getContextUsageChangedCount(), 0);
-  assert.deepEqual(emitted, []);
+  try {
+    // Mid-retry agent_end must NOT finalize: activeRequest is preserved so the
+    // retry turn can stream (message_start/message_end are gated on it), busy
+    // stays true (no flicker, no premature session_finished trigger), and no
+    // session.opened / message.aborted is emitted.
+    assert.equal(context.activeRequest, activeRequest);
+    assert.deepEqual(busy, []);
+    assert.deepEqual(sessionOpened, []);
+    assert.equal(getListChangedCount(), 0);
+    assert.equal(getContextUsageChangedCount(), 0);
+    assert.deepEqual(emitted, []);
+  } finally {
+    context.willRetryWatchdogClear?.();
+  }
 });
 
 test('willRetry watchdog emits operational-error + retry.stuck when a retry backoff never completes', async () => {

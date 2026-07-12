@@ -49,6 +49,8 @@ export interface BottomSectionProps {
   /** True when the active session owns a pending deferred trigger — greys out
    *  the composer's mark-done button with an explanatory tooltip. */
   activeSessionHasDeferredTriggers: boolean;
+  /** Handoff §F: active session queued-message dwell state for the composer warning. */
+  queuedDwell: ViewState['queuedDwell'];
   handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleMarkComplete'>;
 }
 
@@ -83,6 +85,7 @@ export const BottomSection = memo(function BottomSection({
   activeRunSummary,
   tokenRateBySession,
   activeSessionHasDeferredTriggers,
+  queuedDwell,
   handlers,
 }: BottomSectionProps) {
   if (!hasActiveTabs || needsSessionRecovery) return null;
@@ -120,6 +123,7 @@ export const BottomSection = memo(function BottomSection({
         activeRunSummary={activeRunSummary}
         tokenRateBySession={tokenRateBySession}
         activeSessionHasDeferredTriggers={activeSessionHasDeferredTriggers}
+        queuedDwell={queuedDwell}
         focusTrigger={activeSession?.path}
         onSend={handlers.handleSend}
         onRetrySend={handlers.handleRetrySend}

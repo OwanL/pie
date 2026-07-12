@@ -283,7 +283,7 @@ export function pieWarn(scope: string, message: string, data?: Record<string, un
 
 function redactSensitiveText(value: string): string {
   return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
     .replace(/([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|secret)=)[^&\s]+/gi, '$1[redacted]')
     .replace(/\b(api[_-]?key|authorization|password|passwd|secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[redacted]');
 }

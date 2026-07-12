@@ -3,6 +3,7 @@ import * as path from 'node:path';
 
 import { serializeJsonLine } from '../../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../../shared/error-message';
+import { atomicWriteText } from '../shared/atomic-write';
 import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
 import { workspaceHash } from './helpers';
@@ -42,6 +43,16 @@ interface RunAnalyticsStorageOptions {
    *  trimming to {@link maxRunHistoryEntries}. Gates the read+rewrite cost so
    *  steady-state persists stay a single `stat`. */
   pruneByteThreshold?: number;
+  /** Minimum interval between automatic `run-analytics.json` refreshes. */
+  autoExportIntervalMs?: number;
+  /** Test seam for verifying append batching. */
+  appendFile?: typeof fs.appendFile;
+  /** Base delay for automatic export retry after a failure. */
+  autoExportRetryBaseMs?: number;
+  /** Maximum delay for automatic export retry backoff. */
+  autoExportRetryMaxMs?: number;
+  /** Test seam for verifying auto-export timer delays. */
+  autoExportSetTimeout?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
 }
 
 export class RunAnalyticsStorage {
@@ -53,6 +64,13 @@ export class RunAnalyticsStorage {
   private readonly onPersistError?: (error: { message: string; at: string }) => void;
   private readonly maxRunHistoryEntries: number;
   private readonly pruneByteThreshold: number;
+  private readonly autoExportIntervalMs: number;
+  private readonly appendFile: typeof fs.appendFile;
+  private readonly autoExportRetryBaseMs: number;
+  private readonly autoExportRetryMaxMs: number;
+  private readonly autoExportSetTimeout: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private disposed = false;
+  private autoExportFailureCount = 0;
 
   private persistenceQueue: Promise<void> = Promise.resolve();
   private seq = 0;
@@ -60,7 +78,10 @@ export class RunAnalyticsStorage {
   private lastPersistError: { message: string; at: string } | null = null;
   private dirty = false;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoExportTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly persistIntervalMs = 1000;
+  private autoExportDirtyVersion = 0;
+  private lastAutoExportAtMs = 0;
   /**
    * Appends staged by `schedulePersist` that have not yet been flushed to disk.
    * A failed JSONL append stays here and is replayed by the next persist
@@ -109,6 +130,12 @@ export class RunAnalyticsStorage {
     this.onPersistError = options.onPersistError;
     this.maxRunHistoryEntries = options.maxRunHistoryEntries ?? 2000;
     this.pruneByteThreshold = options.pruneByteThreshold ?? 5_000_000;
+    this.autoExportIntervalMs = options.autoExportIntervalMs ?? 30_000;
+    this.appendFile = options.appendFile ?? fs.appendFile;
+    this.autoExportRetryBaseMs = options.autoExportRetryBaseMs ?? 1000;
+    this.autoExportRetryMaxMs = options.autoExportRetryMaxMs ?? 60_000;
+    this.autoExportSetTimeout = options.autoExportSetTimeout ?? setTimeout;
+    this.lastAutoExportAtMs = this.now().getTime();
   }
 
   async start(): Promise<RunCheckpoint | null> {
@@ -118,10 +145,12 @@ export class RunAnalyticsStorage {
     const checkpoint = await this.readCheckpoint();
     this.seq = checkpoint?.seq ?? 0;
     await this.writeAutoExportSafely();
+    this.lastAutoExportAtMs = this.now().getTime();
     return checkpoint;
   }
 
   schedulePersist(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
+    if (this.disposed) return;
     // Stage this persist's appends into the pending buffers so a failed append
     // is retried by the next persist rather than dropped. Dedup per runId keeps
     // only the newest pending snapshot/outcome so retries don't double-append.
@@ -139,6 +168,7 @@ export class RunAnalyticsStorage {
   }
 
   schedulePersistAgentReview(entry: AgentReviewEntry): void {
+    if (this.disposed) return;
     // Stage the latest agent-review entry per runId so a failed append is
     // retried by the next persist, and re-recording for the same run keeps
     // only the newest review (mirrors pendingOutcomes / pendingSnapshots).
@@ -187,14 +217,25 @@ export class RunAnalyticsStorage {
    * before disposing the storage to ensure no pending analytics data is lost.
    */
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
     this.cancelPersistTimer();
+    this.cancelAutoExportTimer();
     await this.flush();
+    await this.queueAutoExport(true);
   }
 
   private cancelPersistTimer(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
+    }
+  }
+
+  private cancelAutoExportTimer(): void {
+    if (this.autoExportTimer) {
+      clearTimeout(this.autoExportTimer);
+      this.autoExportTimer = null;
     }
   }
 
@@ -213,45 +254,59 @@ export class RunAnalyticsStorage {
     const needsCheckpoint = this.dirty;
     this.dirty = false;
     await fs.mkdir(this.storageDir, { recursive: true });
-    // Replay any appends still pending from this or a previously failed
-    // persist. Clear each entry immediately after its append succeeds so a
-    // later failure (e.g. checkpoint write) doesn't trigger a redundant
-    // retry-append of something already on disk.
-    for (const snapshot of [...this.pendingSnapshots.values()]) {
-      await fs.appendFile(
+    // Snapshot each pending map and append one concatenated chunk per file.
+    // Entries are removed only after that file append succeeds and only when
+    // they were not replaced while I/O was in flight. A failed append leaves
+    // the whole batch pending for retry, avoiding partial-batch duplicates.
+    const snapshots = [...this.pendingSnapshots.values()];
+    if (snapshots.length > 0) {
+      await this.appendFile(
         path.join(this.storageDir, 'run-snapshots.jsonl'),
-        serializeJsonLine({
+        snapshots.map((snapshot) => serializeJsonLine({
           schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
           kind: 'run_snapshot',
           recordedAt: this.isoNow(),
           run: snapshot,
-        } satisfies RunSnapshotLogEntry),
+        } satisfies RunSnapshotLogEntry)).join(''),
         'utf8',
       );
-      this.pendingSnapshots.delete(snapshot.runId);
+      this.deleteAppendedEntries(this.pendingSnapshots, snapshots);
     }
-    for (const outcome of [...this.pendingOutcomes.values()]) {
-      await fs.appendFile(
+    const outcomes = [...this.pendingOutcomes.values()];
+    if (outcomes.length > 0) {
+      await this.appendFile(
         path.join(this.storageDir, 'outcome-history.jsonl'),
-        serializeJsonLine(outcome),
+        outcomes.map((outcome) => serializeJsonLine(outcome)).join(''),
         'utf8',
       );
-      this.pendingOutcomes.delete(outcome.runId);
+      this.deleteAppendedEntries(this.pendingOutcomes, outcomes);
     }
-    for (const review of [...this.pendingAgentReviews.values()]) {
-      await fs.appendFile(
+    const reviews = [...this.pendingAgentReviews.values()];
+    if (reviews.length > 0) {
+      await this.appendFile(
         path.join(this.storageDir, 'agent-reviews.jsonl'),
-        serializeJsonLine(review),
+        reviews.map((review) => serializeJsonLine(review)).join(''),
         'utf8',
       );
-      this.pendingAgentReviews.delete(review.runId);
+      this.deleteAppendedEntries(this.pendingAgentReviews, reviews);
     }
     if (needsCheckpoint) {
       const checkpoint = this.buildCheckpoint(++this.seq);
       await this.writeCheckpoint(checkpoint);
     }
-    await this.pruneHistoryIfNeeded();
-    await this.writeAutoExportSafely();
+    try {
+      await this.pruneHistoryIfNeeded();
+    } finally {
+      this.markAutoExportDirty();
+    }
+  }
+
+  private deleteAppendedEntries<T extends { runId: string }>(pending: Map<string, T>, appended: T[]): void {
+    for (const entry of appended) {
+      if (pending.get(entry.runId) === entry) {
+        pending.delete(entry.runId);
+      }
+    }
   }
 
   async queryRunAnalytics(): Promise<RunAnalyticsQueryResult> {
@@ -259,9 +314,22 @@ export class RunAnalyticsStorage {
     return await queryRunAnalyticsStore(this.storageDir);
   }
 
+  /** Read only data already persisted to disk. Used by the aggregate cache so
+   * its one-second live refresh never forces a persistence flush. */
+  async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
+    return await queryRunAnalyticsStore(this.storageDir);
+  }
+
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
     await this.flush();
-    return await exportRunAnalyticsStore(this.storageDir, targetPath, this.now);
+    const payload = await exportRunAnalyticsStore(this.storageDir, targetPath, this.now);
+    if (path.resolve(targetPath) === path.resolve(this.autoExportPath)) {
+      this.autoExportDirtyVersion = 0;
+      this.autoExportFailureCount = 0;
+      this.lastAutoExportAtMs = this.now().getTime();
+      this.cancelAutoExportTimer();
+    }
+    return payload;
   }
 
   private recordPersistError(error: unknown): void {
@@ -380,17 +448,7 @@ export class RunAnalyticsStorage {
 
     // Write to a temp file in the same directory then rename atomically, so a
     // crash mid-write cannot corrupt the JSONL (mirrors exportRunAnalyticsStore).
-    const tmpPath = path.join(
-      path.dirname(targetPath),
-      `.${path.basename(targetPath)}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`,
-    );
-    try {
-      await fs.writeFile(tmpPath, mergedRaw, 'utf8');
-      await fs.rename(tmpPath, targetPath);
-    } catch (error) {
-      await fs.unlink(tmpPath).catch(() => undefined);
-      throw error;
-    }
+    await atomicWriteText(targetPath, mergedRaw);
   }
 
   private async mergeCheckpointStates(legacyStorageDirs: string[]): Promise<void> {
@@ -596,8 +654,9 @@ export class RunAnalyticsStorage {
    *  exceeds {@link pruneByteThreshold} it is read and, if it holds more than
    *  {@link maxRunHistoryEntries} lines, rewritten to keep only the most recent
    *  N (atomic temp+rename). Pruning is rare (gated on byte size) so the steady
-   *  per-persist cost stays a single `stat`; a failed prune is non-fatal (the
-   *  file stays oversized and the next persist retries). */
+   *  per-persist cost stays a single `stat`; a failed prune is surfaced as a
+   *  persistence error but remains non-fatal (the file stays oversized and the
+   *  next persist retries). */
   private async pruneHistoryIfNeeded(): Promise<void> {
     if (this.maxRunHistoryEntries <= 0) {
       return;
@@ -632,35 +691,71 @@ export class RunAnalyticsStorage {
       return;
     }
     const kept = lines.slice(lines.length - maxEntries);
-    const tmpPath = path.join(
-      this.storageDir,
-      `.${fileName}.${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`,
-    );
-    try {
-      await fs.writeFile(tmpPath, `${kept.join('\n')}\n`, 'utf8');
-      await fs.rename(tmpPath, filePath);
-    } catch (error) {
-      await fs.unlink(tmpPath).catch(() => undefined);
-      appendPieLog('warn', 'run-analytics', 'failed to prune history file', {
-        file: fileName,
-        error: toErrorMessage(error),
-      });
+    await atomicWriteText(filePath, `${kept.join('\n')}\n`);
+  }
+
+  private markAutoExportDirty(): void {
+    if (this.disposed) return;
+    this.autoExportDirtyVersion += 1;
+    if (this.autoExportTimer) return;
+    let delay: number;
+    if (this.autoExportFailureCount > 0) {
+      delay = Math.min(
+        this.autoExportRetryMaxMs,
+        this.autoExportRetryBaseMs * 2 ** (this.autoExportFailureCount - 1),
+      );
+    } else {
+      const elapsed = Math.max(0, this.now().getTime() - this.lastAutoExportAtMs);
+      delay = Math.max(0, this.autoExportIntervalMs - elapsed);
     }
+    // Never schedule an immediate retry; a zero-ms timer would spin the event
+    // loop and, after a failure, the elapsed-based throttle would also drop to 0.
+    delay = Math.max(1, delay);
+    this.autoExportTimer = this.autoExportSetTimeout(() => {
+      this.autoExportTimer = null;
+      void this.queueAutoExport(false);
+    }, delay);
+    this.autoExportTimer.unref?.();
+  }
+
+  private async queueAutoExport(force: boolean): Promise<void> {
+    if (this.disposed && !force) return;
+    this.cancelAutoExportTimer();
+    this.persistenceQueue = this.persistenceQueue
+      .catch((error) => this.recordPersistError(error))
+      .then(async () => {
+        if (this.disposed && !force) return;
+        if (!force && this.autoExportDirtyVersion === 0) return;
+        const version = this.autoExportDirtyVersion;
+        const succeeded = await this.writeAutoExportSafely();
+        if (succeeded) {
+          this.lastAutoExportAtMs = this.now().getTime();
+          this.lastPersistError = null;
+          this.autoExportFailureCount = 0;
+          if (this.autoExportDirtyVersion === version) {
+            this.autoExportDirtyVersion = 0;
+          }
+        } else {
+          this.autoExportFailureCount += 1;
+        }
+        if (this.autoExportDirtyVersion > 0) {
+          this.markAutoExportDirty();
+        }
+      });
+    await this.persistenceQueue;
   }
 
   private async writeAutoExport(): Promise<void> {
     await exportRunAnalyticsStore(this.storageDir, this.autoExportPath, this.now);
   }
 
-  private async writeAutoExportSafely(): Promise<void> {
+  private async writeAutoExportSafely(): Promise<boolean> {
     try {
       await this.writeAutoExport();
+      return true;
     } catch (error) {
-      const message = toErrorMessage(error);
-      appendPieLog('warn', 'run-analytics', 'failed to refresh auto-export', {
-        path: this.autoExportPath,
-        error: message,
-      });
+      this.recordPersistError(error);
+      return false;
     }
   }
 

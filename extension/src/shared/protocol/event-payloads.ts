@@ -32,6 +32,7 @@ import type {
   MessageFinishedPayload,
   MessageStartedPayload,
   MessageThinkingPayload,
+  MessageToolCallDeltaPayload,
   OperationalErrorPayload,
   PreflightFailedPayload,
   QueuedDeliveredPayload,
@@ -181,6 +182,18 @@ export function isMessageThinkingPayload(value: unknown): value is MessageThinki
   );
 }
 
+export function isMessageToolCallDeltaPayload(value: unknown): value is MessageToolCallDeltaPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.toolCallId)
+    && isString(value.name)
+    && isString(value.delta)
+  );
+}
+
 export function isMessageFinishedPayload(value: unknown): value is MessageFinishedPayload {
   return (
     isObject(value)
@@ -268,6 +281,8 @@ export function isExtensionUIRequestPayload(value: unknown): value is ExtensionU
     || !isString(value.sessionPath)
     || !isOptionalString(value.extensionId)
     || !isOptionalString(value.subagentCallId)
+    || !isOptionalString(value.toolCallId)
+    || (value.timeout !== undefined && (!isFiniteNumber(value.timeout) || value.timeout <= 0))
   ) {
     return false;
   }

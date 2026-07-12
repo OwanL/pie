@@ -263,9 +263,16 @@ function parseGrepMatch(line: string): GrepMatch | null {
 }
 
 function grepGroup(text: string, ctx: RuleContext): RuleResult | null {
-  if (ctx.toolName !== "bash") return null;
-  const command = ctx.input?.command;
-  if (typeof command !== "string" || !isGrepCommand(command)) return null;
+  const isGrepTool = ctx.toolName === "grep";
+  if (ctx.toolName !== "bash" && !isGrepTool) return null;
+  if (isGrepTool) {
+    // Structured pi `grep` tool emits path:line:content for context=0 matches.
+    // No command string is available, so we rely on the same shape + savings
+    // guards that protect bash grep-family output.
+  } else {
+    const command = ctx.input?.command;
+    if (typeof command !== "string" || !isGrepCommand(command)) return null;
+  }
 
   // Split without the trailing-"" artifact so we can rebuild the exact
   // trailing-newline shape. Internal blank lines are preserved verbatim.
@@ -329,6 +336,132 @@ function grepGroup(text: string, ctx: RuleContext): RuleResult | null {
 }
 
 // ---------------------------------------------------------------------------
+// 4. Consecutive duplicate-line collapse.
+//
+// Long-running commands (builds, pings, polls, repeated status checks) often
+// emit the same status line many times in a row. Collapsing runs of 3+
+// identical consecutive non-blank lines into one line + a count marker saves
+// tokens without removing the information that the line occurred. Severity
+// lines (error/warning/fatal/notice/...) are never collapsed — the agent must
+// still see repeated warnings verbatim. Blank lines are already normalized by
+// the lossless blank-run rule and are skipped here.
+//
+// Lossy + recoverable via recall stash; the count marker makes the collapse
+// transparent. A shrink guard skips the rewrite when the marker would not
+// actually reduce bytes (e.g. very short repeated lines).
+// ---------------------------------------------------------------------------
+const SEVERITY_RE = /\b(?:error|warn|warning|fatal|fail|failed|failure|exception|panic|notice)\b/i;
+
+function isSeverityLine(line: string): boolean {
+  return SEVERITY_RE.test(line);
+}
+
+function collapseDuplicateLines(text: string, _ctx: RuleContext): RuleResult | null {
+  if (!text.includes("\n")) return null;
+  const hadTrailingNewline = text.endsWith("\n");
+  const body = hadTrailingNewline ? text.slice(0, -1) : text;
+  const lines = body.split("\n");
+
+  const out: string[] = [];
+  let current = "";
+  let run = 0;
+  let totalRemoved = 0;
+
+  function flushRun(): void {
+    if (run === 0) return;
+    out.push(current);
+    if (run >= 3) {
+      out.push(`  (... ${run - 1} identical lines)`);
+      totalRemoved += run - 1;
+    } else {
+      for (let i = 1; i < run; i++) out.push(current);
+    }
+    run = 0;
+  }
+
+  for (const line of lines) {
+    if (line.trim() === "" || isSeverityLine(line)) {
+      flushRun();
+      out.push(line);
+      continue;
+    }
+    if (run > 0 && line === current) {
+      run++;
+    } else {
+      flushRun();
+      current = line;
+      run = 1;
+    }
+  }
+  flushRun();
+
+  if (totalRemoved === 0) return null;
+  let rewritten = out.join("\n");
+  if (hadTrailingNewline) rewritten += "\n";
+  if (rewritten.length >= text.length) return null; // shrink guard
+  return { text: rewritten, changed: true, marker: `${totalRemoved} duplicate lines collapsed` };
+}
+
+// ---------------------------------------------------------------------------
+// 5. Spinner / progress-bar noise removal.
+//
+// CLI progress updates (npm install, ora spinners, progress bars) emit frames
+// like `⠋ Fetching metadata…` or `[====>    ] 23%`. These are pure noise to the
+// agent: they carry no stable information and are never cited in follow-ups.
+// Drop lines that are clearly progress updates, while preserving any line that
+// contains an error/warning/notice keyword (e.g. `npm WARN`, `error:`). If the
+// rewrite would leave no meaningful non-noise lines, keep the original — a
+// command that produced only spinner frames is better surfaced through recall
+// than hidden entirely.
+//
+// Detection is conservative: a line must contain a Unicode spinner (Braille
+// block U+2800–U+28FF), or a progress bar pattern (`%` plus block glyphs or a
+// bracketed `%` bar). Lines with percentages but no spinner/progress glyphs are
+// kept (e.g. coverage reports).
+// ---------------------------------------------------------------------------
+const BRAILLE_RE = /[\u2800-\u28FF]/;
+const PROGRESS_BLOCK_RE = /[\u2588-\u259F\u25A0-\u25A9]/;
+const BRACKETED_PERCENT_RE = /^\s*[\(\[].*%[\)\]]/;
+
+function looksLikeProgressNoise(line: string): boolean {
+  if (line.trim() === "") return false;
+  if (isSeverityLine(line)) return false; // always keep warnings/errors/notices
+  if (BRAILLE_RE.test(line)) return true;
+  if (line.includes("%")) {
+    if (PROGRESS_BLOCK_RE.test(line)) return true;
+    if (BRACKETED_PERCENT_RE.test(line)) return true;
+  }
+  return false;
+}
+
+function removeProgressNoise(text: string, _ctx: RuleContext): RuleResult | null {
+  if (!text.includes("\n")) return null;
+  const hadTrailingNewline = text.endsWith("\n");
+  const body = hadTrailingNewline ? text.slice(0, -1) : text;
+  const lines = body.split("\n");
+
+  const out: string[] = [];
+  let removed = 0;
+  for (const line of lines) {
+    if (looksLikeProgressNoise(line)) {
+      removed++;
+      continue;
+    }
+    out.push(line);
+  }
+  if (removed === 0) return null;
+  // Require at least one meaningful non-noise, non-blank line to remain;
+  // otherwise the command produced only noise and is left for recall explicitly.
+  const keptMeaningful = out.some((line) => line.trim() !== "" && !looksLikeProgressNoise(line));
+  if (!keptMeaningful) return null;
+
+  let rewritten = out.join("\n");
+  if (hadTrailingNewline) rewritten += "\n";
+  if (rewritten.length >= text.length) return null; // shrink guard
+  return { text: rewritten, changed: true, marker: `${removed} progress-noise lines removed` };
+}
+
+// ---------------------------------------------------------------------------
 // Ordered lossy pipeline (§7.2). Runs after LOSSLESS_RULES, only under the
 // `default` profile (security keeps columns/permissions). Each rule is gated
 // by its toggle in the pipeline; the stash requirement is enforced there too.
@@ -337,4 +470,6 @@ export const LOSSY_RULES: Rule[] = [
   { name: "ls-long", tier: "lossy", run: lsLong },
   { name: "git-log", tier: "lossy", run: gitLog },
   { name: "grep-group", tier: "lossy", run: grepGroup },
+  { name: "progress-noise", tier: "lossy", run: removeProgressNoise },
+  { name: "duplicate-collapse", tier: "lossy", run: collapseDuplicateLines },
 ];

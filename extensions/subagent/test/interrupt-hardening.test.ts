@@ -5,16 +5,13 @@
  * recent provider-side instability (long time-to-first-token, stream cuts):
  *
  *  Bug 1 — Stop mid-subagent-prompt: parent signal aborts AFTER the child
- *          `session.prompt()` has started streaming. Only escape today is the
- *          30-min `PIE_SUBAGENT_SETTLEMENT_MS` net (default
- *          `PI_SUBAGENT_TIMEOUT_MS=0` → per-prompt timeout DISABLED). A 30-min
- *          wait here = bug. Asserts a tight per-prompt bound exists.
+ *          `session.prompt()` has started streaming. Settlement must be owned
+ *          by the local prompt/abort race, not delayed until the outer renewable
+ *          inactivity net. Asserts a tight cancellation bound exists.
  *
  *  Bug 2 — Stop while child `session.abort()` itself hangs (provider connection
- *          teardown stuck): runner.ts `onAbort` does `void session.abort()` —
- *          UN-awaited, UN-logged, with NO bound. If abort never resolves, only
- *          the 30-min settlement net frees the parent. Asserts a tighter bound
- *          + observability.
+ *          teardown stuck). Remote teardown is advisory: it must be observed and
+ *          detached without owning parent settlement.
  *
  *  Bug 3 — Parallel sibling abort: 4 parallel tasks, abort arrives while 2 are
  *          in prefill and 2 are mid-stream. Asserts ALL four settle within a
@@ -137,7 +134,7 @@ test.before(() => {
 	// Force pure model selection, generous inflight, and CRUCIALLY disable the
 	// per-prompt timeout + the settlement net so the ONLY escape for a hung
 	// dispatch is the path under test (the parent abort). This surfaces the bug
-	// rather than papering over it with the 30-min net.
+	// rather than papering over it with the outer inactivity net.
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
 	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "4";
@@ -248,7 +245,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // Bug 1 — Stop mid-subagent-prompt
 // ---------------------------------------------------------------------------
 
-test("Bug 1: aborting AFTER the child prompt() has started streaming settles the parent tool call within a small bound (NOT the 30-min settlement net)", async () => {
+test("Bug 1: aborting after child prompt() starts settles locally without waiting for the outer inactivity net", async () => {
 	// Default behaviour: prompt() hangs until abort() resolves it (realistic
 	// mid-stream shape — provider is actively streaming, then Stop fires).
 	// onAbort: the mock's default branch NEVER resolves abort() (Bug 2), so for
@@ -324,11 +321,11 @@ test("Nested hard-stop: a parent abort invokes the child's billable-window abort
 	assert.equal(mockState().abortRetryCalls, 1, "child abortRetry() must be invoked on parent abort");
 });
 
-test("Bug 1 (gap): with the settlement net OFF, a child whose abort() does NOT release prompt() is bounded by the per-prompt timeout (Phase 2 fix: default per-prompt timeout now ON)", async () => {
+test("Bug 1 gap: parent abort settles even when child abort() does not release prompt()", async () => {
 	// Bug 2's shape, isolated: abort() resolves (so the abort promise itself
 	// is fine) BUT does not release prompt() (the stream teardown didn't
-	// unblock the SDK's prompt promise). With the settlement net OFF, the
-	// per-prompt timeout (Phase 2: now a sane non-zero default) is the escape.
+	// unblock the SDK's prompt promise). The local prompt race must still own
+	// parent settlement with the outer net disabled.
 	setMockBehavior({
 		onAbort: () => {
 			// abort() resolves, but DOES NOT release the prompt — simulates a
@@ -336,7 +333,7 @@ test("Bug 1 (gap): with the settlement net OFF, a child whose abort() does NOT r
 			return Promise.resolve();
 		},
 	});
-	// Tighten the per-prompt timeout so the test does not wait the full 15min.
+	// Keep an explicit containment ceiling as additional test protection.
 	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
 
@@ -353,9 +350,8 @@ test("Bug 1 (gap): with the settlement net OFF, a child whose abort() does NOT r
 	await waitForCounter("promptStarted", 1);
 	controller.abort();
 
-	// Phase 2 fix: the per-prompt timeout default + raceAbort(prompt) bounds
-	// this. Instead of hanging forever, the tool call settles within the
-	// per-prompt bound with a timeout/abort result.
+	// The prompt is raced directly against parent cancellation, so remote
+	// teardown cannot keep the tool call open.
 	const response = await within(3000, responseP);
 	assert.equal(response.isError, true, "an abort that doesn't release the prompt must surface an error, not hang");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
@@ -369,14 +365,12 @@ test("Bug 1 (gap): with the settlement net OFF, a child whose abort() does NOT r
 // Bug 2 — Stop while child session.abort() itself hangs (provider teardown stuck)
 // ---------------------------------------------------------------------------
 
-test("Bug 2: when child session.abort() never resolves (hung provider teardown), the parent tool call is bounded by the per-prompt timeout, not 30 min (Phase 2 fix: raceAbort(prompt) + default timeout)", async () => {
+test("Bug 2: a hung child session.abort() cannot own parent settlement", async () => {
 	// Default mock behaviour: abort() hangs forever (the bug window). With the
-	// settlement net OFF, the per-prompt timeout (Phase 2: now a sane non-zero
-	// default) + raceAbort(prompt) is the escape — the prompt is raced against
-	// the combined abort signal, so the tool call settles once the timeout
-	// fires regardless of whether abort() resolves.
+	// outer inactivity net OFF, the prompt is raced directly against the parent
+	// signal, so the tool call settles regardless of whether abort() resolves.
 	setMockBehavior(undefined); // default → abort() never resolves, prompt() never released
-	// Tighten the per-prompt timeout so the test does not wait 15min.
+	// Keep an explicit containment ceiling as additional test protection.
 	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
 
@@ -393,8 +387,8 @@ test("Bug 2: when child session.abort() never resolves (hung provider teardown),
 	await waitForCounter("promptStarted", 1);
 	controller.abort();
 
-	// Phase 2 fix: raceAbort(prompt) + the default per-prompt timeout settle
-	// the tool call even when session.abort() never resolves.
+	// Parent cancellation settles the local prompt race even when remote
+	// session.abort() never resolves.
 	const response = await within(3000, responseP);
 	assert.equal(response.isError, true, "a hung abort() must surface an error, not hang the parent");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
@@ -445,11 +439,10 @@ test("Bug 2 (observability): the abort path emits a [pie:subagent] child.abort.i
 // Bug 3 — Parallel sibling abort (4 parallel tasks, mixed prefill + mid-stream)
 // ---------------------------------------------------------------------------
 
-test("Bug 3: a parent abort during parallel sibling dispatch settles ALL siblings within a bound (Phase 2 fix: per-prompt timeout + raceAbort(prompt) bound each sibling)", async () => {
+test("Bug 3: parent abort settles every parallel sibling through its local prompt race", async () => {
 	// 4 tasks, 2 in prefill (prompt started) + 2 mid-stream. The mock's
-	// default: prompt() hangs until abort() releases it; abort() never resolves
-	// (Bug 2 shape). With the settlement net OFF, each sibling is bounded by
-	// the per-prompt timeout (Phase 2: now a sane non-zero default).
+	// default: prompt() hangs and abort() never resolves (Bug 2 shape). Every
+	// sibling must still settle from the shared parent signal.
 	const tasks = [
 		{ agent: "worker", task: "task-1" },
 		{ agent: "worker", task: "task-2" },
@@ -458,7 +451,7 @@ test("Bug 3: a parent abort during parallel sibling dispatch settles ALL sibling
 	] as never;
 
 	setMockBehavior(undefined); // default → abort never resolves, prompt never released
-	// Tighten the per-prompt timeout so the test does not wait 15min per sibling.
+	// Keep an explicit containment ceiling as additional test protection.
 	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
 
@@ -476,9 +469,8 @@ test("Bug 3: a parent abort during parallel sibling dispatch settles ALL sibling
 	await waitForCounter("promptStarted", 4);
 	controller.abort();
 
-	// Phase 2 fix: each sibling's prompt is raced against the combined abort
-	// signal, so all 4 settle within the per-prompt bound even when abort()
-	// hangs. The parent tool call no longer dangles.
+	// Each sibling's prompt is raced against the combined abort signal, so all
+	// four settle even when remote abort hangs.
 	const response = await within(6000, responseP);
 	assert.equal(mockState().abortCalls, 4, "all 4 children must have session.abort() invoked");
 	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";

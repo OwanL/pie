@@ -24,14 +24,14 @@ const points: AggregateSeriesPoint[] = [
   { ms: 3_000, byProvider: [{ key: 'openai', value: 5 }, { key: 'anthropic', value: 2 }], byModel: [{ key: 'openai/gpt', value: 5 }, { key: 'anthropic/claude', value: 2 }] },
 ];
 
-test('StackedAreaChart renders stacked rects for cumulative points', () => {
+test('StackedAreaChart renders solid stacked paths for cumulative points', () => {
   render(
     h(StackedAreaChart, { points, mode: 'cumulative', formatY: (n) => String(n), formatX: (ms) => String(ms) }),
     container,
   );
-  const rects = container.querySelectorAll('rect');
-  // 3 points × up to 2 providers each → at least several stacked rects.
-  assert.ok(rects.length >= 4, `expected several stacked rects, got ${rects.length}`);
+  const paths = container.querySelectorAll('path');
+  assert.equal(paths.length, 2, 'expected one continuous area path per provider');
+  assert.equal(container.querySelectorAll('rect').length, 0, 'cumulative areas should not have rect seams');
   // Axis labels present (first + last x).
   const axis = container.querySelector('.chart-axis');
   assert.ok(axis);

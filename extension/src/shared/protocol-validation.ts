@@ -66,6 +66,8 @@ function validateStateAppliedPayload(value: unknown): value is StateAppliedPaylo
     && isFiniteNumber(value.systemPromptCount)
     && typeof value.domTranscriptLoaderPresent === 'boolean'
     && typeof value.domTabsConnectingPresent === 'boolean'
+    && typeof value.renderSignature === 'string'
+    && (value.domRenderSignature === null || typeof value.domRenderSignature === 'string')
   );
 }
 
@@ -176,7 +178,6 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     subagentMaxParallelTasks: [1, 16],
     bashWarmPoolSize: [0, 8],
     bashWarmupTimeoutMs: [0, 60000],
-    bashAcquireTimeoutMs: [0, 60000],
     bashDefaultTimeout: [1, 600],
     uiBaseFontSize: [10, 24],
     uiComposerFontSize: [11, 28],
@@ -185,6 +186,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
+    subagentPreviewLines: [1, 12],
     uiMessageRailSize: [8, 40],
   };
   const stringKeys: Array<keyof ChatPrefs> = [
@@ -456,6 +458,11 @@ export function validateWebviewToHostMessage(
       if (!isString((value.response as { id?: unknown }).id)) {
         return fail('extensionUiResponse: missing string `response.id`');
       }
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'rearmQueuedDwellWatchdog':
+      if (!isString(value.sessionPath)) return fail('rearmQueuedDwellWatchdog: missing string `sessionPath`');
+      if (!isString(value.localId)) return fail('rearmQueuedDwellWatchdog: missing string `localId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     default:

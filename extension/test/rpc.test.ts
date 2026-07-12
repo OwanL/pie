@@ -174,7 +174,6 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,
@@ -185,7 +184,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashAcquireTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, subagentMaxConcurrency: undefined, subagentMaxParallelTasks: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -206,7 +205,6 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: { small: ['haiku'], medium: ['sonnet'], frontier: ['opus'] },
       subagentNestedAllowedBuckets: undefined,
@@ -232,7 +230,6 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: { small: [], medium: ['sonnet'], frontier: [] },
       subagentNestedAllowedBuckets: undefined,
@@ -274,7 +271,6 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: false, frontier: false },
@@ -300,7 +296,6 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: { small: true, medium: true, frontier: false },
@@ -340,7 +335,6 @@ test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
       bashFastPath: undefined,
       bashShellPath: undefined,
       bashWarmupTimeoutMs: undefined,
-      bashAcquireTimeoutMs: undefined,
       bashDefaultTimeout: undefined,
       subagentBuckets: undefined,
       subagentNestedAllowedBuckets: undefined,

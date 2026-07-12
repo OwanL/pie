@@ -6,6 +6,8 @@
     "lib": ["ES2021"],
     "strict": true,
     "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../node_modules/.cache/typecheck/shared.tsbuildinfo",
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

@@ -45,6 +45,8 @@ function makeParentBridge() {
 }
 
 function createFakeSdk(options?: {
+	onCreateSession?: () => void | Promise<void>;
+	onSubscribe?: () => void;
 	onPrompt?: (emit: (event: any) => void) => Promise<void>;
 }) {
 	const state = {
@@ -69,6 +71,7 @@ function createFakeSdk(options?: {
 		},
 		subscribe: (cb: (event: any) => void) => {
 			listeners.push(cb);
+			options?.onSubscribe?.();
 			return () => {
 				state.unsubscribeCalls++;
 			};
@@ -97,6 +100,7 @@ function createFakeSdk(options?: {
 	const sdk = {
 		createSession: async (args: Record<string, unknown>) => {
 			state.createSessionArgs.push(args);
+			await options?.onCreateSession?.();
 			return { session };
 		},
 		createResourceLoader: (args: Record<string, unknown>) => {
@@ -113,6 +117,9 @@ function createFakeSdk(options?: {
 test("runSingleAgent returns successful result and captures usage/model", async () => {
 	const { sdk, state } = createFakeSdk({
 		onPrompt: async (emit) => {
+			// Simulate a child tool whose end event races behind the terminal
+			// assistant message. Terminal results must not retain live UI state.
+			emit({ type: "tool_execution_start", toolCallId: "nested-1", toolName: "bash" });
 			emit({
 				type: "message_end",
 				message: {
@@ -159,14 +166,51 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(result.usage.input, 11);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.42);
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(result.streaming, false);
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
 });
 
-test("runSingleAgent handles already-aborted parent signal and settles pending UI", async () => {
+test("runSingleAgent aborts while the SDK module is still loading", async () => {
+	const controller = new AbortController();
+	const neverLoads = new Promise<never>(() => {});
+
+	const resultPromise = runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		controller.signal,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		"tool-sdk-load",
+		undefined,
+		undefined,
+		undefined,
+		{ sdkPromise: neverLoads, timeoutMs: 0 } as any,
+	);
+
+	controller.abort();
+	const result = await Promise.race([
+		resultPromise,
+		new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SDK load did not abort")), 500)),
+	]);
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.match(result.errorMessage ?? "", /loading subagent SDK|abort/i);
+});
+
+test("runSingleAgent skips all child setup when the parent signal is already aborted", async () => {
 	const { sdk, state } = createFakeSdk({
-		onPrompt: async () => undefined,
+		onPrompt: async () => assert.fail("an already-aborted parent must never prompt a child model"),
 	});
 	const { bridge, calls } = makeParentBridge();
 	const controller = new AbortController();
@@ -194,12 +238,159 @@ test("runSingleAgent handles already-aborted parent signal and settles pending U
 	);
 
 	assert.equal(result.exitCode, 1);
-	assert.equal(result.errorMessage, "Subagent was aborted (while preparing)");
-	assert.equal(calls.cancelAll, 1);
-	assert.equal(state.abortCalls, 1);
-	assert.equal(state.setUIContextCalls, 1);
-	assert.equal(state.unsubscribeCalls, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.match(result.errorMessage ?? "", /already aborted/);
+	assert.equal(state.createResourceLoaderArgs.length, 0, "must not load child resources after Stop");
+	assert.equal(state.createSessionArgs.length, 0, "must not create a child session after Stop");
+	assert.equal(state.promptCalls, 0, "must not start provider work after Stop");
+	assert.equal(state.abortCalls, 0, "there is no child session to abort");
+	assert.equal(state.setUIContextCalls, 0);
+	assert.equal(state.unsubscribeCalls, 0);
+	assert.equal(state.disposeCalls, 0);
+	assert.equal(calls.cancelAll, 0, "there is no child bridge prompt to settle");
+});
+
+test("runSingleAgent does not prompt when the parent aborts after session creation", async () => {
+	const controller = new AbortController();
+	const { bridge, calls } = makeParentBridge();
+	const { sdk, state } = createFakeSdk({
+		onSubscribe: () => controller.abort(),
+		onPrompt: async () => assert.fail("must not start provider work after parent abort"),
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		controller.signal,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		"tool-create-race",
+		bridge,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.equal(state.createSessionArgs.length, 1);
+	assert.equal(state.promptCalls, 0, "an already-aborted signal must be checked before invoking prompt()");
+	assert.equal(state.abortCalls, 1, "a session created at the abort boundary must be explicitly aborted");
 	assert.equal(state.disposeCalls, 1);
+	assert.equal(calls.cancelAll, 1, "parent-bridged UI must be cancelled at the abort boundary");
+});
+
+test("runSingleAgent disposes a session whose createSession resolves after parent abort", async () => {
+	const controller = new AbortController();
+	let releaseCreateSession: (() => void) | undefined;
+	const createSessionGate = new Promise<void>((resolve) => {
+		releaseCreateSession = resolve;
+	});
+	const { sdk, state } = createFakeSdk({
+		onCreateSession: () => createSessionGate,
+		onPrompt: async () => assert.fail("an abandoned late session must never be prompted"),
+	});
+
+	const resultPromise = runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		controller.signal,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		"tool-late-create",
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	for (let i = 0; i < 100 && state.createSessionArgs.length === 0; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 2));
+	}
+	assert.equal(state.createSessionArgs.length, 1);
+	controller.abort();
+	const result = await resultPromise;
+	assert.equal(result.stopReason, "aborted");
+	assert.equal(state.disposeCalls, 0, "the SDK has not returned a session yet");
+
+	releaseCreateSession?.();
+	for (let i = 0; i < 100 && state.disposeCalls === 0; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 2));
+	}
+	assert.equal(state.promptCalls, 0);
+	assert.equal(state.abortCalls, 1, "late-created sessions must be aborted best-effort");
+	assert.equal(state.disposeCalls, 1, "late-created sessions must not leak after the caller settled");
+});
+
+test("runSingleAgent holds the global in-flight permit for the full child lifetime", async () => {
+	const previous = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
+	try {
+		const first = createFakeSdk();
+		const second = createFakeSdk();
+		const firstAbort = new AbortController();
+		const secondAbort = new AbortController();
+		const run = (sdk: ReturnType<typeof createFakeSdk>["sdk"], signal: AbortSignal) => runSingleAgent(
+			process.cwd(),
+			[makeAgent()],
+			"worker",
+			"do work",
+			undefined,
+			undefined,
+			signal,
+			undefined,
+			(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+			makeModelRegistry(),
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ sdk: sdk as any, timeoutMs: 0 },
+		);
+
+		const firstRun = run(first.sdk, firstAbort.signal);
+		for (let i = 0; i < 100 && first.state.promptCalls === 0; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+		assert.equal(first.state.promptCalls, 1);
+
+		const secondRun = run(second.sdk, secondAbort.signal);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.equal(second.state.createSessionArgs.length, 0, "second child must wait while the first is active");
+		assert.equal(second.state.promptCalls, 0);
+
+		firstAbort.abort();
+		await firstRun;
+		for (let i = 0; i < 100 && second.state.promptCalls === 0; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+		assert.equal(second.state.promptCalls, 1, "terminalizing the first child must release the permit");
+
+		secondAbort.abort();
+		await secondRun;
+	} finally {
+		if (previous === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+		else process.env.PIE_SUBAGENT_MAX_INFLIGHT = previous;
+	}
 });
 
 test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
@@ -445,22 +636,23 @@ test("execute returns depth-limit response when nested depth is exhausted", asyn
 	}
 });
 
-test("execute returns mode-count error for invalid mode selection", async () => {
+test("execute throws mode-count error for invalid mode selection", async () => {
 	const tempDir = await mkdtemp(path.join(os.tmpdir(), "subagent-mode-test-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = tempDir;
 	try {
-		const response = await execute(
-			"tool-3",
-			{} as any,
-			new AbortController().signal,
-			() => undefined,
-			{ cwd: tempDir, hasUI: false } as any,
-			{} as any,
-			() => false,
+		await assert.rejects(
+			execute(
+				"tool-3",
+				{} as any,
+				new AbortController().signal,
+				() => undefined,
+				{ cwd: tempDir, hasUI: false } as any,
+				{} as any,
+				() => false,
+			),
+			/Provide exactly one mode/,
 		);
-		assert.equal(response.isError, true);
-		assert.match(response.content[0].text, /Provide exactly one mode/);
 	} finally {
 		if (previousAgentDir === undefined) {
 			delete process.env.PI_CODING_AGENT_DIR;

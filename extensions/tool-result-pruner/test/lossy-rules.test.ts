@@ -264,12 +264,23 @@ extension/src/b.ts:30:const y = 2
     }
   });
 
-  test('no-op for non-bash tools (pi grep tool not handled here)', () => {
-    const out = rule('grep-group', mod).run(RG_OUTPUT, { toolName: 'grep', input: { pattern: 'foo' }, profile: 'default' });
-    assert.equal(out, null);
+  test('groups output from the structured pi grep tool', () => {
+    const out = rule('grep-group', mod).run(RG_OUTPUT, { toolName: 'grep', input: { pattern: 'Foo' }, profile: 'default' });
+    assert.equal(
+      out?.text,
+      'extension/src/a.ts\n' +
+        '  6: import { Foo } from \'./foo\'\n' +
+        '  14: export type Bar = string\n' +
+        'extension/src/b.ts\n' +
+        '  22: const x = 1\n' +
+        '  30: const y = 2\n',
+    );
+    assert.equal(out?.changed, true);
+    assert.match(out?.marker ?? '', /4 matches in 2 files/);
   });
 
-  test('no-op when command is not grep-family (avoids grouping arbitrary word:number:text)', () => {
+  test('no-op for non-bash, non-grep tools (avoids grouping arbitrary word:number:text)', () => {
+    assert.equal(rule('grep-group', mod).run(RG_OUTPUT, { toolName: 'find', input: { pattern: 'foo' }, profile: 'default' }), null);
     assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash('cat file.txt')), null);
     assert.equal(rule('grep-group', mod).run(RG_OUTPUT, bash('ls -l')), null);
   });
@@ -315,5 +326,123 @@ extension/src/b.ts:30:const y = 2
       'rg: docs: The system cannot find the file specified. (os error 2)\n' +
         'extension/src/a.ts\n  6: foo\n  14: bar\n',
     );
+  });
+
+  test('no-op for structured grep tool when output is context blocks (not path:line:content)', () => {
+    const contextOutput = `src/a.ts\n  1 | context\n  2 | match\n  3 | context\n`;
+    assert.equal(rule('grep-group', mod).run(contextOutput, { toolName: 'grep', input: { pattern: 'match', context: 1 }, profile: 'default' }), null);
+  });
+});
+
+describe('duplicate-collapse rule', () => {
+  let mod: LossyModule;
+  test.before(async () => {
+    mod = (await import(lossyUrl)) as LossyModule;
+  });
+
+  test('collapses 3+ identical consecutive lines', () => {
+    const input = `building module A\nbuilding module A\nbuilding module A\ndone\n`;
+    const out = rule('duplicate-collapse', mod).run(input, bash('npm run build'));
+    assert.equal(out?.text, 'building module A\n  (... 2 identical lines)\ndone\n');
+    assert.equal(out?.changed, true);
+    assert.match(out?.marker ?? '', /2 duplicate lines collapsed/);
+  });
+
+  test('collapses a long run into one line + count marker', () => {
+    const input = 'Reply from 192.168.1.1: bytes=32 time=1ms TTL=64\n'.repeat(10);
+    const out = rule('duplicate-collapse', mod).run(input, bash('ping -t host'));
+    assert.ok(out);
+    assert.match(out!.text, /\(\.\.\. 9 identical lines\)/);
+    // Only one copy of the duplicated line survives.
+    assert.equal((out!.text.match(/Reply from 192\.168\.1\.1/g) || []).length, 1);
+  });
+
+  test('does not collapse runs shorter than 3', () => {
+    const input = `line\nline\nother\n`;
+    assert.equal(rule('duplicate-collapse', mod).run(input, bash('x')), null);
+  });
+
+  test('does not collapse blank lines (handled losslessly)', () => {
+    const input = `a\n\n\n\nb\n`;
+    assert.equal(rule('duplicate-collapse', mod).run(input, bash('x')), null);
+  });
+
+  test('keeps severity lines intact even when repeated', () => {
+    const input = `WARNING: low disk space\nWARNING: low disk space\nWARNING: low disk space\n`;
+    assert.equal(rule('duplicate-collapse', mod).run(input, bash('x')), null);
+  });
+
+  test('resets run on blank or severity lines', () => {
+    const input = `building module A\nbuilding module A\nbuilding module A\n\nbuilding module B\nbuilding module B\n`;
+    const out = rule('duplicate-collapse', mod).run(input, bash('x'));
+    assert.equal(out?.text, 'building module A\n  (... 2 identical lines)\n\nbuilding module B\nbuilding module B\n');
+  });
+
+  test('no-op when collapsing would not save bytes (very short lines)', () => {
+    const input = `x\nx\nx\n`;
+    assert.equal(rule('duplicate-collapse', mod).run(input, bash('x')), null);
+  });
+
+  test('preserves trailing newline', () => {
+    const input = `building module A\nbuilding module A\nbuilding module A\n`;
+    const out = rule('duplicate-collapse', mod).run(input, bash('x'));
+    assert.ok(out?.text.endsWith('\n'));
+  });
+});
+
+describe('progress-noise rule', () => {
+  let mod: LossyModule;
+  test.before(async () => {
+    mod = (await import(lossyUrl)) as LossyModule;
+  });
+
+  test('drops braille spinner frames and keeps real output', () => {
+    const input = `⠋ Fetching packages\n⠙ Fetching packages\n⠹ Fetching packages\nDone in 1.2s\n`;
+    const out = rule('progress-noise', mod).run(input, bash('npm install'));
+    assert.equal(out?.text, 'Done in 1.2s\n');
+    assert.equal(out?.changed, true);
+    assert.match(out?.marker ?? '', /3 progress-noise lines removed/);
+  });
+
+  test('drops progress-bar lines with block characters', () => {
+    const input = `[████████████████████░░░░░░░░░░] 67%\n[████████████████████████████░░] 90%\nComplete\n`;
+    const out = rule('progress-noise', mod).run(input, bash('download'));
+    assert.equal(out?.text, 'Complete\n');
+  });
+
+  test('drops bracketed percentage progress lines', () => {
+    const input = `(  12%) compiling…\n(  45%) compiling…\nBuild succeeded\n`;
+    const out = rule('progress-noise', mod).run(input, bash('make'));
+    assert.equal(out?.text, 'Build succeeded\n');
+  });
+
+  test('keeps warnings and errors even if they contain spinner chars', () => {
+    // Severity lines are preserved; only the genuine spinner frames are removed.
+    const input = `⠋ Fetching packages\nWARNING: deprecated dependency\n⠙ Fetching packages\nDone\n`;
+    const out = rule('progress-noise', mod).run(input, bash('npm install'));
+    assert.equal(out?.text, 'WARNING: deprecated dependency\nDone\n');
+    assert.match(out?.marker ?? '', /2 progress-noise lines removed/);
+  });
+
+  test('keeps notice lines', () => {
+    const input = `⠋ working\nNOTICE: found 3 vulnerabilities\nDone\n`;
+    const out = rule('progress-noise', mod).run(input, bash('npm audit'));
+    assert.equal(out?.text, 'NOTICE: found 3 vulnerabilities\nDone\n');
+  });
+
+  test('no-op when no progress-noise lines are detected', () => {
+    const input = `Coverage: 85%\nTests: 42 passed\n`;
+    assert.equal(rule('progress-noise', mod).run(input, bash('npm test')), null);
+  });
+
+  test('no-op when output would be entirely noise', () => {
+    const input = `⠋\n⠙\n⠹\n`;
+    assert.equal(rule('progress-noise', mod).run(input, bash('npm install')), null);
+  });
+
+  test('preserves trailing newline', () => {
+    const input = `⠋ Fetching\nDone\n`;
+    const out = rule('progress-noise', mod).run(input, bash('x'));
+    assert.equal(out?.text, 'Done\n');
   });
 });

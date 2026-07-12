@@ -1,8 +1,23 @@
 # Handoff: subagent and provider resilience
 
-**Status:** Open — implementation handoff  
+**Status:** In progress — core subagent/provider reliability implemented; broader acceptance remains open
 **Priority:** P0 reliability  
 **Scope:** `extensions/subagent/`, provider request lifecycle, transcript rendering, queued messages, and operational analytics
+
+## July 2026 reliability-audit update
+
+The structural execution work described below is now substantially implemented:
+
+- productive runs use renewable inactivity/phase leases rather than a default short total-runtime deadline;
+- child terminal ownership, exact-once permit release, bounded teardown, orphan retries, and bounded shutdown drain are in place;
+- process permits are owned by root subagent trees and borrowed by nested descendants, preventing parent/child semaphore deadlocks at full capacity;
+- parallel sibling/partial-result preservation and replay-safe transient failover are covered by focused tests;
+- provider queue/header/stream recovery, shared circuit/active state across reconfiguration, half-open probe closure, afterburn-expiry wake-ups, and cancellation timer cleanup are implemented;
+- deep nesting preserves inherited skill state and the innermost UI/subagent identity, while AbortSignal fallbacks clean up listeners on normal settlement;
+- queued-message correlation, bounded dwell watchdogs, and host-owned Stop / Keep waiting / Remove queued controls are implemented;
+- warm-bash remains non-gating and its marker protocol handles every stdout chunk boundary deterministically.
+
+This handoff is **not yet closed**. Its broader definition of done still requires an end-to-end fake-provider matrix using fake clocks (including the simulated >15-minute healthy control) and confirmation that the requested per-attempt operational analytics are persisted and queryable. Do not infer completion merely from the focused reliability suites passing.
 
 ## Why this handoff exists
 

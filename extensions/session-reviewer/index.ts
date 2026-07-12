@@ -66,15 +66,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_review',
     label: 'Session review',
-    description:
-      'List open app sessions, read their transcripts, and record a done/rating/completion review. `done: true` closes the tab. Use only for explicit session-evaluation tasks; the evaluate-sessions skill contains the rubric.',
-    promptSnippet:
-      'List, inspect, and record reviews for currently open app sessions.',
+    description: 'List open sessions, read transcripts, or record a rating/completion review; done=true closes the tab. Use only for session-evaluation tasks.',
+    promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'Call `listOpen` first, skip pinned or already-reviewed sessions unless explicitly asked, then use `getTranscript` before judging a session.',
-      'Check the proposed review with the user before `setReview`. Mark done only when work is complete or conclusively stopped; done=true closes the tab.',
-      'Use fully for completed work, partial for unresolved work, and setback only when the session left things worse. Include reviewer provenance only when reviewers actually contributed.',
-      'Report a concise final summary after processing the requested sessions.',
+      'For session_review, list before reading, read before judging, confirm reviews with the user, and only close conclusively finished sessions.',
     ],
     parameters: sessionReviewSchema,
 
