@@ -3,6 +3,9 @@
 // spawns run-tests.mjs and is exercised separately by hand.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   inferRepoRoot,
@@ -20,17 +23,23 @@ test('inferRepoRoot resolves to the pie repo root', () => {
 });
 
 test('getChangedFiles returns repo-relative forward-slash paths from git', async () => {
-  const files = await getChangedFiles(repoRoot);
-  assert.ok(Array.isArray(files));
-  assert.ok(files.length > 0, 'expected changed/untracked files in this working tree');
-  for (const f of files) {
-    assert.equal(typeof f, 'string');
-    assert.ok(!f.includes('\\'), `forward-slash only: ${f}`);
-    assert.ok(!path.isAbsolute(f), `repo-relative only: ${f}`);
+  const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-changed-files-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: tempRepo });
+    fs.mkdirSync(path.join(tempRepo, 'scripts'));
+    fs.writeFileSync(path.join(tempRepo, 'scripts', 'tracked.mjs'), 'export {};\n');
+    fs.writeFileSync(path.join(tempRepo, 'scripts', 'untracked.mjs'), 'export {};\n');
+    execFileSync('git', ['add', 'scripts/tracked.mjs'], { cwd: tempRepo });
+
+    const files = await getChangedFiles(tempRepo);
+    assert.deepEqual(files, ['scripts/tracked.mjs', 'scripts/untracked.mjs']);
+    for (const f of files) {
+      assert.ok(!f.includes('\\'), `forward-slash only: ${f}`);
+      assert.ok(!path.isAbsolute(f), `repo-relative only: ${f}`);
+    }
+  } finally {
+    fs.rmSync(tempRepo, { recursive: true, force: true });
   }
-  // The new DX scripts are untracked, so they must appear in the changed set.
-  assert.ok(files.includes('scripts/run-test-files.mjs'), 'run-test-files.mjs should be in changed set');
-  assert.ok(files.includes('scripts/run-changed-tests.mjs'), 'run-changed-tests.mjs should be in changed set');
 });
 
 test('planRuns maps package files to ids and de-duplicates', () => {

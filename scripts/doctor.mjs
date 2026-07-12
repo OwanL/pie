@@ -10,9 +10,9 @@ const ok = (message) => console.log(`  [ok] ${message}`);
 const fail = (message) => { failures++; console.error(`  [FAIL] ${message}`); };
 const warn = (message) => console.warn(`  [warn] ${message}`);
 const normalize = (value) => path.resolve(value).replaceAll("\\", "/").toLowerCase();
-const run = (command, args) => process.platform === "win32"
-  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], { cwd: repoRoot, encoding: "utf8" })
-  : spawnSync(command, args, { cwd: repoRoot, encoding: "utf8" });
+const run = (command, args, cwd = repoRoot) => process.platform === "win32"
+  ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], { cwd, encoding: "utf8" })
+  : spawnSync(command, args, { cwd, encoding: "utf8" });
 
 console.log("pie multi-machine doctor");
 const pinnedNode = readPinnedNodeVersion();
@@ -25,6 +25,12 @@ npm.status === 0 && actualNpm === pinnedNpm ? ok(`npm ${pinnedNpm}`) : fail(`npm
 
 for (const relative of ["package-lock.json", "extension/package-lock.json", "analysis/package-lock.json"]) {
   fs.existsSync(path.join(repoRoot, relative)) ? ok(`${relative} present`) : fail(`${relative} missing`);
+}
+for (const relative of [".", "extension", "analysis"]) {
+  const result = run("npm", ["ls", "--depth=0", "--include=dev"], path.join(repoRoot, relative));
+  result.status === 0
+    ? ok(`${relative === "." ? "root" : relative} dependencies installed`)
+    : fail(`${relative === "." ? "root" : relative} dependencies incomplete; run npm ci at the repo root`);
 }
 
 const settings = JSON.parse(fs.readFileSync(path.join(repoRoot, "settings.json"), "utf8"));

@@ -642,21 +642,27 @@ Write-Host ""
 Write-Host "==> Building pie VSCode extension"
 $extensionDir = Join-Path $repoRoot 'extension'
 
-Push-Location $extensionDir
+Push-Location $repoRoot
 $extensionBuildFailed = $false
 try {
-  npm ci
-  if ($LASTEXITCODE -ne 0) { throw "npm ci failed in extension/" }
+  # Root postinstall installs the locked extension/ and analysis/ trees too.
+  npm ci --include=dev
+  if ($LASTEXITCODE -ne 0) { throw "npm ci failed for the repository dependency trees" }
 
-  npm run build
-  if ($LASTEXITCODE -ne 0) { throw "build failed in extension/" }
+  Push-Location $extensionDir
+  try {
+    npm run build
+    if ($LASTEXITCODE -ne 0) { throw "build failed in extension/" }
 
-  npm run package
-  if ($LASTEXITCODE -ne 0) { throw "vsce package failed in extension/" }
+    npm run package
+    if ($LASTEXITCODE -ne 0) { throw "vsce package failed in extension/" }
+  } finally {
+    Pop-Location
+  }
 
   $packageManifest = Get-Content (Join-Path $extensionDir 'package.json') -Raw | ConvertFrom-Json
   $vsixPattern = "$($packageManifest.name)-*.vsix"
-  $vsix = Get-ChildItem -Filter $vsixPattern | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  $vsix = Get-ChildItem -Path $extensionDir -Filter $vsixPattern | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($vsix) {
     # Resolve the VS Code CLI (code / code-insiders), probing common install
     # locations so a fresh machine without `code` on PATH still works.

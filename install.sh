@@ -357,8 +357,10 @@ done
 echo "==> Building pie VS Code extension"
 vsix=""
 if (
+  # Root postinstall installs the locked extension/ and analysis/ trees too.
+  cd "$repo_root"
+  npm ci --include=dev
   cd "$repo_root/extension"
-  npm ci
   npm run build
   npm run package
 ); then

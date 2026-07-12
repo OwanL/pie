@@ -180,7 +180,7 @@ For a deterministic dependency/build refresh after pulling, first close all VS C
 npm run bootstrap
 ```
 
-This runs `npm ci` in the root, `extension/`, and `analysis/`, installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+This runs a root `npm ci`; its `postinstall` automatically installs the locked `extension/` and `analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
 
 ```bash
 npm run doctor
@@ -218,9 +218,17 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 
 ### Build the pie VS Code extension
 
+From a fresh checkout, install every dependency tree once from the repository root:
+
+```bash
+npm ci             # also installs extension/ and analysis/ via postinstall
+npm run extension:build
+```
+
+For an extension-only refresh after dependencies are already installed:
+
 ```bash
 cd extension
-npm ci
 npm run build      # builds and syncs into the installed extension
 ```
 
