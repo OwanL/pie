@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { RunAnalyticsStorage } from '../src/host/stats-service/storage';
+import { RUN_ANALYTICS_SCHEMA_VERSION, type OutcomeHistoryLogEntry } from '../src/host/run-analytics';
+import { serializeJsonLine } from '../src/shared/jsonl';
 import {
   buildWorkspaceAnalyticsId,
   getDataOutcomesRootPath,
@@ -134,4 +139,59 @@ test('getDefaultRunAnalyticsExportPath falls back to extension global storage ou
     getDefaultRunAnalyticsExportPath('', '/global/storage', '/workspace/project'),
     path.join('/global/storage', 'exports', 'project', 'run-analytics-export.json'),
   );
+});
+
+test('RunAnalyticsStorage prunes CRLF JSONL using actual UTF-8 bytes and keeps the newest record', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-storage-crlf-'));
+  try {
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: root,
+      workspaceId: 'crlf-test',
+      now: () => new Date('2026-07-13T10:00:00.000Z'),
+      serializeSessions: () => ({}),
+      maxRunHistoryEntries: 10,
+      maxRunHistoryBytes: 400,
+      autoExportSetTimeout: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setTimeout>,
+    });
+
+    await storage.start();
+    const storageDir = storage.getStorageDir();
+    const filePath = path.join(storageDir, 'outcome-history.jsonl');
+
+    const outcome = (runId: string, text: string) => ({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_outcome' as const,
+      recordedAt: '2026-07-13T10:00:00.000Z',
+      sessionPath: '/s',
+      runId,
+      taskGroupId: 't',
+      outcome: { resolution: 'resolved' as const, satisfaction: 4 },
+      text,
+    } as OutcomeHistoryLogEntry);
+
+    // Seed the file with CRLF line endings and multi-byte characters so the
+    // UTF-8 byte count exceeds the naive string-length + 1 estimate.
+    const seeded = [outcome('r1', 'éé'), outcome('r2', '€€'), outcome('r3', 'ññ')];
+    const crlfContent = seeded.map((line) => serializeJsonLine(line)).join('').replace(/\n/g, '\r\n');
+    await fs.writeFile(filePath, crlfContent, 'utf8');
+
+    const fullBytes = Buffer.byteLength(crlfContent, 'utf8');
+    assert.ok(fullBytes > 400, `seeded CRLF file ${fullBytes} B should exceed the byte limit`);
+
+    // Appending a new record triggers the post-flush prune.
+    const newest = outcome('r4', 'üü');
+    storage.schedulePersist(undefined, newest);
+    await storage.flush();
+
+    const raw = await fs.readFile(filePath, 'utf8');
+    const keptLines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    const keptIds = keptLines.map((line) => JSON.parse(line).runId);
+
+    assert.ok(raw.includes('\r\n'), 'rewritten file preserves CRLF line endings');
+    assert.deepEqual(keptIds, ['r3', 'r4'], 'oldest two records are pruned; newest two survive');
+    const prunedBytes = Buffer.byteLength(raw, 'utf8');
+    assert.ok(prunedBytes <= 400, `pruned file ${prunedBytes} B must stay within the byte limit`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

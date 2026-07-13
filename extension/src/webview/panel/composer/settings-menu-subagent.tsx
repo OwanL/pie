@@ -269,25 +269,6 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
         );
       })}
 
-      <UiGroupLabel label="Preview" />
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Collapsed preview rows</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.subagentPreviewLines}</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="1"
-          max="12"
-          step="1"
-          value={prefs.subagentPreviewLines}
-          onInput={(e) => onSetPrefs({ subagentPreviewLines: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Collapsed subagent preview rows"
-        />
-        <div class="toolbar-settings-item-hint">Rows reserved for live streaming output on collapsed subagent cards. When the child has no visible stream yet, the rows show pending….</div>
-      </div>
-
       <UiGroupLabel label="Nesting" />
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">

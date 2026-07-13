@@ -11,7 +11,7 @@
 
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { ProviderGate, ProviderGateSaturatedError, ProviderGateAbortError, ProviderGatePoolDisposedError, ProviderGateHeaderTimeoutError, ProviderGateTransientPauseError, ProviderGateAuthError, type ProviderConcurrencyConfig } from '../src/backend/provider-gate.js';
+import { ProviderGate, ProviderGateSaturatedError, ProviderGateAbortError, ProviderGateHeaderTimeoutError, type ProviderConcurrencyConfig } from '../src/backend/provider-gate.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -73,46 +73,6 @@ async function readBody(response: Response): Promise<string> {
 	return text;
 }
 
-function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
-	let resolve!: (value: T) => void;
-	const promise = new Promise<T>((res) => { resolve = res; });
-	return { promise, resolve };
-}
-
-async function within<T>(promise: Promise<T>, ms = 1000): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new Error(`did not settle within ${ms}ms`)), ms);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
-/** Deterministic deferral helper — resolves/rejects under test control. */
-class Deferred<T = void> {
-	promise: Promise<T>;
-	resolve!: (value: T) => void;
-	reject!: (reason?: unknown) => void;
-	settled = false;
-	constructor() {
-		this.promise = new Promise<T>((res, rej) => {
-			this.resolve = (value: T) => {
-				this.settled = true;
-				res(value);
-			};
-			this.reject = (reason?: unknown) => {
-				this.settled = true;
-				rej(reason);
-			};
-		});
-	}
-}
-
 // ── Setup / teardown ──────────────────────────────────────────────────────────
 
 let savedFetch: typeof globalThis.fetch;
@@ -129,82 +89,6 @@ afterEach(() => {
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
-describe('ProviderGate — transient circuit breaker', () => {
-	test('opens after a bounded 5xx burst and recovers through one half-open probe', async () => {
-		let calls = 0;
-		globalThis.fetch = async () => {
-			calls++;
-			return calls <= 2 ? new Response('down', { status: 503 }) : new Response('ok', { status: 200 });
-		};
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 2, breakerOpenSeconds: 0.02, breakerMaxOpenSeconds: 1 }], 0);
-
-		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('a'))).status, 503);
-		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('b'))).status, 503);
-		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('c')), ProviderGateTransientPauseError);
-		assert.equal(calls, 2, 'open breaker must short-circuit without provider traffic');
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('probe'))).status, 200);
-		assert.equal(ProviderGate.getInstance()?.getMetrics()[0]?.breakerState, 'closed');
-	});
-
-	test('surfaces auth failures immediately without opening the transient breaker', async () => {
-		globalThis.fetch = async () => new Response('unauthorized', { status: 401 });
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1 }], 0);
-		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('auth')), ProviderGateAuthError);
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(metrics?.breakerState, 'closed');
-		assert.equal(metrics?.transientFailures, 0);
-	});
-
-	test('an auth response from a half-open probe closes probe ownership instead of wedging the breaker', async () => {
-		let calls = 0;
-		globalThis.fetch = async () => {
-			calls++;
-			return calls === 1 ? new Response('down', { status: 503 }) : new Response('unauthorized', { status: 401 });
-		};
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1, breakerOpenSeconds: 0.01 }], 0);
-		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('fail'))).status, 503);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('probe')), ProviderGateAuthError);
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(metrics?.breakerState, 'closed');
-		assert.equal(metrics?.breakerProbeInFlight, false);
-	});
-
-	test('transient breaker state survives live pool reconfiguration', async () => {
-		let calls = 0;
-		globalThis.fetch = async () => {
-			calls++;
-			return new Response('down', { status: 503 });
-		};
-		const config = { ...BASE_CONFIG, breakerFailureThreshold: 1, breakerOpenSeconds: 10 };
-		const gate = ProviderGate.install([config], 0);
-		assert.equal((await fetch(`${TEST_BASE}/chat`, makeInit('fail'))).status, 503);
-		assert.equal(gate.getMetrics()[0]?.breakerState, 'open');
-
-		gate.reconfigure([{ ...config, maxConcurrentRequests: 4 }], 0);
-		await assert.rejects(fetch(`${TEST_BASE}/chat`, makeInit('blocked')), ProviderGateTransientPauseError);
-		assert.equal(calls, 1, 'reconfiguration must not reset provider health and send another request');
-		assert.equal(gate.getMetrics()[0]?.breakerState, 'open');
-	});
-
-	test('caller cancellation is not counted as a provider failure', async () => {
-		globalThis.fetch = async (_input, init) => new Promise((_resolve, reject) => {
-			const signal = init?.signal;
-			if (signal?.aborted) reject(signal.reason);
-			else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-		});
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1, headerWaitSeconds: 10 }], 0);
-		const controller = new AbortController();
-		const request = fetch(`${TEST_BASE}/chat`, makeInit('cancelled', controller.signal));
-		controller.abort();
-		await assert.rejects(request);
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(metrics?.breakerState, 'closed');
-		assert.equal(metrics?.transientFailures, 0);
-	});
-});
 
 describe('ProviderGate — installation and passthrough', () => {
 	test('non-matching requests pass through unwrapped', async () => {
@@ -283,45 +167,6 @@ describe('ProviderGate — concurrency limiting', () => {
 		]);
 
 		assert.equal(maxInFlight, 1, 'only 1 request should be in-flight at a time');
-	});
-
-	test('reconfiguration shares active capacity with requests draining from the old pool', async () => {
-		const releaseFirst = deferred();
-		const releaseSecond = deferred();
-		const firstStarted = deferred();
-		const secondStarted = deferred();
-		const thirdStarted = deferred();
-		const starts: string[] = [];
-		globalThis.fetch = async (_input, init) => {
-			const id = (init?.headers as Record<string, string>)['x-session-affinity'];
-			starts.push(id);
-			if (id === 'old-1') { firstStarted.resolve(); await releaseFirst.promise; }
-			if (id === 'old-2') { secondStarted.resolve(); await releaseSecond.promise; }
-			if (id === 'new') thirdStarted.resolve();
-			return new Response(null, { status: 204 });
-		};
-		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 2, queueWaitSeconds: 0 }], 0);
-		const first = fetch(TEST_BASE + '/chat', makeInit('old-1'));
-		const second = fetch(TEST_BASE + '/chat', makeInit('old-2'));
-		await Promise.all([firstStarted.promise, secondStarted.promise]);
-
-		gate.reconfigure([{ ...BASE_CONFIG, maxConcurrentRequests: 1, queueWaitSeconds: 0 }], 0);
-		const third = fetch(TEST_BASE + '/chat', makeInit('new'));
-		await new Promise((resolve) => setImmediate(resolve));
-		assert.deepEqual(starts, ['old-1', 'old-2']);
-		assert.equal(gate.getMetrics()[0]?.activeRequests, 2, 'metrics must include draining generations');
-		assert.equal(gate.getMetrics()[0]?.queuedRequests, 1);
-
-		releaseFirst.resolve();
-		await first;
-		await new Promise((resolve) => setImmediate(resolve));
-		assert.deepEqual(starts, ['old-1', 'old-2'], 'new cap=1 stays full while one old request remains');
-
-		releaseSecond.resolve();
-		await within(thirdStarted.promise, 500);
-		await Promise.all([second, third]);
-		assert.deepEqual(starts, ['old-1', 'old-2', 'new']);
-		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
 	});
 
 	test('saturated queue rejects with ProviderGateSaturatedError', async () => {
@@ -412,104 +257,6 @@ describe('ProviderGate — afterburn sticky slots', () => {
 		// Should be near-instant (no queue wait).
 		assert.ok(elapsed < 100, `second request took ${elapsed}ms (should reuse slot)`);
 		assert.equal(callCount, 2);
-	});
-
-	test('a waiter already queued at release receives the slot instead of hanging behind a new afterburn hold', async () => {
-		let releaseFirst!: () => void;
-		const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
-		globalThis.fetch = async (_input, init) => {
-			const id = (init?.headers as Record<string, string>)['x-session-affinity'];
-			if (id === 'session-A') await firstHeld;
-			return makeStreamingResponse([new TextEncoder().encode('data: ok\n\n')]);
-		};
-		ProviderGate.install([{
-			...BASE_CONFIG,
-			maxConcurrentRequests: 1,
-			afterburnSeconds: 10,
-			queueWaitSeconds: 0,
-		}], 0);
-
-		const first = fetch(TEST_BASE + '/chat', makeInit('session-A'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		const queued = fetch(TEST_BASE + '/chat', makeInit('session-B'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		releaseFirst();
-		await within(Promise.all([first, queued]), 1000);
-	});
-
-	test('an unbounded waiter arriving during an existing hold starts when the hold expires', async () => {
-		const starts: string[] = [];
-		globalThis.fetch = async (_input, init) => {
-			starts.push((init?.headers as Record<string, string>)['x-session-affinity']);
-			return new Response(null, { status: 204 });
-		};
-		ProviderGate.install([{
-			...BASE_CONFIG,
-			maxConcurrentRequests: 1,
-			afterburnSeconds: 0.05,
-			queueWaitSeconds: 0,
-		}], 0);
-
-		await fetch(TEST_BASE + '/chat', makeInit('holder'));
-		const queuedAt = performance.now();
-		const waiter = fetch(TEST_BASE + '/chat', makeInit('waiter'));
-		await new Promise((resolve) => setTimeout(resolve, 15));
-		assert.deepEqual(starts, ['holder'], 'a different session must not bypass a live hold');
-		await within(waiter, 500);
-		const elapsed = performance.now() - queuedAt;
-		assert.deepEqual(starts, ['holder', 'waiter']);
-		assert.ok(elapsed >= 25, `waiter started before the hold expired (${elapsed}ms)`);
-		assert.ok(elapsed < 250, `waiter was not woken promptly at hold expiry (${elapsed}ms)`);
-	});
-
-	test('multiple held slots wake multiple waiters in priority/FIFO order', async () => {
-		const starts: string[] = [];
-		globalThis.fetch = async (_input, init) => {
-			starts.push((init?.headers as Record<string, string>)['x-session-affinity']);
-			return new Response(null, { status: 204 });
-		};
-		ProviderGate.install([{
-			...BASE_CONFIG,
-			maxConcurrentRequests: 2,
-			afterburnSeconds: 0.05,
-			queueWaitSeconds: 0,
-		}], 0);
-
-		await fetch(TEST_BASE + '/chat', makeInit('holder-A'));
-		await fetch(TEST_BASE + '/chat', makeInit('holder-B'));
-		const defaultOne = fetch(TEST_BASE + '/chat', makeInit('default-1'));
-		const defaultTwo = fetch(TEST_BASE + '/chat', makeInit('default-2'));
-		const pruner = fetch(TEST_BASE + '/chat', makePrunerInit('pruner'));
-		await new Promise((resolve) => setTimeout(resolve, 15));
-		assert.deepEqual(starts, ['holder-A', 'holder-B']);
-
-		await within(Promise.all([defaultOne, defaultTwo, pruner]), 500);
-		assert.deepEqual(starts.slice(2), ['pruner', 'default-1', 'default-2']);
-	});
-
-	test('reconfiguration and uninstall reject waiters attached to old held pools', async () => {
-		globalThis.fetch = async () => new Response(null, { status: 204 });
-		const config: ProviderConcurrencyConfig = {
-			...BASE_CONFIG,
-			maxConcurrentRequests: 1,
-			afterburnSeconds: 10,
-			queueWaitSeconds: 0,
-		};
-		const gate = ProviderGate.install([config], 0);
-
-		await fetch(TEST_BASE + '/chat', makeInit('old-holder'));
-		const oldWaiter = fetch(TEST_BASE + '/chat', makeInit('old-waiter'));
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		gate.reconfigure([{ ...config, afterburnSeconds: 0 }], 0);
-		await assert.rejects(within(oldWaiter, 250), ProviderGatePoolDisposedError);
-		await within(fetch(TEST_BASE + '/chat', makeInit('new-pool')), 250);
-
-		gate.reconfigure([config], 0);
-		await fetch(TEST_BASE + '/chat', makeInit('dispose-holder'));
-		const disposeWaiter = fetch(TEST_BASE + '/chat', makeInit('dispose-waiter'));
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		ProviderGate.uninstall();
-		await assert.rejects(within(disposeWaiter, 250), ProviderGatePoolDisposedError);
 	});
 
 	test('different session queues behind sticky slot holder', async () => {
@@ -652,70 +399,6 @@ describe('ProviderGate — stream liveness', () => {
 		const res = await fetch(TEST_BASE + '/chat', makeInit('s1'));
 		const text = await readBody(res);
 		assert.equal(text, 'data: hello\n\n');
-	});
-
-	test('a stalled 2xx body counts as a transient failure and opens the breaker', async () => {
-		globalThis.fetch = async () => makeStallingResponse();
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1 }], 0.02);
-		const res = await fetch(TEST_BASE + '/chat', makeInit('stall'));
-		await assert.rejects(res.text(), /stalled/);
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(metrics?.breakerState, 'open');
-		assert.equal(metrics?.transientFailures, 1);
-	});
-
-	test('consumer cancelling the stream releases the slot without counting as a provider failure', async () => {
-		let upstreamCancelled = false;
-		globalThis.fetch = async () => {
-			const body = new ReadableStream<Uint8Array>({
-				pull() {
-					// Stall until the consumer cancels.
-					return new Promise(() => {});
-				},
-				cancel() {
-					upstreamCancelled = true;
-				},
-			});
-			return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
-		};
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1 }], 10); // long idle timeout
-
-		const res = await fetch(TEST_BASE + '/chat', makeInit('s1'));
-		const reader = res.body!.getReader();
-		await new Promise((r) => setTimeout(r, 10));
-		await reader.cancel('consumer cancelled');
-
-		await new Promise((r) => setTimeout(r, 20));
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(upstreamCancelled, true, 'upstream reader must be cancelled');
-		assert.equal(metrics?.activeRequests, 0, 'slot must be released after consumer cancel');
-		assert.equal(metrics?.transientFailures, 0, 'consumer cancel must not count as provider failure');
-		assert.equal(metrics?.breakerState, 'closed', 'breaker must remain closed');
-	});
-
-	test('consumer cancel clears the idle watchdog so it cannot fire later', async () => {
-		let upstreamCancelled = false;
-		globalThis.fetch = async () => {
-			const body = new ReadableStream<Uint8Array>({
-				pull() { return new Promise(() => {}); },
-				cancel() { upstreamCancelled = true; },
-			});
-			return new Response(body, { status: 200 });
-		};
-		ProviderGate.install([{ ...BASE_CONFIG, breakerFailureThreshold: 1 }], 0.05); // 50ms idle timeout
-
-		const res = await fetch(TEST_BASE + '/chat', makeInit('s1'));
-		const reader = res.body!.getReader();
-		await new Promise((r) => setTimeout(r, 10));
-		await reader.cancel('cancelled early');
-
-		// Wait well past the idle timeout to prove the watchdog was cleared.
-		await new Promise((r) => setTimeout(r, 100));
-		assert.equal(upstreamCancelled, true);
-		const metrics = ProviderGate.getInstance()?.getMetrics()[0];
-		assert.equal(metrics?.activeRequests, 0);
-		assert.equal(metrics?.transientFailures, 0);
-		assert.equal(metrics?.breakerState, 'closed');
 	});
 });
 
@@ -1000,71 +683,5 @@ describe('ProviderGate — resolveConfigs from models.json', () => {
 		};
 		const configs = ProviderGate.resolveConfigs(modelsJson);
 		assert.equal(configs[0].headerWaitSeconds, undefined);
-	});
-});
-
-describe('ProviderGate — resolveBaseUrls from models.json', () => {
-	test('maps every provider that has a baseUrl (gated or not)', () => {
-		const modelsJson = {
-			providers: {
-				umans: {
-					baseUrl: 'https://api.code.umans.ai/v1',
-					concurrency: { maxConcurrentRequests: 4 },
-				},
-				openai: { baseUrl: 'https://api.openai.com/v1' },
-				nourl: {},
-			},
-		};
-		const map = ProviderGate.resolveBaseUrls(modelsJson);
-		assert.equal(map.size, 2);
-		assert.equal(map.get('umans'), 'https://api.code.umans.ai/v1');
-		assert.equal(map.get('openai'), 'https://api.openai.com/v1');
-		assert.equal(map.has('nourl'), false);
-	});
-});
-
-describe('ProviderGate — provider-agnostic user overrides', () => {
-	test('gates a provider that had no base concurrency block', () => {
-		const knownBaseUrls = new Map([['openai', 'https://api.openai.com/v1']]);
-		// Install with ZERO base configs — gate is a passthrough until an override.
-		const gate = ProviderGate.install([], 0, knownBaseUrls);
-		assert.deepEqual(gate.getMetrics(), []);
-
-		gate.applyUserOverrides({ openai: { maxConcurrentRequests: 3, afterburnSeconds: 5 } });
-		const metrics = gate.getMetrics();
-		assert.equal(metrics.length, 1);
-		assert.equal(metrics[0].provider, 'openai');
-		assert.equal(metrics[0].maxConcurrentRequests, 3);
-		assert.equal(metrics[0].afterburnSeconds, 5);
-	});
-
-	test('ignores an override for a provider whose baseUrl is unknown', () => {
-		const gate = ProviderGate.install([], 0, new Map());
-		gate.applyUserOverrides({ mystery: { maxConcurrentRequests: 3 } });
-		assert.deepEqual(gate.getMetrics(), []);
-	});
-
-	test('does not gate a new provider from a non-positive cap', () => {
-		const knownBaseUrls = new Map([['openai', 'https://api.openai.com/v1']]);
-		const gate = ProviderGate.install([], 0, knownBaseUrls);
-		// afterburn-only override, no maxConcurrentRequests — nothing to gate on.
-		gate.applyUserOverrides({ openai: { afterburnSeconds: 5 } });
-		assert.deepEqual(gate.getMetrics(), []);
-	});
-
-	test('clearing an override reverts a base provider to its base config', () => {
-		const base: ProviderConcurrencyConfig = {
-			provider: 'test-provider',
-			baseUrl: TEST_BASE,
-			maxConcurrentRequests: 2,
-			afterburnSeconds: 0,
-			queueWaitSeconds: 30,
-		};
-		const gate = ProviderGate.install([base], 0);
-		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 6 } });
-		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 6);
-		// Removing the override should recompute from base (back to 2), not stick.
-		gate.applyUserOverrides({});
-		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 2);
 	});
 });

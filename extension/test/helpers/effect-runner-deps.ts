@@ -50,15 +50,8 @@ export interface MakeEffectRunnerDepsOpts {
    *  post-ack, pre-commit phase; on fire it dispatches PreflightFailed. */
   sendTimerTimeoutMs?: number;
   /** Dynamic send-timer budget (prepass-aware production wiring); takes
-   *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. Takes
-   *  the `sessionPath` (FP-C3) so the budget can be sized to the send's
-   *  provider; tests may ignore the arg. */
-  getSendTimerTimeoutMs?: (sessionPath: string) => number;
-  /** Override the model-start send-timer budget (default 600s). The send-timer
-   *  is re-armed with this budget once the pruning prepass succeeds
-   *  (`ReArmSendTimer`); a fire after re-arm carries the model-start error
-   *  string. Used by tests to avoid waiting the full 10min. */
-  modelStartTimerTimeoutMs?: number;
+   *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. */
+  getSendTimerTimeoutMs?: () => number;
   /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
   timer?: TimerSink;
   /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
@@ -171,9 +164,6 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     handleSelectionFailure(token: string, notice: string) {
       calls.push({ kind: 'handleSelectionFailure', token, notice });
     },
-    applySessionOpened(payload) {
-      calls.push({ kind: 'applySessionOpened', payload });
-    },
     getOpenTranscriptMode() {
       return 'tail' as const;
     },
@@ -220,7 +210,6 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     dispatchEvent: opts.dispatchEvent ?? (() => {}),
     sendTimerTimeoutMs: opts.sendTimerTimeoutMs,
     getSendTimerTimeoutMs: opts.getSendTimerTimeoutMs,
-    modelStartTimerTimeoutMs: opts.modelStartTimerTimeoutMs,
     timer: opts.timer,
   };
 

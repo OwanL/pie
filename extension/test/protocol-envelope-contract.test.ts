@@ -35,7 +35,6 @@ function emptyViewState(): ViewState {
     openTabPaths: [],
     pinnedTabPaths: [],
     runningSessionPaths: [],
-    startingModelSessionPaths: [],
     unreadFinishedSessionPaths: [],
     activeSession: null,
     transcript: [],
@@ -57,7 +56,6 @@ function emptyViewState(): ViewState {
     draftText: '',
     busy: false,
     retryStatus: null,
-    waitingForSlot: null,
     notice: null,
     backendReady: false,
     workspaceCwd: null,
@@ -95,8 +93,8 @@ function emptyViewState(): ViewState {
     showOutcomeDialog: false,
     pendingExtensionUIRequestsBySession: {},
     pendingExtensionUIRequest: null,
-    queuedDwell: [],
     deferredTriggers: [],
+    startingModelSessionPaths: [],
   };
 }
 

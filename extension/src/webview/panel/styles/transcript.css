@@ -657,7 +657,6 @@
    is the bundled :root default (2 rows × 18px) used before the effect runs. */
 :root {
   --activity-tail-content-min-height: 36px;
-  --subagent-preview-content-min-height: 36px;
 }
 
 .turn-activity-tail-content {
@@ -670,10 +669,9 @@
   overflow: hidden;
 }
 
-/* Collapsed subagent cards reserve their own independent row count for the
-   live streaming-text preview (driven by the `subagentPreviewLines` pref). */
+/* Collapsed subagent cards share the same activity-tail row budget. */
 .subagent-live-preview .turn-activity-tail-content {
-  height: var(--subagent-preview-content-min-height);
+  height: var(--activity-tail-content-min-height);
 }
 
 /* Flowing content body: source newlines are collapsed and the text wraps to

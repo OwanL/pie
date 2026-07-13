@@ -16,7 +16,6 @@ export function transcriptRenderSignature(state: Pick<
   | 'prepassPhase'
   | 'retryStatus'
   | 'transcript'
-  | 'waitingForSlot'
 >): string {
   const tail = state.transcript.slice(-3).map((message) => ({
     id: message.id,
@@ -45,7 +44,6 @@ export function transcriptRenderSignature(state: Pick<
     busy: state.busy,
     prepassPhase: state.prepassPhase,
     retryStatus: state.retryStatus,
-    waitingForSlot: state.waitingForSlot,
     transcriptCount: state.transcript.length,
     tail,
   });

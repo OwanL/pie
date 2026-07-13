@@ -160,6 +160,7 @@
     "typecheck:deferred-triggers": "tsc --noEmit -p ../extensions/deferred-triggers/tsconfig.json",
     "test": "node ../scripts/run-tests.mjs --fast --package extension",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
+    "perf:analytics": "tsx ./test/perf/analytics.perf.ts",
     "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"
   },
   "devDependencies": {

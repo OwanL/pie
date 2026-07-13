@@ -1,13 +1,5 @@
 import type { ThinkingLevel } from './models.js';
 import type { TranscriptWindow } from './sessions.js';
-import type {
-  ActiveRunStatus,
-  PruningMode,
-  RunOutcome,
-  RunOutcomeResolution,
-} from '../../../../shared/run-analytics-contracts.js';
-
-export type { ActiveRunStatus, PruningMode, RunOutcome, RunOutcomeResolution };
 
 /** Webview-local UI preferences. Owned by the host so they survive teardown. */
 /** Metadata describing a known pi extension (tool or hook). */
@@ -74,6 +66,8 @@ export interface PruningDetails {
   prepassSafeguardReason?: string;
 }
 
+export type PruningMode = 'auto' | 'shadow' | 'off' | 'custom';
+
 /** Subset of pruning config exposed in the settings UI. */
 export interface PruningSettings {
   mode: PruningMode;
@@ -91,12 +85,12 @@ export interface PruningSettings {
   thinkingLevel: ThinkingLevel;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
-  /** Optional assembled-prepass input token threshold below which the
-   *  skill-pruner keeps all candidates without an LLM call. Compared against
-   *  the local estimate of the assembled prepass input (system prompt +
-   *  candidate user message). `null`/absent = disabled (always run the
-   *  prepass); when triggered the pruner fail-open keeps everything with no
-   *  LLM call and no error feedback. */
+  /** Optional auto-skip threshold (estimated input tokens) below which the
+   *  skill-pruner prepass is skipped for small/trivial turns (Brief F #4).
+   *  `null`/absent = disabled (always run the prepass). Persisted to
+   *  settings.json so the SDK skill-pruner can consume it; the actual skip
+   *  behavior is a cross-repo follow-up in @earendil-works/pi-coding-agent
+   *  (see TODO.md). */
   autoSkipBelowTokens?: number | null;
 }
 
@@ -180,10 +174,8 @@ export interface ChatPrefs {
    *  (independent of the per-reply cap). Default 10. Mirrored to the in-process
    *  subagent extension via PIE_SUBAGENT_MAX_TREE_SESSIONS. */
   subagentMaxTreeSessions: number;
-  /** Max concurrent root subagent trees across the whole process. Each root
-   *  holds one permit for its lifetime; nested descendants borrow that scope so
-   *  recursive delegation cannot deadlock. Default 2. Mirrored via
-   *  PIE_SUBAGENT_MAX_INFLIGHT. */
+  /** Max concurrent in-flight subagent sessions across the whole process.
+   *  Default 2. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
   subagentMaxInflight: number;
   /** Max concurrency within one parallel `tasks[]` array. Default 2.
    *  Mirrored via PIE_SUBAGENT_MAX_CONCURRENCY. */
@@ -191,14 +183,10 @@ export interface ChatPrefs {
   /** Max parallel tasks allowed in a single `subagent` call. Default 4.
    *  Mirrored via PIE_SUBAGENT_MAX_PARALLEL_TASKS. */
   subagentMaxParallelTasks: number;
-  /** Idle target for the single shared warm bash pool — the number of
-   *  pre-warmed bash processes kept warm across ALL sessions (not per session)
-   *  to hide shell-spawn latency. The pool dynamically spawns up to the target
-   *  and kills excess idle when the target is lowered, so total idle bash
-   *  processes are capped process-wide regardless of session count. 0 disables
-   *  warm bash (today's fresh-spawn behaviour). Default 2. Range [0, 8].
-   *  Mirrored via PIE_BASH_WARM_POOL. Live-tuned on the next bash call
-   *  (target-only changes never rebuild the pool; shell/timeout changes do). */
+  /** Size of the per-session warm bash pool (pre-warmed bash processes that
+   *  hide shell-spawn latency). 0 disables warm bash (today's fresh-spawn
+   *  behaviour). Default 2. Mirrored via PIE_BASH_WARM_POOL. Applies on the
+   *  next bash call (the pool is rebuilt live when this changes). */
   bashWarmPoolSize: number;
   /** When true, simple commands (no shell metacharacters) are exec'd directly
    *  without spawning bash at all. Default true. Mirrored via PIE_BASH_FAST_PATH. */
@@ -208,8 +196,11 @@ export interface ChatPrefs {
   bashShellPath: string;
   /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
    *  default (10000). Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000].
-   *  A change rebuilds the shared warm pool on the next bash call. */
+ *  Applies on the next bash call (the pool is rebuilt live when this changes). */
   bashWarmupTimeoutMs: number;
+  /** Acquire wait (ms) for a ready worker when the pool is empty. 0 = built-in
+   *  default (15000). Mirrored via PIE_BASH_ACQUIRE_TIMEOUT_MS. Range [0, 60000]. */
+  bashAcquireTimeoutMs: number;
   /** Default timeout (seconds) for bash commands that don't specify one.
    *  The upstream SDK default is 600s; this caps the worst-case hang for a
    *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
@@ -292,20 +283,14 @@ export interface ChatPrefs {
   providerToggles: Record<string, boolean>;
   /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
    *  queueWaitSeconds, headerWaitSeconds). A provider absent from this map uses
-   *  its models.json `concurrency` defaults, or — for a provider with no base
-   *  concurrency block — is left ungated. Applied to the backend via
-   *  `runtimePrefs.set` → `ProviderGate.applyUserOverrides()`. */
+   *  its models.json `concurrency` defaults. Mirrored to the backend via
+   *  `runtimePrefs.set` → `ProviderGate.reconfigure()`. */
   providerConcurrency: ProviderConcurrencyMap;
   /** Content rows reserved in the live activity-tail preview (the streaming
    *  reasoning/reply text or a running tool/subagent's output shown at the
    *  bottom of a turn). Tools/subagents add one header row on top. Default 2
    *  reproduces the bundled 2-row (reasoning) / 3-row (tool) preview. */
   activityTailLines: number;
-  /** Content rows reserved in the collapsed subagent-card live preview.
-   *  Unlike the generic activity tail, this only shows the subagent's realtime
-   *  streaming text (or a literal `pending...` placeholder while running with
-   *  no visible stream yet). Default 2, range 1–12. */
-  subagentPreviewLines: number;
   /** Size (px) of the clickable user-message markers in the thin rail to the
    *  left of the transcript scrollbar. Each marker is a jump-to button; this
    *  controls the click-target height AND the visible dot size (the dot scales
@@ -349,12 +334,22 @@ export const SUBAGENT_BUCKETS_ENV = 'PIE_SUBAGENT_BUCKETS_JSON';
  *  `NestedAllowedBuckets`. */
 export const NESTED_ALLOWED_BUCKETS_ENV = 'PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON';
 
+export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
+
 export interface ActiveRunSummary {
   runId: string;
   status: ActiveRunStatus;
   scored: boolean;
   /** True when the next send is queued to start a new task group. */
   nextSendStartsNewTask?: boolean;
+}
+
+export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
+
+export interface RunOutcome {
+  resolution: RunOutcomeResolution;
+  /** Intended to be a user-facing ordinal score (e.g. 1–5). */
+  satisfaction: number;
 }
 
 export const DEFAULT_CHAT_PREFS: ChatPrefs = {
@@ -374,6 +369,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   bashFastPath: true,
   bashShellPath: '',
   bashWarmupTimeoutMs: 0,
+  bashAcquireTimeoutMs: 0,
   bashDefaultTimeout: 60,
   subagentBuckets: { ...EMPTY_SUBAGENT_BUCKETS },
   subagentNestedAllowedBuckets: { ...ALL_NESTED_BUCKETS_ALLOWED },
@@ -398,7 +394,6 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   providerToggles: {},
   providerConcurrency: {},
   activityTailLines: 2,
-  subagentPreviewLines: 2,
   uiMessageRailSize: 20,
   hideStatusStrip: false,
   hideTokenRate: false,
@@ -418,7 +413,7 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   provider: 'github-copilot',
   thinkingLevel: 'minimal',
   prepassTimeoutSec: null,
-  autoSkipBelowTokens: 1200,
+  autoSkipBelowTokens: null,
 };
 
 export interface ToolResultPruningRuleToggles {
@@ -609,12 +604,11 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
 }
 
 /**
- * Params for the `runtimePrefs.set` RPC — the wire shape produced by
- * {@link buildRuntimePrefsPayload} and validated by the backend's
- * `validateRuntimePrefsSet`. Canonical definition lives in the shared protocol
- * so the host and backend never drift on a field.
+ * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
+ * Shared between the live `setPrefs` path and startup restore so a pref field
+ * is never mirrored on one path but missing on the other.
  */
-export interface RuntimePrefsSetParams {
+export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   providerToggles: Record<string, boolean>;
   extensionToggles: Record<string, boolean>;
   subagentAlwaysParentModel?: boolean;
@@ -626,28 +620,14 @@ export interface RuntimePrefsSetParams {
   bashWarmPoolSize?: number;
   bashFastPath?: boolean;
   bashShellPath?: string;
-  /** Warmup wait (ms) for a bash process to print the ready marker. 0 = built-in
-   *  default. Mirrored via PIE_BASH_WARMUP_TIMEOUT_MS. Range [0, 60000]. */
   bashWarmupTimeoutMs?: number;
-  /** Default timeout (seconds) for bash commands that don't specify one.
-   *  Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
+  bashAcquireTimeoutMs?: number;
   bashDefaultTimeout?: number;
   subagentBuckets?: SubagentBuckets;
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
   subagentDropTools?: string[];
-  /** Per-provider concurrency overrides. Keys are provider names; values are
-   *  objects with optional `maxConcurrentRequests`, `afterburnSeconds`,
-   *  `queueWaitSeconds`, `headerWaitSeconds`. Applied to the live
-   *  `ProviderGate` via `ProviderGate.applyUserOverrides()`. */
   providerConcurrency?: ProviderConcurrencyMap;
-}
-
-/**
- * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
- * Shared between the live `setPrefs` path and startup restore so a pref field
- * is never mirrored on one path but missing on the other.
- */
-export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParams {
+} {
   return {
     providerToggles: prefs.providerToggles,
     extensionToggles: prefs.extensionToggles,
@@ -661,6 +641,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParam
     bashFastPath: prefs.bashFastPath,
     bashShellPath: prefs.bashShellPath,
     bashWarmupTimeoutMs: prefs.bashWarmupTimeoutMs,
+    bashAcquireTimeoutMs: prefs.bashAcquireTimeoutMs,
     bashDefaultTimeout: prefs.bashDefaultTimeout,
     subagentBuckets: prefs.subagentBuckets,
     subagentNestedAllowedBuckets: prefs.subagentNestedAllowedBuckets,

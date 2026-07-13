@@ -104,6 +104,7 @@ profileOrder:
   - mistral-7b-pi:latest
   - llama3.2-3b-pi:latest
   - gemma4-e2b-pi:latest
+  - qwen2.5:7b-instruct
 providers:
   ollama:
     baseUrl: http://localhost:11434/v1
@@ -162,6 +163,20 @@ providers:
           - minimal
         disabledReason: Too small for agentic work
         costRank: 4
+      - id: qwen2.5:7b-instruct
+        name: "Ollama Local: Qwen 2.5 7B Instruct (8K ctx)"
+        contextWindow: 8192
+        maxTokens: 512
+        pricing:
+          input: 0
+          output: 0
+          cacheRead: 0
+          cacheWrite: 0
+        eligible: false
+        thinking:
+          - minimal
+        disabledReason: Local model; not for general agentic use
+        costRank: 8
       - id: deepseek-v4-flash:cloud
         name: "Ollama Cloud: DeepSeek V4 Flash"
         reasoning: true

@@ -34,6 +34,11 @@ export const DAILY_COST_WINDOW_DAYS = 14;
 /** Length of the rolling "this week" cost window (inclusive of today). */
 export const WEEK_WINDOW_DAYS = 7;
 
+/** Maximum number of points in an intraday cumulative series (cost or tokens).
+ *  One point is reserved for the trailing "now" value; the remaining points are
+ *  time buckets formed by accumulating raw samples. */
+export const MAX_INTRADAY_CHART_POINTS = 240;
+
 interface ProviderAccumulator {
   provider: string;
   cost: number;
@@ -54,9 +59,13 @@ interface DayAccumulator {
   byModel: Map<string, number>;
   /** Number of runs bucketed to this day. */
   runCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  toolCallCount: number;
+  touchedFileCount: number;
 }
 
-/** A timestamped sample for today's intraday cost series. */
+/** A timestamped sample for a date's intraday cost series. */
 interface TodayCostSample {
   ms: number;
   provider: string;
@@ -64,7 +73,7 @@ interface TodayCostSample {
   cost: number;
 }
 
-/** A timestamped sample for today's intraday output-token series. */
+/** A timestamped sample for a date's intraday output-token series. */
 interface TodayTokenSample {
   ms: number;
   provider: string;
@@ -107,8 +116,14 @@ interface DateWindow {
   weekDates: Set<string>;
 }
 
-/** Accumulated run statistics produced by a single pass over the runs. */
-interface RunAccumulations {
+/**
+ * Mergeable, wall-clock-independent aggregate state for a set of runs.
+ *
+ * Pricing is intentionally applied while accumulating, so callers must rebuild
+ * an accumulator when the pricing signature changes. Date windows and live UI
+ * state are applied only by {@link finalizeAggregateStats}.
+ */
+export interface AggregateStatsAccumulator {
   byProvider: Map<string, ProviderAccumulator>;
   byDay: Map<string, DayAccumulator>;
   throughputByDay: Map<string, Map<string, ThroughputAcc>>;
@@ -120,17 +135,35 @@ interface RunAccumulations {
   totalCacheWriteTokens: number;
   totalThroughputOutputTokens: number;
   totalThroughputGenerationMs: number;
-  todayRunCount: number;
-  weekRunCount: number;
-  todayInputTokens: number;
-  todayOutputTokens: number;
-  todayToolCallCount: number;
-  todayTouchedFileCount: number;
-  todayCostSamples: TodayCostSample[];
-  todayTokenSamples: TodayTokenSample[];
-  todayThroughputByHour: Map<number, HourThroughput>;
-  lastRunTurnSeries: AggregateLastRunTurn[];
+  costSamplesByDay: Map<string, TodayCostSample[]>;
+  tokenSamplesByDay: Map<string, TodayTokenSample[]>;
+  throughputByHourByDay: Map<string, Map<number, HourThroughput>>;
+  lastRunEndedMs: number;
   lastRun: AggregateLastRun | null;
+  runCount: number;
+}
+
+/** Optional pure-computation instrumentation used by regression tests/benchmarks. */
+export interface AggregateStatsInstrumentation {
+  onRunAccumulated?: (run: RunSnapshot) => void;
+}
+
+/** Instrumentation for proving that preparation is the only operation which
+ * visits unbounded completed-history day/sample collections. */
+export interface AggregateStatsLayerInstrumentation {
+  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample' | 'throughput_hour') => void;
+}
+
+/**
+ * A completed-history layer narrowed to the protocol's fixed date/chart
+ * windows. It can be overlaid with a mutable open-run accumulator without
+ * walking completed historical days or raw intraday samples again.
+ */
+export interface PreparedAggregateStatsLayer {
+  accumulator: AggregateStatsAccumulator;
+  completedSessionPaths: ReadonlySet<string>;
+  costSamplesCompacted: boolean;
+  tokenSamplesCompacted: boolean;
 }
 
 /** Today-specific cost and throughput rollups. */
@@ -165,6 +198,10 @@ function createProviderAccumulator(provider: string): ProviderAccumulator {
     throughputGenerationMs: 0,
     sampleCount: 0,
   };
+}
+
+function canonicalModel(modelId: string | undefined, pricingMap: Map<string, ModelPricingRecord[]>): string {
+  return modelId && pricingMap.has(modelId) ? modelId : 'unknown';
 }
 
 /** Resolve the provider name for a model id (first priced provider), or `'unknown'`. */
@@ -227,11 +264,15 @@ function usageForModel(
   counts: TokenCounts,
   pricingMap: Map<string, ModelPricingRecord[]>,
 ): AttributedUsage {
-  const pricing = pricingForModel(model === 'unknown' ? undefined : model, pricingMap);
+  // Unknown/stale model IDs are folded into one stable bucket. This keeps every
+  // model/provider breakdown bounded by the current pricing catalog plus one,
+  // rather than by the number of distinct IDs in historical snapshots.
+  const attributedModel = canonicalModel(model === 'unknown' ? undefined : model, pricingMap);
+  const pricing = pricingForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap);
   return {
     ...counts,
-    model,
-    provider: providerForModel(model === 'unknown' ? undefined : model, pricingMap),
+    model: attributedModel,
+    provider: providerForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap),
     occurredAtMs,
     cost: costFromTokens(
       counts.inputTokens,
@@ -334,6 +375,7 @@ function distributeUsageForSeries(
   usage: AttributedUsage[],
   fallbackMs: number,
   includeSample: (ms: number) => boolean,
+  pricingMap: Map<string, ModelPricingRecord[]>,
 ): { cost: TodayCostSample[]; tokens: TodayTokenSample[] } {
   const groups = new Map<string, AttributedUsage>();
   for (const item of usage) {
@@ -357,7 +399,7 @@ function distributeUsageForSeries(
       .map((sample) => ({ sample, ms: Date.parse(sample.endedAt) }))
       .filter(({ sample, ms }) => !Number.isNaN(ms)
         && includeSample(ms)
-        && (sample.modelId ?? run.modelId ?? 'unknown') === group.model);
+        && canonicalModel(sample.modelId ?? run.modelId, pricingMap) === group.model);
     const sampleOutput = samples.reduce((sum, entry) => sum + entry.sample.outputTokens, 0);
     if (samples.length === 0) {
       const ms = includeSample(group.occurredAtMs) ? group.occurredAtMs : fallbackMs;
@@ -400,7 +442,7 @@ function runDayMs(snapshot: RunSnapshot): number {
 function toProviderCost(acc: ProviderAccumulator): AggregateProviderCost {
   return {
     provider: acc.provider,
-    cost: acc.cost,
+    cost: canonicalCostValue(acc.cost),
     inputTokens: acc.inputTokens,
     outputTokens: acc.outputTokens,
     cacheReadTokens: acc.cacheReadTokens,
@@ -454,29 +496,24 @@ function buildDateWindows(nowMs: number): DateWindow {
 }
 
 /**
- * Single pass over all runs that accumulates per-provider, per-day, and
- * per-day-throughput statistics, plus today / week counts and the most-recent
- * run. Returns all intermediate state so the caller can derive the final
- * rollups.
+ * Single pass over all runs that accumulates per-provider, per-day,
+ * per-day-throughput, intraday sample, and most-recent-run state without
+ * consulting the current wall clock.
  */
-function accumulateRuns(
+export function accumulateAggregateStats(
   runs: RunSnapshot[],
   pricingMap: Map<string, ModelPricingRecord[]>,
-  todayDate: string,
-  weekDates: Set<string>,
-): RunAccumulations {
+  instrumentation?: AggregateStatsInstrumentation,
+): AggregateStatsAccumulator {
   const byProvider = new Map<string, ProviderAccumulator>();
   const byDay = new Map<string, DayAccumulator>();
-  // Throughput bucketed by the SAMPLE's end-date (a run spanning midnight
-  // attributes its samples to the day they actually landed, so "today's
-  // throughput" reflects today's generation, not today's runs).
+  // Throughput is bucketed by each sample's end-date. Date-window selection is
+  // deferred until finalization, keeping this accumulator independent of now.
   const throughputByDay = new Map<string, Map<string, ThroughputAcc>>();
   const sessionPaths = new Set<string>();
-  // Intraday series collections (today only, local day).
-  const todayCostSamples: TodayCostSample[] = [];
-  const todayTokenSamples: TodayTokenSample[] = [];
-  const todayThroughputByHour = new Map<number, HourThroughput>();
-  let lastRunTurnSeries: AggregateLastRunTurn[] = [];
+  const costSamplesByDay = new Map<string, TodayCostSample[]>();
+  const tokenSamplesByDay = new Map<string, TodayTokenSample[]>();
+  const throughputByHourByDay = new Map<string, Map<number, HourThroughput>>();
 
   let totalCost = 0;
   let totalInputTokens = 0;
@@ -486,14 +523,7 @@ function accumulateRuns(
   let totalThroughputOutputTokens = 0;
   let totalThroughputGenerationMs = 0;
 
-  let todayRunCount = 0;
-  let weekRunCount = 0;
-  let todayInputTokens = 0;
-  let todayOutputTokens = 0;
-  let todayToolCallCount = 0;
-  let todayTouchedFileCount = 0;
-
-  // Most-recent finalized run (max endedAt across all runs).
+  // Most-recent run (max finalized/updated/started timestamp across all runs).
   let lastRun: AggregateLastRun | null = null;
   let lastRunEndedMs = -1;
 
@@ -521,6 +551,7 @@ function accumulateRuns(
   };
 
   for (const run of runs) {
+    instrumentation?.onRunAccumulated?.(run);
     if (run.sessionPath) sessionPaths.add(run.sessionPath);
     const dayMs = runDayMs(run);
     const usage = attributedRunUsage(run, pricingMap, dayMs);
@@ -569,7 +600,16 @@ function accumulateRuns(
       const date = localDateString(dayMs);
       let day = byDay.get(date);
       if (!day) {
-        day = { date, byProvider: new Map(), byModel: new Map(), runCount: 0 };
+        day = {
+          date,
+          byProvider: new Map(),
+          byModel: new Map(),
+          runCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          toolCallCount: 0,
+          touchedFileCount: 0,
+        };
         byDay.set(date, day);
       }
       for (const item of usage) {
@@ -586,48 +626,60 @@ function accumulateRuns(
         day.byModel.set(item.model, (day.byModel.get(item.model) ?? 0) + item.cost);
       }
       day.runCount += 1;
+      day.inputTokens += runInputTokens;
+      day.outputTokens += runOutputTokens;
+      day.toolCallCount += run.toolUsage?.totalCount ?? 0;
+      day.touchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
 
-      if (date === todayDate) {
-        todayRunCount += 1;
-        todayInputTokens += runInputTokens;
-        todayOutputTokens += runOutputTokens;
-        todayToolCallCount += run.toolUsage?.totalCount ?? 0;
-        todayTouchedFileCount += run.fileMutation?.touchedFileCount ?? 0;
-
-        const series = distributeUsageForSeries(
-          run,
-          usage,
-          dayMs,
-          (ms) => localDateString(ms) === todayDate,
-        );
-        todayCostSamples.push(...series.cost);
-        todayTokenSamples.push(...series.tokens);
-
-        for (const sample of run.turnThroughputSamples) {
-          const sMs = Date.parse(sample.endedAt);
-          if (Number.isNaN(sMs) || localDateString(sMs) !== todayDate) continue;
-          if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
-          const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
-          const sModel = sample.modelId ?? run.modelId ?? 'unknown';
-          const hourDate = new Date(sMs);
-          hourDate.setMinutes(0, 0, 0);
-          const hourMs = hourDate.getTime();
-          let hour = todayThroughputByHour.get(hourMs);
-          if (!hour) {
-            hour = { byProvider: new Map(), byModel: new Map() };
-            todayThroughputByHour.set(hourMs, hour);
-          }
-          let p = hour.byProvider.get(sProvider);
-          if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
-          p.out += sample.outputTokens;
-          p.genMs += sample.generationDurationMs;
-          let m = hour.byModel.get(sModel);
-          if (!m) { m = { out: 0, genMs: 0 }; hour.byModel.set(sModel, m); }
-          m.out += sample.outputTokens;
-          m.genMs += sample.generationDurationMs;
-        }
+      // Preserve the existing run-end date semantics for intraday cost/token
+      // samples, but retain every date so "today" is chosen only at finalize.
+      const series = distributeUsageForSeries(
+        run,
+        usage,
+        dayMs,
+        (ms) => localDateString(ms) === date,
+        pricingMap,
+      );
+      if (series.cost.length > 0) {
+        const existing = costSamplesByDay.get(date);
+        if (existing) existing.push(...series.cost);
+        else costSamplesByDay.set(date, series.cost);
       }
-      if (weekDates.has(date)) weekRunCount += 1;
+      if (series.tokens.length > 0) {
+        const existing = tokenSamplesByDay.get(date);
+        if (existing) existing.push(...series.tokens);
+        else tokenSamplesByDay.set(date, series.tokens);
+      }
+    }
+
+    for (const sample of run.turnThroughputSamples) {
+      const sMs = Date.parse(sample.endedAt);
+      if (Number.isNaN(sMs)) continue;
+      if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
+      const date = localDateString(sMs);
+      const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+      const sModel = canonicalModel(sample.modelId ?? run.modelId, pricingMap);
+      const hourDate = new Date(sMs);
+      hourDate.setMinutes(0, 0, 0);
+      const hourMs = hourDate.getTime();
+      let byHour = throughputByHourByDay.get(date);
+      if (!byHour) {
+        byHour = new Map();
+        throughputByHourByDay.set(date, byHour);
+      }
+      let hour = byHour.get(hourMs);
+      if (!hour) {
+        hour = { byProvider: new Map(), byModel: new Map() };
+        byHour.set(hourMs, hour);
+      }
+      let p = hour.byProvider.get(sProvider);
+      if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
+      p.out += sample.outputTokens;
+      p.genMs += sample.generationDurationMs;
+      let m = hour.byModel.get(sModel);
+      if (!m) { m = { out: 0, genMs: 0 }; hour.byModel.set(sModel, m); }
+      m.out += sample.outputTokens;
+      m.genMs += sample.generationDurationMs;
     }
 
     // Track the most-recent run by its end timestamp. Its token sparkline is
@@ -635,12 +687,12 @@ function accumulateRuns(
     // without counting forwarded child throughput samples twice.
     if (!Number.isNaN(dayMs) && dayMs > lastRunEndedMs) {
       lastRunEndedMs = dayMs;
-      const series = distributeUsageForSeries(run, usage, dayMs, () => true);
-      lastRunTurnSeries = series.tokens
+      const series = distributeUsageForSeries(run, usage, dayMs, () => true, pricingMap);
+      const lastRunTurnSeries: AggregateLastRunTurn[] = series.tokens
         .map((sample) => ({ ms: sample.ms, outputTokens: sample.tokens }))
         .sort((a, b) => a.ms - b.ms);
       lastRun = {
-        cost: runCost,
+        cost: canonicalCostValue(runCost),
         durationMs: run.busyDurationMs ?? 0,
         modelId: run.modelId ?? null,
         provider: providerForModel(run.modelId, pricingMap),
@@ -666,18 +718,161 @@ function accumulateRuns(
     totalCacheWriteTokens,
     totalThroughputOutputTokens,
     totalThroughputGenerationMs,
-    todayRunCount,
-    weekRunCount,
-    todayInputTokens,
-    todayOutputTokens,
-    todayToolCallCount,
-    todayTouchedFileCount,
-    todayCostSamples,
-    todayTokenSamples,
-    todayThroughputByHour,
-    lastRunTurnSeries,
+    costSamplesByDay,
+    tokenSamplesByDay,
+    throughputByHourByDay,
+    lastRunEndedMs,
     lastRun,
+    runCount: runs.length,
   };
+}
+
+function addProviderAccumulator(target: ProviderAccumulator, source: ProviderAccumulator): void {
+  target.cost += source.cost;
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheWriteTokens += source.cacheWriteTokens;
+  target.throughputOutputTokens += source.throughputOutputTokens;
+  target.throughputGenerationMs += source.throughputGenerationMs;
+  target.sampleCount += source.sampleCount;
+}
+
+function mergeProviderMap(
+  target: Map<string, ProviderAccumulator>,
+  source: Map<string, ProviderAccumulator>,
+): void {
+  for (const [provider, sourceAcc] of source) {
+    let targetAcc = target.get(provider);
+    if (!targetAcc) {
+      targetAcc = createProviderAccumulator(provider);
+      target.set(provider, targetAcc);
+    }
+    addProviderAccumulator(targetAcc, sourceAcc);
+  }
+}
+
+/** Merge independently accumulated run sets without revisiting their runs. */
+export function mergeAggregateStatsAccumulators(
+  ...accumulators: AggregateStatsAccumulator[]
+): AggregateStatsAccumulator {
+  const merged: AggregateStatsAccumulator = {
+    byProvider: new Map(),
+    byDay: new Map(),
+    throughputByDay: new Map(),
+    sessionPaths: new Set(),
+    totalCost: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalCacheWriteTokens: 0,
+    totalThroughputOutputTokens: 0,
+    totalThroughputGenerationMs: 0,
+    costSamplesByDay: new Map(),
+    tokenSamplesByDay: new Map(),
+    throughputByHourByDay: new Map(),
+    lastRunEndedMs: -1,
+    lastRun: null,
+    runCount: 0,
+  };
+
+  for (const source of accumulators) {
+    mergeProviderMap(merged.byProvider, source.byProvider);
+    for (const [date, sourceDay] of source.byDay) {
+      let targetDay = merged.byDay.get(date);
+      if (!targetDay) {
+        targetDay = {
+          date,
+          byProvider: new Map(),
+          byModel: new Map(),
+          runCount: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          toolCallCount: 0,
+          touchedFileCount: 0,
+        };
+        merged.byDay.set(date, targetDay);
+      }
+      mergeProviderMap(targetDay.byProvider, sourceDay.byProvider);
+      for (const [model, cost] of sourceDay.byModel) {
+        targetDay.byModel.set(model, (targetDay.byModel.get(model) ?? 0) + cost);
+      }
+      targetDay.runCount += sourceDay.runCount;
+      targetDay.inputTokens += sourceDay.inputTokens;
+      targetDay.outputTokens += sourceDay.outputTokens;
+      targetDay.toolCallCount += sourceDay.toolCallCount;
+      targetDay.touchedFileCount += sourceDay.touchedFileCount;
+    }
+    for (const [date, sourceProviders] of source.throughputByDay) {
+      let targetProviders = merged.throughputByDay.get(date);
+      if (!targetProviders) {
+        targetProviders = new Map();
+        merged.throughputByDay.set(date, targetProviders);
+      }
+      for (const [provider, sourceThroughput] of sourceProviders) {
+        let targetThroughput = targetProviders.get(provider);
+        if (!targetThroughput) {
+          targetThroughput = { provider, outputTokens: 0, generationDurationMs: 0, sampleCount: 0 };
+          targetProviders.set(provider, targetThroughput);
+        }
+        targetThroughput.outputTokens += sourceThroughput.outputTokens;
+        targetThroughput.generationDurationMs += sourceThroughput.generationDurationMs;
+        targetThroughput.sampleCount += sourceThroughput.sampleCount;
+      }
+    }
+    for (const sessionPath of source.sessionPaths) merged.sessionPaths.add(sessionPath);
+    merged.totalCost += source.totalCost;
+    merged.totalInputTokens += source.totalInputTokens;
+    merged.totalOutputTokens += source.totalOutputTokens;
+    merged.totalCacheReadTokens += source.totalCacheReadTokens;
+    merged.totalCacheWriteTokens += source.totalCacheWriteTokens;
+    merged.totalThroughputOutputTokens += source.totalThroughputOutputTokens;
+    merged.totalThroughputGenerationMs += source.totalThroughputGenerationMs;
+    merged.runCount += source.runCount;
+
+    for (const [date, samples] of source.costSamplesByDay) {
+      const target = merged.costSamplesByDay.get(date);
+      if (target) target.push(...samples);
+      else merged.costSamplesByDay.set(date, [...samples]);
+    }
+    for (const [date, samples] of source.tokenSamplesByDay) {
+      const target = merged.tokenSamplesByDay.get(date);
+      if (target) target.push(...samples);
+      else merged.tokenSamplesByDay.set(date, [...samples]);
+    }
+    for (const [date, sourceHours] of source.throughputByHourByDay) {
+      let targetHours = merged.throughputByHourByDay.get(date);
+      if (!targetHours) {
+        targetHours = new Map();
+        merged.throughputByHourByDay.set(date, targetHours);
+      }
+      for (const [hourMs, sourceHour] of sourceHours) {
+        let targetHour = targetHours.get(hourMs);
+        if (!targetHour) {
+          targetHour = { byProvider: new Map(), byModel: new Map() };
+          targetHours.set(hourMs, targetHour);
+        }
+        for (const [provider, values] of sourceHour.byProvider) {
+          const target = targetHour.byProvider.get(provider) ?? { out: 0, genMs: 0 };
+          target.out += values.out;
+          target.genMs += values.genMs;
+          targetHour.byProvider.set(provider, target);
+        }
+        for (const [model, values] of sourceHour.byModel) {
+          const target = targetHour.byModel.get(model) ?? { out: 0, genMs: 0 };
+          target.out += values.out;
+          target.genMs += values.genMs;
+          targetHour.byModel.set(model, target);
+        }
+      }
+    }
+    if (source.lastRun && source.lastRunEndedMs > merged.lastRunEndedMs) {
+      merged.lastRunEndedMs = source.lastRunEndedMs;
+      merged.lastRun = source.lastRun;
+    }
+  }
+
+  return merged;
 }
 
 /** Derive today's per-provider cost and throughput from accumulated buckets. */
@@ -775,10 +970,11 @@ function buildDailyCostSeries(
     const date = localDateString(dayMs);
     const dayAcc = byDay.get(date);
     if (!dayAcc) continue;
+    const byProvider = [...dayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc);
     dailyCost.push({
       date,
-      totalCost: [...dayAcc.byProvider.values()].reduce((s, a) => s + a.cost, 0),
-      byProvider: [...dayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc),
+      totalCost: canonicalCostValue(byProvider.reduce((s, a) => s + a.cost, 0)),
+      byProvider,
       byModel: dayModelCosts(dayAcc.byModel),
     });
   }
@@ -788,34 +984,182 @@ function buildDailyCostSeries(
 /** Convert a day's per-model cost map to a sorted list (desc by cost). */
 function dayModelCosts(byModel: Map<string, number>): AggregateDailyModelCost[] {
   return [...byModel.entries()]
-    .map(([model, cost]) => ({ model, cost }))
-    .sort((a, b) => b.cost - a.cost);
+    .map(([model, cost]) => ({ model, cost: canonicalCostValue(cost) }))
+    .sort((a, b) => b.cost - a.cost || a.model.localeCompare(b.model));
+}
+
+/** Round a cost value to a fixed number of decimal places for deterministic
+ *  protocol-facing cumulative series output. Cost values are USD; 12 decimal
+ *  places is well below any practical currency precision while eliminating
+ *  order-of-addition ULP noise. */
+function canonicalCostValue(value: number): number {
+  return Math.round(value * 1e12) / 1e12;
+}
+
+function sortSegmentsDesc(a: AggregateSeriesSegment, b: AggregateSeriesSegment): number {
+  return b.value - a.value || a.key.localeCompare(b.key);
+}
+
+/** Internal bucket used while building a cumulative series. */
+interface CumulativeBucket {
+  ms: number;
+  byProvider: Map<string, number>;
+  byModel: Map<string, number>;
+  byProviderModel: Map<string, { provider: string; model: string; value: number }>;
+}
+
+/**
+ * Group raw cumulative-series samples into a bounded number of time buckets.
+ * Samples at the same instant are merged first; if there are still too many
+ * distinct instants, uniform-width time buckets are used. Provider/model values
+ * are summed within each bucket so cumulative totals stay exact.
+ */
+function buildCumulativeBuckets<T extends { ms: number; provider: string; model: string; value: number }>(
+  samples: T[],
+  maxSampleBuckets: number,
+  fixedRange?: { startMs: number; endMs: number },
+  forceBucketing = false,
+): CumulativeBucket[] {
+  if (samples.length === 0 || maxSampleBuckets <= 0) return [];
+
+  const sorted = [...samples].sort((a, b) => a.ms - b.ms);
+
+  // First collapse samples that land at the exact same millisecond so repeated
+  // events at one instant do not consume multiple chart points.
+  const exactBuckets = new Map<number, CumulativeBucket>();
+  for (const s of sorted) {
+    let b = exactBuckets.get(s.ms);
+    if (!b) {
+      b = { ms: s.ms, byProvider: new Map(), byModel: new Map(), byProviderModel: new Map() };
+      exactBuckets.set(s.ms, b);
+    }
+    b.byProvider.set(s.provider, (b.byProvider.get(s.provider) ?? 0) + s.value);
+    b.byModel.set(s.model, (b.byModel.get(s.model) ?? 0) + s.value);
+    const pairKey = `${s.provider}\u0000${s.model}`;
+    const pair = b.byProviderModel.get(pairKey);
+    if (pair) pair.value += s.value;
+    else b.byProviderModel.set(pairKey, { provider: s.provider, model: s.model, value: s.value });
+  }
+
+  const buckets = [...exactBuckets.values()].sort((a, b) => a.ms - b.ms);
+  if (buckets.length <= maxSampleBuckets && !forceBucketing) return buckets;
+
+  // Too many distinct instants: uniform-width time buckets across the full range.
+  const firstMs = fixedRange?.startMs ?? buckets[0].ms;
+  const lastMs = fixedRange?.endMs ?? buckets[buckets.length - 1].ms;
+  const duration = lastMs - firstMs;
+  if (duration === 0) {
+    // Every sample is at the same instant; merge everything into one bucket.
+    const merged: CumulativeBucket = {
+      ms: firstMs,
+      byProvider: new Map(),
+      byModel: new Map(),
+      byProviderModel: new Map(),
+    };
+    for (const b of buckets) {
+      for (const [k, v] of b.byProvider) {
+        merged.byProvider.set(k, (merged.byProvider.get(k) ?? 0) + v);
+      }
+      for (const [k, v] of b.byModel) {
+        merged.byModel.set(k, (merged.byModel.get(k) ?? 0) + v);
+      }
+      for (const [k, pair] of b.byProviderModel) {
+        const target = merged.byProviderModel.get(k);
+        if (target) target.value += pair.value;
+        else merged.byProviderModel.set(k, { ...pair });
+      }
+    }
+    return [merged];
+  }
+
+  const uniform = new Map<number, CumulativeBucket>();
+  for (const b of buckets) {
+    const idx = Math.min(maxSampleBuckets - 1, Math.floor(((b.ms - firstMs) * maxSampleBuckets) / duration));
+    let u = uniform.get(idx);
+    if (!u) {
+      u = { ms: b.ms, byProvider: new Map(), byModel: new Map(), byProviderModel: new Map() };
+      uniform.set(idx, u);
+    }
+    for (const [k, v] of b.byProvider) {
+      u.byProvider.set(k, (u.byProvider.get(k) ?? 0) + v);
+    }
+    for (const [k, v] of b.byModel) {
+      u.byModel.set(k, (u.byModel.get(k) ?? 0) + v);
+    }
+    for (const [k, pair] of b.byProviderModel) {
+      const target = u.byProviderModel.get(k);
+      if (target) target.value += pair.value;
+      else u.byProviderModel.set(k, { ...pair });
+    }
+  }
+  return [...uniform.entries()].sort((a, b) => a[0] - b[0]).map(([_, b]) => b);
 }
 
 /** Build a cumulative stacked series (cost or tokens) from per-turn samples,
  *  pruned to [first sample, now] with a trailing "now" point so the area
  *  extends to the current moment. Each point carries cumulative per-provider
- *  and per-model breakdowns (the chart steps up at each point). */
-function buildCumulativeSeries(
+ *  and per-model breakdowns (the chart steps up at each point).
+ *
+ *  To keep the snapshot payload bounded, raw samples are accumulated into at
+ *  most `maxPoints - 1` time buckets; one point is always reserved for the
+ *  trailing "now" value. */
+export function buildCumulativeSeries(
   samples: { ms: number; provider: string; model: string; value: number }[],
   nowMs: number,
+  maxPoints: number = MAX_INTRADAY_CHART_POINTS,
+  options: { forceBucketing?: boolean; targetTotals?: { byProvider: AggregateSeriesSegment[]; byModel: AggregateSeriesSegment[] }; roundValues?: boolean } = {},
 ): AggregateSeriesPoint[] {
-  if (samples.length === 0) return [];
-  const sorted = [...samples].sort((a, b) => a.ms - b.ms);
+  if (samples.length === 0 || maxPoints < 2) return [];
+  const normalizedOptions = typeof options === 'boolean' ? { forceBucketing: options } : options;
+  const forceBucketing = normalizedOptions.forceBucketing ?? false;
+  const targetTotals = normalizedOptions.targetTotals;
+  const roundValues = normalizedOptions.roundValues ?? false;
+  const now = new Date(nowMs);
+  const dayStart = new Date(now);
+  dayStart.setHours(0, 0, 0, 0);
+  const nextDay = new Date(dayStart);
+  nextDay.setDate(nextDay.getDate() + 1);
+  const todayDate = localDateString(nowMs);
+  const allToday = samples.every((sample) => localDateString(sample.ms) === todayDate);
+  // A stable whole-local-day grid makes downsampling composable: a cached
+  // completed layer and a separately accumulated open layer produce exactly
+  // the same buckets as a one-pass finalize, even after either side exceeds
+  // the point cap.
+  const buckets = buildCumulativeBuckets(
+    samples,
+    maxPoints - 1,
+    allToday ? { startMs: dayStart.getTime(), endMs: nextDay.getTime() } : undefined,
+    forceBucketing,
+  );
   const byProvider = new Map<string, number>();
   const byModel = new Map<string, number>();
   const seg = (m: Map<string, number>): AggregateSeriesSegment[] =>
-    [...m.entries()].map(([key, value]) => ({ key, value })).sort((a, b) => b.value - a.value);
+    [...m.entries()]
+      .map(([key, value]) => ({ key, value: roundValues ? canonicalCostValue(value) : value }))
+      .sort(sortSegmentsDesc);
   const points: AggregateSeriesPoint[] = [];
-  for (const s of sorted) {
-    byProvider.set(s.provider, (byProvider.get(s.provider) ?? 0) + s.value);
-    byModel.set(s.model, (byModel.get(s.model) ?? 0) + s.value);
-    points.push({ ms: s.ms, byProvider: seg(byProvider), byModel: seg(byModel) });
+  for (const b of buckets) {
+    for (const [provider, value] of b.byProvider) {
+      byProvider.set(provider, (byProvider.get(provider) ?? 0) + value);
+    }
+    for (const [model, value] of b.byModel) {
+      byModel.set(model, (byModel.get(model) ?? 0) + value);
+    }
+    points.push({ ms: b.ms, byProvider: seg(byProvider), byModel: seg(byModel) });
   }
   // Trailing "now" point (current cumulative) so the chart extends to now.
   const last = points[points.length - 1]!;
   if (last.ms < nowMs) {
     points.push({ ms: nowMs, byProvider: seg(byProvider), byModel: seg(byModel) });
+  }
+  // Snap the final cumulative point to the canonical aggregate totals so the
+  // chart's top-right value always matches the aggregate cost total and is
+  // independent of whether the series was built one-pass or from a compacted
+  // completed layer.
+  if (targetTotals && points.length > 0) {
+    const final = points[points.length - 1]!;
+    final.byProvider = targetTotals.byProvider;
+    final.byModel = targetTotals.byModel;
   }
   return points;
 }
@@ -877,26 +1221,155 @@ function computeLiveTokensPerSecond(
   return { liveTokensPerSecond, runningSessionCount: runningSet.size };
 }
 
+/** Compact one day's raw samples into the same bounded buckets used by the
+ * protocol chart while retaining provider/model pair attribution. */
+function compactIntradaySamples<T extends { ms: number; provider: string; model: string }>(
+  samples: T[],
+  valueOf: (sample: T) => number,
+  create: (ms: number, provider: string, model: string, value: number) => T,
+  fixedRange: { startMs: number; endMs: number },
+): { samples: T[]; compacted: boolean } {
+  const wasCompacted = new Set(samples.map((sample) => sample.ms)).size > MAX_INTRADAY_CHART_POINTS - 1;
+  const buckets = buildCumulativeBuckets(
+    samples.map((sample) => ({ ...sample, value: valueOf(sample) })),
+    MAX_INTRADAY_CHART_POINTS - 1,
+    fixedRange,
+  );
+  const compactedSamples: T[] = [];
+  for (const bucket of buckets) {
+    for (const pair of bucket.byProviderModel.values()) {
+      compactedSamples.push(create(bucket.ms, pair.provider, pair.model, pair.value));
+    }
+  }
+  return { samples: compactedSamples, compacted: wasCompacted };
+}
+
 /**
- * Compute aggregate stats from raw runs + pricing.
- *
- * @param runs all runs (completed + open) for the workspace.
- * @param pricingMap model id → pricing records (from `loadModelPricing`).
- * @param nowMs current wall-clock (ms epoch); used for "today" + the daily/week windows.
- * @param runningSessionPaths currently-running session paths (for the live count).
- * @param ratesBySession live per-session rate states (from `TokenRateService`).
- * @param openTabCount currently-open session tabs (current UI state).
+ * Prepare completed history for repeated open-run overlays. Only the fixed
+ * trailing date windows and a bounded representation of today's raw chart
+ * samples are retained. All-time scalars/provider maps remain exact.
  */
-export function computeAggregateStats(
-  runs: RunSnapshot[],
-  pricingMap: Map<string, ModelPricingRecord[]>,
+export function prepareAggregateStatsLayer(
+  source: AggregateStatsAccumulator,
+  nowMs: number,
+  instrumentation?: AggregateStatsLayerInstrumentation,
+): PreparedAggregateStatsLayer {
+  const todayDate = localDateString(nowMs);
+  const dayStart = new Date(nowMs);
+  dayStart.setHours(0, 0, 0, 0);
+  const nextDay = new Date(dayStart);
+  nextDay.setDate(nextDay.getDate() + 1);
+  const fixedIntradayRange = { startMs: dayStart.getTime(), endMs: nextDay.getTime() };
+  const windowDates = new Set<string>();
+  for (let i = 0; i < DAILY_COST_WINDOW_DAYS; i += 1) {
+    windowDates.add(localDateString(nowMs - i * 86_400_000));
+  }
+
+  const byDay = new Map<string, DayAccumulator>();
+  for (const date of windowDates) {
+    const day = source.byDay.get(date);
+    if (!day) continue;
+    instrumentation?.onCompletedSourceEntryVisited?.('day');
+    byDay.set(date, day);
+  }
+
+  const costSource = source.costSamplesByDay.get(todayDate) ?? [];
+  for (let i = 0; i < costSource.length; i += 1) {
+    instrumentation?.onCompletedSourceEntryVisited?.('cost_sample');
+  }
+  const tokenSource = source.tokenSamplesByDay.get(todayDate) ?? [];
+  for (let i = 0; i < tokenSource.length; i += 1) {
+    instrumentation?.onCompletedSourceEntryVisited?.('token_sample');
+  }
+  const compactedCost = compactIntradaySamples(
+    costSource,
+    (sample) => sample.cost,
+    (ms, provider, model, cost) => ({ ms, provider, model, cost }),
+    fixedIntradayRange,
+  );
+  const compactedTokens = compactIntradaySamples(
+    tokenSource,
+    (sample) => sample.tokens,
+    (ms, provider, model, tokens) => ({ ms, provider, model, tokens }),
+    fixedIntradayRange,
+  );
+
+  const throughputHours = source.throughputByHourByDay.get(todayDate);
+  if (throughputHours) {
+    for (const _hour of throughputHours) {
+      instrumentation?.onCompletedSourceEntryVisited?.('throughput_hour');
+    }
+  }
+
+  return {
+    completedSessionPaths: source.sessionPaths,
+    costSamplesCompacted: compactedCost.compacted,
+    tokenSamplesCompacted: compactedTokens.compacted,
+    accumulator: {
+      byProvider: source.byProvider,
+      byDay,
+      throughputByDay: source.throughputByDay.has(todayDate)
+        ? new Map([[todayDate, source.throughputByDay.get(todayDate)!]])
+        : new Map(),
+      // Session union is handled without copying this potentially historical set
+      // in finalizeAggregateStatsLayers.
+      sessionPaths: new Set(),
+      totalCost: source.totalCost,
+      totalInputTokens: source.totalInputTokens,
+      totalOutputTokens: source.totalOutputTokens,
+      totalCacheReadTokens: source.totalCacheReadTokens,
+      totalCacheWriteTokens: source.totalCacheWriteTokens,
+      totalThroughputOutputTokens: source.totalThroughputOutputTokens,
+      totalThroughputGenerationMs: source.totalThroughputGenerationMs,
+      costSamplesByDay: compactedCost.samples.length > 0 ? new Map([[todayDate, compactedCost.samples]]) : new Map(),
+      tokenSamplesByDay: compactedTokens.samples.length > 0 ? new Map([[todayDate, compactedTokens.samples]]) : new Map(),
+      throughputByHourByDay: throughputHours ? new Map([[todayDate, throughputHours]]) : new Map(),
+      lastRunEndedMs: source.lastRunEndedMs,
+      lastRun: source.lastRun,
+      runCount: source.runCount,
+    },
+  };
+}
+
+/** Finalize a cached completed layer plus a mutable open-run accumulator. */
+export function finalizeAggregateStatsLayers(
+  completed: PreparedAggregateStatsLayer,
+  open: AggregateStatsAccumulator,
   nowMs: number,
   runningSessionPaths: string[],
   ratesBySession: Record<string, TokenRateIndicatorState>,
   openTabCount: number,
 ): AggregateStats {
+  const merged = mergeAggregateStatsAccumulators(completed.accumulator, open);
+  const stats = finalizeAggregateStats(
+    merged,
+    nowMs,
+    runningSessionPaths,
+    ratesBySession,
+    openTabCount,
+    {
+      forceCostSeriesBucketing: completed.costSamplesCompacted,
+      forceTokenSeriesBucketing: completed.tokenSamplesCompacted,
+    },
+  );
+  let sessionCount = completed.completedSessionPaths.size;
+  for (const sessionPath of open.sessionPaths) {
+    if (!completed.completedSessionPaths.has(sessionPath)) sessionCount += 1;
+  }
+  stats.sessionCount = sessionCount;
+  return stats;
+}
+
+/** Convert a merged run accumulator into the protocol-facing aggregate. */
+export function finalizeAggregateStats(
+  acc: AggregateStatsAccumulator,
+  nowMs: number,
+  runningSessionPaths: string[],
+  ratesBySession: Record<string, TokenRateIndicatorState>,
+  openTabCount: number,
+  options: { forceCostSeriesBucketing?: boolean; forceTokenSeriesBucketing?: boolean } = {},
+): AggregateStats {
   const { todayDate, weekStartMs, weekDates } = buildDateWindows(nowMs);
-  const acc = accumulateRuns(runs, pricingMap, todayDate, weekDates);
 
   // ── All-time per-provider rollups ──
   const costByProvider = [...acc.byProvider.values()]
@@ -916,16 +1389,33 @@ export function computeAggregateStats(
   const todayStats = buildTodayStats(todayDate, acc.byDay, acc.throughputByDay);
   const weekStats = buildWeekStats(acc.byDay, weekStartMs);
   const dailyCost = buildDailyCostSeries(acc.byDay, nowMs);
+  const todayDay = acc.byDay.get(todayDate);
+  const todayCostSeriesTotals = todayDay
+    ? {
+        byProvider: todayStats.todayCostByProvider.map((entry) => ({ key: entry.provider, value: entry.cost })),
+        byModel: dayModelCosts(todayDay.byModel).map((entry) => ({ key: entry.model, value: entry.cost })),
+      }
+    : undefined;
   const todayCostSeries = buildCumulativeSeries(
-    acc.todayCostSamples.map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.cost })),
+    (acc.costSamplesByDay.get(todayDate) ?? [])
+      .map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.cost })),
     nowMs,
+    MAX_INTRADAY_CHART_POINTS,
+    { forceBucketing: options.forceCostSeriesBucketing, targetTotals: todayCostSeriesTotals, roundValues: true },
   );
   const todayTokenSeries = buildCumulativeSeries(
-    acc.todayTokenSamples.map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.tokens })),
+    (acc.tokenSamplesByDay.get(todayDate) ?? [])
+      .map((s) => ({ ms: s.ms, provider: s.provider, model: s.model, value: s.tokens })),
     nowMs,
+    MAX_INTRADAY_CHART_POINTS,
+    { forceBucketing: options.forceTokenSeriesBucketing },
   );
-  const todayThroughputSeries = buildThroughputSeries(acc.todayThroughputByHour);
+  const todayThroughputSeries = buildThroughputSeries(
+    acc.throughputByHourByDay.get(todayDate) ?? new Map(),
+  );
   const dailyRunCount = buildDailyRunCount(acc.byDay, nowMs);
+  let weekRunCount = 0;
+  for (const date of weekDates) weekRunCount += acc.byDay.get(date)?.runCount ?? 0;
 
   // ── Live aggregate tok/s ──
   const liveStats = computeLiveTokensPerSecond(runningSessionPaths, ratesBySession);
@@ -935,23 +1425,23 @@ export function computeAggregateStats(
     todayCostByProvider: todayStats.todayCostByProvider,
     todayTokensPerSecond: todayStats.todayTokensPerSecond,
     todayTokensPerSecondByProvider: todayStats.todayTokensPerSecondByProvider,
-    todayRunCount: acc.todayRunCount,
-    todayInputTokens: acc.todayInputTokens,
-    todayOutputTokens: acc.todayOutputTokens,
-    todayToolCallCount: acc.todayToolCallCount,
-    todayTouchedFileCount: acc.todayTouchedFileCount,
+    todayRunCount: todayDay?.runCount ?? 0,
+    todayInputTokens: todayDay?.inputTokens ?? 0,
+    todayOutputTokens: todayDay?.outputTokens ?? 0,
+    todayToolCallCount: todayDay?.toolCallCount ?? 0,
+    todayTouchedFileCount: todayDay?.touchedFileCount ?? 0,
     todayCostSeries,
     todayTokenSeries,
     todayThroughputSeries,
     weekCost: weekStats.weekCost,
     weekCostByProvider: weekStats.weekCostByProvider,
-    weekRunCount: acc.weekRunCount,
+    weekRunCount,
     dailyCost,
     dailyRunCount,
     liveTokensPerSecond: liveStats.liveTokensPerSecond,
     runningSessionCount: liveStats.runningSessionCount,
     openTabCount,
-    totalCost: acc.totalCost,
+    totalCost: canonicalCostValue(acc.totalCost),
     costByProvider,
     tokensPerSecond,
     tokensPerSecondByProvider,
@@ -959,11 +1449,32 @@ export function computeAggregateStats(
     totalOutputTokens: acc.totalOutputTokens,
     totalCacheReadTokens: acc.totalCacheReadTokens,
     totalCacheWriteTokens: acc.totalCacheWriteTokens,
-    runCount: runs.length,
+    runCount: acc.runCount,
     sessionCount: acc.sessionPaths.size,
     lastRun: acc.lastRun,
     warmBash: EMPTY_WARM_BASH_STATS,
     providerGate: EMPTY_PROVIDER_GATE_STATS,
     ready: true,
   };
+}
+
+/**
+ * Compatibility wrapper for callers that still provide raw runs. New code can
+ * cache/merge {@link accumulateAggregateStats} results before finalizing.
+ */
+export function computeAggregateStats(
+  runs: RunSnapshot[],
+  pricingMap: Map<string, ModelPricingRecord[]>,
+  nowMs: number,
+  runningSessionPaths: string[],
+  ratesBySession: Record<string, TokenRateIndicatorState>,
+  openTabCount: number,
+): AggregateStats {
+  return finalizeAggregateStats(
+    accumulateAggregateStats(runs, pricingMap),
+    nowMs,
+    runningSessionPaths,
+    ratesBySession,
+    openTabCount,
+  );
 }

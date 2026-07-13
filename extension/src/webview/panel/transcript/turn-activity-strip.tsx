@@ -12,8 +12,7 @@ export type TurnActivityPhase =
   | 'runningTool'
   | 'preparing'
   | 'pruning'
-  | 'startingModel'
-  | 'waitingForSlot';
+  | 'startingModel';
 
 export interface TurnActivityStripProps {
   label: string;

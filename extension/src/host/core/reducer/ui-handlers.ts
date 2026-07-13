@@ -2,7 +2,6 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
-import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
 import { upsertTranscriptMessage } from './helpers.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
@@ -25,24 +24,6 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
       ? readPrepassLatencyMs(event.message.customDetails)
       : null;
 
-  // When the prepass succeeds, re-arm the post-ack send-timer with the
-  // (generous) model-start budget. The send-timer was armed at send-dispatch
-  // with the tight prepass budget; once pruning is done the remaining wait is
-  // model-start (concurrency/rate-limit/first-token), which can legitimately
-  // be long. Without re-arming, an intended concurrency wait would trip a
-  // spurious `prepass-timeout` false positive ("Pruning took too long") even
-  // though pruning already finished. The promoted op (keyed by corrId) is the
-  // in-flight send that owns the timer; at most one exists per session.
-  const effects: Effect[] = [];
-  if (transitionToSucceeded) {
-    for (const [cid, op] of Object.entries(state.pending.promoted)) {
-      if (op.sessionPath === event.sessionPath) {
-        effects.push({ kind: 'ReArmSendTimer', corrId: cid });
-        break;
-      }
-    }
-  }
-
   const nextState = produce(state, (draft) => {
     draft.transcript.bySession[event.sessionPath] = upsertTranscriptMessage(existing, event.message);
     if (transitionToSucceeded) {
@@ -53,7 +34,7 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
     }
   });
 
-  return { state: nextState, effects };
+  return { state: nextState, effects: [] };
 }
 
 /** Read `prepassLatencyMs` from a pruning-result custom message's details,

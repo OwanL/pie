@@ -93,16 +93,25 @@ export function subagentActivity(result: SubagentSingleResult, now: number): Sub
     running_tool: 'Running tool',
     retry_wait: 'Retrying provider',
   };
-  const label = result.activityPhase
-    ? labels[result.activityPhase]
-    : 'Starting';
-  if (!label) return undefined;
   const runningTools = result.runningTools?.filter(Boolean).join(', ');
-  const detail = result.activityPhase === 'running_tool' && runningTools
+  const hasStreamingOutput = result.streaming === true || !!result.streamingText?.trim();
+  // Concrete output/tool activity is more trustworthy than lifecycle metadata,
+  // which can briefly lag behind streamed child updates.
+  const label = runningTools
+    ? 'Running tool'
+    : hasStreamingOutput
+      ? 'Generating'
+      : result.activityPhase
+        ? labels[result.activityPhase]
+        : 'Starting';
+  if (!label) return undefined;
+  const detail = runningTools
     ? runningTools
-    : result.activityPhase === 'waiting_provider' && result.provider
-      ? result.provider
-      : result.activityDetail ?? (!result.activityPhase ? 'waiting for first status update' : undefined);
+    : hasStreamingOutput
+      ? undefined
+      : result.activityPhase === 'waiting_provider' && result.provider
+        ? result.provider
+        : result.activityDetail ?? (!result.activityPhase ? 'waiting for first status update' : undefined);
   const elapsed = result.activitySince ? formatActivityDuration(now - result.activitySince) : undefined;
   const budget = result.inactivityBudgetMs ? formatActivityDuration(result.inactivityBudgetMs) : undefined;
   const diagnostic = [label, detail, elapsed && `${elapsed} in this state`, budget && `${budget} stall limit`]
@@ -452,7 +461,7 @@ function SubagentSingleBlock({
   // redundant.
   const previewTail = subagentPreviewTail(
     singleResult,
-    prefs.subagentPreviewLines ?? ACTIVITY_TAIL_MAX_LINES,
+    ACTIVITY_TAIL_MAX_LINES,
     status === 'running' || status === 'idle',
   );
 

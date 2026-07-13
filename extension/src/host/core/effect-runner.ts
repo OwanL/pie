@@ -10,10 +10,9 @@
  *    `enqueueLifecycle(() => enqueueSessionOperation(sessionPath, do_rpc))` so
  *    they serialize correctly with legacy `send`/`edit` paths during the
  *    multi-phase migration.
- *  - Existing-session lifecycle effects use `enqueueLifecycle` only (the
- *    inner per-session queue may not be addressable yet). `CreateSession`
- *    dispatches directly because it has no ordering dependency on unrelated
- *    session work; selection tokens reconcile late responses.
+ *  - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle`
+ *    only (the session may not exist yet, so the inner per-session queue
+ *    cannot be addressed).
  *  - `PersistTabs` and `Log` execute directly without queueing.
  *  - `PostImperative` sends an imperative message to the webview via the
  *    `postImperative` callback.
@@ -50,14 +49,12 @@ import type {
   DrainBackendReadyQueueEffect,
   StartBackendReadyWatchdogEffect,
   CancelBackendReadyWatchdogEffect,
-  StartQueuedDwellWatchdogEffect,
-  CancelQueuedDwellWatchdogEffect,
   PostImperativeMessage,
 } from './effects';
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, SessionOpenedPayload, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
@@ -127,10 +124,6 @@ export interface SessionServiceLike {
    *  dispatch the reducer transitions that undo the optimistic tab setup
    *  (CloseTab / SelectSession-fallback / SessionScopeCleared / NoticeShown). */
   handleSelectionFailure(selectionToken: string, notice: string): void;
-  /** Reconcile the authoritative payload returned by create/open/duplicate.
-   * Backend events carry the same payload, but RPC responses have a priority
-   * transport lane so lifecycle completion cannot be starved by stream data. */
-  applySessionOpened(payload: SessionOpenedPayload): void;
   /** Decide whether a `session.open` for `sessionPath` can skip the
    *  transcript round-trip: returns `'skip'` when the host already has the
    *  session's transcript window loaded and the session is not actively
@@ -210,39 +203,7 @@ export interface EffectRunnerDeps {
    * when `prepassTimeoutSec` is null/invalid (SDK-owned default, presumed well
    * under 120s).
    */
-  getSendTimerTimeoutMs?: (sessionPath: string) => number;
-  /**
-   * Override the model-start send-timer budget (default 600s / 10min). The
-   *  send-timer is RE-ARMED with this budget once the pruning prepass succeeds
-   *  (see `ReArmSendTimer`): the remaining wait is model-start (concurrency /
-   *  rate-limit / first-token), which can legitimately be long, so it gets a
-   *  far more generous budget than the prepass window. A fire after re-arm
-   *  carries the model-start error string so the notice blames model-start,
-   *  not pruning. Sized to bound a genuinely-stuck turn without tripping a
-   *  false positive on an intended concurrency wait. Used by tests to avoid
-   *  waiting the full 10min.
-   */
-  modelStartTimerTimeoutMs?: number;
-  /**
-   * Read the live provider-gate concurrency metrics (cached host-side in
-   * `AggregateStats.providerGate`, polled from the backend's `ProviderGate`).
-   * Used by the model-start send-timer re-arm path to detect when the
-   * in-flight request's provider is legitimately QUEUED (`queuedRequests>0`)
-   * or PAUSED (circuit breaker), so the timer re-arms instead of firing a
-   * false-positive `PreflightFailed`. Optional + FAIL-OPEN: when absent (or
-   * when it returns undefined), the gate is skipped and the timer fires as
-   * today. The shape is the minimal slice the runner reasons over.
-   */
-  getProviderGateMetrics?: () => { providers: Array<{ provider: string; queuedRequests: number; paused: boolean }> } | undefined;
-  /**
-   * Resolve the provider name an in-flight send's request would route to, so
-   * the model-start re-arm path can match it against `getProviderGateMetrics`.
-   * Resolves the session's current model id (else the global default) → the
-   * matching model entry's `provider`. Optional + FAIL-OPEN: when absent (or
-   * when it returns undefined), the provider can't be matched and the timer
-   * fires as today.
-   */
-  resolveSessionProvider?: (sessionPath: string) => string | undefined;
+  getSendTimerTimeoutMs?: () => number;
   /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
@@ -279,19 +240,6 @@ interface InFlightSend {
   /** The budget this send's timer was armed with (prepass-aware when
    *  `getSendTimerTimeoutMs` is wired); surfaces in the fire error message. */
   budgetMs: number;
-  /** Which budget the timer is currently armed with: `prepass` (the tight
-   *  `prepassTimeoutSec` + headroom budget armed at send-dispatch) or
-   *  `modelStart` (the generous model-start budget set by `ReArmSendTimer`
-   *  once pruning succeeds). Determines the fire error string so the notice
-   *  blames the right cause (pruning vs model-start). */
-  phase: 'prepass' | 'modelStart';
-  /** Absolute epoch-ms the model-start phase was FIRST armed (set once in
-   *  `reArmInFlightSend` when the prepass succeeds). Used by the metric-gated
-   *  re-arm path in `onSendTimerFire` to enforce a HARD CEILING on the total
-   *  model-start wall-clock wait, so a genuinely-stuck turn (a queue that
-   *  never drains) still fires. Absent during the prepass phase (only the
-   *  modelStart phase tracks the ceiling). */
-  modelStartFirstArmedAt?: number;
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
@@ -309,23 +257,12 @@ interface InFlightSend {
    *  fire / pre-ack failure) so pruning returns to the user's prior mode for the
    *  next turn. Absent on a normal send (no restore). */
   priorPruningMode?: PruningMode;
-  /** FP-C4: true once the EffectRunner has dispatched `WaitingForSlotShown` for
-   *  this send, so a re-arm doesn't re-dispatch on every cycle (the modelStart
-   *  timer re-arms ~every 10min while the provider stays saturated). Cleared
-   *  on commit (`clearInFlightSend` → `WaitingForSlotCleared`) and on fire
-   *  (`onSendTimerFire` fire branch). NOT cleared on `dispose()` — dispose is
-   *  extension-shutdown teardown (the ArchState is torn down with the host),
-   *  so no stuck notice is observable; `clearInFlightSend` owns the live clears. */
-  waitingForSlotShown?: boolean;
 }
 
 export class EffectRunner {
   /** The backend-ready watchdog timer. Started by `StartBackendReadyWatchdog`,
    * cleared by `CancelBackendReadyWatchdog` / `DrainBackendReadyQueue` / fire. */
   private backendReadyWatchdog: TimerHandle | null = null;
-
-  /** Per-message queued dwell watchdogs, keyed by optimistic localId. */
-  private queuedDwellWatchdogs = new Map<string, TimerHandle>();
 
   /** Per-corrId in-flight send/edit context: the post-ack send-timer + the
    *  abort controller (Brief E cancels an in-flight `message.send` on
@@ -345,28 +282,7 @@ export class EffectRunner {
    *  so the reducer reverts via `pending.promoted[corrId]`. */
   private static readonly SEND_TIMER_TIMEOUT_MS = 120_000;
 
-  /** The model-start budget the send-timer is RE-ARMED with once the pruning
-   *  prepass succeeds (`ReArmSendTimer`). The remaining wait is model-start
-   *  (concurrency/rate-limit/first-token), which can legitimately be long, so
-   *  this is far more generous than the prepass budget. Sized to bound a
-   *  genuinely-stuck turn (a silent hang after pruning) without tripping a
-   *  false positive on an intended concurrency wait. A fire after re-arm
-   *  carries the model-start error string so the notice blames model-start,
-   *  not pruning. */
-  private static readonly MODEL_START_TIMER_TIMEOUT_MS = 600_000;
-
-  /** Hard ceiling on total model-start wall-clock wait across metric-gated
-   *  re-arms. When the provider-gate re-arm path keeps extending the timer
-   *  because the in-flight request's provider is legitimately queued/paused,
-   *  this guarantees a genuinely-stuck turn (a queue that never drains, a
-   *  deadlocked slot) still fires after a bounded time. ~2× the single
-   *  model-start budget (20 min): long enough to outlast a normal provider-
-   *  saturation drain, short enough to bound a hang. */
-  private static readonly MODEL_START_HARD_CEILING_MS = EffectRunner.MODEL_START_TIMER_TIMEOUT_MS * 2;
-
   private readonly sendTimerTimeoutMs: number;
-
-  private readonly modelStartTimerTimeoutMs: number;
 
   /** Dispatch table: one handler per `Effect['kind']`. The `Record` key type
    *  forces every kind to have an entry (compile-time exhaustiveness). Built
@@ -375,7 +291,6 @@ export class EffectRunner {
 
   constructor(private readonly deps: EffectRunnerDeps) {
     this.sendTimerTimeoutMs = deps.sendTimerTimeoutMs ?? EffectRunner.SEND_TIMER_TIMEOUT_MS;
-    this.modelStartTimerTimeoutMs = deps.modelStartTimerTimeoutMs ?? EffectRunner.MODEL_START_TIMER_TIMEOUT_MS;
     this.timer = deps.timer ?? defaultTimerSink;
     this.handlers = {
       // ── RPC kinds: route through the double-wrap. `runRpc` short-circuits
@@ -389,7 +304,7 @@ export class EffectRunner {
       ClearQueueRpc: (e) => this.runRpc(e),
       TruncateRpc: (e) => this.runRpc(e),
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
-      // ── Lifecycle kinds (existing sessions queue; fresh create is direct). ──
+      // ── Lifecycle kinds: `enqueueLifecycle`-only. ──
       OpenSession: (e) => this.runLifecycle(e),
       CreateSession: (e) => this.runLifecycle(e),
       DuplicateSession: (e) => this.runLifecycle(e),
@@ -405,13 +320,10 @@ export class EffectRunner {
       DrainBackendReadyQueue: (e) => this.handleDrainBackendReadyQueue(e),
       StartBackendReadyWatchdog: (e) => this.handleStartBackendReadyWatchdog(e),
       CancelBackendReadyWatchdog: (e) => this.handleCancelBackendReadyWatchdog(e),
-      StartQueuedDwellWatchdog: (e) => this.handleStartQueuedDwellWatchdog(e),
-      CancelQueuedDwellWatchdog: (e) => this.handleCancelQueuedDwellWatchdog(e),
       // ── Send-timer (Brief B): clear the post-ack send-timer at the commit
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
       ClearSendTimer: (e) => this.clearInFlightSend(e.corrId),
-      ReArmSendTimer: (e) => this.reArmInFlightSend(e.corrId),
       HydrateModel: (e) => this.handleHydrateModel(e),
       // ── Template rows (pure 1:1 effect → *Result). ──
       FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffService.openFileDiff(e.sessionPath, e.filePath) }),
@@ -563,8 +475,11 @@ export class EffectRunner {
           defaultModel: effect.modelSettings.defaultModel,
           defaultThinkingLevel: effect.modelSettings.defaultThinkingLevel,
         };
-        // Only forward defaultProvider when set — avoids sending a stray
-        // undefined key and keeps the wire payload minimal.
+        // Preserve the picker entry's provider so duplicate model ids are
+        // resolved against the model the user actually selected. Omitting this
+        // makes the backend reuse the current provider, perform a fallback
+        // id-only switch, then reject the successful switch as a provider
+        // mismatch (so it appears to work only on the second attempt).
         if (effect.modelSettings.defaultProvider) {
           setParams.defaultProvider = effect.modelSettings.defaultProvider;
         }
@@ -733,27 +648,6 @@ export class EffectRunner {
     this.clearBackendReadyWatchdog();
   }
 
-  private handleStartQueuedDwellWatchdog(effect: StartQueuedDwellWatchdogEffect): void {
-    const existing = this.queuedDwellWatchdogs.get(effect.localId);
-    if (existing) this.timer.cancel(existing);
-    const timer = this.timer.schedule(() => {
-      this.queuedDwellWatchdogs.delete(effect.localId);
-      this.deps.dispatchEvent({
-        kind: 'QueuedDwellWatchdogFired',
-        sessionPath: effect.sessionPath,
-        localId: effect.localId,
-      });
-    }, effect.timeoutMs);
-    this.queuedDwellWatchdogs.set(effect.localId, timer);
-  }
-
-  private handleCancelQueuedDwellWatchdog(effect: CancelQueuedDwellWatchdogEffect): void {
-    const timer = this.queuedDwellWatchdogs.get(effect.localId);
-    if (!timer) return;
-    this.timer.cancel(timer);
-    this.queuedDwellWatchdogs.delete(effect.localId);
-  }
-
   /** `HydrateModel` — IIFE; `service.hydrateModelState(sessionPath)`. No
    *  result; catch: `log.log('error',…)` swallow. */
   private handleHydrateModel(effect: HydrateModelEffect): void {
@@ -795,7 +689,7 @@ export class EffectRunner {
     const abort = new AbortController();
     // Prepass-aware budget (read fresh each send so a runtime prepassTimeoutSec
     // change takes effect); falls back to the static override/default.
-    const budgetMs = this.deps.getSendTimerTimeoutMs?.(sessionPath) ?? this.sendTimerTimeoutMs;
+    const budgetMs = this.deps.getSendTimerTimeoutMs?.() ?? this.sendTimerTimeoutMs;
     const send: InFlightSend = {
       corrId,
       sessionPath,
@@ -805,7 +699,6 @@ export class EffectRunner {
       userParts,
       timer: null,
       budgetMs,
-      phase: 'prepass',
       abort,
       disposed: false,
       fired: false,
@@ -821,96 +714,16 @@ export class EffectRunner {
     return send;
   }
 
-  /** Decide whether the model-start send-timer should RE-ARM (the in-flight
-   *  request's provider is legitimately queued/paused) instead of firing a
-   *  false-positive `PreflightFailed`. Returns false (→ fire, FAIL-OPEN) when
-   *  either dep is absent, the provider can't be resolved, the metrics carry
-   *  no matching provider, the provider has a free slot (not queued and not
-   *  paused — a genuinely-stuck turn, not a queue wait), or the hard ceiling
-   *  has elapsed. Pure read of `deps` + `send.modelStartFirstArmedAt`; no state
-   *  mutation (the caller schedules the re-arm). */
-  private shouldReArmModelStartTimer(send: InFlightSend): boolean {
-    const metrics = this.deps.getProviderGateMetrics?.();
-    // FAIL-OPEN: no metrics accessor / no metrics → fire as today.
-    if (!metrics) return false;
-    const provider = this.deps.resolveSessionProvider?.(send.sessionPath);
-    // FAIL-OPEN: can't resolve the in-flight request's provider → fire.
-    if (!provider) return false;
-    const entry = metrics.providers.find((p) => p.provider === provider);
-    // FAIL-OPEN: no matching provider in the metrics → fire.
-    if (!entry) return false;
-    // The provider has a free slot and isn't paused — the wait is NOT a queue
-    // wait, so the turn is genuinely stuck → fire (don't mask a real hang).
-    if (!(entry.queuedRequests > 0 || entry.paused === true)) return false;
-    // Hard ceiling: a queue that never drains (deadlock) must still fire.
-    const firstArmed = send.modelStartFirstArmedAt ?? Date.now();
-    if (Date.now() - firstArmed >= EffectRunner.MODEL_START_HARD_CEILING_MS) return false;
-    return true;
-  }
-
   /** Send-timer fire: the post-ack, pre-commit phase elapsed with no commit
    *  point. Dispatch `PreflightFailed` (the reducer rolls back via
    *  `pending.promoted[corrId]`, explicit-corrId short-circuiting its scan).
    *  If `requestId` is unknown (early-ack never happened), the pre-ack
    *  `RequestTracker` timeout should have rejected first and cleared this
-   *  timer via the catch — log so the degenerate case is debuggable. The fire
-   *  error string depends on `send.phase`: `prepass` (pruning still running →
-   *  genuine pruning timeout) vs `modelStart` (pruning succeeded → the delay
-   *  is model-start/concurrency, not pruning). The error mapper distinguishes
-   *  the two strings so the notice blames the right cause.
-   *
-   *  Metric-gated re-arm (modelStart phase only): the model-start timer's
-   *  clock started at issue time, BEFORE the request acquired its
-   *  ProviderGate concurrency slot. When the in-flight request's provider is
-   *  legitimately QUEUED (`queuedRequests>0`) or PAUSED (circuit breaker
-   *  armed), firing now would be a FALSE-POSITIVE PreflightFailed that rolls
-   *  back the user's message even though the turn would succeed once a slot
-   *  frees up. Re-arm instead, up to a hard ceiling, so a genuine queue drain
-   *  succeeds and only a truly-stuck turn fires. FAIL-OPEN: any missing
-   *  dep/metric/provider, a non-queued/non-paused provider, or an elapsed
-   *  ceiling falls through to fire (existing behavior). */
+   *  timer via the catch — log so the degenerate case is debuggable. */
   private onSendTimerFire(send: InFlightSend): void {
     if (send.disposed) return;
-    if (send.phase === 'modelStart' && this.shouldReArmModelStartTimer(send)) {
-      const firstArmed = send.modelStartFirstArmedAt ?? Date.now();
-      const elapsed = Date.now() - firstArmed;
-      const remaining = EffectRunner.MODEL_START_HARD_CEILING_MS - elapsed;
-      // FP-C4: after ~one model-start budget of queued waiting (the re-arm
-      // itself only fires after the budget elapsed with the provider still
-      // saturated), surface a non-blocking "still waiting for a slot" notice
-      // so the user doesn't think pie hung. Dispatched once (guarded by
-      // `waitingForSlotShown`); cleared on commit / fire / dispose.
-      if (!send.waitingForSlotShown) {
-        send.waitingForSlotShown = true;
-        this.deps.dispatchEvent({
-          kind: 'WaitingForSlotShown',
-          sessionPath: send.sessionPath,
-          message: 'Still waiting for a free model slot — the provider is busy. Your turn will start as soon as a slot opens up.',
-        });
-      }
-      // Re-arm for the lesser of a full model-start window or the remaining
-      // ceiling (clamped to ≥1s so a near-ceiling re-arm still wakes to fire
-      // rather than scheduling a non-positive timeout).
-      const nextBudget = Math.min(
-        this.modelStartTimerTimeoutMs,
-        Math.max(1000, remaining + 1),
-      );
-      send.timer = this.timer.schedule(() => this.onSendTimerFire(send), nextBudget);
-      this.deps.log.log('debug', 'send-timer.rearmed', {
-        corrId: send.corrId,
-        sessionPath: send.sessionPath,
-        elapsedMs: elapsed,
-        ceilingMs: EffectRunner.MODEL_START_HARD_CEILING_MS,
-        nextBudgetMs: nextBudget,
-      });
-      return;
-    }
     send.disposed = true;
     send.fired = true;
-    // FP-C4: clear the "still waiting for a slot" notice — the user now sees
-    //  an error (PreflightFailed) or a pre-ack-fire warn. Idempotent at the
-    //  reducer (no-op if absent).
-    this.clearWaitingForSlotNotice(send);
     // Do NOT delete the entry from the in-flight maps yet. A late commit
     // (MessageStarted → ClearSendTimer) needs to detect `fired === true` so it
     // can dispatch a `PreflightSuperseded` retraction that undoes the false-
@@ -922,15 +735,12 @@ export class EffectRunner {
     //  mode for the next turn).
     this.restorePruningMode(send);
     if (send.requestId) {
-      const error = send.phase === 'modelStart'
-        ? `Timed out waiting for the model to start streaming (${send.budgetMs / 1000}s)`
-        : `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`;
       this.deps.dispatchEvent({
         kind: 'PreflightFailed',
         corrId: send.corrId,
         sessionPath: send.sessionPath,
         requestId: send.requestId,
-        error,
+        error: `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`,
       });
       return;
     }
@@ -938,32 +748,6 @@ export class EffectRunner {
       'warn',
       `send-timer fired before early-ack for corrId=${send.corrId} session=${send.sessionPath} (pre-ack RequestTracker timer should have fired first)`,
     );
-  }
-
-  /** Re-arm the post-ack send-timer with the (generous) model-start budget.
-   *  Called when the pruning prepass SUCCEEDS (`ReArmSendTimer` effect, emitted
-   *  by the reducer on the `pruning-result` `CustomMessage`). The send-timer was
-   *  armed at send-dispatch with the tight prepass budget; once pruning is done
-   *  the remaining wait is model-start (concurrency/rate-limit/first-token),
-   *  which can legitimately be long, so the budget switches to
-   *  `modelStartTimerTimeoutMs`. Cancels the in-flight prepass timer and starts
-   *  a fresh one (the model-start window gets its own budget from this moment).
-   *  No-op if the send already committed/cleared/fired (entry gone or disposed)
-   *  — a late `ReArmSendTimer` after a fire/commit is harmless. */
-  private reArmInFlightSend(corrId: string): void {
-    const send = this.inFlightSends.get(corrId);
-    if (!send || send.disposed) return;
-    if (send.timer) this.timer.cancel(send.timer);
-    send.budgetMs = this.modelStartTimerTimeoutMs;
-    send.phase = 'modelStart';
-    // Record the FIRST arming into the modelStart phase — the absolute start of
-    // the model-start wait. Used by the hard-ceiling backstop in
-    // `onSendTimerFire` so metric-gated re-arms cannot extend a genuinely-
-    // stuck turn indefinitely. Set once (idempotent under repeat re-arm).
-    if (send.modelStartFirstArmedAt === undefined) {
-      send.modelStartFirstArmedAt = Date.now();
-    }
-    send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
   }
 
   /** Clear the send-timer + abort context for a corrId. Called on pre-ack
@@ -974,9 +758,6 @@ export class EffectRunner {
     if (!send) return;
     const hadFired = send.fired;
     send.disposed = true;
-    // FP-C4: clear the "still waiting for a slot" notice (commit / pre-ack
-    //  failure / dispose). Idempotent at the reducer (no-op if absent).
-    this.clearWaitingForSlotNotice(send);
     if (send.timer) this.timer.cancel(send.timer);
     this.inFlightSends.delete(corrId);
     if (this.inFlightSendBySession.get(send.sessionPath) === send.corrId) {
@@ -1035,19 +816,6 @@ export class EffectRunner {
     });
   }
 
-  /** FP-C4: dispatch `WaitingForSlotCleared` for a send that had shown the
-   *  "still waiting for a slot" notice, so the non-blocking info chip clears on
-   *  commit / fire / dispose. No-op (and never dispatched) when the notice was
-   *  never shown. The reducer's `handleWaitingForSlotCleared` is idempotent. */
-  private clearWaitingForSlotNotice(send: InFlightSend): void {
-    if (!send.waitingForSlotShown) return;
-    send.waitingForSlotShown = false;
-    this.deps.dispatchEvent({
-      kind: 'WaitingForSlotCleared',
-      sessionPath: send.sessionPath,
-    });
-  }
-
   /** Abort the in-flight `message.send` for a session (Brief E: interrupt
    *  cancels a slow prepass-gated send). Aborts the `AbortController` passed
    *  to `backend.request`: pre-ack, the `RequestTracker` rejects → the catch
@@ -1067,8 +835,6 @@ export class EffectRunner {
   /** Dispose of the runner's resources (called on shutdown). */
   dispose(): void {
     this.clearBackendReadyWatchdog();
-    for (const timer of this.queuedDwellWatchdogs.values()) this.timer.cancel(timer);
-    this.queuedDwellWatchdogs.clear();
     for (const send of this.inFlightSends.values()) {
       send.disposed = true;
       if (send.timer) this.timer.cancel(send.timer);
@@ -1203,12 +969,6 @@ export class EffectRunner {
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
           statsService.onMessageEdited(effect.sessionPath, effect.messageId);
           statsService.prepareForSend(effect.sessionPath, []);
-          // Editing is restart semantics, not a mutation racing a live turn.
-          // message.interrupt is idempotent and now acknowledges only after the
-          // abort settles, so this forms a strict stop → truncate → send barrier.
-          await backend.request('message.interrupt', {
-            sessionPath: effect.sessionPath,
-          }, { signal: send.abort.signal });
           await backend.request('session.truncateAfter', {
             sessionPath: effect.sessionPath,
             entryId: effect.messageId,
@@ -1266,12 +1026,7 @@ export class EffectRunner {
           // First load and any running session get the full authoritative
           // snapshot.
           const transcript = service.getOpenTranscriptMode(effect.sessionPath);
-          const payload = await backend.request<SessionOpenedPayload>('session.open', {
-            sessionPath: effect.sessionPath,
-            selectionToken: effect.selectionToken,
-            transcript,
-          });
-          service.applySessionOpened(payload);
+          await backend.request('session.open', { sessionPath: effect.sessionPath, selectionToken: effect.selectionToken, transcript });
           dispatch({
             kind: 'OpenSessionResult',
             corrId: effect.corrId,
@@ -1305,11 +1060,7 @@ export class EffectRunner {
       // CreateSession.
       void queues.enqueueLifecycle(async () => {
         try {
-          const payload = await backend.request<SessionOpenedPayload>('session.duplicate', {
-            sessionPath: effect.sourceSessionPath,
-            selectionToken: effect.selectionToken,
-          });
-          service.applySessionOpened(payload);
+          await backend.request('session.duplicate', { sessionPath: effect.sourceSessionPath, selectionToken: effect.selectionToken });
           dispatch({ kind: 'DuplicateSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
         } catch (err) {
           service.handleSelectionFailure(effect.selectionToken, `Failed to duplicate session: ${toErrorMessage(err)}`);
@@ -1318,17 +1069,19 @@ export class EffectRunner {
       });
       return;
     }
-    // A fresh session has no ordering dependency on work for existing sessions.
-    // The global lifecycle queue made + wait behind unrelated opens, sends, and
-    // model changes (several seconds in observed traces). Dispatch directly;
-    // the pre-minted selection token prevents a late response stealing focus.
-    void (async () => {
+    // CreateSession: the reducer already did the optimistic tab setup; the
+    // runner owns the backend session.create RPC, serialized on the lifecycle
+    // queue (shared with open/close). The selection token was minted in
+    // service.createNewSession() BEFORE the reducer activated the pending tab,
+    // so handleSelectionFailure can restore the previous active path on
+    // failure. On failure handleSelectionFailure dispatches the reducer
+    // transitions that undo the optimistic setup (CloseTab / SelectSession-
+    // fallback / SessionScopeCleared / NoticeShown) — so the reducer's
+    // CreateSessionResult handler stays a no-op, matching the pre-migration
+    // recovery path.
+    void queues.enqueueLifecycle(async () => {
       try {
-        const payload = await backend.request<SessionOpenedPayload>('session.create', {
-          cwd: effect.cwd,
-          selectionToken: effect.selectionToken,
-        });
-        service.applySessionOpened(payload);
+        await backend.request('session.create', { cwd: effect.cwd, selectionToken: effect.selectionToken });
         dispatch({
           kind: 'CreateSessionResult',
           corrId: effect.corrId,
@@ -1345,7 +1098,7 @@ export class EffectRunner {
           error: toErrorMessage(err),
         });
       }
-    })();
+    });
   }
 }
 

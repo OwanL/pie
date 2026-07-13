@@ -1,10 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { computeAggregateStats, providerForModel, pricingForModel } from '../src/host/stats-service/aggregate-stats';
+import {
+  accumulateAggregateStats,
+  computeAggregateStats,
+  finalizeAggregateStats,
+  finalizeAggregateStatsLayers,
+  mergeAggregateStatsAccumulators,
+  prepareAggregateStatsLayer,
+  providerForModel,
+  pricingForModel,
+  buildCumulativeSeries,
+  MAX_INTRADAY_CHART_POINTS,
+} from '../src/host/stats-service/aggregate-stats';
 import { sumLiveRate } from '../src/host/aggregate-stats-service';
 import type { RunSnapshot } from '../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../shared/pricing-core';
+import type { AggregateSeriesSegment } from '../src/shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../src/shared/token-rate';
 
 function makeRun(overrides: Partial<RunSnapshot>): RunSnapshot {
@@ -89,6 +101,84 @@ const NOW = localNoon(2026, 7, 4);
 function assertClose(actual: number | undefined, expected: number): void {
   assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${actual} ≉ ${expected}`);
 }
+
+test('mergeable accumulators deterministically match the compatibility wrapper', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['openai/gpt', [pricing('openai', 2, 6)]],
+    ['anthropic/claude', [pricing('anthropic', 3, 15)]],
+  ]);
+  const runs = [
+    makeRun({ runId: 'completed-1', modelId: 'openai/gpt', inputTokens: 1_000_000, outputTokens: 500_000 }),
+    makeRun({ runId: 'completed-2', sessionPath: '/s/2', modelId: 'anthropic/claude', inputTokens: 2_000_000, outputTokens: 1_000_000 }),
+    makeRun({ runId: 'open-1', sessionPath: '/s/3', modelId: 'openai/gpt', inputTokens: 3_000_000, outputTokens: 2_000_000 }),
+  ];
+  let accumulatedRuns = 0;
+  const completed = accumulateAggregateStats(runs.slice(0, 2), pricingMap, {
+    onRunAccumulated: () => { accumulatedRuns += 1; },
+  });
+  const open = accumulateAggregateStats(runs.slice(2), pricingMap, {
+    onRunAccumulated: () => { accumulatedRuns += 1; },
+  });
+  const merged = finalizeAggregateStats(
+    mergeAggregateStatsAccumulators(completed, open),
+    NOW,
+    ['/s/3'],
+    {},
+    3,
+  );
+  const direct = computeAggregateStats(runs, pricingMap, NOW, ['/s/3'], {}, 3);
+  assert.deepEqual(merged, direct);
+  assert.equal(accumulatedRuns, runs.length, 'instrumentation observes each accumulated run once');
+});
+
+test('mergeable accumulators match randomized contiguous completed/open splits', () => {
+  let seed = 0x5eed1234;
+  const random = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x1_0000_0000;
+  };
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['m-a', [pricing('provider-a', 2, 6)]],
+    ['m-b', [pricing('provider-b', 3, 9)]],
+  ]);
+
+  for (let iteration = 0; iteration < 40; iteration += 1) {
+    const count = 1 + Math.floor(random() * 30);
+    const runs: RunSnapshot[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const dayOffset = Math.floor(random() * 20);
+      const at = isoLocal(2026, 7, 4 - dayOffset, 8 + (i % 12));
+      runs.push(makeRun({
+        runId: `random-${iteration}-${i}`,
+        sessionPath: `/s/${Math.floor(random() * 6)}`,
+        modelId: random() < 0.5 ? 'm-a' : 'm-b',
+        inputTokens: Math.floor(random() * 5) * 1_000_000,
+        outputTokens: Math.floor(random() * 5) * 1_000_000,
+        startedAt: at,
+        updatedAt: at,
+        finalizedAt: at,
+        toolUsage: { ...makeRun({}).toolUsage, totalCount: Math.floor(random() * 8) },
+        fileMutation: { ...makeRun({}).fileMutation, touchedFileCount: Math.floor(random() * 5) },
+      }));
+    }
+    const split = Math.floor(random() * (runs.length + 1));
+    const completed = accumulateAggregateStats(runs.slice(0, split), pricingMap);
+    const open = accumulateAggregateStats(runs.slice(split), pricingMap);
+    const merged = finalizeAggregateStatsLayers(
+      prepareAggregateStatsLayer(completed, NOW),
+      open,
+      NOW,
+      [],
+      {},
+      0,
+    );
+    assert.deepEqual(
+      merged,
+      computeAggregateStats(runs, pricingMap, NOW, [], {}, 0),
+      `randomized equivalence iteration ${iteration}`,
+    );
+  }
+});
 
 test('computeAggregateStats: per-provider cost + token totals', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([
@@ -588,4 +678,166 @@ test('computeAggregateStats: empty series when no today runs', () => {
   assert.equal(stats.todayCostSeries.length, 0);
   assert.equal(stats.todayTokenSeries.length, 0);
   assert.equal(stats.todayThroughputSeries.length, 0);
+});
+
+function segmentMap(segments: AggregateSeriesSegment[]): Map<string, number> {
+  return new Map(segments.map((s) => [s.key, s.value]));
+}
+
+test('buildCumulativeSeries: downsamples to cap while preserving exact totals', () => {
+  const samples = [];
+  for (let i = 0; i < 500; i += 1) {
+    samples.push({ ms: i * 1000, provider: `p${i % 3}`, model: `m${i % 3}`, value: i + 1 });
+  }
+  const total = samples.reduce((sum: number, s: { value: number }) => sum + s.value, 0);
+  const expectedProvider = new Map<string, number>();
+  const expectedModel = new Map<string, number>();
+  for (const s of samples) {
+    expectedProvider.set(s.provider, (expectedProvider.get(s.provider) ?? 0) + s.value);
+    expectedModel.set(s.model, (expectedModel.get(s.model) ?? 0) + s.value);
+  }
+  const cap = 10;
+  const series = buildCumulativeSeries(samples, 600_000, cap);
+  assert.ok(series.length <= cap, `series length ${series.length} exceeds cap ${cap}`);
+  assert.ok(series.length > 1, 'expected at least one sample bucket plus the now point');
+  for (let i = 0; i < series.length - 1; i += 1) {
+    assert.ok(series[i]!.ms <= series[i + 1]!.ms, 'series must be chronological');
+  }
+  const final = series[series.length - 1]!;
+  assert.equal(final.byProvider.reduce((sum, s) => sum + s.value, 0), total);
+  assert.deepEqual(segmentMap(final.byProvider), expectedProvider);
+  assert.deepEqual(segmentMap(final.byModel), expectedModel);
+});
+
+test('buildCumulativeSeries: multiple samples in the same bucket are accumulated', () => {
+  const samples = [];
+  for (let i = 0; i < 50; i += 1) {
+    samples.push({ ms: 1000 + i, provider: 'openai', model: 'm', value: 1 });
+  }
+  const cap = 5;
+  const series = buildCumulativeSeries(samples, 2000, cap);
+  assert.ok(series.length <= cap, `series length ${series.length} exceeds cap ${cap}`);
+  const final = series[series.length - 1]!;
+  assert.equal(final.byProvider.reduce((sum, s) => sum + s.value, 0), 50);
+  assert.equal(final.byProvider.find((s) => s.key === 'openai')?.value, 50);
+  assert.equal(final.byModel.find((s) => s.key === 'm')?.value, 50);
+});
+
+test('buildCumulativeSeries: trailing now point is included without exceeding cap', () => {
+  const samples = [];
+  for (let i = 0; i < 100; i += 1) {
+    samples.push({ ms: i * 10, provider: 'openai', model: 'm', value: 1 });
+  }
+  const cap = 10;
+  const series = buildCumulativeSeries(samples, 2000, cap);
+  assert.ok(series.length <= cap, `series length ${series.length} exceeds cap ${cap}`);
+  assert.ok(series.length > 1, 'expected sample buckets plus the trailing now point');
+  assert.equal(series[series.length - 1]!.ms, 2000);
+});
+
+test('layered and one-pass cumulative cost series are deterministic and match the aggregate total', () => {
+  const now = localNoon(2026, 7, 13);
+  const pricingMap = new Map<string, ModelPricingRecord[]>([
+    ['fixture/model-a', [pricing('provider-a', 2, 6)]],
+    ['fixture/model-b', [pricing('provider-b', 3, 9)]],
+  ]);
+  const runs: RunSnapshot[] = [];
+  for (let i = 0; i < 2000; i += 1) {
+    const minute = i % 1200;
+    const iso = new Date(2026, 6, 13, 0, minute, 0).toISOString();
+    runs.push(makeRun({
+      runId: `layered-${i}`,
+      sessionPath: `/s/${i % 20}`,
+      modelId: i % 2 === 0 ? 'fixture/model-a' : 'fixture/model-b',
+      inputTokens: 100 + i,
+      outputTokens: 100,
+      startedAt: iso,
+      updatedAt: iso,
+      finalizedAt: iso,
+      turnThroughputSamples: [0, 1].map((sample) => ({
+        endedAt: new Date(2026, 6, 13, 0, minute, sample).toISOString(),
+        outputTokens: 50,
+        generationDurationMs: 1_000,
+        concurrentBusySessions: 1,
+        status: 'completed' as const,
+        turnLatencyMs: null,
+        overheadMs: null,
+        providerLatencyMs: null,
+      })),
+    }));
+  }
+  const split = 500;
+  const completed = accumulateAggregateStats(runs.slice(0, split), pricingMap);
+  const open = accumulateAggregateStats(runs.slice(split), pricingMap);
+  const layered = finalizeAggregateStatsLayers(prepareAggregateStatsLayer(completed, now), open, now, [], {}, 0);
+  const direct = computeAggregateStats(runs, pricingMap, now, [], {}, 0);
+  // Regression: before the fix, layered and one-pass final cost points differed
+  // by a few ULPs (e.g., 0.9919691341559999 vs 0.991969134156) and the series
+  // final value did not equal the aggregate today cost.
+  assert.deepEqual(layered.todayCostSeries, direct.todayCostSeries,
+    'layered and one-pass cumulative cost series must be exactly equal');
+  const final = direct.todayCostSeries.at(-1)!;
+  assert.equal(
+    final.byProvider.reduce((sum, entry) => sum + entry.value, 0),
+    direct.todayCost,
+    'final cumulative cost series must equal the aggregate today cost',
+  );
+  assert.equal(
+    final.byModel.reduce((sum, entry) => sum + entry.value, 0),
+    direct.todayCost,
+    'final cumulative cost series model breakdown must equal the aggregate today cost',
+  );
+  assert.equal(direct.costByProvider.length, 2);
+  assert.equal(direct.todayCostByProvider.length, 2);
+  assert.equal(direct.dailyCost[direct.dailyCost.length - 1]!.byModel.length, 2);
+});
+
+test('computeAggregateStats: intraday series capped at 240 for thousands of same-day samples', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 2, 6)]]]);
+  const baseMs = Date.parse(isoLocal(2026, 7, 4, 0, 0));
+  const samples = [];
+  for (let i = 0; i < 1000; i += 1) {
+    samples.push({
+      endedAt: new Date(baseMs + i * 60_000).toISOString(),
+      outputTokens: 1000,
+      generationDurationMs: 1000,
+      concurrentBusySessions: 1,
+      status: 'completed' as const,
+      turnLatencyMs: null,
+      overheadMs: null,
+      providerLatencyMs: null,
+    });
+  }
+  const run = makeRun({
+    runId: 'r1',
+    modelId: 'm',
+    outputTokens: 1_000_000,
+    startedAt: isoLocal(2026, 7, 4, 0, 0),
+    updatedAt: samples[samples.length - 1].endedAt,
+    finalizedAt: samples[samples.length - 1].endedAt,
+    turnThroughputSamples: samples,
+  });
+  const lateNow = new Date(2026, 6, 4, 23, 0, 0).getTime();
+  const stats = computeAggregateStats([run], pricingMap, lateNow, [], {}, 0);
+  assert.ok(
+    stats.todayTokenSeries.length <= MAX_INTRADAY_CHART_POINTS,
+    `token series ${stats.todayTokenSeries.length} exceeds cap ${MAX_INTRADAY_CHART_POINTS}`,
+  );
+  assert.ok(
+    stats.todayCostSeries.length <= MAX_INTRADAY_CHART_POINTS,
+    `cost series ${stats.todayCostSeries.length} exceeds cap ${MAX_INTRADAY_CHART_POINTS}`,
+  );
+  for (const series of [stats.todayTokenSeries, stats.todayCostSeries]) {
+    for (let i = 0; i < series.length - 1; i += 1) {
+      assert.ok(series[i]!.ms <= series[i + 1]!.ms, 'intraday series must be chronological');
+    }
+  }
+  const finalToken = stats.todayTokenSeries[stats.todayTokenSeries.length - 1]!;
+  assert.equal(finalToken.byProvider.reduce((sum, s) => sum + s.value, 0), 1_000_000);
+  const finalCost = stats.todayCostSeries[stats.todayCostSeries.length - 1]!;
+  assertClose(finalCost.byProvider.reduce((sum, s) => sum + s.value, 0), 6);
+  assert.equal(finalToken.byProvider[0]!.key, 'openai');
+  assert.equal(finalToken.byModel[0]!.key, 'm');
+  assert.equal(finalCost.byProvider[0]!.key, 'openai');
+  assert.equal(finalCost.byModel[0]!.key, 'm');
 });

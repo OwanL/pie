@@ -8,8 +8,9 @@
   "packageManager": "npm@11.13.0",
   "//workspaces": "npm workspaces are intentionally NOT enabled. Extension packages are loaded directly by pi and verified by the root test/typecheck runners. Activating workspaces would require package.json files for every extension and would change root dependency installation. Track enabling this in docs/internal/code-review/TODO-archive.md.",
   "scripts": {
-    "postinstall": "node ./scripts/install-dependencies.mjs",
+    "postinstall": "node ./scripts/install-dependencies.mjs && node ./scripts/install-git-hooks.mjs",
     "install:dependencies": "node ./scripts/install-dependencies.mjs",
+    "hooks:install": "node ./scripts/install-git-hooks.mjs",
     "test": "node ./scripts/run-tests.mjs",
     "test:fast": "node ./scripts/run-tests.mjs --fast",
     "test:file": "node ./scripts/run-test-files.mjs",

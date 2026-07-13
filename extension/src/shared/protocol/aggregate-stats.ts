@@ -203,11 +203,6 @@ export interface ProviderGateProviderMetrics {
   queuedRequests: number;
   maxConcurrentRequests: number;
   afterburnSeconds: number;
-  /** Max seconds a queued request waits for a slot before failing with a
-   *  retryable 429/503 (0 = unbounded). Surfaced from the backend's
-   *  `ProviderGate` so the host's send-timer can size its prepass headroom to
-   *  the real configured bound (FP-C3) instead of a hardcoded 30s default. */
-  queueWaitSeconds: number;
   paused: boolean;
   pausedUntilMs: number;
   strikeCount: number;

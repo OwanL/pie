@@ -309,10 +309,7 @@ export type Effect =
   | DrainBackendReadyQueueEffect
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
-  | StartQueuedDwellWatchdogEffect
-  | CancelQueuedDwellWatchdogEffect
-  | ClearSendTimerEffect
-  | ReArmSendTimerEffect;
+  | ClearSendTimerEffect;
 
 /**
  * Drain queued sends when a pending session path resolves to a real path.
@@ -357,33 +354,6 @@ export interface CancelBackendReadyWatchdogEffect extends EffectBase {
 }
 
 /**
- * Start the per-localId queued-message dwell watchdog (handoff §F). Emitted by
- * the reducer on the Send-while-busy path (a steering/followUp message was
- * queued). On fire, the runner dispatches `QueuedDwellWatchdogFired` → the
- * reducer marks the dwell entry `watchdogFired` (actionable). Keyed by
- * `localId` (globally unique) so multiple queued messages each have their own
- * timer from their own enqueue time. Does NOT interrupt the in-flight turn.
- */
-export interface StartQueuedDwellWatchdogEffect extends EffectBase {
-  kind: 'StartQueuedDwellWatchdog';
-  sessionPath: string;
-  localId: string;
-  timeoutMs: number;
-}
-
-/**
- * Cancel the per-localId queued-message dwell watchdog. Emitted by the reducer
- * when the queued message is delivered, cleared, interrupted, rolled back
- * (pre-ack failure), abandoned (backend restart), or the session is closed —
- * so the timer never fires into a stale/absent entry. The runner cancel is a
- * no-op when no timer is running for that `localId` (idempotent).
- */
-export interface CancelQueuedDwellWatchdogEffect extends EffectBase {
-  kind: 'CancelQueuedDwellWatchdog';
-  localId: string;
-}
-
-/**
  * Clear the post-ack send-timer for an in-flight send/edit. Emitted by the
  * reducer at the **commit point** (first `MessageStarted` for the `requestId`,
  * where `handleMessageStarted` also drops `pending.promoted[corrId]`) so the
@@ -395,23 +365,5 @@ export interface CancelQueuedDwellWatchdogEffect extends EffectBase {
  */
 export interface ClearSendTimerEffect extends EffectBase {
   kind: 'ClearSendTimer';
-}
-
-/**
- * Re-arm the post-ack send-timer with the (generous) model-start budget.
- * Emitted by the reducer when the pruning prepass SUCCEEDS (the
- * `pruning-result` `CustomMessage` lands while `prepassBySession[session]` is
- * `running`). The send-timer was armed at send-dispatch with the tight prepass
- * budget (`prepassTimeoutSec` + first-token headroom); once pruning is done the
- * remaining wait is model-start (concurrency/rate-limit/first-token), which
- * can legitimately be long. Re-arming prevents a spurious `prepass-timeout`
- * false positive for an intended concurrency wait, while still bounding a
- * genuinely-stuck turn (a later fire carries the model-start error string so
- * the notice blames model-start, not pruning). Carries only `corrId`; the
- * budget source lives in `EffectRunner` (mirroring `ClearSendTimer`). See
- * `docs/STATE_CONTRACT.md` § Optimistic Reconciliation "Timer ownership".
- */
-export interface ReArmSendTimerEffect extends EffectBase {
-  kind: 'ReArmSendTimer';
 }
 

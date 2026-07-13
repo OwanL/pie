@@ -318,15 +318,6 @@ export interface MessageThinkingEvent {
   thinking: string;
 }
 
-export interface MessageToolCallDeltaEvent {
-  kind: 'MessageToolCallDelta';
-  sessionPath: string;
-  messageId: string;
-  toolCallId: string;
-  name: string;
-  delta: string;
-}
-
 export interface MessageAbortedEvent {
   kind: 'MessageAborted';
   sessionPath: string;
@@ -684,30 +675,6 @@ export interface SessionsInterruptedEvent {
   reason: string;
 }
 
-/** Non-blocking "still waiting for a concurrency slot" notice for a session
- *  (FP-C4). Dispatched by the EffectRunner when a send's modelStart phase has
- *  been queued waiting for a saturated provider's slot for ~one model-start
- *  budget (~10min). The reducer records it in `waitingForSlotBySession`; the
- *  projection surfaces the active session's entry as a non-blocking info
- *  chip/banner INDEPENDENT of the error-notice triple (a non-error
- *  NoticeShown would clobber an error notice's kind/raw). Cleared by
- *  `WaitingForSlotCleared` on commit / fire / dispose. */
-export interface WaitingForSlotShownEvent {
-  kind: 'WaitingForSlotShown';
-  sessionPath: string;
-  message: string;
-}
-
-/** Clears a session's "still waiting for a concurrency slot" notice (FP-C4).
- *  Dispatched by the EffectRunner when the send commits (MessageStarted →
- *  ClearSendTimer), fires (PreflightFailed — the user now sees an error), or
- *  the in-flight entry is disposed. The reducer deletes the entry from
- *  `waitingForSlotBySession` (no-op if absent — idempotent). */
-export interface WaitingForSlotClearedEvent {
-  kind: 'WaitingForSlotCleared';
-  sessionPath: string;
-}
-
 /** Steering (FollowUp): the agent loop injected a queued follow-up user
  *  message into a turn. The host promotes its earliest optimistic 'queued'
  *  transcript message to 'completed' (FIFO — the SDK drains the follow-up
@@ -718,27 +685,6 @@ export interface QueuedDeliveredEvent {
   kind: 'QueuedDelivered';
   sessionPath: string;
   text: string;
-  /** The optimistic message ID of the delivered queued message, when the
-   *  backend correlated it (handoff §F). Present when the backend's
-   *  `queuedLocalIds` FIFO queue had an entry to shift; absent for a legacy
-   *  host or a clear/interrupt race. The reducer matches truthfully by
-   *  `localId` when present, else falls back to FIFO (earliest 'queued'). */
-  localId?: string;
-}
-
-/** The queued-message dwell watchdog fired (handoff §F): a queued steering/
- *  followUp message has waited past the hard dwell threshold without being
- *  delivered. Dispatched by the EffectRunner's per-localId timer (armed on the
- *  Send-while-busy path). The reducer marks the dwell entry `watchdogFired`
- *  (actionable) and emits a `Log` (warn) so the stuck queue is observable. It
- *  does NOT interrupt the in-flight turn — healthy tools are not auto-stopped
- *  just because a follow-up was queued; the user is offered Stop/Remove via the
- *  existing Interrupt/ClearQueue commands. Cleared (with the entry) on
- *  delivery/clear/interrupt/restart. */
-export interface QueuedDwellWatchdogFiredEvent {
-  kind: 'QueuedDwellWatchdogFired';
-  sessionPath: string;
-  localId: string;
 }
 
 /** The SDK began an auto-retry attempt (transient provider error). The
@@ -766,32 +712,11 @@ export interface RetryEndedEvent {
   finalError?: string;
 }
 
-/** The willRetry watchdog declared a retry stuck: the SDK's backoff did not
- *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,
- *  or an extension hook blocked the retry). Emitted by the backend alongside
- *  an `operational-error` (code `RETRY_STUCK`) which carries the user-facing
- *  message; this event carries the structured timing detail.
- *
- *  The reducer emits a `Log` effect (warn) so the stuck detail is visible in
- *  the pie OutputChannel. It does NOT set a notice — the companion
- *  `operational-error` already surfaced one for the same condition (the two
- *  events fire in the same watchdog callback), so a notice here would
- *  double-notify. The reducer stays pure: the side effect (logging) is an
- *  `Effect`, executed by the `EffectRunner`. */
-export interface RetryStuckEvent {
-  kind: 'RetryStuck';
-  sessionPath: string;
-  delayMs: number;
-  graceMs: number;
-  requestId?: string;
-}
-
 export type BackendEvent =
   | MessageStartedEvent
   | MessageAbortedEvent
   | MessageDeltaEvent
   | MessageThinkingEvent
-  | MessageToolCallDeltaEvent
   | ToolCallEvent
   | MessageFinishedEvent
   | BusyChangedEvent
@@ -804,10 +729,8 @@ export type BackendEvent =
   | SessionOpenedEvent
   | SessionClosedEvent
   | QueuedDeliveredEvent
-  | QueuedDwellWatchdogFiredEvent
   | RetryStartedEvent
-  | RetryEndedEvent
-  | RetryStuckEvent;
+  | RetryEndedEvent;
 
 /** Emitted when a session summary is upserted (used for placeholder creation). */
 export interface SessionSummaryUpsertedEvent {
@@ -847,8 +770,6 @@ export type HostEvent =
   | OpenTabsChangedEvent
   | PreflightFailedEvent
   | PreflightSupersededEvent
-  | SessionsInterruptedEvent
-  | WaitingForSlotShownEvent
-  | WaitingForSlotClearedEvent;
+  | SessionsInterruptedEvent;
 
 export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;

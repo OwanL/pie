@@ -168,70 +168,6 @@ test('reducer: non-Interrupt Command passes through unchanged', () => {
   assert.ok(result.effects.length > 0, 'Send should produce effects');
 });
 
-test('reducer: RetryStuck emits a warn Log effect and leaves state unchanged (no notice)', () => {
-  // The willRetry watchdog declared a retry stuck. The reducer must NOT set a
-  // notice (the companion operational-error already surfaced one via the
-  // Error event) — it only emits a Log effect so the structured timing detail
-  // is visible in the pie OutputChannel. State is unchanged.
-  const event: Event = {
-    kind: 'RetryStuck',
-    sessionPath: '/a',
-    delayMs: 30_000,
-    graceMs: 60_000,
-    requestId: 'req-1',
-  };
-
-  const result = reducer(initialArchState, event);
-
-  assert.deepEqual(result.state, initialArchState, 'state unchanged');
-  assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0]?.kind, 'Log');
-  if (result.effects[0]?.kind === 'Log') {
-    assert.equal(result.effects[0].level, 'warn');
-    assert.match(result.effects[0].message, /retry\.stuck/);
-    assert.deepEqual(result.effects[0].data, {
-      sessionPath: '/a',
-      delayMs: 30_000,
-      graceMs: 60_000,
-      requestId: 'req-1',
-    });
-  }
-  // No notice set (the companion operational-error owns the user-facing notice).
-  assert.equal(result.state.settings.notice, null);
-  assert.equal(result.state.settings.noticeKind, null);
-});
-
-test('reducer: WaitingForSlotShown records a non-blocking notice per session (independent of the error-notice triple)', () => {
-  const event: Event = {
-    kind: 'WaitingForSlotShown',
-    sessionPath: '/a',
-    message: 'Still waiting for a free model slot.',
-  };
-  const result = reducer(initialArchState, event);
-  assert.equal(result.state.sessions.waitingForSlotBySession['/a'], 'Still waiting for a free model slot.');
-  // The error-notice triple is untouched (independent field).
-  assert.equal(result.state.settings.notice, null);
-  assert.equal(result.state.settings.noticeKind, null);
-  assert.equal(result.state.settings.noticeRaw, null);
-});
-
-test('reducer: WaitingForSlotCleared removes the notice and is a no-op when absent (idempotent)', () => {
-  const withNotice: ArchState = {
-    ...initialArchState,
-    sessions: {
-      ...initialArchState.sessions,
-      waitingForSlotBySession: { '/a': 'Still waiting for a free model slot.' },
-    },
-  };
-  const result = reducer(withNotice, { kind: 'WaitingForSlotCleared', sessionPath: '/a' });
-  assert.equal(result.state.sessions.waitingForSlotBySession['/a'], undefined);
-
-  // Idempotent: clearing an absent session is a no-op (state unchanged).
-  const noOp = reducer(initialArchState, { kind: 'WaitingForSlotCleared', sessionPath: '/b' });
-  assert.deepEqual(noOp.state, initialArchState);
-  assert.deepEqual(noOp.effects, []);
-});
-
 // ─── Phase 4: Send ──────────────────────────────────────────────────────────
 
 test('reducer: Send command inserts optimistic message and produces SendRpc', () => {
@@ -723,42 +659,6 @@ test('reducer: MessageThinking resolves alias and appends reasoning', () => {
   const msg = result.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'canonical-t');
   assert.equal(msg?.thinking, 'plan');
   assert.equal(result.effects.length, 0);
-});
-
-test('reducer: MessageToolCallDelta accumulates transient tool arguments', () => {
-  const state: ArchState = {
-    ...initialArchState,
-    transcript: {
-      ...initialArchState.transcript,
-      bySession: {
-        '/s': [{ id: 'm1', role: 'assistant' as const, createdAt: '', markdown: '', status: 'streaming' as const, parts: [], toolCalls: [] }],
-      },
-    },
-  };
-
-  const first = reducer(state, {
-    kind: 'MessageToolCallDelta',
-    sessionPath: '/s',
-    messageId: 'm1',
-    toolCallId: 'tool-1',
-    name: 'bash',
-    delta: '{"command":',
-  });
-  const second = reducer(first.state, {
-    kind: 'MessageToolCallDelta',
-    sessionPath: '/s',
-    messageId: 'm1',
-    toolCallId: 'tool-1',
-    name: 'bash',
-    delta: '"npm test"}',
-  });
-
-  const msg = second.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'm1');
-  assert.deepEqual(msg?.draftingToolCall, {
-    id: 'tool-1',
-    name: 'bash',
-    argumentsText: '{"command":"npm test"}',
-  });
 });
 
 test('reducer: ToolCall resolves alias and upserts tool call directly', () => {
@@ -2244,15 +2144,6 @@ test('reducer: prepass phase running→succeeded on a pruning-result CustomMessa
   });
   assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
   assert.equal(result.state.pending.prepassBySession['/s']?.latencyMs, 250);
-  // Pruning succeeded → the reducer re-arms the post-ack send-timer with the
-  // (generous) model-start budget (ReArmSendTimer) so an intended concurrency
-  // wait doesn't trip a spurious prepass-timeout false positive ("Pruning took
-  // too long") after pruning already finished. Carries the promoted op's corrId
-  // (the in-flight send that owns the timer).
-  assert.ok(
-    result.effects.some((e) => e.kind === 'ReArmSendTimer' && e.corrId === 'c-pp'),
-    'pruning-result emits ReArmSendTimer for the promoted corrId',
-  );
   const view = selectViewState(result.state);
   assert.equal(view.prepassPhase, 'succeeded', 'projected prepassPhase succeeded (promoted op still exists)');
   assert.equal(view.prepassStartedAt, 1000, 'startedAt still projected from the promoted op');
@@ -2267,10 +2158,6 @@ test('reducer: prepass phase running→succeeded on a pruning-result CustomMessa
     message: { id: 'cm-prune2', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const, customType: 'pruning-result' as const, customDetails: { prepassLatencyMs: 999 } } as ChatMessage,
   });
   assert.equal(noOp.state.pending.prepassBySession['/s'], undefined, 'no fabricated chip for a background / already-committed pruning-result');
-  assert.ok(
-    !noOp.effects.some((e) => e.kind === 'ReArmSendTimer'),
-    'no ReArmSendTimer for a session with no active (running) prepass',
-  );
 });
 
 test('reducer: prepass phase running→idle at the commit point (first MessageStarted clears prepassBySession) (Brief F host-side)', () => {

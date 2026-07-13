@@ -74,12 +74,10 @@
   interrupted message plus `busy=false`. `RETRY_STUCK` is therefore a terminal
   recovery event, never a warning that leaves the session busy indefinitely.
 
-## Queued Follow-up Liveness
+## Queued Follow-ups
 
-- A send accepted while its session is already running is tracked host-side in `pending.queuedDwellBySession[sessionPath]` by immutable `localId`, with `enqueuedAt`, `watchdogFired`, and `abandoned` state. The reducer arms one `StartQueuedDwellWatchdog` effect per queued message; delivery, rollback, interrupt, queue clearing, session cleanup, and backend restart cancel/remove that state.
-- The dwell watchdog is informational and never interrupts productive work automatically. When its hard threshold fires, the reducer marks only the matching entry actionable and projects the active session's entries as `ViewState.queuedDwell`.
-- The webview's queued-dwell banner is passive over host state. **Stop current turn** uses the existing interrupt barrier, **Remove queued** uses the existing queue-clear operation, and **Keep waiting** posts `rearmQueuedDwellWatchdog`; the host resets `watchdogFired` and starts a fresh bounded watchdog. The webview must not hide or re-arm the warning using local component state.
-- A late watchdog event for a delivered, abandoned, or removed `localId` is a no-op. Re-arming a missing/abandoned entry is also a no-op, so stale UI actions cannot revive terminal queue state.
+- Sends accepted while a session is already running remain optimistic `queued` transcript messages until the backend reports delivery.
+- Delivery reconciliation is FIFO, matching the SDK's steering/follow-up queue order. Interrupt and queue-clear operations remove queued optimistic messages and their pending rollback snapshots.
 
 ## Reducer Purity
 

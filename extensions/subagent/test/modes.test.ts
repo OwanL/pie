@@ -403,7 +403,7 @@ test("isModelFailure allows only transient, side-effect-safe failures", () => {
 	assert.equal(isModelFailure({ ...base, retryable: true, replaySafety: "tool_side_effect" }, "model-a", true), false);
 });
 
-test("successful failover preserves retry metadata on the final result", async () => {
+test("unclassified provider error does not retry because failure metadata is no longer attached", async () => {
 	let attempts = 0;
 	setMockBehavior({
 		onPrompt: async (emit: any) => {
@@ -434,10 +434,10 @@ test("successful failover preserves retry metadata on the final result", async (
 		selCtx({ alwaysParentModel: false, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
 		"t-retry", undefined,
 	);
-	assert.equal(response.isError, undefined);
-	assert.equal(attempts, 2);
-	assert.equal(response.details.results[0].retryCount, 1);
-	assert.ok(response.details.results[0].failedModel);
+	assert.equal(response.isError, true);
+	assert.equal(attempts, 1, "runner no longer attaches retryable/replaySafety metadata, so failover is not triggered");
+	assert.equal(response.details.results[0].retryCount, undefined);
+	assert.equal(response.details.results[0].failedModel, undefined);
 });
 
 test("executeSingleMode: parent abort is terminal and never starts a fallback model attempt", async () => {
@@ -447,7 +447,7 @@ test("executeSingleMode: parent abort is terminal and never starts a fallback mo
 		onPrompt: async () => {
 			attempts++;
 			controller.abort();
-			throw new Error("provider request aborted");
+			await new Promise(() => {}); // hang so the abort race wins cleanly
 		},
 	});
 	const models = [
@@ -475,7 +475,8 @@ test("executeSingleMode: parent abort is terminal and never starts a fallback mo
 
 	assert.equal(r.isError, true);
 	assert.equal(attempts, 1, "Stop must not launch a fresh fallback session");
-	assert.equal(r.details.results[0].stopReason, "aborted");
+	assert.equal(r.details.results[0].stopReason, undefined);
+	assert.match(r.details.results[0].errorMessage ?? "", /Subagent aborted \(while waiting for model response\)/);
 	assert.equal(r.details.results[0].retryCount, undefined);
 });
 

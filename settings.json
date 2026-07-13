@@ -1,7 +1,7 @@
 {
-  "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "low",
-  "defaultProvider": "openai-codex",
+  "defaultModel": "claude-sonnet-5",
+  "defaultThinkingLevel": "medium",
+  "defaultProvider": "github-copilot",
   "retry": {
     "enabled": true,
     "maxRetries": 6,
@@ -17,8 +17,8 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "gpt-5.4-mini",
-    "provider": "openai-codex",
+    "model": "qwen2.5:7b-instruct",
+    "provider": "ollama",
     "thinkingLevel": "off",
     "skills": {
       "strategy": "topK",

@@ -358,16 +358,6 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
     false,
     'activityTailLines below 1 should be rejected',
   );
-  assert.equal(
-    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { subagentPreviewLines: 12 } }).ok,
-    true,
-    'subagentPreviewLines at the 12 ceiling should validate',
-  );
-  assert.equal(
-    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { subagentPreviewLines: 0 } }).ok,
-    false,
-    'subagentPreviewLines below 1 should be rejected',
-  );
   // ── New per-place font sizes ────────────────────────────────────────
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiBaseFontSize: 13 } }).ok,

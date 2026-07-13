@@ -181,35 +181,6 @@ export function handleMessageThinking(state: ArchState, event: Extract<Event, { 
   return { state: nextState, effects: [] };
 }
 
-export function handleMessageToolCallDelta(state: ArchState, event: Extract<Event, { kind: 'MessageToolCallDelta' }>): ReducerResult {
-  if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
-    return { state, effects: [] };
-  }
-  const messageId = resolveAlias(state, event.messageId);
-  const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
-  const nextState = produce(state, (draft) => {
-    const list = draft.transcript.bySession[event.sessionPath];
-    if (!list) return;
-    const message =
-      cachedIndex !== undefined && list[cachedIndex]?.id === messageId
-        ? list[cachedIndex]
-        : list.find((m: ChatMessage) => m.id === messageId);
-    if (message && message.status !== 'completed' && message.status !== 'interrupted') {
-      const previous = message.draftingToolCall;
-      message.draftingToolCall = {
-        id: event.toolCallId,
-        name: event.name,
-        argumentsText: previous?.id === event.toolCallId
-          ? previous.argumentsText + event.delta
-          : event.delta,
-      };
-      message.status = 'streaming';
-    }
-  });
-
-  return { state: nextState, effects: [] };
-}
-
 export function handleToolCall(state: ArchState, event: Extract<Event, { kind: 'ToolCall' }>): ReducerResult {
   const messageId = resolveAlias(state, event.messageId);
   const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
@@ -309,7 +280,7 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
   return { state: nextState, effects: [] };
 }
 
-export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'MessageToolCallDelta' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {
+export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {
   switch (event.kind) {
     case 'MessageStarted':
       return handleMessageStarted(state, event);
@@ -317,8 +288,6 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
       return handleMessageDelta(state, event);
     case 'MessageThinking':
       return handleMessageThinking(state, event);
-    case 'MessageToolCallDelta':
-      return handleMessageToolCallDelta(state, event);
     case 'ToolCall':
       return handleToolCall(state, event);
     case 'MessageFinished':
@@ -345,39 +314,15 @@ export function handleStreamingEvent(state: ArchState, event: Extract<BackendEve
   }
 }
 
-/** Steering: the agent loop injected a queued steering user message into the
- *  current turn. Promote the matching optimistic 'queued' user message to
- *  'completed' and drop its `pending.promoted`/`pending.ops` rollback snapshot
- *  (by localId) — the message has committed to a turn, so a later failure is an
- *  in-turn error, never a rollback. The subsequent assistant `MessageStarted`
- *  appends the reply under the in-progress request's id via the existing path.
- *
- *  Handoff §F — truthful delivery matching with legacy fallback:
- *  - When the backend correlated the delivery to a `localId` (it mirrors the
- *    SDK's FIFO steering drain in a per-session `queuedLocalIds` queue and
- *    shifts it on each user-role `message_start`), promote THAT exact message.
- *    If the id is no longer 'queued' (already cleared/delivered/interrupted),
- *    no-op — the id was authoritative, so we must NOT fall back to FIFO (that
- *    would wrongly promote a different queued message).
- *  - When `localId` is absent (legacy host that did not send one, or a
- *    clear/interrupt race emptied the backend's queue before the SDK drained),
- *    fall back to FIFO: promote the EARLIEST remaining 'queued' message (the
- *    SDK drains the steering queue one message at a time in enqueue order).
- *
- *  Either way, clear the dwell entry for the delivered message and cancel its
- *  watchdog (handoff §F: the queued message is no longer waiting). */
+/** Steering: the agent loop injected the next queued user message into the
+ * current turn. Promote the earliest optimistic queued message (the SDK drains
+ * the steering queue in FIFO order) and drop its rollback snapshot. */
 export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { kind: 'QueuedDelivered' }>): ReducerResult {
   const list = state.transcript.bySession[event.sessionPath];
   if (!list) return { state, effects: [] };
 
-  let idx: number;
-  if (event.localId) {
-    idx = list.findIndex((m) => m.id === event.localId && m.role === 'user' && m.status === 'queued');
-    if (idx < 0) return { state, effects: [] };
-  } else {
-    idx = list.findIndex((m) => m.role === 'user' && m.status === 'queued');
-    if (idx < 0) return { state, effects: [] };
-  }
+  const idx = list.findIndex((m) => m.role === 'user' && m.status === 'queued');
+  if (idx < 0) return { state, effects: [] };
   const localId = list[idx].id;
   const nextState = produce(state, (draft) => {
     const transcript = draft.transcript.bySession[event.sessionPath];
@@ -398,46 +343,8 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
     for (const [corrId, op] of Object.entries(draft.pending.ops)) {
       if (op.queued && op.localId === localId) delete draft.pending.ops[corrId];
     }
-    const dwell = draft.pending.queuedDwellBySession[event.sessionPath];
-    if (dwell) {
-      draft.pending.queuedDwellBySession[event.sessionPath] = dwell.filter((e) => e.localId !== localId);
-    }
   });
-  return {
-    state: nextState,
-    effects: [{ kind: 'CancelQueuedDwellWatchdog', corrId: 'queued:delivered', localId }],
-  };
-}
-
-/** Handoff §F: the per-localId dwell watchdog fired — a queued message has
- *  waited past the hard threshold without being delivered. Mark the dwell
- *  entry actionable (`watchdogFired`) so the projection can surface Stop/Remove
- *  affordances (the existing Interrupt/ClearQueue commands). Does NOT interrupt
- *  the in-flight turn — healthy tools are not auto-stopped just because a
- *  follow-up was queued. Emits a `Log` (warn) so the stuck queue is observable.
- *  No-op if the entry is gone (delivered/cleared) or already terminal
- *  (`watchdogFired`/`abandoned`) — the timer fired late or the restart path
- *  already cancelled+marked it. */
-export function handleQueuedDwellWatchdogFired(state: ArchState, event: Extract<Event, { kind: 'QueuedDwellWatchdogFired' }>): ReducerResult {
-  const entry = state.pending.queuedDwellBySession[event.sessionPath]?.find((e) => e.localId === event.localId);
-  if (!entry || entry.watchdogFired || entry.abandoned) {
-    return { state, effects: [] };
-  }
-  const nextState = produce(state, (draft) => {
-    const target = draft.pending.queuedDwellBySession[event.sessionPath]?.find((e) => e.localId === event.localId);
-    if (target) target.watchdogFired = true;
-  });
-  return {
-    state: nextState,
-    effects: [
-      {
-        kind: 'Log',
-        corrId: 'queued:watchdog',
-        level: 'warn',
-        message: `Queued message ${event.localId} in ${event.sessionPath} has waited past the dwell threshold — offering Stop/Remove.`,
-      },
-    ],
-  };
+  return { state: nextState, effects: [] };
 }
 
 export function handleAssistantMessageErrorStamped(

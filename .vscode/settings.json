@@ -4,6 +4,7 @@
   "editor.tabSize": 2,
   "editor.insertSpaces": true,
   "files.eol": "\n",
+  "files.insertFinalNewline": true,
   "typescript.preferences.quoteStyle": "single",
   "javascript.preferences.quoteStyle": "single",
   "github.copilot.chat.claudeAgent.allowDangerouslySkipPermissions": true,

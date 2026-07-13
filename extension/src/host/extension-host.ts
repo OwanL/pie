@@ -195,34 +195,13 @@ export class PieExtension implements vscode.Disposable {
       // orphan a late `MessageStarted` reply). Falls back to the 120s default
       // when `prepassTimeoutSec` is unset/invalid (SDK default, presumed < 120s).
       // Read fresh each send so a runtime settings change takes effect.
-      getSendTimerTimeoutMs: (sessionPath: string) => {
+      getSendTimerTimeoutMs: () => {
         const p = this.archState.settings.pruningSettings.prepassTimeoutSec;
         const HEADROOM_SEC = 30;
-        // FP-C3: real per-provider queueWaitSeconds headroom. A send whose
-        // provider is saturated spends up to `queueWaitSeconds` queued for a
-        // concurrency slot BEFORE its prepass even begins; that wait is inside
-        // this timer's window (the clock starts at issue, before the slot is
-        // acquired). Use the real configured value from aggregateStats.providerGate
-        // (polled from the backend's ProviderGate), falling back to a
-        // conservative 30s when unavailable (fail-safe — never under-size the
-        // headroom and trip a spurious PreflightFailed mid-queue).
-        const QUEUE_WAIT_HEADROOM_MS = this.resolveQueueWaitHeadroomMs(sessionPath);
         return typeof p === 'number' && Number.isFinite(p) && p > 0
-          ? (p + HEADROOM_SEC) * 1000 + QUEUE_WAIT_HEADROOM_MS
-          : 120_000 + QUEUE_WAIT_HEADROOM_MS;
+          ? (p + HEADROOM_SEC) * 1000
+          : 120_000;
       },
-      // Metric-gated re-arm for the model-start send-timer: when the in-flight
-      // request's provider is legitimately QUEUED waiting for a concurrency
-      // slot (or PAUSED by the circuit breaker), the model-start timer (whose
-      // clock starts at issue, before the slot is acquired) would otherwise
-      // fire a false-positive PreflightFailed. `getProviderGateMetrics` reads
-      // the live signal (cached in AggregateStats.providerGate, polled from the
-      // backend's ProviderGate); `resolveSessionProvider` resolves the
-      // request's provider via the session's model → available-models table
-      // (mirroring host/core/model-capability.ts). Both optional + fail-open:
-      // the runner fires as today if either is absent or yields no match.
-      getProviderGateMetrics: () => this.aggregateStatsService.getAggregateStats().providerGate,
-      resolveSessionProvider: (sessionPath: string) => this.resolveSessionProvider(sessionPath),
       queues: this.service.queues,
       tabs: {
         // PersistTabs: write openTabPaths + activeSessionPath to globalState,
@@ -305,45 +284,11 @@ export class PieExtension implements vscode.Disposable {
     this.statusBar.show();
   }
 
-  /** Resolve the provider name for a session's in-flight request, mirroring
-   *  host/core/model-capability.ts: the session summary's `modelId` (falling
-   *  back to the global default model) → the available-models table's
-   *  `.provider`. Returns `undefined` when the model/provider can't be
-   *  resolved (fail-open). Shared by the FP-C2a model-start re-arm gate and
-   *  the FP-C3 send-timer queue-wait headroom. */
-  private resolveSessionProvider(sessionPath: string): string | undefined {
-    const archState = this.archState;
-    const modelId = archState.sessions.sessions.find((s) => s.path === sessionPath)?.modelId
-      ?? archState.settings.modelSettings?.defaultModel;
-    if (!modelId) return undefined;
-    const directModels = archState.settings.availableModelsBySession[sessionPath] ?? [];
-    const fallbackModels = Object.values(archState.settings.availableModelsBySession).flatMap((models) => models);
-    return [...directModels, ...fallbackModels].find((m) => m.id === modelId)?.provider;
-  }
-
-  /** FP-C3: resolve the real per-provider `queueWaitSeconds` headroom for a
-   *  send's provider, read from the live `aggregateStats.providerGate`
-   *  (polled from the backend's `ProviderGate`). Falls back to a conservative
-   *  30s default when the gate is disabled, the provider can't be resolved, no
-   *  matching provider metric exists, or the configured value is 0/unbounded —
-   *  fail-safe so the send-timer never under-sizes the headroom and trips a
-   *  spurious `PreflightFailed` mid-queue. */
-  private resolveQueueWaitHeadroomMs(sessionPath: string): number {
-    const DEFAULT_HEADROOM_MS = 30_000;
-    const providerGate = this.aggregateStatsService.getAggregateStats().providerGate;
-    if (!providerGate.enabled) return DEFAULT_HEADROOM_MS;
-    const provider = this.resolveSessionProvider(sessionPath);
-    if (!provider) return DEFAULT_HEADROOM_MS;
-    const metric = providerGate.providers.find((p) => p.provider === provider);
-    if (!metric || metric.queueWaitSeconds <= 0) return DEFAULT_HEADROOM_MS;
-    return metric.queueWaitSeconds * 1000;
-  }
-
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
     this.tokenRateService.start();
-    this.aggregateStatsService.start();
     await this.statsService.start();
+    this.aggregateStatsService.start();
     await this.service.start();
     // Push the restored open-tab summaries to the backend so the
     // `session_review` tool's listOpen works immediately after startup

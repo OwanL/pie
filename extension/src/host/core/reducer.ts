@@ -34,7 +34,7 @@ export { initialArchState };
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
 import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult } from './reducer/result-handlers.js';
-import { handleStreamingEvent, handleQueuedDelivered, handleQueuedDwellWatchdogFired, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
+import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
   handleSessionListChanged,
@@ -47,9 +47,6 @@ import {
   handleRunningSessionsChanged,
   handleRetryStarted,
   handleRetryEnded,
-  handleRetryStuck,
-  handleWaitingForSlotShown,
-  handleWaitingForSlotCleared,
   handleUnreadFinishedSessionsChanged,
   handleSessionSummaryUpserted,
   handleSessionSummariesReplaced,
@@ -138,7 +135,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'MessageAborted':
     case 'MessageDelta':
     case 'MessageThinking':
-    case 'MessageToolCallDelta':
     case 'ToolCall':
     case 'MessageFinished': {
       return handleStreamingEvent(state, event);
@@ -146,10 +142,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'QueuedDelivered': {
       return handleQueuedDelivered(state, event);
-    }
-
-    case 'QueuedDwellWatchdogFired': {
-      return handleQueuedDwellWatchdogFired(state, event);
     }
 
     // ─── Session lifecycle events ─────────────────────────────────────────
@@ -262,18 +254,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'RetryEnded': {
       return handleRetryEnded(state, event);
-    }
-
-    case 'RetryStuck': {
-      return handleRetryStuck(state, event);
-    }
-
-    case 'WaitingForSlotShown': {
-      return handleWaitingForSlotShown(state, event);
-    }
-
-    case 'WaitingForSlotCleared': {
-      return handleWaitingForSlotCleared(state, event);
     }
 
     case 'SessionsInterrupted': {

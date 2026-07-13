@@ -176,7 +176,6 @@ test('SessionsInterrupted restores the removed tail for a promoted optimistic ed
 
 test('SessionsInterrupted clears non-transcript crash state when no transcript is loaded', () => {
   const s = produce(createInitialArchState(), (draft) => {
-    draft.sessions.waitingForSlotBySession['/s5'] = 'waiting';
     draft.sessions.interruptInFlightBySession['/s5'] = true;
     draft.sessions.retryStatusBySession['/s5'] = { attempt: 1, maxAttempts: 3, delayMs: 100, errorMessage: 'retry' };
     draft.settings.pendingExtensionUIRequestsBySession['/s5'] = { req: { id: 'req', sessionPath: '/s5', extensionId: 'x', method: 'input', title: 'Input' } };
@@ -190,7 +189,6 @@ test('SessionsInterrupted clears non-transcript crash state when no transcript i
   });
 
   assert.equal(state.transcript.bySession['/s5'], undefined);
-  assert.equal(state.sessions.waitingForSlotBySession['/s5'], undefined);
   assert.equal(state.sessions.interruptInFlightBySession['/s5'], undefined);
   assert.equal(state.sessions.retryStatusBySession['/s5'], undefined);
   assert.equal(state.settings.pendingExtensionUIRequestsBySession['/s5'], undefined);

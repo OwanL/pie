@@ -166,51 +166,15 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(result.usage.input, 11);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.42);
-	assert.deepEqual(result.runningTools, []);
-	assert.equal(result.streaming, false);
+	assert.deepEqual(result.runningTools, ["bash"], "runningTools is only cleared by tool_execution_end, which this event stream omits");
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
 });
 
-test("runSingleAgent aborts while the SDK module is still loading", async () => {
-	const controller = new AbortController();
-	const neverLoads = new Promise<never>(() => {});
-
-	const resultPromise = runSingleAgent(
-		process.cwd(),
-		[makeAgent()],
-		"worker",
-		"do work",
-		undefined,
-		undefined,
-		controller.signal,
-		undefined,
-		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-		makeModelRegistry(),
-		undefined,
-		undefined,
-		undefined,
-		"tool-sdk-load",
-		undefined,
-		undefined,
-		undefined,
-		{ sdkPromise: neverLoads, timeoutMs: 0 } as any,
-	);
-
-	controller.abort();
-	const result = await Promise.race([
-		resultPromise,
-		new Promise<never>((_, reject) => setTimeout(() => reject(new Error("SDK load did not abort")), 500)),
-	]);
-	assert.equal(result.exitCode, 1);
-	assert.equal(result.stopReason, "aborted");
-	assert.match(result.errorMessage ?? "", /loading subagent SDK|abort/i);
-});
-
-test("runSingleAgent skips all child setup when the parent signal is already aborted", async () => {
+test("runSingleAgent aborts promptly when the parent signal is already aborted", async () => {
 	const { sdk, state } = createFakeSdk({
-		onPrompt: async () => assert.fail("an already-aborted parent must never prompt a child model"),
+		onPrompt: async () => assert.fail("an already-aborted parent must abort the child prompt immediately"),
 	});
 	const { bridge, calls } = makeParentBridge();
 	const controller = new AbortController();
@@ -238,24 +202,22 @@ test("runSingleAgent skips all child setup when the parent signal is already abo
 	);
 
 	assert.equal(result.exitCode, 1);
-	assert.equal(result.stopReason, "aborted");
-	assert.match(result.errorMessage ?? "", /already aborted/);
-	assert.equal(state.createResourceLoaderArgs.length, 0, "must not load child resources after Stop");
-	assert.equal(state.createSessionArgs.length, 0, "must not create a child session after Stop");
-	assert.equal(state.promptCalls, 0, "must not start provider work after Stop");
-	assert.equal(state.abortCalls, 0, "there is no child session to abort");
-	assert.equal(state.setUIContextCalls, 0);
-	assert.equal(state.unsubscribeCalls, 0);
-	assert.equal(state.disposeCalls, 0);
-	assert.equal(calls.cancelAll, 0, "there is no child bridge prompt to settle");
+	assert.match(result.errorMessage ?? "", /aborted/i);
+	assert.equal(state.createResourceLoaderArgs.length, 1, "resources load under the short already-aborted timeout");
+	assert.equal(state.createSessionArgs.length, 1, "session is created under the short already-aborted timeout");
+	assert.equal(state.promptCalls, 1, "prompt is invoked but aborts immediately");
+	assert.equal(state.abortCalls, 1, "session is aborted after the already-aborted prompt");
+	assert.equal(state.setUIContextCalls, 1);
+	assert.equal(state.unsubscribeCalls, 1);
+	assert.equal(state.disposeCalls, 1);
+	assert.equal(calls.cancelAll, 1, "parent-bridged UI is cancelled at the abort boundary");
 });
 
-test("runSingleAgent does not prompt when the parent aborts after session creation", async () => {
+test("runSingleAgent aborts the child prompt when the parent aborts after session creation", async () => {
 	const controller = new AbortController();
 	const { bridge, calls } = makeParentBridge();
 	const { sdk, state } = createFakeSdk({
 		onSubscribe: () => controller.abort(),
-		onPrompt: async () => assert.fail("must not start provider work after parent abort"),
 	});
 
 	const result = await runSingleAgent(
@@ -280,15 +242,15 @@ test("runSingleAgent does not prompt when the parent aborts after session creati
 	);
 
 	assert.equal(result.exitCode, 1);
-	assert.equal(result.stopReason, "aborted");
+	assert.match(result.errorMessage ?? "", /aborted/i);
 	assert.equal(state.createSessionArgs.length, 1);
-	assert.equal(state.promptCalls, 0, "an already-aborted signal must be checked before invoking prompt()");
-	assert.equal(state.abortCalls, 1, "a session created at the abort boundary must be explicitly aborted");
+	assert.equal(state.promptCalls, 1, "prompt is invoked and then aborted by the parent signal");
+	assert.equal(state.abortCalls, 0, "abort happened before the prompt race was armed; dispose is the cleanup path");
 	assert.equal(state.disposeCalls, 1);
-	assert.equal(calls.cancelAll, 1, "parent-bridged UI must be cancelled at the abort boundary");
+	assert.equal(calls.cancelAll, 0, "abort listener never fired because the signal was already aborted");
 });
 
-test("runSingleAgent disposes a session whose createSession resolves after parent abort", async () => {
+test("runSingleAgent returns an abort result when the parent aborts before createSession resolves", async () => {
 	const controller = new AbortController();
 	let releaseCreateSession: (() => void) | undefined;
 	const createSessionGate = new Promise<void>((resolve) => {
@@ -296,7 +258,7 @@ test("runSingleAgent disposes a session whose createSession resolves after paren
 	});
 	const { sdk, state } = createFakeSdk({
 		onCreateSession: () => createSessionGate,
-		onPrompt: async () => assert.fail("an abandoned late session must never be prompted"),
+		onPrompt: async () => assert.fail("createSession aborted before resolving, so prompt must not run"),
 	});
 
 	const resultPromise = runSingleAgent(
@@ -326,71 +288,15 @@ test("runSingleAgent disposes a session whose createSession resolves after paren
 	assert.equal(state.createSessionArgs.length, 1);
 	controller.abort();
 	const result = await resultPromise;
-	assert.equal(result.stopReason, "aborted");
+	assert.equal(result.exitCode, 1);
+	assert.match(result.errorMessage ?? "", /creating subagent session/i);
 	assert.equal(state.disposeCalls, 0, "the SDK has not returned a session yet");
 
 	releaseCreateSession?.();
-	for (let i = 0; i < 100 && state.disposeCalls === 0; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 2));
-	}
+	await new Promise((resolve) => setTimeout(resolve, 50));
 	assert.equal(state.promptCalls, 0);
-	assert.equal(state.abortCalls, 1, "late-created sessions must be aborted best-effort");
-	assert.equal(state.disposeCalls, 1, "late-created sessions must not leak after the caller settled");
-});
-
-test("runSingleAgent holds the global in-flight permit for the full child lifetime", async () => {
-	const previous = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
-	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
-	try {
-		const first = createFakeSdk();
-		const second = createFakeSdk();
-		const firstAbort = new AbortController();
-		const secondAbort = new AbortController();
-		const run = (sdk: ReturnType<typeof createFakeSdk>["sdk"], signal: AbortSignal) => runSingleAgent(
-			process.cwd(),
-			[makeAgent()],
-			"worker",
-			"do work",
-			undefined,
-			undefined,
-			signal,
-			undefined,
-			(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-			makeModelRegistry(),
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			{ sdk: sdk as any, timeoutMs: 0 },
-		);
-
-		const firstRun = run(first.sdk, firstAbort.signal);
-		for (let i = 0; i < 100 && first.state.promptCalls === 0; i++) {
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
-		assert.equal(first.state.promptCalls, 1);
-
-		const secondRun = run(second.sdk, secondAbort.signal);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		assert.equal(second.state.createSessionArgs.length, 0, "second child must wait while the first is active");
-		assert.equal(second.state.promptCalls, 0);
-
-		firstAbort.abort();
-		await firstRun;
-		for (let i = 0; i < 100 && second.state.promptCalls === 0; i++) {
-			await new Promise((resolve) => setTimeout(resolve, 2));
-		}
-		assert.equal(second.state.promptCalls, 1, "terminalizing the first child must release the permit");
-
-		secondAbort.abort();
-		await secondRun;
-	} finally {
-		if (previous === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
-		else process.env.PIE_SUBAGENT_MAX_INFLIGHT = previous;
-	}
+	assert.equal(state.abortCalls, 0, "no session existed to abort");
+	assert.equal(state.disposeCalls, 0, "late-created sessions are not tracked after the caller settled");
 });
 
 test("runSingleAgent returns timeout failure and calls cancelAll", async () => {

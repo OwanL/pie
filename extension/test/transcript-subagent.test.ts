@@ -162,6 +162,25 @@ test('running subagent placeholders stay visibly active before the first progres
   });
 });
 
+test('running subagent output is shown as generating before lifecycle status arrives', () => {
+  const result = {
+    agent: 'reviewer',
+    task: 'Inspect regression',
+    exitCode: -1 as const,
+    messages: [],
+    activityPhase: 'preparing' as const,
+    activityDetail: 'waiting for subagent runtime status',
+    streamingText: 'I am inspecting the code',
+  };
+  assert.equal(singleResultStatus(result, 'running', false), 'running');
+  assert.deepEqual(subagentActivity(result, 1_000), {
+    label: 'Generating',
+    detail: undefined,
+    elapsed: undefined,
+    diagnostic: 'Generating',
+  });
+});
+
 test('terminal tool status overrides stale child running-tool state', () => {
   const staleCompleted = {
     agent: 'reviewer',

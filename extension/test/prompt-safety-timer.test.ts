@@ -14,14 +14,9 @@ function metric(overrides: Partial<ProviderGateMetrics> = {}): ProviderGateMetri
     queuedRequests: 0,
     maxConcurrentRequests: 2,
     afterburnSeconds: 0,
-    queueWaitSeconds: 30,
     paused: false,
     pausedUntilMs: 0,
     strikeCount: 0,
-    breakerState: 'closed',
-    breakerOpenUntilMs: 0,
-    transientFailures: 0,
-    breakerProbeInFlight: false,
     ...overrides,
   };
 }

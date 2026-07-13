@@ -21,18 +21,16 @@ import type { AgentConfig } from "./agents.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
-import type { OnUpdateCallback, SingleResult, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
+import type { OnUpdateCallback, SingleResult, SubagentDetails } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
-import { readKeptSkills, type KeptSkills } from "../../shared/pruned-skills.js";
+import { readKeptSkills } from "../../shared/pruned-skills.js";
 import {
 	ParentExtensionUIBridgeProxy,
 	type ParentBridge,
 } from "./src/parent-extension-ui-bridge-proxy.js";
 import { inflightSemaphore } from "./src/concurrency-limit.js";
-import { ChildLifecycle, makeAttemptId, resolveLivenessConfig, type LeaseViolation } from "./src/lifecycle.js";
-import { hardAbortBillable, orphanRegistry } from "./src/cleanup.js";
 
 /**
  * Minimal contract for the session events emitted by the pi SDK's
@@ -154,20 +152,25 @@ const SUBAGENT_TIMEOUT_ENV = "PI_SUBAGENT_TIMEOUT_MS";
  * escape; this timeout is the last-resort safety net that guarantees a stuck
  * subagent can't dangle the parent session indefinitely.
  *
- * Disabled by default: productive subagents are bounded by renewable,
- * phase-specific inactivity leases rather than total elapsed time. A custom
- * positive value enables an additional absolute containment ceiling. The main
- * pie session is not affected.
+ * 15 minutes is generous enough for real multi-turn tool-using work while
+ * bounding a hung turn tightly enough to surface a loud failure long before the
+ * 30-min settlement net. Set `PI_SUBAGENT_TIMEOUT_MS=0` to disable (or a
+ * custom positive value to override). The main pie session is NOT affected —
+ * its `httpIdleTimeoutMs: 0` setting is preserved.
  */
-export const DEFAULT_SUBAGENT_TIMEOUT_MS = 0;
+export const DEFAULT_SUBAGENT_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * Resolve the per-prompt timeout for subagent runs, in milliseconds.
  *
  * Reads `PI_SUBAGENT_TIMEOUT_MS` from the environment:
- * - A positive number enables an explicit absolute prompt ceiling.
- * - Unset, zero, negative, or invalid disables that ceiling; renewable phase
- *   leases and the outer settlement net still bound inactivity.
+ * - A positive number (milliseconds) sets an explicit timeout safety net that
+ *   wraps the prompt. `0` explicitly DISABLES the timeout (escape hatch for
+ *   environments that want only the parent-abort / settlement paths).
+ * - Unset → the {@link DEFAULT_SUBAGENT_TIMEOUT_MS} safety net (a stuck
+ *   subagent neither hangs the parent forever nor relies solely on the 30-min
+ *   settlement net).
+ * - Invalid → the default.
  *
  * The parent's abort signal (Ctrl+C / parent cancellation) always takes
  * priority; the timeout is a last-resort net for cases where the provider
@@ -179,8 +182,8 @@ export function resolveSubagentTimeoutMs(): number {
 	const raw = process.env[SUBAGENT_TIMEOUT_ENV];
 	if (raw === undefined || raw === "") return DEFAULT_SUBAGENT_TIMEOUT_MS;
 	const ms = Number(raw);
-	if (!Number.isFinite(ms) || ms <= 0) return 0;
-	return ms;
+	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SUBAGENT_TIMEOUT_MS;
+	return ms === 0 ? 0 : ms;
 }
 
 /**
@@ -204,22 +207,12 @@ export interface TreeBudget {
  *   spawning without re-discovering the caller. `undefined` at the root caller
  *   (the main agent) and for agents without a `canSpawn` field → unrestricted.
  * - `budget` is the shared tree-wide session counter; created at the root call.
- * - `processPermitScope` marks a tree whose root child owns a process-wide
- *   capacity permit. Descendants borrow that tree permit instead of acquiring
- *   another one, preventing recursive fan-out from deadlocking behind its own
- *   active ancestors.
  */
 export interface SubagentRuntimeContext {
 	depth: number;
 	trail: string[];
 	canSpawn?: string[];
 	budget?: TreeBudget;
-	processPermitScope?: object;
-	/** Main-turn skill selection inherited through every nested level. Storing it
-	 * in AsyncLocalStorage avoids depth-2+ children looking up their immediate
-	 * in-memory parent session (which has no skill-pruner record) and widening
-	 * back to all skills. */
-	keptSkills?: KeptSkills;
 }
 
 export const subagentRuntime = new AsyncLocalStorage<SubagentRuntimeContext>();
@@ -289,9 +282,12 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	fn: (item: TIn, index: number) => Promise<TOut>,
 	/** When provided and already aborted, workers that haven't started `fn`
 	 *  yet (still queued waiting for a free slot) skip their item and return
-	 *  the `abortedPlaceholder` instead. `runSingleAgent` also rejects an
-	 *  already-aborted entry, but skipping here avoids needless result setup and
-	 *  keeps parallel cancellation prompt. */
+	 *  the `abortedPlaceholder` instead. This prevents a queued worker from
+	 *  starting `fn` after the parent has already aborted — which in the
+	 *  subagent case means `runSingleAgent` is entered with an already-aborted
+	 *  signal, hitting the `parentAlreadyAborted` branch where `createSession`
+	 *  and `runPrompt()` run without `raceAbort` and can hang a dead proxy
+	 *  indefinitely (the 30-min settlement timer is the only escape). */
 	signal?: AbortSignal,
 	abortedPlaceholder?: TOut,
 ): Promise<TOut[]> {
@@ -305,9 +301,10 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 			const current = nextIndex++;
 			if (current >= items.length) return;
 			// If the parent aborted while this worker was queued (waiting for a
-			// free slot), skip the remaining items. Returning the placeholder
-			// lets `Promise.all` settle promptly and avoids entering child setup
-			// after cancellation.
+			// free slot), skip the remaining items — they would enter `fn` with
+			// an already-aborted signal, which for subagents means the
+			// unraced `createSession`/`runPrompt` hang. Returning the
+			// placeholder lets `Promise.all` settle promptly.
 			if (signal?.aborted) {
 				results[current] = placeholder;
 				continue;
@@ -328,11 +325,8 @@ function createInitialResult(
 	agentName: string,
 	task: string,
 	step: number | undefined,
-	actualModelId: string | undefined,
+	actualModelId: string,
 	modelResolutionDiagnostic: string | undefined,
-	provider: string | undefined,
-	contextWindow: number | undefined,
-	thinkingLevel: ThinkingLevel | undefined,
 ): SingleResult {
 	const result: SingleResult = {
 		agent: agentName,
@@ -343,28 +337,12 @@ function createInitialResult(
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: actualModelId,
-		provider,
-		contextWindow,
-		thinkingLevel,
 		step,
-		streaming: false,
-		turnThroughputSamples: [],
 	};
 	if (modelResolutionDiagnostic) {
 		result.modelResolutionDiagnostic = modelResolutionDiagnostic;
 	}
 	return result;
-}
-
-/** Progress delivery is observational and must never own child correctness.
- * A renderer/bridge exception cannot be allowed to leak a session or permit. */
-function emitUpdateSafely(onUpdate: OnUpdateCallback | undefined, partial: Parameters<OnUpdateCallback>[0]): void {
-	if (!onUpdate) return;
-	try {
-		onUpdate(partial);
-	} catch (error) {
-		logLoud("subagent progress callback failed", { error: toErrorMessage(error) });
-	}
 }
 
 /** Build the update emitter that publishes partial state to the parent UI. */
@@ -379,7 +357,7 @@ function createUpdateEmitter(
 		// Prefer the final output from completed messages; fall back to in-flight streaming text.
 		const finalOutput = getFinalOutput(result.messages);
 		const text = finalOutput || streamingTextRef.value || "(running...)";
-		emitUpdateSafely(onUpdate, {
+		onUpdate({
 			content: [{ type: "text", text }],
 			details: makeDetails([result]),
 		});
@@ -467,57 +445,28 @@ function subscribeToSession(
 	emitUpdate: () => void,
 	streamingTextRef: { value: string },
 	stageRef: { value: string },
-	turnStartRef: { value: number | null },
-	lifecycle?: ChildLifecycle,
 ): () => void {
-	// Tool names are not unique in a parallel batch (two bash calls are common).
-	// Track by call id so one completion cannot erase a still-running sibling.
-	const runningTools = new Map<string, string>();
-	let anonymousToolSequence = 0;
 	return session.subscribe((event) => {
-		if (lifecycle?.isTerminal) return;
-		if (event.type === "message_start" && event.message?.role === "assistant") {
-			lifecycle?.transition("waiting_provider", { type: "response-headers" });
-			turnStartRef.value = Date.now();
-			return;
-		}
 		if (event.type === "message_update") {
-			lifecycle?.transition("streaming", { type: "model-delta" });
 			handleMessageUpdate(event, result, emitUpdate, streamingTextRef, stageRef);
 			return;
 		}
 		if (event.type === "tool_execution_start" && event.toolName) {
-			const key = event.toolCallId ?? `anonymous:${anonymousToolSequence++}`;
-			runningTools.set(key, event.toolName);
-			lifecycle?.transition("running_tool", { type: "tool-start", description: event.toolName });
-			result.runningTools = [...runningTools.values()];
+			result.runningTools = [...(result.runningTools ?? []), event.toolName];
 			emitUpdate();
 			return;
 		}
 		if (event.type === "tool_execution_end" && event.toolName) {
-			if (event.toolCallId !== undefined) {
-				runningTools.delete(event.toolCallId);
-			} else {
-				const matching = [...runningTools].find(([, name]) => name === event.toolName)?.[0];
-				if (matching !== undefined) runningTools.delete(matching);
-			}
-			result.runningTools = [...runningTools.values()];
-			if (runningTools.size > 0) {
-				lifecycle?.progress({ type: "tool-end", description: `${runningTools.size} tool(s) still running` });
-			} else {
-				lifecycle?.transition("waiting_provider", { type: "tool-end", description: event.toolName });
-			}
+			result.runningTools = (result.runningTools ?? []).filter((t) => t !== event.toolName);
 			emitUpdate();
 			return;
 		}
 		if (event.type === "tool_execution_update" && event.toolCallId !== undefined) {
-			lifecycle?.progress({ type: "tool-heartbeat" });
 			applyToolExecutionUpdate(result, event.toolCallId, event.partialResult, emitUpdate);
 			return;
 		}
 		if (event.type === "message_end" && event.message) {
-			lifecycle?.progress({ type: "message-end" });
-			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef, turnStartRef);
+			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef);
 		}
 	});
 }
@@ -534,43 +483,15 @@ function handleMessageUpdate(
 	// The SDK delivers events in order per message: message_start → message_update* → message_end.
 	// A single `streamingText` buffer is sufficient because only one assistant
 	// message streams at a time in the subagent's single-prompt session.
-	const ae = event.assistantMessageEvent;
-	if (!ae) return;
-	if (ae.type === "text_delta" && ae.delta) {
+	if (event.assistantMessageEvent?.type === "text_delta" && event.assistantMessageEvent.delta) {
 		// First delta ⇒ the model has started streaming; tracked so abort/timeout
 		// diagnostics can distinguish prefill ("waiting for model response") from
 		// a mid-stream interrupt ("streaming").
 		stageRef.value = "streaming";
-		streamingTextRef.value += ae.delta;
+		streamingTextRef.value += event.assistantMessageEvent.delta;
 		result.streamingText = streamingTextRef.value;
-		result.streaming = true;
-		emitUpdate();
-	} else if (ae.type === "thinking_delta" && ae.thinking) {
-		// Reasoning deltas don't accumulate into `streamingText` (a complete
-		// thinking block is committed to `messages` at `message_end`), but they
-		// DO signal the model is actively generating. Set the `streaming` flag so
-		// the host's token-rate clock keeps advancing through a reasoning-only
-		// stream — matching the main session, which counts the streaming
-		// message's `thinking` live. Without this, a thinking-heavy subagent's
-		// clock would pause mid-reasoning and spike when the message landed.
-		stageRef.value = "streaming";
-		result.streaming = true;
 		emitUpdate();
 	}
-}
-
-/**
- * Map a finished assistant message's stop reason onto a throughput-sample
- * status. Mirrors the host's `toTurnThroughputStatus` semantics.
- */
-function toSubagentThroughputStatus(rawMessage: SubagentEventMessage): SubagentTurnThroughputSample['status'] {
-	if (rawMessage.errorMessage || rawMessage.stopReason === 'error') {
-		return 'error';
-	}
-	if (rawMessage.stopReason === 'aborted' || rawMessage.stopReason === 'interrupted') {
-		return 'interrupted';
-	}
-	return 'completed';
 }
 
 /** Handle a completed message, recording usage and resetting streaming buffers. */
@@ -579,7 +500,6 @@ function handleMessageEnd(
 	result: SingleResult,
 	emitUpdate: () => void,
 	streamingTextRef: { value: string },
-	turnStartRef: { value: number | null },
 ): void {
 	const msg = rawMessage as Message;
 	if (msg.role === "assistant" || msg.role === "toolResult") {
@@ -591,32 +511,6 @@ function handleMessageEnd(
 		// (Only assistant messages produce text_delta events, so only reset on those.)
 		streamingTextRef.value = "";
 		result.streamingText = undefined;
-		// The model finished generating this turn — clear the streaming flag so
-		// the host's token-rate clock pauses during the subsequent tool call /
-		// between turns, until the next turn's first delta re-sets it.
-		result.streaming = false;
-
-		// Record a per-turn throughput observation for this assistant turn so
-		// the parent run's historical tok/s includes subagent generation work,
-		// attributed to the model the subagent actually ran on.
-		const nowMs = Date.now();
-		const startedAt = turnStartRef.value;
-		const generationDurationMs = Math.max(0, nowMs - (startedAt ?? nowMs));
-		const outputTokens = rawMessage.usage?.output ?? 0;
-		const status = toSubagentThroughputStatus(rawMessage);
-		// Match the host tracker's guard: keep the sample when there is
-		// measurable generation time, output tokens, or a non-completed status.
-		if (generationDurationMs > 0 || outputTokens > 0 || status !== 'completed') {
-			const samples = result.turnThroughputSamples ?? (result.turnThroughputSamples = []);
-			samples.push({
-				endedAt: new Date().toISOString(),
-				outputTokens,
-				generationDurationMs,
-				status,
-				modelId: result.model ?? rawMessage.model,
-			});
-		}
-		turnStartRef.value = null;
 	}
 	emitUpdate();
 }
@@ -629,41 +523,6 @@ function abortError(stage: string): Error {
 	const err = new Error(`Subagent aborted (while ${stage})`);
 	err.name = "AbortError";
 	return err;
-}
-
-/** Combine abort sources without relying on AbortSignal.any. The fallback is
- * important for older embedded Node runtimes: dropping the lease signal would
- * make pre-spawn phases unbounded whenever a parent signal also existed. The
- * disposer is mandatory on normal completion because `once` listeners otherwise
- * remain attached forever when none of the sources aborts. */
-function combineAbortSignals(signals: Array<AbortSignal | undefined>): {
-	signal: AbortSignal | undefined;
-	cleanup: () => void;
-} {
-	const active = signals.filter((value): value is AbortSignal => value !== undefined);
-	if (active.length === 0) return { signal: undefined, cleanup: () => {} };
-	if (active.length === 1) return { signal: active[0], cleanup: () => {} };
-	if (typeof AbortSignal.any === "function") return { signal: AbortSignal.any(active), cleanup: () => {} };
-	const controller = new AbortController();
-	const listeners = new Map<AbortSignal, () => void>();
-	const cleanup = () => {
-		for (const [signal, listener] of listeners) signal.removeEventListener("abort", listener);
-		listeners.clear();
-	};
-	const abortFrom = (source: AbortSignal) => {
-		if (!controller.signal.aborted) controller.abort(source.reason);
-		cleanup();
-	};
-	for (const signal of active) {
-		if (signal.aborted) {
-			abortFrom(signal);
-			break;
-		}
-		const listener = () => abortFrom(signal);
-		listeners.set(signal, listener);
-		signal.addEventListener("abort", listener, { once: true });
-	}
-	return { signal: controller.signal, cleanup };
 }
 
 /** Race `promise` against the parent abort signal. Rejects with an
@@ -690,6 +549,49 @@ async function raceAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>
 			},
 		);
 	});
+}
+
+/** Race a promise against a timeout — used ONLY for the `parentAlreadyAborted`
+ *  branch where `raceAbort` can't be used (the signal is already aborted so
+ *  `raceAbort` would throw immediately). Without this, a hung SDK/dead proxy
+ *  that ignores `session.abort()` would dangle the worker until the 30-min
+ *  settlement timer fires (the "scout :2 starts after abort" timing window).
+ *  The timeout is long enough for a fast SDK to settle (especially after
+ *  `session.abort()` is called), short enough that the user isn't stuck. */
+function raceTimeout<T>(stage: string, ms: number, promise: Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(abortError(stage)), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(err) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+		);
+	});
+}
+
+/** Immediately stop the child session's billable windows — compaction LLM
+ *  call, branch-summary, bash, retry — that `session.abort()` alone does NOT
+ *  cover. These run in the narrow window between agent_end and teardownSession:
+ *  without calling them here, a nested subagent's post-agent_end compaction
+ *  call would keep billing until the try/catch/finally unwinds to dispose().
+ *  Each is optional (defensive: no-op when the session doesn't expose it),
+ *  and each is fire-and-forget synchronous — they stop the window instantly,
+ *  we don't wait for the underlying provider call to settle. */
+function hardAbortBillable(session: unknown): void {
+	const s = session as Record<string, () => void> | null;
+	if (!s || typeof s !== "object") return;
+	for (const method of ["abortCompaction", "abortBranchSummary", "abortBash", "abortRetry"]) {
+		try {
+			s[method]?.();
+		} catch {
+			/* a stuck billable-window abort must not prevent the others — swallow */
+		}
+	}
 }
 
 /** Emit a structured, machine-readable error log for a subagent hardening
@@ -722,10 +624,6 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 	if (!(timeoutMs > 0)) {
 		const onAbort = (handler: () => void): (() => void) => {
 			if (!parentSignal) return () => {};
-			if (parentSignal.aborted) {
-				handler();
-				return () => {};
-			}
 			parentSignal.addEventListener("abort", handler, { once: true });
 			return () => parentSignal.removeEventListener("abort", handler);
 		};
@@ -753,30 +651,27 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 	const cleanupTimeout = () => clearTimeout(timeoutTimer);
 
 	let signal: AbortSignal;
-	let cleanupCombined = () => {};
 	if (parentSignal) {
 		if (typeof AbortSignal.any === 'function') {
 			signal = AbortSignal.any([parentSignal, timeoutSignal]);
 		} else {
-			// Fallback for runtimes without AbortSignal.any. Both listeners must be
-			// removed on ordinary prompt completion, not only when one source aborts.
+			// Fallback for runtimes without AbortSignal.any
 			const controller = new AbortController();
-			const onParent = () => abortFrom(parentSignal);
-			const onTimeout = () => abortFrom(timeoutSignal);
-			cleanupCombined = () => {
+			const stop = (reason: () => void) => {
+				reason();
 				parentSignal.removeEventListener('abort', onParent);
 				timeoutSignal.removeEventListener('abort', onTimeout);
 			};
-			const abortFrom = (source: AbortSignal) => {
-				if (!controller.signal.aborted) controller.abort(source.reason);
-				cleanupCombined();
-			};
+			const onParent = () => stop(() => controller.abort());
+			const onTimeout = () => stop(() => controller.abort());
 			if (parentSignal.aborted) {
-				abortFrom(parentSignal);
-			} else if (timeoutSignal.aborted) {
-				abortFrom(timeoutSignal);
+				stop(() => controller.abort());
 			} else {
 				parentSignal.addEventListener('abort', onParent, { once: true });
+			}
+			if (timeoutSignal.aborted) {
+				stop(() => controller.abort());
+			} else {
 				timeoutSignal.addEventListener('abort', onTimeout, { once: true });
 			}
 			signal = controller.signal;
@@ -785,22 +680,10 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 		signal = timeoutSignal;
 	}
 	const onAbort = (handler: () => void): (() => void) => {
-		if (signal.aborted) {
-			handler();
-			return () => {};
-		}
 		signal.addEventListener("abort", handler, { once: true });
 		return () => signal.removeEventListener("abort", handler);
 	};
-	return {
-		timeoutSignal,
-		combinedSignal: signal,
-		onAbort,
-		cleanup: () => {
-			cleanupTimeout();
-			cleanupCombined();
-		},
-	};
+	return { timeoutSignal, combinedSignal: signal, onAbort, cleanup: cleanupTimeout };
 }
 
 /** Apply a timeout-failure to a result. */
@@ -810,8 +693,6 @@ function applyTimeoutFailure(result: SingleResult, timeoutMs: number, stage?: st
 	const suffix = stage ? ` (while ${stage})` : "";
 	result.errorMessage = `Subagent timed out after ${timeoutMs / 1000}s waiting for model response${suffix}.`;
 	result.streamingText = undefined;
-	result.streaming = false;
-	result.runningTools = [];
 }
 
 /** Apply a stop-reason-based exit code to a result. */
@@ -823,11 +704,8 @@ function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: s
 		result.exitCode = 0;
 	}
 	result.streamingText = undefined;
-	result.streaming = false;
-	result.runningTools = [];
-	if (parentAborted) {
-		result.stopReason = "aborted";
-		if (result.exitCode === 0) result.exitCode = 1;
+	if (parentAborted && result.exitCode === 0) {
+		result.exitCode = 1;
 		if (!result.errorMessage) result.errorMessage = "Subagent was aborted";
 	}
 	// Enrich whatever message we have (the SDK's raw "Request was aborted" or
@@ -849,56 +727,6 @@ function applyThrownError(result: SingleResult, err: unknown, stage?: string): v
 	result.errorMessage = (result.errorMessage || message) + suffix;
 	result.stderr = result.stderr || message;
 	result.streamingText = undefined;
-	result.streaming = false;
-	result.runningTools = [];
-}
-
-/** Copy lifecycle classification onto the durable child result so retry/failover
- * policy can reject auth, cancellation, partial-output, and tool-side-effect
- * replays instead of treating every non-zero exit as model-failover-safe. */
-function attachFailureClassification(result: SingleResult, lifecycle: ChildLifecycle): void {
-	const classified = lifecycle.classified;
-	if (!classified) return;
-	result.failureClass = classified.class;
-	result.retryable = classified.retryable;
-	result.replaySafety = classified.replaySafety;
-	result.retryAfterMs = classified.retryAfterMs;
-}
-
-/** Terminalize and surface a failure that occurs before a child session is owned. */
-function applyPreSpawnFailure(
-	result: SingleResult,
-	lifecycle: ChildLifecycle,
-	err: unknown,
-	parentAborted: boolean,
-	metadata: { toolCallId?: string; agent: string; task: string; stage: string },
-	onUpdate: OnUpdateCallback | undefined,
-	makeDetails: (results: SingleResult[]) => SubagentDetails,
-): void {
-	result.exitCode = 1;
-	result.errorMessage = toErrorMessage(err);
-	result.stderr = result.errorMessage;
-	if (parentAborted) {
-		result.stopReason = "aborted";
-		lifecycle.cancel(result.errorMessage);
-	} else {
-		lifecycle.fail(err);
-	}
-	attachFailureClassification(result, lifecycle);
-	const classified = lifecycle.classified;
-	logLoud("subagent pre-spawn aborted/failed", {
-		...metadata,
-		cause: (err as { name?: string } | null)?.name === "AbortError" ? "aborted" : "error",
-		failureClass: classified?.class,
-		retryable: classified?.retryable,
-		replaySafety: classified?.replaySafety,
-		httpStatus: classified?.httpStatus,
-		error: result.errorMessage,
-	});
-	emitUpdateSafely(onUpdate, {
-		content: [{ type: "text", text: `⚠ ${metadata.agent}: ${result.errorMessage}` }],
-		details: makeDetails([result]),
-	});
 }
 
 /** Tear down a session, swallowing disposal errors. */
@@ -915,48 +743,6 @@ function teardownSession(unsubscribe: () => void, session: { dispose: () => void
 	}
 }
 
-/** Best-effort cleanup for a session returned after its createSession race was
- * already abandoned. The caller has settled and released its permit, so this
- * cleanup must never be awaited; synchronously disposing still prevents a late
- * SDK resolution from leaking extensions, listeners, or provider resources. */
-function cleanupLateCreatedSession(
-	session: SessionLike,
-	agentName: string,
-	task: string,
-	signalListenersBefore: Map<string, Set<Function>>,
-): void {
-	hardAbortBillable(session);
-	try {
-		void session.abort().catch((error) => {
-			logLoud("late-created session abort rejected", {
-				agent: agentName,
-				task,
-				error: toErrorMessage(error),
-			});
-		});
-	} catch (error) {
-		logLoud("late-created session abort threw", {
-			agent: agentName,
-			task,
-			error: toErrorMessage(error),
-		});
-	}
-	try {
-		session.dispose();
-	} catch (error) {
-		logLoud("late-created session dispose threw", {
-			agent: agentName,
-			task,
-			error: toErrorMessage(error),
-		});
-	} finally {
-		// createSession may itself finish loading provider modules after the
-		// caller's first reclaim pass. Sweep again at the actual late-settlement
-		// boundary so those listeners cannot escape the snapshot window.
-		reclaimOrphanedSignalListeners(signalListenersBefore);
-	}
-}
-
 /**
  * Process signals whose listeners we audit around subagent session creation.
  *
@@ -967,9 +753,10 @@ function cleanupLateCreatedSession(
  * `() => { for (const p of pools.values()) p.dispose(); }`. The SDK never
  * exposes a handle to remove it, and `DefaultResourceLoader` has no
  * `destroy()`/`dispose()`, so each subagent session leaks one such closure
- * on each of these signals — never removed. Parallel and nested runs can
- * quickly cross Node's default cap (10), causing the host to emit a
- * `MaxListenersExceededWarning` that looks like a pie memory leak.
+ * on each of these signals — never removed. With `MAX_PARALLEL_TASKS=8` plus
+ * nested runs, the count crosses Node's default cap (10) and the host emits
+ * `MaxListenersExceededWarning: N SIGINT listeners added to [process]`,
+ * which looks like a pie memory leak.
  *
  * The leaked closures are pure no-arg pool-disposers: on a still-living host
  * the pools are already torn down by the time they could fire, so they are
@@ -1078,7 +865,6 @@ export async function runSingleAgent(
 	/** Internal test seam to avoid loading the real SDK and long timeout delays. */
 	_internal?: {
 		sdk?: SubagentSdk;
-		sdkPromise?: Promise<SubagentSdk>;
 		timeoutMs?: number;
 	},
 ): Promise<SingleResult> {
@@ -1105,93 +891,11 @@ export async function runSingleAgent(
 		step,
 		actualModelId,
 		modelResolutionDiagnostic,
-		resolvedModel?.provider,
-		resolvedModel?.contextWindow,
-		thinkingLevel,
 	);
-
-	// A queued retry or parallel worker can enter after the parent has already
-	// been interrupted. Starting a fresh SDK session in that state is not
-	// cleanup: it creates new provider work after Stop, and was the direct cause
-	// of agents appearing to "wake up" only when interrupted before cancelling.
-	// There is no child UI/session to settle yet, so terminalize without loading
-	// resources, acquiring capacity, creating a session, or prompting a model.
-	if (signal?.aborted) {
-		currentResult.exitCode = 1;
-		currentResult.stopReason = "aborted";
-		currentResult.errorMessage = "Subagent was skipped because the parent was already aborted";
-		currentResult.stderr = currentResult.errorMessage;
-		onUpdate?.({
-			content: [{ type: "text", text: `⚠ ${agentName}: ${currentResult.errorMessage}` }],
-			details: makeDetails([currentResult]),
-		});
-		return currentResult;
-	}
-
 	const streamingTextRef = { value: "" };
 	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef);
-	const lifecycle = new ChildLifecycle(
-		makeAttemptId(agentName),
-		resolveLivenessConfig(),
-		Date.now,
-		(activity) => {
-			currentResult.activityPhase = activity.phase;
-			currentResult.activityDetail = activity.detail;
-			currentResult.activitySince = activity.phaseStartedAt;
-			currentResult.lastProgressAt = activity.lastProgressAt;
-			currentResult.inactivityBudgetMs = activity.budgetMs;
-			emitUpdate();
-		},
-	);
-	lifecycle.provider = resolvedModel?.provider;
-	lifecycle.model = actualModelId;
-	const runtimeStore = readRuntimeContext();
-	const inheritedPermitScope = runtimeStore.processPermitScope;
-	lifecycle.transition(
-		inheritedPermitScope ? "preparing" : "queued",
-		inheritedPermitScope
-			? { type: "permit-inherited", description: "using ancestor subagent tree capacity" }
-			: { type: "concurrency-wait", description: "waiting for process-wide subagent tree capacity" },
-	);
-	const leaseController = new AbortController();
-	let leaseViolation: LeaseViolation | undefined;
-	lifecycle.startWatchdog((violation) => {
-		leaseViolation = violation;
-		leaseController.abort(new Error(violation.reason));
-	});
-	const effectiveAbort = combineAbortSignals([signal, leaseController.signal]);
-	const effectiveSignal = effectiveAbort.signal!;
-	lifecycle.registerCleanup(effectiveAbort.cleanup);
 
-	let sdk: SubagentSdk;
-	try {
-		if (!inheritedPermitScope) {
-			const release = await inflightSemaphore.acquire(effectiveSignal);
-			const ownedPermitScope = {};
-			runtimeStore.processPermitScope = ownedPermitScope;
-			lifecycle.setRelease(() => {
-				if (runtimeStore.processPermitScope === ownedPermitScope) {
-					delete runtimeStore.processPermitScope;
-				}
-				release();
-			});
-		}
-		lifecycle.transition("preparing", { type: "permit-acquired", description: "loading subagent runtime" });
-		const sdkPromise = _internal?.sdkPromise
-			?? (_internal?.sdk ? Promise.resolve(_internal.sdk) : loadSubagentSdk());
-		sdk = await raceAbort(effectiveSignal, sdkPromise, "loading subagent SDK");
-	} catch (err) {
-		applyPreSpawnFailure(
-			currentResult,
-			lifecycle,
-			err,
-			signal?.aborted === true,
-			{ toolCallId: _toolCallId, agent: agentName, task, stage: "sdk-load-or-capacity" },
-			onUpdate,
-			makeDetails,
-		);
-		return currentResult;
-	}
+	const sdk = _internal?.sdk ?? (await loadSubagentSdk());
 	const promptTimeoutMs = _internal?.timeoutMs ?? resolveSubagentTimeoutMs();
 
 	// 4. Build an isolated resource loader and create the session.
@@ -1206,18 +910,21 @@ export async function runSingleAgent(
 	// sessions load skills from the same locations, so name-based filtering is
 	// exact. Undefined / "keep-all" / not-found → no filter (today's behavior).
 	let skillsOverride: SubagentSkillsOverride | undefined;
-	// Prefer the tree-threaded value. Depth-2+ immediate parents are in-memory
-	// subagent sessions and never run the skill-pruner prepass, so looking them up
-	// by session id widens nested prompts back to every skill.
-	const kept = readRuntimeContext().keptSkills ?? (parentSessionId ? readKeptSkills(parentSessionId) : undefined);
-	// A non-empty kept set filters the subagent's skills to exactly those the
-	// main turn kept. An empty array remains the existing keep-all safeguard.
-	if (Array.isArray(kept) && kept.length > 0) {
-		const keptSet = new Set(kept);
-		skillsOverride = (base) => ({
-			skills: base.skills.filter((s) => keptSet.has(s.name)),
-			diagnostics: base.diagnostics,
-		});
+	if (parentSessionId) {
+		const kept = readKeptSkills(parentSessionId);
+		// A non-empty kept set filters the subagent's skills to exactly those the
+		// main turn kept. An empty array is treated as keep-all (no filter): the
+		// main turn may now legitimately prune every skill when tools remain, but a
+		// subagent works on an isolated sub-task with no mid-turn skill recovery, so
+		// it never inherits zero skills via this path. "keep-all" / undefined also
+		// fall through to no filter (today's behavior).
+		if (Array.isArray(kept) && kept.length > 0) {
+			const keptSet = new Set(kept);
+			skillsOverride = (base) => ({
+				skills: base.skills.filter((s) => keptSet.has(s.name)),
+				diagnostics: base.diagnostics,
+			});
+		}
 	}
 
 	// Tools: subtract the user-configured drop list (e.g. ["ask_user"]) from
@@ -1243,14 +950,31 @@ export async function runSingleAgent(
 		skillsOverride,
 	});
 
-	// Pre-spawn phase: resource load → session creation. Root children acquired a
-	// process-wide tree permit before SDK/resource work; nested children borrow
-	// that ancestor scope so a fully occupied process cannot deadlock when every
-	// active parent delegates again. The parent abort signal MUST interrupt every
-	// phase — not just `runPrompt()` — otherwise a worker stuck here can't be
-	// stopped (the "Build Out" freeze class). Root permits remain registered with
-	// the lifecycle for the complete tree lifetime and release exactly once.
+	// Pre-spawn phase: resource load → concurrency acquire → session creation.
+	// The parent abort signal MUST interrupt every one of these phases — not just
+	// `runPrompt()` — otherwise a worker stuck here can't be stopped (the
+	// "Build Out" freeze class). `raceAbort` rejects early on a FUTURE abort; the
+	// `finally { release() }` around `createSession` guarantees a hung/aborted
+	// createSession releases its concurrency permit (no process-wide poison).
+	// On any abort/failure here we return a loud SingleResult instead of letting
+	// `execute()` never return (which would silently dangle the parent).
 	//
+	// Already-aborted-at-entry is a special case: the parent signal is already
+	// aborted (the common path is `mapWithConcurrencyLimit` skipping queued
+	// workers, but a timing window exists where the signal fires AFTER the
+	// queue check but BEFORE `createSession`). We still need to create the
+	// session + run the prompt to settle pending UI, but since `raceAbort`
+	// would throw immediately on an already-aborted signal, we race against a
+	// short timeout instead — so a hung SDK/dead proxy can't dangle the worker
+	// for 30 minutes until the settlement timer fires.
+	const parentAlreadyAborted = signal?.aborted === true;
+	// When already aborted, use a 10s timeout for createSession + prompt
+	// phases — long enough for a fast SDK to settle (especially after
+	// session.abort() is called), short enough that the user doesn't wait
+	// minutes for a dead proxy. This is the defense-in-depth backstop for the
+	// timing window between `mapWithConcurrencyLimit`'s signal check and
+	// `fn()` executing.
+	const ALREADY_ABORTED_TIMEOUT_MS = 10_000;
 	// Snapshot exit-signal listeners BEFORE `resourceLoader.reload()`. The
 	// SDK's loader pulls in transitive provider HTTP-handler code that leaks
 	// an orphaned pool-dispose SIGINT/SIGTERM closure per reload (see
@@ -1259,53 +983,50 @@ export async function runSingleAgent(
 	// count stays bounded across many parallel/nested subagent runs.
 	const signalListenersBefore = snapshotSignalListeners();
 	let session: SessionLike;
-	let resourceReloadPromise: Promise<void> | undefined;
-	let createSessionPromise: Promise<{ session: SessionLike }> | undefined;
 	try {
-		resourceReloadPromise = resourceLoader.reload();
-		await raceAbort(effectiveSignal, resourceReloadPromise, "loading subagent resources");
-		lifecycle.progress({ type: "resources-loaded", description: "creating isolated session" });
-		if (effectiveSignal.aborted) throw abortError("creating subagent session");
-		createSessionPromise = sdk.createSession({
-			cwd: sessionCwd,
-			modelRegistry,
-			model: resolvedModel,
-			thinkingLevel,
-			tools: effectiveTools,
-			sessionManager: sdk.createSessionManager(sessionCwd),
-			resourceLoader,
-		});
-		const created = await raceAbort(effectiveSignal, createSessionPromise, "creating subagent session");
-		session = created.session;
+		if (parentAlreadyAborted) {
+			await raceTimeout("loading subagent resources (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, resourceLoader.reload());
+		} else {
+			await raceAbort(signal, resourceLoader.reload(), "loading subagent resources");
+		}
+		const release = await inflightSemaphore.acquire(parentAlreadyAborted ? undefined : signal);
+		try {
+			const createSessionPromise = sdk.createSession({
+				cwd: sessionCwd,
+				modelRegistry,
+				model: resolvedModel,
+				thinkingLevel,
+				tools: effectiveTools,
+				sessionManager: sdk.createSessionManager(sessionCwd),
+				resourceLoader,
+			});
+			const created = parentAlreadyAborted
+				? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
+				: await raceAbort(signal, createSessionPromise, "creating subagent session");
+			session = created.session;
+		} finally {
+			release();
+		}
 	} catch (err) {
-		// If createSession resolves after the abort race has already rejected,
-		// nobody else owns the returned session. Dispose it asynchronously rather
-		// than leaking a hidden child runtime after the parent tool call settled.
-		if (resourceReloadPromise) {
-			void resourceReloadPromise.then(
-				() => reclaimOrphanedSignalListeners(signalListenersBefore),
-				() => reclaimOrphanedSignalListeners(signalListenersBefore),
-			);
-		}
-		if (createSessionPromise) {
-			void createSessionPromise.then(
-				(created) => cleanupLateCreatedSession(created.session, agentName, task, signalListenersBefore),
-				() => {},
-			);
-		}
 		// Pre-spawn abort or failure: never reach the prompt phase. Return a
 		// loud failure result so `execute()` always settles and the parent
 		// transcript/toolResult is written. This is the structural guarantee
 		// that a stuck worker can't silently dangle the parent session.
-		applyPreSpawnFailure(
-			currentResult,
-			lifecycle,
-			err,
-			signal?.aborted === true,
-			{ toolCallId: _toolCallId, agent: agentName, task, stage: "pre-spawn" },
-			onUpdate,
-			makeDetails,
-		);
+		currentResult.exitCode = 1;
+		currentResult.errorMessage = toErrorMessage(err);
+		currentResult.stderr = currentResult.errorMessage;
+		logLoud("subagent pre-spawn aborted/failed", {
+			toolCallId: _toolCallId,
+			agent: agentName,
+			task,
+			stage: "pre-spawn",
+			cause: (err as { name?: string } | null)?.name === "AbortError" ? "aborted" : "error",
+			error: currentResult.errorMessage,
+		});
+		onUpdate?.({
+			content: [{ type: "text", text: `⚠ ${agentName}: ${currentResult.errorMessage}` }],
+			details: makeDetails([currentResult]),
+		});
 		// Reclaim any orphaned exit-signal listeners the loader leaked before
 		// the pre-spawn phase failed (reload may have run partially). See the
 		// snapshot above and `reclaimOrphanedSignalListeners`.
@@ -1313,50 +1034,69 @@ export async function runSingleAgent(
 		return currentResult;
 	}
 
-	// Everything after session creation is inside one ownership boundary. Any
-	// setup failure (model getter, UI bridge, subscribe, progress callback) must
-	// still terminalize the lifecycle, release the permit, and dispose the child.
-	const stageRef = { value: "preparing" };
-	const turnStartRef: { value: number | null } = { value: null };
-	let proxy: ParentExtensionUIBridgeProxy | undefined;
-	let unsubscribe: () => void = () => {};
-	const subagentDepth = readRuntimeContext().depth;
-	const runPrompt = (): Promise<void> =>
-		subagentContext.run({ depth: subagentDepth }, () => session.prompt(`Task: ${task}`));
-
-	try {
 	// Capture the model the session actually selected (in case our hint was overridden).
 	if (session.agent?.state?.model) {
 		currentResult.model = session.agent.state.model.id;
 	}
 
 	// Inject the parent UI bridge proxy so subagent ask_user calls appear in the parent UI.
+	let proxy: ParentExtensionUIBridgeProxy | undefined;
 	if (parentUiBridge && _toolCallId) {
 		proxy = new ParentExtensionUIBridgeProxy(parentUiBridge, _toolCallId);
 		session.extensionRunner.setUIContext(proxy);
 	}
 
+	// Track the current run stage for abort/timeout diagnostics (D). The first
+	// streamed text_delta flips this to "streaming" (see handleMessageUpdate);
+	// "waiting for model response" covers prefill (the common abort window, and
+	// the one that produced the bare "Request was aborted" symptom).
+	const stageRef = { value: "preparing" };
+
 	// 5. Subscribe to session events.
-	unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef, turnStartRef, lifecycle);
+	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, stageRef);
+
+	// Wrap the prompt in the shared subagent context (A) so extensions whose
+	// before_agent_start hooks fire during session.prompt() — notably the
+	// skill-pruner prepass — can detect they are inside a scoped subagent
+	// session and skip. AsyncLocalStorage is per-async-context, so this is safe
+	// under parallel subagent runs (unlike a process.env flag, which would race).
+	const subagentDepth = readRuntimeContext().depth;
+	const runPrompt = (): Promise<void> =>
+		subagentContext.run({ depth: subagentDepth }, () => session.prompt(`Task: ${task}`));
 
 	// Emit an early progress signal (B) so the UI doesn't look hung during
 	// resource load + model prefill, before the first streamed delta. The
 	// skill-pruner prepass is skipped inside subagent sessions (see
 	// shouldSkipPruning), so this window is just prefill — but it can still be
 	// long for large prompts, and previously showed nothing at all.
-	emitUpdateSafely(onUpdate, {
+	onUpdate?.({
 		content: [{ type: "text", text: `Starting ${agentName}…` }],
 		details: makeDetails([currentResult]),
 	});
 
 	// 6. Run the prompt with timeout / parent-signal handling, then shape the final result.
-		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(effectiveSignal, promptTimeoutMs);
+	try {
+		if (parentAlreadyAborted) {
+			// If the parent signal is already aborted, run the prompt anyway
+			// (it'll abort quickly after session.abort()) and return an explicit
+			// abort result. Race against a short timeout so a hung SDK/dead
+			// proxy that ignores session.abort() can't dangle the worker.
+			void session.abort();
+			// Settle any in-flight parent-bridge ask_user prompt so it can't hang.
+			proxy?.cancelAll();
+			await raceTimeout("prompt (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, runPrompt());
+			currentResult.exitCode = 1;
+			if (!currentResult.errorMessage) currentResult.errorMessage = `Subagent was aborted (while ${stageRef.value})`;
+			return currentResult;
+		}
+
+		const { timeoutSignal, combinedSignal, onAbort, cleanup } = buildCombinedAbortSignal(signal, promptTimeoutMs);
 		let timedOut = false;
 		const removeAbortListener = onAbort(() => {
 			// If the prompt timeout has fired (even if the parent signal also fired
 			// simultaneously), flag it as a timeout so callers can distinguish the cause.
 			// When the timeout is disabled, timeoutSignal is undefined and this never fires.
-			if (timeoutSignal?.aborted || leaseController.signal.aborted) timedOut = true;
+			if (timeoutSignal?.aborted) timedOut = true;
 			// Immediately stop the child's billable windows (compaction,
 			// branch-summary, bash, retry) — these run in the gap between
 			// agent_end and teardownSession and are NOT covered by abort().
@@ -1381,29 +1121,13 @@ export async function runSingleAgent(
 			// every abort/timeout path (which cascaded into cancelling every later
 			// test in execution-paths.test.ts). `clearTimeout` on settle removes it.
 			let danglingTimer: ReturnType<typeof setTimeout> | undefined;
-			// Defer invocation so even a non-conforming synchronous throw from
-			// session.abort() becomes a handled rejection rather than escaping the
-			// AbortSignal event listener and skipping the remaining cleanup.
-			const abortPromise = Promise.resolve().then(() => session.abort());
 			void Promise.race([
-				abortPromise,
+				session.abort(),
 				new Promise<"__dangling__">((r) => { danglingTimer = setTimeout(() => r("__dangling__"), 5_000); }),
 			])
 				.then((outcome) => {
 					if (danglingTimer) clearTimeout(danglingTimer);
 					if (outcome === "__dangling__") {
-						orphanRegistry.register({
-							attemptId: lifecycle.attemptId,
-							provider: lifecycle.provider,
-							model: lifecycle.model,
-							phase: lifecycle.phase,
-							detachedAt: Date.now(),
-							lastError: "session.abort() did not settle within grace",
-							billableWindowsStopped: true,
-						}, async () => {
-							await session.abort();
-							session.dispose();
-						});
 						logLoud("child.dangling-detected", {
 							toolCallId: _toolCallId,
 							agent: agentName,
@@ -1432,13 +1156,10 @@ export async function runSingleAgent(
 					});
 				});
 			// Settle any in-flight parent-bridge ask_user prompt so it can't hang.
-			try { proxy?.cancelAll(); } catch (error) {
-				logLoud("subagent UI cancellation failed", { agent: agentName, error: toErrorMessage(error) });
-			}
+			proxy?.cancelAll();
 		});
 
 		stageRef.value = "waiting for model response";
-		lifecycle.transition("waiting_provider", { type: "prompt-dispatched", description: "waiting for provider response" });
 		// Race the prompt against the combined abort signal. A hung provider
 		// stream / hung SDK that ignores `session.abort()` would otherwise
 		// hang the parent even after the timeout fires — racing the prompt
@@ -1449,19 +1170,7 @@ export async function runSingleAgent(
 		// (today's behavior — the settlement net is the only escape).
 		try {
 			if (combinedSignal) {
-				// Do not evaluate runPrompt() until after the abort check. An abort
-				// can land after createSession/subscribe but before this phase; calling
-				// prompt first would start fresh provider work after Stop and only then
-				// notice that the signal was already aborted.
-				if (combinedSignal.aborted) throw abortError("waiting for model response");
-				const promptPromise = runPrompt();
-				// A provider/mock can synchronously abort the parent while prompt()
-				// creates its promise. In that narrow window raceAbort observes an
-				// already-aborted signal and throws before attaching handlers to the
-				// prompt promise. Observe its eventual rejection here so it cannot
-				// escape as an unhandledRejection after the parent has settled.
-				promptPromise.catch(() => {});
-				await raceAbort(combinedSignal, promptPromise, "waiting for model response");
+				await raceAbort(combinedSignal, runPrompt(), "waiting for model response");
 			} else {
 				await runPrompt();
 			}
@@ -1478,9 +1187,7 @@ export async function runSingleAgent(
 			// catch for the timeout case; non-timeout aborts fall through to the
 			// outer catch to preserve their enriched stage/cause message.
 			if (timedOut) {
-				applyTimeoutFailure(currentResult, leaseViolation?.budgetMs ?? promptTimeoutMs, leaseViolation?.phase ?? stageRef.value);
-				lifecycle.fail(currentResult.errorMessage);
-				attachFailureClassification(currentResult, lifecycle);
+				applyTimeoutFailure(currentResult, promptTimeoutMs, stageRef.value);
 				return currentResult;
 			}
 			throw err;
@@ -1493,45 +1200,11 @@ export async function runSingleAgent(
 		}
 
 		applyStopReason(currentResult, signal?.aborted === true, stageRef.value);
-		if (currentResult.exitCode === 0) lifecycle.finish(currentResult);
-		else {
-			lifecycle.fail(currentResult.errorMessage);
-			attachFailureClassification(currentResult, lifecycle);
-		}
 		return currentResult;
 	} catch (err) {
 		applyThrownError(currentResult, err, stageRef.value);
-		if (signal?.aborted) {
-			// User/parent cancellation is terminal and must never be mistaken for
-			// a model failure eligible for fallback retry. Override an earlier
-			// toolUse/error stop reason because Stop owns the final outcome.
-			currentResult.stopReason = "aborted";
-			lifecycle.cancel(currentResult.errorMessage ?? "parent abort");
-		} else {
-			lifecycle.fail(err);
-		}
-		attachFailureClassification(currentResult, lifecycle);
-		// Surface the classified provider failure so the cause (transport /
-		// timeout / 429 / 5xx / auth / abort) and replay safety are observable
-		// in the [pie:subagent] log stream. Classification is recorded only —
-		// this does not change retry, model selection, or failover behaviour.
-		const promptClassified = lifecycle.classified;
-		logLoud("subagent prompt failed", {
-			toolCallId: _toolCallId,
-			agent: agentName,
-			task,
-			stage: stageRef.value,
-			cause: signal?.aborted ? "parent-abort" : "error",
-			failureClass: promptClassified?.class,
-			retryable: promptClassified?.retryable,
-			replaySafety: promptClassified?.replaySafety,
-			httpStatus: promptClassified?.httpStatus,
-			retryAfterMs: promptClassified?.retryAfterMs,
-			error: currentResult.errorMessage,
-		});
 		return currentResult;
 	} finally {
-		lifecycle.dispose();
 		teardownSession(unsubscribe, session);
 		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
 		// during this session (see `snapshotSignalListeners` above). Runs after

@@ -36,7 +36,6 @@ import type {
   ComposerInput,
   ActiveRunSummary,
   UserContentPart,
-  QueuedDwellEntry,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import {
@@ -105,18 +104,6 @@ export interface SessionsState {
    *  Independent of `runningSessionPaths` (a retry sleeps between turns and the
    *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
   retryStatusBySession: Record<string, RetryStatus>;
-
-  /** Per-session non-blocking "still waiting for a concurrency slot" notice
-   *  (FP-C4). Set by the EffectRunner when a send's modelStart phase has been
-   *  queued waiting for a saturated provider's slot for ~one model-start
-   *  budget (~10min) — so a user doesn't think pie hung during a long
-   *  saturation window. Cleared on commit (MessageStarted), on fire
-   *  (PreflightFailed — the user now sees an error), or when the entry is
-   *  disposed. Surfaced to the webview as a non-blocking info chip/banner
-   *  for the active session, INDEPENDENT of the error-notice triple (a
-   *  non-error NoticeShown would clobber an error notice's kind/raw —
-   *  STATE_CONTRACT § Notice Surfacing). Mirrors `retryStatusBySession`. */
-  waitingForSlotBySession: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,13 +390,6 @@ export interface PendingState {
   /** Per-session pruning prepass phase for the live status chip (Brief F).
    *  Absent entry = `idle`. See {@link PrepassPhaseState}. */
   prepassBySession: Record<string, PrepassPhaseState>;
-  /** Per-session queued-message dwell + watchdog state (handoff §F). Each
-   *  optimistic 'queued' steering/followUp message gets a {@link QueuedDwellEntry}
-   *  at send time; the array is FIFO (mirrors the transcript's queued messages).
-   *  Cleared on delivery/clear/interrupt/rollback/session-close. An entry's
-   *  `watchdogFired`/`abandoned` flags are the actionable terminal signals the
-   *  projection surfaces for the active session. */
-  queuedDwellBySession: Record<string, QueuedDwellEntry[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +436,6 @@ export function createInitialArchState(): ArchState {
       analyticsFactorsBySession: {},
       interruptInFlightBySession: {},
       retryStatusBySession: {},
-      waitingForSlotBySession: {},
     },
     settings: {
       modelSettings: null,
@@ -493,7 +472,6 @@ export function createInitialArchState(): ArchState {
       sendQueueBySession: {},
       backendReadyQueueBySession: {},
       prepassBySession: {},
-      queuedDwellBySession: {},
     },
   };
 }

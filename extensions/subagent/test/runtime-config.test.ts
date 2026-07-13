@@ -46,7 +46,7 @@ test("resolveSubagentTimeoutMs: positive ms → that value", () => {
 
 test("resolveSubagentTimeoutMs: 0 → disabled", () => {
 	process.env.PI_SUBAGENT_TIMEOUT_MS = "0";
-	assert.equal(resolveSubagentTimeoutMs(), DEFAULT_SUBAGENT_TIMEOUT_MS);
+	assert.equal(resolveSubagentTimeoutMs(), 0);
 });
 
 test("resolveSubagentTimeoutMs: negative → disabled", () => {

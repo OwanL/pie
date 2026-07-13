@@ -27,7 +27,6 @@ function ProviderConcurrencyControls({
   metrics?: ProviderGateProviderMetrics;
 }) {
   const overrides = prefs.providerConcurrency[provider] ?? {};
-  const gated = !!metrics || provider in prefs.providerConcurrency;
   const maxConcurrent = overrides.maxConcurrentRequests ?? metrics?.maxConcurrentRequests ?? 2;
   const afterburn = overrides.afterburnSeconds ?? metrics?.afterburnSeconds ?? 0;
   const queueWait = overrides.queueWaitSeconds ?? 30;
@@ -35,20 +34,10 @@ function ProviderConcurrencyControls({
 
   const setOverride = (field: 'maxConcurrentRequests' | 'afterburnSeconds' | 'queueWaitSeconds' | 'headerWaitSeconds', value: number) => {
     const current = prefs.providerConcurrency[provider] ?? {};
-    // Always establish a concrete concurrency cap when writing an override.
-    // The gate only gates a provider that has no base concurrency block once
-    // maxConcurrentRequests is set, so seeding it here means touching ANY
-    // slider (e.g. afterburn first) actually takes effect instead of silently
-    // producing an ignored override.
-    const next = {
-      maxConcurrentRequests: current.maxConcurrentRequests ?? maxConcurrent,
-      ...current,
-      [field]: value,
-    };
     onSetPrefs({
       providerConcurrency: {
         ...prefs.providerConcurrency,
-        [provider]: next,
+        [provider]: { ...current, [field]: value },
       },
     });
   };
@@ -56,11 +45,6 @@ function ProviderConcurrencyControls({
   return (
     <div class="toolbar-settings-ext-settings" style="padding-left: 28px;">
       <div class="toolbar-settings-list">
-        {!gated && (
-          <div class="toolbar-settings-item-hint" style="margin-bottom: 4px;">
-            Not gated — requests to this provider are unthrottled. Set “Max concurrent” to start enforcing a limit.
-          </div>
-        )}
         {/* Max concurrent requests */}
         <div class="toolbar-settings-ui-control">
           <div class="toolbar-settings-ui-control-head">
@@ -166,9 +150,7 @@ function ProviderConcurrencyControls({
 
 function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggleExpand }: ProviderItemProps) {
   const checked = prefs.providerToggles[provider] !== false;
-  // Concurrency is provider-agnostic: every provider can be capped from here,
-  // whether or not it ships a base concurrency block or is currently gated.
-  const hasConcurrency = true;
+  const hasConcurrency = !!metrics || provider in prefs.providerConcurrency;
   return (
     <div>
       <button

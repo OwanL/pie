@@ -525,3 +525,9 @@ profiles:
       - minimal
     disabled_reason: Too small for agentic work
     cost: 4
+  - id: qwen2.5:7b-instruct
+    eligible: false
+    thinking:
+      - minimal
+    disabled_reason: Local model; not for general agentic use
+    cost: 8

@@ -403,73 +403,6 @@ export function handleRetryEnded(state: ArchState, event: Extract<Event, { kind:
   };
 }
 
-/** The willRetry watchdog declared a retry stuck (the SDK's backoff did not
- *  complete within `delayMs + graceMs`). The companion `operational-error`
- *  (code `RETRY_STUCK`) — fired in the same watchdog callback — already
- *  surfaced a user-facing notice via the `Error` event, so this handler does
- *  NOT set a notice (avoiding a double-notify). It emits a `Log` effect so
- *  the structured timing detail is visible in the pie OutputChannel for
- *  diagnosis. The reducer stays pure: logging is an `Effect`, executed by the
- *  `EffectRunner`. State is unchanged. */
-export function handleRetryStuck(state: ArchState, event: Extract<Event, { kind: 'RetryStuck' }>): ReducerResult {
-  const logEffect: Effect = {
-    kind: 'Log',
-    corrId: '',
-    level: 'warn',
-    message: 'retry.stuck: a retry backoff did not complete within the watchdog window',
-    data: {
-      sessionPath: event.sessionPath,
-      delayMs: event.delayMs,
-      graceMs: event.graceMs,
-      requestId: event.requestId ?? null,
-    },
-  };
-  return { state, effects: [logEffect] };
-}
-
-/** Record a non-blocking "still waiting for a concurrency slot" notice for a
- *  session (FP-C4). Pure: spread-set into `waitingForSlotBySession`. The
- *  EffectRunner dispatches this when a send's modelStart phase has been queued
- *  ~one model-start budget (~10min); the projection surfaces the active
- *  session's entry as a non-blocking info chip INDEPENDENT of the error-notice
- *  triple. Idempotent (re-dispatch overwrites with the same message). */
-export function handleWaitingForSlotShown(state: ArchState, event: Extract<Event, { kind: 'WaitingForSlotShown' }>): ReducerResult {
-  return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        waitingForSlotBySession: {
-          ...state.sessions.waitingForSlotBySession,
-          [event.sessionPath]: event.message,
-        },
-      },
-    },
-    effects: [],
-  };
-}
-
-/** Clear a session's "still waiting for a concurrency slot" notice (FP-C4).
- *  Pure: shallow-copy + delete. No-op (returns state unchanged) when the
- *  session has no entry — idempotent against a late/duplicate clear. */
-export function handleWaitingForSlotCleared(state: ArchState, event: Extract<Event, { kind: 'WaitingForSlotCleared' }>): ReducerResult {
-  if (!(event.sessionPath in state.sessions.waitingForSlotBySession)) {
-    return { state, effects: [] };
-  }
-  const nextWaiting = { ...state.sessions.waitingForSlotBySession };
-  delete nextWaiting[event.sessionPath];
-  return {
-    state: {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        waitingForSlotBySession: nextWaiting,
-      },
-    },
-    effects: [],
-  };
-}
-
 /**
  * Mark every still-streaming assistant message in each listed session as
  * `interrupted` and stamp `errorDetail` with the supplied reason. Dispatched by
@@ -486,9 +419,6 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     return { state, effects: [] };
   }
 
-  const abandonedLocalIds = sessionPaths.flatMap((sessionPath) =>
-    (state.pending.queuedDwellBySession[sessionPath] ?? []).map((entry) => entry.localId),
-  );
   const affectedPaths = new Set(sessionPaths);
   const rollbackOps = [
     ...Object.entries(state.pending.ops),
@@ -512,14 +442,12 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
       // streaming-message interruption.
       delete draft.sessions.retryStatusBySession[sessionPath];
       delete draft.sessions.interruptInFlightBySession[sessionPath];
-      delete draft.sessions.waitingForSlotBySession[sessionPath];
       delete draft.settings.pendingExtensionUIRequestsBySession[sessionPath];
       delete draft.transcript.pagingInFlightBySession[sessionPath];
       delete draft.pending.currentTurnBySession[sessionPath];
       delete draft.pending.sendQueueBySession[sessionPath];
       delete draft.pending.backendReadyQueueBySession[sessionPath];
       delete draft.pending.prepassBySession[sessionPath];
-      delete draft.pending.queuedDwellBySession[sessionPath];
 
       // Reconcile optimistic mutations before dropping their snapshots. This
       // mirrors SendResult/EditResult failure and makes late RPC rejection a
@@ -591,17 +519,7 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
     }
   });
 
-  return {
-    state: nextState,
-    effects: [
-      ...rollbackEffects,
-      ...abandonedLocalIds.map((localId) => ({
-        kind: 'CancelQueuedDwellWatchdog' as const,
-        corrId: 'queued:restart-unknown',
-        localId,
-      })),
-    ],
-  };
+  return { state: nextState, effects: rollbackEffects };
 }
 
 export function handleUnreadFinishedSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'UnreadFinishedSessionsChanged' }>): ReducerResult {

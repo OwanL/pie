@@ -13,7 +13,6 @@ import {
   handleEdit,
   handleTruncateAfter,
   handleClearQueue,
-  handleRearmQueuedDwellWatchdog,
   handleSetOutcomeDialog,
   handleDismissNotice,
   handleRespondExtensionUI,
@@ -71,10 +70,6 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'ClearQueue': {
       return handleClearQueue(state, cmd);
-    }
-
-    case 'RearmQueuedDwellWatchdog': {
-      return handleRearmQueuedDwellWatchdog(state, cmd);
     }
 
     case 'Send': {

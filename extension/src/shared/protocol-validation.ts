@@ -186,7 +186,6 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
-    subagentPreviewLines: [1, 12],
     uiMessageRailSize: [8, 40],
   };
   const stringKeys: Array<keyof ChatPrefs> = [
@@ -458,11 +457,6 @@ export function validateWebviewToHostMessage(
       if (!isString((value.response as { id?: unknown }).id)) {
         return fail('extensionUiResponse: missing string `response.id`');
       }
-      return { ok: true, value: value as WebviewToHostMessage };
-
-    case 'rearmQueuedDwellWatchdog':
-      if (!isString(value.sessionPath)) return fail('rearmQueuedDwellWatchdog: missing string `sessionPath`');
-      if (!isString(value.localId)) return fail('rearmQueuedDwellWatchdog: missing string `localId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     default:

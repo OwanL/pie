@@ -3,11 +3,17 @@ import * as path from 'node:path';
 
 import { loadModelPricing } from '../backend/pricing';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
-import { EMPTY_AGGREGATE_STATS, type AggregateDailyCost, type AggregateDailyRunCount, type AggregateProviderCost, type AggregateProviderThroughput, type AggregateSeriesPoint, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
+import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import type { StatsService } from './stats-service';
-import { computeAggregateStats } from './stats-service/aggregate-stats';
+import {
+  accumulateAggregateStats,
+  finalizeAggregateStatsLayers,
+  prepareAggregateStatsLayer,
+  type AggregateStatsAccumulator,
+  type PreparedAggregateStatsLayer,
+} from './stats-service/aggregate-stats';
 import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
 import { appendPieLog } from './util/pie-log';
@@ -27,10 +33,10 @@ import { toErrorMessage } from './util/error-message';
  *
  * ## Refresh model
  *
- * A {@link RECOMPUTE_MS} interval refreshes the rollup. Completed runs are
- * cached and re-read only when the JSONL/checkpoint mtime signature changes;
- * current runs come directly from the in-memory tracker each tick. Thus active
- * sessions stay live without forcing a persistence flush or full-history read.
+ * A {@link RECOMPUTE_MS} interval refreshes the rollup. Completed runs and
+ * their accumulation are cached by snapshot/pricing signatures; current runs
+ * come directly from the in-memory tracker and are accumulated each tick. Thus
+ * active sessions stay live without a persistence flush or historical walk.
  *
  * The live `tokensPerSecond` aggregate (sum of running sessions' rates) is read
  * from `TokenRateService.getRates()` each tick — cheap and always current.
@@ -61,6 +67,13 @@ export interface AggregateStatsServiceDeps {
   /** File-system stat callback used by the cache-mutation detector. Defaults
    *  to `fs.stat` in production; tests inject a mock to control mtime values. */
   mtimeFn?: (path: string, cb: (err: NodeJS.ErrnoException | null, stats: { mtimeMs: number }) => void) => void;
+  /** Test/benchmark seam for proving which run set was accumulated. */
+  onAccumulatorBuilt?: (scope: 'completed' | 'open', runCount: number) => void;
+  /** Test/benchmark seam proving unbounded completed-history entries are only
+   * visited while preparing a new completed layer, never on open-run ticks. */
+  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample' | 'throughput_hour') => void;
+  /** Clock seam for deterministic date-boundary tests. */
+  now?: () => Date;
 }
 
 /** Recompute interval. Trades responsiveness vs disk read frequency; the mtime
@@ -68,7 +81,7 @@ export interface AggregateStatsServiceDeps {
 const RECOMPUTE_MS = 1000;
 
 interface PricingCache {
-  mtimeMs: number;
+  signature: string;
   map: Map<string, ModelPricingRecord[]>;
 }
 
@@ -85,6 +98,12 @@ export class AggregateStatsService {
   private pricingCache: PricingCache | null = null;
   private lastDataSignature: DataSignature | null = null;
   private completedRunsCache: RunSnapshot[] = [];
+  private completedAccumulator: AggregateStatsAccumulator | null = null;
+  private completedAccumulatorKey: string | null = null;
+  private completedLayer: PreparedAggregateStatsLayer | null = null;
+  private completedLayerKey: string | null = null;
+  private openAccumulator: AggregateStatsAccumulator | null = null;
+  private lastFinalizedDate: string | null = null;
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
   private started = false;
@@ -138,27 +157,67 @@ export class AggregateStatsService {
     const runningSessionPaths = archState.sessions.runningSessionPaths;
     const openTabCount = archState.sessions.openTabPaths.length;
     const ratesBySession = this.deps.tokenRateService.getRates();
-    const nowMs = Date.now();
+    const nowMs = (this.deps.now?.() ?? new Date()).getTime();
+    const currentDate = localDateString(nowMs);
+    const openRuns = this.deps.statsService.getOpenRuns();
+    // Finalization stages the authoritative closed snapshot synchronously before
+    // the open run disappears. Use that snapshot as the persistence bridge so
+    // status, outcome, finalizedAt, and day bucketing are never stale.
+    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
 
-    // Refresh completed history only when persistence changed. Open runs are
-    // always sourced below from the tracker, so an active tick never calls the
-    // flush-before-query API or re-parses full history merely because it is active.
     const storageDir = this.deps.statsService.getStorageDir();
-    const signature = await this.readDataSignature(storageDir);
+    const dataSignature = await this.readDataSignature(storageDir);
     const completedDataUnchanged = this.lastDataSignature !== null
-      && signature !== null
-      && signaturesEqual(this.lastDataSignature, signature);
+      && dataSignature !== null
+      && signaturesEqual(this.lastDataSignature, dataSignature);
     if (!completedDataUnchanged) {
       const { completedRuns } = await this.deps.statsService.queryPersistedRunAnalytics();
       this.completedRunsCache = completedRuns;
-      this.lastDataSignature = signature;
+      this.lastDataSignature = dataSignature;
     }
-    const dataUnchanged = completedDataUnchanged && runningSessionPaths.length === 0;
 
-    // Live warm-bash metrics from the backend (in-memory, same-process registry
-    // read via RPC). Cheap; polled every tick so ready/warming counts stay
-    // current. Failures retain the cached value so a transient RPC hiccup
-    // never freezes the segment.
+    const completedRunIds = new Set(this.completedRunsCache.map((run) => run.runId));
+    const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
+
+    const pricing = this.loadPricingCached();
+    const pendingOverrideKey = [...pendingRunIds].sort().join(',');
+    const completedKey = dataSignature === null
+      ? null
+      : `${dataSignature.snapshotsMtimeMs}:${pricing.signature}:overrides=${pendingOverrideKey}`;
+    let completedRebuilt = false;
+    if (
+      this.completedAccumulator === null
+      || completedKey === null
+      || this.completedAccumulatorKey !== completedKey
+    ) {
+      const effectiveCompletedRuns = pendingRunIds.size === 0
+        ? this.completedRunsCache
+        : this.completedRunsCache.filter((run) => !pendingRunIds.has(run.runId));
+      this.completedAccumulator = accumulateAggregateStats(effectiveCompletedRuns, pricing.map);
+      this.completedAccumulatorKey = completedKey;
+      completedRebuilt = true;
+      this.deps.onAccumulatorBuilt?.('completed', effectiveCompletedRuns.length);
+    }
+
+    // Live accumulation is intentionally rebuilt every tick from only the
+    // small mutable set plus authoritative finalized snapshots awaiting append.
+    // Historical runs are not walked when an open run changes.
+    const effectiveOpenById = new Map<string, RunSnapshot>();
+    for (const run of openRuns) {
+      if (!completedRunIds.has(run.runId) && !pendingRunIds.has(run.runId)) {
+        effectiveOpenById.set(run.runId, run);
+      }
+    }
+    // Pending finalized snapshots are authoritative until their append lands,
+    // including when a stale snapshot with the same runId is already persisted.
+    for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
+    const effectiveOpenRuns = [...effectiveOpenById.values()];
+    const nextOpenAccumulator = accumulateAggregateStats(effectiveOpenRuns, pricing.map);
+    this.deps.onAccumulatorBuilt?.('open', effectiveOpenRuns.length);
+    const openChanged = this.openAccumulator === null
+      || !deepEqualValue(this.openAccumulator, nextOpenAccumulator);
+    this.openAccumulator = nextOpenAccumulator;
+
     let warmBash = this.cached.warmBash;
     try {
       warmBash = await this.deps.fetchWarmBashStats();
@@ -168,9 +227,6 @@ export class AggregateStatsService {
       });
     }
 
-    // Live provider-gate metrics from the backend (in-memory ProviderGate
-    // singleton read via RPC). Cheap; polled every tick so active/queued
-    // counts + pause state stay current. Failures retain the cached value.
     let providerGate = this.cached.providerGate;
     try {
       providerGate = await this.deps.fetchProviderGateStats();
@@ -180,30 +236,45 @@ export class AggregateStatsService {
       });
     }
 
+    const historicalChanged = completedRebuilt
+      || openChanged
+      || this.lastFinalizedDate !== currentDate
+      || !this.cached.ready;
     let next: AggregateStats;
-    if (dataUnchanged) {
-      // Only refresh the live/current fields cheaply from in-memory state.
+    if (historicalChanged) {
+      const layerKey = `${this.completedAccumulatorKey ?? 'volatile'}:${currentDate}`;
+      if (completedRebuilt || this.completedLayer === null || this.completedLayerKey !== layerKey) {
+        this.completedLayer = prepareAggregateStatsLayer(this.completedAccumulator, nowMs, {
+          onCompletedSourceEntryVisited: this.deps.onCompletedSourceEntryVisited,
+        });
+        this.completedLayerKey = layerKey;
+      }
+      next = finalizeAggregateStatsLayers(
+        this.completedLayer,
+        nextOpenAccumulator,
+        nowMs,
+        runningSessionPaths,
+        ratesBySession,
+        openTabCount,
+      );
+      next.warmBash = warmBash;
+      next.providerGate = providerGate;
+      this.lastFinalizedDate = currentDate;
+    } else {
+      // Live-only refresh: preserve every historical array/object reference.
       next = {
         ...this.cached,
         liveTokensPerSecond: sumLiveRate(runningSessionPaths, ratesBySession),
-        runningSessionCount: runningSessionPaths.length,
+        runningSessionCount: new Set(runningSessionPaths).size,
         openTabCount,
         warmBash,
         providerGate,
       };
-    } else {
-      const pricingMap = this.loadPricingCached();
-      const runs = [...this.completedRunsCache, ...this.deps.statsService.getOpenRuns()];
-      next = computeAggregateStats(runs, pricingMap, nowMs, runningSessionPaths, ratesBySession, openTabCount);
-      next.warmBash = warmBash;
-      next.providerGate = providerGate;
     }
 
-    if (!aggregateEqual(this.cached, next)) {
+    if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
       this.deps.onChanged();
-    } else {
-      this.cached = next;
     }
   }
 
@@ -238,33 +309,30 @@ export class AggregateStatsService {
     });
   }
 
-  /** Load + cache the model pricing map by `models.json` mtime (mirror the
-   *  subagent-profiles cache pattern). Returns an empty map when the agent
-   *  dir or `models.json` is absent. */
-  private loadPricingCached(): Map<string, ModelPricingRecord[]> {
+  /** Load + cache pricing by agent-dir + `models.json` stat signature. */
+  private loadPricingCached(): PricingCache {
     const agentDir = this.deps.getAgentDir();
-    if (!agentDir) {
-      this.pricingCache = null;
-      return new Map();
-    }
+    if (!agentDir) return this.cachePricing('unresolved', new Map());
+
     const modelsJsonPath = path.join(agentDir, 'models.json');
-    let mtimeMs = -1;
+    let signature: string;
     try {
-      mtimeMs = fs.statSync(modelsJsonPath).mtimeMs;
+      const stat = fs.statSync(modelsJsonPath);
+      signature = `${modelsJsonPath}:${stat.mtimeMs}:${stat.size}`;
     } catch (error) {
-      // Missing models.json → no pricing (cost falls back to 0).
       appendPieLog('debug', 'aggregate-stats', 'models.json stat failed; no pricing available', {
         error: toErrorMessage(error),
       });
-      this.pricingCache = null;
-      return new Map();
+      return this.cachePricing(`missing:${modelsJsonPath}`, new Map());
     }
-    if (this.pricingCache && this.pricingCache.mtimeMs === mtimeMs) {
-      return this.pricingCache.map;
-    }
-    const map = loadModelPricing(modelsJsonPath);
-    this.pricingCache = { mtimeMs, map };
-    return map;
+    if (this.pricingCache?.signature === signature) return this.pricingCache;
+    return this.cachePricing(signature, loadModelPricing(modelsJsonPath));
+  }
+
+  private cachePricing(signature: string, map: Map<string, ModelPricingRecord[]>): PricingCache {
+    if (this.pricingCache?.signature === signature) return this.pricingCache;
+    this.pricingCache = { signature, map };
+    return this.pricingCache;
   }
 }
 
@@ -288,39 +356,10 @@ function signaturesEqual(a: DataSignature | null, b: DataSignature | null): bool
   return a.snapshotsMtimeMs === b.snapshotsMtimeMs;
 }
 
-/** Compact signature for an intraday series so the changed-gate can detect a
- *  new turn (length + last point ms + cumulative total) without a full O(n)
- *  comparison each tick. */
-function seriesSignature(s: AggregateSeriesPoint[]): string {
-  if (s.length === 0) return '0';
-  const last = s[s.length - 1]!;
-  const total = last.byProvider.reduce((sum, p) => sum + p.value, 0);
-  return `${s.length}:${last.ms}:${total.toFixed(6)}`;
-}
-
-/** Compact content signatures for the daily/per-provider tooltip-driving arrays,
- *  so the changed-gate posts when their contents shift even if a derived
- *  headline total happens to be unchanged. */
-function dailyCostSig(d: AggregateDailyCost[]): string {
-  return d.map((x) => `${x.date}:${x.totalCost.toFixed(6)}`).join(',');
-}
-
-function dailyRunCountSig(d: AggregateDailyRunCount[]): string {
-  return d.map((x) => `${x.date}:${x.runCount}`).join(',');
-}
-
-function providerCostSig(p: AggregateProviderCost[]): string {
-  return p.map((x) => `${x.provider}:${x.cost.toFixed(6)}`).join(',');
-}
-
-function throughputSig(p: AggregateProviderThroughput[]): string {
-  return p.map((x) => `${x.provider}:${x.tokensPerSecond.toFixed(3)}:${x.outputTokens}`).join(',');
-}
-
 /** Sum of live tok/s across currently-running sessions, counting ONLY sessions
  *  that are actively generating. A paused session's held rate is excluded so a
  *  long tool call does not inflate the aggregate — the same predicate as the
- *  live-rate loop in {@link computeAggregateStats}. The param is widened to
+ *  live-rate loop in {@link finalizeAggregateStats}. The param is widened to
  *  {@link TokenRateIndicatorState} (from `TokenRateService.getRates()`) so the
  *  `state` field is available to filter on. Exported for unit testing. */
 export function sumLiveRate(
@@ -328,7 +367,7 @@ export function sumLiveRate(
   ratesBySession: Record<string, TokenRateIndicatorState>,
 ): number {
   let sum = 0;
-  for (const sessionPath of runningSessionPaths) {
+  for (const sessionPath of new Set(runningSessionPaths)) {
     const state = ratesBySession[sessionPath];
     if (
       state
@@ -343,118 +382,51 @@ export function sumLiveRate(
   return sum;
 }
 
-/**
- * Shallow equality for the "changed?" gate. Compares the fields a user would
- * perceive as different (recent + current + all-time cost/tokens/counts,
- * live rate, per-provider arrays by content). Per-provider arrays are compared
- * by length + first-entry provider/cost (cheap); a genuinely different
- * breakdown triggers a post.
- */
-function aggregateEqual(a: AggregateStats, b: AggregateStats): boolean {
-  if (a === b) return true;
-  if (
-    // Recent + current (the headline fields — most likely to change):
-    a.todayCost !== b.todayCost
-    || a.weekCost !== b.weekCost
-    || a.todayTokensPerSecond !== b.todayTokensPerSecond
-    || a.tokensPerSecond !== b.tokensPerSecond
-    || a.liveTokensPerSecond !== b.liveTokensPerSecond
-    || a.todayRunCount !== b.todayRunCount
-    || a.weekRunCount !== b.weekRunCount
-    || a.runningSessionCount !== b.runningSessionCount
-    || a.openTabCount !== b.openTabCount
-    // All-time context:
-    || a.totalCost !== b.totalCost
-    || a.totalInputTokens !== b.totalInputTokens
-    || a.totalOutputTokens !== b.totalOutputTokens
-    || a.totalCacheReadTokens !== b.totalCacheReadTokens
-    || a.totalCacheWriteTokens !== b.totalCacheWriteTokens
-    || a.runCount !== b.runCount
-    || a.sessionCount !== b.sessionCount
-    || a.todayRunCount !== b.todayRunCount
-    || a.todayInputTokens !== b.todayInputTokens
-    || a.todayOutputTokens !== b.todayOutputTokens
-    || a.todayToolCallCount !== b.todayToolCallCount
-    || a.todayTouchedFileCount !== b.todayTouchedFileCount
-    || a.ready !== b.ready
-    // Warm-bash live metrics (ready/warming flaps + exec counters are
-    // perceptible changes worth a post).
-    || a.warmBash.enabled !== b.warmBash.enabled
-    || a.warmBash.poolSize !== b.warmBash.poolSize
-    || a.warmBash.ready !== b.warmBash.ready
-    || a.warmBash.warming !== b.warmBash.warming
-    || a.warmBash.fastPathEnabled !== b.warmBash.fastPathEnabled
-    || a.warmBash.totalFastPath !== b.warmBash.totalFastPath
-    || a.warmBash.totalWarm !== b.warmBash.totalWarm
-    || a.warmBash.totalFallback !== b.warmBash.totalFallback
-    || a.warmBash.totalWarmupFailures !== b.warmBash.totalWarmupFailures
-    // Provider-gate live metrics (active/queued flaps + pause state changes
-    // are perceptible changes worth a post).
-    || a.providerGate.enabled !== b.providerGate.enabled
-    || a.providerGate.providers.length !== b.providerGate.providers.length
-  ) {
+/** Complete structural equality for protocol aggregates and accumulator caches. */
+export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boolean {
+  return deepEqualValue(a, b);
+}
+
+function deepEqualValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+
+  if (a instanceof Map && b instanceof Map) {
+    if (a.size !== b.size) return false;
+    for (const [key, value] of a) {
+      if (!b.has(key) || !deepEqualValue(value, b.get(key))) return false;
+    }
+    return true;
+  }
+  if (a instanceof Set && b instanceof Set) {
+    if (a.size !== b.size) return false;
+    for (const value of a) if (!b.has(value)) return false;
+    return true;
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      if (!deepEqualValue(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) || Array.isArray(b)) {
     return false;
   }
-  // Provider-gate per-provider metrics (active/queued/max + afterburn + pause).
-  for (let i = 0; i < a.providerGate.providers.length; i += 1) {
-    const x = a.providerGate.providers[i]!;
-    const y = b.providerGate.providers[i]!;
-    if (
-      x.provider !== y.provider
-      || x.activeRequests !== y.activeRequests
-      || x.queuedRequests !== y.queuedRequests
-      || x.maxConcurrentRequests !== y.maxConcurrentRequests
-      || x.afterburnSeconds !== y.afterburnSeconds
-      || x.queueWaitSeconds !== y.queueWaitSeconds
-      || x.paused !== y.paused
-      || x.pausedUntilMs !== y.pausedUntilMs
-      || x.strikeCount !== y.strikeCount
-    ) {
-      return false;
-    }
-  }
-  // Per-provider cost lists (today + all-time) by length + first entries.
-  if (a.costByProvider.length !== b.costByProvider.length) return false;
-  for (let i = 0; i < a.costByProvider.length; i += 1) {
-    const x = a.costByProvider[i]!;
-    const y = b.costByProvider[i]!;
-    if (x.provider !== y.provider || x.cost !== y.cost) return false;
-  }
-  if (a.todayCostByProvider.length !== b.todayCostByProvider.length) return false;
-  for (let i = 0; i < a.todayCostByProvider.length; i += 1) {
-    const x = a.todayCostByProvider[i]!;
-    const y = b.todayCostByProvider[i]!;
-    if (x.provider !== y.provider || x.cost !== y.cost) return false;
-  }
-  // Intraday series (today cost/tokens/throughput) + daily run count. A
-  // zero-cost turn (free model) grows the token/throughput series without
-  // moving todayCost, so compare a compact signature (length + last point).
-  if (seriesSignature(a.todayCostSeries) !== seriesSignature(b.todayCostSeries)) return false;
-  if (seriesSignature(a.todayTokenSeries) !== seriesSignature(b.todayTokenSeries)) return false;
-  if (seriesSignature(a.todayThroughputSeries) !== seriesSignature(b.todayThroughputSeries)) return false;
-  // Daily series + per-provider breakdowns that drive tooltip graphs. Compare
-  // compact content signatures (not just length) so a run landing on an
-  // existing day / a per-provider token shift posts even when the headline
-  // totals they derive from happen to be unchanged.
-  if (dailyCostSig(a.dailyCost) !== dailyCostSig(b.dailyCost)) return false;
-  if (dailyRunCountSig(a.dailyRunCount) !== dailyRunCountSig(b.dailyRunCount)) return false;
-  if (providerCostSig(a.weekCostByProvider) !== providerCostSig(b.weekCostByProvider)) return false;
-  if (throughputSig(a.todayTokensPerSecondByProvider) !== throughputSig(b.todayTokensPerSecondByProvider)) return false;
-  if (throughputSig(a.tokensPerSecondByProvider) !== throughputSig(b.tokensPerSecondByProvider)) return false;
-  // Last run: compare by identity + cost + endedAt (a different most-recent run
-  // is a perceptible change worth a post).
-  const la = a.lastRun;
-  const lb = b.lastRun;
-  if ((la === null) !== (lb === null)) return false;
-  if (la && lb) {
-    if (la.cost !== lb.cost
-      || la.durationMs !== lb.durationMs
-      || la.modelId !== lb.modelId
-      || la.endedAt !== lb.endedAt
-      || la.outcome?.satisfaction !== lb.outcome?.satisfaction
-      || la.turnSeries.length !== lb.turnSeries.length) {
-      return false;
-    }
+
+  const aRecord = a as Record<string, unknown>;
+  const bRecord = b as Record<string, unknown>;
+  const aKeys = Object.keys(aRecord);
+  const bKeys = Object.keys(bRecord);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(bRecord, key)
+      || !deepEqualValue(aRecord[key], bRecord[key])) return false;
   }
   return true;
+}
+
+function localDateString(ms: number): string {
+  const date = new Date(ms);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }

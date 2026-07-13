@@ -69,7 +69,7 @@ test('EffectRunner routes InterruptRpc through enqueueLifecycle → enqueueSessi
   assert.equal(events[0]?.ok, true);
 });
 
-test('EffectRunner CreateSession bypasses unrelated lifecycle work and dispatches CreateSessionResult{ok:true}', async () => {
+test('EffectRunner CreateSession runs on the lifecycle queue and dispatches CreateSessionResult{ok:true}', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
 
@@ -85,11 +85,10 @@ test('EffectRunner CreateSession bypasses unrelated lifecycle work and dispatche
 
   // The reducer already did the optimistic tab setup; the service already
   // minted the selection token (before the reducer activated the pending tab).
-  // A fresh session has no ordering dependency on existing-session work, so
-  // the request bypasses the global lifecycle queue and carries the token.
-  assert.equal(calls.some((c) => c.kind === 'lifecycle'), false);
+  // The request is serialized with other session lifecycle work and carries
+  // the pre-minted selection token.
+  assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.create', params: { cwd: '/w', selectionToken: 'tok-1' } });
-  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'CreateSessionResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.sessionPath, '/__pending__:new');
@@ -127,7 +126,6 @@ test('EffectRunner OpenSession issues session.open (with the pre-minted token) o
   // lifecycle queue, carrying that token — mirroring CreateSession.
   assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.open', params: { sessionPath: '/existing', selectionToken: 'tok', transcript: 'tail' } });
-  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'OpenSessionResult');
   assert.equal(events[0]?.ok, true);
   assert.equal(events[0]?.sessionPath, '/existing');
@@ -182,7 +180,6 @@ test('EffectRunner DuplicateSession issues session.duplicate (with the SOURCE pa
   // pending copy path) + the token — mirroring CreateSession/OpenSession.
   assert.equal(calls.some((c) => c.kind === 'lifecycle'), true);
   assert.deepEqual(calls.find((c) => c.kind === 'request'), { kind: 'request', method: 'session.duplicate', params: { sessionPath: '/src', selectionToken: 'tok-d' } });
-  assert.equal(calls.some((c) => c.kind === 'applySessionOpened'), true);
   assert.equal(events[0]?.kind, 'DuplicateSessionResult');
   assert.equal(events[0]?.ok, true);
   // The pending COPY path is echoed back on the result (not the source path).
@@ -312,7 +309,7 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
     kind: 'SetModelRpc',
     corrId: 'sm1',
     sessionPath: '/s',
-    modelSettings: { defaultModel: 'image-model', defaultThinkingLevel: 'medium' },
+    modelSettings: { defaultModel: 'image-model', defaultProvider: 'image-provider', defaultThinkingLevel: 'medium' },
   });
   await settle();
 
@@ -324,7 +321,7 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
   // service path), then the backend write.
   assert.equal(callsSansEffectDispatch[0]?.kind, 'lifecycle');
   const req = callsSansEffectDispatch.find((c) => c.kind === 'request');
-  assert.deepEqual(req, { kind: 'request', method: 'settings.set', params: { sessionPath: '/s', defaultModel: 'image-model', defaultThinkingLevel: 'medium' } });
+  assert.deepEqual(req, { kind: 'request', method: 'settings.set', params: { sessionPath: '/s', defaultModel: 'image-model', defaultProvider: 'image-provider', defaultThinkingLevel: 'medium' } });
   // Effect-side concerns (host-local epoch + disk-persisting analytics).
   assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'bumpEpoch'), { kind: 'bumpEpoch', sessionPath: '/s' });
   assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'onModelConfigChanged'), { kind: 'onModelConfigChanged', sessionPath: '/s', modelId: 'image-model', thinkingLevel: 'medium' });
@@ -509,17 +506,16 @@ test('EffectRunner SendRpc keeps the send-timer armed after early-ack (cleared a
   runner.dispose();
 });
 
-test('EffectRunner SendRpc passes the sessionPath to getSendTimerTimeoutMs so the budget can be sized per-provider (FP-C3)', async () => {
-  // FP-C3: the send-timer budget getter now receives the sessionPath so the
-  // production wiring can add the real per-provider queueWaitSeconds as
-  // headroom. Verify the runner forwards the sessionPath (the getter is the
-  // only seam; the extension-host's resolveQueueWaitHeadroomMs reads it).
+test('EffectRunner SendRpc calls getSendTimerTimeoutMs() with no argument for the dynamic send-timer budget', async () => {
+  // The production wiring derives the budget from the current
+  // prepassTimeoutSec + first-token headroom. Verify the runner calls the
+  // getter with no argument (the getter is the only seam).
   const timers = new FakeTimerSink();
-  let capturedSessionPath: string | undefined;
+  let getterCalled = false;
   const { deps } = makeEffectRunnerDeps({
     requestImpl: () => Promise.resolve({ requestId: 'req-fp3' }),
-    getSendTimerTimeoutMs: (sessionPath: string) => {
-      capturedSessionPath = sessionPath;
+    getSendTimerTimeoutMs: () => {
+      getterCalled = true;
       return 60_000;
     },
     timer: timers,
@@ -529,7 +525,7 @@ test('EffectRunner SendRpc passes the sessionPath to getSendTimerTimeoutMs so th
   runner.run({ kind: 'SendRpc', corrId: 'c-fp3', sessionPath: '/fp3-session', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-fp3' });
   await settle();
 
-  assert.equal(capturedSessionPath, '/fp3-session', 'getSendTimerTimeoutMs received the send sessionPath');
+  assert.equal(getterCalled, true, 'getSendTimerTimeoutMs was called');
   runner.dispose();
 });
 
@@ -594,90 +590,6 @@ test('EffectRunner SendRpc send-timer budget honors getSendTimerTimeoutMs (prepa
     // prepass-aware budget governs the timer + the error message.
     assert.match(pf.error, /210s/);
     assert.ok(!/120s/.test(pf.error));
-  }
-  runner.dispose();
-});
-
-test('EffectRunner ReArmSendTimer re-arms the send-timer with the model-start budget (fire blames model-start, not pruning)', async () => {
-  // Pruning succeeds → the reducer emits ReArmSendTimer. The send-timer (armed
-  // with the tight prepass budget at send-dispatch) is cancelled and re-armed
-  // with the generous model-start budget. A later fire carries the model-start
-  // error string so the notice blames model-start (concurrency/rate-limit),
-  // NOT pruning — pruning already finished.
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-ms' }),
-    sendTimerTimeoutMs: 50_000, // tight prepass budget (50s)
-    modelStartTimerTimeoutMs: 90_000, // generous model-start budget (90s; small for test)
-    timer: timers,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-ms', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-ms' });
-  await settle();
-  assert.equal(timers.size, 1, 'prepass send-timer armed after early-ack');
-
-  // Pruning succeeds → reducer would emit ReArmSendTimer; drive it directly.
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-ms' });
-  assert.equal(timers.size, 1, 're-armed: old prepass timer cancelled, new model-start timer scheduled');
-
-  // Fire the (re-armed) model-start timer.
-  timers.runAll();
-  const pf = dispatchedEvents[0];
-  assert.equal(pf?.kind, 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    // model-start error string (NOT the prepass/turn string) → notice blames
-    // model-start, not pruning.
-    assert.match(pf.error, /Timed out waiting for the model to start streaming/);
-    assert.ok(!/Timed out waiting for the turn to start streaming/.test(pf.error), 'not the prepass-timeout string');
-    assert.match(pf.error, /90s/, 'model-start budget (90s), not the 50s prepass budget');
-  }
-  runner.dispose();
-});
-
-test('EffectRunner ReArmSendTimer is a no-op when no in-flight send exists (late re-arm after commit/fire)', () => {
-  const timers = new FakeTimerSink();
-  const { deps } = makeEffectRunnerDeps({ timer: timers });
-  const runner = new EffectRunner(deps);
-  // No send was dispatched → no in-flight entry. ReArmSendTimer must not throw
-  // and must not schedule a timer.
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-none' });
-  assert.equal(timers.size, 0);
-  runner.dispose();
-});
-
-test('EffectRunner ReArmSendTimer also covers the EDIT path (edit waiting for a slot does not false-positive as pruning)', async () => {
-  // An edit arms the same post-ack send-timer (phase 'prepass'). When pruning
-  // succeeds the reducer re-arms it with the model-start budget, so an edit
-  // waiting for a concurrency slot does not trip a spurious prepass-timeout
-  // ("Pruning took too long") either. The fire carries the model-start string;
-  // the mapper then classifies it as edit-failed (opKind 'edit').
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-edit-ms' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-  });
-  const runner = new EffectRunner(deps);
-
-  runner.run({ kind: 'EditRpc', corrId: 'c-edit-ms', sessionPath: '/a', messageId: 'msg-1', text: 'edited', inputs: [], localId: 'loc-edit-ms' });
-  await settle();
-  assert.equal(timers.size, 1, 'edit send-timer armed after early-ack');
-
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-edit-ms' });
-  assert.equal(timers.size, 1, 'edit re-armed with the model-start budget');
-
-  timers.runAll();
-  const pf = dispatchedEvents[0];
-  assert.equal(pf?.kind, 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    assert.match(pf.error, /Timed out waiting for the model to start streaming/);
-    assert.match(pf.error, /90s/);
   }
   runner.dispose();
 });
@@ -990,417 +902,4 @@ test('EffectRunner SendRpc does NOT touch pruning for a normal send (no priorPru
   timers.runAll();
   assert.equal(pruningCalls.length, 0, 'a normal send (no priorPruningMode) never restores pruning');
   runner.dispose();
-});
-
-// ─── FP-C2a: model-start send-timer metric-gated re-arm (false-positive guard) ──
-// The model-start send-timer's clock starts at issue time, BEFORE the request
-// acquires its ProviderGate concurrency slot. When the in-flight request's
-// provider is legitimately QUEUED (`queuedRequests>0`) or PAUSED (circuit
-// breaker), firing now would be a FALSE-POSITIVE PreflightFailed that rolls
-// back the user's message even though the turn would succeed once a slot frees
-// up. `onSendTimerFire`'s modelStart branch calls `shouldReArmModelStartTimer`
-// which re-arms instead of firing, up to `MODEL_START_HARD_CEILING_MS` (a
-// genuinely-stuck backstop). FAIL-OPEN: any missing dep/metric/provider, a
-// non-queued/non-paused provider, or an elapsed ceiling falls through to fire.
-// The gate is scoped to the modelStart phase ONLY — the prepass phase is NOT
-// gated (a prepass fire is a genuine pruning timeout, not a queue wait).
-
-// `MODEL_START_HARD_CEILING_MS` is a private static on EffectRunner, derived
-// from the (also private) `MODEL_START_TIMER_TIMEOUT_MS = 600_000` static
-// default — NOT from the injected `modelStartTimerTimeoutMs` override. Mirrored
-// here as a local so the ceiling test advances the clock past it; if the
-// source constant changes this must change in lock-step (lock-in intent).
-const MODEL_START_HARD_CEILING_MS = 600_000 * 2; // = EffectRunner.MODEL_START_HARD_CEILING_MS
-
-test('EffectRunner modelStart send-timer RE-ARMS when the provider has queuedRequests>0 and elapsed < ceiling (no false-positive PreflightFailed)', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-q' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-q', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-q' });
-  await settle();
-  // Pruning prepass succeeds → reducer emits ReArmSendTimer → modelStart phase.
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-q' });
-  assert.equal(timers.size, 1, 'model-start timer armed after re-arm');
-
-  // Fire the model-start timer: provider is queued + elapsed ~0 < ceiling →
-  // RE-ARM (extend) instead of firing a false-positive PreflightFailed.
-  timers.runAll();
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 0, 'no false-positive PreflightFailed while the provider is legitimately queued');
-  assert.equal(timers.size, 1, 'timer re-armed (a fresh model-start timer scheduled)');
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer RE-ARMS when the provider is paused (circuit breaker) and elapsed < ceiling', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-pause' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 0, paused: true }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-pause', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-pause' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-pause' });
-
-  timers.runAll();
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 0, 'no false-positive PreflightFailed while the provider is paused (circuit breaker)');
-  assert.equal(timers.size, 1, 'timer re-armed (provider paused → defer)');
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer FIRES (PreflightFailed) when the provider has a free slot (not queued, not paused) — genuinely stuck, not a queue wait', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-free' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 0, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-free', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-free' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-free' });
-
-  timers.runAll();
-
-  // Free slot → the wait is NOT a queue wait → the turn is genuinely stuck →
-  // fire (don't mask a real hang behind a phantom queue).
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fires when the provider is neither queued nor paused');
-  assert.equal(timers.size, 0, 'no re-arm (fired, existing behavior)');
-  const pf = dispatchedEvents.find((e) => e.kind === 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    assert.equal(pf.corrId, 'c-free');
-    assert.match(pf.error, /Timed out waiting for the model to start streaming/);
-  }
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer FAIL-OPEN: fires when getProviderGateMetrics is absent (never hangs on a missing gate)', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-nogate' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  // Neither gate accessor wired → fail-open (fire as today).
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-nogate', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-nogate' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-nogate' });
-
-  timers.runAll();
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fails open when the metrics accessor is absent');
-  assert.equal(timers.size, 0);
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer FAIL-OPEN: fires when resolveSessionProvider returns undefined (provider unresolvable)', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-noprovider' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    // Metrics say the provider is saturated, but the in-flight request's
-    // provider can't be resolved → can't match → fail-open.
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 5, paused: true }],
-    }),
-    resolveSessionProvider: () => undefined,
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-noprovider', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-noprovider' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-noprovider' });
-
-  timers.runAll();
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fails open when the provider cannot be resolved');
-  assert.equal(timers.size, 0);
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer FAIL-OPEN: fires when no matching provider is present in the metrics', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-nomatch' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    // The in-flight request routes to 'anthropic', but the metrics only know
-    // 'openai' → no matching entry → fail-open.
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 9, paused: true }],
-    }),
-    resolveSessionProvider: () => 'anthropic',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-nomatch', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-nomatch' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-nomatch' });
-
-  timers.runAll();
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fails open when no matching provider is present in the metrics');
-  assert.equal(timers.size, 0);
-  runner.dispose();
-});
-
-test('EffectRunner modelStart send-timer FIRES past the hard ceiling even when the provider is queued (genuinely-stuck backstop)', async () => {
-  // A queue that never drains (deadlock) must still fire after the cumulative
-  // ceiling — the metric-gated re-arm path cannot extend a genuinely-stuck
-  // turn indefinitely. `modelStartFirstArmedAt` is captured (once) at re-arm
-  // time, so we pin the clock there, then advance past the ceiling before
-  // firing.
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-stuck' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  const realNow = Date.now;
-  const base = 1_700_000_000_000; // a plausible epoch-ms
-  let now = base;
-  Date.now = () => now;
-  try {
-    runner.run({ kind: 'SendRpc', corrId: 'c-stuck', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-stuck' });
-    await settle();
-    // Re-arm captures modelStartFirstArmedAt = Date.now() = base.
-    runner.run({ kind: 'ReArmSendTimer', corrId: 'c-stuck' });
-
-    // Advance the wall clock PAST the hard ceiling (1_200_000 ms).
-    now = base + MODEL_START_HARD_CEILING_MS + 1;
-
-    timers.runAll(); // fire → ceiling exceeded → shouldReArmModelStartTimer returns false → FIRE
-
-    assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fires past the hard ceiling even when the provider is still queued');
-    assert.equal(timers.size, 0, 'no re-arm past the ceiling');
-    const pf = dispatchedEvents.find((e) => e.kind === 'PreflightFailed');
-    if (pf?.kind === 'PreflightFailed') {
-      assert.equal(pf.corrId, 'c-stuck');
-      assert.match(pf.error, /Timed out waiting for the model to start streaming/);
-    }
-  } finally {
-    Date.now = realNow;
-  }
-  runner.dispose();
-});
-
-test('EffectRunner send-timer provider-gate re-arm is scoped to the modelStart phase (prepass phase is NOT gated — always fires)', async () => {
-  // During the prepass phase (before ReArmSendTimer) the gate is NOT consulted
-  // even when the provider is queued/paused AND the gate accessor is wired: a
-  // prepass fire is a genuine pruning timeout, not a concurrency queue wait,
-  // so it fires (existing behavior). Proves the gate is a modelStart-phase
-  // concern only.
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-prepass' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: true }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-prepass', sessionPath: '/a', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-prepass' });
-  await settle();
-  // NO ReArmSendTimer → phase stays 'prepass' (the tight prepass budget).
-  assert.equal(timers.size, 1, 'prepass send-timer armed after early-ack');
-
-  timers.runAll(); // fire → phase !== 'modelStart' → gate check skipped → FIRE
-
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'PreflightFailed').length, 1, 'prepass phase is NOT gated by provider metrics — fires even when the provider is queued/paused');
-  assert.equal(timers.size, 0, 'no re-arm during the prepass phase');
-  const pf = dispatchedEvents.find((e) => e.kind === 'PreflightFailed');
-  if (pf?.kind === 'PreflightFailed') {
-    // Prepass-phase fire string (the turn-start string, NOT the model-start string).
-    assert.match(pf.error, /Timed out waiting for the turn to start streaming/);
-  }
-  runner.dispose();
-});
-
-// ─── FP-C4: non-blocking "still waiting for a slot" notice on modelStart re-arm ──
-// When a send's modelStart phase re-arms because the provider is saturated
-// (FP-C2a), the user has been waiting ~one model-start budget (~10min) with no
-// visible feedback. The EffectRunner dispatches a non-blocking
-// `WaitingForSlotShown` notice (once — guarded by `waitingForSlotShown`) so the
-// webview can surface an info chip INDEPENDENT of the error-notice triple. It
-// is cleared on commit (ClearSendTimer) or fire (PreflightFailed) via
-// `WaitingForSlotCleared`.
-
-test('EffectRunner modelStart re-arm dispatches WaitingForSlotShown once (non-blocking, independent of error-notice triple)', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-wait' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  runner.run({ kind: 'SendRpc', corrId: 'c-wait', sessionPath: '/wait', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-wait' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-wait' }); // pruning succeeds → modelStart phase
-  assert.equal(timers.size, 1, 'model-start timer armed');
-
-  // First re-arm (provider saturated): dispatch WaitingForSlotShown ONCE.
-  timers.runAll();
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
-  const shown = dispatchedEvents.find((e) => e.kind === 'WaitingForSlotShown');
-  if (shown?.kind === 'WaitingForSlotShown') {
-    assert.equal(shown.sessionPath, '/wait');
-    assert.match(shown.message, /Still waiting for a free model slot/i);
-  }
-  assert.equal(timers.size, 1, 're-armed for another cycle');
-
-  // Second re-arm: must NOT re-dispatch (guarded by waitingForSlotShown).
-  timers.runAll();
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1, 'dispatched once even across re-arms');
-  runner.dispose();
-});
-
-test('EffectRunner clears WaitingForSlotShown on commit (ClearSendTimer) and on fire (PreflightFailed)', async () => {
-  const timers = new FakeTimerSink();
-  const dispatchedEvents: Event[] = [];
-  const { deps } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-clear' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers,
-  });
-  const runner = new EffectRunner({
-    ...deps,
-    dispatchEvent: (e) => dispatchedEvents.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-
-  // --- Commit path: clear on MessageStarted ---
-  runner.run({ kind: 'SendRpc', corrId: 'c-commit', sessionPath: '/commit', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-commit' });
-  await settle();
-  runner.run({ kind: 'ReArmSendTimer', corrId: 'c-commit' });
-  timers.runAll(); // re-arm → WaitingForSlotShown
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
-
-  // Commit (ClearSendTimer) → WaitingForSlotCleared.
-  runner.run({ kind: 'ClearSendTimer', corrId: 'c-commit' });
-  assert.equal(dispatchedEvents.filter((e) => e.kind === 'WaitingForSlotCleared').length, 1);
-  runner.dispose();
-
-  // --- Fire path: clear on PreflightFailed ---
-  const timers2 = new FakeTimerSink();
-  const dispatched2: Event[] = [];
-  const { deps: deps2 } = makeEffectRunnerDeps({
-    requestImpl: () => Promise.resolve({ requestId: 'req-fire' }),
-    sendTimerTimeoutMs: 50_000,
-    modelStartTimerTimeoutMs: 90_000,
-    timer: timers2,
-  });
-  const runner2 = new EffectRunner({
-    ...deps2,
-    dispatchEvent: (e) => dispatched2.push(e),
-    getProviderGateMetrics: () => ({
-      providers: [{ provider: 'openai', queuedRequests: 1, paused: false }],
-    }),
-    resolveSessionProvider: () => 'openai',
-  });
-  runner2.run({ kind: 'SendRpc', corrId: 'c-fire', sessionPath: '/fire', text: 'hi', inputs: [], composedText: 'hi', localId: 'loc-fire' });
-  await settle();
-  runner2.run({ kind: 'ReArmSendTimer', corrId: 'c-fire' });
-  timers2.runAll(); // re-arm → WaitingForSlotShown
-  assert.equal(dispatched2.filter((e) => e.kind === 'WaitingForSlotShown').length, 1);
-
-  // Advance past the hard ceiling so the next fire is a genuine FIRE (not re-arm).
-  const realNow = Date.now;
-  const base = Date.now();
-  const now = base + MODEL_START_HARD_CEILING_MS + 1;
-  Date.now = () => now;
-  try {
-    timers2.runAll(); // fire → PreflightFailed + WaitingForSlotCleared
-  } finally {
-    Date.now = realNow;
-  }
-  assert.equal(dispatched2.filter((e) => e.kind === 'PreflightFailed').length, 1, 'fired past ceiling');
-  assert.equal(dispatched2.filter((e) => e.kind === 'WaitingForSlotCleared').length, 1, 'cleared on fire');
-  runner2.dispose();
 });

@@ -34,10 +34,6 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
   assert.match(html, /toolbar-settings-ext-settings/);
   assert.match(html, /Always use parent model</);
 
-  // Preview control for collapsed subagent cards.
-  assert.match(html, /Collapsed preview rows</);
-  assert.match(html, /Rows reserved for live streaming output/);
-
   // Model buckets group + all three bucket labels + hints.
   assert.match(html, /Model buckets</);
   assert.match(html, /Haiku-class busywork</);

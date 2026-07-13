@@ -21,7 +21,6 @@ import type {
   PruningCatalog,
   PruningDetails,
   PruningResult,
-  QueuedDwellEntry,
   RetryStatus,
   SessionSummary,
   SystemPromptEntry,
@@ -49,7 +48,6 @@ const EMPTY_AVAILABLE_MODELS: ModelInfo[] = [];
 const EMPTY_COMPOSER_INPUTS: ComposerInput[] = [];
 const EMPTY_FILE_CHANGES: FileChangeEntry[] = [];
 const EMPTY_READ_PATHS: string[] = [];
-const EMPTY_QUEUED_DWELL: QueuedDwellEntry[] = [];
 const EMPTY_PRUNING_CATALOG: PruningCatalog = { skills: [], tools: [] };
 const EMPTY_DEFERRED_TRIGGERS: readonly DeferredTriggerView[] = [];
 
@@ -220,9 +218,6 @@ interface ProjectionSignature {
   // exactly this), so the inputs are wired in explicitly.
   activePromotedOp: PendingOp | null;
   activePrepassPhase: PrepassPhaseState | null;
-  /** Handoff §F: active session's queued-message dwell list. Wired into the
-   *  signature so a watchdog fire or re-arm reposts the view. */
-  activeQueuedDwell: QueuedDwellEntry[];
 }
 
 function computeProjectionSignature(state: ArchState): ProjectionSignature {
@@ -255,9 +250,6 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
     activePrepassPhase: activePath
       ? state.pending.prepassBySession[activePath] ?? null
       : null,
-    activeQueuedDwell: activePath
-      ? state.pending.queuedDwellBySession[activePath] ?? EMPTY_QUEUED_DWELL
-      : EMPTY_QUEUED_DWELL,
   };
 }
 
@@ -274,8 +266,7 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
     a.activeSystemPrompts === b.activeSystemPrompts &&
     a.activeEditingMessageId === b.activeEditingMessageId &&
     a.activePromotedOp === b.activePromotedOp &&
-    a.activePrepassPhase === b.activePrepassPhase &&
-    a.activeQueuedDwell === b.activeQueuedDwell
+    a.activePrepassPhase === b.activePrepassPhase
   );
 }
 
@@ -384,16 +375,6 @@ function projectViewState(state: ArchState): ViewState {
   const retryStatus: RetryStatus | null =
     activePath ? sessions.retryStatusBySession[activePath] ?? null : null;
 
-  // FP-C4: non-blocking "still waiting for a concurrency slot" notice for the
-  // active session. Independent of the error-notice triple.
-  const waitingForSlot: string | null =
-    activePath ? sessions.waitingForSlotBySession[activePath] ?? null : null;
-
-  // ── Queued-message dwell projection (handoff §F) ──
-  const queuedDwell: QueuedDwellEntry[] = activePath
-    ? state.pending.queuedDwellBySession[activePath] ?? EMPTY_QUEUED_DWELL
-    : EMPTY_QUEUED_DWELL;
-
   // ── Pruning projection ──
   const pruningResult = selectActivePruningResult(state);
   const pruningCatalog = selectActivePruningCatalog(activePath, sessions.analyticsFactorsBySession);
@@ -432,7 +413,6 @@ function projectViewState(state: ArchState): ViewState {
     draftText: activeDraftText,
     busy,
     retryStatus,
-    waitingForSlot,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
     noticeRaw: settings.noticeRaw,
@@ -457,7 +437,6 @@ function projectViewState(state: ArchState): ViewState {
     editingMessageId: activePath ? state.transcript.editingMessageIdBySession[activePath] ?? null : null,
     showOutcomeDialog: activePath ? state.settings.showOutcomeDialogBySession[activePath] ?? false : false,
     pendingExtensionUIRequestsBySession: settings.pendingExtensionUIRequestsBySession,
-    queuedDwell,
     pendingExtensionUIRequest: activePath
       ? (() => {
           const sessionMap = settings.pendingExtensionUIRequestsBySession[activePath];

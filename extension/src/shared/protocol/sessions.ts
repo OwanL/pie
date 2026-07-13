@@ -344,40 +344,6 @@ export interface RetryStatus {
   errorMessage: string;
 }
 
-/** Per-queued-message dwell + watchdog state (handoff §F: queued-message
- *  liveness). One entry per optimistic 'queued' steering/followUp message,
- *  tracked from send time until delivery/clear/interrupt/restart. The host
- *  records `enqueuedAt` (pure, from the Send command timestamp) so the webview
- *  can show elapsed wait; the watchdog marks an entry actionable when the hard
- *  dwell threshold elapses; a backend restart marks it abandoned. Queued
- *  messages are never silently discarded or left immortal: every entry reaches
- *  a terminal signal (delivered / cleared / interrupted / watchdog-fired /
- *  abandoned) that clears it.
- *
- *  Do not auto-interrupt healthy tools just because a user queued a follow-up:
- *  the watchdog only marks the entry actionable (surfaced as Stop / Remove
- *  affordances via the existing Interrupt / ClearQueue commands); it does NOT
- *  interrupt the in-flight turn. */
-export interface QueuedDwellEntry {
-  /** The optimistic transcript message ID this entry tracks. */
-  localId: string;
-  /** Enqueue time (ms epoch) — PURE, captured from the Send command's
-   *  `timestamp` at the reducer (not a reducer wall-clock read), so dwell is
-   *  deterministic and testable without real timers. */
-  enqueuedAt: number;
-  /** True once the dwell watchdog fired (hard threshold reached). The entry is
-   *  now actionable: the webview surfaces Stop (Interrupt) / Remove (ClearQueue)
-   *  affordances. Cleared (with the whole entry) on delivery/clear/interrupt/
-   *  restart — never left set on an immortal message. */
-  watchdogFired: boolean;
-  /** True when the backend died (`SessionsInterrupted`) while this message was
-   *  queued. The SDK's in-memory steer/followUp queue is gone, so the message
-   *  can never be delivered. Terminal: the transcript message is also marked
-   *  `interrupted` (truthful persisted state — never immortal 'queued'), and the
-   *  only recovery is Remove (ClearQueue). */
-  abandoned: boolean;
-}
-
 /** Emitted by the backend when the SDK begins an auto-retry attempt (after a
  *  transient error), just before the exponential-backoff sleep. The webview
  *  surfaces this as a "Retrying N of M…" status chip with a Cancel button. */
@@ -435,11 +401,8 @@ export interface OperationalErrorPayload {
  *  complete within `delayMs + graceMs` (the provider may be down mid-backoff,
  *  or an extension hook blocked the retry). Fires alongside an
  *  `operational-error` (code `RETRY_STUCK`) which carries the user-facing
- *  message; this event carries the structured timing detail for diagnostic
- *  logging. The host dispatches a `RetryStuck` reducer event that emits a
- *  `Log` effect (visible in the pie OutputChannel) — it does NOT set a
- *  notice, since the companion `operational-error` already surfaced one for
- *  the same condition (avoiding a double-notify). */
+ *  message. The host relies on that companion event for reporting and does not
+ *  dispatch a second reducer event, avoiding duplicate notices. */
 export interface RetryStuckPayload {
   sessionPath: string;
   /** SDK-reported backoff delay (ms) the retry was sleeping. */

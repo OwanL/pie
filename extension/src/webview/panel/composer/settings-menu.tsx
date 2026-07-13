@@ -161,7 +161,7 @@ const SKILL_PRUNER_SETTING_LABELS = [
 ];
 const SUBAGENT_SETTING_LABELS = [
   'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
-  'Subagent collapsed preview rows', 'Subagent nesting levels',
+  'Subagent nesting levels',
   'Subagent tree session budget', 'Subagent max active trees',
   'Subagent max concurrency', 'Subagent max parallel tasks',
 ];

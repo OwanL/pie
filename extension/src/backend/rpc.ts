@@ -1,4 +1,4 @@
-import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, RuntimePrefsSetParams, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection } from '../shared/protocol';
+import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection, buildRuntimePrefsPayload } from '../shared/protocol';
 import { ALL_NESTED_BUCKETS_ALLOWED } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
@@ -440,6 +440,12 @@ function validateBooleanMap(
   }
   return out;
 }
+
+/** Wire shape of a `runtimePrefs.set` payload, derived from
+ *  {@link buildRuntimePrefsPayload} so the backend validator tracks the
+ *  producer. Local replacement for the former protocol-level
+ *  `RuntimePrefsSetParams` (now inlined on `buildRuntimePrefsPayload`). */
+type RuntimePrefsSetParams = ReturnType<typeof buildRuntimePrefsPayload>;
 
 /** Validate an optional `providerConcurrency` payload. Accepts `undefined`
  *  (omitted) or an object whose keys are provider names and values are objects

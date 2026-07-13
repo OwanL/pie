@@ -1004,14 +1004,9 @@ test('provider_gate.metrics returns live ProviderGate metrics when installed', a
       queuedRequests: 0,
       maxConcurrentRequests: 2,
       afterburnSeconds: 5,
-      queueWaitSeconds: 30,
       paused: false,
       pausedUntilMs: 0,
       strikeCount: 0,
-      breakerState: 'closed',
-      breakerOpenUntilMs: 0,
-      transientFailures: 0,
-      breakerProbeInFlight: false,
     }],
   });
 });

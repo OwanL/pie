@@ -49,7 +49,6 @@ function validState(): ViewState {
     fileChanges: [],
     readFilePaths: [],
     pendingComposerInputs: [],
-    queuedDwell: [],
   } as unknown as ViewState;
 }
 
@@ -77,7 +76,6 @@ const CRITICAL_FIELDS: Array<{ path: string; type: string }> = [
   { path: 'fileChanges', type: 'array' },
   { path: 'readFilePaths', type: 'array' },
   { path: 'pendingComposerInputs', type: 'array' },
-  { path: 'queuedDwell', type: 'array' },
 ];
 
 /** Set a nested dotted path on a shallow-cloned object tree to `value`. */

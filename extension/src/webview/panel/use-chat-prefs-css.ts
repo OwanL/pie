@@ -22,7 +22,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     expandedSectionFontSize,
     expandedSectionMaxHeight,
     activityTailLines,
-    subagentPreviewLines,
     uiFontSans,
     uiFontMono,
     uiAccentColor,
@@ -55,7 +54,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     root.setProperty('--expanded-font-size', `${expandedSectionFontSize}px`);
     root.setProperty('--expanded-section-max-height', `${expandedSectionMaxHeight}px`);
     root.setProperty('--activity-tail-content-min-height', `${activityTailLines * ACTIVITY_TAIL_ROW_HEIGHT_PX}px`);
-    root.setProperty('--subagent-preview-content-min-height', `${subagentPreviewLines * ACTIVITY_TAIL_ROW_HEIGHT_PX}px`);
     // Per-place font sizes: base body/message text and the composer input.
     root.setProperty('--panel-font-size', `${uiBaseFontSize}px`);
     root.setProperty('--panel-composer-font-size', `${uiComposerFontSize}px`);
@@ -166,7 +164,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     expandedSectionFontSize,
     expandedSectionMaxHeight,
     activityTailLines,
-    subagentPreviewLines,
     uiFontSans,
     uiFontMono,
     uiAccentColor,

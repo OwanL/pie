@@ -44,10 +44,8 @@ export const EMPTY_VIEW_STATE: ViewState = {
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
   deferredTriggers: [],
-  queuedDwell: [],
   busy: false,
   retryStatus: null,
-  waitingForSlot: null,
   notice: null,
   noticeKind: null,
   backendReady: false,
@@ -166,7 +164,6 @@ function useHydrateViewState() {
       toolResultPruningSettings,
       pruningCatalog,
       availableModels,
-      queuedDwell: raw.queuedDwell ?? [],
     };
   }, []);
 }

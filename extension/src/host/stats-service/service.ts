@@ -218,6 +218,13 @@ export class StatsService implements RunObserver {
     return this.tracker.getOpenRuns();
   }
 
+  /** Finalized snapshots waiting for their batched JSONL append. This is the
+   * completion bridge used by AggregateStatsService, preserving finalized
+   * status/outcome/timestamps rather than its last observed open snapshot. */
+  getPendingCompletedRuns(): RunSnapshot[] {
+    return this.storage.getPendingCompletedRuns();
+  }
+
   /** Query the completed-data cache source without forcing pending analytics
    * to flush. Intended for mtime-gated host rollups. */
   async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {

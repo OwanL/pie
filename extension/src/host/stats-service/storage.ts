@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 import { serializeJsonLine } from '../../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../../shared/error-message';
-import { atomicWriteText } from '../shared/atomic-write';
+import { atomicWriteText as atomicWriteTextImpl } from '../shared/atomic-write';
 import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
 import { workspaceHash } from './helpers';
@@ -18,6 +18,9 @@ import {
 } from '../run-analytics/query';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
+  coerceAgentReviewEntry,
+  coerceOutcomeHistoryLogEntry,
+  coerceRunSnapshot,
   type AgentReviewEntry,
   type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
@@ -35,14 +38,13 @@ interface RunAnalyticsStorageOptions {
   serializeSessions: () => Record<string, PersistedSessionRunState>;
   onPersistError?: (error: { message: string; at: string }) => void;
   /** Max lines retained per JSONL history file (`run-snapshots` /
-   *  `outcome-history` / `agent-reviews`). When a file exceeds
-   *  {@link pruneByteThreshold} it is trimmed to the most recent N lines.
-   *  `<= 0` disables pruning (unbounded growth). */
+   *  `outcome-history` / `agent-reviews`). `<= 0` disables line-based pruning. */
   maxRunHistoryEntries?: number;
-  /** File size (bytes) at which a JSONL history file is read and considered for
-   *  trimming to {@link maxRunHistoryEntries}. Gates the read+rewrite cost so
-   *  steady-state persists stay a single `stat`. */
-  pruneByteThreshold?: number;
+  /** Hard max UTF-8 bytes retained per JSONL history file. When either this
+   *  limit or {@link maxRunHistoryEntries} is exceeded, the file is rewritten to
+   *  keep the newest suffix that satisfies both limits. `<= 0` disables the
+   *  byte limit. */
+  maxRunHistoryBytes?: number;
   /** Minimum interval between automatic `run-analytics.json` refreshes. */
   autoExportIntervalMs?: number;
   /** Test seam for verifying append batching. */
@@ -53,6 +55,10 @@ interface RunAnalyticsStorageOptions {
   autoExportRetryMaxMs?: number;
   /** Test seam for verifying auto-export timer delays. */
   autoExportSetTimeout?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  /** Test seam for atomic rewrites during pruning. */
+  atomicWriteText?: (filePath: string, data: string) => Promise<void>;
+  /** Test seam for startup freshness metadata reads. */
+  stat?: typeof fs.stat;
 }
 
 export class RunAnalyticsStorage {
@@ -63,7 +69,9 @@ export class RunAnalyticsStorage {
   private readonly serializeSessions: () => Record<string, PersistedSessionRunState>;
   private readonly onPersistError?: (error: { message: string; at: string }) => void;
   private readonly maxRunHistoryEntries: number;
-  private readonly pruneByteThreshold: number;
+  private readonly maxRunHistoryBytes: number;
+  private readonly atomicWriteText: (filePath: string, data: string) => Promise<void>;
+  private readonly stat: typeof fs.stat;
   private readonly autoExportIntervalMs: number;
   private readonly appendFile: typeof fs.appendFile;
   private readonly autoExportRetryBaseMs: number;
@@ -129,7 +137,9 @@ export class RunAnalyticsStorage {
     this.serializeSessions = options.serializeSessions;
     this.onPersistError = options.onPersistError;
     this.maxRunHistoryEntries = options.maxRunHistoryEntries ?? 2000;
-    this.pruneByteThreshold = options.pruneByteThreshold ?? 5_000_000;
+    this.maxRunHistoryBytes = options.maxRunHistoryBytes ?? 5_000_000;
+    this.atomicWriteText = options.atomicWriteText ?? atomicWriteTextImpl;
+    this.stat = options.stat ?? fs.stat;
     this.autoExportIntervalMs = options.autoExportIntervalMs ?? 30_000;
     this.appendFile = options.appendFile ?? fs.appendFile;
     this.autoExportRetryBaseMs = options.autoExportRetryBaseMs ?? 1000;
@@ -144,9 +154,62 @@ export class RunAnalyticsStorage {
     await this.sweepStaleTempFiles();
     const checkpoint = await this.readCheckpoint();
     this.seq = checkpoint?.seq ?? 0;
-    await this.writeAutoExportSafely();
     this.lastAutoExportAtMs = this.now().getTime();
+    // Freshness metadata is advisory for a derived export. Never put its I/O on
+    // the startup critical path and never let a stat failure reject start().
+    void this.checkAutoExportFreshnessSafely();
     return checkpoint;
+  }
+
+  private async checkAutoExportFreshnessSafely(): Promise<void> {
+    try {
+      await this.checkAutoExportFreshness();
+    } catch (error) {
+      // Surface/log best-effort, then schedule the normal background export
+      // path. Rebuilding is a safe retry when freshness cannot be established.
+      this.recordPersistError(error);
+      this.markAutoExportDirty();
+    }
+  }
+
+  /** Compare the derived export mtime to canonical source mtimes. */
+  private async checkAutoExportFreshness(): Promise<void> {
+    let exportMtime: number | undefined;
+    try {
+      const exportStat = await this.stat(this.autoExportPath);
+      exportMtime = exportStat.mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    if (exportMtime === undefined) {
+      this.markAutoExportDirty();
+      return;
+    }
+
+    const sourceFiles = [
+      'run-snapshots.jsonl',
+      'outcome-history.jsonl',
+      'agent-reviews.jsonl',
+      'open-runs.gen',
+      'open-runs.a.json',
+      'open-runs.b.json',
+    ];
+    for (const fileName of sourceFiles) {
+      try {
+        const stat = await this.stat(path.join(this.storageDir, fileName));
+        if (stat.mtimeMs > exportMtime) {
+          this.markAutoExportDirty();
+          return;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+      }
+    }
   }
 
   schedulePersist(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
@@ -320,6 +383,11 @@ export class RunAnalyticsStorage {
     return await queryRunAnalyticsStore(this.storageDir);
   }
 
+  /** Finalized snapshots staged for append but not yet durably persisted. */
+  getPendingCompletedRuns(): RunSnapshot[] {
+    return [...this.pendingSnapshots.values()];
+  }
+
   async exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload> {
     await this.flush();
     const payload = await exportRunAnalyticsStore(this.storageDir, targetPath, this.now);
@@ -448,7 +516,7 @@ export class RunAnalyticsStorage {
 
     // Write to a temp file in the same directory then rename atomically, so a
     // crash mid-write cannot corrupt the JSONL (mirrors exportRunAnalyticsStore).
-    await atomicWriteText(targetPath, mergedRaw);
+    await this.atomicWriteText(targetPath, mergedRaw);
   }
 
   private async mergeCheckpointStates(legacyStorageDirs: string[]): Promise<void> {
@@ -651,47 +719,100 @@ export class RunAnalyticsStorage {
   }
 
   /** Bound on-disk growth of the append-only JSONL history files. When a file
-   *  exceeds {@link pruneByteThreshold} it is read and, if it holds more than
-   *  {@link maxRunHistoryEntries} lines, rewritten to keep only the most recent
-   *  N (atomic temp+rename). Pruning is rare (gated on byte size) so the steady
-   *  per-persist cost stays a single `stat`; a failed prune is surfaced as a
-   *  persistence error but remains non-fatal (the file stays oversized and the
-   *  next persist retries). */
+   *  exceeds {@link maxRunHistoryEntries} or {@link maxRunHistoryBytes}, it is
+   *  read and rewritten (atomic temp+rename) to keep the newest suffix that
+   *  satisfies both limits. The newest valid record is always retained, even if
+   *  it alone exceeds the byte limit. UTF-8 byte size is used instead of string
+   *  length. A failed prune is surfaced as a persistence error but remains
+   *  non-fatal; the original file is preserved because the rewrite is atomic. */
   private async pruneHistoryIfNeeded(): Promise<void> {
-    if (this.maxRunHistoryEntries <= 0) {
+    if (this.maxRunHistoryEntries <= 0 && this.maxRunHistoryBytes <= 0) {
       return;
     }
     await Promise.all(
       ['run-snapshots.jsonl', 'outcome-history.jsonl', 'agent-reviews.jsonl'].map(
-        (fileName) => this.pruneJsonlFile(fileName, this.maxRunHistoryEntries),
+        (fileName) => this.pruneJsonlFile(fileName),
       ),
     );
   }
 
-  private async pruneJsonlFile(fileName: string, maxEntries: number): Promise<void> {
+  private async pruneJsonlFile(fileName: string): Promise<void> {
     const filePath = path.join(this.storageDir, fileName);
-    let size: number;
+    let raw: string;
     try {
-      size = (await fs.stat(filePath)).size;
+      raw = await fs.readFile(filePath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return;
       }
       throw error;
     }
-    if (size < this.pruneByteThreshold) {
+
+    const allLines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+    if (allLines.length === 0) {
       return;
     }
-    const raw = await readOptionalText(filePath);
-    if (!raw) {
+
+    // Retention is defined over valid records. A malformed/truncated tail must
+    // not become the mandatory "newest" exception and evict valid history.
+    const lines = allLines.filter((line) => this.isValidHistoryRecord(fileName, line));
+    const lineTerminator = raw.includes('\r\n') ? '\r\n' : '\n';
+    const terminatorBytes = Buffer.byteLength(lineTerminator, 'utf8');
+    const lineBytes = lines.map((line) => Buffer.byteLength(line, 'utf8') + terminatorBytes);
+    const totalLines = lines.length;
+    const totalBytes = lineBytes.reduce((sum, bytes) => sum + bytes, 0);
+    const entryLimit = this.maxRunHistoryEntries > 0 ? this.maxRunHistoryEntries : Infinity;
+    const byteLimit = this.maxRunHistoryBytes > 0 ? this.maxRunHistoryBytes : Infinity;
+
+    if (allLines.length === lines.length && totalLines <= entryLimit && totalBytes <= byteLimit) {
       return;
     }
-    const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
-    if (lines.length <= maxEntries) {
+
+    // Walk newest-to-oldest to retain the largest suffix satisfying both limits.
+    let keptCount = 0;
+    let keptBytes = 0;
+    let start = lines.length;
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const bytes = lineBytes[i]!;
+      if (keptCount === 0) {
+        // Always retain the newest valid record, even if it alone exceeds the byte limit.
+        keptBytes = bytes;
+        keptCount = 1;
+        start = i;
+      } else if (keptCount + 1 <= entryLimit && keptBytes + bytes <= byteLimit) {
+        keptBytes += bytes;
+        keptCount += 1;
+        start = i;
+      } else {
+        break;
+      }
+    }
+
+    if (start === 0 && allLines.length === lines.length) {
       return;
     }
-    const kept = lines.slice(lines.length - maxEntries);
-    await atomicWriteText(filePath, `${kept.join('\n')}\n`);
+
+    const kept = lines.slice(start);
+    await this.atomicWriteText(filePath, kept.length > 0 ? `${kept.join(lineTerminator)}${lineTerminator}` : '');
+  }
+
+  private isValidHistoryRecord(fileName: string, line: string): boolean {
+    try {
+      const parsed = parseJsonOrThrow<unknown>(line, `${fileName} record`);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+      if (fileName === 'run-snapshots.jsonl') {
+        const entry = parsed as { kind?: unknown; run?: unknown };
+        // Match queryRunAnalyticsStore exactly: the envelope kind gates the
+        // record and the canonical snapshot coercer validates/coerces its run.
+        return entry.kind === 'run_snapshot' && coerceRunSnapshot(entry.run) !== null;
+      }
+      if (fileName === 'outcome-history.jsonl') {
+        return coerceOutcomeHistoryLogEntry(parsed) !== null;
+      }
+      return coerceAgentReviewEntry(parsed) !== null;
+    } catch {
+      return false;
+    }
   }
 
   private markAutoExportDirty(): void {

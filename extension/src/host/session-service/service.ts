@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, SessionOpenedPayload } from '../../shared/protocol';
+import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -181,14 +181,6 @@ export class SessionService implements vscode.Disposable {
    *  the optimistic tab setup. */
   handleSelectionFailure(selectionToken: string, notice: string): void {
     this.state.handleSelectionFailure(selectionToken, notice);
-  }
-
-  /** Apply the authoritative lifecycle RPC result immediately. The backend
-   * also emits `session.opened`; that later duplicate is intentionally safe
-   * and acts as a refresh, while this response-path application completes the
-   * selection even when stream events are backlogged on stdout. */
-  applySessionOpened(payload: SessionOpenedPayload): void {
-    this.events.applySessionOpened(payload);
   }
 
   getOpenTranscriptMode(sessionPath: string): TranscriptMode {

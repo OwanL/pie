@@ -53,6 +53,18 @@
           }
         },
         {
+          "id": "qwen2.5:7b-instruct",
+          "name": "Ollama Local: Qwen 2.5 7B Instruct (8K ctx)",
+          "contextWindow": 8192,
+          "maxTokens": 512,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
           "id": "deepseek-v4-flash:cloud",
           "name": "Ollama Cloud: DeepSeek V4 Flash",
           "reasoning": true,
