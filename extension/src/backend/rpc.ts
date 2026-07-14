@@ -441,6 +441,16 @@ function validateBooleanMap(
   return out;
 }
 
+function validateNestedBooleanMap(method: string, fieldName: string, raw: unknown): Record<string, Record<string, boolean>> {
+  if (raw === undefined) return {};
+  if (!isObj(raw) || Array.isArray(raw)) fail(method, `${fieldName} must be an object when provided`);
+  const out: Record<string, Record<string, boolean>> = {};
+  for (const [sessionPath, value] of Object.entries(raw)) {
+    out[sessionPath] = validateBooleanMap(method, `${fieldName}[${JSON.stringify(sessionPath)}]`, value);
+  }
+  return out;
+}
+
 /** Wire shape of a `runtimePrefs.set` payload, derived from
  *  {@link buildRuntimePrefsPayload} so the backend validator tracks the
  *  producer. Local replacement for the former protocol-level
@@ -514,9 +524,20 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
     'extensionToggles',
     (params as Record<string, unknown>)['extensionToggles'],
   );
+  const rawSubagentProviderDefaults = (params as Record<string, unknown>)['subagentProviderDefaults'];
+  const subagentProviderDefaults = rawSubagentProviderDefaults === undefined
+    ? undefined
+    : validateBooleanMap('runtimePrefs.set', 'subagentProviderDefaults', rawSubagentProviderDefaults);
+  const rawSubagentProviderToggles = (params as Record<string, unknown>)['subagentProviderTogglesBySession'];
+  const subagentProviderTogglesBySession = rawSubagentProviderToggles === undefined
+    ? undefined
+    : validateNestedBooleanMap('runtimePrefs.set', 'subagentProviderTogglesBySession', rawSubagentProviderToggles);
   const rawAlwaysParent = (params as Record<string, unknown>)['subagentAlwaysParentModel'];
   const subagentAlwaysParentModel =
     rawAlwaysParent === undefined ? undefined : typeof rawAlwaysParent === 'boolean' ? rawAlwaysParent : fail('runtimePrefs.set', 'subagentAlwaysParentModel must be a boolean when provided');
+  const rawRouteAroundSaturated = (params as Record<string, unknown>)['subagentRouteAroundSaturatedProviders'];
+  const subagentRouteAroundSaturatedProviders =
+    rawRouteAroundSaturated === undefined ? undefined : typeof rawRouteAroundSaturated === 'boolean' ? rawRouteAroundSaturated : fail('runtimePrefs.set', 'subagentRouteAroundSaturatedProviders must be a boolean when provided');
   const subagentMaxDepth = validateOptionalInt('runtimePrefs.set', 'subagentMaxDepth', (params as Record<string, unknown>)['subagentMaxDepth'], 0, 8);
   const subagentMaxTreeSessions = validateOptionalInt('runtimePrefs.set', 'subagentMaxTreeSessions', (params as Record<string, unknown>)['subagentMaxTreeSessions'], 5, 200);
   const subagentBuckets = validateOptionalSubagentBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentBuckets']);
@@ -524,8 +545,6 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const rawSubagentDropTools = (params as Record<string, unknown>)['subagentDropTools'];
   const subagentDropTools = rawSubagentDropTools === undefined ? undefined : Array.isArray(rawSubagentDropTools) && rawSubagentDropTools.every((entry) => typeof entry === 'string') ? [...(rawSubagentDropTools as string[])] : fail('runtimePrefs.set', 'subagentDropTools must be an array of strings when provided');
   const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
-  const subagentMaxConcurrency = validateOptionalInt('runtimePrefs.set', 'subagentMaxConcurrency', (params as Record<string, unknown>)['subagentMaxConcurrency'], 1, 16);
-  const subagentMaxParallelTasks = validateOptionalInt('runtimePrefs.set', 'subagentMaxParallelTasks', (params as Record<string, unknown>)['subagentMaxParallelTasks'], 1, 16);
   const bashWarmPoolSize = validateOptionalInt('runtimePrefs.set', 'bashWarmPoolSize', (params as Record<string, unknown>)['bashWarmPoolSize'], 0, 8);
   const rawBashFastPath = (params as Record<string, unknown>)['bashFastPath'];
   const bashFastPath = rawBashFastPath === undefined ? undefined : typeof rawBashFastPath === 'boolean' ? rawBashFastPath : fail('runtimePrefs.set', 'bashFastPath must be a boolean when provided');
@@ -534,7 +553,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashWarmupTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashWarmupTimeoutMs', (params as Record<string, unknown>)['bashWarmupTimeoutMs'], 0, 60000);
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
-  return { providerToggles, extensionToggles, subagentAlwaysParentModel, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, subagentMaxConcurrency, subagentMaxParallelTasks, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
 }
 
 export interface OpenTabsSetParams {

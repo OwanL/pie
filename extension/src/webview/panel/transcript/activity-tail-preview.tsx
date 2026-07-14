@@ -4,13 +4,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { summarizeSubagentToolCallInput } from '../../../shared/tool-call-analysis';
+import { formatToolResult } from '../../../shared/tool-result-format';
 import { cx } from '../utils/cx';
-import type { SubagentSingleResult } from './subagent';
+import { getToolCallPresentation } from '../tool-call-summary';
+import type { RawContentPart, RawMessage, SubagentSingleResult } from '../../../shared/subagent-result';
 import {
   ACTIVITY_TAIL_ROW_HEIGHT_PX,
   collapseSpaces,
+  takeLastChars,
   type TurnActivityTail,
 } from './activity-tail';
+import { textFromToolResult } from './highlight';
 import { isForwardExtension, useBufferedText, type BufferedTextRate } from './use-buffered-text';
 
 /**
@@ -351,37 +355,171 @@ function useTailConsoleScroll(
 }
 
 /** A subagent that has been dispatched but hasn't started executing yet — the
- *  synthesized placeholder before any messages, streaming text, or nested
- *  tool calls have arrived. Renders with a muted "waiting" treatment so queued
- *  agents (e.g. not-yet-started parallel members) recede behind active ones. */
+ *  synthesized placeholder before any messages, streaming text/reasoning, or
+ *  nested tool calls have arrived. Renders with a muted "waiting" treatment so
+ *  queued agents (e.g. not-yet-started parallel members) recede behind active
+ *  ones. */
 export function isIdle(result: SubagentSingleResult): boolean {
   if (result.exitCode !== -1) return false;
   const hasMessages = Array.isArray(result.messages) && result.messages.length > 0;
   const hasStreamingText = !!result.streamingText?.trim();
+  const hasStreamingReasoning = !!result.streamingReasoning?.trim();
   const hasRunningTools = (result.runningTools?.length ?? 0) > 0;
   // A real lifecycle update means the child has started. Only an explicitly
   // local queue remains visually idle; provider waits must not masquerade as
   // unexplained inactivity.
   const awaitingLocalCapacity = result.activityPhase === 'queued';
-  return !hasMessages && !hasStreamingText && !hasRunningTools && awaitingLocalCapacity;
+  return !hasMessages && !hasStreamingText && !hasStreamingReasoning && !hasRunningTools && awaitingLocalCapacity;
+}
+
+/** Cap on the tool output carried into the collapsed preview. Unlike the main
+ *  transcript's activity tail (which windows to the last ~480 chars), the
+ *  collapsed subagent preview includes the full recent tool output so a running
+ *  bash / read etc. surfaces its actual content; the body then windows the
+ *  visible rows with a top fade. Bounded only as a safety ceiling against
+ *  pathological output so the per-snapshot re-derivation (~6×/sec) stays cheap. */
+const SUBAGENT_TOOL_OUTPUT_MAX_CHARS = 8000;
+
+interface LatestToolActivity {
+  name: string;
+  /** One-line command/input summary, if derivable (e.g. a bash command). */
+  inputLine?: string;
+  /** The tool's output text (partial while running, full when complete). */
+  output?: string;
+  /** True while the tool is still executing (no completed toolResult yet). */
+  running: boolean;
+}
+
+/** Extract the most recent nested tool activity from a child's raw messages.
+ *
+ * Mirrors the tool-result collection in `subagent.ts`'s `collectRawToolResults`:
+ * completed tool results land as `toolResult` messages (or user `toolResult`
+ * parts), while a running tool's partial result is stamped directly on its
+ * `toolCall` content part by the runner's `tool_execution_update` handler — so
+ * it surfaces before the `toolResult` message arrives. Scans backward so the
+ * newest toolCall wins (the one currently streaming output). */
+function latestToolActivity(result: SubagentSingleResult): LatestToolActivity | undefined {
+  const messages: RawMessage[] = Array.isArray(result.messages) ? result.messages : [];
+  if (messages.length === 0) return undefined;
+
+  const toolResultMap = new Map<string, { result: unknown; isError?: boolean }>();
+  for (const msg of messages) {
+    if (msg.role === 'toolResult' && msg.toolCallId != null) {
+      toolResultMap.set(String(msg.toolCallId), {
+        result: formatToolResult(msg),
+        isError: msg.isError,
+      });
+      continue;
+    }
+    if (msg.role !== 'user') continue;
+    const parts: RawContentPart[] = Array.isArray(msg.content) ? msg.content : [];
+    for (const part of parts) {
+      if (part.type === 'toolResult' && part.id !== undefined) {
+        toolResultMap.set(String(part.id), { result: part.result });
+      }
+    }
+  }
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== 'assistant') continue;
+    const content: RawContentPart[] = Array.isArray(msg.content) ? msg.content : [];
+    for (let j = content.length - 1; j >= 0; j--) {
+      const part = content[j];
+      if (!part || typeof part !== 'object' || part.type !== 'toolCall') continue;
+      const id = part.id != null ? String(part.id) : undefined;
+      const name = typeof part.name === 'string' ? part.name : undefined;
+      if (!id || !name) continue;
+      const completed = toolResultMap.get(id);
+      const rawResult = completed?.result ?? part.result;
+      const output = rawResult != null ? textFromToolResult(rawResult) : undefined;
+      const presentation = getToolCallPresentation({
+        id,
+        name,
+        input: part.arguments ?? {},
+        result: rawResult,
+        status: completed?.isError ? 'failed' : completed ? 'completed' : 'running',
+      });
+      return {
+        name,
+        inputLine: presentation.summary?.trim() || undefined,
+        output: output ? takeLastChars(output.replace(/\n+$/, ''), SUBAGENT_TOOL_OUTPUT_MAX_CHARS) : undefined,
+        running: !completed,
+      };
+    }
+  }
+  return undefined;
 }
 
 /** Build the collapsed subagent-card live preview.
  *
- * Prefer realtime text when available, otherwise project the child's current
- * lifecycle into the preview. Only a genuinely queued child is pending;
- * reasoning, provider waits, and tool execution must remain visibly active. */
+ * Replaces generic lifecycle placeholders ("Generating…", "Running tool…")
+ * with actual content whenever it is available, in priority order:
+ *
+ *  1. Live model generation — reply text (`streamingText`), then reasoning
+ *     (`streamingReasoning`). Reasoning is surfaced before any reply text has
+ *     arrived, covering the phase that previously fell back to a bare
+ *     "Generating…" label.
+ *  2. A running nested tool — its name + one-line input plus its live output
+ *     (e.g. bash stdout), including the full recent output rather than the main
+ *     transcript's aggressively-windowed tail.
+ *  3. Lifecycle fallback — projected phase label, used only when no actual
+ *     content exists yet.
+ *
+ * Only a genuinely queued child is pending; reasoning, provider waits, and
+ * tool execution all remain visibly active. */
 export function subagentPreviewTail(
   result: SubagentSingleResult,
   lineBudget: number,
   running: boolean,
 ): TurnActivityTail | undefined {
   const rawTask = result.task?.trim();
-  const inputLine = rawTask ? (summarizeSubagentToolCallInput({ task: rawTask }) ?? undefined) : undefined;
-  const sourceText = result.streamingText?.trim();
+  const taskInputLine = rawTask ? (summarizeSubagentToolCallInput({ task: rawTask }) ?? undefined) : undefined;
 
-  // Completed/failed/idle with no task and no stream: nothing to preview.
-  if (!sourceText && !running && !inputLine) return undefined;
+  const streamText = result.streamingText?.trim();
+  const streamReasoning = result.streamingReasoning?.trim();
+
+  // 1. Live model generation: prefer reply text, fall back to reasoning. Both
+  //    replace the generic "Generating…" lifecycle label with the actual
+  //    content being produced. (reply text already did this; reasoning is the
+  //    new addition covering the reasoning-only phase before reply text.)
+  if (streamText || streamReasoning) {
+    const sourceText = (streamText || streamReasoning)!;
+    const isReasoning = !streamText && !!streamReasoning;
+    return {
+      kind: isReasoning ? 'reasoning' : 'subagent',
+      label: taskInputLine ? 'task' : undefined,
+      inputLine: taskInputLine,
+      lines: [sourceText],
+      truncated: false,
+      cursor: running && !isIdle(result),
+      reservedRows: lineBudget + (taskInputLine ? 1 : 0),
+      sourceText: sourceText || undefined,
+    };
+  }
+
+  // 2. Most recent nested tool: surface its name + one-line input and any
+  //    output (e.g. bash stdout) instead of a bare lifecycle label. Keep a
+  //    completed tool visible while the child waits for its next provider turn;
+  //    it remains the latest concrete activity until new generation arrives.
+  //    Unlike the main transcript preview, this intentionally includes tools
+  //    even before output arrives and retains their complete recent output.
+  const tool = latestToolActivity(result);
+  if (tool && running && (tool.inputLine || tool.output)) {
+    return {
+      kind: 'tool',
+      label: tool.name,
+      inputLine: tool.inputLine,
+      lines: tool.output ? [tool.output] : [],
+      truncated: false,
+      cursor: tool.running && !isIdle(result),
+      reservedRows: lineBudget + 1,
+      sourceText: tool.output,
+    };
+  }
+
+  // 3. Lifecycle fallback — only when no actual content exists.
+  if (!running && !taskInputLine) return undefined;
 
   const runningTools = result.runningTools?.filter(Boolean).join(', ');
   const activityLabels: Record<string, string> = {
@@ -399,15 +537,15 @@ export function subagentPreviewTail(
       : result.streaming
         ? 'Generating...'
         : undefined) ?? 'Starting...';
-  const lines = sourceText ? [sourceText] : running ? [activityLine] : [];
+  const lines = running ? [activityLine] : [];
   return {
     kind: 'subagent',
-    label: inputLine ? 'task' : undefined,
-    inputLine,
+    label: taskInputLine ? 'task' : undefined,
+    inputLine: taskInputLine,
     lines,
     truncated: false,
     cursor: running && !isIdle(result),
-    reservedRows: lineBudget + (inputLine ? 1 : 0),
-    sourceText: sourceText || undefined,
+    reservedRows: lineBudget + (taskInputLine ? 1 : 0),
+    sourceText: undefined,
   };
 }

@@ -50,9 +50,13 @@ import {
   isToolStartedPayload,
 } from '../../shared/protocol/event-payloads.js';
 import { appendPieLog } from '../util/pie-log.js';
+import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
+import { isLiveLifecycleWatermark, isTurnSemanticEnvelope, type LiveLifecycleWatermark, type TurnSemanticEnvelope } from '../../shared/live-pipeline-protocol.js';
 
 export interface SessionBackendEventHandlers {
   onSessionOpened(payload: SessionOpenedPayload): void;
+  onTurnSemantic(payload: TurnSemanticEnvelope): void;
+  onLiveLifecycle(payload: LiveLifecycleWatermark): void;
   onSessionListChanged(payload: SessionListChangedPayload): void;
   onMessageStarted(payload: MessageStartedPayload): void;
   onMessageDelta(payload: MessageDeltaPayload): void;
@@ -90,6 +94,7 @@ function dispatch<TPayload>(
 ): void {
   const payload = event.payload;
   if (!guard(payload)) {
+    tracePayloadValidation(event, false);
     appendPieLog(
       'warn',
       'event-dispatch',
@@ -97,6 +102,7 @@ function dispatch<TPayload>(
     );
     return;
   }
+  tracePayloadValidation(event, true);
   handle(payload);
 }
 
@@ -105,6 +111,12 @@ export function dispatchSessionBackendEvent(
   handlers: SessionBackendEventHandlers,
 ): void {
   switch (event.event) {
+    case 'live.semantic':
+      dispatch(event, isTurnSemanticEnvelope, handlers.onTurnSemantic);
+      return;
+    case 'live.lifecycle':
+      dispatch(event, isLiveLifecycleWatermark, handlers.onLiveLifecycle);
+      return;
     case 'session.opened':
       dispatch(event, isSessionOpenedPayload, handlers.onSessionOpened);
       return;
@@ -175,4 +187,46 @@ export function dispatchSessionBackendEvent(
       dispatch(event, isErrorPayload, handlers.onError);
       return;
   }
+  tracePayloadValidation(event, false, 'unsupported_observation');
+}
+
+function tracePayloadValidation(
+  event: EventEnvelope,
+  valid: boolean,
+  reasonCode: 'malformed_payload' | 'unsupported_observation' = 'malformed_payload',
+): void {
+  if (!isLivePipelineTraceEnabled()) return;
+  const payload = event.payload && typeof event.payload === 'object'
+    ? event.payload as Record<string, unknown>
+    : undefined;
+  recordLivePipelineTrace({
+    process: 'host',
+    stage: 'host.payload.validated',
+    kind: valid ? 'success' : 'failure',
+    identifiers: {
+      ...(typeof payload?.sessionPath === 'string' ? { session: payload.sessionPath } : {}),
+      ...(typeof payload?.requestId === 'string' ? { request: payload.requestId } : {}),
+      ...(typeof payload?.turnId === 'string' ? { turn: payload.turnId } : {}),
+      ...(typeof payload?.attemptId === 'string' ? { attempt: payload.attemptId } : {}),
+      ...(typeof payload?.messageId === 'string' ? { message: payload.messageId } : {}),
+      ...(typeof payload?.toolCallId === 'string' ? { tool: payload.toolCallId } : {}),
+    },
+    eventKind: traceEventKind(event.event),
+    eventSeq: typeof payload?.seq === 'number' && Number.isSafeInteger(payload.seq) && payload.seq >= 0
+      ? payload.seq
+      : undefined,
+    reasonCode: valid ? undefined : reasonCode,
+  });
+}
+
+function traceEventKind(event: string) {
+  if (event === 'message.delta') return 'text' as const;
+  if (event === 'message.thinking') return 'reasoning' as const;
+  if (event === 'message.toolCallDelta') return 'tool_draft' as const;
+  if (event === 'tool.started') return 'tool_start' as const;
+  if (event === 'tool.progress') return 'tool_progress' as const;
+  if (event === 'tool.finished') return 'tool_terminal' as const;
+  if (event === 'message.started') return 'turn_start' as const;
+  if (event === 'message.finished' || event === 'message.aborted') return 'turn_terminal' as const;
+  return 'control' as const;
 }

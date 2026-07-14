@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 
 import { auditLog } from '../util/audit';
-import { toErrorMessage } from '../util/error-message';
 import { pieWarn } from '../util/pie-logger';
 import {
   DEFAULT_WEBVIEW_VIEW_NAME,
@@ -9,189 +8,109 @@ import {
   isHotReloadAssetFileName,
 } from '../webview/hot-reload';
 import { resolveWebviewHtml } from '../webview/assets';
-import type { SidebarSyncState } from './sync';
+import type { StateDeliveryRecoveryReason } from './state-delivery-controller';
 import type { WebviewToHostMessage } from '../../shared/protocol';
 
-/** Debounce window for coalescing multiple asset writes into one webview reload. */
 const HOT_RELOAD_DEBOUNCE_MS = 120;
 
-/**
- * Dependencies injected by {@link SidebarViewProvider}. The provider remains
- * the orchestrator owning the shared webview state; the hot-reloader reads and
- * mutates it through these callbacks.
- */
+type ResolvedWebviewHtml = Awaited<ReturnType<typeof resolveWebviewHtml>>;
+
+/** Stamp a short, host-owned generation into every renderer document. */
+export function injectViewGenerationMeta(html: string, viewGeneration: number): string {
+  const generation = Number.isSafeInteger(viewGeneration)
+    ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, viewGeneration))
+    : 0;
+  const meta = `<meta name="pie-view-generation" content="${generation}" />`;
+  const head = /<head\b[^>]*>/i.exec(html);
+  if (!head || head.index === undefined) return `${meta}${html}`;
+  const insertionPoint = head.index + head[0].length;
+  return `${html.slice(0, insertionPoint)}\n  ${meta}${html.slice(insertionPoint)}`;
+}
+
 export interface SidebarHotReloaderDeps {
   getContext(): vscode.ExtensionContext;
   getView(): vscode.WebviewView | undefined;
-  getWebviewReady(): boolean;
-  setWebviewReady(value: boolean): void;
-  getSyncState(): SidebarSyncState;
-  setSyncState(state: SidebarSyncState): void;
-  /** Invoked after a reload resets webview readiness (wired to watchdog.clear). */
-  onReloadWebviewReadyReset(): void;
+  /** Synchronously invalidates delivery generation and readiness. */
+  onReloadStart(reason: string): void;
+  /** Current host-owned generation stamped into replacement HTML. */
+  getViewGeneration(): number;
+  resolveAssets?(context: vscode.ExtensionContext, webview: vscode.Webview): Promise<ResolvedWebviewHtml>;
 }
 
-/**
- * Owns webview asset watching, hot reload on asset changes, asset-version
- * mismatch reloads, and the shared `reloadWebviewAssets` core. Extracted
- * verbatim from {@link SidebarViewProvider}.
- */
+/** Asset/reload mechanics only; snapshot delivery remains controller-owned. */
 export class SidebarHotReloader {
   private hotReloadTimer?: ReturnType<typeof setTimeout>;
   private assetWatcher?: vscode.FileSystemWatcher;
   private currentAssetVersion: string | null = null;
   private reloadingForAssetMismatch = false;
-  private reloadingForStateAppliedTimeout = false;
-  /**
-   * Unified reload-in-progress flag spanning every reload path (asset watcher,
-   * asset-version mismatch, watchdog timeout) from reload start until the new
-   * renderer's `ready` handshake — the window in which the webview's renderer
-   * is being replaced. The readiness probe consults this to avoid posting to /
-   * adopting readiness from a renderer that is about to be torn down or is
-   * still loading. Cleared by the provider on bridge-ready.
-   */
+  private reloadingForRecovery = false;
   private reloading = false;
 
   constructor(private readonly deps: SidebarHotReloaderDeps) {}
 
   ensureAssetWatcher(): void {
-    if (this.assetWatcher) {
-      return;
-    }
+    if (this.assetWatcher) return;
 
     const assetDir = getWebviewAssetDir(this.deps.getContext().extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(vscode.Uri.file(assetDir), '**/*'),
     );
     const onAssetEvent = (uri: vscode.Uri) => {
-      if (!isHotReloadAssetFileName(uri.fsPath, DEFAULT_WEBVIEW_VIEW_NAME)) {
-        return;
+      if (isHotReloadAssetFileName(uri.fsPath, DEFAULT_WEBVIEW_VIEW_NAME)) {
+        this.scheduleHotReload(uri.fsPath);
       }
-      this.scheduleHotReload(uri.fsPath);
     };
-
     watcher.onDidChange(onAssetEvent);
     watcher.onDidCreate(onAssetEvent);
     watcher.onDidDelete(onAssetEvent);
-
     this.assetWatcher = watcher;
   }
 
-  scheduleHotReload(changedPath: string): void {
-    if (this.hotReloadTimer !== undefined) {
-      clearTimeout(this.hotReloadTimer);
-    }
-
+  scheduleHotReload(_changedPath: string): void {
+    if (this.hotReloadTimer !== undefined) clearTimeout(this.hotReloadTimer);
     auditLog('sidebar-provider', 'hotReload.schedule', {
-      changedPath,
+      reason: 'asset-change',
       visible: this.deps.getView()?.visible ?? false,
     });
-
     this.hotReloadTimer = setTimeout(() => {
       this.hotReloadTimer = undefined;
-      void this.reloadWebviewAssets(changedPath);
+      void this.reloadWebviewAssets('asset-change');
     }, HOT_RELOAD_DEBOUNCE_MS);
-  }
-
-  private async reloadWebviewAssets(changedPath: string): Promise<void> {
-    const view = this.deps.getView();
-    if (!view) {
-      return;
-    }
-
-    this.reloading = true;
-    let applied = false;
-    try {
-      const resolvedAssets = await resolveWebviewHtml(this.deps.getContext(), view.webview);
-      if (this.deps.getView() !== view) {
-        return;
-      }
-
-      this.currentAssetVersion = resolvedAssets.assetVersion;
-      this.deps.setWebviewReady(false);
-      this.deps.setSyncState({ ...this.deps.getSyncState(), globalDirty: true });
-      this.deps.onReloadWebviewReadyReset();
-      view.webview.html = resolvedAssets.html;
-      applied = true;
-      this.reloadingForAssetMismatch = false;
-      this.reloadingForStateAppliedTimeout = false;
-
-      auditLog('sidebar-provider', 'hotReload.apply', {
-        changedPath,
-        revision: this.deps.getSyncState().globalRevision,
-        visible: view.visible,
-      });
-    } catch (error) {
-      this.reloadingForAssetMismatch = false;
-      this.reloadingForStateAppliedTimeout = false;
-      pieWarn('sidebar-provider', 'failed to hot reload webview assets', { changedPath, error: toErrorMessage(error) });
-    } finally {
-      // A non-applied reload (view swapped mid-await, or a throw) leaves no new
-      // renderer to send a `ready` handshake, so `clearReloading` (called by the
-      // provider on bridge-ready) would never fire — reset here to avoid a
-      // permanent `reloading=true` that freezes readiness probes / snapshot
-      // posts. A successful apply stays set until bridge-ready (see field doc).
-      if (!applied) {
-        this.reloading = false;
-      }
-    }
   }
 
   getIncomingAssetVersion(msg: WebviewToHostMessage): string | null {
     if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
       return msg.assetVersion ?? null;
     }
-
     return null;
   }
 
-  shouldReloadForAssetMismatch(
-    msg: WebviewToHostMessage,
-    assetVersion: string | null,
-  ): boolean {
-    if (!this.currentAssetVersion) {
-      return false;
-    }
-
-    if (msg.type !== 'ready' && msg.type !== 'refreshState' && msg.type !== 'requestSnapshot') {
-      return false;
-    }
-
+  shouldReloadForAssetMismatch(msg: WebviewToHostMessage, assetVersion: string | null): boolean {
+    if (!this.currentAssetVersion) return false;
+    if (msg.type !== 'ready' && msg.type !== 'refreshState' && msg.type !== 'requestSnapshot') return false;
     return assetVersion !== this.currentAssetVersion;
   }
 
   async reloadForAssetMismatch(): Promise<void> {
-    if (this.reloadingForAssetMismatch || this.reloadingForStateAppliedTimeout) {
-      return;
-    }
-
+    if (this.reloading || this.reloadingForAssetMismatch || this.reloadingForRecovery) return;
     this.reloadingForAssetMismatch = true;
-    this.deps.setWebviewReady(false);
-    this.deps.setSyncState({ ...this.deps.getSyncState(), globalDirty: true });
-    await this.reloadWebviewAssets('assetVersionMismatch');
+    await this.reloadWebviewAssets('asset-version-mismatch');
   }
 
-  async reloadForStateAppliedTimeout(revision: number): Promise<void> {
-    if (this.reloadingForAssetMismatch || this.reloadingForStateAppliedTimeout) {
-      return;
-    }
-
-    this.reloadingForStateAppliedTimeout = true;
-    this.deps.setWebviewReady(false);
-    this.deps.setSyncState({ ...this.deps.getSyncState(), globalDirty: true });
-    await this.reloadWebviewAssets(`stateAppliedTimeout:${revision}`);
+  async reloadForRecovery(reason: StateDeliveryRecoveryReason, _revision?: number): Promise<void> {
+    if (this.reloading || this.reloadingForAssetMismatch || this.reloadingForRecovery) return;
+    this.reloadingForRecovery = true;
+    await this.reloadWebviewAssets(`recovery:${reason}`);
   }
 
   setCurrentAssetVersion(version: string | null): void {
     this.currentAssetVersion = version;
   }
 
-  /** Whether a webview reload is in progress (reload start → next bridge-ready). */
   isReloading(): boolean {
     return this.reloading;
   }
 
-  /** Clear the reload-in-progress flag (called by the provider on bridge-ready). */
   clearReloading(): void {
     this.reloading = false;
   }
@@ -202,7 +121,7 @@ export class SidebarHotReloader {
 
   resetReloadFlags(): void {
     this.reloadingForAssetMismatch = false;
-    this.reloadingForStateAppliedTimeout = false;
+    this.reloadingForRecovery = false;
     this.reloading = false;
   }
 
@@ -213,8 +132,42 @@ export class SidebarHotReloader {
     }
     this.assetWatcher?.dispose();
     this.currentAssetVersion = null;
+    this.resetReloadFlags();
+  }
+
+  private async reloadWebviewAssets(reason: string): Promise<void> {
+    const view = this.deps.getView();
+    if (!view) {
+      this.resetPathFlags();
+      return;
+    }
+
+    this.reloading = true;
+    this.deps.onReloadStart(reason);
+    let applied = false;
+    try {
+      const resolver = this.deps.resolveAssets ?? resolveWebviewHtml;
+      const resolvedAssets = await resolver(this.deps.getContext(), view.webview);
+      if (this.deps.getView() !== view) return;
+
+      this.currentAssetVersion = resolvedAssets.assetVersion;
+      view.webview.html = injectViewGenerationMeta(resolvedAssets.html, this.deps.getViewGeneration());
+      applied = true;
+      auditLog('sidebar-provider', 'hotReload.apply', { reason, visible: view.visible });
+    } catch (error: unknown) {
+      pieWarn('sidebar-provider', 'failed to hot reload webview assets', {
+        reason,
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    } finally {
+      this.resetPathFlags();
+      // Successful replacement remains reloading until its bridge handshake.
+      if (!applied) this.reloading = false;
+    }
+  }
+
+  private resetPathFlags(): void {
     this.reloadingForAssetMismatch = false;
-    this.reloadingForStateAppliedTimeout = false;
-    this.reloading = false;
+    this.reloadingForRecovery = false;
   }
 }

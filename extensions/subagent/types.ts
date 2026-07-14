@@ -8,16 +8,12 @@ import type { Message } from "@mariozechner/pi-ai";
 import type { AgentScope } from "./agents.js";
 import type { ThinkingLevel } from "./bucket-selector.js";
 
-export const MAX_PARALLEL_TASKS = 4;
-export const MAX_CONCURRENCY = 2;
 export const COLLAPSED_ITEM_COUNT = 10;
 export const MAX_MODEL_RETRIES = 5;
 /** Max characters shown when previewing a task description in chain/parallel renderCall. */
 export const TASK_PREVIEW_SHORT = 40;
 /** Max characters shown when previewing a task description in single-mode renderCall. */
 export const TASK_PREVIEW_LONG = 60;
-/** Max characters shown for parallel result summaries (overridable via PI_SUBAGENT_PARALLEL_PREVIEW). */
-export const PARALLEL_SUMMARY_PREVIEW = 8000;
 export const AGENT_SCOPE_VALUES = new Set<AgentScope>(["user", "project", "both"]);
 
 export interface UsageStats {
@@ -49,6 +45,20 @@ export interface SingleResult {
 	task: string;
 	exitCode: number;
 	messages: Message[];
+	/** Bounded terminal answer kept separately so durable transcript compaction
+	 * can remove duplicate final prose from messages without degrading the UI. */
+	finalOutput?: string;
+	/** True when the durable parent-facing transcript has been compacted. */
+	transcriptCompacted?: boolean;
+	/** Compact modifying-tool summary used by host/session_changes after verbose
+	 * write/edit payloads are removed from the durable child transcript. */
+	fileChanges?: Array<{
+		path: string;
+		kind: "created" | "modified" | "deleted";
+		description: string;
+		additions?: number;
+		deletions?: number;
+	}>;
 	stderr: string;
 	usage: UsageStats;
 	/** The model the subagent session actually ran with. */
@@ -63,6 +73,13 @@ export interface SingleResult {
 	errorMessage?: string;
 	/** Streaming text accumulated from in-progress assistant turn, available while running. */
 	streamingText?: string;
+	/** Streaming reasoning (thinking) accumulated from the in-progress assistant
+	 *  turn, available while running. Mirrors {@link streamingText} but captures
+	 *  `thinking_delta` events so the parent UI can preview live reasoning before
+	 *  any reply text has arrived (the gap that previously surfaced as a generic
+	 *  "Generating…" placeholder). Cleared on `message_end` alongside
+	 *  {@link streamingText}. */
+	streamingReasoning?: string;
 	/** True while the subagent's model is actively generating output for the
 	 *  in-progress assistant turn (set on the first text/thinking delta, cleared
 	 *  on `message_end`). The host's token-rate clock reads this to keep
@@ -90,7 +107,12 @@ export interface SingleResult {
 	activityDetail?: string;
 	/** Epoch milliseconds at which this phase began. */
 	activitySince?: number;
-	/** Epoch milliseconds at which credible progress was last observed. */
+	/** Monotonically increasing per-child progress sequence. Incremented only for
+	 * credible child activity, allowing parents to distinguish real work from
+	 * duplicate `onUpdate` snapshots without relying on wall-clock timestamps. */
+	progressGeneration?: number;
+	/** Epoch milliseconds at which credible progress was last observed. Kept for
+	 * display/diagnostics; settlement renewal uses {@link progressGeneration}. */
 	lastProgressAt?: number;
 	/** Inactivity budget for this phase. Generous provider budgets remain valid;
 	 * exposing them makes a slow/unreliable provider observable rather than

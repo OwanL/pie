@@ -6,6 +6,7 @@ import {
   type PreparedAgentReviewRow,
   type PreparedBackendErrorRow,
   type PreparedFileExtensionRow,
+  type PreparedHistoricalSessionSummary,
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
   type PreparedToolResultPruningRow,
@@ -26,8 +27,9 @@ import {
   type VerificationCommandKind,
 } from './contracts.ts';
 import { existingHashPrefix, hashToPrefix } from './hash.ts';
-import { loadModelPricingMap, estimateRunCostUsd } from './pricing.ts';
+import { loadModelPricingMap, estimateRunCostUsd, type TokenUsageForCost } from './pricing.ts';
 import { loadModelFamilyMap, resolveModelFamily, resolveModelProvider } from './model-family.ts';
+import { normalizeSessionPath } from './transcript-source.ts';
 
 function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
@@ -36,6 +38,86 @@ function round3(value: number): number {
 function normalizeNullableText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+const TOKEN_USAGE_KEYS = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+] as const;
+
+function normalizeTokenCount(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function hasPositiveTokenUsage(usage: TokenUsageForCost): boolean {
+  return TOKEN_USAGE_KEYS.some((key) => usage[key] > 0);
+}
+
+function addKnownCosts(left: number, right: number): number {
+  return Math.round((left + right) * 1_000_000) / 1_000_000;
+}
+
+/**
+ * Price canonical subagent token totals without treating attribution samples as additional usage.
+ * Samples consume (and are clipped to) the canonical totals in source order; only the positive
+ * remainder uses the parent model. This also makes duplicate/oversized samples unable to inflate
+ * cost beyond the authoritative rollup.
+ */
+function estimateSubagentCostUsd(
+  run: RunSnapshot,
+  parentModelId: string | null,
+  canonicalUsage: TokenUsageForCost,
+  pricingMap: ReturnType<typeof loadModelPricingMap>,
+): number | null {
+  if (run.toolUsage.subagentCallCount <= 0) {
+    return 0;
+  }
+  if (!hasPositiveTokenUsage(canonicalUsage)) {
+    return null;
+  }
+
+  const remaining: TokenUsageForCost = { ...canonicalUsage };
+  const seenSourceIds = new Set<string>();
+  let totalCost = 0;
+
+  for (const sample of run.auxiliaryLlmUsage ?? []) {
+    if (sample.kind !== 'subagent' || seenSourceIds.has(sample.sourceId)) {
+      continue;
+    }
+    seenSourceIds.add(sample.sourceId);
+
+    const attributed: TokenUsageForCost = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+    for (const key of TOKEN_USAGE_KEYS) {
+      attributed[key] = Math.min(normalizeTokenCount(sample[key]), remaining[key]);
+      remaining[key] = Math.max(0, remaining[key] - attributed[key]);
+    }
+    if (!hasPositiveTokenUsage(attributed)) {
+      continue;
+    }
+
+    const sampleCost = estimateRunCostUsd(normalizeNullableText(sample.modelId), attributed, pricingMap);
+    if (sampleCost === null) {
+      return null;
+    }
+    totalCost = addKnownCosts(totalCost, sampleCost);
+  }
+
+  if (hasPositiveTokenUsage(remaining)) {
+    const remainderCost = estimateRunCostUsd(parentModelId, remaining, pricingMap);
+    if (remainderCost === null) {
+      return null;
+    }
+    totalCost = addKnownCosts(totalCost, remainderCost);
+  }
+
+  return totalCost;
 }
 
 function normalizeVerificationState(totalCount: number, failureCount: number): 'none' | 'passing' | 'failing' {
@@ -81,6 +163,18 @@ function toStartedDay(timestamp: string): string {
 
 function getRunOutcome(run: RunSnapshot, outcomesByRunId: Map<string, RunOutcome>): RunOutcome | null {
   return run.outcome ?? outcomesByRunId.get(run.runId) ?? null;
+}
+
+function outcomeFromAgentReview(review: AgentReviewSourceEvent): RunOutcome | null {
+  if (!review.done || !Number.isInteger(review.rating) || review.rating < 1 || review.rating > 5) {
+    return null;
+  }
+  const resolution = review.completion === 'fully'
+    ? 'resolved'
+    : review.completion === 'partial'
+      ? 'partially_resolved'
+      : 'unresolved';
+  return { resolution, satisfaction: review.rating, source: 'agent' };
 }
 
 function runStatusPriority(status: RunSnapshot['status']): number {
@@ -157,44 +251,45 @@ function prepareRun(
     ? dimMeans.reduce((a, b) => a + b, 0) / dimMeans.length
     : null;
 
-  const subagentInputTokens = run.toolUsage.subagentInputTokens ?? 0;
-  const subagentOutputTokens = run.toolUsage.subagentOutputTokens ?? 0;
-  const subagentCacheReadTokens = run.toolUsage.subagentCacheReadTokens ?? 0;
-  const subagentCacheWriteTokens = run.toolUsage.subagentCacheWriteTokens ?? 0;
-
-  const parentEstimatedCostUsd = estimateRunCostUsd(normalizedModelId, {
-    inputTokens: run.inputTokens ?? 0,
-    outputTokens: run.outputTokens ?? 0,
-    cacheReadTokens: run.cacheReadTokens ?? 0,
-    cacheWriteTokens: run.cacheWriteTokens ?? 0,
-  }, pricingMap);
-  // The subagent model is not currently rolled up to the run snapshot; fall back
-  // to the parent model for cost estimation. This keeps the total cost accurate
-  // even when subagents use a different model, at the expense of provider-specific
-  // pricing precision.
-  const subagentEstimatedCostUsd = estimateRunCostUsd(normalizedModelId, {
+  const subagentInputTokens = normalizeTokenCount(run.toolUsage.subagentInputTokens);
+  const subagentOutputTokens = normalizeTokenCount(run.toolUsage.subagentOutputTokens);
+  const subagentCacheReadTokens = normalizeTokenCount(run.toolUsage.subagentCacheReadTokens);
+  const subagentCacheWriteTokens = normalizeTokenCount(run.toolUsage.subagentCacheWriteTokens);
+  const parentUsage: TokenUsageForCost = {
+    inputTokens: normalizeTokenCount(run.inputTokens),
+    outputTokens: normalizeTokenCount(run.outputTokens),
+    cacheReadTokens: normalizeTokenCount(run.cacheReadTokens),
+    cacheWriteTokens: normalizeTokenCount(run.cacheWriteTokens),
+  };
+  const parentUsageReported = (run.tokenReportedTurnCount ?? 0) > 0 || hasPositiveTokenUsage(parentUsage);
+  const parentEstimatedCostUsd = parentUsageReported
+    ? estimateRunCostUsd(normalizedModelId, parentUsage, pricingMap)
+    : null;
+  const subagentEstimatedCostUsd = estimateSubagentCostUsd(run, normalizedModelId, {
     inputTokens: subagentInputTokens,
     outputTokens: subagentOutputTokens,
     cacheReadTokens: subagentCacheReadTokens,
     cacheWriteTokens: subagentCacheWriteTokens,
   }, pricingMap);
-  const totalEstimatedCostUsd = parentEstimatedCostUsd === null && subagentEstimatedCostUsd === null
-    ? null
-    : (parentEstimatedCostUsd ?? 0) + (subagentEstimatedCostUsd ?? 0);
+  const totalEstimatedCostUsd = parentEstimatedCostUsd !== null && subagentEstimatedCostUsd !== null
+    ? addKnownCosts(parentEstimatedCostUsd, subagentEstimatedCostUsd)
+    : null;
 
+  const scored = run.scored || outcome !== null;
   return {
     runId: run.runId,
     taskGroupId: run.taskGroupId,
     sessionPathHash: hashToPrefix(run.sessionPath, 16),
-    status: run.status,
-    scored: run.scored,
+    status: outcome ? 'scored' : run.status,
+    scored,
     startedAt: run.startedAt,
     startedDay,
     updatedAt: run.updatedAt,
     finalizedAt: run.finalizedAt ?? null,
-    finalizationReason: run.finalizationReason ?? null,
+    finalizationReason: outcome ? 'scored' : (run.finalizationReason ?? null),
     resolution: outcome?.resolution ?? null,
     satisfaction: outcome?.satisfaction ?? null,
+    outcomeSource: outcome ? (outcome.source ?? 'user') : null,
     modelId: normalizedModelId,
     modelFamily,
     provider,
@@ -216,6 +311,10 @@ function prepareRun(
     skillCount: run.analyticsFactors?.skills.length ?? 0,
     contextFileCount: run.analyticsFactors?.contextFiles.length ?? 0,
     promptGuidelineCount: run.analyticsFactors?.promptGuidelineHashes.length ?? 0,
+    initialUserMessageChars: typeof run.initialUserMessageChars === 'number'
+      && Number.isFinite(run.initialUserMessageChars)
+      ? Math.max(0, Math.trunc(run.initialUserMessageChars))
+      : null,
     fsSubagentAlwaysParentModel: run.functionalSettings?.subagentAlwaysParentModel ?? null,
     fsPruningMode: run.functionalSettings?.pruningMode ?? null,
     fsPruningEnabled: run.functionalSettings ? run.functionalSettings.pruningMode !== 'off' : null,
@@ -244,6 +343,8 @@ function prepareRun(
     unsupportedInputCount: run.unsupportedInputCount,
     inputKindsUsed: [...run.inputKindsUsed],
     toolCallCount: run.toolUsage.totalCount,
+    toolDurationMs: run.toolUsage.totalDurationMs,
+    timedToolCallCount: run.toolUsage.timedCallCount,
     toolFailureCount: run.toolUsage.failureCount,
     resultIssueCount: run.toolUsage.resultIssueCount,
     subagentCallCount: run.toolUsage.subagentCallCount,
@@ -289,8 +390,9 @@ function prepareRun(
     lineModifications: run.fileMutation.lineModifications,
     lineMutationTotal:
       run.fileMutation.lineAdditions + run.fileMutation.lineDeletions + run.fileMutation.lineModifications,
-    tokenEfficiency: (run.fileMutation.lineAdditions + run.fileMutation.lineDeletions + run.fileMutation.lineModifications) > 0
-      ? round3((run.outputTokens ?? 0) / (run.fileMutation.lineAdditions + run.fileMutation.lineDeletions + run.fileMutation.lineModifications))
+    tokenEfficiency: parentUsageReported
+      && (run.fileMutation.lineAdditions + run.fileMutation.lineDeletions + run.fileMutation.lineModifications) > 0
+      ? round3(parentUsage.outputTokens / (run.fileMutation.lineAdditions + run.fileMutation.lineDeletions + run.fileMutation.lineModifications))
       : null,
     contextUtilization: (run.contextTokens != null && run.contextLimit != null && run.contextLimit > 0)
       ? round3(run.contextTokens / run.contextLimit)
@@ -335,9 +437,18 @@ function prepareRun(
 
 function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): PreparedToolUsageRow[] {
   const startedDay = toStartedDay(run.startedAt);
-  return Object.entries(run.toolUsage.countsByName)
-    .filter(([, callCount]) => callCount > 0)
-    .map(([toolName, callCount]) => {
+  // Terminal events from older hosts sometimes lost their name while the
+  // corresponding tool.started count remained correctly attributed. Preserve
+  // duration/failure-only sentinel rows instead of silently dropping them.
+  const toolNames = new Set([
+    ...Object.keys(run.toolUsage.countsByName),
+    ...Object.keys(run.toolUsage.failureCountsByName),
+    ...Object.keys(run.toolUsage.resultIssueCountsByName),
+    ...Object.keys(run.toolUsage.durationMsByName),
+  ]);
+  return [...toolNames]
+    .map((toolName) => {
+      const callCount = run.toolUsage.countsByName[toolName] ?? 0;
       // Result-issue breakdown (verification failure / empty probe) now lives in
       // the result-issue rollup after the legacy remap; failureCountsByNameAndKind
       // is execution-only. failureCount is execution-only, so executionFailureCount
@@ -368,7 +479,7 @@ function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): Prepare
         thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
         experimentAssignment: normalizeNullableText(run.experimentAssignment),
         mixedTreatmentConfig: run.mixedTreatmentConfig,
-        scored: run.scored,
+        scored: run.scored || outcome !== null,
         satisfaction: outcome?.satisfaction ?? null,
         resolution: outcome?.resolution ?? null,
       };
@@ -407,7 +518,7 @@ function prepareToolFailures(run: RunSnapshot, outcome: RunOutcome | null): Prep
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored,
+      scored: run.scored || outcome !== null,
       satisfaction: outcome?.satisfaction ?? null,
       resolution: outcome?.resolution ?? null,
     });
@@ -472,7 +583,7 @@ function prepareVerificationUsage(run: RunSnapshot, outcome: RunOutcome | null):
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored,
+      scored: run.scored || outcome !== null,
       satisfaction: outcome?.satisfaction ?? null,
       resolution: outcome?.resolution ?? null,
     }));
@@ -502,7 +613,7 @@ function prepareBackendErrors(run: RunSnapshot, outcome: RunOutcome | null): Pre
     modelId: normalizeNullableText(run.modelId),
     thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
     experimentAssignment: normalizeNullableText(run.experimentAssignment),
-    scored: run.scored,
+    scored: run.scored || outcome !== null,
     satisfaction: outcome?.satisfaction ?? null,
     resolution: outcome?.resolution ?? null,
   }));
@@ -542,7 +653,7 @@ function prepareFileExtensions(run: RunSnapshot, outcome: RunOutcome | null): Pr
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored,
+      scored: run.scored || outcome !== null,
       satisfaction: outcome?.satisfaction ?? null,
       resolution: outcome?.resolution ?? null,
     };
@@ -741,7 +852,7 @@ function prepareAgentReviews(
       agentDone: e.done,
       reviewerBuckets: [...e.reviewerBuckets].sort(),
       reviewerCount: e.reviewerCount,
-      userSatisfaction: matchedRun?.satisfaction ?? null,
+      userSatisfaction: matchedRun?.outcomeSource === 'user' ? matchedRun.satisfaction : null,
     };
   });
 }
@@ -751,21 +862,27 @@ function roundThroughput(value: number): number {
 }
 
 /**
- * Flatten per-turn throughput samples into analysis rows stamped with the
- * parent run's metadata. `tokensPerSecond` is precomputed for completed turns
- * with reported output tokens and positive generation time (null otherwise so
- * errored / tokenless turns stay countable without polluting the throughput
- * distribution).
+ * Flatten per-turn throughput samples into analysis rows. `modelId` is attributed
+ * from `sample.modelId` when present (per-sample provider attribution, e.g. a
+ * sub-agent turn or a mid-run model swap), falling back to the parent run's
+ * `modelId`. `tokensPerSecond` is precomputed for completed turns with reported
+ * output tokens and positive generation time (null otherwise so errored /
+ * tokenless turns stay countable without polluting the throughput distribution).
  */
-function prepareTurnThroughput(run: RunSnapshot): PreparedTurnThroughputRow[] {
+function prepareTurnThroughput(
+  run: RunSnapshot,
+  familyMap: ReturnType<typeof loadModelFamilyMap>,
+): PreparedTurnThroughputRow[] {
   if (!run.turnThroughputSamples || run.turnThroughputSamples.length === 0) {
     return [];
   }
-  const modelId = normalizeNullableText(run.modelId);
+  const runModelId = normalizeNullableText(run.modelId);
   const thinkingLevel = normalizeThinkingLevel(run.thinkingLevel);
   const experimentAssignment = normalizeNullableText(run.experimentAssignment);
 
   return run.turnThroughputSamples.map((sample) => {
+    const modelId = normalizeNullableText(sample.modelId) ?? runModelId;
+    const modelFamily = resolveModelFamily(modelId, familyMap);
     const tokensPerSecond =
       sample.status === 'completed'
       && sample.outputTokens > 0
@@ -777,6 +894,7 @@ function prepareTurnThroughput(run: RunSnapshot): PreparedTurnThroughputRow[] {
       endedAt: sample.endedAt,
       startedDay: toStartedDay(sample.endedAt),
       modelId,
+      modelFamily,
       thinkingLevel,
       experimentAssignment,
       outputTokens: sample.outputTokens,
@@ -797,14 +915,50 @@ function prepareTurnThroughput(run: RunSnapshot): PreparedTurnThroughputRow[] {
 
 export function prepareSourceAnalytics(source: SourceAnalyticsPayload): PreparedAnalyticsData {
   const outcomesByRunId = new Map<string, RunOutcome>();
+  const explicitOutcomeRunIds = new Set<string>();
   for (const outcome of source.outcomes) {
     outcomesByRunId.set(outcome.runId, outcome.outcome);
+    explicitOutcomeRunIds.add(outcome.runId);
+  }
+  // Backfill reviews recorded before agent outcomes were persisted directly.
+  // Explicit run outcomes always win; among agent reviews the latest source
+  // event wins for the same run.
+  for (const review of source.agentReviews ?? []) {
+    const outcome = outcomeFromAgentReview(review);
+    if (outcome && !explicitOutcomeRunIds.has(review.runId)) {
+      outcomesByRunId.set(review.runId, outcome);
+    }
   }
 
   const dedupedRuns = dedupeRunsById([...source.completedRuns, ...source.openRuns]);
   const pricingMap = loadModelPricingMap();
   const familyMap = loadModelFamilyMap();
   const runs = dedupedRuns.map((run) => prepareRun(run, outcomesByRunId, pricingMap, familyMap));
+  const canonicalRunBySessionPath = new Map<string, PreparedRunRow>();
+  dedupedRuns.forEach((run, index) => canonicalRunBySessionPath.set(normalizeSessionPath(run.sessionPath), runs[index]!));
+  const historicalByPath = new Map<string, PreparedHistoricalSessionSummary>();
+  for (const summary of source.historicalSessions ?? []) {
+    const normalizedPath = normalizeSessionPath(summary.normalizedSessionPath);
+    const canonicalRun = canonicalRunBySessionPath.get(normalizedPath);
+    const { normalizedSessionPath: _privatePath, ...safeSummary } = summary;
+    const prepared: PreparedHistoricalSessionSummary = {
+      ...safeSummary,
+      attributions: safeSummary.attributions.map((attribution) => ({
+        ...attribution,
+        modelFamily: resolveModelFamily(attribution.modelId, familyMap) ?? '(unknown)',
+      })),
+      sessionPathHash: canonicalRun?.sessionPathHash ?? hashToPrefix(normalizedPath, 16),
+      matchedCanonical: canonicalRun !== undefined,
+      transcriptOnly: canonicalRun === undefined,
+    };
+    const existing = historicalByPath.get(normalizedPath);
+    if (existing) {
+      prepared.sourceProvenance = [...new Set([...existing.sourceProvenance, ...prepared.sourceProvenance])].sort();
+      if (!prepared.review) prepared.review = existing.review;
+    }
+    historicalByPath.set(normalizedPath, prepared);
+  }
+  const historicalSessions = [...historicalByPath.values()];
   const toolUsage: PreparedToolUsageRow[] = [];
   const toolFailures: PreparedToolFailureRow[] = [];
   const verificationUsage: PreparedVerificationUsageRow[] = [];
@@ -819,7 +973,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     verificationUsage.push(...prepareVerificationUsage(run, outcome));
     backendErrors.push(...prepareBackendErrors(run, outcome));
     fileExtensions.push(...prepareFileExtensions(run, outcome));
-    turnThroughput.push(...prepareTurnThroughput(run));
+    turnThroughput.push(...prepareTurnThroughput(run, familyMap));
   }
 
   const pruningEvents = preparePruningEvents(source.pruningDecisions ?? [], runs);
@@ -846,5 +1000,6 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     warmBashRewrites,
     warmBashSummaries,
     agentReviews,
+    historicalSessions,
   };
 }

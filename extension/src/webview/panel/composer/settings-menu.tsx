@@ -155,12 +155,13 @@ const PROVIDER_CONCURRENCY_LABELS = [
   'Max concurrent', 'Afterburn', 'Queue wait', 'Header wait',
 ];
 const SKILL_PRUNER_SETTING_LABELS = [
-  'Pruning mode', 'Pruning prepass model', 'Pruning thinking level',
+  'Pruning mode', 'Skip small prepasses', 'Skip below tokens',
+  'Pruning prepass model', 'Pruning thinking level',
   'Pruning skill limit', 'Pruning tool limit', 'Omitted skills (never pruned)',
   'Omitted tools (never pruned)',
 ];
 const SUBAGENT_SETTING_LABELS = [
-  'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
+  'Subagent default providers', 'Subagent dropped tools', 'Subagent model buckets', 'Subagent nested bucket allowlist',
   'Subagent nesting levels',
   'Subagent tree session budget', 'Subagent max active trees',
   'Subagent max concurrency', 'Subagent max parallel tasks',
@@ -301,6 +302,14 @@ function buildSettingsSearchIndex(
       haystack: 'subagent always use parent model'.toLowerCase(),
       checked: !!prefs.subagentAlwaysParentModel,
       apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentAlwaysParentModel')),
+    });
+    entries.push({
+      type: 'toggle',
+      id: 'subagent:route-around-saturated',
+      label: 'Route around busy providers',
+      haystack: 'subagent route around busy saturated providers capacity concurrency queue'.toLowerCase(),
+      checked: !!prefs.subagentRouteAroundSaturatedProviders,
+      apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentRouteAroundSaturatedProviders')),
     });
     for (const def of NESTED_LABELS) {
       const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;

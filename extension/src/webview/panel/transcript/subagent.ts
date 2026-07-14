@@ -27,6 +27,8 @@ import {
 export {
   getRenderableSubagentResult,
   getRenderableSubagentResultFromToolCall,
+  isSubagentSingleResultInterrupted,
+  isSubagentSingleResultRunning,
 } from '../../../shared/subagent-result';
 export type { SubagentResult, SubagentSingleResult } from '../../../shared/subagent-result';
 
@@ -232,6 +234,16 @@ function subagentTaskMessage(result: SubagentSingleResult, idPrefix: string): Ch
 
 export function subagentSingleResultToChatMessages(result: SubagentSingleResult, idPrefix: string): ChatMessage[] {
   const chatMessages = rawMessagesToChatMessages(Array.isArray(result.messages) ? result.messages : [], idPrefix);
+  const finalOutput = nonEmptyText(result.finalOutput);
+  if (!isSubagentSingleResultRunning(result) && finalOutput && !chatMessages.some((message) => message.role === 'assistant' && message.markdown?.trim() === finalOutput)) {
+    chatMessages.push({
+      id: `${idPrefix}-final-output`,
+      role: 'assistant',
+      createdAt: '',
+      markdown: finalOutput,
+      status: isSubagentSingleResultFailed(result) ? 'error' : 'completed',
+    });
+  }
   const hasExplicitUserTask = chatMessages.some((message) => message.role === 'user');
   const taskMessage = hasExplicitUserTask ? undefined : subagentTaskMessage(result, idPrefix);
 

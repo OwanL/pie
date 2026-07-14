@@ -12,6 +12,7 @@ import { FileChangesPanel } from './file-changes-panel';
 import { LoadingIndicator } from './components/loading-indicator';
 import type { PanelSurface } from './panel-state';
 import type { AppHandlers } from './use-app-handlers';
+import { useCommittedAppSurface } from './transcript/commit-registry';
 
 export interface PanelMainProps {
   panelSurface: PanelSurface;
@@ -41,7 +42,6 @@ export interface PanelMainProps {
   openTabPaths: ViewState['openTabPaths'];
   /** Wired to the agent-reply pruning chip's Cancel button (Brief F). */
   onCancelPrepass: () => void;
-  renderSignature: string;
 }
 
 // Transcript rendering pulls in markdown sanitizing, syntax grammars, YAML,
@@ -53,6 +53,15 @@ const TranscriptHost = lazy(async () => {
   const module = await import('./transcript/transcript-host');
   return { default: module.TranscriptHost };
 });
+
+function TranscriptSuspenseSurface() {
+  useCommittedAppSurface('transcript-suspense');
+  return (
+    <div class="empty-state empty-state--loading transcript-suspense" data-render-surface="transcript-suspense">
+      <LoadingIndicator status="Loading conversation" />
+    </div>
+  );
+}
 
 export const PanelMain = memo(function PanelMain({
   panelSurface,
@@ -81,7 +90,6 @@ export const PanelMain = memo(function PanelMain({
   workspaceCwd,
   openTabPaths,
   onCancelPrepass,
-  renderSignature,
 }: PanelMainProps) {
   return (
     <div class="panel-main">
@@ -116,7 +124,7 @@ export const PanelMain = memo(function PanelMain({
           <LoadingIndicator status={loadingStatus} />
         </div>
       ) : (
-        <Suspense fallback={<div class="empty-state empty-state--loading"><LoadingIndicator status="Loading conversation" /></div>}>
+        <Suspense fallback={<TranscriptSuspenseSurface />}>
         <TranscriptHost
           openTabPaths={openTabPaths}
           activeSessionPath={activeSessionPath}
@@ -140,7 +148,6 @@ export const PanelMain = memo(function PanelMain({
           onContextMenu={handlers.handleOpenContextMenu}
           postMessage={postMessage}
           onCancelPrepass={onCancelPrepass}
-          renderSignature={renderSignature}
         />
         </Suspense>
       )}

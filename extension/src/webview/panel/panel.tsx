@@ -8,8 +8,8 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
-import { isSuspenseThenable } from './render-error';
-import { webviewLog, setWebviewLogSink } from './utils/log';
+import { isSuspenseThenable, sanitizedRenderFailure, sanitizedRenderLog } from './render-error';
+import { setWebviewLogSink } from './utils/log';
 
 // ─── VS Code API ─────────────────────────────────────────────────────────────
 
@@ -25,16 +25,36 @@ function getAssetVersion(): string | undefined {
   return document.querySelector('meta[name="pie-asset-version"]')?.getAttribute('content') ?? undefined;
 }
 
+/** Read the host-stamped generation; malformed/missing markup never guesses. */
+export function getViewGeneration(): number | undefined {
+  const raw = document.querySelector('meta[name="pie-view-generation"]')?.getAttribute('content');
+  const value = raw === null || raw === undefined || raw.trim() === '' ? Number.NaN : Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function withHandshakeMetadata(
+  msg: Extract<WebviewToHostMessage, { type: 'ready' | 'refreshState' | 'requestSnapshot' }>,
+): WebviewToHostMessage {
+  const viewGeneration = getViewGeneration();
+  return {
+    ...msg,
+    assetVersion: getAssetVersion(),
+    ...(viewGeneration === undefined ? {} : { viewGeneration }),
+  };
+}
+
+export function withViewGeneration(msg: WebviewToHostMessage): WebviewToHostMessage {
+  const viewGeneration = getViewGeneration();
+  return viewGeneration === undefined ? msg : { ...msg, viewGeneration };
+}
+
 function postMessage(msg: WebviewToHostMessage): void {
   if (msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
-    vscodeApi.postMessage({
-      ...msg,
-      assetVersion: getAssetVersion(),
-    });
+    vscodeApi.postMessage(withHandshakeMetadata(msg));
     return;
   }
 
-  vscodeApi.postMessage(msg);
+  vscodeApi.postMessage(withViewGeneration(msg));
 }
 
 // ─── Error handling ──────────────────────────────────────────────────────────
@@ -72,6 +92,17 @@ function showRenderErrorOverlay(error: unknown) {
   document.body.appendChild(overlay);
 }
 
+function reportRenderFailure(
+  classification: 'component_error' | 'uncaught_error' | 'unhandled_rejection',
+  scope: 'panel' | 'webview',
+): void {
+  // Host logs are deliberately classification-only. The original error stays
+  // local to the overlay below, where it is useful to the person debugging.
+  console.error(`[pie:webview:${scope}] render failure`, classification);
+  postMessage(sanitizedRenderLog(classification, scope));
+  postMessage({ type: 'renderFailure', payload: sanitizedRenderFailure(classification) });
+}
+
 const prevCatchError = (options as any).__e;
 (options as any).__e = (error: any, vnode: any, oldVNode: any) => {
   // Lazy components suspend by throwing a Promise through this hook. Let
@@ -82,18 +113,17 @@ const prevCatchError = (options as any).__e;
     throw error;
   }
 
-  webviewLog('error', 'panel', 'Preact render error', { error: String(error?.stack || error) });
-  postMessage({ type: 'stateApplied', payload: { revision: -999, backendReady: false, transcriptLoaded: false, openTabCount: 0, transcriptCount: 0, systemPromptCount: 0, domTranscriptLoaderPresent: false, domTabsConnectingPresent: false, renderError: String(error?.stack || error) } } as any);
+  reportRenderFailure('component_error', 'panel');
   showRenderErrorOverlay(error);
   if (prevCatchError) prevCatchError(error, vnode, oldVNode);
 };
 
-window.addEventListener('error', (e) => {
-  webviewLog('error', 'panel', 'Uncaught error', { error: String(e.error?.stack || e.error) });
+window.addEventListener('error', () => {
+  reportRenderFailure('uncaught_error', 'panel');
 });
 
-window.addEventListener('unhandledrejection', (e) => {
-  webviewLog('error', 'webview', 'unhandledrejection', e.reason);
+window.addEventListener('unhandledrejection', () => {
+  reportRenderFailure('unhandled_rejection', 'webview');
 });
 
 // ─── Mount ───────────────────────────────────────────────────────────────────

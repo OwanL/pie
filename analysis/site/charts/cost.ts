@@ -1,5 +1,11 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight, median } from '../lib.ts';
+import {
+  CHART_COLORS,
+  categoricalHeight,
+  estimatedRunCostUsd,
+  median,
+  modelFamilyKey,
+} from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
 
 export interface CostByModelRow {
@@ -28,10 +34,11 @@ interface CostTrendRow {
  * Per-model cost rollup. A *session* (one `sessionPathHash`) may contain
  * multiple runs, so "average spend per model per session" requires summing run
  * costs within each session first, then averaging across sessions — distinct
- * from the per-run mean/median. Models with no priced runs still appear (total
- * `$0` is meaningful for free/local models) but report `sessionCount: 0`.
+ * from the per-run mean/median. The internal cohort retains unpriced models for
+ * coverage accounting; spend-ranking exports filter them by `withCostCount`.
+ * Reported free/local usage is priced at `$0` and therefore remains eligible.
  */
-export function groupCostByModel(runs: PreparedRunRow[]): CostByModelRow[] {
+function costByModelCohortRows(runs: PreparedRunRow[]): CostByModelRow[] {
   const perModel = new Map<string, {
     perRunCosts: number[];
     runCount: number;
@@ -42,44 +49,59 @@ export function groupCostByModel(runs: PreparedRunRow[]): CostByModelRow[] {
     if (run.status === 'open') {
       continue;
     }
-    const model = run.modelId?.trim() || '(unknown)';
+    const model = modelFamilyKey(run);
     const entry = perModel.get(model) ?? { perRunCosts: [], runCount: 0, sessionSubtotals: new Map<string, number>() };
     entry.runCount += 1;
-    if (run.estimatedCostUsd !== null) {
-      entry.perRunCosts.push(run.estimatedCostUsd);
+    const cost = estimatedRunCostUsd(run);
+    if (cost !== null) {
+      entry.perRunCosts.push(cost);
       const prev = entry.sessionSubtotals.get(run.sessionPathHash) ?? 0;
-      entry.sessionSubtotals.set(run.sessionPathHash, prev + run.estimatedCostUsd);
+      entry.sessionSubtotals.set(run.sessionPathHash, prev + cost);
     }
     perModel.set(model, entry);
   }
-  return [...perModel.entries()]
-    .map(([model, e]) => {
-      const subtotals = [...e.sessionSubtotals.values()];
-      const total = subtotals.reduce((sum, v) => sum + v, 0);
-      return {
-        model,
-        totalCostUsd: Math.round(total * 10000) / 10000,
-        medianCostUsdPerRun: median(e.perRunCosts) ?? 0,
-        avgCostUsdPerSession: subtotals.length === 0 ? 0 : Math.round((total / subtotals.length) * 10000) / 10000,
-        medianCostUsdPerSession: median(subtotals) ?? 0,
-        runCount: e.runCount,
-        withCostCount: e.perRunCosts.length,
-        sessionCount: subtotals.length,
-      };
-    })
+  return [...perModel.entries()].map(([model, e]) => {
+    const subtotals = [...e.sessionSubtotals.values()];
+    const total = subtotals.reduce((sum, value) => sum + value, 0);
+    return {
+      model,
+      totalCostUsd: Math.round(total * 10000) / 10000,
+      medianCostUsdPerRun: median(e.perRunCosts) ?? 0,
+      avgCostUsdPerSession: subtotals.length === 0 ? 0 : Math.round((total / subtotals.length) * 10000) / 10000,
+      medianCostUsdPerSession: median(subtotals) ?? 0,
+      runCount: e.runCount,
+      withCostCount: e.perRunCosts.length,
+      sessionCount: subtotals.length,
+    };
+  });
+}
+
+/** Top model families by total estimated spend. */
+export function groupCostByModel(runs: PreparedRunRow[]): CostByModelRow[] {
+  return costByModelCohortRows(runs)
+    .filter((row) => row.withCostCount > 0)
     .sort((a, b) => b.totalCostUsd - a.totalCostUsd)
+    .slice(0, 12);
+}
+
+/** Independently ranked top model families by average estimated spend per session. */
+export function groupCostPerSessionByModel(runs: PreparedRunRow[]): CostByModelRow[] {
+  return costByModelCohortRows(runs)
+    .filter((row) => row.sessionCount > 0)
+    .sort((a, b) => b.avgCostUsdPerSession - a.avgCostUsdPerSession)
     .slice(0, 12);
 }
 
 function costTrendRows(runs: PreparedRunRow[]): CostTrendRow[] {
   const map = new Map<string, { total: number; count: number }>();
   for (const run of runs) {
-    if (run.status === 'open' || run.estimatedCostUsd === null) {
+    const cost = estimatedRunCostUsd(run);
+    if (run.status === 'open' || cost === null) {
       continue;
     }
     const day = run.startedDay;
     const entry = map.get(day) ?? { total: 0, count: 0 };
-    entry.total += run.estimatedCostUsd;
+    entry.total += cost;
     entry.count += 1;
     map.set(day, entry);
   }
@@ -113,15 +135,16 @@ export function costTrendByProviderRows(runs: PreparedRunRow[]): CostTrendByProv
   const byDayProvider = new Map<string, Map<string, { total: number; count: number }>>();
 
   for (const run of runs) {
-    if (run.status === 'open' || run.estimatedCostUsd === null) {
+    const cost = estimatedRunCostUsd(run);
+    if (run.status === 'open' || cost === null) {
       continue;
     }
     const provider = run.provider?.trim() || '(unknown)';
-    totalsByProvider.set(provider, (totalsByProvider.get(provider) ?? 0) + run.estimatedCostUsd);
+    totalsByProvider.set(provider, (totalsByProvider.get(provider) ?? 0) + cost);
 
     const dayMap = byDayProvider.get(run.startedDay) ?? new Map<string, { total: number; count: number }>();
     const entry = dayMap.get(provider) ?? { total: 0, count: 0 };
-    entry.total += run.estimatedCostUsd;
+    entry.total += cost;
     entry.count += 1;
     dayMap.set(provider, entry);
     byDayProvider.set(run.startedDay, dayMap);
@@ -173,9 +196,10 @@ export const costCharts: ChartEntry[] = [
   {
     id: 'chart-cost-by-model',
     render: async (ctx: ChartContext) => {
+      const cohort = costByModelCohortRows(ctx.runs).filter((row) => row.withCostCount > 0);
       const rows = groupCostByModel(ctx.runs);
-      const total = rows.reduce((s, r) => s + r.totalCostUsd, 0);
-      ctx.setNote('cost-by-model-note', `Top ${rows.length} models by spend; ${rows.length === 0 ? 'no' : 'summarized'} cost data. Estimated via token usage × model pricing.`, ctx.renderToken);
+      const total = cohort.reduce((sum, row) => sum + row.totalCostUsd, 0);
+      ctx.setNote('cost-by-model-note', `Top ${rows.length} of ${cohort.length} model families with priced runs by spend; full priced-cohort total $${Math.round(total * 100) / 100}. Reported free usage remains priced at $0; models with no priced rows are omitted.`, ctx.renderToken);
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: categoricalHeight(rows.length),
@@ -202,7 +226,7 @@ export const costCharts: ChartEntry[] = [
       };
       await ctx.renderSpec('chart-cost-by-model', spec, 'No completed runs with cost data match the current filters.', ctx.renderToken);
       if (rows.length > 0) {
-        ctx.setNote('cost-by-model-note', `Top ${rows.length} models by spend; shown total $${Math.round(total * 100) / 100}. Avg spend per session in tooltip. Estimated via token usage × model pricing.`, ctx.renderToken);
+        ctx.setNote('cost-by-model-note', `Top ${rows.length} of ${cohort.length} model families with priced runs by spend; full priced-cohort total $${Math.round(total * 100) / 100}. Avg spend per session in tooltip. Reported free usage remains priced at $0; models with no priced rows are omitted.`, ctx.renderToken);
       }
     },
   },
@@ -211,11 +235,10 @@ export const costCharts: ChartEntry[] = [
     render: async (ctx: ChartContext) => {
       // Per-session average is only meaningful for models with ≥1 priced session;
       // a $0 bar would otherwise conflate "free model" with "no pricing".
-      const rows = groupCostByModel(ctx.runs)
-        .filter((r) => r.sessionCount > 0)
-        .sort((a, b) => b.avgCostUsdPerSession - a.avgCostUsdPerSession);
-      const sessionTotal = rows.reduce((s, r) => s + r.sessionCount, 0);
-      ctx.setNote('cost-per-session-by-model-note', `Top ${rows.length} models by average spend per session; ${sessionTotal} priced sessions. A session rolls up all of its runs.`, ctx.renderToken);
+      const cohort = costByModelCohortRows(ctx.runs).filter((row) => row.sessionCount > 0);
+      const rows = groupCostPerSessionByModel(ctx.runs);
+      const sessionTotal = cohort.reduce((sum, row) => sum + row.sessionCount, 0);
+      ctx.setNote('cost-per-session-by-model-note', `Top ${rows.length} of ${cohort.length} model families independently ranked by average spend per session; full filtered cohort has ${sessionTotal} priced model-sessions. A model-session rolls up all of its runs.`, ctx.renderToken);
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: categoricalHeight(rows.length),
@@ -324,9 +347,12 @@ export const costCharts: ChartEntry[] = [
   {
     id: 'chart-cost-vs-satisfaction',
     render: async (ctx: ChartContext) => {
-      const points = ctx.runs
-        .filter((r) => r.status !== 'open' && r.satisfaction !== null && r.estimatedCostUsd !== null && r.estimatedCostUsd > 0)
-        .map((r) => ({ cost: r.estimatedCostUsd!, satisfaction: r.satisfaction!, model: r.modelId?.trim() || '(unknown)' }));
+      const points = ctx.runs.flatMap((run) => {
+        const cost = estimatedRunCostUsd(run);
+        return run.status !== 'open' && run.satisfaction !== null && cost !== null && cost > 0
+          ? [{ cost, satisfaction: run.satisfaction, model: modelFamilyKey(run) }]
+          : [];
+      });
       ctx.setNote('cost-vs-satisfaction-note', `${points.length} scored runs with cost data; log-scaled cost axis.`, ctx.renderToken);
       const spec = points.length === 0 ? null : {
         width: 'container',
@@ -352,11 +378,12 @@ export const costCharts: ChartEntry[] = [
     render: async (ctx: ChartContext) => {
       const groups = new Map<string, number[]>();
       for (const run of ctx.runs) {
-        if (run.status === 'open' || run.estimatedCostUsd === null || run.resolution === null) {
+        const cost = estimatedRunCostUsd(run);
+        if (run.status === 'open' || cost === null || run.resolution === null) {
           continue;
         }
         const entry = groups.get(run.resolution) ?? [];
-        entry.push(run.estimatedCostUsd);
+        entry.push(cost);
         groups.set(run.resolution, entry);
       }
       const rows = [...groups.entries()].map(([resolution, costs]) => ({

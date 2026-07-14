@@ -120,8 +120,6 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
 	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
-	"PIE_SUBAGENT_MAX_CONCURRENCY",
-	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
 	"PI_SUBAGENT_TIMEOUT_MS",
@@ -137,8 +135,6 @@ test.before(() => {
 	// rather than papering over it with the outer inactivity net.
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "4";
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "8";
 	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";
 	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "0";   // net OFF — the structural abort path is the only escape
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
@@ -438,78 +434,3 @@ test("Bug 2 (observability): the abort path emits a [pie:subagent] child.abort.i
 // ---------------------------------------------------------------------------
 // Bug 3 — Parallel sibling abort (4 parallel tasks, mixed prefill + mid-stream)
 // ---------------------------------------------------------------------------
-
-test("Bug 3: parent abort settles every parallel sibling through its local prompt race", async () => {
-	// 4 tasks, 2 in prefill (prompt started) + 2 mid-stream. The mock's
-	// default: prompt() hangs and abort() never resolves (Bug 2 shape). Every
-	// sibling must still settle from the shared parent signal.
-	const tasks = [
-		{ agent: "worker", task: "task-1" },
-		{ agent: "worker", task: "task-2" },
-		{ agent: "worker", task: "task-3" },
-		{ agent: "worker", task: "task-4" },
-	] as never;
-
-	setMockBehavior(undefined); // default → abort never resolves, prompt never released
-	// Keep an explicit containment ceiling as additional test protection.
-	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
-	process.env.PI_SUBAGENT_TIMEOUT_MS = "200";
-
-	const controller = new AbortController();
-	const responseP = execute(
-		"tool-bug3",
-		{ tasks } as never,
-		controller.signal,
-		() => undefined,
-		makeCtx() as never,
-		{ getAllTools: () => [] } as never,
-		() => false,
-	);
-
-	await waitForCounter("promptStarted", 4);
-	controller.abort();
-
-	// Each sibling's prompt is raced against the combined abort signal, so all
-	// four settle even when remote abort hangs.
-	const response = await within(6000, responseP);
-	assert.equal(mockState().abortCalls, 4, "all 4 children must have session.abort() invoked");
-	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
-	assert.match(text, /abort|timeout|timed out/i, "parallel dispatch must surface an abort/timeout result, not hang");
-
-	process.env.PI_SUBAGENT_TIMEOUT_MS = prevTimeout;
-});
-
-test("Bug 3 (happy path — control): when abort() DOES release prompt(), a parent abort settles all 4 siblings within a bound and releases all permits", async () => {
-	// Control: the same scenario as above but with a happy abort() that
-	// releases prompt(). Asserts the structural path WORKS when the provider
-	// honours the abort — isolating the bug to the hung-abort window.
-	const tasks = [
-		{ agent: "worker", task: "task-1" },
-		{ agent: "worker", task: "task-2" },
-		{ agent: "worker", task: "task-3" },
-		{ agent: "worker", task: "task-4" },
-	] as never;
-
-	setMockBehavior({
-		onAbort: (release: (v?: unknown) => void) => { release(); return Promise.resolve(); },
-	});
-
-	const controller = new AbortController();
-	const responseP = execute(
-		"tool-bug3-control",
-		{ tasks } as never,
-		controller.signal,
-		() => undefined,
-		makeCtx() as never,
-		{ getAllTools: () => [] } as never,
-		() => false,
-	);
-	await waitForCounter("promptStarted", 4);
-	controller.abort();
-
-	const response = await within(2000, responseP);
-	// All 4 siblings got an abort result.
-	assert.equal(mockState().abortCalls, 4, "all 4 children must have session.abort() invoked");
-	const text = (response.content?.[0] as { text?: string } | undefined)?.text ?? "";
-	assert.match(text, /abort/i, "parallel dispatch must surface an abort result, not hang");
-});

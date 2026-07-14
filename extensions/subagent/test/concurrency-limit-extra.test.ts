@@ -6,8 +6,7 @@
  * pure-logic contracts of `Semaphore` and the env-aware limit helpers that are
  * NOT exercised elsewhere: zero/fractional/negative capacity, the
  * `SemaphoreAbortError` identity, permit-transfer-on-release semantics, and
- * the invalid-input fallbacks of `getMaxInflight` / `getMaxConcurrency` /
- * `getMaxParallelTasks`.
+ * invalid-input fallbacks for the root-tree limit.
  */
 
 import test from "node:test";
@@ -16,16 +15,11 @@ import {
 	Semaphore,
 	SemaphoreAbortError,
 	getMaxInflight,
-	getMaxConcurrency,
-	getMaxParallelTasks,
 	DEFAULT_MAX_INFLIGHT,
 } from "../src/concurrency-limit.js";
-import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "../types.js";
 
 const ENV_KEYS = [
 	"PIE_SUBAGENT_MAX_INFLIGHT",
-	"PIE_SUBAGENT_MAX_CONCURRENCY",
-	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 ] as const;
 
 const snapshot: Record<string, string | undefined> = {};
@@ -225,34 +219,4 @@ test("getMaxInflight: negative number falls back to default", () => {
 test("getMaxInflight: '1' is honoured (minimum valid)", () => {
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "1";
 	assert.equal(getMaxInflight(), 1);
-});
-
-test("getMaxConcurrency: non-numeric falls back to MAX_CONCURRENCY", () => {
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "nope";
-	assert.equal(getMaxConcurrency(), MAX_CONCURRENCY);
-});
-
-test("getMaxConcurrency: float is floored", () => {
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "2.7";
-	assert.equal(getMaxConcurrency(), 2);
-});
-
-test("getMaxConcurrency: zero falls back to MAX_CONCURRENCY", () => {
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "0";
-	assert.equal(getMaxConcurrency(), MAX_CONCURRENCY);
-});
-
-test("getMaxParallelTasks: non-numeric falls back to MAX_PARALLEL_TASKS", () => {
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "xyz";
-	assert.equal(getMaxParallelTasks(), MAX_PARALLEL_TASKS);
-});
-
-test("getMaxParallelTasks: float is floored", () => {
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "5.5";
-	assert.equal(getMaxParallelTasks(), 5);
-});
-
-test("getMaxParallelTasks: negative falls back to MAX_PARALLEL_TASKS", () => {
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "-1";
-	assert.equal(getMaxParallelTasks(), MAX_PARALLEL_TASKS);
 });

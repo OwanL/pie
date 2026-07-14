@@ -1,12 +1,10 @@
 /**
  * Guard-rail tests for the subagent tool's entry point (src/execute.ts).
  *
- * The orchestration logic (single/parallel/chain execution, session limits,
- * trail-loop prevention, {previous} threading, mode routing, details shape) is
- * already covered end-to-end against the REAL `execute*Mode` functions in
- * modes.test.ts (with a fake SDK). What is NOT covered there — and is unique
- * to `execute()` / `validateSubagentParams()` — is the front-door validation:
- * exactly-one-mode enforcement, unknown-agent detection (with suggestions and
+ * Single-task execution and trail-loop handling are covered end-to-end in
+ * modes.test.ts (with a fake SDK). What is unique to `execute()` /
+ * `validateSubagentParams()` is front-door validation: the required single-task
+ * shape, unknown-agent detection (with suggestions and
  * the scope-keyword guard), the disabled short-circuit, and the
  * subagent-depth limit. Those guard-rails are exercised here against the REAL
  * exported functions, with no SDK and no LLM, so every case is sub-ms.
@@ -62,16 +60,7 @@ test("validateSubagentParams: no mode specified returns ok:false", () => {
 	const v = validateSubagentParams({} as any, MOCK_AGENTS);
 	assert.equal(v.ok, false);
 	assert.equal(v.invalidResults.length, 1);
-	assert.match(v.invalidResults[0].stderr, /Invalid parameters\. Provide exactly one mode/);
-});
-
-test("validateSubagentParams: multiple modes specified returns ok:false", () => {
-	const v = validateSubagentParams(
-		{ agent: "worker", task: "do work", tasks: [{ agent: "reviewer", task: "r" }] } as any,
-		MOCK_AGENTS,
-	);
-	assert.equal(v.ok, false);
-	assert.match(v.invalidResults[0].stderr, /Provide exactly one mode/);
+	assert.match(v.invalidResults[0].stderr, /Provide one non-empty agent and task/);
 });
 
 test("validateSubagentParams: valid single mode returns ok:true, mode 'single', no invalid results", () => {
@@ -82,22 +71,6 @@ test("validateSubagentParams: valid single mode returns ok:true, mode 'single', 
 	assert.equal(v.invalidResults.length, 0);
 });
 
-test("validateSubagentParams: valid parallel mode returns mode 'parallel'", () => {
-	const v = validateSubagentParams({ tasks: [{ agent: "worker", task: "t" }] } as any, MOCK_AGENTS);
-	assert.equal(v.ok, true);
-	if (!v.ok) return;
-	assert.equal(v.mode, "parallel");
-	assert.equal(v.invalidResults.length, 0);
-});
-
-test("validateSubagentParams: valid chain mode returns mode 'chain'", () => {
-	const v = validateSubagentParams({ chain: [{ agent: "worker", task: "t" }] } as any, MOCK_AGENTS);
-	assert.equal(v.ok, true);
-	if (!v.ok) return;
-	assert.equal(v.mode, "chain");
-	assert.equal(v.invalidResults.length, 0);
-});
-
 test("validateSubagentParams: unknown single agent yields a 'Did you mean' suggestion", () => {
 	const v = validateSubagentParams({ agent: "Worker", task: "do work" } as any, MOCK_AGENTS);
 	assert.equal(v.ok, true);
@@ -105,23 +78,6 @@ test("validateSubagentParams: unknown single agent yields a 'Did you mean' sugge
 	assert.equal(v.invalidResults.length, 1);
 	assert.equal(v.invalidResults[0].agent, "Worker");
 	assert.match(v.invalidResults[0].stderr, /Did you mean "worker"/);
-});
-
-test("validateSubagentParams: unknown agent in tasks is reported", () => {
-	const v = validateSubagentParams({ tasks: [{ agent: "nonexistent", task: "t" }] } as any, MOCK_AGENTS);
-	assert.equal(v.ok, true);
-	if (!v.ok) return;
-	assert.equal(v.invalidResults.length, 1);
-	assert.match(v.invalidResults[0].stderr, /Unknown agent.*nonexistent/);
-});
-
-test("validateSubagentParams: unknown agent in chain carries the 1-based step", () => {
-	const v = validateSubagentParams({ chain: [{ agent: "worker", task: "ok" }, { agent: "ghost", task: "bad" }] } as any, MOCK_AGENTS);
-	assert.equal(v.ok, true);
-	if (!v.ok) return;
-	assert.equal(v.invalidResults.length, 1);
-	assert.equal(v.invalidResults[0].step, 2);
-	assert.match(v.invalidResults[0].stderr, /Unknown agent.*ghost/);
 });
 
 test("validateSubagentParams: scope keyword used as an agent name triggers the scope-keyword error", () => {

@@ -19,13 +19,41 @@ export interface AskUserContextValue {
   postMessage: (msg: WebviewToHostMessage) => void;
   /** All pending requests for the active session, keyed by request ID. */
   pendingRequests: Record<string, ExtensionUIRequestPayload>;
+  /** Register/unregister an inline prompt that is actually mounted in the DOM.
+   *  The fixed composer-adjacent fallback only hides while its exact request
+   *  has a live inline surface. */
+  registerInlineRequest: (requestId: string) => void;
+  unregisterInlineRequest: (requestId: string) => void;
 }
 
 export const AskUserContext = createContext<AskUserContextValue>({
   sessionPath: null,
   postMessage: () => {},
   pendingRequests: {},
+  registerInlineRequest: () => {},
+  unregisterInlineRequest: () => {},
 });
+
+function isInteractiveRequest(request: ExtensionUIRequestPayload): boolean {
+  return request.method === 'select' || request.method === 'confirm' || request.method === 'input';
+}
+
+/**
+ * Select the request that needs the fixed composer-adjacent fallback.
+ * Requests without an inline owner retain priority. When every request has an
+ * inline owner, choose the oldest request whose exact inline prompt is not
+ * mounted; this keeps concurrent collapsed/virtualized questions actionable
+ * even if an earlier sibling is already visible inline.
+ */
+export function selectFixedPromptRequest(
+  pendingRequests: Record<string, ExtensionUIRequestPayload>,
+  inlinePromptRequestCounts: Record<string, number>,
+): ExtensionUIRequestPayload | null {
+  const requests = Object.values(pendingRequests).filter(isInteractiveRequest);
+  return requests.find((request) => !request.subagentCallId && !request.toolCallId)
+    ?? requests.find((request) => (inlinePromptRequestCounts[request.id] ?? 0) <= 0)
+    ?? null;
+}
 
 /**
  * Find the pending ask_user request that matches a given caller id.
@@ -42,7 +70,7 @@ export function findMatchingRequest(
   callerId?: string,
 ): ExtensionUIRequestPayload | null {
   for (const request of Object.values(pendingRequests)) {
-    if (request.method !== 'select' && request.method !== 'confirm' && request.method !== 'input') continue;
+    if (!isInteractiveRequest(request)) continue;
     if (callerId === undefined) {
       if (request.toolCallId === undefined && request.subagentCallId === undefined) return request;
     } else {

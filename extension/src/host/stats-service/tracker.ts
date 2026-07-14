@@ -33,6 +33,21 @@ import type { GetArchState, DispatchArchEvent } from './types';
 
 const TOOL_FAILURE_SAMPLE_LIMIT = 20;
 
+function outcomeFromAgentReview(
+  rating: number,
+  completion: AgentReviewCompletion,
+): RunOutcome | null {
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return null;
+  }
+  const resolution = completion === 'fully'
+    ? 'resolved'
+    : completion === 'partial'
+      ? 'partially_resolved'
+      : 'unresolved';
+  return { resolution, satisfaction: rating, source: 'agent' };
+}
+
 function toNonNegativeInt(value: unknown): number {
   return Number.isFinite(value) && typeof value === 'number' && value > 0 ? Math.trunc(value) : 0;
 }
@@ -98,7 +113,7 @@ export class SessionRunTracker {
     return runs;
   }
 
-  prepareForSend(sessionPath: string, inputs: ComposerInput[]): string {
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
     const state = this.runState.getOrCreateSessionState(sessionPath);
 
     if (state.currentRun) {
@@ -117,6 +132,7 @@ export class SessionRunTracker {
     state.busyStartedAt = null;
 
     run.sendCount += 1;
+    run.initialUserMessageChars = Array.from(initialUserMessage.trim()).length;
     run.updatedAt = this.runState.isoNow();
     summarizeInputs(run, inputs);
     if (state.queuedUnsupportedInputCount > 0) {
@@ -731,6 +747,15 @@ export class SessionRunTracker {
   }
 
   recordOutcome(sessionPath: string, outcome: RunOutcome): void {
+    // User outcomes historically had no provenance field; keep that wire shape
+    // stable and reserve the explicit `agent` marker for agent-authored scores.
+    this.recordOutcomeWithSource(sessionPath, {
+      resolution: outcome.resolution,
+      satisfaction: outcome.satisfaction,
+    });
+  }
+
+  private recordOutcomeWithSource(sessionPath: string, outcome: RunOutcome): void {
     const state = this.runState.getOrCreateSessionState(sessionPath);
 
     if (state.currentRun) {
@@ -739,7 +764,12 @@ export class SessionRunTracker {
       return;
     }
 
-    if (!state.lastRun || state.lastRun.status !== 'closed_unscored') {
+    // A user outcome may replace an agent-authored outcome, and a corrected
+    // agent review may replace its earlier agent-authored outcome. Never let an
+    // agent review overwrite an existing user outcome.
+    const canUpdateLastRun = state.lastRun?.status === 'closed_unscored'
+      || (state.lastRun?.status === 'scored' && state.lastRun.outcome?.source === 'agent');
+    if (!state.lastRun || !canUpdateLastRun) {
       return;
     }
 
@@ -796,6 +826,16 @@ export class SessionRunTracker {
       reviewerCount: review.reviewerCount ?? 0,
     };
     this.runState.persistAgentReview(entry);
+
+    // A completed agent review is a first-class run outcome. Persist the
+    // provenance on the outcome, but otherwise feed it through the same scored
+    // run path as a user rating so every aggregate and leaderboard sees it.
+    const outcome = review.done
+      ? outcomeFromAgentReview(review.rating, review.completion)
+      : null;
+    if (outcome) {
+      this.recordOutcomeWithSource(sessionPath, outcome);
+    }
   }
 
   startNewTask(sessionPath: string): void {

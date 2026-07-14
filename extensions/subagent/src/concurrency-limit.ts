@@ -1,15 +1,11 @@
 /**
  * Process-wide concurrency gate for root subagent trees.
  *
- * Multiple `subagent` tool calls in a single parent reply can each spawn their
- * own parallel batches. The per-batch `mapWithConcurrencyLimit` only throttles
- * one `tasks[]` array at a time, so a burst can still open many independent
- * trees. Each root child holds one process permit for its complete lifetime;
+ * Multiple sibling `subagent` tool calls in a parent reply can start together.
+ * Each root child holds one process permit for its complete lifetime;
  * nested descendants borrow that ancestor scope so recursive delegation cannot
  * deadlock while every process permit is held by a parent waiting on children.
  */
-
-import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "../types.js";
 
 /** Acquire/release handle returned by {@link Semaphore.acquire}. */
 export interface Release {
@@ -125,22 +121,6 @@ export function getMaxInflight(): number {
 	if (raw === undefined || raw === "") return DEFAULT_MAX_INFLIGHT;
 	const n = Number(raw);
 	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_INFLIGHT;
-}
-
-/** Resolve the per-`tasks[]` concurrency limit. */
-export function getMaxConcurrency(): number {
-	const raw = process.env["PIE_SUBAGENT_MAX_CONCURRENCY"];
-	if (raw === undefined || raw === "") return MAX_CONCURRENCY;
-	const n = Number(raw);
-	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : MAX_CONCURRENCY;
-}
-
-/** Resolve the max number of parallel tasks in one `subagent` call. */
-export function getMaxParallelTasks(): number {
-	const raw = process.env["PIE_SUBAGENT_MAX_PARALLEL_TASKS"];
-	if (raw === undefined || raw === "") return MAX_PARALLEL_TASKS;
-	const n = Number(raw);
-	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : MAX_PARALLEL_TASKS;
 }
 
 /** Process-wide semaphore guarding complete root-tree lifetimes. */

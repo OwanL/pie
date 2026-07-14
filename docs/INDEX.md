@@ -24,6 +24,7 @@ This folder mixes design contracts, implementation plans (some completed, some o
 
 Historical migration and planning documents were removed from the tree after completion. Check git history for the original content:
 
+- `HANDOFF_SESSION_HANGS_2026-07-12.md` — superseded session-hang investigation. Its bounded settlement, provider-capacity, atomic-write, and cross-session queue fixes now live in code and the active contracts.
 - `ARCH-MIGRATION-PLAN.md` — multi-phase extension host + webview migration to CQRS/Elm/MVI.
 - `HANDOFF_mvi-migration.md` — MVI migration tracker (Phases 0–5, 12 Phase 5 items). **Completed** — the MessageRouter is 100% Commands, `QueueManager` deleted, all per-session keyed maps cleaned on session close, optimistic-op TTL in place, all deferred items resolved. The code is now the authoritative record; see `ARCHITECTURE.md` and `STATE_CONTRACT.md`.
 - `PLAN-extension-ui-questions.md` — extension UI question resolution.
@@ -32,7 +33,7 @@ Historical migration and planning documents were removed from the tree after com
 - `model-token-pricing-implementation-plan.md` — token-pricing migration; **completed**. Pricing now lives in `extensions/subagent/pricing.ts` + `extension/src/backend/pricing.ts`; authoritative price evidence in `internal/model-token-pricing-sources.md`.
 - `ui-ux-review.md` — pie webview UI/UX engineering review (41 findings across hitboxes, a11y, streaming jank, virtualization, tabs, overlays). **Completed** across two rounds (commits `b1a0107` + `5a1804c`); the code is the authoritative record.
 - `audit-ui-subagent-prompt.md` — UI & subagent systems audit (integrity / duplication / architecture findings with P0–P2 remediation steps). Historical report; remediations landed in code.
-- `model-scoring-methodology.md` — superseded fitness-based model-scoring methodology; replaced by the data-driven stratified leaderboard (`analysis/scripts/stratified-ranker.ts`).
+- `model-scoring-methodology.md` — superseded fitness-based methodology; replaced by the bias-aware, regularized strength leaderboard (`analysis/scripts/leaderboard.ts`). The separate `stratified-ranker.ts` is an offline bucket experiment, not the dashboard or runtime source of truth.
 - `subagent-ask-user-design.md` — subagent `ask_user` support design (multi-entry pending requests, parent-bridge proxy, subagent-scoped webview rendering). **Implemented**.
 - `subagent-model-selection-v2.md` — subagent model-selection v2 (bucket system). **Implemented** in `extensions/subagent/bucket-selector.ts` + `bridge.ts`.
 - `EXPANDED-SECTION-UI-PLAN.md` — bash/terminal + reasoning-preview expanded-section decisions (bound reasoning, shared `expandedSectionMaxHeight`, reduced default max-height, removed "hold close while turn active"). **Implemented**; `expandedSectionMaxHeight` lives in `extension/src/shared/protocol/settings.ts`; the code is authoritative.

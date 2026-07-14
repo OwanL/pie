@@ -54,7 +54,7 @@ Downsampling must preserve:
 
 ### Tests
 
-Extend `extension/test/aggregate-stats.test.ts`:
+Extend `extension/test/host/stats-service/aggregate-stats.test.ts`:
 
 - Generate thousands of same-day samples.
 - Assert each intraday series contains at most 240 points.
@@ -94,7 +94,7 @@ No eager migration is required. Existing oversized files will be corrected on th
 
 ### Tests
 
-Extend `extension/test/run-analytics-performance-regression.test.ts`:
+Extend `extension/test/host/stats-service/run-analytics-performance-regression.test.ts`:
 
 - File exceeds bytes but not line count: it is pruned.
 - File exceeds line count but not bytes: it is pruned.
@@ -301,9 +301,9 @@ Targeted development loop:
 
 ```bash
 cd extension
-npx tsx --test test/aggregate-stats.test.ts
-npx tsx --test test/run-analytics-performance-regression.test.ts
-npx tsx --test test/stats-service.test.ts
+npx tsx --test test/host/stats-service/aggregate-stats.test.ts
+npx tsx --test test/host/stats-service/run-analytics-performance-regression.test.ts
+npx tsx --test test/host/stats-service/stats-service.test.ts
 ```
 
 Final manual verification should compare the existing large analytics store with a fresh store and record:

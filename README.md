@@ -199,7 +199,7 @@ See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local sta
 npm run test
 
 # tight loop: run only named files
-npm run test:file -- extension/test/activity-tail.test.ts
+npm run test:file -- extension/test/webview/transcript/activity/activity-tail.test.ts
 
 # run fast suites for packages touched in the working tree
 npm run test:changed

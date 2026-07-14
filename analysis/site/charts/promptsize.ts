@@ -1,5 +1,5 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, median } from '../lib.ts';
+import { CHART_COLORS, median, modelFamilyKey } from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
 
 /**
@@ -55,7 +55,7 @@ export const promptSizeCharts: ChartEntry[] = [
           promptTokens: r.inputTokens,
           satisfaction: r.satisfaction!,
           resolution: r.resolution ?? '(unscored)',
-          model: r.modelId?.trim() || '(unknown)',
+          model: modelFamilyKey(r),
         }));
       ctx.setNote('prompt-size-vs-satisfaction-note', `${points.length} scored runs with prompt-size data; log-scaled token axis.`, ctx.renderToken);
       const spec = points.length === 0 ? null : {

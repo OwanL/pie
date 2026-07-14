@@ -101,6 +101,20 @@ function normalizePromptFamily(promptFamily: string | null): string {
   return promptFamily?.trim() ? promptFamily : '(none)';
 }
 
+function completeEstimatedRunCostUsd(run: PreparedRunRow): number | null {
+  return typeof run.totalEstimatedCostUsd === 'number' && Number.isFinite(run.totalEstimatedCostUsd)
+    ? run.totalEstimatedCostUsd
+    : null;
+}
+
+function hasScorableUserOutcome(run: PreparedRunRow): boolean {
+  return run.scored
+    && run.satisfaction !== null
+    && !run.mixedModelConfig
+    && !run.mixedTreatmentConfig
+    && run.outcomeSource === 'user';
+}
+
 function createEmptyResolutionCounts(): ResolutionCounts {
   return {
     resolved: 0,
@@ -148,10 +162,9 @@ function createOverview(prepared: PreparedAnalyticsData): OverviewData {
   const runs = prepared.runs;
   const completedRuns = runs.filter((run) => run.status !== 'open');
   const scoredRuns = completedRuns.filter((run) => run.satisfaction !== null);
-  // True spend: prefer totalEstimatedCostUsd (parent + subagent sessions) so the
-  // headline cost reflects spawned sub-agent spend too. Falls back to the
-  // parent-only estimatedCostUsd for legacy runs that predate the field.
-  const costValues = completedRuns.map((r) => r.totalEstimatedCostUsd ?? r.estimatedCostUsd).filter((v): v is number => v !== null);
+  // True spend requires a complete parent + applicable subagent total; parent-only estimates
+  // are never substituted for incomplete/unknown totals.
+  const costValues = completedRuns.map(completeEstimatedRunCostUsd).filter((v): v is number => v !== null);
   const resolutionCounts = createEmptyResolutionCounts();
   for (const run of scoredRuns) {
     addResolutionCount(resolutionCounts, run.resolution);
@@ -211,7 +224,20 @@ function createModelQuality(prepared: PreparedAnalyticsData): ModelQualityData {
 
   const rows: ModelQualityAggregateRow[] = [...groups.entries()].map(([key, runs]) => {
     const [modelId, thinkingLevel, experimentAssignment] = key.split('::');
-    const scoredRuns = runs.filter((run) => run.satisfaction !== null);
+    const scoredRuns = runs.filter(hasScorableUserOutcome);
+    const nonMixedAgentOutcomes = runs.filter((run) => (
+      run.scored
+      && run.satisfaction !== null
+      && !run.mixedModelConfig
+      && !run.mixedTreatmentConfig
+      && run.outcomeSource === 'agent'
+    ));
+    const mixedModelExcludedOutcomes = runs.filter((run) => (
+      run.scored && run.satisfaction !== null && run.mixedModelConfig
+    ));
+    const mixedTreatmentExcludedOutcomes = runs.filter((run) => (
+      run.scored && run.satisfaction !== null && !run.mixedModelConfig && run.mixedTreatmentConfig
+    ));
     const resolutionCounts = createEmptyResolutionCounts();
     for (const run of scoredRuns) {
       addResolutionCount(resolutionCounts, run.resolution);
@@ -224,6 +250,9 @@ function createModelQuality(prepared: PreparedAnalyticsData): ModelQualityData {
       runCount: runs.length,
       providerModelIds: [...new Set(runs.map((r) => (r.modelId ?? '').trim() || '(unknown)'))].sort(),
       scoredRunCount: scoredRuns.length,
+      agentOutcomeCount: nonMixedAgentOutcomes.length,
+      mixedModelExcludedOutcomeCount: mixedModelExcludedOutcomes.length,
+      mixedTreatmentExcludedOutcomeCount: mixedTreatmentExcludedOutcomes.length,
       averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
       averageBusyDurationMs: average(runs.map((run) => run.busyDurationMs), 0),
       medianBusyDurationMs: median(runs.map((run) => run.busyDurationMs)),
@@ -260,8 +289,9 @@ function createModelQuality(prepared: PreparedAnalyticsData): ModelQualityData {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     rows,
     notes: [
-      'Satisfaction averages from fewer than 3 scored runs are highly variable and should be interpreted with caution.',
-      'Runs from the same task group are not independent observations; treat per-run sample sizes as upper bounds.',
+      'Satisfaction, resolution, and scoredRunCount use only stable-model, stable-treatment user outcomes, matching leaderboard attribution. Agent outcomes are supplemental; mixed-model and mixed-treatment outcomes are excluded and disclosed separately.',
+      'Satisfaction averages from fewer than 3 user outcomes are highly variable and should be interpreted with caution.',
+      'Operational run metrics use all completed runs in each group. Runs from the same task group are not independent observations; treat per-run sample sizes as upper bounds.',
     ],
   };
 }
@@ -283,8 +313,19 @@ function createVerificationImpact(prepared: PreparedAnalyticsData): Verification
   const groupedRuns = new Map<string, PreparedRunRow[]>();
   const summaryGroups = new Map<string, PreparedRunRow[]>();
 
+  // Pre-group verification-usage rows by runId so each run's lookup is O(1)
+  // instead of re-filtering the full usage list per run (O(R×V) → O(V+R)).
+  // Order is preserved (Map arrays follow prepared.verificationUsage order),
+  // so the emitted rows are identical to the prior per-run `.filter`.
+  const usageByRunId = new Map<string, typeof prepared.verificationUsage>();
+  for (const row of prepared.verificationUsage) {
+    const existing = usageByRunId.get(row.runId) ?? [];
+    existing.push(row);
+    usageByRunId.set(row.runId, existing);
+  }
+
   for (const run of prepared.runs.filter((entry) => entry.status !== 'open')) {
-    const usageRows = prepared.verificationUsage.filter((row) => row.runId === run.runId);
+    const usageRows = usageByRunId.get(run.runId) ?? [];
     const kinds = usageRows.map((row) => row.kind);
     const effectiveKinds = kinds.length > 0 ? [...new Set(kinds)] : ['none'];
     for (const verificationKind of effectiveKinds) {
@@ -663,7 +704,7 @@ function buildAgentReviewComparison(prepared: PreparedAnalyticsData): AgentRevie
   // User side: group user-scored runs (satisfaction != null) by model family.
   const userByModel = new Map<string, number[]>();
   for (const run of prepared.runs) {
-    if (run.status === 'open' || run.satisfaction === null) {
+    if (run.status === 'open' || run.satisfaction === null || run.outcomeSource !== 'user') {
       continue;
     }
     const mid = run.modelFamily?.trim() || '(unknown)';
@@ -718,7 +759,9 @@ function buildAgentReviewComparison(prepared: PreparedAnalyticsData): AgentRevie
     .sort((a, b) => b.reviewCount - a.reviewCount || JSON.stringify(a.reviewerBuckets).localeCompare(JSON.stringify(b.reviewerBuckets)));
 
   const totalAgentReviews = rows.length;
-  const totalRunsScoredByUser = prepared.runs.filter((r) => r.status !== 'open' && r.satisfaction !== null).length;
+  const totalRunsScoredByUser = prepared.runs.filter(
+    (r) => r.status !== 'open' && r.satisfaction !== null && r.outcomeSource === 'user',
+  ).length;
   const totalScoredByBoth = rows.filter((r) => r.userSatisfaction !== null).length;
 
   return {
@@ -790,19 +833,18 @@ function createFileExtensions(prepared: PreparedAnalyticsData): FileExtensionDat
 }
 
 function createTokenThroughput(prepared: PreparedAnalyticsData): TokenThroughputData {
-  // Only completed turns with a precomputed tokensPerSecond contribute to the
-  // throughput distribution; errored / tokenless turns are retained for
-  // future error-rate analysis but excluded from the throughput series.
-  const rows: PreparedTurnThroughputRow[] = prepared.turnThroughput
-    .filter((row) => row.tokensPerSecond !== null)
-    .map((row) => ({ ...row }));
+  // Retain every turn (including errored / tokenless ones with null
+  // tokensPerSecond) so coverage and error-rate analysis see the full
+  // population. Chart transforms filter null tokensPerSecond at render time;
+  // the artifact itself must not drop rows.
+  const rows: PreparedTurnThroughputRow[] = prepared.turnThroughput.map((row) => ({ ...row }));
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     rows,
     notes: [
       'Throughput = output tokens / generation time (ms → s). Generation time excludes tool execution (tools run between assistant messages), so it isolates raw model emission speed.',
-      'concurrentBusySessions records how many sessions were mid-run when the turn ended; throughput degradation as this rises indicates provider rate-limiting under multi-session load.',
-      'Only completed turns with reported output tokens are plotted; errored / tokenless turns are stored but excluded from the throughput distribution.',
+      'concurrentBusySessions is end-of-turn descriptive telemetry: how many sessions were mid-run when the turn ended. It is not a causal rate-limit signal — the count is sampled once per turn and co-varies with many factors, so treat any throughput-vs-concurrency correlation as descriptive, not causal.',
+      'Every turn is retained for coverage / error analysis (including errored and tokenless turns with null tokensPerSecond). Chart transforms filter null tokensPerSecond at render time; the artifact never drops rows.',
     ],
   };
 }
@@ -897,7 +939,10 @@ export async function writeSiteData(outputDir: string, bundle: SiteDataBundle): 
 
 function validateManifest(manifest: unknown): asserts manifest is SiteManifest {
   assert(isRecord(manifest), 'manifest.json must contain an object.');
-  assert(manifest.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'manifest.json has an unexpected schemaVersion.');
+  assert(
+    manifest.schemaVersion === SITE_DATA_SCHEMA_VERSION,
+    `manifest.json schemaVersion mismatch: expected ${SITE_DATA_SCHEMA_VERSION}, got ${String(manifest.schemaVersion)}. Regenerate site data.`,
+  );
   assert(typeof manifest.generatedAt === 'string', 'manifest.json is missing generatedAt.');
   assert(typeof manifest.sourceWorkspaceKey === 'string', 'manifest.json is missing sourceWorkspaceKey.');
   assert(typeof manifest.sourceExportedAt === 'string', 'manifest.json is missing sourceExportedAt.');
@@ -924,6 +969,8 @@ function validateRunSummary(runSummary: unknown): void {
     assert(typeof row.runId === 'string', `run-summary.json row ${index} is missing runId.`);
     assert(typeof row.sessionPathHash === 'string', `run-summary.json row ${index} is missing sessionPathHash.`);
     assert(typeof row.toolCallCount === 'number', `run-summary.json row ${index} is missing toolCallCount.`);
+    assert(typeof row.toolDurationMs === 'number', `run-summary.json row ${index} is missing toolDurationMs.`);
+    assert(typeof row.timedToolCallCount === 'number', `run-summary.json row ${index} is missing timedToolCallCount.`);
   }
 }
 
@@ -984,50 +1031,112 @@ function validateTimeline(timeline: unknown): asserts timeline is TimelineData {
 }
 
 function validateModelLeaderboard(leaderboard: unknown): void {
+  const isNonNegativeInteger = (value: unknown): value is number => (
+    typeof value === 'number' && Number.isInteger(value) && value >= 0
+  );
+  const isUnitInterval = (value: unknown): value is number => (
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+  );
+
   assert(isRecord(leaderboard), 'model-leaderboard.json must contain an object.');
   assert(leaderboard.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'model-leaderboard.json has an unexpected schemaVersion.');
   assert(Array.isArray(leaderboard.rows), 'model-leaderboard.json is missing rows.');
-  let previousRank: number | null = null;
+  assert(isRecord(leaderboard.weights), 'model-leaderboard.json is missing weights.');
+  for (const dimension of ['satisfaction', 'resolutionRate', 'fileChurn', 'toolReliability', 'verificationPassRate', 'tokenEfficiency']) {
+    assert(typeof leaderboard.weights[dimension] === 'number' && Number.isFinite(leaderboard.weights[dimension]), `model-leaderboard.json weights.${dimension} is invalid.`);
+  }
+  assert(leaderboard.weights.fileChurn === 0, 'model-leaderboard.json process weights must be zero.');
+  assert(leaderboard.weights.toolReliability === 0, 'model-leaderboard.json process weights must be zero.');
+  assert(leaderboard.weights.verificationPassRate === 0, 'model-leaderboard.json process weights must be zero.');
+  assert(leaderboard.weights.tokenEfficiency === 0, 'model-leaderboard.json process weights must be zero.');
+  assert(
+    Math.abs((leaderboard.weights.satisfaction as number) + (leaderboard.weights.resolutionRate as number) - 1) <= 1e-9,
+    'model-leaderboard.json satisfaction and resolution weights must sum to 1.',
+  );
+  assert(isNonNegativeInteger(leaderboard.minimumScoredRuns), 'model-leaderboard.json has an invalid minimumScoredRuns.');
+  assert(isNonNegativeInteger(leaderboard.minimumEffectiveTasks), 'model-leaderboard.json has an invalid minimumEffectiveTasks.');
+  assert(isUnitInterval(leaderboard.minimumTaskScoringCoverage), 'model-leaderboard.json minimumTaskScoringCoverage must be in [0,1].');
+  assert(isRecord(leaderboard.caseMix), 'model-leaderboard.json is missing caseMix.');
+  const caseMix = leaderboard.caseMix;
+  assert(caseMix.method === 'direct_standardization', 'model-leaderboard.json has an invalid caseMix method.');
+  assert(typeof caseMix.applied === 'boolean', 'model-leaderboard.json caseMix is missing applied.');
+  assert(isNonNegativeInteger(caseMix.minimumRatedTasksPerBand), 'model-leaderboard.json caseMix has an invalid minimumRatedTasksPerBand.');
+  assert(isNonNegativeInteger(caseMix.minimumModelRatedTasksPerBand), 'model-leaderboard.json caseMix has an invalid minimumModelRatedTasksPerBand.');
+  assert(isUnitInterval(caseMix.minimumTargetBandWeight), 'model-leaderboard.json caseMix has an invalid minimumTargetBandWeight.');
+  assert(isRecord(caseMix.targetBandWeights), 'model-leaderboard.json caseMix is missing targetBandWeights.');
+  assert(isRecord(caseMix.scoredBandCounts), 'model-leaderboard.json caseMix is missing scoredBandCounts.');
+  const bands = ['low', 'medium', 'high'] as const;
+  for (const band of bands) {
+    assert(isUnitInterval(caseMix.targetBandWeights[band]), `model-leaderboard.json caseMix.targetBandWeights.${band} is invalid.`);
+    assert(isNonNegativeInteger(caseMix.scoredBandCounts[band]), `model-leaderboard.json caseMix.scoredBandCounts.${band} is invalid.`);
+  }
+  assert(Array.isArray(caseMix.activeSignals), 'model-leaderboard.json caseMix is missing activeSignals.');
+  assert(Array.isArray(leaderboard.notes), 'model-leaderboard.json is missing notes.');
+  assert(isRecord(leaderboard.sourceWeights), 'model-leaderboard.json is missing sourceWeights.');
+  assert(isRecord(leaderboard.sourcePriors), 'model-leaderboard.json is missing sourcePriors.');
+  assert(isRecord(leaderboard.sourceLogitSpreads), 'model-leaderboard.json is missing sourceLogitSpreads.');
+  assert(isRecord(leaderboard.shrinkage), 'model-leaderboard.json is missing shrinkage.');
+  let expectedRank = 1;
   let seenUnranked = false;
   for (const [index, row] of leaderboard.rows.entries()) {
     assert(isRecord(row), `model-leaderboard.json row ${index} must be an object.`);
-    assert(typeof row.modelId === 'string', `model-leaderboard.json row ${index} is missing modelId.`);
-    assert(typeof row.thinkingLevel === 'string', `model-leaderboard.json row ${index} is missing thinkingLevel.`);
-    assert(typeof row.runCount === 'number' && row.runCount >= 0, `model-leaderboard.json row ${index} has an invalid runCount.`);
-    assert(typeof row.scoredRunCount === 'number' && row.scoredRunCount >= 0, `model-leaderboard.json row ${index} has an invalid scoredRunCount.`);
+    assert(typeof row.modelId === 'string' && row.thinkingLevel === '(all)', `model-leaderboard.json row ${index} must be a family-level row.`);
+    assert(Array.isArray(row.thinkingLevels), `model-leaderboard.json row ${index} is missing thinkingLevels.`);
+    for (const field of ['userEvidenceCount', 'userEvidenceMass', 'agentEvidenceCount', 'agentEvidenceMass', 'processEvidenceCount', 'processEvidenceMass', 'canonicalTaskCount', 'transcriptOnlySessionCount', 'mixedAttributionMass']) {
+      assert(typeof row[field] === 'number' && Number.isFinite(row[field]) && row[field] >= 0, `model-leaderboard.json row ${index}.${field} is invalid.`);
+    }
+    assert(['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(String(row.evidenceTier)), `model-leaderboard.json row ${index} has invalid evidenceTier.`);
+    for (const field of ['userChannelScore', 'agentChannelScore', 'processChannelScore', 'compositeScore']) {
+      assert(row[field] === null || isUnitInterval(row[field]), `model-leaderboard.json row ${index}.${field} is invalid.`);
+    }
+    // Migrated invariants: count / coverage / gate-shape fields.
+    assert(isNonNegativeInteger(row.runCount), `model-leaderboard.json row ${index} has an invalid runCount.`);
+    assert(isNonNegativeInteger(row.scoredRunCount), `model-leaderboard.json row ${index} has an invalid scoredRunCount.`);
+    assert(isNonNegativeInteger(row.effectiveTaskCount), `model-leaderboard.json row ${index} has an invalid effectiveTaskCount.`);
+    assert(isNonNegativeInteger(row.attributableRunCount), `model-leaderboard.json row ${index} has an invalid attributableRunCount.`);
+    assert(isNonNegativeInteger(row.attributableTaskCount), `model-leaderboard.json row ${index} has an invalid attributableTaskCount.`);
+    assert(row.scoringCoverage === null || isUnitInterval(row.scoringCoverage), `model-leaderboard.json row ${index} has invalid scoringCoverage.`);
+    assert(typeof row.scoringCoverageGateFailed === 'boolean', `model-leaderboard.json row ${index} is missing scoringCoverageGateFailed.`);
+    assert(typeof row.caseMixAdjusted === 'boolean', `model-leaderboard.json row ${index} is missing caseMixAdjusted.`);
+    assert(typeof row.caseMixBandOverlapGateFailed === 'boolean', `model-leaderboard.json row ${index} is missing caseMixBandOverlapGateFailed.`);
+    assert(isRecord(row.taskComplexityBandCounts), `model-leaderboard.json row ${index} is missing taskComplexityBandCounts.`);
+    for (const band of bands) {
+      assert(isNonNegativeInteger(row.taskComplexityBandCounts[band]), `model-leaderboard.json row ${index} has invalid ${band} task count.`);
+    }
+    // Migrated invariant: provider canonical run/scored sums (transcript fields are separate).
     assert(Array.isArray(row.providers), `model-leaderboard.json row ${index} is missing providers.`);
     let providerRunSum = 0;
     let providerScoredSum = 0;
     for (const [pIndex, provider] of row.providers.entries()) {
       assert(isRecord(provider), `model-leaderboard.json row ${index} providers[${pIndex}] must be an object.`);
       assert(typeof provider.modelId === 'string', `model-leaderboard.json row ${index} providers[${pIndex}] is missing modelId.`);
-      assert(typeof provider.runCount === 'number' && provider.runCount >= 0, `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid runCount.`);
-      assert(typeof provider.scoredRunCount === 'number' && provider.scoredRunCount >= 0, `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid scoredRunCount.`);
-      providerRunSum += provider.runCount as number;
-      providerScoredSum += provider.scoredRunCount as number;
+      assert(isNonNegativeInteger(provider.runCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid runCount.`);
+      assert(isNonNegativeInteger(provider.scoredRunCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid scoredRunCount.`);
+      assert(isNonNegativeInteger(provider.transcriptOnlySessionCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid transcriptOnlySessionCount.`);
+      assert(typeof provider.transcriptEvidenceMass === 'number' && Number.isFinite(provider.transcriptEvidenceMass) && provider.transcriptEvidenceMass >= 0, `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid transcriptEvidenceMass.`);
+      providerRunSum += provider.runCount;
+      providerScoredSum += provider.scoredRunCount;
     }
-    // Every run is attributed to exactly one provider-specific id, so the breakdown must reconcile
-    // with the row totals — guards against grouping/regrouping bugs.
     assert(providerRunSum === row.runCount, `model-leaderboard.json row ${index} provider runCount sum (${providerRunSum}) != row.runCount (${row.runCount}).`);
     assert(providerScoredSum === row.scoredRunCount, `model-leaderboard.json row ${index} provider scoredRunCount sum (${providerScoredSum}) != row.scoredRunCount (${row.scoredRunCount}).`);
+    // Migrated invariant: dimensions shape/ranges.
     assert(isRecord(row.dimensions), `model-leaderboard.json row ${index} is missing dimensions.`);
     assert(isRecord(row.dimensions.tokenEfficiency), `model-leaderboard.json row ${index} is missing tokenEfficiency dimension.`);
-    if (row.rank !== null) {
+    // Migrated invariant: rank ordering / sequential ranks.
+    if (row.compositeScore !== null) {
+      assert(row.rank === expectedRank, `model-leaderboard.json row ${index} has a non-contiguous rank.`);
+      expectedRank += 1;
       assert(!seenUnranked, `model-leaderboard.json row ${index} is ranked after unranked rows.`);
-      assert(row.compositeScore !== null, `model-leaderboard.json row ${index} has rank but null compositeScore.`);
+      assert(row.unadjustedCompositeScore !== null, `model-leaderboard.json row ${index} has rank but null unadjustedCompositeScore.`);
       assert(row.reliabilityFactor !== null && typeof row.reliabilityFactor === 'number', `model-leaderboard.json row ${index} has rank but invalid reliabilityFactor.`);
-      if (previousRank !== null) {
-        assert((row.rank as number) >= previousRank, `model-leaderboard.json row ${index} rank is not ascending.`);
-      }
-      previousRank = row.rank as number;
+      assert(isRecord(row.scoreInterval80) && isUnitInterval(row.scoreInterval80.lower) && isUnitInterval(row.scoreInterval80.upper), `model-leaderboard.json row ${index} has invalid scoreInterval80.`);
+      assert(row.scoreInterval80.level === 0.8, `model-leaderboard.json row ${index} has invalid interval level.`);
+      assert(isNonNegativeInteger(row.scoreInterval80.bestRank) && isNonNegativeInteger(row.scoreInterval80.worstRank), `model-leaderboard.json row ${index} has invalid rank interval.`);
     } else {
       seenUnranked = true;
-      assert(row.compositeScore === null, `model-leaderboard.json row ${index} has compositeScore but null rank.`);
+      assert(row.rank === null, `model-leaderboard.json row ${index} has null compositeScore but non-null rank.`);
     }
   }
-  assert(isRecord(leaderboard.weights), 'model-leaderboard.json is missing weights.');
-  assert(typeof leaderboard.minimumScoredRuns === 'number', 'model-leaderboard.json is missing minimumScoredRuns.');
-  assert(Array.isArray(leaderboard.notes), 'model-leaderboard.json is missing notes.');
 }
 
 function validatePruningImpact(data: unknown): asserts data is PruningImpactData {
@@ -1100,11 +1209,17 @@ function validateTokenThroughput(data: unknown): asserts data is TokenThroughput
   data.rows.forEach((row, index) => {
     assert(isRecord(row), `token-throughput.json row ${index} must be an object.`);
     assert(typeof row.runId === 'string', `token-throughput.json row ${index} is missing runId.`);
+    assert(row.modelId === null || typeof row.modelId === 'string', `token-throughput.json row ${index} has an invalid modelId.`);
+    assert(row.modelFamily === null || typeof row.modelFamily === 'string', `token-throughput.json row ${index} has an invalid modelFamily.`);
     assert(typeof row.endedAt === 'string', `token-throughput.json row ${index} is missing endedAt.`);
     assert(typeof row.generationDurationMs === 'number' && row.generationDurationMs >= 0, `token-throughput.json row ${index} has an invalid generationDurationMs.`);
     assert(typeof row.outputTokens === 'number' && row.outputTokens >= 0, `token-throughput.json row ${index} has an invalid outputTokens.`);
     assert(typeof row.concurrentBusySessions === 'number' && row.concurrentBusySessions >= 0, `token-throughput.json row ${index} has an invalid concurrentBusySessions.`);
     assert(typeof row.status === 'string', `token-throughput.json row ${index} is missing status.`);
+    assert(typeof row.inputTokens === 'number' && row.inputTokens >= 0, `token-throughput.json row ${index} has an invalid inputTokens.`);
+    assert(typeof row.cacheReadTokens === 'number' && row.cacheReadTokens >= 0, `token-throughput.json row ${index} has an invalid cacheReadTokens.`);
+    assert(typeof row.cacheWriteTokens === 'number' && row.cacheWriteTokens >= 0, `token-throughput.json row ${index} has an invalid cacheWriteTokens.`);
+    assert(row.contextTokens === null || (typeof row.contextTokens === 'number' && row.contextTokens >= 0), `token-throughput.json row ${index} has an invalid contextTokens.`);
   });
 }
 

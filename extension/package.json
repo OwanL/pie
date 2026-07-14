@@ -161,6 +161,7 @@
     "test": "node ../scripts/run-tests.mjs --fast --package extension",
     "perf": "tsx ./test/perf/streaming-pipeline.perf.ts",
     "perf:analytics": "tsx ./test/perf/analytics.perf.ts",
+    "prepackage": "npm run build -- --no-sync",
     "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"
   },
   "devDependencies": {

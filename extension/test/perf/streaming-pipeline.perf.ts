@@ -11,15 +11,11 @@
  *   buildStateEnvelope()── pure snapshot builder
  *   structuredClone()    ── proxy for webview.postMessage clone cost
  *
- * It replicates `PieExtension.dispatchArchEvent` + `scheduleRender` +
- * `SidebarViewProvider.postState` faithfully, including the wasteful
- * double-projection in scheduleRender (1× sync for bootLog + 1× microtask for
- * the status bar) and the double `getViewState` in postState (1× envelope +
- * 1× bootLog). An `OrchestrationMode` flag toggles baseline (as-written) vs
- * fixed (single projection) so the orchestration win is attributable in
- * isolation — the pure-function costs (reducer find, derivePruningResult walk)
- * are measured against the real source, so fixing the source moves those
- * numbers automatically.
+ * It runs the current orchestration (no projection in `scheduleRender`; one
+ * `getViewState` in `postState`) and retains the former extra-projection path
+ * as a labelled legacy comparison. The pure-function costs (reducer lookup,
+ * projection, envelope construction, clone) are measured against real source,
+ * so source changes move those numbers automatically.
  *
  * Run:   npx tsx ./test/perf/streaming-pipeline.perf.ts
  *        (also: `npm run perf` from extension/)
@@ -59,13 +55,11 @@ const TOOL_PROGRESS_PER_CYCLE = 4;
 const TRANSCRIPT_LENGTHS = [0, 100, 400, 1000];
 const TOOL_LOOKUP_ITERS = 5000;
 
-// ─── Orchestration mode (baseline vs fixed) ──────────────────────────────────
+// ─── Orchestration mode (legacy vs current) ──────────────────────────────────
 //
-// `baseline` mirrors the code as written today: scheduleRender calls
-// selectViewState twice per event (sync bootLog + microtask status bar) and
-// postState calls getViewState twice (envelope + bootLog).
-// `fixed` removes the wasted projections: the status bar / bootLog read
-// ArchState fields directly, and postState computes the view state once.
+// `legacy` preserves the former extra scheduleRender/postState projection work
+// for before/after comparison. `current` mirrors source today: status bar and
+// boot logging read ArchState directly, and postState computes ViewState once.
 
 interface OrchestrationMode {
   name: string;
@@ -74,12 +68,12 @@ interface OrchestrationMode {
 }
 
 const BASELINE: OrchestrationMode = {
-  name: 'baseline',
+  name: 'legacy',
   scheduleRenderDoubleProjection: true,
   postStateDoubleProjection: true,
 };
 const FIXED_ORCH: OrchestrationMode = {
-  name: 'fixed-orch',
+  name: 'current',
   scheduleRenderDoubleProjection: false,
   postStateDoubleProjection: false,
 };
@@ -293,7 +287,7 @@ function stepEvent(state: ArchState, event: Event, mode: OrchestrationMode, acc:
   acc.events++;
   if (event.kind === 'MessageDelta') acc.deltas++;
 
-  // scheduleRender — baseline pays TWO full projections per event.
+  // Legacy scheduleRender paid TWO full projections per event.
   if (mode.scheduleRenderDoubleProjection) {
     const p0 = performance.now();
     selectViewState(state); // sync (bootLog fields only)
@@ -306,7 +300,7 @@ function stepEvent(state: ArchState, event: Event, mode: OrchestrationMode, acc:
     acc.projectionUs += (p3 - p2) * 1000;
     acc.projectionCalls++;
   }
-  // fixed mode: status bar reads archState.settings.notice + .sessions.runningSessionPaths.length
+  // Current mode: status bar reads archState.settings.notice + .sessions.runningSessionPaths.length
   // directly; bootLog reads archState fields. No projection. (scheduleState still queues a post.)
   return state;
 }
@@ -382,7 +376,7 @@ function runScenario(
   }
 
   const viewState: ViewState = selectViewState(state);
-  const viewStateJsonBytes = JSON.stringify(viewState).length;
+  const viewStateJsonBytes = Buffer.byteLength(JSON.stringify(viewState), 'utf8');
   const deltas = Math.max(acc.deltas, 1);
 
   return {
@@ -554,8 +548,8 @@ function printRunTable(rows: RunResult[]): void {
 }
 
 function printScaling(rows: RunResult[]): void {
-  console.log('\n=== O(n) scaling check: per-delta sync cost vs transcript length (burst, baseline) ===');
-  const burst = rows.filter((r) => r.regime === 'burst' && r.mode === 'baseline');
+  console.log('\n=== O(n) scaling check: per-delta sync cost vs transcript length (burst, current) ===');
+  const burst = rows.filter((r) => r.regime === 'burst' && r.mode === 'current');
   if (burst.length < 2) return;
   const base = burst[0].perDeltaSyncUs;
   for (const r of burst) {
@@ -653,6 +647,11 @@ async function main(): Promise<void> {
   const report = {
     generatedAt: new Date().toISOString(),
     gitSha: gitSha(),
+    environment: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+    },
     scenario: { DELTA_COUNT, THINKING_COUNT, TOOL_CYCLES, TRANSCRIPT_LENGTHS },
     runs: runRows,
     toolLookups: toolRows,

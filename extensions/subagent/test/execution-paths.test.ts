@@ -166,10 +166,78 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(result.usage.input, 11);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.42);
-	assert.deepEqual(result.runningTools, ["bash"], "runningTools is only cleared by tool_execution_end, which this event stream omits");
+	assert.deepEqual(result.runningTools, [], "terminalization clears nested tools even when tool_execution_end is omitted");
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
+});
+
+test("runSingleAgent publishes real lifecycle phases and streaming state", async () => {
+	const snapshots: Array<{ phase?: string; detail?: string; streaming?: boolean; reasoning?: string; tools: string[] }> = [];
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", thinking: "reasoning" } });
+			emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "working" } });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "using a tool" }],
+					usage: { input: 1, output: 1, totalTokens: 2, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash" });
+			emit({ type: "tool_execution_end", toolCallId: "bash-1", toolName: "bash" });
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		(partial) => {
+			const current = partial.details?.results[0];
+			if (current) snapshots.push({
+				phase: current.activityPhase,
+				detail: current.activityDetail,
+				streaming: current.streaming,
+				reasoning: current.streamingReasoning,
+				tools: [...(current.runningTools ?? [])],
+			});
+		},
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(snapshots[0]?.phase, "preparing");
+	const queuedIndex = snapshots.findIndex((snapshot) => snapshot.phase === "queued" && snapshot.detail?.includes("concurrency"));
+	const providerIndex = snapshots.findIndex((snapshot, index) => index > queuedIndex && snapshot.phase === "waiting_provider");
+	const streamingIndex = snapshots.findIndex((snapshot, index) => index > providerIndex && snapshot.phase === "streaming" && snapshot.streaming === true);
+	const toolIndex = snapshots.findIndex((snapshot, index) => index > streamingIndex && snapshot.phase === "running_tool" && snapshot.tools[0] === "bash");
+	const postToolProviderIndex = snapshots.findIndex((snapshot, index) => index > toolIndex && snapshot.phase === "waiting_provider" && snapshot.tools.length === 0);
+	assert.ok(queuedIndex > 0, "resource preparation advances to the process-wide concurrency queue");
+	assert.ok(providerIndex > queuedIndex, "the provider wait begins only after the concurrency queue");
+	assert.ok(streamingIndex > providerIndex, "provider output advances the wait to generating");
+	assert.ok(snapshots.some((snapshot) => snapshot.reasoning === "reasoning"), "live reasoning is published for the collapsed preview");
+	assert.ok(toolIndex > streamingIndex, "tool execution follows provider generation");
+	assert.ok(postToolProviderIndex > toolIndex, "finishing the tool returns to the next provider wait");
+	assert.equal(result.activityPhase, "completed");
+	assert.equal(result.streaming, false);
+	assert.equal(result.provider, "test");
 });
 
 test("runSingleAgent aborts promptly when the parent signal is already aborted", async () => {
@@ -202,6 +270,10 @@ test("runSingleAgent aborts promptly when the parent signal is already aborted",
 	);
 
 	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.equal(result.activityPhase, "cancelled");
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(result.streaming, false);
 	assert.match(result.errorMessage ?? "", /aborted/i);
 	assert.equal(state.createResourceLoaderArgs.length, 1, "resources load under the short already-aborted timeout");
 	assert.equal(state.createSessionArgs.length, 1, "session is created under the short already-aborted timeout");
@@ -289,6 +361,10 @@ test("runSingleAgent returns an abort result when the parent aborts before creat
 	controller.abort();
 	const result = await resultPromise;
 	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "aborted");
+	assert.equal(result.activityPhase, "cancelled");
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(result.streaming, false);
 	assert.match(result.errorMessage ?? "", /creating subagent session/i);
 	assert.equal(state.disposeCalls, 0, "the SDK has not returned a session yet");
 
@@ -300,7 +376,12 @@ test("runSingleAgent returns an abort result when the parent aborts before creat
 });
 
 test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
-	const { sdk, state } = createFakeSdk();
+	const { sdk, state } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "tool_execution_start", toolCallId: "nested-timeout", toolName: "bash" });
+			await new Promise<void>(() => undefined);
+		},
+	});
 	const { bridge, calls } = makeParentBridge();
 
 	const result = await runSingleAgent(
@@ -326,6 +407,9 @@ test("runSingleAgent returns timeout failure and calls cancelAll", async () => {
 
 	assert.equal(result.exitCode, 1);
 	assert.equal(result.stopReason, "timeout");
+	assert.equal(result.activityPhase, "failed");
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(result.streaming, false);
 	assert.match(result.errorMessage ?? "", /timed out after 0.01s/);
 	assert.equal(calls.cancelAll, 1);
 	assert.ok(state.abortCalls >= 1);
@@ -394,7 +478,12 @@ test("runSingleAgent with timeout disabled: parent abort interrupts without time
 	const prevTimeout = process.env.PI_SUBAGENT_TIMEOUT_MS;
 	delete process.env.PI_SUBAGENT_TIMEOUT_MS;
 	try {
-		const { sdk, state } = createFakeSdk(); // prompt hangs until abort
+		const { sdk, state } = createFakeSdk({
+			onPrompt: async (emit) => {
+				emit({ type: "tool_execution_start", toolCallId: "nested-abort", toolName: "read" });
+				await new Promise<void>(() => undefined);
+			},
+		});
 		const { bridge, calls } = makeParentBridge();
 		const controller = new AbortController();
 
@@ -423,7 +512,10 @@ test("runSingleAgent with timeout disabled: parent abort interrupts without time
 		const result = await resultPromise;
 
 		assert.equal(result.exitCode, 1);
-		assert.notEqual(result.stopReason, "timeout");
+		assert.equal(result.stopReason, "aborted");
+		assert.equal(result.activityPhase, "cancelled");
+		assert.deepEqual(result.runningTools, []);
+		assert.equal(result.streaming, false);
 		assert.doesNotMatch(result.errorMessage ?? "", /timed out/);
 		assert.ok(state.abortCalls >= 1);
 		assert.equal(calls.cancelAll, 1);
@@ -479,7 +571,7 @@ test("runSingleAgent honours PI_SUBAGENT_TIMEOUT_MS env var (no seam): hanging p
 	}
 });
 
-test("validateSubagentParams enforces exactly one mode and validates agent names", () => {
+test("validateSubagentParams enforces the single-task shape and validates agent names", () => {
 	const agents = [makeAgent({ name: "worker" })];
 
 	const invalidMode = validateSubagentParams({}, agents);
@@ -542,7 +634,7 @@ test("execute returns depth-limit response when nested depth is exhausted", asyn
 	}
 });
 
-test("execute throws mode-count error for invalid mode selection", async () => {
+test("execute throws a parameter error when agent and task are missing", async () => {
 	const tempDir = await mkdtemp(path.join(os.tmpdir(), "subagent-mode-test-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -557,7 +649,7 @@ test("execute throws mode-count error for invalid mode selection", async () => {
 				{} as any,
 				() => false,
 			),
-			/Provide exactly one mode/,
+			/Provide one non-empty agent and task/,
 		);
 	} finally {
 		if (previousAgentDir === undefined) {
@@ -725,45 +817,72 @@ test("runSingleAgent propagates nested tool_execution_update partials onto resul
 	assert.ok(lastDetails, "last update carried details");
 });
 
-test("runSingleAgent tool_execution_update is a graceful no-op before the assistant message lands (T1)", async () => {
-	// An update arriving before message_end committed the toolCall's owner
-	// assistant message must not throw — the next update catches it.
+test("runSingleAgent replays the latest tool_execution_update after its assistant toolCall commits", async () => {
+	const firstPartial = { content: [{ type: "text", text: "first" }], details: { results: [] } };
+	const latestPartial = { content: [{ type: "text", text: "latest" }], details: { results: [] } };
 	const { sdk } = createFakeSdk({
 		onPrompt: async (emit) => {
-			emit({ type: "tool_execution_update", toolCallId: "tc-early", partialResult: { content: [], details: { results: [] } } });
+			// Both updates race ahead of the message_end that commits their owner.
+			emit({ type: "tool_execution_update", toolCallId: "tc-early", partialResult: firstPartial });
+			emit({ type: "tool_execution_update", toolCallId: "tc-early", partialResult: latestPartial });
 			emit({
 				type: "message_end",
 				message: {
 					role: "assistant",
-					content: [{ type: "text", text: "done" }],
+					content: [{ type: "toolCall", id: "tc-early", name: "subagent", arguments: {} }],
 					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
 					model: "m",
-					stopReason: "completed",
+					stopReason: "toolUse",
 				},
 			});
 		},
 	});
 
 	const result = await runSingleAgent(
-		process.cwd(),
-		[makeAgent()],
-		"worker",
-		"do work",
-		undefined,
-		undefined,
-		undefined,
-		undefined,
+		process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
 		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
-		makeModelRegistry(),
-		undefined,
+		makeModelRegistry(), undefined,
 		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		{ sdk: sdk as any, timeoutMs: 0 },
+		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any, timeoutMs: 0 },
 	);
 
 	assert.equal(result.exitCode, 0);
+	const assistant = result.messages.find((message) => message.role === "assistant") as any;
+	const toolCall = assistant.content.find((part: any) => part.type === "toolCall" && part.id === "tc-early");
+	assert.equal(toolCall.result, latestPartial, "the buffered latest partial is attached after message_end");
+	assert.equal(toolCall.status, "running");
+});
+
+test("runSingleAgent ignores tool_execution_update received after tool_execution_end", async () => {
+	const beforeEnd = { content: [{ type: "text", text: "before end" }], details: { results: [] } };
+	const latePartial = { content: [{ type: "text", text: "late" }], details: { results: [] } };
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tc-ended", name: "subagent", arguments: {} }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "tool_execution_update", toolCallId: "tc-ended", partialResult: beforeEnd });
+			emit({ type: "tool_execution_end", toolCallId: "tc-ended", toolName: "subagent" });
+			emit({ type: "tool_execution_update", toolCallId: "tc-ended", partialResult: latePartial });
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(), undefined,
+		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined, undefined, undefined, undefined, undefined, { sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	const assistant = result.messages.find((message) => message.role === "assistant") as any;
+	const toolCall = assistant.content.find((part: any) => part.type === "toolCall" && part.id === "tc-ended");
+	assert.equal(toolCall.result, beforeEnd, "late partial must not overwrite the state present at end");
 });

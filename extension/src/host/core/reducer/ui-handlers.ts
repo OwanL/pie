@@ -16,17 +16,21 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
   // Guarded on 'running' so a pruning-result for an already-committed or
   // background turn (no active prepass) does not fabricate a chip.
   const isPruningResult = event.message.customType === 'pruning-result';
+  const isPrepassSucceeded = isPruningResult || event.message.customType === 'preflight-succeeded';
   const prepass = state.pending.prepassBySession[event.sessionPath];
   const transitionToSucceeded =
-    isPruningResult && prepass?.phase === 'running';
+    isPrepassSucceeded && prepass?.phase === 'running';
+  const refreshSucceededDetails = isPruningResult && prepass?.phase === 'succeeded';
   const latencyMs =
-    transitionToSucceeded
+    transitionToSucceeded || refreshSucceededDetails
       ? readPrepassLatencyMs(event.message.customDetails)
       : null;
 
   const nextState = produce(state, (draft) => {
-    draft.transcript.bySession[event.sessionPath] = upsertTranscriptMessage(existing, event.message);
-    if (transitionToSucceeded) {
+    if (isPruningResult) {
+      draft.transcript.bySession[event.sessionPath] = upsertTranscriptMessage(existing, event.message);
+    }
+    if (transitionToSucceeded || refreshSucceededDetails) {
       draft.pending.prepassBySession[event.sessionPath] = {
         phase: 'succeeded',
         latencyMs,
@@ -34,7 +38,16 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
     }
   });
 
-  return { state: nextState, effects: [] };
+  const promotedCorrId = transitionToSucceeded
+    ? Object.entries(state.pending.promoted).find(([, op]) => op.sessionPath === event.sessionPath)?.[0]
+    : undefined;
+
+  return {
+    state: nextState,
+    effects: promotedCorrId
+      ? [{ kind: 'MarkPrepassSucceeded', corrId: promotedCorrId }]
+      : [],
+  };
 }
 
 /** Read `prepassLatencyMs` from a pruning-result custom message's details,
@@ -59,6 +72,13 @@ export function handleExtensionUIRequest(state: ArchState, event: Extract<Event,
       const sessionMap = draft.settings.pendingExtensionUIRequestsBySession[sessionPath] ?? {};
       sessionMap[event.request.id] = event.request;
       draft.settings.pendingExtensionUIRequestsBySession[sessionPath] = sessionMap;
+      const turn = draft.livePipeline.turnsBySession[sessionPath];
+      if (turn && !turn.pendingExtensionUiRequestIds.includes(event.request.id)) {
+        turn.pendingExtensionUiRequestIds.push(event.request.id);
+        turn.phase = 'waiting_input';
+        draft.livePipeline.revisionBySession[sessionPath] =
+          (draft.livePipeline.revisionBySession[sessionPath] ?? 0) + 1;
+      }
     }),
     effects: [],
   };
@@ -101,15 +121,17 @@ export function handleNoticeShown(state: ArchState, event: Extract<Event, { kind
 }
 
 export function handlePendingExtensionUIRequestsCleared(state: ArchState, event: Extract<Event, { kind: 'PendingExtensionUIRequestsCleared' }>): ReducerResult {
-  const { [event.sessionPath]: _removed, ...remaining } = state.settings.pendingExtensionUIRequestsBySession;
   return {
-    state: {
-      ...state,
-      settings: {
-        ...state.settings,
-        pendingExtensionUIRequestsBySession: remaining,
-      },
-    },
+    state: produce(state, (draft) => {
+      delete draft.settings.pendingExtensionUIRequestsBySession[event.sessionPath];
+      const turn = draft.livePipeline.turnsBySession[event.sessionPath];
+      if (turn && turn.pendingExtensionUiRequestIds.length > 0) {
+        turn.pendingExtensionUiRequestIds = [];
+        if (turn.phase === 'waiting_input') turn.phase = 'running_tool';
+        draft.livePipeline.revisionBySession[event.sessionPath] =
+          (draft.livePipeline.revisionBySession[event.sessionPath] ?? 0) + 1;
+      }
+    }),
     effects: [],
   };
 }

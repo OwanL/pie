@@ -1,5 +1,6 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
+import type { ToolPreview } from '../live-pipeline-protocol.js';
 import type {
   SessionAnalyticsFactors,
   SessionContextFileFactor,
@@ -226,6 +227,8 @@ export interface ToolStartedPayload {
   input: unknown;
   /** Epoch milliseconds when the backend began executing the tool call. */
   startedAt: number;
+  /** Stable grouping for concurrently-running sibling calls. */
+  parallelGroupId?: string;
 }
 
 export interface ToolFinishedPayload {
@@ -233,10 +236,20 @@ export interface ToolFinishedPayload {
   sessionPath: string;
   messageId: string;
   toolCallId: string;
+  /** Authoritative tool metadata, repeated from tool.started so terminal
+   *  analytics do not depend on the owner message remaining loaded. */
+  name?: string;
+  input?: unknown;
   result: unknown;
   status: Extract<ToolCall['status'], 'completed' | 'failed'>;
   /** Wall-clock execution time in milliseconds for this tool call. */
   durationMs?: number;
+  /** Stable grouping for concurrently-running sibling calls. */
+  parallelGroupId?: string;
+  /** Stable SDK toolResult session entry; present only after persistence. */
+  durableEntryId?: string;
+  /** Full-result side-effect channel; canonical live state already terminalized. */
+  canonicalLive?: boolean;
 }
 
 export interface CustomMessagePayload {
@@ -250,8 +263,8 @@ export interface ToolProgressPayload {
   sessionPath: string;
   messageId: string;
   toolCallId: string;
-  /** Partial result from onUpdate callback — same shape as the final result. */
-  partialResult: unknown;
+  /** Typed bounded rendering preview; never a raw SDK onUpdate value. */
+  preview: ToolPreview;
 }
 
 export interface MessageFinishedPayload {

@@ -54,9 +54,9 @@ The baseline working tree was initially red: extension markdown/model-sync tests
 
 ## Changes completed in this pass
 
-### 1. Bounded subagent runs
+### 1. Progress-aware subagent settlement
 
-`extensions/subagent/runner.ts` currently treats `PI_SUBAGENT_TIMEOUT_MS=0` as invalid and falls back to a 15-minute safety timeout. This is temporary containment, not the target resilience model: productive slow agents must not be killed by total duration. The replacement design—progress-aware phase leases, bounded local settlement independent of remote teardown, provider circuit breaking, and a healthy run beyond 15 simulated minutes—is specified in [`HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md`](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md). Once that acceptance matrix passes, remove the 15-minute normal timeout.
+Subagents no longer have a short absolute runtime timeout by default. `PI_SUBAGENT_TIMEOUT_MS` is now an opt-in containment ceiling; unset, empty, zero, negative, and non-finite values disable it. The tree-wide settlement net instead renews only for credible model, tool, lifecycle, terminal, or nested-child progress, so productive slow agents can continue while duplicate/no-op updates cannot keep a stalled tree alive. The broader phase-lease, bounded-cleanup, provider-circuit, and fake-provider acceptance work remains specified in [`HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md`](HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md).
 
 ### 2. Terminal subagent failures remain visible
 

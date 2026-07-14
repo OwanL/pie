@@ -23,7 +23,7 @@ and one pairing (umans ↔ litellm) has no validation at all.
    routing silently breaks. **No code or test validates this pairing.**
 2. **`cost` is a name collision with different semantics**: `models.json` `cost` = real USD/M-token
    object; `model-profiles.yaml` `cost` = 0–30 relative ranking scalar. Confusing to edit.
-3. The only enforcement is `extension/test/model-profile-coverage.test.ts` — 5 tests checking
+3. The only enforcement is `extension/test/integration/model-profile-coverage.test.ts` — 5 tests checking
    models.json ↔ model-profiles.yaml id agreement (fail-only, no repair). It does **not** cover
    the litellm pairing.
 4. settings.json model fields (`defaultModel`, `pruning.model`, etc.) reference model ids that
@@ -432,7 +432,7 @@ write('settings.json', JSON.stringify(settings, null, 2));
 
 ### New: sync-consistency test
 
-`extension/test/model-config-sync.test.ts` — the primary guard against drift:
+`extension/test/integration/model-config-sync.test.ts` — the primary guard against drift:
 
 1. Run the sync script's generation logic **in-memory** from `models.yaml`.
 2. Compare against the committed `models.json`, `model-profiles.yaml`,
@@ -484,7 +484,7 @@ Each step is independently verifiable. Commit after each.
 
 5. **Add `npm run sync-models`** to `package.json` scripts. Add `--check` flag.
 
-6. **Add the sync-consistency test** (`extension/test/model-config-sync.test.ts`).
+6. **Add the sync-consistency test** (`extension/test/integration/model-config-sync.test.ts`).
 
 7. **Add the umans ↔ litellm assertion** to `model-profile-coverage.test.ts`.
 

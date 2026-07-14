@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useContext, useMemo } from 'preact/hooks';
+import { useContext, useEffect, useMemo } from 'preact/hooks';
 
 import type { ToolCall } from '../../../../shared/protocol';
 import { AskUserContext, findMatchingRequest } from '../../hooks/ask-user-context';
@@ -131,6 +131,13 @@ function renderAskUserTool({
   const matchingRequest = findMatchingRequest(askUserCtx.pendingRequests, subagentCtx?.id ?? toolCall.id);
   const sessionPath = askUserCtx.sessionPath;
   const postMessage = askUserCtx.postMessage;
+  const mountedInlineRequestId = toolCall.status === 'running' ? matchingRequest?.id : undefined;
+
+  useEffect(() => {
+    if (!mountedInlineRequestId) return;
+    askUserCtx.registerInlineRequest(mountedInlineRequestId);
+    return () => askUserCtx.unregisterInlineRequest(mountedInlineRequestId);
+  }, [askUserCtx.registerInlineRequest, askUserCtx.unregisterInlineRequest, mountedInlineRequestId]);
 
   // Source label for the prompt eyebrow. Subagent questions show the agent
   // name (and nesting depth when > 1, i.e. a subagent-of-subagent) so the user

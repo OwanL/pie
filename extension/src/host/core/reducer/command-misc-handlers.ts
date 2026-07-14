@@ -343,11 +343,29 @@ export function handleRespondExtensionUI(state: ArchState, cmd: Extract<Command,
   return {
     state: produce(state, (draft) => {
       const sessionMap = draft.settings.pendingExtensionUIRequestsBySession[cmd.sessionPath];
+      const request = sessionMap?.[cmd.requestId];
+      const priorPhase = draft.livePipeline.turnsBySession[cmd.sessionPath]?.phase;
+      if (request) {
+        draft.pending.extensionUiResponseByCorrId[cmd.corrId] = {
+          sessionPath: cmd.sessionPath,
+          request,
+          priorPhase,
+        };
+      }
       if (sessionMap) {
         delete sessionMap[cmd.requestId];
         if (Object.keys(sessionMap).length === 0) {
           delete draft.settings.pendingExtensionUIRequestsBySession[cmd.sessionPath];
         }
+      }
+      const turn = draft.livePipeline.turnsBySession[cmd.sessionPath];
+      if (turn) {
+        turn.pendingExtensionUiRequestIds = turn.pendingExtensionUiRequestIds.filter((id) => id !== cmd.requestId);
+        if (turn.phase === 'waiting_input' && turn.pendingExtensionUiRequestIds.length === 0) {
+          turn.phase = 'running_tool';
+        }
+        draft.livePipeline.revisionBySession[cmd.sessionPath] =
+          (draft.livePipeline.revisionBySession[cmd.sessionPath] ?? 0) + 1;
       }
     }),
     effects: [
@@ -366,6 +384,18 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
     }),
     ...(cmd.prefs.providerToggles && {
       providerToggles: { ...current.providerToggles, ...cmd.prefs.providerToggles },
+    }),
+    ...(cmd.prefs.subagentProviderDefaults && {
+      subagentProviderDefaults: {
+        ...current.subagentProviderDefaults,
+        ...cmd.prefs.subagentProviderDefaults,
+      },
+    }),
+    ...(cmd.prefs.subagentProviderTogglesBySession && {
+      subagentProviderTogglesBySession: {
+        ...current.subagentProviderTogglesBySession,
+        ...cmd.prefs.subagentProviderTogglesBySession,
+      },
     }),
     // Normalize subagentBuckets so ArchState always holds a complete
     // {small,medium,frontier} object even if a caller dispatches a partial

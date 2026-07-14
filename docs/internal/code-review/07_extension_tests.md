@@ -5,15 +5,15 @@ Scope: `extension/test/` (~165 `*.test.ts` files, ~1574 `test()` cases) + `_help
 ## Files reviewed (sampled)
 
 - `extension/test/_helpers/dom.ts`, `extension/test/_helpers/render-counter.ts` — only shared helpers
-- `extension/test/arch-effect-runner.test.ts` (full) — riskiest-code coverage
-- `extension/test/arch-boundary-guards.test.ts` (full) — source-text guards
-- `extension/test/create-session-ordering.test.ts` (full) — integration-style ordering test
-- `extension/test/arch-reducer.test.ts` (head), `state-reducer-invariants.test.ts` (head) — reducer coverage
-- `extension/test/webview-render.test.ts` (head), `transcript-virtual-list-rows.test.ts` (head) — virtualization
-- `extension/test/webview-style-contract.test.ts` (full), `tool-call-heading-css.test.ts` (head) — CSS/source-text tests
-- `extension/test/backend-session-event-handler.test.ts` (head) — message-router-adjacent
-- `extension/test/app-smoke.test.ts`, `nested-subagent-expand.test.ts` (heads) — mount-based UI tests
-- `extension/test/auto-scroll.test.ts` (head), `transcript-helpers.test.ts` (head) — pure-logic tests
+- `extension/test/host/core/architecture/arch-effect-runner.test.ts` (full) — riskiest-code coverage
+- `extension/test/host/core/architecture/arch-boundary-guards.test.ts` (full) — source-text guards
+- `extension/test/host/core/lifecycle/create-session-ordering.test.ts` (full) — integration-style ordering test
+- `extension/test/host/core/architecture/arch-reducer.test.ts` (head), `host/core/state/state-reducer-invariants.test.ts` (head) — reducer coverage
+- `extension/test/webview/components/webview-render.test.ts` (head), `webview/transcript/messages/transcript-virtual-list-rows.test.ts` (head) — virtualization
+- `extension/test/webview/components/webview-style-contract.test.ts` (full), `webview/transcript/tools/tool-call-heading-css.test.ts` (head) — CSS/source-text tests
+- `extension/test/backend/sessions/backend-session-event-handler.test.ts` (head) — message-router-adjacent
+- `extension/test/webview/components/app-smoke.test.ts`, `webview/transcript/tools/nested-subagent-expand.test.ts` (heads) — mount-based UI tests
+- `extension/test/webview/transcript/activity/auto-scroll.test.ts` (head), `host/core/reducer/transcript-helpers.test.ts` (head) — pure-logic tests
 - `extension/test/perf/auto-follow-reflow.test.ts` (head) — perf harness
 - Suite-wide greps: renderToString (14 files), `readFileSync`/`fs.readFile` (19 files), `EffectRunnerDeps` (7 files), `installDom` (16 files), `backendReady: true` readyState (13 files), factory-helper duplication (10+ files)
 

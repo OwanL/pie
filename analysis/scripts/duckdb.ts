@@ -50,6 +50,7 @@ interface DuckDbRunRow {
   finalization_reason: string | null;
   resolution: string | null;
   satisfaction: number | null;
+  outcome_source: string | null;
   model_id: string | null;
   model_family: string | null;
   provider: string | null;
@@ -89,6 +90,8 @@ interface DuckDbRunRow {
   unsupported_input_count: number;
   input_kinds_used: string[];
   tool_call_count: number;
+  tool_duration_ms: number;
+  timed_tool_call_count: number;
   tool_failure_count: number;
   result_issue_count: number;
   subagent_call_count: number;
@@ -144,6 +147,7 @@ interface DuckDbRunRow {
   edit_revisit_rate: number | null;
   files_reviewed_count: number;
   read_revisit_rate: number | null;
+  initial_user_message_chars: number | null;
 }
 
 interface DuckDbToolUsageRow {
@@ -334,6 +338,7 @@ interface DuckDbTurnThroughputRow {
   ended_at: string;
   started_day: string;
   model_id: string | null;
+  model_family: string | null;
   thinking_level: string | null;
   experiment_assignment: string | null;
   output_tokens: number;
@@ -344,6 +349,15 @@ interface DuckDbTurnThroughputRow {
   turn_latency_ms: number | null;
   overhead_ms: number | null;
   provider_latency_ms: number | null;
+  // ── Per-turn token/context fields added after the initial throughput export
+  //    layer. Kept in sync with `PreparedTurnThroughputRow` (contracts.ts) +
+  //    `toDuckDbTurnThroughputRow` + `turnThroughputTableSchema()`. Appended
+  //    here (and in the mapper/schema) so the positional `INSERT ... SELECT *
+  //    FROM read_json_auto` column order is preserved — see `populateTableFromJson`.
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  context_tokens: number | null;
 }
 
 function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
@@ -360,6 +374,7 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     finalization_reason: row.finalizationReason,
     resolution: row.resolution,
     satisfaction: row.satisfaction,
+    outcome_source: row.outcomeSource,
     model_id: row.modelId,
     model_family: row.modelFamily,
     provider: row.provider,
@@ -399,6 +414,8 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     unsupported_input_count: row.unsupportedInputCount,
     input_kinds_used: row.inputKindsUsed,
     tool_call_count: row.toolCallCount,
+    tool_duration_ms: row.toolDurationMs,
+    timed_tool_call_count: row.timedToolCallCount,
     tool_failure_count: row.toolFailureCount,
     result_issue_count: row.resultIssueCount,
     subagent_call_count: row.subagentCallCount,
@@ -449,6 +466,7 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     edit_revisit_rate: row.editRevisitRate,
     files_reviewed_count: row.filesReviewedCount,
     read_revisit_rate: row.readRevisitRate,
+    initial_user_message_chars: row.initialUserMessageChars,
   };
 }
 
@@ -663,6 +681,7 @@ function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnTh
     ended_at: row.endedAt,
     started_day: row.startedDay,
     model_id: row.modelId,
+    model_family: row.modelFamily,
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     output_tokens: row.outputTokens,
@@ -673,6 +692,10 @@ function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnTh
     turn_latency_ms: row.turnLatencyMs,
     overhead_ms: row.overheadMs,
     provider_latency_ms: row.providerLatencyMs,
+    input_tokens: row.inputTokens,
+    cache_read_tokens: row.cacheReadTokens,
+    cache_write_tokens: row.cacheWriteTokens,
+    context_tokens: row.contextTokens,
   };
 }
 
@@ -760,6 +783,7 @@ CREATE TABLE runs (
   finalization_reason VARCHAR,
   resolution VARCHAR,
   satisfaction DOUBLE,
+  outcome_source VARCHAR,
   model_id VARCHAR,
   model_family VARCHAR,
   provider VARCHAR,
@@ -799,6 +823,8 @@ CREATE TABLE runs (
   unsupported_input_count INTEGER,
   input_kinds_used VARCHAR[],
   tool_call_count INTEGER,
+  tool_duration_ms BIGINT,
+  timed_tool_call_count INTEGER,
   tool_failure_count INTEGER,
   result_issue_count INTEGER,
   subagent_call_count INTEGER,
@@ -848,7 +874,8 @@ CREATE TABLE runs (
   auto_retry_count INTEGER,
   edit_revisit_rate DOUBLE,
   files_reviewed_count INTEGER,
-  read_revisit_rate DOUBLE
+  read_revisit_rate DOUBLE,
+  initial_user_message_chars INTEGER
 );
 `.trim();
 }
@@ -886,7 +913,7 @@ CREATE TABLE tool_failures (
   tool_name VARCHAR,
   failure_kind VARCHAR,
   count INTEGER,
-  exit_code INTEGER,
+  exit_code BIGINT,
   error_excerpt VARCHAR,
   verification_kinds VARCHAR[],
   started_at TIMESTAMP,
@@ -1087,6 +1114,7 @@ CREATE TABLE turn_throughput (
   ended_at TIMESTAMP,
   started_day DATE,
   model_id VARCHAR,
+  model_family VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
   output_tokens BIGINT,
@@ -1096,7 +1124,11 @@ CREATE TABLE turn_throughput (
   tokens_per_second DOUBLE,
   turn_latency_ms INTEGER,
   overhead_ms INTEGER,
-  provider_latency_ms INTEGER
+  provider_latency_ms INTEGER,
+  input_tokens BIGINT,
+  cache_read_tokens BIGINT,
+  cache_write_tokens BIGINT,
+  context_tokens BIGINT
 );
 `.trim();
 }

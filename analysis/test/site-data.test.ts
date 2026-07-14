@@ -17,11 +17,64 @@ test('site data generation writes the expected files and passes validation', asy
     await writeSiteData(dir, bundle);
 
     const roundTrip = await readSiteDataBundle(dir);
+    assert.equal(roundTrip.manifest.schemaVersion, 4);
+    assert.equal(roundTrip.modelLeaderboard.schemaVersion, 4);
     assert.equal(roundTrip.manifest.completedRunCount, 7);
     assert.equal(roundTrip.runSummary.rows.length, 8);
     assert.ok(roundTrip.verificationImpact.summaryRows.length > 0);
     assert.ok(roundTrip.toolUsage.summaryRows.length > 0);
+    assert.equal(roundTrip.modelLeaderboard.minimumTaskScoringCoverage, 0);
+    assert.equal(roundTrip.modelLeaderboard.caseMix.minimumModelRatedTasksPerBand, 0);
+    assert.ok(roundTrip.modelLeaderboard.rows.every((row) => (
+      typeof row.attributableTaskCount === 'number'
+      && typeof row.scoringCoverageGateFailed === 'boolean'
+    )));
   });
+});
+
+test('model quality uses stable-treatment user outcomes and discloses supplemental exclusions', async () => {
+  const fixture = deepClone(await loadFixture());
+  const base = fixture.completedRuns[0]!;
+  fixture.completedRuns = [];
+  fixture.openRuns = [];
+  fixture.outcomes = [];
+  fixture.agentReviews = [];
+
+  const add = (runId: string, source: 'user' | 'agent', mixed: boolean, satisfaction: number, mixedTreatment = false) => {
+    const run = deepClone(base);
+    run.runId = runId;
+    run.taskGroupId = `${runId}-task`;
+    run.modelId = 'quality-attribution-model';
+    run.thinkingLevel = 'high';
+    run.experimentAssignment = null;
+    run.status = 'scored';
+    run.scored = true;
+    run.mixedModelConfig = mixed;
+    run.mixedTreatmentConfig = mixedTreatment;
+    run.outcome = {
+      source,
+      satisfaction,
+      resolution: satisfaction === 5 ? 'resolved' : 'unresolved',
+    };
+    fixture.completedRuns.push(run);
+  };
+  add('quality-user', 'user', false, 5);
+  add('quality-agent', 'agent', false, 1);
+  add('quality-mixed', 'user', true, 1);
+  add('quality-treatment', 'user', false, 1, true);
+
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(fixture));
+  validateSiteDataBundle(bundle);
+  const row = bundle.modelQuality.rows.find((candidate) => candidate.modelId === 'quality-attribution-model')!;
+
+  assert.equal(row.runCount, 4, 'operational denominator retains all completed runs');
+  assert.equal(row.scoredRunCount, 1);
+  assert.equal(row.agentOutcomeCount, 1);
+  assert.equal(row.mixedModelExcludedOutcomeCount, 1);
+  assert.equal(row.mixedTreatmentExcludedOutcomeCount, 1);
+  assert.equal(row.averageSatisfaction, 5);
+  assert.deepEqual(row.resolutionCounts, { resolved: 1, partiallyResolved: 0, unresolved: 0 });
+  assert.match(bundle.modelQuality.notes.join(' '), /stable-model, stable-treatment user outcomes/i);
 });
 
 test('site data generation handles no-scored and open-only edge cases', async () => {
@@ -234,6 +287,104 @@ test('site data validation rejects malformed tool usage payloads', async () => {
   );
 });
 
+test('model leaderboard validation requires v4 evidence and interval fields', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const missingEvidence = deepClone(bundle) as any;
+  delete missingEvidence.modelLeaderboard.rows[0].userEvidenceMass;
+  assert.throws(() => validateSiteDataBundle(missingEvidence), /userEvidenceMass is invalid/);
+
+  const missingSourceWeights = deepClone(bundle) as any;
+  delete missingSourceWeights.modelLeaderboard.sourceWeights;
+  assert.throws(() => validateSiteDataBundle(missingSourceWeights), /missing sourceWeights/);
+
+  const invalidInterval = deepClone(bundle) as any;
+  invalidInterval.modelLeaderboard.rows.find((row: any) => row.compositeScore !== null).scoreInterval80.lower = -1;
+  assert.throws(() => validateSiteDataBundle(invalidInterval), /invalid scoreInterval80/);
+});
+
+test('model leaderboard validation catches provider runCount sum mismatch', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  mutated.modelLeaderboard.rows[0].providers[0].runCount += 999;
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /provider runCount sum.*!= row\.runCount/,
+  );
+});
+
+test('model leaderboard validation catches provider scoredRunCount sum mismatch', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  mutated.modelLeaderboard.rows[0].providers[0].scoredRunCount += 999;
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /provider scoredRunCount sum.*!= row\.scoredRunCount/,
+  );
+});
+
+test('model leaderboard validation catches missing dimensions', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  delete mutated.modelLeaderboard.rows[0].dimensions;
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /row 0 is missing dimensions/,
+  );
+});
+
+test('model leaderboard validation catches non-contiguous rank', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  const firstRanked = mutated.modelLeaderboard.rows.find((row: any) => row.compositeScore !== null);
+  firstRanked.rank = 5;
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /non-contiguous rank/,
+  );
+});
+
+test('model leaderboard validation catches ranked row after unranked', async () => {
+  const fixture = deepClone(await loadFixture());
+  // Ensure an unknown family exists (compositeScore === null, unranked).
+  delete (fixture.completedRuns[0] as Partial<typeof fixture.completedRuns[0]>).modelId;
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(fixture));
+  const mutated = deepClone(bundle) as any;
+  const rows = mutated.modelLeaderboard.rows as any[];
+  const unrankedIndex = rows.findIndex((row) => row.compositeScore === null);
+  assert.ok(unrankedIndex >= 0, 'fixture produces an unranked (unknown) family');
+  assert.ok(unrankedIndex > 0, 'unranked row is not first (ranked rows precede it)');
+  // Move the unranked row to the front so a ranked row follows it.
+  const [unranked] = rows.splice(unrankedIndex, 1);
+  rows.unshift(unranked);
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /ranked after unranked rows/,
+  );
+});
+
+test('model leaderboard validation catches missing scoringCoverageGateFailed', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  delete mutated.modelLeaderboard.rows[0].scoringCoverageGateFailed;
+  assert.throws(
+    () => validateSiteDataBundle(mutated),
+    /missing scoringCoverageGateFailed/,
+  );
+});
+
+test('model leaderboard validation catches null compositeScore with non-null rank', async () => {
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
+  const mutated = deepClone(bundle) as any;
+  const unranked = mutated.modelLeaderboard.rows.find((row: any) => row.compositeScore === null);
+  if (unranked) {
+    unranked.rank = 1;
+    assert.throws(
+      () => validateSiteDataBundle(mutated),
+      /null compositeScore but non-null rank/,
+    );
+  }
+});
+
 test('writeSiteData rejects JSON targets and unexpected non-JSON files', async () => {
   await withTempDir(async (dir) => {
     const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
@@ -250,4 +401,45 @@ test('writeSiteData rejects JSON targets and unexpected non-JSON files', async (
       /Site-data output must be a directory/,
     );
   });
+});
+
+test('token-throughput artifact retains errored/tokenless turns and validates per-turn token/context fields', async () => {
+  const prepared = deepClone(prepareSourceAnalytics(await loadFixture()));
+  // Inject an errored (tokenless) turn with null tokensPerSecond. It must be
+  // retained in the artifact for coverage/error analysis — chart transforms
+  // filter null tokensPerSecond at render time; the artifact must not drop rows.
+  prepared.turnThroughput.push({
+    runId: 'retention-run',
+    endedAt: '2026-05-10T15:00:00.000Z',
+    startedDay: '2026-05-10',
+    modelId: 'gpt-4.1',
+    modelFamily: 'gpt-4.1',
+    thinkingLevel: 'medium',
+    experimentAssignment: null,
+    outputTokens: 0,
+    generationDurationMs: 0,
+    concurrentBusySessions: 1,
+    status: 'error',
+    tokensPerSecond: null,
+    turnLatencyMs: null,
+    overheadMs: null,
+    providerLatencyMs: null,
+    inputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    contextTokens: null,
+  });
+
+  const bundle = buildSiteDataBundle(prepared);
+  // Validates the new inputTokens/cacheReadTokens/cacheWriteTokens/contextTokens
+  // fields on every row, including the injected null-tokensPerSecond row.
+  validateSiteDataBundle(bundle);
+
+  const retained = bundle.tokenThroughput.rows.filter((row) => row.runId === 'retention-run');
+  assert.equal(retained.length, 1, 'errored/tokenless turn must be retained in the artifact');
+  assert.equal(retained[0]?.tokensPerSecond, null);
+  assert.equal(retained[0]?.inputTokens, 0);
+  assert.equal(retained[0]?.cacheReadTokens, 0);
+  assert.equal(retained[0]?.cacheWriteTokens, 0);
+  assert.equal(retained[0]?.contextTokens, null);
 });

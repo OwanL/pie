@@ -3,6 +3,7 @@ import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.
 import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
 import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
+import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
@@ -35,19 +36,50 @@ export interface ExtensionUIResponsePayload {
   cancelled?: boolean;
 }
 
-export interface StateAppliedPayload {
+export interface RenderEvidenceBase {
+  /** Host snapshot revision this evidence describes. */
   revision: number;
-  backendReady: boolean;
-  transcriptLoaded: boolean;
-  openTabCount: number;
-  transcriptCount: number;
-  systemPromptCount: number;
-  domTranscriptLoaderPresent: boolean;
-  domTabsConnectingPresent: boolean;
-  /** Signature expected from the accepted snapshot. */
-  renderSignature: string;
-  /** Signature read from the committed transcript DOM. */
-  domRenderSignature: string | null;
+  /** Host-owned view generation; stale generations are telemetry-only. */
+  viewGeneration: number;
+}
+
+/** The webview validated and accepted a strictly newer state envelope. */
+export interface StateReceivedPayload extends RenderEvidenceBase {
+  snapshotBytes: number;
+}
+
+/** The outer application tree committed the accepted revision. */
+export interface AppCommittedPayload extends RenderEvidenceBase {
+  surface: 'app' | 'loading' | 'empty' | 'transcript-suspense' | 'transcript';
+}
+
+/**
+ * The transcript subtree committed the expected bounded identity. The identity
+ * is derived from committed leaf metadata; it is never copied from a wrapper
+ * attribute or obtained by scanning complete DOM text.
+ */
+export interface TranscriptCommittedPayload extends RenderEvidenceBase {
+  identity: string;
+  mountGeneration: number;
+  evidence: 'displayed' | 'offscreen' | 'no-transcript';
+}
+
+/** Metadata-only explanation when the transcript cannot yet prove a target. */
+export interface TranscriptCommitBlockedPayload extends RenderEvidenceBase {
+  reason: 'window_mismatch' | 'structure_mismatch' | 'leaf_missing' | 'leaf_mismatch';
+}
+
+/** An rAF after transcript commit observed the same identity. */
+export interface PaintObservedPayload extends TranscriptCommittedPayload {
+  latencyMs: number;
+}
+
+/** Typed and sanitized renderer failure evidence. No arbitrary error body. */
+export interface RenderFailurePayload {
+  viewGeneration: number;
+  revision: number | null;
+  surface: 'app' | 'transcript' | 'transcript-suspense' | 'unknown';
+  classification: 'component_error' | 'uncaught_error' | 'unhandled_rejection' | 'unknown';
 }
 
 /** The full view state sent from the extension host to the webview. */
@@ -104,6 +136,8 @@ export interface ViewState {
  *  with `willRetry`, which the backend now gates on, so `busy` stays true
  *  throughout a retry; this field is the authoritative retry signal). */
   retryStatus: RetryStatus | null;
+  /** Host-owned producer/tool phase for the active turn. */
+  liveTurnPhase: LiveTurnPhase | null;
   notice: string | null;
   /** Failure category for the current notice, or null when the notice is a
    *  plain info/warning string (or there is no notice). Set ONLY at the Brief H
@@ -193,7 +227,13 @@ export type HostToWebviewMessage =
       type: 'state';
       protocolVersion: number;
       hostInstanceId: string;
+      /** Invalidates settlements and evidence from a replaced/reloaded view. */
+      viewGeneration: number;
       revision: number;
+      /** Bounded host-owned identity expected from committed transcript leaves. */
+      expectedTranscriptIdentity: string;
+      /** UTF-8 JSON bytes measured by the host when diagnostics are enabled; 0 otherwise. */
+      snapshotBytes: number;
       state: ViewState;
     }
   | {
@@ -223,10 +263,16 @@ export type HostToWebviewMessage =
       volume: number;
     };
 
-/** Messages the webview can send back to the host. */
-export type WebviewToHostMessage =
-  | { type: 'ready'; assetVersion?: string }
-  | { type: 'refreshState'; assetVersion?: string }
+type WithViewGeneration<T> = T extends unknown ? T & { viewGeneration?: number } : never;
+
+/** Messages the webview can send back to the host. Every renderer-originated
+ * message may carry the host-stamped generation so current controls remain
+ * usable during a reload while stale documents are rejected safely. */
+export type WebviewToHostMessage = WithViewGeneration<WebviewToHostMessagePayload>;
+
+type WebviewToHostMessagePayload =
+  | { type: 'ready'; assetVersion?: string; viewGeneration?: number }
+  | { type: 'refreshState'; assetVersion?: string; viewGeneration?: number }
   | {
       /**
        * Request a state snapshot. When `sessionPath` is provided the host MAY
@@ -237,6 +283,7 @@ export type WebviewToHostMessage =
        */
       type: 'requestSnapshot';
       assetVersion?: string;
+      viewGeneration?: number;
       sessionPath?: string;
     }
   | { type: 'openFilePicker' }
@@ -298,7 +345,12 @@ export type WebviewToHostMessage =
       sessionPath: string;
       disabledEntries: string[];
     }
-  | { type: 'stateApplied'; payload: StateAppliedPayload }
+  | { type: 'stateReceived'; payload: StateReceivedPayload }
+  | { type: 'appCommitted'; payload: AppCommittedPayload }
+  | { type: 'transcriptCommitted'; payload: TranscriptCommittedPayload }
+  | { type: 'transcriptCommitBlocked'; payload: TranscriptCommitBlockedPayload }
+  | { type: 'paintObserved'; payload: PaintObservedPayload }
+  | { type: 'renderFailure'; payload: RenderFailurePayload }
   | { type: 'extensionUiResponse'; sessionPath: string; response: ExtensionUIResponsePayload }
   | { type: 'setFileChangesExpanded'; sessionPath: string; expanded: boolean }
   // ── Brief H: recovery actions surfaced from an error notice. The host owns

@@ -3,6 +3,7 @@ import {
   CHART_COLORS,
   categoricalHeight,
   meanInterval,
+  modelFamilyKey,
   selectedCompletedRuns,
   selectedRunIds,
   selectedScoredCompletedRuns,
@@ -70,7 +71,7 @@ interface QuestionScatterRow {
   questionsJitter: number;
   satisfaction: number;
   resolution: string;
-  modelId: string;
+  model: string;
   lineMutationTotal: number;
   toolFailureCount: number;
   busyMinutes: number;
@@ -91,7 +92,7 @@ function questionScatterRows(
         : questions + stableJitter(run.runId),
       satisfaction: run.satisfaction ?? 0,
       resolution: run.resolution ?? 'unknown',
-      modelId: run.modelId ?? '(unknown)',
+      model: modelFamilyKey(run),
       lineMutationTotal: run.lineMutationTotal,
       toolFailureCount: run.toolFailureCount,
       busyMinutes: Math.max(run.busyDurationMs / 60000, 1 / 60),
@@ -214,7 +215,7 @@ export const questionCharts: ChartEntry[] = [
                 legend: { orient: 'bottom' as const, gradientLength: 120 },
               },
               tooltip: [
-                { field: 'modelId', type: 'nominal' as const, title: 'Model' },
+                { field: 'model', type: 'nominal' as const, title: 'Model family' },
                 { field: 'resolution', type: 'nominal' as const, title: 'Resolution' },
                 { field: 'questions', type: 'quantitative' as const, title: 'Questions asked' },
                 { field: 'satisfaction', type: 'quantitative' as const, title: 'Satisfaction' },

@@ -49,6 +49,7 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
     finalizationReason: 'scored',
     resolution: 'resolved',
     satisfaction: 4,
+    outcomeSource: 'user',
     modelId: 'model-a',
     modelFamily: 'model-a',
     provider: null,
@@ -67,6 +68,7 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
     skillCount: 0,
     contextFileCount: 0,
     promptGuidelineCount: 0,
+    initialUserMessageChars: null,
     fsSubagentAlwaysParentModel: null,
     fsPruningMode: null,
     fsPruningEnabled: null,
@@ -95,6 +97,8 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
     unsupportedInputCount: 0,
     inputKindsUsed: [],
     toolCallCount: 5,
+    toolDurationMs: 0,
+    timedToolCallCount: 0,
     toolFailureCount: 0,
     resultIssueCount: 0,
     subagentCallCount: 0,
@@ -161,6 +165,9 @@ function makeDiverseRuns(count: number, modelId = 'model-a'): PreparedRunRow[] {
     runs.push(makeRun({
       runId: `run-${i}`,
       modelId,
+      initialUserMessageChars: scale * 100,
+      filesystemPathRefCount: scale,
+      contextFileCount: scale,
       lineAdditions: scale * 10,
       lineDeletions: scale * 2,
       lineModifications: scale,
@@ -235,48 +242,26 @@ test('percentileRanks: strictly increasing sequence', () => {
 // extractSignals
 // ===========================================================================
 
-test('extractSignals: all 6 signals extracted correctly', () => {
+test('extractSignals: ex-ante task signals are extracted correctly', () => {
   const run = makeRun({
     runId: 'sig-test',
-    lineAdditions: 10,
-    lineDeletions: 5,
-    lineModifications: 3,
-    touchedFileCount: 7,
-    toolCallCount: 12,
-    busyDurationMs: 9000,
-    verificationTotalCount: 4,
-    inputTokens: 500,
+    initialUserMessageChars: 500,
+    filesystemPathRefCount: 2,
+    imageInputCount: 1,
+    contextFileCount: 4,
   });
 
   const signals = extractSignals(run);
-  assert.equal(signals.lineMutations, 18);   // 10+5+3
-  assert.equal(signals.touchedFileCount, 7);
-  assert.equal(signals.toolCallCount, 12);
-  assert.equal(signals.busyDurationMs, 9000);
-  assert.equal(signals.verificationTotalCount, 4);
-  assert.equal(signals.inputTokens, 500);
+  assert.equal(signals.initialUserMessageChars, 500);
+  assert.equal(signals.attachmentCount, 3);
+  assert.equal(signals.contextFileCount, 4);
 });
 
-test('extractSignals: all zeros', () => {
-  const run = makeRun({
-    runId: 'zero-sig',
-    lineAdditions: 0,
-    lineDeletions: 0,
-    lineModifications: 0,
-    touchedFileCount: 0,
-    toolCallCount: 0,
-    busyDurationMs: 0,
-    verificationTotalCount: 0,
-    inputTokens: 0,
-  });
-
-  const signals = extractSignals(run);
-  assert.equal(signals.lineMutations, 0);
-  assert.equal(signals.touchedFileCount, 0);
-  assert.equal(signals.toolCallCount, 0);
-  assert.equal(signals.busyDurationMs, 0);
-  assert.equal(signals.verificationTotalCount, 0);
-  assert.equal(signals.inputTokens, 0);
+test('extractSignals: historical prompt size stays unknown', () => {
+  const signals = extractSignals(makeRun({ runId: 'zero-sig' }));
+  assert.equal(signals.initialUserMessageChars, null);
+  assert.equal(signals.attachmentCount, 0);
+  assert.equal(signals.contextFileCount, 0);
 });
 
 // ===========================================================================
@@ -297,9 +282,9 @@ test('computeComplexityScores: single run gets score 0.5', () => {
 
 test('computeComplexityScores: identical runs all get 0.5', () => {
   const runs = [
-    makeRun({ runId: 'a', lineAdditions: 10, touchedFileCount: 5, toolCallCount: 3, busyDurationMs: 1000, verificationTotalCount: 1, inputTokens: 100 }),
-    makeRun({ runId: 'b', lineAdditions: 10, touchedFileCount: 5, toolCallCount: 3, busyDurationMs: 1000, verificationTotalCount: 1, inputTokens: 100 }),
-    makeRun({ runId: 'c', lineAdditions: 10, touchedFileCount: 5, toolCallCount: 3, busyDurationMs: 1000, verificationTotalCount: 1, inputTokens: 100 }),
+    makeRun({ runId: 'a', initialUserMessageChars: 100, filesystemPathRefCount: 1, contextFileCount: 1 }),
+    makeRun({ runId: 'b', initialUserMessageChars: 100, filesystemPathRefCount: 1, contextFileCount: 1 }),
+    makeRun({ runId: 'c', initialUserMessageChars: 100, filesystemPathRefCount: 1, contextFileCount: 1 }),
   ];
   const scores = computeComplexityScores(runs);
   assert.equal(scores.size, 3);
@@ -308,32 +293,21 @@ test('computeComplexityScores: identical runs all get 0.5', () => {
   }
 });
 
-test('computeComplexityScores: all 6 signals contribute to the score', () => {
-  // Two runs: one with all high signals, one with all low signals.
-  // If any single signal were dropped, the gap would shrink differently.
+test('computeComplexityScores: all ex-ante signals contribute to the score', () => {
   const low = makeRun({
     runId: 'low',
-    lineAdditions: 1, lineDeletions: 0, lineModifications: 0,
-    touchedFileCount: 1,
-    toolCallCount: 1,
-    busyDurationMs: 100,
-    verificationTotalCount: 0,
-    inputTokens: 10,
+    initialUserMessageChars: 10,
+    filesystemPathRefCount: 0,
+    contextFileCount: 0,
   });
   const high = makeRun({
     runId: 'high',
-    lineAdditions: 1000, lineDeletions: 500, lineModifications: 200,
-    touchedFileCount: 50,
-    toolCallCount: 100,
-    busyDurationMs: 500000,
-    verificationTotalCount: 20,
-    inputTokens: 10000,
+    initialUserMessageChars: 10_000,
+    filesystemPathRefCount: 3,
+    contextFileCount: 10,
   });
   const scores = computeComplexityScores([low, high]);
 
-  // With two items, each percentile is either 0.25 or 0.75.
-  // All 6 signals should rank 'low' at 0.25 and 'high' at 0.75.
-  // Average = 6 * 0.25 / 6 = 0.25 for low, 0.75 for high.
   assert.equal(scores.get('low'), 0.25);
   assert.equal(scores.get('high'), 0.75);
 });
@@ -349,31 +323,23 @@ test('computeComplexityScores: diverse runs produce different scores', () => {
 });
 
 test('computeComplexityScores: all-zero signals still yield 0.5 for each run', () => {
-  // When all signals are 0, all percentile ranks are 0.5 (all tied).
   const runs = [
-    makeRun({ runId: 'z1', lineAdditions: 0, lineDeletions: 0, lineModifications: 0, touchedFileCount: 0, toolCallCount: 0, busyDurationMs: 0, verificationTotalCount: 0, inputTokens: 0 }),
-    makeRun({ runId: 'z2', lineAdditions: 0, lineDeletions: 0, lineModifications: 0, touchedFileCount: 0, toolCallCount: 0, busyDurationMs: 0, verificationTotalCount: 0, inputTokens: 0 }),
+    makeRun({ runId: 'z1', initialUserMessageChars: 0 }),
+    makeRun({ runId: 'z2', initialUserMessageChars: 0 }),
   ];
   const scores = computeComplexityScores(runs);
   assert.equal(scores.get('z1'), 0.5);
   assert.equal(scores.get('z2'), 0.5);
 });
 
-test('computeComplexityScores: mixing zero and nonzero signals', () => {
-  // One run has zero lineMutations but high token count; another has the reverse.
+test('computeComplexityScores: complementary ex-ante signals balance', () => {
   const runs = [
-    makeRun({ runId: 'tok-heavy', lineAdditions: 0, lineDeletions: 0, lineModifications: 0, touchedFileCount: 1, toolCallCount: 1, busyDurationMs: 100, verificationTotalCount: 0, inputTokens: 10000 }),
-    makeRun({ runId: 'line-heavy', lineAdditions: 500, lineDeletions: 200, lineModifications: 50, touchedFileCount: 10, toolCallCount: 5, busyDurationMs: 5000, verificationTotalCount: 2, inputTokens: 50 }),
+    makeRun({ runId: 'text-heavy', initialUserMessageChars: 10_000, filesystemPathRefCount: 0, contextFileCount: 0 }),
+    makeRun({ runId: 'context-heavy', initialUserMessageChars: 10, filesystemPathRefCount: 2, contextFileCount: 4 }),
   ];
   const scores = computeComplexityScores(runs);
-  // Both should be 0.5 since there are only 2 items and they are complements
-  // Actually: for 2 items, each signal is either 0.25 or 0.75
-  // tok-heavy: lineMutations=0 (0.25), touchedFile=1 (0.25), toolCall=1 (0.25),
-  //            duration=100 (0.25), verification=0 (0.25), input=10000 (0.75)
-  // → (0.25*5 + 0.75)/6 = 2.0/6 ≈ 0.3333
-  // line-heavy: complements → (0.75*5 + 0.25)/6 = 4.0/6 ≈ 0.6667
-  assert.ok(Math.abs(scores.get('tok-heavy')! - 2 / 6) < 1e-10);
-  assert.ok(Math.abs(scores.get('line-heavy')! - 4 / 6) < 1e-10);
+  assert.ok(Math.abs(scores.get('text-heavy')! - 5 / 12) < 1e-10);
+  assert.ok(Math.abs(scores.get('context-heavy')! - 7 / 12) < 1e-10);
 });
 
 // ===========================================================================
@@ -796,6 +762,8 @@ test('assignModelsToBuckets: models appear in their best band', () => {
       modelId: 'model-x',
       satisfaction: 2,           // low satisfaction in low band
       resolution: 'unresolved',
+      initialUserMessageChars: 10,
+      contextFileCount: 0,
       lineAdditions: 1,         // low complexity signals
       lineDeletions: 0,
       lineModifications: 0,
@@ -812,6 +780,8 @@ test('assignModelsToBuckets: models appear in their best band', () => {
       modelId: 'model-x',
       satisfaction: 5,           // high satisfaction in high band
       resolution: 'resolved',
+      initialUserMessageChars: 5_000,
+      contextFileCount: 10,
       lineAdditions: 500,       // high complexity signals
       lineDeletions: 200,
       lineModifications: 50,
@@ -847,6 +817,8 @@ test('assignModelsToBuckets: model with runs in only one band appears in that bu
       modelId: 'model-y',
       satisfaction: 4,
       resolution: 'resolved',
+      initialUserMessageChars: 10,
+      contextFileCount: 0,
       lineAdditions: 5,
       lineDeletions: 1,
       lineModifications: 1,
@@ -864,6 +836,8 @@ test('assignModelsToBuckets: model with runs in only one band appears in that bu
       modelId: 'filler-z',
       satisfaction: 3,
       resolution: 'resolved',
+      initialUserMessageChars: 5_000,
+      contextFileCount: 10,
       lineAdditions: 500,
       lineDeletions: 100,
       lineModifications: 50,
@@ -942,6 +916,8 @@ test('assignModelsToBuckets: models with fewer than 3 scored runs in a band are 
       modelId: 'low-count-model',
       satisfaction: 5,
       resolution: 'resolved',
+      initialUserMessageChars: 10,
+      contextFileCount: 0,
       lineAdditions: 1, lineDeletions: 0, lineModifications: 0,
       touchedFileCount: 1,
       toolCallCount: 1,
@@ -957,6 +933,8 @@ test('assignModelsToBuckets: models with fewer than 3 scored runs in a band are 
       modelId: 'qualifying-model',
       satisfaction: 4,
       resolution: 'resolved',
+      initialUserMessageChars: 500,
+      contextFileCount: 2,
       lineAdditions: 5, lineDeletions: 2, lineModifications: 1,
       touchedFileCount: 1,
       toolCallCount: 1,
@@ -972,6 +950,8 @@ test('assignModelsToBuckets: models with fewer than 3 scored runs in a band are 
       modelId: 'filler-model',
       satisfaction: 3,
       resolution: 'resolved',
+      initialUserMessageChars: 5_000,
+      contextFileCount: 10,
       lineAdditions: 500, lineDeletions: 100, lineModifications: 50,
       touchedFileCount: 20,
       toolCallCount: 100,
@@ -1055,6 +1035,8 @@ test('full pipeline: multi-model scenario assigns each model to a bucket', () =>
       modelId: 'model-a',
       satisfaction: 4,
       resolution: 'resolved',
+      initialUserMessageChars: 10,
+      contextFileCount: 0,
       lineAdditions: 5, lineDeletions: 2, lineModifications: 1,
       touchedFileCount: 1,
       toolCallCount: 2,
@@ -1070,6 +1052,8 @@ test('full pipeline: multi-model scenario assigns each model to a bucket', () =>
       modelId: 'model-b',
       satisfaction: 3,
       resolution: 'partially_resolved',
+      initialUserMessageChars: 500,
+      contextFileCount: 5,
       lineAdditions: 50, lineDeletions: 20, lineModifications: 10,
       touchedFileCount: 8,
       toolCallCount: 15,
@@ -1085,6 +1069,8 @@ test('full pipeline: multi-model scenario assigns each model to a bucket', () =>
       modelId: 'model-c',
       satisfaction: 5,
       resolution: 'resolved',
+      initialUserMessageChars: 5_000,
+      contextFileCount: 20,
       lineAdditions: 500, lineDeletions: 200, lineModifications: 50,
       touchedFileCount: 30,
       toolCallCount: 50,

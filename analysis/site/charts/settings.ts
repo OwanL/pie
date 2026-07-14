@@ -1,77 +1,225 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, average, categoricalHeight, completedRuns } from '../lib.ts';
+import { CHART_COLORS, categoricalHeight, completedRuns, meanInterval } from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
 
+const MIN_SCORED_PER_SETTING_GROUP = 3;
+
 /** Common shape for a setting-dimension comparison row fed to Vega-Lite. */
-interface SettingImpactRow {
+export interface SettingImpactRow {
   group: string;
-  avgSatisfaction: number | null;
+  avgSatisfaction: number;
+  ciLower: number;
+  ciUpper: number;
+  ciLabel: string;
+  nLabel: string;
   runCount: number;
   scoredCount: number;
   resolutionRate: number | null;
 }
 
-function summarizeGroup(runs: PreparedRunRow[]): Omit<SettingImpactRow, 'group'> {
+export interface SettingComparison {
+  rows: SettingImpactRow[];
+  totalRunCount: number;
+  totalScoredCount: number;
+  trackedRunCount: number;
+  trackedScoredCount: number;
+}
+
+function summarizeGroup(runs: PreparedRunRow[]): Omit<SettingImpactRow, 'group'> | null {
   const scored = runs.filter((run) => run.satisfaction !== null);
-  const avgSatisfaction = average(scored.map((run) => run.satisfaction!));
+  if (scored.length < MIN_SCORED_PER_SETTING_GROUP) {
+    return null;
+  }
+  const interval = meanInterval(scored.map((run) => run.satisfaction!), { min: 1, max: 5 });
+  if (!interval) {
+    return null;
+  }
   const resolved = scored.filter((run) => run.resolution === 'resolved').length;
-  const resolutionRate = scored.length > 0 ? Math.round((resolved / scored.length) * 1000) / 1000 : null;
   return {
-    avgSatisfaction,
+    avgSatisfaction: interval.mean,
+    ciLower: interval.lower,
+    ciUpper: interval.upper,
+    ciLabel: interval.ciLabel,
+    nLabel: `n=${scored.length}`,
     runCount: runs.length,
     scoredCount: scored.length,
-    resolutionRate,
+    resolutionRate: Math.round((resolved / scored.length) * 1000) / 1000,
   };
 }
 
-/** Keep only groups with at least one scored run so satisfaction bars always render. */
-function toImpactRows(groups: Array<{ group: string; runs: PreparedRunRow[] }>): SettingImpactRow[] {
-  return groups
-    .map(({ group, runs }) => ({ group, ...summarizeGroup(runs) }))
-    .filter((row) => row.scoredCount > 0);
+/**
+ * Pure setting comparison transform. Null group keys are untracked and are
+ * excluded from displayed comparisons while remaining represented in coverage.
+ */
+export function settingComparisonRows(
+  runs: PreparedRunRow[],
+  groupForRun: (run: PreparedRunRow) => string | null,
+  order: readonly string[] = [],
+): SettingComparison {
+  const completed = completedRuns(runs);
+  const tracked = completed.flatMap((run) => {
+    const group = groupForRun(run)?.trim();
+    return group ? [{ group, run }] : [];
+  });
+  const groups = new Map<string, PreparedRunRow[]>();
+  for (const { group, run } of tracked) {
+    const groupRuns = groups.get(group) ?? [];
+    groupRuns.push(run);
+    groups.set(group, groupRuns);
+  }
+
+  const orderedGroups = [
+    ...order.filter((group) => groups.has(group)),
+    ...[...groups.keys()].filter((group) => !order.includes(group)),
+  ];
+  const rows = orderedGroups.flatMap((group) => {
+    const summary = summarizeGroup(groups.get(group) ?? []);
+    return summary ? [{ group, ...summary }] : [];
+  });
+
+  return {
+    rows,
+    totalRunCount: completed.length,
+    totalScoredCount: completed.filter((run) => run.satisfaction !== null).length,
+    trackedRunCount: tracked.length,
+    trackedScoredCount: tracked.filter(({ run }) => run.satisfaction !== null).length,
+  };
 }
 
-function satisfactionBarSpec(rows: SettingImpactRow[]) {
+function coverageText(comparison: SettingComparison): string {
+  const untracked = comparison.totalRunCount - comparison.trackedRunCount;
+  return `${comparison.trackedRunCount}/${comparison.totalRunCount} completed runs tracked; `
+    + `${comparison.trackedScoredCount}/${comparison.totalScoredCount} scored runs tracked; `
+    + `${untracked} untracked completed run${untracked === 1 ? '' : 's'} excluded from the comparison.`;
+}
+
+function satisfactionTooltip() {
+  return [
+    { field: 'group', type: 'nominal' as const, title: 'Setting' },
+    { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Mean satisfaction', format: '.2f' },
+    { field: 'ciLabel', type: 'nominal' as const, title: 'Mean interval' },
+    { field: 'runCount', type: 'quantitative' as const, title: 'Completed runs' },
+    { field: 'scoredCount', type: 'quantitative' as const, title: 'Scored runs' },
+    { field: 'resolutionRate', type: 'quantitative' as const, title: 'Resolved rate', format: '.0%' },
+  ];
+}
+
+/** Layered mean-satisfaction spec with t-based 95% intervals and visible n labels. */
+export function satisfactionIntervalSpec(rows: SettingImpactRow[]) {
+  const sort = rows.map((row) => row.group);
   return rows.length === 0 ? null : {
     width: 'container',
     height: 240,
     data: { values: rows },
-    mark: { type: 'bar' as const, cornerRadiusEnd: 4, opacity: 0.88 },
-    encoding: {
-      x: {
-        field: 'group',
-        type: 'nominal' as const,
-        title: null,
-        axis: { labelAngle: 0 },
-      },
-      y: {
-        field: 'avgSatisfaction',
-        type: 'quantitative' as const,
-        title: 'Avg satisfaction',
-        // Satisfaction is a 1–5 Likert scale: floor the axis at 1 so the
-        // On/Off/mode differences (typically 3.5–4.5) are visible, not flattened.
-        scale: { domain: [1, 5] },
-      },
-      color: {
-        field: 'group',
-        type: 'nominal' as const,
-        scale: { range: [CHART_COLORS.accent, CHART_COLORS.gold, CHART_COLORS.muted] },
-        // x-axis already encodes group; suppress the duplicate legend.
-        legend: null,
-      },
-      tooltip: [
-        { field: 'group', type: 'nominal' as const, title: 'Setting' },
-        { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Avg satisfaction', format: '.2f' },
-        { field: 'runCount', type: 'quantitative' as const, title: 'Completed runs' },
-        { field: 'scoredCount', type: 'quantitative' as const, title: 'Scored runs' },
-        {
-          field: 'resolutionRate',
-          type: 'quantitative' as const,
-          title: 'Resolved rate',
-          format: '.0%',
+    layer: [
+      {
+        mark: { type: 'bar' as const, cornerRadiusEnd: 4, opacity: 0.72 },
+        encoding: {
+          x: { field: 'group', type: 'nominal' as const, sort, title: null, axis: { labelAngle: 0 } },
+          y: { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Observed mean satisfaction', scale: { domain: [1, 5] } },
+          color: { field: 'group', type: 'nominal' as const, scale: { range: [CHART_COLORS.accent, CHART_COLORS.gold, CHART_COLORS.muted] }, legend: null },
+          tooltip: satisfactionTooltip(),
         },
-      ],
+      },
+      {
+        mark: { type: 'rule' as const, strokeWidth: 3, color: CHART_COLORS.text },
+        encoding: {
+          x: { field: 'group', type: 'nominal' as const, sort },
+          y: { field: 'ciLower', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          y2: { field: 'ciUpper' },
+          tooltip: satisfactionTooltip(),
+        },
+      },
+      {
+        mark: { type: 'point' as const, filled: true, size: 90, color: CHART_COLORS.text },
+        encoding: {
+          x: { field: 'group', type: 'nominal' as const, sort },
+          y: { field: 'avgSatisfaction', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          tooltip: satisfactionTooltip(),
+        },
+      },
+      {
+        mark: { type: 'text' as const, dy: 12, fontSize: 11, color: CHART_COLORS.text },
+        encoding: {
+          x: { field: 'group', type: 'nominal' as const, sort },
+          y: { field: 'ciUpper', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          text: { field: 'nLabel', type: 'nominal' as const },
+        },
+      },
+    ],
+  };
+}
+
+interface ExtensionImpactRow extends SettingImpactRow {
+  extension: string;
+  state: 'Explicitly enabled' | 'Explicitly disabled';
+}
+
+function extensionIntervalSpec(rows: ExtensionImpactRow[], extensions: string[]) {
+  const tooltip = [
+    { field: 'extension', type: 'nominal' as const, title: 'Extension' },
+    { field: 'state', type: 'nominal' as const, title: 'Explicit override' },
+    { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Mean satisfaction', format: '.2f' },
+    { field: 'ciLabel', type: 'nominal' as const, title: 'Mean interval' },
+    { field: 'runCount', type: 'quantitative' as const, title: 'Completed runs' },
+    { field: 'scoredCount', type: 'quantitative' as const, title: 'Scored runs' },
+    { field: 'resolutionRate', type: 'quantitative' as const, title: 'Resolved rate', format: '.0%' },
+  ];
+  const x = { field: 'extension', type: 'nominal' as const, sort: extensions, title: null, axis: { labelAngle: 0, labelLimit: 120 } };
+  const xOffset = { field: 'state', type: 'nominal' as const };
+  const color = {
+    field: 'state',
+    type: 'nominal' as const,
+    legend: { title: 'Explicit override' },
+    scale: {
+      domain: ['Explicitly enabled', 'Explicitly disabled'],
+      range: [CHART_COLORS.success, CHART_COLORS.coral],
     },
+  };
+  return rows.length === 0 ? null : {
+    width: 'container',
+    height: categoricalHeight(extensions.length, 40),
+    data: { values: rows },
+    layer: [
+      {
+        mark: { type: 'bar' as const, cornerRadiusEnd: 3, opacity: 0.7 },
+        encoding: {
+          x,
+          xOffset,
+          y: { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Observed mean satisfaction', scale: { domain: [1, 5] } },
+          color,
+          tooltip,
+        },
+      },
+      {
+        mark: { type: 'rule' as const, strokeWidth: 2.5, color: CHART_COLORS.text },
+        encoding: {
+          x,
+          xOffset,
+          y: { field: 'ciLower', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          y2: { field: 'ciUpper' },
+          tooltip,
+        },
+      },
+      {
+        mark: { type: 'point' as const, filled: true, size: 70, color: CHART_COLORS.text },
+        encoding: {
+          x,
+          xOffset,
+          y: { field: 'avgSatisfaction', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          tooltip,
+        },
+      },
+      {
+        mark: { type: 'text' as const, dy: 11, fontSize: 10, color: CHART_COLORS.text },
+        encoding: {
+          x,
+          xOffset,
+          y: { field: 'ciUpper', type: 'quantitative' as const, scale: { domain: [1, 5] } },
+          text: { field: 'nLabel', type: 'nominal' as const },
+        },
+      },
+    ],
   };
 }
 
@@ -79,44 +227,33 @@ export const settingsCharts: ChartEntry[] = [
   {
     id: 'chart-settings-subagent-parent',
     render: async (ctx: ChartContext) => {
-      const runs = completedRuns(ctx.runs);
-      const onRuns = runs.filter((run) => run.fsSubagentAlwaysParentModel === true);
-      const offRuns = runs.filter((run) => run.fsSubagentAlwaysParentModel === false);
-      const untrackedRuns = runs.filter((run) => run.fsSubagentAlwaysParentModel === null);
-      const rows = toImpactRows([
-        { group: 'On', runs: onRuns },
-        { group: 'Off', runs: offRuns },
-        { group: '(untracked)', runs: untrackedRuns },
-      ]);
-      const totalScored = runs.filter((run) => run.satisfaction !== null).length;
+      const comparison = settingComparisonRows(
+        ctx.runs,
+        (run) => run.fsSubagentAlwaysParentModel === null ? null : run.fsSubagentAlwaysParentModel ? 'On' : 'Off',
+        ['On', 'Off'],
+      );
       ctx.setNote(
         'settings-subagent-parent-note',
-        `Average satisfaction for runs where sub-agents always use the parent model (On) vs. bucket selection (Off). ${totalScored} scored runs in view; runs recorded before tracking existed fall under (untracked).`,
+        `Observed mean satisfaction when sub-agents were configured to use the parent model (On) versus bucket selection (Off). ${coverageText(comparison)} Only groups with ≥${MIN_SCORED_PER_SETTING_GROUP} scored runs are shown with 95% mean intervals; descriptive only, not an adjusted treatment effect.`,
         ctx.renderToken,
       );
-      await ctx.renderSpec('chart-settings-subagent-parent', satisfactionBarSpec(rows), 'No scored runs with subagent parent-model tracking match the current filters.', ctx.renderToken);
+      await ctx.renderSpec('chart-settings-subagent-parent', satisfactionIntervalSpec(comparison.rows), 'No tracked groups have at least 3 scored runs under the current filters.', ctx.renderToken);
     },
   },
   {
     id: 'chart-settings-pruning-mode',
     render: async (ctx: ChartContext) => {
-      const runs = completedRuns(ctx.runs);
-      const modes = ['auto', 'shadow', 'off', 'custom'] as const;
-      const groups: Array<{ group: string; runs: PreparedRunRow[] }> = modes
-        .map((mode) => ({ group: mode, runs: runs.filter((run) => run.fsPruningMode === mode) }))
-        .filter((entry) => entry.runs.length > 0);
-      const untrackedRuns = runs.filter((run) => run.fsPruningMode === null);
-      if (untrackedRuns.length > 0) {
-        groups.push({ group: '(untracked)', runs: untrackedRuns });
-      }
-      const rows = toImpactRows(groups);
-      const enabledCount = runs.filter((run) => run.fsPruningEnabled === true).length;
+      const comparison = settingComparisonRows(
+        ctx.runs,
+        (run) => run.fsPruningMode,
+        ['auto', 'shadow', 'off', 'custom'],
+      );
       ctx.setNote(
         'settings-pruning-mode-note',
-        `Average satisfaction by pruning mode at run start. ${enabledCount} of ${runs.length} runs had pruning active (mode !== 'off'); (untracked) covers runs recorded before tracking existed.`,
+        `Observed mean satisfaction by pruning mode recorded at run start. ${coverageText(comparison)} Only groups with ≥${MIN_SCORED_PER_SETTING_GROUP} scored runs are shown with 95% mean intervals; descriptive only, not an adjusted treatment effect.`,
         ctx.renderToken,
       );
-      await ctx.renderSpec('chart-settings-pruning-mode', satisfactionBarSpec(rows), 'No scored runs with pruning-mode tracking match the current filters.', ctx.renderToken);
+      await ctx.renderSpec('chart-settings-pruning-mode', satisfactionIntervalSpec(comparison.rows), 'No tracked pruning-mode groups have at least 3 scored runs under the current filters.', ctx.renderToken);
     },
   },
   {
@@ -124,94 +261,64 @@ export const settingsCharts: ChartEntry[] = [
     render: async (ctx: ChartContext) => {
       const runs = completedRuns(ctx.runs);
       const affectedByExtension = new Map<string, PreparedRunRow[]>();
+      const runsWithOverrides = new Set<string>();
       for (const run of runs) {
         for (const [extensionId, enabled] of Object.entries(run.fsExtensionToggles)) {
           if (typeof enabled !== 'boolean') {
             continue;
           }
+          runsWithOverrides.add(run.runId);
           const bucket = affectedByExtension.get(extensionId) ?? [];
           bucket.push(run);
           affectedByExtension.set(extensionId, bucket);
         }
       }
 
-      const rows: Array<SettingImpactRow & { extension: string; state: 'Enabled' | 'Disabled' }> = [];
+      const rows: ExtensionImpactRow[] = [];
       const rankedExtensions = [...affectedByExtension.entries()]
         .sort((left, right) => right[1].length - left[1].length)
         .slice(0, 12);
 
       for (const [extensionId, extensionRuns] of rankedExtensions) {
-        const enabledRuns = extensionRuns.filter((run) => run.fsExtensionToggles[extensionId] === true);
-        const disabledRuns = extensionRuns.filter((run) => run.fsExtensionToggles[extensionId] === false);
-        for (const { state, runs } of [
-          { state: 'Enabled' as const, runs: enabledRuns },
-          { state: 'Disabled' as const, runs: disabledRuns },
+        for (const { state, runs: stateRuns } of [
+          { state: 'Explicitly enabled' as const, runs: extensionRuns.filter((run) => run.fsExtensionToggles[extensionId] === true) },
+          { state: 'Explicitly disabled' as const, runs: extensionRuns.filter((run) => run.fsExtensionToggles[extensionId] === false) },
         ]) {
-          const summary = summarizeGroup(runs);
-          if (summary.scoredCount === 0) {
-            continue;
+          const summary = summarizeGroup(stateRuns);
+          if (summary) {
+            rows.push({ extension: extensionId, state, ...summary, group: state });
           }
-          rows.push({ extension: extensionId, state, ...summary, group: state });
         }
       }
 
+      const displayedExtensions = rankedExtensions
+        .map(([extensionId]) => extensionId)
+        .filter((extensionId) => rows.some((row) => row.extension === extensionId));
+      const totalScored = runs.filter((run) => run.satisfaction !== null).length;
+      const scoredWithOverrides = runs.filter((run) => runsWithOverrides.has(run.runId) && run.satisfaction !== null).length;
       ctx.setNote(
         'settings-extension-toggles-note',
-        `Average satisfaction by per-extension enabled/disabled toggle at run start, for the ${rankedExtensions.length} most-used extensions. Only groups with scored runs are shown.`,
+        `Observed mean satisfaction by explicit per-extension override at run start; these values are not effective extension state. ${runsWithOverrides.size}/${runs.length} completed and ${scoredWithOverrides}/${totalScored} scored runs recorded at least one explicit override. Only groups with ≥${MIN_SCORED_PER_SETTING_GROUP} scored runs are shown with 95% mean intervals; descriptive only, not an adjusted treatment effect.`,
         ctx.renderToken,
       );
-      const spec = rows.length === 0 ? null : {
-        width: 'container',
-        height: categoricalHeight(rankedExtensions.length, 40),
-        data: { values: rows },
-        mark: { type: 'bar' as const, cornerRadiusEnd: 3, opacity: 0.85 },
-        encoding: {
-          x: { field: 'extension', type: 'nominal' as const, title: null, axis: { labelAngle: 0, labelLimit: 120 } },
-          y: { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Avg satisfaction', scale: { domain: [1, 5] } },
-          color: {
-            field: 'state',
-            type: 'nominal' as const,
-            legend: { title: 'Toggle' },
-            scale: { range: [CHART_COLORS.success, CHART_COLORS.coral] },
-          },
-          xOffset: { field: 'state', type: 'nominal' as const },
-          tooltip: [
-            { field: 'extension', type: 'nominal' as const, title: 'Extension' },
-            { field: 'state', type: 'nominal' as const, title: 'Toggle' },
-            { field: 'avgSatisfaction', type: 'quantitative' as const, title: 'Avg satisfaction', format: '.2f' },
-            { field: 'runCount', type: 'quantitative' as const, title: 'Completed runs' },
-            { field: 'scoredCount', type: 'quantitative' as const, title: 'Scored runs' },
-            { field: 'resolutionRate', type: 'quantitative' as const, title: 'Resolved rate', format: '.0%' },
-          ],
-        },
-      };
-      await ctx.renderSpec('chart-settings-extension-toggles', spec, 'No scored runs with extension-toggle tracking match the current filters.', ctx.renderToken);
+      const spec = extensionIntervalSpec(rows, displayedExtensions);
+      await ctx.renderSpec('chart-settings-extension-toggles', spec, 'No explicit extension-override groups have at least 3 scored runs under the current filters.', ctx.renderToken);
     },
   },
   {
     id: 'chart-settings-tool-result-pruning',
     render: async (ctx: ChartContext) => {
-      // Bucket completed runs by whether tool-result pruning was enabled at run
-      // start (true / false / null=untracked) and contrast average satisfaction.
-      // Answers "are outcomes better with or without the system?" Read-tool
-      // results are never pruned (hard safety guard), so the On bucket reflects
-      // bash/ls/grep/find/etc. output pruning only.
-      const runs = completedRuns(ctx.runs);
-      const onRuns = runs.filter((run) => run.fsToolResultPruningEnabled === true);
-      const offRuns = runs.filter((run) => run.fsToolResultPruningEnabled === false);
-      const untrackedRuns = runs.filter((run) => run.fsToolResultPruningEnabled === null);
-      const rows = toImpactRows([
-        { group: 'On', runs: onRuns },
-        { group: 'Off', runs: offRuns },
-        { group: '(untracked)', runs: untrackedRuns },
-      ]);
-      const totalScored = runs.filter((run) => run.satisfaction !== null).length;
+      const comparison = settingComparisonRows(
+        ctx.runs,
+        (run) => run.fsToolResultPruningEnabled === null ? null : run.fsToolResultPruningEnabled ? 'On' : 'Off',
+        ['On', 'Off'],
+      );
       ctx.setNote(
         'settings-tool-result-pruning-note',
-        `Average satisfaction for runs with tool-result pruning enabled (On) vs. disabled (Off). ${totalScored} scored runs in view; the system is on by default, so Off is skewed toward sessions where the user explicitly turned it off (selection bias). (untracked) covers runs recorded before tracking existed.`,
+        `Observed mean satisfaction with tool-result pruning enabled (On) versus disabled (Off) at run start. ${coverageText(comparison)} Only groups with ≥${MIN_SCORED_PER_SETTING_GROUP} scored runs are shown with 95% mean intervals; descriptive only and subject to explicit opt-out selection, not an adjusted treatment effect.`,
         ctx.renderToken,
       );
-      await ctx.renderSpec('chart-settings-tool-result-pruning', satisfactionBarSpec(rows), 'No scored runs with tool-result-pruning tracking match the current filters.', ctx.renderToken);
+      await ctx.renderSpec('chart-settings-tool-result-pruning', satisfactionIntervalSpec(comparison.rows), 'No tracked tool-result-pruning groups have at least 3 scored runs under the current filters.', ctx.renderToken);
     },
   },
 ];

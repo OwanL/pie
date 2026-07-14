@@ -46,7 +46,7 @@ describe('reapPrunedRawStashes', () => {
     writeFileSync(p, bytes);
     const t = now - ageDays * DAY;
     // Date object (not raw ms) — utimesSync throws EINVAL on Windows for a
-    // bare number; mirrors extension/test/temp-log-reaper.test.ts.
+    // bare number; mirrors extension/test/host/util/temp-log-reaper.test.ts.
     utimesSync(p, new Date(t), new Date(t));
     return p;
   }

@@ -127,7 +127,7 @@ export default function (pi: ExtensionAPI) {
 
       if (p.action === 'list') {
         const triggers = listActiveForSession(sessionPath);
-        return ok(renderList(triggers), { count: triggers.length, triggers });
+        return ok(renderList(triggers), { count: triggers.length });
       }
 
       if (p.action === 'cancel') {
@@ -142,7 +142,7 @@ export default function (pi: ExtensionAPI) {
           targetId
             ? `Cancelled deferred trigger ${targetId} for this session.`
             : 'Cancelled all pending deferred triggers for this session.',
-          { cancelled: targetId ?? 'all' },
+          undefined,
         );
       }
 
@@ -161,7 +161,7 @@ export default function (pi: ExtensionAPI) {
       });
       return ok(
         `Registered deferred trigger ${id}:\n  [${describeTrigger(specs)}]\n  note: ${note || '(none)'}\n\nYour turn will end now; you will be resumed automatically when the trigger fires. When resumed, re-evaluate the condition and either complete the task or call \`defer_trigger\` with action \`register\` again to keep waiting.`,
-        { triggerId: id, triggers: specs, note },
+        undefined,
       );
     },
   });

@@ -1,13 +1,24 @@
 import type { ViewState } from './protocol/webview';
 
+const TEXT_SAMPLE_CHARS = 192;
+
 /**
  * Compact identity for the transcript state that must be visible after a
- * snapshot commit. The tail is sufficient: live status changes only occur on
- * the current assistant turn, while the count catches structural changes.
+ * snapshot commit. It covers the bounded tail plus any earlier streaming
+ * message: queued follow-ups can push the still-running tool owner out of the
+ * tail, and acknowledging only the tail would bless a visibly stale tool card.
  *
- * This is intentionally deterministic and dependency-free so the host and
- * webview can calculate the same value. It is a correctness checksum, not a
- * cryptographic hash.
+ * Hashing is deliberately bounded. Tool results can contain complete nested
+ * subagent transcripts, and this function runs in both processes (twice in the
+ * webview) for every streaming snapshot. Each host ToolCall event advances the
+ * message's O(1) `toolStateRevision`, so arbitrary partial-result/status
+ * changes remain visible to the checksum without serializing result payloads
+ * or scanning tool-call collections. Long text and drafted arguments use fixed
+ * head/middle/tail samples; their full lengths catch normal append-only
+ * streaming.
+ *
+ * This is deterministic and dependency-free so the host and webview calculate
+ * the same value. It is a correctness checksum, not a cryptographic hash.
  */
 export function transcriptRenderSignature(state: Pick<
   ViewState,
@@ -17,47 +28,54 @@ export function transcriptRenderSignature(state: Pick<
   | 'retryStatus'
   | 'transcript'
 >): string {
-  const tail = state.transcript.slice(-3).map((message) => ({
-    id: message.id,
-    status: message.status,
-    markdownLength: message.markdown.length,
-    markdownFingerprint: fnv1a(message.markdown),
-    thinkingLength: message.thinking?.length ?? 0,
-    thinkingFingerprint: fnv1a(message.thinking ?? ''),
-    draftingToolCall: message.draftingToolCall
-      ? [
-          message.draftingToolCall.id,
-          message.draftingToolCall.name,
-          message.draftingToolCall.argumentsText.length,
-          fnv1a(message.draftingToolCall.argumentsText),
-        ]
-      : null,
-    toolCalls: (message.toolCalls ?? []).map((tool) => [
-      tool.id,
-      tool.name,
-      tool.status,
-      serializedIdentity(tool.result),
-    ]),
-  }));
+  const tailStart = Math.max(0, state.transcript.length - 3);
+  const earlierStreaming = state.transcript
+    .slice(0, tailStart)
+    .filter((message) => message.status === 'streaming')
+    .map(messageRenderIdentity);
+  const tail = state.transcript.slice(tailStart).map(messageRenderIdentity);
   const source = JSON.stringify({
     sessionPath: state.activeSession?.path ?? null,
     busy: state.busy,
     prepassPhase: state.prepassPhase,
     retryStatus: state.retryStatus,
     transcriptCount: state.transcript.length,
+    earlierStreaming,
     tail,
   });
   return fnv1a(source);
 }
 
-function serializedIdentity(value: unknown): [length: number, fingerprint: string] {
-  if (value === undefined) return [0, fnv1a('')];
-  try {
-    const serialized = JSON.stringify(value) ?? '';
-    return [serialized.length, fnv1a(serialized)];
-  } catch {
-    return [-1, 'unserializable'];
+function messageRenderIdentity(message: ViewState['transcript'][number]) {
+  return {
+    id: message.id,
+    status: message.status,
+    markdown: sampledTextIdentity(message.markdown),
+    thinking: sampledTextIdentity(message.thinking ?? ''),
+    draftingToolCall: message.draftingToolCall
+      ? [
+          message.draftingToolCall.id,
+          message.draftingToolCall.name,
+          sampledTextIdentity(message.draftingToolCall.argumentsText),
+        ]
+      : null,
+    toolCallCount: message.toolCalls?.length ?? 0,
+    toolStateRevision: message.toolStateRevision ?? 0,
+  };
+}
+
+function sampledTextIdentity(value: string): [length: number, fingerprint: string] {
+  if (value.length <= TEXT_SAMPLE_CHARS * 3) {
+    return [value.length, fnv1a(value)];
   }
+
+  const middleStart = Math.max(0, Math.floor(value.length / 2) - Math.floor(TEXT_SAMPLE_CHARS / 2));
+  const sample = [
+    value.slice(0, TEXT_SAMPLE_CHARS),
+    value.slice(middleStart, middleStart + TEXT_SAMPLE_CHARS),
+    value.slice(-TEXT_SAMPLE_CHARS),
+  ].join('\u0000');
+  return [value.length, fnv1a(sample)];
 }
 
 function fnv1a(value: string): string {

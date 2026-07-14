@@ -16,12 +16,16 @@ import {
   selectModel,
   loadModelConfig,
   parseProviderToggles,
+  parseSessionProviderToggles,
+  resolveSubagentProviderToggles,
   getDisabledProviders,
   getAllowedModelIdsForProviders,
   nearestSupportedThinking,
   parseBucketConfig,
   readBucketAssignments,
   PROVIDER_TOGGLES_ENV,
+  SUBAGENT_PROVIDER_DEFAULTS_ENV,
+  SUBAGENT_PROVIDER_TOGGLES_ENV,
   SUBAGENT_BUCKETS_ENV,
 } from "../bucket-selector.js";
 import type { ThinkingLevel, ModelProviderRef, BucketAssignments, SimpleModelConfig } from "../bucket-selector.js";
@@ -282,6 +286,75 @@ describe("selectModel", () => {
     assert.equal(result.modelId, "model-b");
   });
 
+  it("soft-filters saturated model ids when another bucket candidate has capacity", () => {
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: ["busy-model", "open-model"],
+      frontier: [],
+    };
+    const config = makeConfig([{ id: "busy-model" }, { id: "open-model" }]);
+
+    const result = selectModel(
+      "medium",
+      undefined,
+      assignments,
+      config,
+      new Set(["busy-model", "open-model"]),
+      undefined,
+      ACTIVE_MODEL,
+      new Set(["open-model"]),
+    );
+
+    assert.equal(result.fallback, false);
+    assert.equal(result.modelId, "open-model");
+    assert.deepEqual(result.pool, ["open-model"]);
+  });
+
+  it("fails open to the old bucket pool when every eligible model is saturated", () => {
+    const assignments: BucketAssignments = {
+      small: ["busy-a", "busy-b"],
+      medium: [],
+      frontier: [],
+    };
+    const config = makeConfig([{ id: "busy-a" }, { id: "busy-b" }]);
+
+    const result = selectModel(
+      "small",
+      undefined,
+      assignments,
+      config,
+      new Set(["busy-a", "busy-b"]),
+      undefined,
+      ACTIVE_MODEL,
+      new Set(),
+    );
+
+    assert.equal(result.fallback, false);
+    assert.ok(["busy-a", "busy-b"].includes(result.modelId));
+    assert.deepEqual(result.pool, ["busy-a", "busy-b"]);
+  });
+
+  it("keeps old selection behavior when capacity routing is disabled", () => {
+    const assignments: BucketAssignments = {
+      small: ["model-a"],
+      medium: [],
+      frontier: [],
+    };
+    const result = selectModel(
+      "small",
+      undefined,
+      assignments,
+      makeConfig([{ id: "model-a" }]),
+      new Set(["model-a"]),
+      undefined,
+      ACTIVE_MODEL,
+    );
+
+    assert.equal(result.fallback, false);
+    assert.equal(result.modelId, "model-a");
+    assert.deepEqual(result.pool, ["model-a"]);
+  });
+
   it("models not in config are treated as supporting all thinking levels", () => {
     const assignments: BucketAssignments = {
       small: [],
@@ -463,6 +536,31 @@ describe("parseProviderToggles", () => {
   });
 });
 
+describe("parseSessionProviderToggles", () => {
+  it("returns only the requested session's provider map", () => {
+    const raw = JSON.stringify({ "/a.jsonl": { fast: false, cheap: true }, "/b.jsonl": { fast: true } });
+    assert.deepEqual(parseSessionProviderToggles(raw, "/a.jsonl"), { fast: false, cheap: true });
+  });
+
+  it("fails closed to no extra toggles for malformed or missing sessions", () => {
+    assert.deepEqual(parseSessionProviderToggles("bad", "/a.jsonl"), {});
+    assert.deepEqual(parseSessionProviderToggles(JSON.stringify({}), "/a.jsonl"), {});
+    assert.deepEqual(parseSessionProviderToggles(JSON.stringify({ "/a.jsonl": { fast: "no" } }), "/a.jsonl"), {});
+  });
+});
+
+describe("resolveSubagentProviderToggles", () => {
+  it("inherits defaults and lets session-specific values override them", () => {
+    assert.deepEqual(
+      resolveSubagentProviderToggles(
+        { anthropic: false, openai: true },
+        { anthropic: true, google: false },
+      ),
+      { anthropic: true, openai: true, google: false },
+    );
+  });
+});
+
 // ============================================================
 // getDisabledProviders
 // ============================================================
@@ -542,6 +640,8 @@ describe("getAllowedModelIdsForProviders", () => {
 describe("PROVIDER_TOGGLES_ENV", () => {
   it("has expected value", () => {
     assert.equal(PROVIDER_TOGGLES_ENV, "PIE_PROVIDER_TOGGLES_JSON");
+    assert.equal(SUBAGENT_PROVIDER_DEFAULTS_ENV, "PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON");
+    assert.equal(SUBAGENT_PROVIDER_TOGGLES_ENV, "PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON");
   });
 });
 

@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ModelInfo, PruningSettings, PruningMode, ThinkingLevel } from '../../../shared/protocol';
+import { DEFAULT_PRUNING_SETTINGS, type ChatPrefs, type ModelInfo, type PruningSettings, type PruningMode, type ThinkingLevel } from '../../../shared/protocol';
 import { toggleChatPref } from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
 import { ModelPicker } from '../components/model-picker';
@@ -25,6 +25,9 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
     modelEntries.find((e) => e.model.id === pruningSettings.model)?.selectedLabel
     || pruningSettings.model
     || 'Select model…';
+  const autoSkipBelowTokens = pruningSettings.autoSkipBelowTokens === undefined
+    ? DEFAULT_PRUNING_SETTINGS.autoSkipBelowTokens!
+    : pruningSettings.autoSkipBelowTokens;
 
   return (
     <div class="toolbar-settings-ext-settings">
@@ -55,6 +58,48 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
           ))}
         </select>
       </div>
+      <button
+        class={`toolbar-settings-item${autoSkipBelowTokens !== null ? ' checked' : ''}`}
+        type="button"
+        role="checkbox"
+        aria-checked={autoSkipBelowTokens !== null}
+        title="Skip the pruning prepass when its estimated input is below the configured token threshold. Skipped turns keep the full catalog and do not produce a pruning summary."
+        onClick={() => onSetPruningSettings({
+          autoSkipBelowTokens: autoSkipBelowTokens === null ? 1200 : null,
+        })}
+      >
+        <span class="toolbar-settings-item-check" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={autoSkipBelowTokens !== null ? '' : 'opacity:0'}>
+            <polyline points="2.5,6.5 5,9 10.5,3.5" />
+          </svg>
+        </span>
+        <span class="toolbar-settings-item-label">Skip small prepasses</span>
+      </button>
+      {autoSkipBelowTokens !== null && (
+        <div class="toolbar-settings-item toolbar-settings-stepper-row">
+          <span class="toolbar-settings-item-label">Skip below tokens</span>
+          <div class="toolbar-settings-stepper">
+            <button
+              type="button"
+              class="toolbar-settings-stepper-btn"
+              aria-label="Decrease auto-skip token threshold"
+              disabled={autoSkipBelowTokens <= 100}
+              onClick={() => onSetPruningSettings({
+                autoSkipBelowTokens: Math.max(100, autoSkipBelowTokens - 100),
+              })}
+            >−</button>
+            <span class="toolbar-settings-stepper-value">{autoSkipBelowTokens}</span>
+            <button
+              type="button"
+              class="toolbar-settings-stepper-btn"
+              aria-label="Increase auto-skip token threshold"
+              onClick={() => onSetPruningSettings({
+                autoSkipBelowTokens: autoSkipBelowTokens + 100,
+              })}
+            >+</button>
+          </div>
+        </div>
+      )}
       <div class="toolbar-settings-item toolbar-settings-mode-row">
         <span class="toolbar-settings-item-label">Prepass model</span>
         <ModelPicker

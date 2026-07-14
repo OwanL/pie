@@ -6,10 +6,9 @@
  * persistence write, a log line); the reducer never performs them directly.
  * The runner translates each effect into the appropriate queue path:
  *
- * - Any `*Rpc` effect routes through the **double-wrap**
- *   `enqueueLifecycle(() => enqueueSessionOperation(sessionPath, do_rpc))` so
- *   it serializes correctly with legacy `send`/`edit` paths during the
- *   multi-phase migration (see plan §Phase 2 EffectRunner contract).
+ * - Session-scoped `*Rpc` effects route through
+ *   `enqueueSessionOperation(sessionPath, do_rpc)` so they remain FIFO within
+ *   one session without blocking lifecycle work for other tabs.
  * - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle`
  *   directly because the target session may not yet exist.
  * - `PersistTabs` and `Log` execute synchronously without queueing.
@@ -66,6 +65,13 @@ export interface EditRpcEffect extends EffectBase {
 export interface InterruptRpcEffect extends EffectBase {
   kind: 'InterruptRpc';
   sessionPath: string;
+}
+
+export interface RequestLiveTurnCheckpointEffect extends EffectBase {
+  kind: 'RequestLiveTurnCheckpoint';
+  sessionPath: string;
+  turnId: string;
+  attemptId: string;
 }
 
 export interface ClearQueueRpcEffect extends EffectBase {
@@ -272,6 +278,7 @@ export type Effect =
   | SendRpcEffect
   | EditRpcEffect
   | InterruptRpcEffect
+  | RequestLiveTurnCheckpointEffect
   | ClearQueueRpcEffect
   | TruncateRpcEffect
   | OpenSessionEffect
@@ -309,6 +316,7 @@ export type Effect =
   | DrainBackendReadyQueueEffect
   | StartBackendReadyWatchdogEffect
   | CancelBackendReadyWatchdogEffect
+  | MarkPrepassSucceededEffect
   | ClearSendTimerEffect;
 
 /**
@@ -351,6 +359,16 @@ export interface StartBackendReadyWatchdogEffect extends EffectBase {
  */
 export interface CancelBackendReadyWatchdogEffect extends EffectBase {
   kind: 'CancelBackendReadyWatchdog';
+}
+
+/**
+ * Transition an in-flight send/edit from the pruning-prepass timeout window to
+ * the model-start timeout window. Emitted when the backend's explicit
+ * preflight-succeeded signal arrives, before the first assistant MessageStarted
+ * commit point.
+ */
+export interface MarkPrepassSucceededEffect extends EffectBase {
+  kind: 'MarkPrepassSucceeded';
 }
 
 /**

@@ -123,7 +123,18 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
   deps.state.touchSessionTranscript(sessionPath);
 }
 
-export function onMessageFinished(payload: MessageFinishedPayload, deps: HandlerDeps): void {
+interface TerminalHandlerOptions {
+  /** Canonical live semantic path already committed transcript state. */
+  skipTranscriptMutation?: boolean;
+  /** A paired terminal handler already recorded the observer boundary. */
+  skipObserver?: boolean;
+}
+
+export function onMessageFinished(
+  payload: MessageFinishedPayload,
+  deps: HandlerDeps,
+  options: TerminalHandlerOptions = {},
+): void {
   const sessionPath = deps.requireEventSessionPath('message.finished', payload.sessionPath);
   if (!sessionPath) {
     return;
@@ -138,12 +149,14 @@ export function onMessageFinished(payload: MessageFinishedPayload, deps: Handler
     }
   }
 
-  deps.dispatchArch({
-    kind: 'MessageFinished',
-    sessionPath,
-    message,
-  });
-  deps.runObserver.onAssistantTurnEnded(
+  if (!options.skipTranscriptMutation) {
+    deps.dispatchArch({
+      kind: 'MessageFinished',
+      sessionPath,
+      message,
+    });
+  }
+  if (!options.skipObserver) deps.runObserver.onAssistantTurnEnded(
     sessionPath,
     message.id,
     message.durationMs ?? 0,
@@ -164,7 +177,11 @@ export function onMessageFinished(payload: MessageFinishedPayload, deps: Handler
   deps.state.touchSessionTranscript(sessionPath);
 }
 
-export function onMessageAborted(payload: MessageAbortedPayload, deps: HandlerDeps): void {
+export function onMessageAborted(
+  payload: MessageAbortedPayload,
+  deps: HandlerDeps,
+  options: TerminalHandlerOptions = {},
+): void {
   const sessionPath = deps.requireEventSessionPath('message.aborted', payload.sessionPath);
   if (!sessionPath) {
     return;
@@ -175,13 +192,15 @@ export function onMessageAborted(payload: MessageAbortedPayload, deps: HandlerDe
     ? undefined
     : stripReqIds(payload.reason?.trim() || DEFAULT_UNEXPECTED_INTERRUPT_REASON);
 
-  deps.dispatchArch({
-    kind: 'MessageAborted',
-    sessionPath,
-    messageId: payload.messageId,
-    userInitiated,
-    reason,
-  });
+  if (!options.skipTranscriptMutation) {
+    deps.dispatchArch({
+      kind: 'MessageAborted',
+      sessionPath,
+      messageId: payload.messageId,
+      userInitiated,
+      reason,
+    });
+  }
 
   if (reason) {
     // Always alert the user about an unexpected (non-user-initiated)
@@ -211,7 +230,7 @@ export function onMessageAborted(payload: MessageAbortedPayload, deps: HandlerDe
     }
   }
 
-  if (payload.messageId) {
+  if (payload.messageId && !options.skipObserver) {
     deps.runObserver.onAssistantTurnEnded(
       sessionPath,
       payload.messageId,
@@ -259,6 +278,7 @@ export function onQueuedDelivered(payload: QueuedDeliveredPayload, deps: Handler
     kind: 'QueuedDelivered',
     sessionPath,
     text: payload.text,
+    localId: payload.localId,
   });
 }
 

@@ -7,33 +7,20 @@ The session shares the parent's auth, model registry, and OAuth tokens but gets 
 context window, system prompt, and tool allowlist. This is what unlocks newer GitHub Copilot
 models that were broken under the previous CLI-subprocess approach.
 
-## Modes
+## Invocation and orchestration
 
-### Single
+One tool call delegates one task:
+
 ```json
 { "agent": "worker", "task": "Implement the login form" }
 ```
 
-### Parallel
-```json
-{
-  "tasks": [
-    { "agent": "worker", "task": "Add unit tests" },
-    { "agent": "worker", "task": "Update docs" }
-  ]
-}
-```
+Use pi's native orchestration rather than a batch mode:
 
-### Chain
-Sequential execution with `{previous}` placeholder for prior output:
-```json
-{
-  "chain": [
-    { "agent": "scout", "task": "Find all API endpoints" },
-    { "agent": "worker", "task": "Add validation to: {previous}" }
-  ]
-}
-```
+- **Independent work:** emit multiple sibling `subagent` tool calls in one assistant response. Pi executes sibling calls concurrently.
+- **Dependent work:** wait for the prior call's result, then issue another `subagent` call in a later turn. The parent agent decides what context to carry forward.
+
+This keeps scheduling, interruption, and error handling on pi's normal tool-call path instead of duplicating those mechanisms inside this extension.
 
 ## Agent Discovery
 
@@ -61,9 +48,18 @@ env var (set by the pie host on startup and on every change).
   fresh installs start with all buckets empty).
 - Models whose provider is toggled off in pie are filtered out of the pool at
   selection time; a model that can't be resolved falls back to the active model.
+- **Route around busy providers** is an opt-in, default-off setting. When enabled,
+  bucket selection softly excludes a model only when every enabled/configured
+  provider offering it is paused or has no immediately claimable ProviderGate
+  slot. Afterburn-held slots count as busy. If capacity is unavailable or all
+  eligible candidates are busy, selection fails open to the normal pool and the
+  chosen provider queues as before. Duplicate model ids prefer an immediately
+  available provider over a saturated provider when one exists. Capacity checks
+  are advisory rather than reservations: another request may claim the slot
+  before the subagent starts, so the chosen provider can still queue.
 - A model id may appear in more than one bucket.
-- "Always use parent model" (same settings section) skips bucket selection
-  entirely and runs every subagent on the caller's active model.
+- "Always use parent model" (same settings section) skips bucket and capacity
+  selection entirely and runs every subagent on the caller's active model.
 
 Model selection still reads `<pi-config>/model-profiles.yaml` (`.json`
 fallback) for thinking-level support lookups — the shared registry, also
@@ -95,40 +91,18 @@ A downgrade is recorded on the result as `bucketDowngradeReason`. All-true
 (the default) leaves behaviour unchanged. This is independent of "Always use
 parent model", which takes precedence (and skips bucket selection) when enabled.
 
-## Removed parameters
+## Removed parameters and routes
 
-The `agentScope` parameter has been removed from the public tool schema. Discovery is now automatic and always covers both user and project agent directories. The legacy field is stripped by `prepareArguments` for backward compatibility with old sessions and resumed transcripts, so existing calls that still include it continue to work.
+The public schema is `{ agent, task, cwd?, bucket?, thinkingLevel?, confirmProjectAgents? }`.
+
+- `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.
+- `tasks` and `chain` batch routes were removed. Old one-item batches are migrated by `prepareArguments`; multi-item batches fail schema validation with guidance to use sibling calls or later turns.
 
 Project-local agents still require confirmation before running (see **Agent Discovery** above).
 
 ## Validation errors
 
-Early failures — disabled subagents, depth/tree limits, unknown agents, multiple modes, or a caller `canSpawn` allowlist violation — surface as tool results with `isError: true`. Successful child sessions return normally and are not marked as errors, even when a sibling failed in parallel mode.
-
-## Task Scores
-
-Optional hints for model selection:
-```json
-{
-  "agent": "worker",
-  "task": "Add validation to the signup form and update its tests",
-  "taskScores": { "precision": 3, "thoroughness": 3, "reasoning": 0 }
-}
-```
-
-Scores: `reasoning`, `precision`, `creativity`, `thoroughness` (0–5 each).
-
-Use the lowest score that fits:
-- Omit routine dimensions; omitted fields default to `2`.
-- `3` = normal professional work that genuinely depends on that dimension.
-- `4` = hard/high-risk or unusually complex work.
-- `5` = rare frontier difficulty on that dimension.
-- `reasoning` is special: omit/`2` requests low thinking; use `0` for direct/shallow work.
-- Score task difficulty, not importance or your uncertainty.
-
-Model selection reads `<pi-config>/model-profiles.yaml` when present, with `.json` fallback for backward compatibility (the shared registry — also consumed by pie's model picker). If no profile registry is available, no score-based model/thinking override is applied and normal agent/caller model resolution takes over.
-
-When running under pie, provider toggles are mirrored into the pi backend. Models that are only available from providers toggled off in pie are removed from the subagent selection pool.
+Early failures — disabled subagents, depth/tree limits, missing or unknown agents, or a caller `canSpawn` allowlist violation — surface as error tool results. Each sibling call settles independently through pi's normal tool lifecycle.
 
 ## Disabling Sub Agents
 
@@ -149,10 +123,7 @@ that sub agents are unavailable. Any call returns:
 
 - Max depth: 3 (nested subagent calls) — configurable via `PIE_SUBAGENT_MAX_DEPTH`
   (set by the pie host from the settings menu; default 3).
-- Max subagent sessions per reply: 20 — bounds breadth within a single tool call.
-- Max parallel tasks: 4 by default — configurable via `PIE_SUBAGENT_MAX_PARALLEL_TASKS`.
-- Per-call parallel concurrency: 2 by default — configurable via `PIE_SUBAGENT_MAX_CONCURRENCY`.
-- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
+- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. The same value limits sibling subagent calls emitted in one agent turn. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
 - Tree-wide session budget: 10 — caps the total number of subagent sessions spawned
   across an *entire* nested tree (independent of the per-reply counter), so increased
   nesting can't run away on cost. Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
@@ -223,9 +194,12 @@ Subagents have **no short wall-clock deadline by default**. Productive work may
 continue indefinitely while it reports credible progress. Phase-specific
 provider/tool leases bound stalled phases, and an outer settlement inactivity
 net force-settles a completely silent dispatch after 12 minutes by default.
-Each progress update renews that outer deadline; `PIE_SUBAGENT_SETTLEMENT_MS`
-can override the inactivity budget or disable it with `0`. Parent cancellation
-remains immediate.
+Only credible child progress renews that outer deadline: lifecycle/retry/terminal
+transitions, model/reasoning/tool-call streaming, and tool start/update/end
+(including nested descendant progress propagated through `tool_execution_update`).
+Repeated identical `onUpdate` snapshots do not renew it.
+`PIE_SUBAGENT_SETTLEMENT_MS` can override the inactivity budget or disable it
+with `0`. Parent cancellation remains immediate.
 
 Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
 optional absolute containment ceiling. Unset, empty, zero, negative, and
@@ -236,20 +210,14 @@ non-finite values disable this per-prompt ceiling.
 export PI_SUBAGENT_TIMEOUT_MS=600000
 ```
 
-## Parallel output preview
+## Persisted result size
 
-In parallel mode, each task's output is returned to the parent model, truncated
-to a preview limit to bound context growth (default **8000 chars** per task;
-with up to 8 tasks that's ~64 KB). When truncated, the elided char count is
-noted so the parent LLM knows output was cut. Override via
-`PI_SUBAGENT_PARALLEL_PREVIEW` (characters). `0` disables truncation entirely
-(full output per task — use with care for large outputs).
+Live updates retain the child transcript needed for rich progress rendering. Once a child settles, the result persisted in the parent session is compacted:
 
-```bash
-# Return full output for every parallel task
-export PI_SUBAGENT_PARALLEL_PREVIEW=0
-```
+- the final answer is stored once in bounded `finalOutput` (32,000 characters),
+- reasoning and duplicate final prose are removed from nested messages,
+- intermediate prose and tool output are capped,
+- tool-call metadata remains available for transcript rendering and `session_changes` file-change derivation,
+- nested subagent tool results are compacted recursively.
 
-Chain mode is unaffected: the `{previous}` placeholder substitutes the prior
-step's full output, and the chain returns the final step's full output to the
-parent. Single mode returns the agent's full final output.
+Legacy stored parallel/chain results remain renderable, but new calls only produce single-result details.

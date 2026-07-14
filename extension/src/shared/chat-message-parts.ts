@@ -100,6 +100,10 @@ export function upsertAssistantToolPart(parts: ChatMessagePart[], toolCall: Tool
     merged.parallelGroupId = nextToolCall.parallelGroupId;
   }
 
+  if (nextToolCall.durableEntryId !== undefined) {
+    merged.durableEntryId = nextToolCall.durableEntryId;
+  }
+
   parts[index] = { kind: 'toolCall', toolCall: merged };
 }
 

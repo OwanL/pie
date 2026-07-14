@@ -1,4 +1,5 @@
 import type { Model } from "@mariozechner/pi-ai";
+import type { ProviderCapacitySnapshot } from "../../shared/provider-capacity-bridge.js";
 
 export interface ModelRegistryLike {
 	getAvailable(): Model<any>[];
@@ -26,6 +27,7 @@ export function resolveExecutionModel(
 	callerModel: Model<any> | undefined,
 	requestedModel: string | undefined,
 	disabledProviders?: Set<string>,
+	providerCapacity?: ProviderCapacitySnapshot,
 ): ResolvedExecutionModel {
 	const isProviderEnabled = (provider: string): boolean => !disabledProviders?.has(provider);
 	const callerProviderEnabled = !callerModel || isProviderEnabled(callerModel.provider);
@@ -36,14 +38,37 @@ export function resolveExecutionModel(
 		const availableModels = modelRegistry.getAvailable();
 		const allModels = modelRegistry.getAll();
 
+		const availableMatches = availableModels.filter(
+			(model) => model.id === requestedModel && isProviderEnabled(model.provider),
+		);
+		const hasImmediateCapacity = (provider: string): boolean =>
+			providerCapacity?.[provider]?.immediatelyClaimable !== false;
+
 		if (callerModel && isProviderEnabled(callerModel.provider)) {
 			const sameProvider = modelRegistry.find(callerModel.provider, requestedModel);
 			if (sameProvider && isProviderEnabled(sameProvider.provider)) {
+				// Preserve the historical caller-provider preference unless that
+				// provider is explicitly saturated and another enabled provider offering
+				// the duplicate id is available or ungated (missing capacity state fails open).
+				if (!hasImmediateCapacity(sameProvider.provider)) {
+					const alternate = availableMatches.find((model) =>
+						model.provider !== sameProvider.provider && hasImmediateCapacity(model.provider),
+					);
+					if (alternate) {
+						return { resolvedModel: alternate, actualModelId: alternate.id };
+					}
+				}
 				return { resolvedModel: sameProvider, actualModelId: sameProvider.id };
 			}
 		}
 
-		const foundAvailable = availableModels.find((m) => m.id === requestedModel && isProviderEnabled(m.provider));
+		// The caller may not offer this id. Capacity-rank every enabled duplicate
+		// before falling back to registry order, otherwise a saturated first match
+		// can defeat bucket-level routing even though another provider is free.
+		const capacityAvailable = providerCapacity
+			? availableMatches.find((model) => hasImmediateCapacity(model.provider))
+			: undefined;
+		const foundAvailable = capacityAvailable ?? availableMatches[0];
 		if (foundAvailable) {
 			return { resolvedModel: foundAvailable, actualModelId: foundAvailable.id };
 		}

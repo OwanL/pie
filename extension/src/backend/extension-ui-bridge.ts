@@ -74,10 +74,11 @@ export class ExtensionUIBridge {
   /**
    * Resolve a pending request with the response from the host.
    */
-  resolveRequest(response: ExtensionUIResponsePayload): void {
+  resolveRequest(response: ExtensionUIResponsePayload): boolean {
     const pending = this.pending.get(response.id);
-    if (!pending) return;
+    if (!pending) return false;
     pending.resolve(response);
+    return true;
   }
 
   /** Cancel only dialogs owned by one subagent call. A child timeout must not

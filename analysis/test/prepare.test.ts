@@ -11,8 +11,52 @@ test('prepareSourceAnalytics builds the derived row model', async () => {
 
   assert.equal(prepared.runs.length, 8);
   assert.ok(prepared.runs.every((run) => typeof run.sessionPathHash === 'string' && run.sessionPathHash.length === 16));
+  assert.ok(prepared.runs.every((run) => run.initialUserMessageChars === null), 'historical fixture defaults ex-ante prompt size to unknown');
   assert.ok(prepared.toolUsage.some((row) => row.toolName === 'subagent'));
   assert.ok(prepared.verificationUsage.some((row) => row.kind === 'test'));
+});
+
+test('prepareSourceAnalytics preserves privacy-safe initial message size', async () => {
+  const fixture = deepClone(await loadFixture());
+  (fixture.completedRuns[0] as any).initialUserMessageChars = 321;
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const run = prepared.runs.find((row) => row.runId === fixture.completedRuns[0]!.runId);
+  assert.equal(run?.initialUserMessageChars, 321);
+});
+
+test('prepareSourceAnalytics preserves run timing totals and failure-only tool rows', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.toolUsage.totalCount = 2;
+  run.toolUsage.timedCallCount = 2;
+  run.toolUsage.totalDurationMs = 12_500;
+  run.toolUsage.countsByName = { bash: 2 };
+  run.toolUsage.durationMsByName = { bash: 500, '(unknown)': 12_000 };
+  run.toolUsage.failureCountsByName = { '(unknown)': 3 };
+  run.toolUsage.resultIssueCountsByName = { '(unknown)': 1 };
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const preparedRun = prepared.runs.find((row) => row.runId === run.runId);
+  const unknownUsage = prepared.toolUsage.find(
+    (row) => row.runId === run.runId && row.toolName === '(unknown)',
+  );
+
+  assert.equal(preparedRun?.toolDurationMs, 12_500);
+  assert.equal(preparedRun?.timedToolCallCount, 2);
+  assert.deepEqual(unknownUsage && {
+    callCount: unknownUsage.callCount,
+    failureCount: unknownUsage.failureCount,
+    resultIssueCount: unknownUsage.resultIssueCount,
+    totalDurationMs: unknownUsage.totalDurationMs,
+    meanDurationMs: unknownUsage.meanDurationMs,
+  }, {
+    callCount: 0,
+    failureCount: 3,
+    resultIssueCount: 1,
+    totalDurationMs: 12_000,
+    meanDurationMs: null,
+  });
 });
 
 test('prepareSourceAnalytics exposes tool failure reason rows', async () => {
@@ -141,10 +185,10 @@ test('prepareSourceAnalytics computes derived efficiency metrics', async () => {
   assert.ok(Math.abs(r1.contextUtilization! - 18200 / 200000) < 0.001);
   assert.equal(r1.firstAttemptSuccess, false);
 
-  // run-003: output=0, lmt=35 → tokenEfficiency=0; both tokens 0 → cacheHitRatio=null
+  // run-003: no reported token usage despite lmt=35 → tokenEfficiency=null; cacheHitRatio=null
   //          ctx=16800/200000; interrupted=0, edited=0, truncated=0, resolved → firstAttemptSuccess=true
   const r3 = byId.get('run-003')!;
-  assert.equal(r3.tokenEfficiency, 0);
+  assert.equal(r3.tokenEfficiency, null);
   assert.equal(r3.cacheHitRatio, null);
   assert.ok(Math.abs(r3.contextUtilization! - 16800 / 200000) < 0.001);
   assert.equal(r3.firstAttemptSuccess, true);
@@ -162,6 +206,121 @@ test('prepareSourceAnalytics computes derived efficiency metrics', async () => {
   // run-006: contextTokens=null → contextUtilization=null
   const r6 = byId.get('run-006')!;
   assert.equal(r6.contextUtilization, null);
+});
+
+test('prepareSourceAnalytics distinguishes missing token telemetry from reported free usage', async () => {
+  const fixture = deepClone(await loadFixture());
+  const noUsage = fixture.completedRuns[0] as any;
+  const reportedFree = fixture.completedRuns[1] as any;
+  const legacyPositiveTotals = fixture.completedRuns[2] as any;
+
+  for (const run of [noUsage, reportedFree, legacyPositiveTotals]) {
+    run.modelId = 'mistral-7b-pi:latest';
+    run.toolUsage.subagentCallCount = 0;
+    run.toolUsage.subagentInputTokens = 0;
+    run.toolUsage.subagentOutputTokens = 0;
+    run.toolUsage.subagentCacheReadTokens = 0;
+    run.toolUsage.subagentCacheWriteTokens = 0;
+    run.inputTokens = 0;
+    run.outputTokens = 0;
+    run.cacheReadTokens = 0;
+    run.cacheWriteTokens = 0;
+    run.tokenReportedTurnCount = 0;
+    run.fileMutation.lineAdditions = 10;
+    run.fileMutation.lineDeletions = 0;
+    run.fileMutation.lineModifications = 0;
+  }
+  reportedFree.tokenReportedTurnCount = 1;
+  legacyPositiveTotals.outputTokens = 100;
+
+  const byId = new Map(prepareSourceAnalytics(fixture).runs.map((run) => [run.runId, run]));
+  const noUsageRow = byId.get(noUsage.runId)!;
+  assert.equal(noUsageRow.estimatedCostUsd, null);
+  assert.equal(noUsageRow.totalEstimatedCostUsd, null);
+  assert.equal(noUsageRow.tokenEfficiency, null);
+
+  const freeRow = byId.get(reportedFree.runId)!;
+  assert.equal(freeRow.estimatedCostUsd, 0);
+  assert.equal(freeRow.subagentEstimatedCostUsd, 0);
+  assert.equal(freeRow.totalEstimatedCostUsd, 0);
+  assert.equal(freeRow.tokenEfficiency, 0);
+
+  const legacyRow = byId.get(legacyPositiveTotals.runId)!;
+  assert.equal(legacyRow.estimatedCostUsd, 0, 'positive parent totals establish reported usage even when the turn counter is absent');
+  assert.equal(legacyRow.totalEstimatedCostUsd, 0);
+  assert.equal(legacyRow.tokenEfficiency, 10);
+});
+
+test('prepareSourceAnalytics prices canonical subagent usage by child model with safe remainder handling', async () => {
+  const fixture = deepClone(await loadFixture());
+  const base = fixture.completedRuns[0] as any;
+  fixture.completedRuns = [];
+  fixture.openRuns = [];
+  fixture.outcomes = [];
+
+  const makeRun = (runId: string, parentModelId: string) => {
+    const run = deepClone(base) as any;
+    run.runId = runId;
+    run.taskGroupId = `${runId}-task`;
+    run.modelId = parentModelId;
+    run.inputTokens = 0;
+    run.outputTokens = 0;
+    run.cacheReadTokens = 0;
+    run.cacheWriteTokens = 0;
+    run.tokenReportedTurnCount = 1;
+    run.toolUsage.subagentCallCount = 1;
+    run.toolUsage.subagentInputTokens = 0;
+    run.toolUsage.subagentOutputTokens = 0;
+    run.toolUsage.subagentCacheReadTokens = 0;
+    run.toolUsage.subagentCacheWriteTokens = 0;
+    run.auxiliaryLlmUsage = [];
+    return run;
+  };
+  const sample = (sourceId: string, modelId: string, inputTokens: number) => ({
+    kind: 'subagent' as const,
+    sourceId,
+    occurredAt: base.startedAt,
+    modelId,
+    inputTokens,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+
+  const crossModel = makeRun('subagent-cross-model', 'mistral-7b-pi:latest');
+  crossModel.toolUsage.subagentInputTokens = 1_000_000;
+  crossModel.auxiliaryLlmUsage = [sample('cross', 'glm-5.2:cloud', 1_000_000)];
+
+  const unknownPricing = makeRun('subagent-unknown-pricing', 'mistral-7b-pi:latest');
+  unknownPricing.toolUsage.subagentInputTokens = 1_000;
+  unknownPricing.auxiliaryLlmUsage = [sample('unknown', 'not-in-pricing-catalog', 1_000)];
+
+  const unreported = makeRun('subagent-unreported', 'mistral-7b-pi:latest');
+
+  const free = makeRun('subagent-free', 'glm-5.2:cloud');
+  free.toolUsage.subagentInputTokens = 1_000_000;
+  free.auxiliaryLlmUsage = [sample('free', 'mistral-7b-pi:latest', 1_000_000)];
+
+  const remainder = makeRun('subagent-remainder', 'glm-5.2:cloud');
+  remainder.toolUsage.subagentInputTokens = 2_000_000;
+  remainder.auxiliaryLlmUsage = [
+    sample('duplicate-source', 'mistral-7b-pi:latest', 1_000_000),
+    sample('duplicate-source', 'mistral-7b-pi:latest', 1_000_000),
+  ];
+
+  fixture.completedRuns.push(crossModel, unknownPricing, unreported, free, remainder);
+  const byId = new Map(prepareSourceAnalytics(fixture).runs.map((run) => [run.runId, run]));
+
+  assert.equal(byId.get(crossModel.runId)!.subagentEstimatedCostUsd, 1.2, 'child usage uses the child model rate, not the free parent rate');
+  assert.equal(byId.get(crossModel.runId)!.totalEstimatedCostUsd, 1.2);
+  assert.equal(byId.get(unknownPricing.runId)!.subagentEstimatedCostUsd, null);
+  assert.equal(byId.get(unknownPricing.runId)!.totalEstimatedCostUsd, null, 'unknown child pricing makes the complete total unknown');
+  assert.equal(byId.get(unreported.runId)!.subagentEstimatedCostUsd, null, 'calls without canonical token usage are unknown');
+  assert.equal(byId.get(unreported.runId)!.totalEstimatedCostUsd, null);
+  assert.equal(byId.get(free.runId)!.subagentEstimatedCostUsd, 0, 'reported usage on a known free child remains a priced $0');
+  assert.equal(byId.get(free.runId)!.totalEstimatedCostUsd, 0);
+  assert.equal(byId.get(remainder.runId)!.subagentEstimatedCostUsd, 1.2, 'duplicate attribution is counted once and the positive remainder uses the parent rate');
+  assert.equal(byId.get(remainder.runId)!.totalEstimatedCostUsd, 1.2);
 });
 
 test('prepareSourceAnalytics flattens functional settings into fs* columns', async () => {
@@ -233,6 +392,32 @@ test('prepareSourceAnalytics flattens per-turn throughput samples and precompute
   // Errored turns are retained but excluded from the throughput distribution.
   assert.equal(rows[2]?.status, 'error');
   assert.equal(rows[2]?.tokensPerSecond, null);
+});
+
+test('prepareSourceAnalytics attributes per-turn modelId from the sample, falling back to the run model', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.modelId = 'gpt-4.1';
+  run.turnThroughputSamples = [
+    { endedAt: '2026-05-10T14:08:00.000Z', outputTokens: 1800, generationDurationMs: 28000, concurrentBusySessions: 1, status: 'completed' },
+    { endedAt: '2026-05-10T14:09:00.000Z', outputTokens: 900, generationDurationMs: 14000, concurrentBusySessions: 1, status: 'completed', modelId: 'claude-sonnet-4.5' },
+    { endedAt: '2026-05-10T14:10:00.000Z', outputTokens: 500, generationDurationMs: 9000, concurrentBusySessions: 2, status: 'completed', modelId: '   ' },
+  ];
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const rows = prepared.turnThroughput.filter((row) => row.runId === run.runId);
+
+  assert.equal(rows.length, 3);
+  // No sample.modelId → falls back to the parent run's model and family.
+  assert.equal(rows[0]?.modelId, 'gpt-4.1');
+  assert.equal(rows[0]?.modelFamily, 'gpt-4.1');
+  // sample.modelId present → per-sample (child) attribution wins, even when it
+  // differs from the parent run's model (e.g. a sub-agent or mid-run swap).
+  assert.equal(rows[1]?.modelId, 'claude-sonnet-4.5');
+  assert.equal(rows[1]?.modelFamily, 'claude-sonnet-4.5');
+  // A blank sample.modelId normalizes to null → falls back to the run model.
+  assert.equal(rows[2]?.modelId, 'gpt-4.1');
+  assert.equal(rows[2]?.modelFamily, 'gpt-4.1');
 });
 
 test('prepareSourceAnalytics sets tokenEfficiency to null when lineMutationTotal is zero', async () => {

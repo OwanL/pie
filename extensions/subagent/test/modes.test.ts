@@ -16,12 +16,6 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-	formatParallelResult,
-	formatChainSuccessResult,
-	buildChainStepFailureResponse,
-	checkChainPreFlight,
-} from "../src/modes.js";
 import { isModelFailure } from "../src/selection.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
@@ -42,194 +36,10 @@ function result(over: Partial<SingleResult> = {}): SingleResult {
 	} as SingleResult;
 }
 
-function makeDetails(mode: "single" | "parallel" | "chain", results: SingleResult[]): SubagentDetails {
-	return { mode, agentScope: "user", projectAgentsDir: null, results };
-}
-
 function assistantMsg(text: string): any {
 	return { role: "assistant", content: [{ type: "text", text }], model: "m" };
 }
 
-type Step = { agent: string; task: string };
-
-// ---------------------------------------------------------------------------
-// formatParallelResult
-// ---------------------------------------------------------------------------
-
-test("formatParallelResult: summarizes N results with success count", () => {
-	const results = [
-		result({ agent: "a", exitCode: 0, messages: [assistantMsg("out-a")] }),
-		result({ agent: "b", exitCode: 0, messages: [assistantMsg("out-b")] }),
-		result({ agent: "c", exitCode: 1, stderr: "boom", messages: [assistantMsg("partial-c")] }),
-	];
-	const r: any = formatParallelResult(results, makeDetails);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /^Parallel: 2\/3 succeeded/);
-	assert.ok(r.content[0].text.includes("[a] completed: out-a"));
-	assert.ok(r.content[0].text.includes("[b] completed: out-b"));
-	assert.ok(r.content[0].text.includes("[c] failed:"));
-	assert.ok(r.content[0].text.includes("boom"));
-	assert.deepEqual(r.details.results, results);
-	assert.equal(r.details.mode, "parallel");
-});
-
-test("formatParallelResult: isError false when all succeed", () => {
-	const results = [result({ agent: "a", exitCode: 0 }), result({ agent: "b", exitCode: 0 })];
-	const r: any = formatParallelResult(results, makeDetails);
-	assert.equal(r.isError, false);
-	assert.match(r.content[0].text, /Parallel: 2\/2 succeeded/);
-});
-
-test("formatParallelResult: empty results -> 0/0 succeeded and not an error", () => {
-	const r: any = formatParallelResult([], makeDetails);
-	assert.match(r.content[0].text, /Parallel: 0\/0 succeeded/);
-	assert.equal(r.isError, false);
-});
-
-test("formatParallelResult: failed task with no stderr/output shows '(no output)'", () => {
-	const results = [result({ agent: "a", exitCode: 1, messages: [], stderr: "" })];
-	const r: any = formatParallelResult(results, makeDetails);
-	assert.ok(r.content[0].text.includes("[a] failed: (no output)"));
-});
-
-// ---------------------------------------------------------------------------
-// formatChainSuccessResult
-// ---------------------------------------------------------------------------
-
-test("formatChainSuccessResult: content is the final output of the last result", () => {
-	const results = [
-		result({ agent: "a", messages: [assistantMsg("first")] }),
-		result({ agent: "b", messages: [assistantMsg("final answer")] }),
-	];
-	const r: any = formatChainSuccessResult(results, makeDetails);
-	assert.equal(r.content[0].text, "final answer");
-	assert.equal(r.isError, undefined);
-	assert.equal(r.details.mode, "chain");
-	assert.deepEqual(r.details.results, results);
-});
-
-test("formatChainSuccessResult: '(no output)' when last result has no assistant text", () => {
-	const results = [result({ agent: "a", messages: [] })];
-	const r: any = formatChainSuccessResult(results, makeDetails);
-	assert.equal(r.content[0].text, "(no output)");
-});
-
-// ---------------------------------------------------------------------------
-// buildChainStepFailureResponse
-// ---------------------------------------------------------------------------
-
-test("buildChainStepFailureResponse: undefined when result is not an error", () => {
-	const r = buildChainStepFailureResponse(0, { agent: "a", task: "t" } as Step, result({ exitCode: 0 }), [], makeDetails);
-	assert.equal(r, undefined);
-});
-
-test("buildChainStepFailureResponse: includes 1-based step index and error message", () => {
-	const res = result({ exitCode: 1, errorMessage: "kaboom" });
-	const collected: SingleResult[] = [];
-	const r: any = buildChainStepFailureResponse(2, { agent: "worker", task: "t" } as Step, res, collected, makeDetails);
-	assert.ok(r);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 3 \(worker\): kaboom/);
-	assert.equal(r.details.mode, "chain");
-	assert.deepEqual(r.details.results, collected);
-});
-
-test("buildChainStepFailureResponse: step index is 1-based from the 0-based input", () => {
-	const r: any = buildChainStepFailureResponse(0, { agent: "a", task: "t" } as Step, result({ exitCode: 1, stderr: "err" }), [], makeDetails);
-	assert.match(r.content[0].text, /step 1 /);
-});
-
-test("buildChainStepFailureResponse: prefers errorMessage, falls back to stderr then final output", () => {
-	const viaStderr: any = buildChainStepFailureResponse(
-		0, { agent: "a", task: "t" } as Step,
-		result({ exitCode: 1, stderr: "std-err", messages: [assistantMsg("out")] }),
-		[], makeDetails,
-	);
-	assert.ok(viaStderr.content[0].text.includes("std-err"));
-
-	const viaOutput: any = buildChainStepFailureResponse(
-		0, { agent: "a", task: "t" } as Step,
-		result({ exitCode: 1, messages: [assistantMsg("final-out")] }),
-		[], makeDetails,
-	);
-	assert.ok(viaOutput.content[0].text.includes("final-out"));
-});
-
-test("buildChainStepFailureResponse: aborted stopReason also counts as failure", () => {
-	const r: any = buildChainStepFailureResponse(
-		0, { agent: "a", task: "t" } as Step,
-		result({ exitCode: 0, stopReason: "aborted", errorMessage: "user aborted" }),
-		[], makeDetails,
-	);
-	assert.ok(r, "aborted stopReason should be treated as a failure");
-	assert.match(r.content[0].text, /user aborted/);
-});
-
-// ---------------------------------------------------------------------------
-// checkChainPreFlight
-// ---------------------------------------------------------------------------
-
-function preFlightArgs(over: Partial<{ trail: string[]; checkSessionLimit: () => string | undefined; results: SingleResult[] }> = {}) {
-	return {
-		runtimeCtx: { depth: 0, trail: over.trail ?? [] },
-		checkSessionLimit: over.checkSessionLimit ?? (() => undefined),
-		results: over.results ?? [],
-		makeDetails,
-	};
-}
-
-test("checkChainPreFlight: no loop and no session limit -> undefined (pass-through)", () => {
-	const results: SingleResult[] = [];
-	const r = checkChainPreFlight(0, { agent: "a", task: "t" } as Step, "do thing", preFlightArgs({ results }));
-	assert.equal(r, undefined);
-	assert.equal(results.length, 0, "no error result pushed on pass-through");
-});
-
-test("checkChainPreFlight: trail loop -> error response mentioning the agent and step", () => {
-	const results: SingleResult[] = [];
-	const r: any = checkChainPreFlight(
-		1,
-		{ agent: "loopy", task: "t" } as Step,
-		"do thing",
-		preFlightArgs({ trail: ["loopy", "loopy"], results }),
-	);
-	assert.ok(r);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 2: trail loop for agent "loopy"/);
-	assert.equal(results.length, 1, "error result pushed into results");
-	assert.equal(results[0].agent, "loopy");
-	assert.ok(results[0].errorMessage?.includes("Trail loop detected"));
-	assert.equal(results[0].step, 2);
-	assert.equal(r.details.mode, "chain");
-});
-
-test("checkChainPreFlight: session limit -> error response includes the limit message", () => {
-	const results: SingleResult[] = [];
-	const r: any = checkChainPreFlight(
-		3,
-		{ agent: "a", task: "t" } as Step,
-		"do thing",
-		preFlightArgs({ checkSessionLimit: () => "session limit reached", results }),
-	);
-	assert.ok(r);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 4: session limit reached/);
-	assert.equal(results.length, 1);
-	assert.equal(results[0].errorMessage, "session limit reached");
-	assert.equal(results[0].step, 4);
-});
-
-test("checkChainPreFlight: trail loop takes precedence over session limit", () => {
-	const results: SingleResult[] = [];
-	const r: any = checkChainPreFlight(
-		0,
-		{ agent: "dup", task: "t" } as Step,
-		"x",
-		preFlightArgs({ trail: ["dup", "dup"], checkSessionLimit: () => "should-not-fire", results }),
-	);
-	assert.match(r.content[0].text, /trail loop/);
-	assert.doesNotMatch(r.content[0].text, /should-not-fire/);
-});
 
 // ---------------------------------------------------------------------------
 // execute* mode tests
@@ -287,11 +97,9 @@ writeFileSync(
 Module.register(pathToFileURL(__hookPath));
 const __require = createRequire(import.meta.url);
 const __modesPath = path.resolve("extensions/subagent/src/modes.ts");
-const { executeSingleMode, executeParallelMode, executeChainMode } = __require(__modesPath) as typeof import("../src/modes.js");
+const { executeSingleMode } = __require(__modesPath) as typeof import("../src/modes.js");
 // Loose aliases so the many-arg orchestration calls read cleanly.
 const execSingle = executeSingleMode as any;
-const execParallel = executeParallelMode as any;
-const execChain = executeChainMode as any;
 
 function makeCtx(): any {
 	return {
@@ -369,13 +177,13 @@ test("executeSingleMode: error result returns isError with 'Agent <stopReason>: 
 test("executeSingleMode: trail loop short-circuits before runSingleAgent", async () => {
 	let called = false;
 	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const r: any = await execSingle(
-		{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: ["worker", "worker"] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
+	await assert.rejects(
+		() => execSingle(
+			{ agent: "worker", task: "do work" }, makeCtx(), makeAgents(),
+			() => undefined, { depth: 0, trail: ["worker", "worker"] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
+		),
+		/Trail loop detected: agent "worker"/,
 	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Trail loop detected: agent "worker"/);
-	assert.equal(r.details.results.length, 0);
 	assert.equal(called, false, "trail loop must not reach runSingleAgent");
 });
 
@@ -475,200 +283,13 @@ test("executeSingleMode: parent abort is terminal and never starts a fallback mo
 
 	assert.equal(r.isError, true);
 	assert.equal(attempts, 1, "Stop must not launch a fresh fallback session");
-	assert.equal(r.details.results[0].stopReason, undefined);
+	assert.equal(r.details.results[0].stopReason, "aborted");
+	assert.equal(r.details.results[0].activityPhase, "cancelled");
+	assert.deepEqual(r.details.results[0].runningTools, []);
+	assert.equal(r.details.results[0].streaming, false);
 	assert.match(r.details.results[0].errorMessage ?? "", /Subagent aborted \(while waiting for model response\)/);
 	assert.equal(r.details.results[0].retryCount, undefined);
 });
-
-// --- executeParallelMode ----------------------------------------------------
-
-test("executeParallelMode: too many tasks returns isError without running", async () => {
-	const previousMax = process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "4";
-	try {
-		let called = false;
-		setMockBehavior({ onPrompt: async () => { called = true; } });
-		const tasks = Array.from({ length: 9 }, () => ({ agent: "worker", task: "t" }));
-		const r: any = await execParallel(
-			{ tasks }, makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-		);
-		assert.equal(r.isError, true);
-		assert.match(r.content[0].text, /Too many parallel tasks \(9\)\. Max is 4\./);
-		assert.equal(called, false);
-	} finally {
-		if (previousMax === undefined) delete process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
-		else process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = previousMax;
-	}
-});
-
-test("executeParallelMode: all tasks succeed -> not an error", async () => {
-	setMockBehavior(successBehavior("done"));
-	const r: any = await execParallel(
-		{ tasks: [{ agent: "worker", task: "a" }, { agent: "worker", task: "b" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, false);
-	assert.match(r.content[0].text, /Parallel: 2\/2 succeeded/);
-	assert.equal(r.details.mode, "parallel");
-	assert.equal(r.details.results.length, 2);
-	assert.equal(r.details.results[0].exitCode, 0);
-});
-
-test("executeParallelMode: partial failure -> isError and onUpdate reports progress", async () => {
-	const updates: any[] = [];
-	setMockBehavior({
-		onPrompt: async (emit: any, prompt: string) => {
-			if (prompt.includes("fail")) emit(messageEnd("partial", "error"));
-			else emit(messageEnd("ok", "completed"));
-		},
-	});
-	const r: any = await execParallel(
-		{ tasks: [{ agent: "worker", task: "ok-task" }, { agent: "worker", task: "fail-task" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, (u: any) => updates.push(u), noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Parallel: 1\/2 succeeded/);
-	assert.ok(updates.length >= 1, "onUpdate fired during the parallel run");
-	assert.deepEqual(
-		updates[0].details.results.map((result: any) => [result.activityPhase, result.activityDetail]),
-		[
-			["queued", "waiting for parallel worker slot"],
-			["queued", "waiting for parallel worker slot"],
-		],
-		"the first update must replace host-reconstructed placeholders before workers start",
-	);
-	assert.ok(
-		updates.some((u) => u.content[0].text.includes("done") && u.content[0].text.includes("running")),
-		"a running-progress update was emitted",
-	);
-	assert.equal(r.details.mode, "parallel");
-});
-
-test("executeParallelMode: per-task session limit creates an error result", async () => {
-	let called = false;
-	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const r: any = await execParallel(
-		{ tasks: [{ agent: "worker", task: "a" }] }, makeCtx(), makeAgents(),
-		() => "session limit reached", { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.ok(r.content[0].text.includes("[worker] failed:"));
-	assert.ok(r.content[0].text.includes("session limit reached"));
-	assert.equal(called, false, "session limit short-circuits before runSingleAgent");
-});
-
-test("executeParallelMode: per-task trail loop creates an error result", async () => {
-	let called = false;
-	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const r: any = await execParallel(
-		{ tasks: [{ agent: "worker", task: "a" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: ["worker", "worker"] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.ok(r.content[0].text.includes("Trail loop detected"));
-	assert.equal(called, false);
-});
-
-// --- executeChainMode -------------------------------------------------------
-
-test("executeChainMode: all steps succeed -> final output of last step", async () => {
-	setMockBehavior({
-		onPrompt: async (emit: any, prompt: string) => {
-			const text = prompt.includes("first") ? "first-out" : "second-out";
-			emit(messageEnd(text, "completed"));
-		},
-	});
-	const r: any = await execChain(
-		{ chain: [{ agent: "worker", task: "first" }, { agent: "worker", task: "then second" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, undefined);
-	assert.equal(r.content[0].text, "second-out");
-	assert.equal(r.details.mode, "chain");
-	assert.equal(r.details.results.length, 2);
-});
-
-test("executeChainMode: substitutes {previous} with the prior step output", async () => {
-	const seenPrompts: string[] = [];
-	setMockBehavior({
-		onPrompt: async (emit: any, prompt: string) => {
-			seenPrompts.push(prompt);
-			const text = prompt.includes("FIRST") ? "FIRST-RESULT" : "done";
-			emit(messageEnd(text, "completed"));
-		},
-	});
-	await execChain(
-		{ chain: [{ agent: "worker", task: "FIRST" }, { agent: "worker", task: "use [{previous}] now" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(seenPrompts.length, 2);
-	assert.ok(seenPrompts[1].includes("FIRST-RESULT"), "previous output substituted into step 2");
-	assert.ok(!seenPrompts[1].includes("{previous}"), "{previous} placeholder removed");
-});
-
-test("executeChainMode: failing step stops the chain with an error", async () => {
-	setMockBehavior({
-		onPrompt: async (emit: any, prompt: string) => {
-			if (prompt.includes("boom")) emit(messageEnd("partial", "error"));
-			else emit(messageEnd("ok", "completed"));
-		},
-	});
-	const r: any = await execChain(
-		{ chain: [{ agent: "worker", task: "first" }, { agent: "worker", task: "boom" }, { agent: "worker", task: "third" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 2 \(worker\): partial/);
-	assert.equal(r.details.mode, "chain");
-	assert.equal(r.details.results.length, 2, "chain stopped before step 3");
-});
-
-test("executeChainMode: trail loop in pre-flight stops the chain", async () => {
-	let called = false;
-	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const r: any = await execChain(
-		{ chain: [{ agent: "worker", task: "first" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: ["worker", "worker"] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 1: trail loop for agent "worker"/);
-	assert.equal(r.details.results.length, 1);
-	assert.equal(r.details.results[0].step, 1);
-	assert.equal(called, false, "trail loop short-circuits before runSingleAgent");
-});
-
-test("executeChainMode: session limit in pre-flight stops the chain", async () => {
-	let called = false;
-	setMockBehavior({ onPrompt: async () => { called = true; } });
-	const r: any = await execChain(
-		{ chain: [{ agent: "worker", task: "first" }] }, makeCtx(), makeAgents(),
-		() => "session limit reached", { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.equal(r.isError, true);
-	assert.match(r.content[0].text, /Chain stopped at step 1: session limit reached/);
-	assert.equal(called, false);
-});
-
-test("executeChainMode: onUpdate mirrors partial results into the chain view", async () => {
-	const updates: any[] = [];
-	setMockBehavior(successBehavior("ok"));
-	await execChain(
-		{ chain: [{ agent: "worker", task: "first" }] }, makeCtx(), makeAgents(),
-		() => undefined, { depth: 0, trail: [] }, noOpDetails, (u: any) => updates.push(u), noSignal(), selCtx(), "t1", undefined,
-	);
-	assert.ok(updates.length >= 1, "onUpdate fired");
-	assert.equal(updates[0].details.mode, "chain");
-});
-
-// --- subagentCallId stamping (mirrors the webview SubagentCallContext) --------
-// The webview renders a subagent's ask_user inline by matching the request's
-// subagentCallId against the enclosing tool-call id: bare `id` when a single
-// result renders (results.length <= 1), `${id}:${index}` when multiple results
-// render (results.length > 1). modes.ts must stamp the SAME id or the inline
-// prompt never matches and the subagent hangs. These tests pin the stamping by
-// capturing the ParentExtensionUIBridgeProxy each runSingleAgent constructs
-// (via the mock SDK's setUIContext sink) and reading the stamped id back through
-// a mock parent bridge.
 
 function createStampCaptureBridge() {
 	const calls: { select: { opts: any }[] } = { select: [] };
@@ -702,39 +323,4 @@ test("executeSingleMode stamps the bare tool-call id (single result -> bare id)"
 	);
 	const ids = await capturedSubagentCallIds(bridge);
 	assert.deepEqual(ids, ["callD"]);
-});
-
-test("executeChainMode stamps bare id for step 0 and `${id}:${i}` for later steps", async () => {
-	setMockBehavior(successBehavior("ok"));
-	const bridge = createStampCaptureBridge();
-	await execChain(
-		{ chain: [{ agent: "worker", task: "s0" }, { agent: "worker", task: "s1" }, { agent: "worker", task: "s2" }] },
-		makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "callA", bridge,
-	);
-	// Chain steps run sequentially; each constructs one proxy in order.
-	const ids = await capturedSubagentCallIds(bridge);
-	assert.deepEqual(ids, ["callA", "callA:1", "callA:2"]);
-});
-
-test("executeParallelMode stamps `${id}:${index}` for multi-task and bare id for single-task", async () => {
-	setMockBehavior(successBehavior("ok"));
-
-	// Multi-task (results.length > 1) -> webview uses `${id}:${index}`.
-	const bridgeMulti = createStampCaptureBridge();
-	await execParallel(
-		{ tasks: [{ agent: "worker", task: "a" }, { agent: "worker", task: "b" }] },
-		makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "callB", bridgeMulti,
-	);
-	const idsMulti = (await capturedSubagentCallIds(bridgeMulti)).sort();
-	assert.deepEqual(idsMulti, ["callB:0", "callB:1"]);
-
-	// Single-task (results.length <= 1) -> webview uses bare `id`.
-	(globalThis as any).__MOCK_PROXIES__ = [];
-	const bridgeSingle = createStampCaptureBridge();
-	await execParallel(
-		{ tasks: [{ agent: "worker", task: "a" }] },
-		makeCtx(), makeAgents(), () => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "callC", bridgeSingle,
-	);
-	const idsSingle = await capturedSubagentCallIds(bridgeSingle);
-	assert.deepEqual(idsSingle, ["callC"]);
 });

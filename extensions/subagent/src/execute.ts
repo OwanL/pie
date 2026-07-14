@@ -15,7 +15,6 @@ import {
 	getMaxDepth,
 	type SubagentRuntimeContext,
 } from "../runner.js";
-import { SubagentParams } from "../schema.js";
 import {
 	type OnUpdateCallback,
 	type SingleResult,
@@ -30,23 +29,29 @@ import {
 	type NestedAllowedBuckets,
 	ALL_NESTED_BUCKETS_ALLOWED,
 	PROVIDER_TOGGLES_ENV,
+	SUBAGENT_PROVIDER_DEFAULTS_ENV,
+	SUBAGENT_PROVIDER_TOGGLES_ENV,
 	getAllowedModelIdsForProviders,
 	getDisabledProviders,
 	loadModelConfig,
 	parseProviderToggles,
+	parseSessionProviderToggles,
+	resolveSubagentProviderToggles,
 	readBucketAssignments,
 	readNestedAllowedBuckets,
 	downgradeBucketForNested,
 	selectModel,
 } from "../bucket-selector.js";
-import { MAX_SESSIONS_PER_CALL, makeDetails } from "./helpers.js";
+import { makeDetails } from "./helpers.js";
+import { executeSingleTask, type SingleSubagentParams } from "./single.js";
+import { compactSubagentDetails } from "./result-compaction.js";
+import {
+	readAlwaysParentModelFromEnv,
+	readRouteAroundSaturatedProviders,
+} from "./provider-capacity.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
-// Model-selection primitives (SelectionContext, resolveModel, …) now live in
-// ./selection.ts. They are imported here for local use and re-exported below so
-// existing `from "./execute.js"` imports (incl. tests) keep resolving. This
-// extraction breaks the execute↔modes circular import that caused parallel
-// subagent dispatch to crash with `Cannot read properties of undefined
-// (reading 'checkTrailLoop')` under pi's TS→CJS loader.
+// Model-selection primitives live in ./selection.ts and remain re-exported
+// here for compatibility with existing focused tests and integrations.
 import {
 	resolveModel,
 	attachSelectionMetadata,
@@ -58,13 +63,9 @@ import {
 /** Root of the pi-config repo, resolved from this extension's known position. */
 const CONFIG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-/** Environment key used by the pie host to force sub-agents to use the parent model. */
-const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = "PIE_SUBAGENT_ALWAYS_PARENT_MODEL";
-
 /** Reads the always-parent-model override from the environment (set by the pie host). */
 export function readAlwaysParentModel(): boolean {
-	const raw = process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV];
-	return raw === "1" || raw === "true";
+	return readAlwaysParentModelFromEnv();
 }
 
 /**
@@ -97,70 +98,38 @@ export function readSubagentConfirmDefault(): boolean | undefined {
 
 // SelectionContext moved to ./selection.ts (see import above).
 
-/**
- * Validates exactly-one-mode and agent name existence.
- * Returns the selected mode and any invalid agent results.
- */
+/** Validate the sole supported invocation shape and agent name. */
 export function validateSubagentParams(
-	params: SubagentParams,
+	params: SingleSubagentParams,
 	agents: AgentConfig[],
 ):
-	| { ok: true; mode: "single" | "parallel" | "chain"; invalidResults: SingleResult[] }
+	| { ok: true; mode: "single"; invalidResults: SingleResult[] }
 	| { ok: false; invalidResults: SingleResult[] } {
-	const hasChain = (params.chain?.length ?? 0) > 0;
-	const hasTasks = (params.tasks?.length ?? 0) > 0;
-	const hasSingle = Boolean(params.agent && params.task);
-	const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
-	if (modeCount !== 1) {
+	if (typeof params.agent !== "string" || params.agent.trim() === "" || typeof params.task !== "string" || params.task.trim() === "") {
 		return {
 			ok: false,
-			invalidResults: [
-				{
-					agent: "",
-					agentSource: "unknown",
-					task: "",
-					exitCode: 1,
-					messages: [],
-					stderr: "Invalid parameters. Provide exactly one mode.",
-					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-				},
-			],
+			invalidResults: [{
+				agent: "",
+				agentSource: "unknown",
+				task: "",
+				exitCode: 1,
+				messages: [],
+				stderr: "Invalid parameters. Provide one non-empty agent and task; use sibling calls for independent work.",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			}],
 		};
 	}
-
-	const mode = hasChain ? "chain" : hasTasks ? "parallel" : "single";
-
-	const invalidResults: SingleResult[] = [];
-	if (params.chain) {
-		for (let i = 0; i < params.chain.length; i++) {
-			const step = params.chain[i];
-			if (!agents.some((a) => a.name === step.agent)) {
-				invalidResults.push(createInvalidAgentResult(step.agent, step.task, agents, i + 1));
-			}
-		}
-	}
-	if (params.tasks) {
-		for (const task of params.tasks) {
-			if (!agents.some((a) => a.name === task.agent)) {
-				invalidResults.push(createInvalidAgentResult(task.agent, task.task, agents));
-			}
-		}
-	}
-	if (params.agent && params.task && !agents.some((a) => a.name === params.agent)) {
-		invalidResults.push(createInvalidAgentResult(params.agent, params.task, agents));
-	}
-
-	return { ok: true, mode, invalidResults };
+	const invalidResults = agents.some((agent) => agent.name === params.agent)
+		? []
+		: [createInvalidAgentResult(params.agent, params.task, agents)];
+	return { ok: true, mode: "single", invalidResults };
 }
 
-// resolveModel / attachSelectionMetadata / isModelFailure / checkTrailLoop moved to
-// ./selection.ts. Re-exported here so existing `from "./execute.js"` imports
-// (incl. tests) keep resolving. modes.ts now imports them directly from
-// ./selection.ts, which removes the execute↔modes circular import.
+// Compatibility re-exports for existing focused imports.
 export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, type SelectionContext };
 
 /** Standard error response shape used by early returns. */
-export type Mode = "single" | "parallel" | "chain";
+export type Mode = "single";
 type ErrorResponse = { content: { type: "text"; text: string }[]; details: SubagentDetails; isError: true };
 
 /** Environment key for the last-resort settlement inactivity budget
@@ -208,6 +177,88 @@ export function resolveSettlementGraceMs(): number {
 	const ms = Number(raw);
 	if (!Number.isFinite(ms) || ms < 0) return DEFAULT_SETTLEMENT_GRACE_MS;
 	return ms;
+}
+
+/** Compact semantic fallback for old snapshots that predate progressGeneration.
+ * Do not include timestamps: a producer repeatedly stamping Date.now() is not
+ * credible work and must not keep a hung tree alive. */
+function legacyProgressFingerprint(result: SingleResult): string {
+	return JSON.stringify([
+		result.agent, result.task, result.step, result.exitCode, result.model,
+		result.stopReason, result.errorMessage, result.activityPhase, result.activityDetail,
+		result.streaming, result.streamingText, result.streamingReasoning, result.runningTools,
+		result.messages.length, result.usage.turns, result.usage.input, result.usage.output,
+		result.retryCount, result.failedModel, result.selectedModel,
+	]);
+}
+
+/** Identify one stable child attempt. A generation reset is only credible
+ * when this identity changes (for example, a model retry moves to another
+ * provider/model); agent/task/step alone are not enough. */
+function progressAttemptIdentity(result: SingleResult): string {
+	return JSON.stringify([
+		result.agent,
+		result.task,
+		result.step ?? null,
+		result.provider ?? null,
+		result.model ?? null,
+	]);
+}
+
+/** Tracks the latest per-child progress sequence at this execute boundary.
+ * Modern children renew only when their generation advances past the highest
+ * value observed for the same attempt. Keeping a high-water mark is important:
+ * a stale 5 → 4 → 5 sequence must not turn the final 5 into fresh progress.
+ * Legacy snapshots use a semantic fingerprint until an explicit generation is
+ * observed, so duplicate callbacks still do not renew the settlement lease. */
+export function createProgressObserver(): (details: SubagentDetails | undefined) => boolean {
+	type ProgressState = {
+		identity: string;
+		highWaterGeneration?: number;
+		sawGeneration: boolean;
+		fingerprint: string;
+	};
+	const previous = new Map<number, ProgressState>();
+	return (details) => {
+		if (!details?.results) return false;
+		let progressed = false;
+		for (let index = 0; index < details.results.length; index++) {
+			const result = details.results[index];
+			const generation = Number.isSafeInteger(result.progressGeneration) && result.progressGeneration! >= 0
+				? result.progressGeneration
+				: undefined;
+			const fingerprint = legacyProgressFingerprint(result);
+			const identity = progressAttemptIdentity(result);
+			const before = previous.get(index);
+			if (!before || before.identity !== identity) {
+				// A changed attempt identity is the one allowed generation reset.
+				progressed = true;
+				previous.set(index, {
+					identity,
+					highWaterGeneration: generation,
+					sawGeneration: generation !== undefined,
+					fingerprint,
+				});
+				continue;
+			}
+
+			if (generation !== undefined) {
+				if (!before.sawGeneration) {
+					progressed = true;
+					before.sawGeneration = true;
+					before.highWaterGeneration = generation;
+				} else if (generation > (before.highWaterGeneration ?? -1)) {
+					progressed = true;
+					before.highWaterGeneration = generation;
+				}
+			} else if (!before.sawGeneration && fingerprint !== before.fingerprint) {
+				// Compatibility path for pre-generation snapshots only.
+				progressed = true;
+			}
+			before.fingerprint = fingerprint;
+		}
+		return progressed;
+	};
 }
 
 /** Sentinel resolved by the settlement timer when the dispatch hasn't returned. */
@@ -309,22 +360,10 @@ export function disallowedByCanSpawn(
 	return [...requested].filter((name) => !canSpawn.includes(name));
 }
 
-/** Builds a counter that returns an error message after `MAX_SESSIONS_PER_CALL` invocations. */
-function createSessionLimitChecker(): () => string | undefined {
-	let sessionsSpawned = 0;
-	return () => {
-		if (++sessionsSpawned > MAX_SESSIONS_PER_CALL) {
-			return `Sub-agent session limit reached (max ${MAX_SESSIONS_PER_CALL} sessions per reply).`;
-		}
-		return undefined;
-	};
-}
-
-/** Throws when the caller provided zero or multiple execution modes.
- *  Invalid executions throw so pi persists isError=true per the tool contract. */
-function throwModeCountError(agents: AgentConfig[]): never {
+/** Invalid executions throw so pi persists isError=true per the tool contract. */
+function throwParamsError(agents: AgentConfig[]): never {
 	const available = agents.map((a) => `${a.name} (${a.source})`).join(", ") || "none";
-	throw new Error(`Invalid parameters. Provide exactly one mode.\nAvailable agents: ${available}`);
+	throw new Error(`Invalid parameters. Provide one non-empty agent and task; use sibling calls for independent work.\nAvailable agents: ${available}`);
 }
 
 /** Throws when one or more requested agent names do not exist.
@@ -333,18 +372,14 @@ function throwInvalidAgents(invalidResults: SingleResult[]): never {
 	throw new Error(summarizeInvalidAgentResults(invalidResults));
 }
 
-/** Collect the unique agent names referenced by `params` (chain, tasks, or single). */
-function collectRequestedAgentNames(params: SubagentParams): Set<string> {
-	const names = new Set<string>();
-	if (params.chain) for (const step of params.chain) names.add(step.agent);
-	if (params.tasks) for (const t of params.tasks) names.add(t.agent);
-	if (params.agent) names.add(params.agent);
-	return names;
+/** Collect the sole requested agent name. */
+function collectRequestedAgentNames(params: SingleSubagentParams): Set<string> {
+	return new Set([params.agent]);
 }
 
 /** Confirms project-local agent usage with the user; returns undefined on approval, response on cancel. */
 export async function maybeApproveProjectAgents(
-	params: SubagentParams,
+	params: SingleSubagentParams,
 	agents: AgentConfig[],
 	discovery: ReturnType<typeof discoverAgents>,
 	mode: Mode,
@@ -409,6 +444,15 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 	const bucketAssignments = readBucketAssignments();
 
 	const disabledProviders = getDisabledProviders(parseProviderToggles(process.env[PROVIDER_TOGGLES_ENV]));
+	const sessionPath = readRuntimeContext().rootSessionPath
+		?? ctx.sessionManager?.getSessionFile?.()
+		?? undefined;
+	const subagentProviderToggles = resolveSubagentProviderToggles(
+		parseProviderToggles(process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV]),
+		parseSessionProviderToggles(process.env[SUBAGENT_PROVIDER_TOGGLES_ENV], sessionPath),
+	);
+	const subagentDisabled = getDisabledProviders(subagentProviderToggles);
+	for (const provider of subagentDisabled) disabledProviders.add(provider);
 	const availableModels = ctx.modelRegistry.getAvailable();
 	const allowedModelIds = new Set<string>(
 		availableModels
@@ -416,82 +460,53 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 			.map((m) => m.id),
 	);
 
-	return { modelConfig, disabledProviders, allowedModelIds, bucketAssignments, alwaysParentModel: readAlwaysParentModel(), nestedAllowedBuckets: readNestedAllowedBuckets() };
+	return {
+		modelConfig,
+		disabledProviders,
+		allowedModelIds,
+		bucketAssignments,
+		alwaysParentModel: readAlwaysParentModel(),
+		routeAroundSaturatedProviders: readRouteAroundSaturatedProviders(),
+		registryModels: availableModels,
+		nestedAllowedBuckets: readNestedAllowedBuckets(),
+	};
 }
 
-/** Memoized handle to the dynamically-imported modes module.
- *
- *  `dispatchToMode` used to call `await import("./modes.js")` fresh on every
- *  invocation. Parallel-mode subagent dispatch calls `execute()` — and
- *  therefore `dispatchToMode` — concurrently, multiple times, from the same
- *  process. Under pi's on-the-fly TS→CJS extension loader, concurrent
- *  `import()` calls for the *same* specifier are not guaranteed to be
- *  deduped/serialized the way a spec-compliant ESM loader would: a second
- *  call can observe a not-yet-fully-populated module object from the first
- *  call's in-flight (re-)transpile, surfacing as
- *  `Cannot read properties of undefined (reading 'checkTrailLoop')` — this
- *  recurred even after the execute↔modes circular-import fix, confirming the
- *  race is independent of the cycle. Caching the promise here means the
- *  module is imported exactly once per process; every caller (sequential or
- *  concurrent) awaits the same settled promise instead of re-triggering the
- *  loader. On failure the cached promise is cleared so a subsequent call can
- *  retry rather than being permanently stuck on a rejected import. */
-let modesModulePromise: Promise<typeof import("./modes.js")> | undefined;
-function loadModesModule(): Promise<typeof import("./modes.js")> {
-	if (!modesModulePromise) {
-		modesModulePromise = import("./modes.js").catch((err) => {
-			modesModulePromise = undefined;
-			throw err;
-		});
-	}
-	return modesModulePromise;
-}
-
-/** Routes the validated request to the mode-specific execution function. */
-async function dispatchToMode(
-	mode: Mode,
-	params: SubagentParams,
+/** Dispatch the sole supported execution route. */
+function dispatchSingle(
+	params: SingleSubagentParams,
 	ctx: ToolContext,
 	agents: AgentConfig[],
-	checkSessionLimit: () => string | undefined,
 	runtimeCtx: SubagentRuntimeContext,
-	makeDetailsBound: (m: Mode, res: SingleResult[]) => SubagentDetails,
+	makeDetailsBound: (results: SingleResult[]) => SubagentDetails,
 	onUpdate: OnUpdateCallback,
 	signal: AbortSignal,
 	selectionCtx: SelectionContext,
-	_toolCallId: string,
+	toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
 	parentSessionId: string | undefined,
 	allToolNames: string[] | undefined,
 ) {
-	// Lazy import to avoid circular dependencies (see loadModesModule for why
-	// this is memoized rather than a bare `await import(...)` per call).
-	const { executeChainMode, executeParallelMode, executeSingleMode } = await loadModesModule();
-
-	const modeArgs = [
+	return executeSingleTask({
 		params,
 		ctx,
 		agents,
-		checkSessionLimit,
 		runtimeCtx,
-		makeDetailsBound,
+		makeDetails: makeDetailsBound,
 		onUpdate,
 		signal,
 		selectionCtx,
-		_toolCallId,
+		toolCallId,
 		parentUiBridge,
 		parentSessionId,
 		allToolNames,
-	] as const;
-	if (mode === "chain") return executeChainMode(...modeArgs);
-	if (mode === "parallel") return executeParallelMode(...modeArgs);
-	return executeSingleMode(...modeArgs);
+	});
 }
 
 /** Main execute function for the subagent tool. */
 export async function execute(
 	_toolCallId: string,
-	params: SubagentParams,
+	params: SingleSubagentParams,
 	signal: AbortSignal,
 	onUpdate: OnUpdateCallback,
 	ctx: ToolContext,
@@ -506,10 +521,9 @@ export async function execute(
 	if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(maxDepth);
 
 	// Seed the shared tree-wide session budget at the outermost call. Nested
-	// calls inherit it via the AsyncLocalStorage context (see modes.ts buildRuntime).
+	// calls inherit it through the AsyncLocalStorage runtime context.
 	if (!runtimeCtx.budget) runtimeCtx.budget = { sessions: 0 };
 
-	const checkSessionLimit = createSessionLimitChecker();
 	// Project-local agents are found by walking up from a cwd looking for an
 	// `agents/` dir. The session cwd (`ctx.cwd`) is the VS Code workspace root,
 	// which may sit ABOVE the actual project (e.g. a multi-repo workspace whose
@@ -520,13 +534,11 @@ export async function execute(
 	// PI_CODING_AGENT_DIR is unset (e.g. a session launched from System32).
 	const discoveryCwds = [ctx.cwd, CONFIG_ROOT];
 	if (params.cwd) discoveryCwds.push(params.cwd);
-	if (params.tasks) for (const t of params.tasks) if (t.cwd) discoveryCwds.push(t.cwd);
-	if (params.chain) for (const s of params.chain) if (s.cwd) discoveryCwds.push(s.cwd);
 	const discovery = discoverAgents(discoveryCwds, DEFAULT_AGENT_SCOPE);
 	const agents = discovery.agents;
 	const validation = validateSubagentParams(params, agents);
 	if (!validation.ok) {
-		throwModeCountError(agents);
+		throwParamsError(agents);
 	}
 	const { mode, invalidResults } = validation;
 
@@ -537,8 +549,8 @@ export async function execute(
 	const approvalError = await maybeApproveProjectAgents(params, agents, discovery, mode, ctx);
 	if (approvalError) return approvalError;
 
-	const makeDetailsBound = (m: Mode, res: SingleResult[]) =>
-		makeDetails(m, res, DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir);
+	const makeDetailsBound = (results: SingleResult[]) =>
+		makeDetails("single", results, DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir);
 
 	// Enforce the caller's canSpawn allowlist. The root caller (main agent) has
 	// no canSpawn → unrestricted. An agent with a canSpawn list may only spawn the
@@ -556,7 +568,7 @@ export async function execute(
 					text: `Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`,
 				},
 			],
-			details: makeDetailsBound(mode, []),
+			details: makeDetailsBound([]),
 			isError: true,
 		};
 	}
@@ -569,8 +581,8 @@ export async function execute(
 	// user-configured drop-tools list subtracted from unrestricted agents.
 	// Both are defensive: undefined when unresolvable → today's behavior.
 	const parentSessionId = (ctx as { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.();
-	// Seed once from the main session, then modes.ts threads this immutable
-	// selection through AsyncLocalStorage for every deeper nested child.
+	// Seed once from the main session; the runtime context carries this
+	// immutable selection through every deeper nested child.
 	if (runtimeCtx.keptSkills === undefined && parentSessionId) {
 		runtimeCtx.keptSkills = readKeptSkills(parentSessionId);
 	}
@@ -601,12 +613,14 @@ export async function execute(
 			results: details.results.map((result, index) => ({
 				...previous[index],
 				...result,
-				// Preserve partial prose across the settlement-triggered abort update.
+				// Preserve partial prose/reasoning across the settlement-triggered abort update.
 				streamingText: result.streamingText ?? previous[index]?.streamingText,
+				streamingReasoning: result.streamingReasoning ?? previous[index]?.streamingReasoning,
 			})),
 		};
 	};
 	let renewSettlementDeadline: (() => void) | undefined;
+	const observeProgress = createProgressObserver();
 	let acceptDispatchUpdates = true;
 	const deliverUpdate = (partial: Parameters<OnUpdateCallback>[0]): void => {
 		try { onUpdate?.(partial); } catch (error) {
@@ -616,61 +630,52 @@ export async function execute(
 	const preservingOnUpdate: OnUpdateCallback = (partial) => {
 		if (!acceptDispatchUpdates) return;
 		captureDetails(partial.details);
-		// Mode/runner updates are emitted only for credible child activity:
-		// lifecycle transitions, model deltas, tool heartbeats/completion, or a
-		// sibling reaching a terminal result. Renew the OUTER inactivity net on
-		// those updates so productive work is never killed solely for running
-		// longer than the configured budget.
-		renewSettlementDeadline?.();
+		// Never treat callback frequency as progress. Runner-owned results advance
+		// progressGeneration for lifecycle/model/tool/terminal activity (including
+		// propagated nested children); old snapshots fall back to semantic changes.
+		if (observeProgress(partial.details)) renewSettlementDeadline?.();
 		deliverUpdate(partial);
 	};
-	const fallbackResults = (cause: string): SingleResult[] => {
-		const requested = mode === "single"
-			? [{ agent: params.agent ?? "unknown", task: params.task ?? "" }]
-			: mode === "parallel"
-				? (params.tasks ?? [])
-				: (params.chain ?? []);
-		return requested.map((item, index) => ({
-			agent: item.agent,
-			agentSource: "unknown",
-			task: item.task,
-			exitCode: 1,
-			messages: [],
-			stderr: cause,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-			stopReason: "error",
-			errorMessage: cause,
-			...(mode === "chain" ? { step: index + 1 } : {}),
-		}));
-	};
+	const fallbackResults = (cause: string): SingleResult[] => [{
+		agent: params.agent,
+		agentSource: "unknown",
+		task: params.task,
+		exitCode: 1,
+		messages: [],
+		stderr: cause,
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		stopReason: "error",
+		errorMessage: cause,
+	}];
 	const terminalDetails = (cause: string): SubagentDetails => {
-		if (!latestDetails) return makeDetailsBound(mode, fallbackResults(cause));
-		return {
+		if (!latestDetails) return compactSubagentDetails(makeDetailsBound(fallbackResults(cause)));
+		return compactSubagentDetails({
 			...latestDetails,
 			results: latestDetails.results.map((result) => {
-				const running = result.exitCode === -1 || result.streaming === true || (result.runningTools?.length ?? 0) > 0;
-				if (!running) return result;
+				// exitCode is authoritative; runningTools/streaming can be stale when
+				// the nested lifecycle ends without its final event.
+				if (result.exitCode !== -1) return result;
 				return {
 					...result,
 					exitCode: 1,
 					streaming: false,
 					runningTools: [],
+					activityPhase: "failed",
+					activityDetail: cause,
 					stopReason: "error",
 					errorMessage: result.errorMessage ?? cause,
 					stderr: result.stderr || cause,
 				};
 			}),
-		};
+		});
 	};
 
 	const settlementMs = resolveSettlementMs();
 	if (settlementMs <= 0) {
-		return dispatchToMode(
-			mode,
+		return dispatchSingle(
 			params,
 			ctx,
 			agents,
-			checkSessionLimit,
 			runtimeCtx,
 			makeDetailsBound,
 			preservingOnUpdate,
@@ -713,12 +718,10 @@ export async function execute(
 	renewSettlementDeadline = armSettlementDeadline;
 	armSettlementDeadline();
 
-	const dispatchPromise = dispatchToMode(
-		mode,
+	const dispatchPromise = dispatchSingle(
 		params,
 		ctx,
 		agents,
-		checkSessionLimit,
 		runtimeCtx,
 		makeDetailsBound,
 		preservingOnUpdate,

@@ -27,9 +27,11 @@ It has three actions:
   the review. Persists to the session-review sidecar. When `done: true`, the
   app closes that session's tab — the same close path a user takes (pinned
   tabs included) — so the tab is cleaned up rather than just badged, AND the
-  host analytics service records an `agent_review` entry (joined to the
-  session's run) so agent judgement can be compared against the user's own
-  `run_outcome` in the dashboard. A `partial` / `setback` review keeps the tab
+  host analytics service records an `agent_review` entry joined to the
+  session's run and promotes the review to a scored run outcome for the main
+  metrics and leaderboard. The outcome retains `source: agent` provenance so
+  agent judgement remains distinguishable from a user's own `run_outcome` and
+  can still be compared separately in the dashboard. A `partial` / `setback` review keeps the tab
   open with a status badge. `reviewerBuckets` / `reviewerCount` record the
   multi-reviewer provenance (see below).
 

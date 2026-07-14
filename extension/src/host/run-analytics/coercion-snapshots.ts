@@ -175,7 +175,8 @@ function validateArrays(candidate: Partial<RunSnapshot>): boolean {
 function validateOptionalNumbers(candidate: Partial<RunSnapshot>): boolean {
   return (
     (candidate.contextTokens === null || candidate.contextTokens === undefined || typeof candidate.contextTokens === 'number') &&
-    (candidate.contextLimit === null || candidate.contextLimit === undefined || typeof candidate.contextLimit === 'number')
+    (candidate.contextLimit === null || candidate.contextLimit === undefined || typeof candidate.contextLimit === 'number') &&
+    (candidate.initialUserMessageChars === undefined || typeof candidate.initialUserMessageChars === 'number')
   );
 }
 
@@ -235,6 +236,9 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
           : null,
     analyticsFactors: coerceSessionAnalyticsFactors(candidate.analyticsFactors),
     functionalSettings: coerceFunctionalSettings(candidate.functionalSettings),
+    ...(candidate.initialUserMessageChars === undefined
+      ? {}
+      : { initialUserMessageChars: toNonNegativeInteger(candidate.initialUserMessageChars) }),
     sendCount: Math.trunc(c.sendCount),
     assistantTurnCount: Math.trunc(c.assistantTurnCount),
     assistantTurnDurationMs: Math.trunc(c.assistantTurnDurationMs),

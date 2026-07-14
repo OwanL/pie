@@ -1,14 +1,25 @@
 import type { Writable } from 'node:stream';
 import { JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../shared/jsonl';
 import type { ErrorPayload, EventEnvelope, ResponseEnvelope } from '../shared/protocol';
+import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 
 interface QueuedLine {
   line: string;
   bytes: number;
   progressKey?: string;
+  /** Sequenced semantic records must never be dropped or reordered. */
+  sequencedSemantic: boolean;
   /** RPC acknowledgements are independent control traffic. They must not sit
    * behind an arbitrarily large backlog of already-queued stream events. */
   response: boolean;
+  queuedAt: number;
+  trace?: WriterTraceMetadata;
+}
+
+interface WriterTraceMetadata {
+  identifiers: { session?: string; request?: string; turn?: string; attempt?: string; message?: string; tool?: string };
+  eventKind: 'text' | 'reasoning' | 'tool_draft' | 'tool_start' | 'tool_progress' | 'tool_terminal' | 'turn_start' | 'turn_terminal' | 'control' | 'checkpoint' | 'snapshot' | 'render';
+  eventSeq?: number;
 }
 
 export interface OrderedJsonlWriterOptions {
@@ -20,11 +31,15 @@ export interface OrderedJsonlWriterOptions {
   onFatal?: (error: Error) => void;
 }
 
-/** Serializes writes while bounding application-owned backlog. Queued progress
- * for the same session/tool is stale by definition and is coalesced. RPC
+/** Serializes writes while bounding application-owned backlog. Legacy
+ * unsequenced progress for the same session/tool is coalesced. Sequenced live
+ * semantic records remain strict FIFO and fail closed rather than creating an
+ * artificial sequence gap. RPC
  * responses use a priority lane (FIFO within that lane), so control-plane
  * acknowledgements cannot be head-of-line blocked by queued stream events.
  * The active stream write is never preempted and event/event order is retained. */
+const MAX_TERMINAL_TOOL_KEYS = 2_048;
+
 export class OrderedJsonlWriter {
   private readonly queue: QueuedLine[] = [];
   private readonly maxQueuedBytes: number;
@@ -35,6 +50,7 @@ export class OrderedJsonlWriter {
   private writing = false;
   private failed = false;
   private readonly terminalToolKeys = new Set<string>();
+  private readonly terminalToolKeyOrder: string[] = [];
 
   constructor(private readonly stream: Writable, options: OrderedJsonlWriterOptions = {}) {
     this.maxQueuedBytes = options.maxQueuedBytes ?? 2 * JSONL_MAX_LINE_BYTES;
@@ -48,25 +64,48 @@ export class OrderedJsonlWriter {
 
   write(value: unknown): void {
     if (this.failed) throw new Error('JSONL writer is unavailable after a fatal error.');
-    const line = serializeJsonLine(value);
-    const entry: QueuedLine = {
+    let line = serializeJsonLine(value);
+    let entry: QueuedLine = {
       line,
       bytes: Buffer.byteLength(line),
       progressKey: progressKey(value),
+      sequencedSemantic: isSequencedSemanticEnvelope(value),
       response: isResponseEnvelope(value),
+      queuedAt: performance.now(),
+      trace: isBackendLivePipelineTraceEnabled() ? writerTraceMetadata(value) : undefined,
     };
     if (entry.bytes > JSONL_MAX_LINE_BYTES) {
-      if (entry.progressKey) return;
-      this.fail(`Fatal JSONL stdout record overflow (${entry.bytes} > ${JSONL_MAX_LINE_BYTES} bytes).`);
+      if (entry.progressKey && !entry.sequencedSemantic) return;
+      if (entry.response) {
+        const responseId = (value as { id: string }).id;
+        line = serializeJsonLine(responseError(
+          responseId,
+          'RESPONSE_TOO_LARGE',
+          `Backend response exceeded the JSONL record limit (${entry.bytes} > ${JSONL_MAX_LINE_BYTES} bytes).`,
+        ));
+        entry = {
+          line,
+          bytes: Buffer.byteLength(line),
+          sequencedSemantic: false,
+          response: true,
+          queuedAt: performance.now(),
+          trace: isBackendLivePipelineTraceEnabled() ? writerTraceMetadata(value) : undefined,
+        };
+      } else {
+        this.fail(`Fatal JSONL stdout record overflow (${entry.bytes} > ${JSONL_MAX_LINE_BYTES} bytes).`);
+      }
     }
 
     const terminalKey = terminalToolKey(value);
-    if (entry.progressKey && this.terminalToolKeys.has(entry.progressKey)) return;
+    if (entry.progressKey && !entry.sequencedSemantic && this.terminalToolKeys.has(entry.progressKey)) return;
 
-    if (this.writing && entry.progressKey) {
+    if (this.writing && entry.progressKey && !entry.sequencedSemantic) {
       const staleIndex = this.queue.findIndex((queued) => queued.progressKey === entry.progressKey);
       if (staleIndex >= 0) {
         const stale = this.queue[staleIndex]!;
+        const staleSeq = stale.trace?.eventSeq;
+        const nextSeq = entry.trace?.eventSeq;
+        if (staleSeq !== undefined && nextSeq !== undefined && nextSeq <= staleSeq) return;
         const replacementBytes = this.queuedBytes - stale.bytes + entry.bytes;
         const replacementEventBytes = replacementBytes - this.queuedResponseBytes;
         if (replacementEventBytes > this.maxQueuedBytes) return;
@@ -74,7 +113,19 @@ export class OrderedJsonlWriter {
         // could place it after a terminal/response event already queued.
         this.queue[staleIndex] = entry;
         this.queuedBytes = replacementBytes;
+        this.traceQueued(entry);
         return;
+      }
+    }
+
+    if (terminalKey) {
+      const staleIndex = this.queue.findIndex((queued) => queued.progressKey === terminalKey);
+      if (staleIndex >= 0 && !this.queue[staleIndex]?.sequencedSemantic) {
+        const [stale] = this.queue.splice(staleIndex, 1);
+        if (stale) {
+          this.queuedBytes -= stale.bytes;
+          if (stale.response) this.queuedResponseBytes -= stale.bytes;
+        }
       }
     }
 
@@ -86,18 +137,33 @@ export class OrderedJsonlWriter {
         );
       }
       if (!entry.response && eventBytes + entry.bytes > this.maxQueuedBytes) {
-        if (entry.progressKey) return;
+        if (entry.progressKey && !entry.sequencedSemantic) return;
         this.fail(
           `Fatal JSONL stdout event queue overflow (${eventBytes + entry.bytes} > ${this.maxQueuedBytes} bytes).`,
         );
       }
     }
 
-    if (terminalKey) this.terminalToolKeys.add(terminalKey);
+    if (terminalKey) this.rememberTerminalToolKey(terminalKey);
     this.queue.push(entry);
     this.queuedBytes += entry.bytes;
     if (entry.response) this.queuedResponseBytes += entry.bytes;
+    this.traceQueued(entry);
     this.pump();
+  }
+
+  getDebugState(): { terminalToolKeys: number; queueDepth: number; queuedBytes: number } {
+    return { terminalToolKeys: this.terminalToolKeys.size, queueDepth: this.queue.length, queuedBytes: this.queuedBytes };
+  }
+
+  private rememberTerminalToolKey(key: string): void {
+    if (this.terminalToolKeys.has(key)) return;
+    this.terminalToolKeys.add(key);
+    this.terminalToolKeyOrder.push(key);
+    while (this.terminalToolKeyOrder.length > MAX_TERMINAL_TOOL_KEYS) {
+      const expired = this.terminalToolKeyOrder.shift();
+      if (expired) this.terminalToolKeys.delete(expired);
+    }
   }
 
   private fail(message: string): never {
@@ -123,6 +189,7 @@ export class OrderedJsonlWriter {
     this.writing = true;
     this.stream.write(entry.line, (error?: Error | null) => {
       this.writing = false;
+      this.traceSettled(entry, !!error);
       if (error) {
         this.failed = true;
         this.onFatal(new Error(`Fatal JSONL stdout write failure: ${error.message}`));
@@ -131,6 +198,81 @@ export class OrderedJsonlWriter {
       this.pump();
     });
   }
+
+  private traceQueued(entry: QueuedLine): void {
+    if (!entry.trace) return;
+    recordBackendLivePipelineTrace({
+      stage: 'backend.writer.queued',
+      kind: 'start',
+      identifiers: entry.trace.identifiers,
+      eventKind: entry.trace.eventKind,
+      eventSeq: entry.trace.eventSeq,
+      queueDepth: this.queue.length,
+      queueBytes: this.queuedBytes,
+    });
+  }
+
+  private traceSettled(entry: QueuedLine, failed: boolean): void {
+    if (!entry.trace) return;
+    recordBackendLivePipelineTrace({
+      stage: 'backend.writer.settled',
+      kind: failed ? 'failure' : 'success',
+      identifiers: entry.trace.identifiers,
+      eventKind: entry.trace.eventKind,
+      eventSeq: entry.trace.eventSeq,
+      durationMs: Math.max(0, performance.now() - entry.queuedAt),
+      queueDepth: this.queue.length,
+      queueBytes: this.queuedBytes,
+      reasonCode: failed ? 'writer_failure' : undefined,
+    });
+  }
+}
+
+function writerTraceMetadata(value: unknown): WriterTraceMetadata {
+  const envelope = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const payload = envelope.payload && typeof envelope.payload === 'object'
+    ? envelope.payload as Record<string, unknown>
+    : {};
+  const event = typeof envelope.event === 'string' ? envelope.event : '';
+  return {
+    identifiers: {
+      ...(typeof payload.sessionPath === 'string' ? { session: payload.sessionPath } : {}),
+      ...(typeof payload.requestId === 'string' ? { request: payload.requestId } : typeof envelope.id === 'string' ? { request: envelope.id } : {}),
+      ...(typeof payload.turnId === 'string' ? { turn: payload.turnId } : {}),
+      ...(typeof payload.attemptId === 'string' ? { attempt: payload.attemptId } : {}),
+      ...(typeof payload.messageId === 'string' ? { message: payload.messageId } : {}),
+      ...(typeof payload.toolCallId === 'string' ? { tool: payload.toolCallId } : {}),
+    },
+    eventKind: event === 'live.semantic' ? writerSemanticEventKind(payload.kind) : writerEventKind(event),
+    eventSeq: typeof payload.seq === 'number' && Number.isSafeInteger(payload.seq) && payload.seq >= 0
+      ? payload.seq
+      : undefined,
+  };
+}
+
+function writerSemanticEventKind(kind: unknown): WriterTraceMetadata['eventKind'] {
+  if (kind === 'turn.text') return 'text';
+  if (kind === 'turn.reasoning') return 'reasoning';
+  if (kind === 'turn.toolDraft') return 'tool_draft';
+  if (kind === 'tool.started') return 'tool_start';
+  if (kind === 'tool.progress') return 'tool_progress';
+  if (kind === 'tool.terminal') return 'tool_terminal';
+  if (kind === 'turn.started') return 'turn_start';
+  if (kind === 'turn.terminal') return 'turn_terminal';
+  return 'control';
+}
+
+function writerEventKind(event: string): WriterTraceMetadata['eventKind'] {
+  if (event === 'message.delta') return 'text';
+  if (event === 'message.thinking') return 'reasoning';
+  if (event === 'message.toolCallDelta') return 'tool_draft';
+  if (event === 'tool.started') return 'tool_start';
+  if (event === 'tool.progress') return 'tool_progress';
+  if (event === 'tool.finished') return 'tool_terminal';
+  if (event === 'message.started') return 'turn_start';
+  if (event === 'message.finished' || event === 'message.aborted') return 'turn_terminal';
+  if (event.includes('checkpoint')) return 'checkpoint';
+  return 'control';
 }
 
 function isResponseEnvelope(value: unknown): boolean {
@@ -151,12 +293,33 @@ function toolKey(value: unknown, expectedEvent: string): string | undefined {
     : undefined;
 }
 
+function semanticToolKey(value: unknown, expectedKind: string): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const envelope = value as { event?: unknown; payload?: unknown };
+  if (envelope.event !== 'live.semantic' || !envelope.payload || typeof envelope.payload !== 'object') return undefined;
+  const payload = envelope.payload as { kind?: unknown; sessionPath?: unknown; turnId?: unknown; attemptId?: unknown; executionId?: unknown };
+  return payload.kind === expectedKind
+    && typeof payload.sessionPath === 'string'
+    && typeof payload.turnId === 'string'
+    && typeof payload.attemptId === 'string'
+    && typeof payload.executionId === 'string'
+      ? `${payload.sessionPath}\u0000${payload.turnId}\u0000${payload.attemptId}\u0000${payload.executionId}`
+      : undefined;
+}
+
+function isSequencedSemanticEnvelope(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const envelope = value as { event?: unknown; payload?: unknown };
+  if (envelope.event !== 'live.semantic' || !envelope.payload || typeof envelope.payload !== 'object') return false;
+  return Number.isSafeInteger((envelope.payload as { seq?: unknown }).seq);
+}
+
 function progressKey(value: unknown): string | undefined {
-  return toolKey(value, 'tool.progress');
+  return semanticToolKey(value, 'tool.progress') ?? toolKey(value, 'tool.progress');
 }
 
 function terminalToolKey(value: unknown): string | undefined {
-  return toolKey(value, 'tool.finished');
+  return semanticToolKey(value, 'tool.terminal') ?? toolKey(value, 'tool.finished');
 }
 
 const stdoutWriter = new OrderedJsonlWriter(process.stdout);

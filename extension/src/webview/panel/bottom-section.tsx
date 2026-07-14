@@ -17,10 +17,10 @@ export interface BottomSectionProps {
   needsSessionRecovery: boolean;
   pendingExtensionUIRequest: ViewState['pendingExtensionUIRequest'];
   activeSessionPath: string | null;
-  isAskUserHandledInline: boolean;
   postMessage: (msg: WebviewToHostMessage) => void;
   busy: ViewState['busy'];
   retryStatus: ViewState['retryStatus'];
+  liveTurnPhase: ViewState['liveTurnPhase'];
   /** Brief E: optimistic in-flight interrupt flag (webview-local). Drives the
    *  "Stopping…" affordance so the click reflects within one frame. */
   interrupting: boolean;
@@ -57,10 +57,10 @@ export const BottomSection = memo(function BottomSection({
   needsSessionRecovery,
   pendingExtensionUIRequest,
   activeSessionPath,
-  isAskUserHandledInline,
   postMessage,
   busy,
   retryStatus,
+  liveTurnPhase,
   interrupting,
   activeSession,
   modelSettings,
@@ -89,8 +89,13 @@ export const BottomSection = memo(function BottomSection({
 
   return (
     <>
-      {pendingExtensionUIRequest && activeSessionPath && !isAskUserHandledInline && (
-        <ExtensionUIPrompt sessionPath={activeSessionPath} request={pendingExtensionUIRequest} postMessage={postMessage} />
+      {pendingExtensionUIRequest && activeSessionPath && (
+        <ExtensionUIPrompt
+          sessionPath={activeSessionPath}
+          request={pendingExtensionUIRequest}
+          postMessage={postMessage}
+          sourceLabel={pendingExtensionUIRequest.subagentCallId ? 'Subagent' : undefined}
+        />
       )}
       <Composer
         sessionPath={activeSessionPath}
@@ -98,6 +103,7 @@ export const BottomSection = memo(function BottomSection({
         postMessage={postMessage}
         busy={busy}
         retryStatus={retryStatus}
+        liveTurnPhase={liveTurnPhase}
         interrupting={interrupting}
         activeModelId={activeSession?.modelId}
         activeThinkingLevel={activeSession?.thinkingLevel}

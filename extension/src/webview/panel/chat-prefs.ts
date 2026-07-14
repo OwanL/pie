@@ -1,4 +1,4 @@
-import type { ChatPrefs } from '../../shared/protocol';
+import type { ChatPrefs, ModelInfo } from '../../shared/protocol';
 
 export type BooleanPrefKey =
   | 'autoExpandReasoning'
@@ -7,6 +7,7 @@ export type BooleanPrefKey =
   | 'suppressCompletionNotifications'
   | 'showPruningMessages'
   | 'subagentAlwaysParentModel'
+  | 'subagentRouteAroundSaturatedProviders'
   | 'runtimeAuditLog'
   | 'hideStatusStrip'
   | 'hideTokenRate'
@@ -152,6 +153,62 @@ export function setProviderEnabled(prefs: ChatPrefs, provider: string, enabled: 
     providerToggles: {
       ...prefs.providerToggles,
       [provider]: enabled,
+    },
+  };
+}
+
+/** Providers represented by at least one model in a configured subagent bucket. */
+export function getSubagentBucketProviders(prefs: ChatPrefs, availableModels: ModelInfo[]): string[] {
+  const bucketIds = new Set([
+    ...prefs.subagentBuckets.small,
+    ...prefs.subagentBuckets.medium,
+    ...prefs.subagentBuckets.frontier,
+  ]);
+  return [...new Set(
+    availableModels.filter((model) => bucketIds.has(model.id)).map((model) => model.provider),
+  )].sort((a, b) => a.localeCompare(b));
+}
+
+/** Effective provider state in a session: explicit override → default → enabled. */
+export function isSubagentProviderEnabled(
+  prefs: ChatPrefs,
+  provider: string,
+  sessionPath?: string | null,
+): boolean {
+  const sessionValue = sessionPath
+    ? prefs.subagentProviderTogglesBySession[sessionPath]?.[provider]
+    : undefined;
+  return sessionValue ?? prefs.subagentProviderDefaults[provider] ?? true;
+}
+
+/** Set the default state inherited by sessions without an explicit override. */
+export function setSubagentProviderDefaultEnabled(
+  prefs: ChatPrefs,
+  provider: string,
+  enabled: boolean,
+): Partial<ChatPrefs> {
+  return {
+    subagentProviderDefaults: {
+      ...prefs.subagentProviderDefaults,
+      [provider]: enabled,
+    },
+  };
+}
+
+/** Toggle a provider only for subagents launched by one chat session. */
+export function setSubagentProviderEnabled(
+  prefs: ChatPrefs,
+  sessionPath: string,
+  provider: string,
+  enabled: boolean,
+): Partial<ChatPrefs> {
+  return {
+    subagentProviderTogglesBySession: {
+      ...prefs.subagentProviderTogglesBySession,
+      [sessionPath]: {
+        ...(prefs.subagentProviderTogglesBySession[sessionPath] ?? {}),
+        [provider]: enabled,
+      },
     },
   };
 }

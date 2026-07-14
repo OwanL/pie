@@ -1195,26 +1195,35 @@
 }
 
 .system-prompt-toggle-trigger {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 6px;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--status-chip-radius);
   background: var(--panel-control-surface);
-  color: var(--panel-foreground);
+  color: var(--panel-muted);
   cursor: pointer;
   transition:
     background var(--status-chip-transition-duration) var(--panel-ease-out),
     border-color var(--status-chip-transition-duration) var(--panel-ease-out),
-    color var(--status-chip-transition-duration) var(--panel-ease-out);
+    color var(--status-chip-transition-duration) var(--panel-ease-out),
+    transform var(--panel-duration-fast) var(--panel-ease-spring);
 }
 
 .system-prompt-toggle-trigger:hover,
 .system-prompt-toggle-trigger:focus-visible,
 .system-prompt-toggle-trigger.open {
+  border-color: var(--panel-border-subtle);
   background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.system-prompt-toggle-trigger:active {
+  transform: scale(0.93);
 }
 
 .system-prompt-toggle-trigger:focus-visible {
@@ -1229,7 +1238,21 @@
   color: var(--panel-accent);
 }
 
+/* Keep the subagent provider trigger compact beside the system-prompt picker. */
+.subagent-provider-trigger {
+  justify-content: center;
+  width: 24px;
+  padding: 0;
+}
+
+.subagent-provider-icon {
+  flex: none;
+}
+
 .system-prompt-toggle-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1242,10 +1265,6 @@
   font-size: 9px;
   font-weight: 600;
   line-height: 1;
-}
-
-.system-prompt-toggle-caret {
-  color: var(--panel-muted);
 }
 
 .system-prompt-toggle-dropdown {

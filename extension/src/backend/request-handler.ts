@@ -2,8 +2,9 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, type ErrorPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
+import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, type CustomMessagePayload, type ErrorPayload, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { toErrorMessage } from '../shared/error-message';
+import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
 import {
   validateLoadTranscriptPage,
@@ -25,7 +26,13 @@ import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { buildPromptText, lowerImageInputs, normalizeThinkingLevel } from './message-inputs';
 import type { SessionContext, SessionContextCreationReason } from './server-types';
+import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
+import {
+  getBackendLivePipelineTraceHealth,
+  recordBackendLivePipelineTrace,
+  setBackendLivePipelineTraceEnabled,
+} from './live-pipeline-trace-runtime';
 
 /**
  * Backend safety-net timeout for the PRE-COMMIT phase of a `message.send`.
@@ -212,9 +219,18 @@ async function handleRuntimePrefsSet(
 ): Promise<unknown> {
   const params = validateRuntimePrefsSet(request.params);
   process.env[PROVIDER_TOGGLES_ENV] = JSON.stringify(params.providerToggles);
+  if (params.subagentProviderDefaults !== undefined) {
+    process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV] = JSON.stringify(params.subagentProviderDefaults);
+  }
+  if (params.subagentProviderTogglesBySession !== undefined) {
+    process.env[SUBAGENT_PROVIDER_TOGGLES_ENV] = JSON.stringify(params.subagentProviderTogglesBySession);
+  }
   process.env[EXTENSION_TOGGLES_ENV] = JSON.stringify(params.extensionToggles);
   if (params.subagentAlwaysParentModel !== undefined) {
     process.env['PIE_SUBAGENT_ALWAYS_PARENT_MODEL'] = params.subagentAlwaysParentModel ? '1' : '0';
+  }
+  if (params.subagentRouteAroundSaturatedProviders !== undefined) {
+    process.env[SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV] = params.subagentRouteAroundSaturatedProviders ? '1' : '0';
   }
   if (params.subagentMaxDepth !== undefined) {
     process.env['PIE_SUBAGENT_MAX_DEPTH'] = String(params.subagentMaxDepth);
@@ -224,12 +240,6 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentMaxInflight !== undefined) {
     process.env['PIE_SUBAGENT_MAX_INFLIGHT'] = String(params.subagentMaxInflight);
-  }
-  if (params.subagentMaxConcurrency !== undefined) {
-    process.env['PIE_SUBAGENT_MAX_CONCURRENCY'] = String(params.subagentMaxConcurrency);
-  }
-  if (params.subagentMaxParallelTasks !== undefined) {
-    process.env['PIE_SUBAGENT_MAX_PARALLEL_TASKS'] = String(params.subagentMaxParallelTasks);
   }
   if (params.bashWarmPoolSize !== undefined) {
     process.env['PIE_BASH_WARM_POOL'] = String(params.bashWarmPoolSize);
@@ -486,6 +496,11 @@ function clearActiveRequest(
       clearTimeout(context.activeRequest.promptSafetyTimer);
       context.activeRequest.promptSafetyTimer = undefined;
     }
+    if (context.activeRequest.semanticLeaseTimer) {
+      clearTimeout(context.activeRequest.semanticLeaseTimer);
+      context.activeRequest.semanticLeaseTimer = undefined;
+    }
+    context.activeRequest.pendingDurableToolTerminals?.clear();
     context.activeRequest = undefined;
   }
 }
@@ -538,7 +553,8 @@ async function handleMessageSend(
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
-  const context = await deps.ensureSessionContext(params.sessionPath);
+  let context = await deps.ensureSessionContext(params.sessionPath);
+  if (context.recoveryPromise) context = await context.recoveryPromise;
   // Steering: if a turn is already running, inject this message into the
   // current turn via the SDK's `steer()` (delivered after in-flight tool calls
   // finish, before the next LLM call). Falls back to `followUp()` (queue for the
@@ -553,30 +569,49 @@ async function handleMessageSend(
   // queued message; the backend forwards that as `message.queuedDelivered` so
   // the host promotes the message from 'queued' to 'completed'.
   if (context.activeRequest || context.session.isStreaming) {
+    if ((context.queuedLocalIds?.length ?? 0) >= LIVE_PIPELINE_LIMITS.queuedMessageCorrelations) {
+      throw new BackendError('QUEUE_CAPACITY_EXCEEDED', 'Too many queued follow-up messages. Wait for delivery or clear the queue before sending more.');
+    }
     const queuedImages = lowerImageInputs(params.inputs);
     const queuedImagePayload = queuedImages.length > 0 ? queuedImages : undefined;
     const queuedPromptText = buildPromptText(params.text, params.inputs);
-    if (context.session.steer) {
-      await context.session.steer(queuedPromptText, queuedImagePayload);
-    } else {
-      await context.session.followUp(queuedPromptText, queuedImagePayload);
+    // Register before entering the SDK: steer/followUp may synchronously emit
+    // the delivery message_start before its promise settles.
+    const deliveryLocalId = params.localId ?? '';
+    const queuedLocalIds = context.queuedLocalIds ??= [];
+    queuedLocalIds.push(deliveryLocalId);
+    try {
+      if (context.session.steer) {
+        await context.session.steer(queuedPromptText, queuedImagePayload);
+      } else {
+        await context.session.followUp(queuedPromptText, queuedImagePayload);
+      }
+    } catch (error) {
+      // Remove only our still-pending slot. If synchronous delivery already
+      // consumed it, there is no stale correlation to remove.
+      const index = queuedLocalIds.indexOf(deliveryLocalId);
+      if (index >= 0) queuedLocalIds.splice(index, 1);
+      throw error;
     }
-    // Handoff §F: mirror the SDK's FIFO steering/followUp drain order so we
-    // can correlate delivery back to the host's optimistic localId. The queue
-    // is shifted on each user-role `message_start` in session-event-handler.ts.
-    // An undefined localId is still pushed (as an empty sentinel) to keep the
-    // FIFO positions aligned with the SDK's actual drain order.
-    if (!context.queuedLocalIds) {
-      context.queuedLocalIds = [];
-    }
-    context.queuedLocalIds.push(params.localId ?? '');
     return { queued: true };
   }
 
   const requestId = crypto.randomUUID();
+  const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
+  const canonicalMessageId = `${requestId}:1`;
   context.activeRequest = {
     id: requestId,
     messageIndex: 0,
+    liveTurnAccumulator: new BackendLiveTurnAccumulator({
+      protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+      sessionPath: context.sessionPath,
+      requestId,
+      turnId,
+      attemptId,
+      canonicalMessageId,
+      startedAt: Date.now(),
+    }),
     modelId: context.session.model?.id,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
     // The first turn has no preceding tool call, so its latency window opens at
@@ -677,6 +712,21 @@ async function handleMessageSend(
         preflightResult: (success) => {
           if (preflightFailed) return;
           if (success) {
+            // Explicit phase boundary for the host watchdog. This internal
+            // custom event is not inserted into the visible transcript; the
+            // durable pruning-result entry independently supplies the UI summary.
+            deps.emit('message.custom', {
+              requestId,
+              sessionPath: context.sessionPath,
+              message: {
+                id: `${requestId}:preflight-succeeded`,
+                role: 'system',
+                createdAt: new Date().toISOString(),
+                markdown: '',
+                status: 'completed',
+                customType: 'preflight-succeeded',
+              },
+            } satisfies CustomMessagePayload);
             // Prepass succeeded: the turn is proceeding to streaming.
             // `emitBusyChanged(true)` is idempotent (the host set running
             // optimistically at Send time; `agent_start` will also fire it) —
@@ -764,6 +814,12 @@ async function handleMessageInterrupt(
   }
   if (context.activeRequest) {
     context.activeRequest.aborted = true;
+    const accumulator = context.activeRequest.liveTurnAccumulator;
+    if (accumulator) {
+      deps.emit('live.semantic', accumulator.observe({
+        kind: 'turn.phase', phase: 'aborting', inactivityBudgetMs: resolveInterruptAbortWatchdogMs(),
+      }, Date.now()));
+    }
   }
   const abortRequestId = context.activeRequest?.id;
   context.uiBridge?.cancelAll();
@@ -804,14 +860,43 @@ async function handleMessageInterrupt(
   if (watchdogTimer) clearTimeout(watchdogTimer);
 
   if (outcome === 'timeout') {
-    const message = `message.interrupt: session.abort() did not settle within ${watchdogMs}ms. The session is still marked running so Stop can be retried; reload the window if the provider teardown remains wedged.`;
+    const message = `Provider teardown did not settle within ${watchdogMs}ms. Pie interrupted the turn locally and is replacing the session runtime.`;
+    const active = context.activeRequest;
+    if (active?.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
+    active?.pendingDurableToolTerminals?.clear();
+    if (active?.liveTurnAccumulator) {
+      context.terminalLiveTurn = { accumulator: active.liveTurnAccumulator, expiresAt: Date.now() + 10_000 };
+    }
+    context.activeRequest = undefined;
     deps.emit('operational-error', {
-      code: 'INTERRUPT_ABORT_STUCK',
-      message,
+      code: 'INTERRUPT_ABORT_STUCK', message, requestId: abortRequestId, sessionPath: params.sessionPath,
+    });
+    if (abortRequestId) deps.emit('message.aborted', {
       requestId: abortRequestId,
       sessionPath: params.sessionPath,
+      messageId: active?.lastAssistantMessageId,
+      userInitiated: true,
+    } satisfies MessageAbortedPayload);
+    deps.emitBusyChanged(context, false);
+    context.recoveryPromise = deps.createSessionContext(
+      deps.sdk.SessionManager.open(params.sessionPath),
+      'resume',
+    ).then(async (replacement) => {
+      await Promise.allSettled([
+        deps.buildSessionOpenedPayload(replacement.sessionPath).then((payload) => deps.emit('session.opened', payload)),
+        deps.emitSessionListChanged(),
+      ]);
+      return replacement;
     });
-    throw new BackendError('INTERRUPT_ABORT_STUCK', message);
+    void context.recoveryPromise.catch((error) => {
+      deps.emit('operational-error', {
+        code: 'SESSION_RUNTIME_RECOVERY_FAILED',
+        message: `Could not replace the stalled session runtime: ${toErrorMessage(error)}`,
+        sessionPath: params.sessionPath,
+        requestId: abortRequestId,
+      });
+    });
+    return { interrupted: true, settled: false, teardownTimedOut: true };
   }
 
   if (typeof outcome === 'object') {
@@ -883,7 +968,15 @@ async function handleExtensionUiResponse(
   if (!context?.uiBridge) {
     throw new BackendError('NO_UI_BRIDGE', `No UI bridge for session: ${params.sessionPath}`);
   }
-  context.uiBridge.resolveRequest(params.response);
+  if (!context.uiBridge.resolveRequest(params.response)) {
+    throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
+  }
+  const accumulator = context.activeRequest?.liveTurnAccumulator;
+  if (accumulator) {
+    deps.emit('live.semantic', accumulator.observe({
+      kind: 'turn.extensionUi', uiRequestId: params.response.id, action: 'closed',
+    }, Date.now()));
+  }
   return { ok: true };
 }
 
@@ -1023,6 +1116,55 @@ async function handleWarmBashStats(
   return collectWarmBashStats();
 }
 
+async function handleLivePipelineTraceSetEnabled(
+  _deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = request.params && typeof request.params === 'object'
+    ? request.params as Record<string, unknown>
+    : undefined;
+  if (typeof params?.enabled !== 'boolean') {
+    throw new BackendError('INVALID_PARAMS', 'diagnostics.livePipeline.setEnabled requires boolean enabled.');
+  }
+  setBackendLivePipelineTraceEnabled(params.enabled);
+  return { enabled: params.enabled, health: getBackendLivePipelineTraceHealth() };
+}
+
+async function handleLiveTurnCheckpoint(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionPath('liveTurn.checkpoint', request.params);
+  const context = deps.getSessionContext(params.sessionPath);
+  if (!context) return { status: 'backend_restarted', checkpoint: null, watermark: null };
+  const now = Date.now();
+  if (context.terminalLiveTurn && context.terminalLiveTurn.expiresAt <= now) {
+    context.terminalLiveTurn = undefined;
+  }
+  const accumulator = context.activeRequest?.liveTurnAccumulator
+    ?? context.terminalLiveTurn?.accumulator;
+  if (!accumulator) return { status: 'inactive', checkpoint: null, watermark: null };
+  const checkpoint = accumulator.checkpoint();
+  let encodedBytes: number;
+  try { encodedBytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8'); }
+  catch { return { status: 'oversize', checkpoint: null, watermark: accumulator.lifecycleWatermark() ?? null }; }
+  if (encodedBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+    return { status: 'oversize', checkpoint: null, watermark: accumulator.lifecycleWatermark() ?? null };
+  }
+  if (getBackendLivePipelineTraceHealth().enabled) {
+    recordBackendLivePipelineTrace({
+      stage: 'backend.checkpoint.built', kind: 'success',
+      identifiers: { session: params.sessionPath, request: checkpoint.turn.requestId, turn: checkpoint.turnId, attempt: checkpoint.attemptId },
+      eventKind: 'checkpoint', eventSeq: checkpoint.checkpointSeq, snapshotBytes: encodedBytes,
+    });
+  }
+  return {
+    status: context.activeRequest ? 'active' : 'terminal_grace',
+    checkpoint,
+    watermark: accumulator.lifecycleWatermark() ?? null,
+  };
+}
+
 async function handleProviderGateMetrics(
   _deps: BackendRequestHandlerDeps,
   _request: RequestEnvelope,
@@ -1057,6 +1199,8 @@ const handlers: Record<string, RequestHandler> = {
   'systemPromptToggles.set': handleSystemPromptTogglesSet,
   'warm_bash.stats': handleWarmBashStats,
   'provider_gate.metrics': handleProviderGateMetrics,
+  'liveTurn.checkpoint': handleLiveTurnCheckpoint,
+  'diagnostics.livePipeline.setEnabled': handleLivePipelineTraceSetEnabled,
 };
 
 export async function handleBackendRequest(

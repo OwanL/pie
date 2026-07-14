@@ -12,8 +12,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * 20–35s LLM call (plus a fail-open failure mode) before the first streamed
  * token, making subagents look hung.
  *
- * Safety in parallel mode: `AsyncLocalStorage` is per-async-context, NOT
- * process-global, so concurrent parallel subagent runs each carry their own
+ * Safety with sibling calls: `AsyncLocalStorage` is per-async-context, NOT
+ * process-global, so concurrent subagent runs each carry their own
  * store. This is why an environment variable is not used here — `process.env`
  * is shared across parallel runs and would race.
  *

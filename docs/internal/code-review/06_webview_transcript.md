@@ -159,7 +159,7 @@ Tool-name typos (e.g. `'web-serch'`) register/look up against an empty slot with
 
 - **`message-equal.ts:60-65` — `jsonEqual` uses `JSON.stringify`** — `NaN`/`Infinity` serialize to `null` so `{x:NaN}` would compare equal to `{x:null}`; latent footgun (token/usage counts are integers in practice). Also key-order differences yield spurious inequality (perf only, not correctness).
 
-- **`message-equal.ts:39-58` — completeness is process-guaranteed, not type-guaranteed** — the comparer enumerates fields explicitly; a new top-level `ChatMessage` field would be silently ignored, causing stale renders. Only guarded by a manual test (`test/message-equal.test.ts:8-15`). No `keyof ChatMessage` exhaustiveness check. (Streaming/tool-call deltas ARE handled correctly — `parts`/`toolCalls`/`userParts`/`usage`/`customDetails` all flow through `jsonEqual`.)
+- **`message-equal.ts:39-58` — completeness is process-guaranteed, not type-guaranteed** — the comparer enumerates fields explicitly; a new top-level `ChatMessage` field would be silently ignored, causing stale renders. Only guarded by a manual test (`test/webview/transcript/messages/message-equal.test.ts:8-15`). No `keyof ChatMessage` exhaustiveness check. (Streaming/tool-call deltas ARE handled correctly — `parts`/`toolCalls`/`userParts`/`usage`/`customDetails` all flow through `jsonEqual`.)
 
 - **`use-transcript-scroll-anchor.ts:18-25` `buildCandidates` skips `size <= 0`** (unmeasured) rows — during initial measurement the topmost rendered row may have size 0, so the anchor captures a later row; the layout-commit re-pin then targets that later row, producing a one-frame offset jump on first settle.
 

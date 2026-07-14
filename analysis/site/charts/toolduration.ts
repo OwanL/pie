@@ -1,11 +1,11 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight, selectedRunIds, sum } from '../lib.ts';
+import { CHART_COLORS, categoricalHeight, selectedRunIds } from '../lib.ts';
 
 interface ToolDurationRow {
   tool: string;
   totalDurationSec: number;
-  meanDurationSec: number;
-  callCount: number;
+  meanDurationSec: number | null;
+  callCount: number | null;
 }
 
 export const toolDurationCharts: ChartEntry[] = [
@@ -28,12 +28,12 @@ export const toolDurationCharts: ChartEntry[] = [
         .map(([tool, e]) => ({
           tool,
           totalDurationSec: Math.round((e.total / 1000) * 10) / 10,
-          meanDurationSec: e.calls > 0 ? Math.round((e.total / e.calls / 1000) * 100) / 100 : 0,
-          callCount: e.calls,
+          meanDurationSec: e.calls > 0 ? Math.round((e.total / e.calls / 1000) * 100) / 100 : null,
+          callCount: e.calls > 0 ? e.calls : null,
         }))
         .sort((a, b) => b.totalDurationSec - a.totalDurationSec)
         .slice(0, 14);
-      ctx.setNote('tool-duration-note', `Cumulative execution time per tool (top ${rows.length}); mean = total / timed calls.`, ctx.renderToken);
+      ctx.setNote('tool-duration-note', `Cumulative execution time per tool (top ${rows.length}); mean is unavailable when historical terminal call counts were not attributable.`, ctx.renderToken);
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: categoricalHeight(rows.length),

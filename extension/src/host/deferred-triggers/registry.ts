@@ -51,6 +51,15 @@ export interface DeferredTriggerRegistryDeps {
 /** Prefix on the synthetic wake-up `Send` corrId (debugging + future filtering). */
 const TRIGGER_CORR_PREFIX = 'deferred-trigger:';
 
+/** Node clamps larger setTimeout delays to 1ms, which would make a timer over
+ *  ~24.8 days fire immediately. Long deadlines are therefore scheduled in
+ *  bounded slices and checked against their absolute deadline after each one. */
+export const MAX_TIMER_SLICE_MS = 2_147_483_647;
+
+export function boundedTimerSlice(remainingMs: number): number {
+  return Math.max(1, Math.min(remainingMs, MAX_TIMER_SLICE_MS));
+}
+
 export class DeferredTriggerRegistry {
   private readonly triggers = new Map<string, ActiveTrigger>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
@@ -221,15 +230,24 @@ export class DeferredTriggerRegistry {
     const spec = timerSpecs.reduce((a, b) => (a.ms <= b.ms ? a : b));
     const registeredAt = Date.parse(t.registeredAt);
     const base = Number.isFinite(registeredAt) ? registeredAt : Date.now();
-    const remaining = base + spec.ms - Date.now();
+    const deadline = base + spec.ms;
     const fire = (): void => this.fire(t.id, `timer elapsed after ${spec.ms}ms`);
-    if (remaining <= 0) {
+    const scheduleNextSlice = (): void => {
+      if (!this.triggers.has(t.id)) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        fire();
+        return;
+      }
+      this.timers.set(t.id, setTimeout(scheduleNextSlice, boundedTimerSlice(remaining)));
+    };
+    if (deadline <= Date.now()) {
       // Already elapsed (e.g. process was down) — fire on the next tick to
       // avoid re-entrancy during reload.
       setImmediate(fire);
       return;
     }
-    this.timers.set(t.id, setTimeout(fire, remaining));
+    scheduleNextSlice();
   }
 
   private clearTimer(id: string): void {

@@ -66,6 +66,7 @@ session_changes { action: 'diff', sessionPath?, path[], context? }   → unified
 
 - `sessionPath` (optional) — defaults to the calling session via `ctx.sessionManager.getSessionFile()` (see §5). When provided (a session file path, same convention as `session_review.getTranscript`), targets another session through the same parse path.
 - `path` (`diff` only) — **array** of file paths (relative to session cwd, as the manifest reports them). Pass `["path"]` for a single file.
+- Manifest and diff-header paths inside the session cwd are rendered relative to it, even when the original tool call used an absolute path. Paths outside the cwd remain absolute. The output does not repeat the cwd because pi already provides it in the agent's system prompt.
 - `context` (`diff` only, optional) — lines of surrounding diff context. **Default `0`** (changes-only); see §4.
 
 ---

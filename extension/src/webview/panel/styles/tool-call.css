@@ -322,9 +322,17 @@
   color: var(--panel-warning);
 }
 
+@media (max-width: 850px) {
+  .subagent-telemetry-cost,
+  .subagent-telemetry-cache,
+  .subagent-telemetry-turns {
+    display: none;
+  }
+}
+
 @media (max-width: 700px) {
   .subagent-telemetry-rate,
-  .subagent-telemetry-output {
+  .subagent-telemetry-input {
     display: none;
   }
 
@@ -993,13 +1001,11 @@
   }
 }
 
-/* ── Subagent lifecycle state (idle → running → completed) ─────────────── */
+/* ── Subagent lifecycle state (idle → running → terminal) ──────────────── */
 /* The subagent card root carries a `status` class (`idle` | `running` |
-   `failed` | `completed`) computed in tool-call-item.tsx. Completed keeps the
-   default styling; failed is signalled by the StatusChip. The two
-   non-terminal states get a subtle, distinct treatment so queued vs. active
-   agents are legible at a glance — especially inside a parallel batch where
-   some members start before others. */
+   `interrupted` | `failed` | `completed`) computed in tool-call-item.tsx.
+   Terminal failures and user interruptions retain distinct semantic colors;
+   the two non-terminal states distinguish queued from active siblings. */
 
 /* Idle (dispatched but not yet started): drop the accent-tinted surface for a
    neutral one and dim the header text, so waiting agents recede behind
@@ -1021,6 +1027,19 @@
 
 .tool-call.tool-call-subagent.idle .subagent-activity {
   opacity: 0.65;
+}
+
+/* Terminal failures are not just a chip: tint the collapsed card edge so the
+   stopped child remains legible in dense parallel groups. Interruptions use
+   warning rather than danger because they are intentional/user-driven. */
+.tool-call.tool-call-subagent.failed .subagent-header[aria-expanded="false"] {
+  background: color-mix(in srgb, var(--panel-danger) 5%, var(--panel-subagent-header-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel-danger) 35%, var(--panel-subagent-header-border));
+}
+
+.tool-call.tool-call-subagent.interrupted .subagent-header[aria-expanded="false"] {
+  background: color-mix(in srgb, var(--panel-warning) 5%, var(--panel-subagent-header-surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--panel-warning) 35%, var(--panel-subagent-header-border));
 }
 
 /* Running (started, actively working): a slow accent-tinted sheen sweeps

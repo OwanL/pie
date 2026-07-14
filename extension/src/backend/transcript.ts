@@ -203,7 +203,7 @@ function mapBashExecution(entry: SessionEntryLike, message: MessageLike): MapRes
 }
 
 /** Apply a toolResult entry to the current assistant bubble. */
-function mapToolResultMessage(message: MessageLike, state: MapLoopState): MapResult {
+function mapToolResultMessage(entry: SessionEntryLike, message: MessageLike, state: MapLoopState): MapResult {
   const currentAssistant = state.currentAssistant;
   if (currentAssistant) {
     applyToolResultToParts(
@@ -211,6 +211,7 @@ function mapToolResultMessage(message: MessageLike, state: MapLoopState): MapRes
       message.toolCallId,
       formatToolResult(message),
       message.isError ? 'failed' : 'completed',
+      entry.id,
     );
     currentAssistant.toolCalls = toolCallsFromMessageParts(currentAssistant.parts);
   }
@@ -245,6 +246,7 @@ function mapAssistantTurn(
       turnUsage,
       errorMessage: message.errorMessage,
       status: assistantStatus(message),
+      durableEntryId: entry.id,
     });
     return { kind: 'skip' };
   }
@@ -263,6 +265,7 @@ function mapAssistantTurn(
     toolCalls: toolCallsFromMessageParts(messageParts),
     durationMs,
     usage: turnUsage,
+    durableEntryId: entry.id,
   };
   state.currentAssistant = next;
   return { kind: 'push', resetAssistant: false, message: next };
@@ -279,6 +282,7 @@ function mergeAssistantTurn(
     turnUsage: ReturnType<typeof usageFromMessage>;
     errorMessage: string | undefined;
     status: ChatMessage['status'];
+    durableEntryId: string;
   },
 ): void {
   const newText = parts ? textFromParts(parts) : '';
@@ -297,6 +301,7 @@ function mergeAssistantTurn(
   appendAssistantParts(current, messageParts, true);
   current.toolCalls = toolCallsFromMessageParts(current.parts);
   current.status = update.status;
+  current.durableEntryId = update.durableEntryId;
   if (update.errorMessage) {
     current.errorDetail = update.errorMessage;
   }
@@ -324,7 +329,7 @@ function dispatchMessageEntry(
     case 'assistant':
       return mapAssistantTurn(entry, message, state);
     case 'toolResult':
-      return mapToolResultMessage(message, state);
+      return mapToolResultMessage(entry, message, state);
     case 'bashExecution':
       return mapBashExecution(entry, message);
     case 'custom':

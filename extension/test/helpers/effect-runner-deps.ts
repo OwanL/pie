@@ -146,7 +146,7 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
   // interface too.
   const service: SessionServiceLike = {
     async hydrateModelState() {},
-    setPrefs() {},
+    async setPrefs() {},
     async setSystemPromptToggles() {},
     bumpSessionDataEpoch(sessionPath: string) {
       calls.push({ kind: 'bumpEpoch', sessionPath });

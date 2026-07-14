@@ -1,13 +1,15 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { JSX } from 'preact';
+import { useState } from 'preact/hooks';
 
 import type { PruningDetails } from '../../../shared/protocol';
 import { pruningTotals } from './pruning';
 import { Collapsible } from '../components/collapsible';
 import { ResizablePre } from '../components/resizable-pre';
 import { highlightToolResultText } from './highlight';
+import { cx } from '../utils/cx';
+import { formatTokens } from '../utils/format-tokens';
 
 interface PruningDiagnosticsProps {
   details: PruningDetails;
@@ -20,35 +22,21 @@ function diagnosticText(value: string | undefined, emptyLabel: string): string {
   return value && value.trim().length > 0 ? value : emptyLabel;
 }
 
-function listText(values: readonly string[]): string {
-  return values.length > 0 ? values.join(', ') : 'None';
-}
-
 function modeLabel(mode: PruningDetails['mode']): string {
   switch (mode) {
     case 'shadow':
-      return 'Shadow (measured only)';
+      return 'Shadow';
     case 'off':
       return 'Off';
+    case 'custom':
+      return 'Custom';
     case 'auto':
     default:
       return 'Auto';
   }
 }
 
-function tokenBreakdown(details: PruningDetails): string | null {
-  const skillTokens = details.skillTokensSaved ?? 0;
-  const toolTokens = details.toolTokensSaved ?? 0;
-  const total = skillTokens + toolTokens;
-  if (total <= 0) return null;
-
-  const parts: string[] = [];
-  if (skillTokens > 0) parts.push(`skills ${skillTokens} tokens`);
-  if (toolTokens > 0) parts.push(`tools ${toolTokens} tokens`);
-  parts.push(`total ${total} tokens`);
-  return parts.join(' · ');
-}
-
+/** "model · thinking-level · latency" — the prepass provenance line. */
 function prepassLabel(details: PruningDetails): string | null {
   const parts: string[] = [];
   if (details.prepassModel) parts.push(details.prepassModel);
@@ -61,19 +49,11 @@ function prepassLabel(details: PruningDetails): string | null {
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
-function DetailRow({ label, children, danger = false }: { label: string; children: JSX.Element | string | null; danger?: boolean }) {
-  return (
-    <div class="pruning-detail-row">
-      <span class="pruning-detail-hint">{label}</span>
-      <span class={`pruning-detail-text${danger ? ' pruning-detail-text-danger' : ''}`}>{children}</span>
-    </div>
-  );
-}
-
+/** A labelled raw <pre> block (system/user prompt or raw LLM output). */
 function RawBlock({ label, children }: { label: string; children: string }) {
   return (
     <div class="pruning-raw-block">
-      <span class="pruning-detail-hint">{label}</span>
+      <span class="pruning-raw-label">{label}</span>
       <ResizablePre class="pruning-raw-pre hljs-scope" minHeight={80}>
         <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(children) }} />
       </ResizablePre>
@@ -81,53 +61,134 @@ function RawBlock({ label, children }: { label: string; children: string }) {
   );
 }
 
+interface CategoryProps {
+  title: string;
+  kept: number;
+  total: number;
+  included: readonly string[];
+  excluded: readonly string[];
+}
+
+/** A Skills/Tools section: a count sub-header followed by kept (accent) and
+ *  pruned (struck, muted) name tags. Tags wrap; kept precede pruned so the
+ *  surviving catalog reads first. */
+function PruningCategory({ title, kept, total, included, excluded }: CategoryProps) {
+  return (
+    <div class="pruning-category">
+      <div class="pruning-category-header">
+        <span class="pruning-category-title">{title}</span>
+        <span class="pruning-category-count">kept {kept} of {total}</span>
+      </div>
+      <div class="pruning-tag-list">
+        {included.map((name) => (
+          <span class="pruning-tag pruning-tag-kept" title={`Kept · ${name}`}>{name}</span>
+        ))}
+        {excluded.map((name) => (
+          <span class="pruning-tag pruning-tag-pruned" title={`Pruned · ${name}`}>{name}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PruningDiagnosticsContent({ details, rawExpanded, onRawToggle }: Omit<PruningDiagnosticsProps, 'presentation'>) {
   const failed = !!details.prepassError;
   const totals = pruningTotals(details);
-  const savedText = tokenBreakdown(details);
   const prepass = prepassLabel(details);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+
+  const showSkills = totals.skillsTotal > 0 || details.excludedSkills.length > 0;
+  const showTools = totals.toolsTotal > 0 || details.excludedTools.length > 0;
 
   return (
     <div class="pruning-detail-list">
-      {failed && <DetailRow label="Error" danger>{details.prepassError ?? null}</DetailRow>}
-      {prepass && <DetailRow label="Prepass">{prepass}</DetailRow>}
-      <DetailRow label="Mode">{modeLabel(details.mode)}</DetailRow>
-      {savedText && <DetailRow label="Saved">{savedText}</DetailRow>}
-      {(totals.skillsTotal > 0 || details.excludedSkills.length > 0) && (
-        <>
-          <DetailRow label="Skills pruned">{listText(details.excludedSkills)}</DetailRow>
-          <DetailRow label="Skills kept">{listText(details.includedSkills)}</DetailRow>
-        </>
+      {failed && (
+        <div class="pruning-banner pruning-banner-danger" role="alert">
+          <span class="pruning-banner-icon" aria-hidden="true">⚠</span>
+          <span class="pruning-banner-text">{details.prepassError}</span>
+        </div>
       )}
-      {(totals.toolsTotal > 0 || details.excludedTools.length > 0) && (
-        <>
-          <DetailRow label="Tools pruned">{listText(details.excludedTools)}</DetailRow>
-          <DetailRow label="Tools kept">{listText(details.includedTools)}</DetailRow>
-        </>
+
+      <div class="pruning-stat-row">
+        {totals.skillsTotal > 0 && (
+          <div class="pruning-stat-tile">
+            <span class="pruning-stat-value">{`${totals.skillsKept}/${totals.skillsTotal}`}</span>
+            <span class="pruning-stat-label">skills</span>
+          </div>
+        )}
+        {totals.toolsTotal > 0 && (
+          <div class="pruning-stat-tile">
+            <span class="pruning-stat-value">{`${totals.toolsKept}/${totals.toolsTotal}`}</span>
+            <span class="pruning-stat-label">tools</span>
+          </div>
+        )}
+        {totals.tokensSaved > 0 && (
+          <div class="pruning-stat-tile pruning-stat-tile-accent">
+            <span class="pruning-stat-value">{`✂ ${formatTokens(totals.tokensSaved)}`}</span>
+            <span class="pruning-stat-label">tokens saved</span>
+          </div>
+        )}
+        <div class="pruning-meta">
+          {prepass && <div class="pruning-meta-line">{prepass}</div>}
+          <span class={cx('pruning-mode-badge', `pruning-mode-${details.mode}`)}>{modeLabel(details.mode)}</span>
+        </div>
+      </div>
+
+      {showSkills && (
+        <PruningCategory
+          title="Skills"
+          kept={totals.skillsKept}
+          total={totals.skillsTotal}
+          included={details.includedSkills}
+          excluded={details.excludedSkills}
+        />
       )}
-      {details.prepassSafeguardReason && <DetailRow label="Keep-all safeguard">{details.prepassSafeguardReason}</DetailRow>}
-      <div class="pruning-detail-row">
-        <span class="pruning-detail-hint">Reasoning</span>
+      {showTools && (
+        <PruningCategory
+          title="Tools"
+          kept={totals.toolsKept}
+          total={totals.toolsTotal}
+          included={details.includedTools}
+          excluded={details.excludedTools}
+        />
+      )}
+
+      {details.prepassSafeguardReason && (
+        <div class="pruning-banner pruning-banner-warning">
+          <span class="pruning-banner-icon" aria-hidden="true">⚠</span>
+          <span class="pruning-banner-text">Keep-all safeguard — {details.prepassSafeguardReason}</span>
+        </div>
+      )}
+
+      <Collapsible
+        open={reasoningOpen}
+        onToggle={(open: boolean) => setReasoningOpen(open)}
+        ariaLabel="Toggle pruning prepass reasoning"
+        class="pruning-sub-collapsible"
+        headerClass="pruning-sub-header"
+        bodyClass="pruning-sub-body"
+        closeFooter={false}
+        header={<span>Reasoning</span>}
+      >
         <ResizablePre class="pruning-raw-pre hljs-scope" minHeight={80}>
           <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(diagnosticText(details.prepassThinking, '∅ No reasoning returned')) }} />
         </ResizablePre>
-      </div>
-      <div class="pruning-raw-toggle">
-        <Collapsible
-          open={rawExpanded}
-          onToggle={() => onRawToggle()}
-          ariaLabel="Toggle prepass prompts and output"
-          class="pruning-raw-toggle-collapsible"
-          headerClass="pruning-raw-toggle-button"
-          bodyClass="pruning-raw-content"
-          closeFooter={false}
-          header={<span>Prepass prompts and output</span>}
-        >
-          <RawBlock label="System prompt">{diagnosticText(details.prepassSystemPrompt, '∅ No system prompt captured')}</RawBlock>
-          <RawBlock label="User prompt">{diagnosticText(details.prepassUserMessage, '∅ No user prompt captured')}</RawBlock>
-          <RawBlock label="Raw LLM output">{diagnosticText(details.prepassResponse, '∅ Empty response')}</RawBlock>
-        </Collapsible>
-      </div>
+      </Collapsible>
+
+      <Collapsible
+        open={rawExpanded}
+        onToggle={() => onRawToggle()}
+        ariaLabel="Toggle prepass prompts and output"
+        class="pruning-sub-collapsible"
+        headerClass="pruning-sub-header"
+        bodyClass="pruning-sub-body"
+        closeFooter={false}
+        header={<span>Prepass prompts and output</span>}
+      >
+        <RawBlock label="System prompt">{diagnosticText(details.prepassSystemPrompt, '∅ No system prompt captured')}</RawBlock>
+        <RawBlock label="User prompt">{diagnosticText(details.prepassUserMessage, '∅ No user prompt captured')}</RawBlock>
+        <RawBlock label="Raw LLM output">{diagnosticText(details.prepassResponse, '∅ Empty response')}</RawBlock>
+      </Collapsible>
     </div>
   );
 }

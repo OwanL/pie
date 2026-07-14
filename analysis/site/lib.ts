@@ -206,6 +206,20 @@ export function selectedRunIds(runs: PreparedRunRow[]): Set<string> {
   return new Set(runs.map((run) => run.runId));
 }
 
+/** Canonical provider-agnostic key used by every model-grouped chart. */
+export function modelFamilyKey(model: { modelFamily?: string | null; modelId?: string | null }): string {
+  return model.modelFamily?.trim() || model.modelId?.trim() || '(unknown)';
+}
+
+/** Complete total run cost; parent-only estimates are never substituted for unknown totals. */
+export function estimatedRunCostUsd(
+  run: Pick<PreparedRunRow, 'totalEstimatedCostUsd'>,
+): number | null {
+  return typeof run.totalEstimatedCostUsd === 'number' && Number.isFinite(run.totalEstimatedCostUsd)
+    ? run.totalEstimatedCostUsd
+    : null;
+}
+
 /** A short, stable label for a model/thinking cell in categorical charts. */
 export function modelAxisLabel(modelId: string | null, thinkingLevel: string | null | undefined): string {
   const model = modelId?.trim() || '(unknown)';

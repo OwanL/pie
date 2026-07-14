@@ -4,15 +4,13 @@ import {
   average,
   categoricalHeight,
   completedRuns,
+  estimatedRunCostUsd,
+  modelFamilyKey,
   selectedRunIds,
   sortNatural,
   uniqueNonEmpty,
 } from '../lib.ts';
 import type { PreparedRunRow, PreparedTurnThroughputRow } from '../../scripts/contracts.ts';
-
-function modelLabel(run: { modelId: string | null }): string {
-  return run.modelId?.trim() || '(unknown)';
-}
 
 // ─── 1. Subagent cost attribution ────────────────────────────────────────────
 
@@ -34,12 +32,13 @@ interface SubagentCostRow {
 function subagentCostRows(runs: PreparedRunRow[]): SubagentCostRow[] {
   const byModel = new Map<string, { parent: number; subagent: number; runs: number; withSub: number }>();
   for (const run of completedRuns(runs)) {
-    const parent = run.estimatedCostUsd ?? 0;
-    const subagent = run.subagentEstimatedCostUsd ?? 0;
-    if (parent === 0 && subagent === 0) {
+    const total = estimatedRunCostUsd(run) ?? 0;
+    const parent = Math.min(run.estimatedCostUsd ?? 0, total);
+    const subagent = Math.max(0, total - parent);
+    if (total === 0) {
       continue;
     }
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? { parent: 0, subagent: 0, runs: 0, withSub: 0 };
     entry.parent += parent;
     entry.subagent += subagent;
@@ -58,20 +57,20 @@ function subagentCostRows(runs: PreparedRunRow[]): SubagentCostRow[] {
       runCount: e.runs,
       runsWithSubagents: e.withSub,
     }))
-    .sort((a, b) => b.totalCostUsd - a.totalCostUsd)
-    .slice(0, 12);
+    .sort((a, b) => b.totalCostUsd - a.totalCostUsd);
 }
 
 const subagentCostChart: ChartEntry = {
   id: 'chart-subagent-cost-attribution',
   render: async (ctx: ChartContext) => {
-    const rows = subagentCostRows(ctx.runs);
-    const totalSubagent = rows.reduce((s, r) => s + r.subagentCostUsd, 0);
-    const grandTotal = rows.reduce((s, r) => s + r.totalCostUsd, 0);
+    const cohort = subagentCostRows(ctx.runs);
+    const rows = cohort.slice(0, 12);
+    const totalSubagent = cohort.reduce((sum, row) => sum + row.subagentCostUsd, 0);
+    const grandTotal = cohort.reduce((sum, row) => sum + row.totalCostUsd, 0);
     const share = grandTotal > 0 ? Math.round((totalSubagent / grandTotal) * 100) : 0;
     ctx.setNote(
       'subagent-cost-attribution-note',
-      `${rows.length} models. Subagent sessions bill separately and were previously excluded from run cost — the top segment is hidden spend now captured by total cost. Subagents = ${share}% of total spend ($${Math.round(totalSubagent * 100) / 100}).`,
+      `Top ${rows.length} of ${cohort.length} model families. Full filtered-cohort spend is $${Math.round(grandTotal * 100) / 100}; subagent sessions account for ${share}% ($${Math.round(totalSubagent * 100) / 100}). Components use only complete parent + applicable subagent totals; unknown totals are omitted.`,
       ctx.renderToken,
     );
 
@@ -150,10 +149,11 @@ function contextGrowthPoints(ctx: ChartContext): { points: ContextGrowthPoint[];
     byRun.set(row.runId, entry);
   }
 
+  const familyByRun = new Map(ctx.runs.map((run) => [run.runId, modelFamilyKey(run)]));
   const points: ContextGrowthPoint[] = [];
   for (const [runId, rows] of byRun) {
     rows.sort((a, b) => a.endedAt.localeCompare(b.endedAt));
-    const model = rows[0]?.modelId?.trim() || '(unknown)';
+    const model = familyByRun.get(runId) ?? modelFamilyKey(rows[0] ?? {});
     rows.forEach((row, index) => {
       points.push({
         turnOrdinal: index,
@@ -241,7 +241,7 @@ interface FrictionRow {
 function frictionRows(runs: PreparedRunRow[]): FrictionRow[] {
   const byModel = new Map<string, { compaction: number[]; retry: number[]; runs: number; compacted: number; retried: number }>();
   for (const run of completedRuns(runs)) {
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? { compaction: [], retry: [], runs: 0, compacted: 0, retried: 0 };
     entry.compaction.push(run.compactionCount ?? 0);
     entry.retry.push(run.autoRetryCount ?? 0);

@@ -1,6 +1,6 @@
 # Agent / Harness Infrastructure Improvements
 
-> **Status:** implementation in progress (2026-07-02). Item 1 ✅ shipped; items 2–5 pending. Per maintainer preference, this proposes **off-the-shelf solutions over bespoke systems** where one exists.
+> **Status:** updated 2026-07-13. The subagent batch/chain orchestration described in older audit sections below has been removed. One tool call now delegates one task; pi's native sibling tool calls provide parallelism and normal turns provide sequencing. Per maintainer preference, this favors **off-the-shelf harness behavior over bespoke orchestration**.
 
 Scope: improving agent *outcomes/performance* and *provider reliability* for the pie stack — the VS Code extension, pi extensions, system prompts, skills, and the umans provider wiring. Four problem areas surfaced from a workspace scan:
 
@@ -17,12 +17,15 @@ Scope: improving agent *outcomes/performance* and *provider reliability* for the
 
 The user symptom — *"nesting set to 1 depth max, meaning no nesting, however it keeps happening, resulting in 10+ sub agent calls at once, instantly getting my account rate limited"* — is **not** a depth-enforcement failure. Depth **is** enforced (`extensions/subagent/src/execute.ts`: `if (runtimeCtx.depth >= maxDepth) return depthLimitResponse(...)`). The storm is **horizontal fan-out at one depth level**:
 
-- A model reply can emit **multiple `subagent` tool calls in parallel**. Each tool call then runs its own batch.
-- A single `subagent` call can itself fan out via `tasks:[...]` — up to `MAX_PARALLEL_TASKS = 8` tasks, throttled to `MAX_CONCURRENCY = 4` concurrent (`extensions/subagent/src/types.ts`, `modes.ts`).
-- Per-reply cap is `MAX_SESSIONS_PER_CALL = 20` (`extensions/subagent/src/helpers.ts`).
-- Runner env defaults: `DEFAULT_MAX_DEPTH = 3`, `DEFAULT_MAX_TREE_SESSIONS = 50`.
+The original failure combined native sibling calls with an additional `tasks[]` fan-out layer and per-batch concurrency. The current design has one route only:
 
-So under worst-case options the model can fire ~4 concurrent requests in *each* of several parallel tool calls, none of which coordinate with each other. With umans' stricter session limits, that's an instant 429 convoy.
+- A model reply may emit **multiple sibling `subagent` calls** for independent work.
+- Every call has `{ agent, task, cwd?, bucket?, thinkingLevel? }`; `tasks[]`, `chain`, the per-call session counter, and the per-batch worker pool are gone.
+- `PIE_SUBAGENT_MAX_INFLIGHT` caps active root trees process-wide and also bounds sibling calls emitted in one agent turn.
+- Each root holds its permit for the complete tree lifetime. Nested descendants borrow that scope, preventing recursive permit deadlock.
+- `DEFAULT_MAX_DEPTH = 3` and the tree-wide session budget defaults to 10.
+
+This leaves one admission-control path rather than several partially coordinated limits.
 
 ### Why "max depth = 1" didn't help
 
@@ -42,7 +45,7 @@ flowchart LR
 
 **a. Expose a real "disabled" mode and relabel the slider.** ✅ Shipped (lower bound `0`, short-circuit at `maxDepth === 0`). Remaining: relabel the slider "Off / 1 level / …" (`extension/src/webview/panel/composer/settings-menu-subagent.tsx`).
 
-**b. Make the throughput caps configurable and lower the defaults.** ✅ Shipped — `subagentMaxParallelTasks`, `subagentMaxConcurrency`, `subagentMaxSessionsPerReply` are threaded through `runtimePrefs.set` → `PIE_SUBAGENT_*` env (`extension/src/backend/rpc.ts`), defaults lowered to 4 / 2. A **global, cross-reply in-flight subagent cap** also shipped as `extensions/subagent/src/concurrency-limit.ts` (`PIE_SUBAGENT_MAX_INFLIGHT`, default 2) wrapping `createAgentSession` — the single most effective fix for the "10+ at once" symptom.
+**b. Use one throughput cap.** ✅ Shipped — obsolete `subagentMaxParallelTasks` and `subagentMaxConcurrency` preferences were removed with the batch route. `subagentMaxInflight` / `PIE_SUBAGENT_MAX_INFLIGHT` is now the single root-tree and per-turn sibling-call cap.
 
 ---
 
@@ -109,17 +112,11 @@ The phrase in the request — *"the app does not respect sub agent limits … 10
 | Limit | Where enforced | Stops the "10+ at once" storm? |
 |---|---|---|
 | `subagentMaxDepth` | `extensions/subagent/src/execute.ts` | **No** — caps vertical nesting, not horizontal fan-out |
-| `subagentMaxTreeSessions` (50 default) | `runner.ts` `consumeTreeSlot` | **Partly** — total tree budget, but 50 is far too high to prevent a rate-limit |
-| `MAX_PARALLEL_TASKS` (8) + `MAX_CONCURRENCY` (4) | `extensions/subagent/src/modes.ts` | **Partly** — but per-call only, hardcoded, and 4-concurrent still bursts umans |
-| `MAX_SESSIONS_PER_CALL` (20) | `extensions/subagent/src/helpers.ts` | **No** — too high; also per-call not global |
-| *Global in-flight request governor* | **does not exist** | — |
+| `subagentMaxTreeSessions` (10 default) | `runner.ts` `consumeTreeSlot` | Bounds total recursive cost per tree |
+| `subagentMaxInflight` (2 default) | `concurrency-limit.ts` + `runner.ts` | Caps active root trees process-wide and sibling calls per turn |
+| Provider concurrency / LiteLLM queue | host provider gate + proxy | Coordinates actual provider requests |
 
-**The missing primitive is a process-wide concurrency gate that the model cannot bypass.** Two ways to land it, in order of effort:
-
-1. **In-process semaphore** (smallest change). Add `extensions/subagent/src/concurrency-limit.ts` exporting a `Semaphore` acquired around every `createAgentSession` call in `runner.ts`. Default `PIE_SUBAGENT_MAX_INFLIGHT=2`. Configurable via the same `runtimePrefs.set` mirror. ~30 lines. This alone kills the 10-at-once symptom.
-2. **LiteLLM proxy's `rpm`/`tpm`** (§2). Pushes the guarantee outside pi so it covers the main agent + every subagent + any other pi consumer uniformly — it can't be bypassed even if a future code path forgets the semaphore. **This is the off-the-shelf answer the maintainer asked for.** The in-process semaphore is still worth keeping as defence-in-depth (it fails fast before the request even leaves the machine), but the proxy should be the source of truth for "respect the account limit."
-
-Tighten the obviously-too-high defaults together with whichever path you pick: `DEFAULT_MAX_TREE_SESSIONS` 50 → 10, `MAX_PARALLEL_TASKS` 8 → 4, `MAX_CONCURRENCY` 4 → 2. ✅ Shipped — see `extensions/subagent/types.ts` and `extensions/subagent/runner.ts`.
+The process-wide gate is now implemented. A root child holds its permit until its complete prompt/tree settles; descendants borrow it. The former per-batch limits were removed along with `tasks[]`, leaving one local admission-control path plus the provider-level queue.
 
 ---
 
@@ -130,9 +127,9 @@ Tighten the obviously-too-high defaults together with whichever path you pick: `
 `APPEND_SYSTEM.md` (rewritten 2026-07-04, item 4 static portion ✅ shipped) now reads:
 ```text
 - Delegate to sub-agents when tasks can be broken down into discrete steps ...
-  Prefer SEQUENTIAL sub-agents by default; only parallelize (multiple parallel
-  subagent tool calls in one reply, or tasks:[...] with several entries) when the
-  tasks are genuinely independent AND you have rate-limit headroom.
+  Prefer SEQUENTIAL sub-agents by default; only emit multiple sibling subagent
+  calls in one reply when the tasks are genuinely independent AND you have
+  rate-limit headroom.
 - Reserve a sub-agent verification pass for non-trivial changes; for trivial
   edits, inline verification (re-reading the diff, a quick check) is fine.
 ```
@@ -148,7 +145,7 @@ Agent configs reinforce it — `agents/worker.md` and `agents/scout.md` now defe
 
 ## 5. Centralised settings (cross-cutting)
 
-The `runtimePrefs.set` RPC pattern (`extension/src/backend/request-handler.ts`) already mirrors host prefs → process env for `PIE_SUBAGENT_MAX_DEPTH`, `PIE_SUBAGENT_MAX_TREE_SESSIONS`, `PIE_SUBAGENT_BUCKETS`, `PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS`. Extending it for the new knobs (`PIE_SUBAGENT_MAX_INFLIGHT`, `PIE_SUBAGENT_MAX_CONCURRENCY`, `PIE_SUBAGENT_MAX_PARALLEL_TASKS`) is free — and makes them hot-reload through the settings menu without a reload. Use this same channel for everything in §3 so the user tunes the throttle live while watching the token-rate indicator.
+The `runtimePrefs.set` RPC mirrors host prefs → process env for depth, tree sessions, model buckets, nested bucket policy, and `PIE_SUBAGENT_MAX_INFLIGHT`. The obsolete per-batch concurrency and parallel-task preferences were removed from the protocol and settings UI.
 
 ---
 
@@ -157,10 +154,10 @@ The `runtimePrefs.set` RPC pattern (`extension/src/backend/request-handler.ts`) 
 | # | Change | Effort | Impact on the stated pain | Status |
 |---|---|---|---|---|
 | 1 | LiteLLM proxy in front of umans, with `rpm` set to the real limit | S–M | **Eliminates** key-rotation. Queue-backoff is the missing governor. | ✅ Done |
-| 2 | In-process subagent semaphore (`PIE_SUBAGENT_MAX_INFLIGHT=2`) + expose `MAX_CONCURRENCY` / `MAX_PARALLEL_TASKS` prefs | S | Kills "10+ at once" before a request leaves the machine | ✅ Done |
+| 2 | In-process root-tree semaphore (`PIE_SUBAGENT_MAX_INFLIGHT=2`) and single-task tool route | S | Kills "10+ at once" before a request leaves the machine | ✅ Done |
 | 3 | `subagentMaxDepth` lower bound 0, short-circuit at 0 | S | Gives the real "no subagents" kill switch | ✅ Done (slider relabel cosmetic only) |
 | 4 | Rewrite the fan-out-biased guidance in `APPEND_SYSTEM.md` + agents adaptively | S | Stops the model from *wanting* the storm | ⬙ Static rewrite done; adaptive `providerBusy` signal pending |
-| 5 | Tighten defaults (`MAX_TREE_SESSIONS` 50→10, `MAX_PARALLEL_TASKS` 8→4, `MAX_CONCURRENCY` 4→2) | XS | Cheap insurance | ✅ Done |
+| 5 | Tighten tree defaults and remove duplicated per-batch limits | XS | Cheap insurance and lower complexity | ✅ Done |
 
 Items 1 + 2 together close the loop: the semaphore fails fast locally, LiteLLM holds the queue and retries honouring `Retry-After` centrally. Neither requires bespoke queue logic.
 
@@ -172,9 +169,9 @@ Items 1 + 2 together close the loop: the semaphore fails fast locally, LiteLLM h
 |---|---|
 | Depth gate | `extensions/subagent/src/execute.ts` (`execute()` → `depthLimitResponse`) |
 | Extended defaults + runner knobs | `extensions/subagent/runner.ts` (`getMaxDepth`, `getMaxTreeSessions`, `consumeTreeSlot`, `DEFAULT_MAX_*`) |
-| Throughput caps (now configurable via `runtimePrefs.set`) | `extensions/subagent/types.ts` (`MAX_PARALLEL_TASKS=4`, `MAX_CONCURRENCY=2`), `extensions/subagent/src/helpers.ts` (`MAX_SESSIONS_PER_CALL=20`) |
-| Global in-flight gate | `extensions/subagent/src/concurrency-limit.ts` (`Semaphore`, `PIE_SUBAGENT_MAX_INFLIGHT`) |
-| Parallel fan-out wing | `extensions/subagent/src/modes.ts` (`executeParallelMode`, `mapWithConcurrencyLimit`) |
+| Single-task execution | `extensions/subagent/src/single.ts`, dispatched by `src/execute.ts` |
+| Global root-tree gate | `extensions/subagent/src/concurrency-limit.ts` (`Semaphore`, `PIE_SUBAGENT_MAX_INFLIGHT`) and `runner.ts` (tree-lifetime permit scope) |
+| Durable result compaction | `extensions/subagent/src/result-compaction.ts`, `extension/src/shared/file-change-derivation.ts` |
 | Pref mirror to env | `extension/src/backend/rpc.ts` (`runtimePrefs.set` handler), `extension/src/host/session-service/service.ts`, `extension/src/host/session-service/startup.ts` |
 | Prefs shape + defaults | `extension/src/shared/protocol/settings.ts` (`DEFAULT_CHAT_PREFS`), `extension/src/shared/protocol-validation.ts` |
 | UI slider + clamps | `extension/src/webview/panel/composer/settings-menu-subagent.tsx`, `extension/src/backend/rpc.ts` (`validateOptionalInt`) |

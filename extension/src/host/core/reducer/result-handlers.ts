@@ -441,11 +441,23 @@ export function handleModelSwitchConfirmResult(
   };
 }
 
-export function handleSetPrefsResult(state: ArchState, _event: Extract<Event, { kind: 'SetPrefsResult' }>): ReducerResult {
-  return { state, effects: [] };
+export function handleSetPrefsResult(state: ArchState, event: Extract<Event, { kind: 'SetPrefsResult' }>): ReducerResult {
+  if (event.ok) return { state, effects: [] };
+  return {
+    state: {
+      ...state,
+      settings: {
+        ...state.settings,
+        notice: `The setting could not be fully applied. Retry it, or restart the backend if the problem continues.`,
+        noticeKind: 'operational-error',
+        noticeRaw: event.error ?? 'runtimePrefs.set failed',
+      },
+    },
+    effects: [],
+  };
 }
 
-export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' }>): ReducerResult {
+export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
   switch (event.kind) {
     case 'InterruptResult':
       return handleInterruptResult(state, event);
@@ -496,14 +508,39 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
       }
       return { state, effects };
     }
+    case 'ExtensionUiResponseResult': {
+      const pending = state.pending.extensionUiResponseByCorrId[event.corrId];
+      if (!pending) return { state, effects: [] };
+      const next = produce(state, (draft) => {
+        delete draft.pending.extensionUiResponseByCorrId[event.corrId];
+        if (event.ok) return;
+        const sessionMap = draft.settings.pendingExtensionUIRequestsBySession[pending.sessionPath] ?? {};
+        sessionMap[pending.request.id] = pending.request;
+        draft.settings.pendingExtensionUIRequestsBySession[pending.sessionPath] = sessionMap;
+        const turn = draft.livePipeline.turnsBySession[pending.sessionPath];
+        if (turn && !turn.pendingExtensionUiRequestIds.includes(pending.request.id)) {
+          turn.pendingExtensionUiRequestIds.push(pending.request.id);
+          turn.phase = pending.priorPhase ?? 'waiting_input';
+          draft.livePipeline.revisionBySession[pending.sessionPath] =
+            (draft.livePipeline.revisionBySession[pending.sessionPath] ?? 0) + 1;
+        }
+      });
+      return {
+        state: next,
+        effects: event.ok ? [] : [{
+          kind: 'Log', corrId: event.corrId, level: 'error',
+          message: 'ExtensionUiResponseResult failed; restored pending prompt',
+          data: { hasError: typeof event.error === 'string' && event.error.length > 0 },
+        }],
+      };
+    }
     case 'RecordOutcomeResult':
     case 'StartNewTaskResult':
     case 'ContinueTaskResult':
     case 'OpenFileInEditorResult':
     case 'OpenFileResult':
     case 'SetPruningSettingsResult':
-    case 'SetToolResultPruningSettingsResult':
-    case 'ExtensionUiResponseResult': {
+    case 'SetToolResultPruningSettingsResult': {
       if (!event.ok) {
         return {
           state,

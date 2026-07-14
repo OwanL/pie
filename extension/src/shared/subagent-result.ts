@@ -11,10 +11,9 @@ import { isRecord } from './type-guards';
  * tokens of running subagents). It is pure data shaping — no preact, no DOM,
  * no I/O — so it is safe to run in the extension host.
  *
- * The raw shape comes from the `subagent` extension (see
- * `extensions/subagent/src/modes.ts`): one tool call carries a `results[]`
- * array (one entry per task for parallel/chain modes, all sharing the same
- * `toolCallId`). The renderable extraction normalizes the two result-field
+ * The raw shape comes from the `subagent` extension: new calls carry one
+ * compacted child in `results[]`; legacy stored parallel/chain calls may carry
+ * several. The renderable extraction normalizes the two result-field
  * shapes (`{ results }` and `{ details: { results } }`), infers a running
  * status for results that lack one, and synthesizes a placeholder when a
  * running call has not yet produced any result.
@@ -62,6 +61,16 @@ export interface SubagentSingleResult {
   /** `-1` while the subagent is still running. */
   exitCode: number;
   messages: RawMessage[];
+  /** Bounded terminal answer stored outside compacted child messages. */
+  finalOutput?: string;
+  transcriptCompacted?: boolean;
+  fileChanges?: Array<{
+    path: string;
+    kind: 'created' | 'modified' | 'deleted';
+    description?: string;
+    additions?: number;
+    deletions?: number;
+  }>;
   /** The model the subagent session actually ran with. */
   model?: string;
   /** Provider that owns the selected model. */
@@ -93,6 +102,11 @@ export interface SubagentSingleResult {
   retryCount?: number;
   /** Streaming text from the current in-progress assistant turn. */
   streamingText?: string;
+  /** Streaming reasoning (thinking) from the current in-progress assistant
+   *  turn. Captures `thinking_delta` events so the collapsed preview can show
+   *  live reasoning before reply text arrives (instead of a generic
+   *  "Generating…" placeholder). Cleared when the assistant message commits. */
+  streamingReasoning?: string;
   /** True while the subagent's model is actively generating the in-progress
    *  assistant turn (first delta received, message not yet ended). Drives the
    *  host token-rate clock so it advances through stalls + reasoning streams but
@@ -114,7 +128,14 @@ export interface SubagentResult {
 }
 
 export function isSubagentSingleResultRunning(result: SubagentSingleResult): boolean {
-  return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
+  // exitCode is the lifecycle source of truth. runningTools is only activity
+  // detail and may be stale when a nested tool never emits execution_end after
+  // an abort/provider failure.
+  return result.exitCode === -1;
+}
+
+export function isSubagentSingleResultInterrupted(result: SubagentSingleResult): boolean {
+  return result.stopReason === 'aborted' || result.activityPhase === 'cancelled';
 }
 
 function isSubagentSingleResultFailed(result: SubagentSingleResult): boolean {
@@ -132,7 +153,7 @@ function nonEmptyText(value: string | undefined): string | undefined {
 
 function subagentSingleResultFallbackMarkdown(result: SubagentSingleResult): string {
   if (!isSubagentSingleResultFailed(result)) {
-    return '(no output)';
+    return nonEmptyText(result.finalOutput) ?? '(no output)';
   }
 
   const detail = nonEmptyText(result.errorMessage) ?? nonEmptyText(result.stderr);
@@ -255,7 +276,33 @@ function normalizeRenderableSubagentResult(
   toolStatus: ToolCall['status'],
 ): SubagentResult {
   if (toolStatus !== 'running') {
-    return result;
+    return {
+      ...result,
+      results: result.results.map((current) => {
+        const wasStillRunning = current.exitCode === -1;
+        const interrupted = isSubagentSingleResultInterrupted(current);
+        const terminalExitCode = wasStillRunning
+          ? (toolStatus === 'completed' ? 0 : 1)
+          : current.exitCode;
+        const hadLiveState = current.streaming === true || (current.runningTools?.length ?? 0) > 0;
+        if (!wasStillRunning && !hadLiveState) return current;
+
+        return {
+          ...current,
+          exitCode: terminalExitCode,
+          runningTools: [],
+          streaming: false,
+          ...(wasStillRunning && toolStatus === 'failed' && !current.stopReason
+            ? { stopReason: interrupted ? 'aborted' : 'error' }
+            : {}),
+          activityPhase: interrupted
+            ? 'cancelled'
+            : terminalExitCode !== 0
+              ? 'failed'
+              : 'completed',
+        };
+      }),
+    };
   }
 
   return {
@@ -280,7 +327,55 @@ function normalizeRenderableSubagentResult(
 }
 
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
-  const raw = rawResult as { details?: unknown; results?: unknown } | undefined;
+  const raw = rawResult as { kind?: unknown; mode?: unknown; children?: unknown; details?: unknown; results?: unknown } | undefined;
+
+  // Protocol-v4 live state carries a typed, bounded subagent preview rather
+  // than the extension's unbounded raw partial. Rehydrate the render model so
+  // the running child reply/activity stays visible before tool.finished.
+  if (raw?.kind === 'subagent' && Array.isArray(raw.children) && raw.children.length > 0) {
+    const mode: SubagentResult['mode'] = raw.mode === 'parallel' || raw.mode === 'chain' ? raw.mode : 'single';
+    const results = raw.children.flatMap((candidate): SubagentSingleResult[] => {
+      if (!isRecord(candidate)) return [];
+      const id = typeof candidate.id === 'string' ? candidate.id : 'subagent';
+      const agent = typeof candidate.agent === 'string' ? candidate.agent : id;
+      const task = typeof candidate.task === 'string'
+        ? candidate.task
+        : typeof candidate.summary === 'string' ? candidate.summary : 'Delegated task';
+      const phase = typeof candidate.phase === 'string' ? candidate.phase : 'running';
+      const explicitExit = typeof candidate.exitCode === 'number' ? candidate.exitCode : undefined;
+      const exitCode = explicitExit ?? (phase === 'completed' ? 0 : phase === 'failed' || phase === 'cancelled' ? 1 : -1);
+      const summary = typeof candidate.summary === 'string' ? candidate.summary : undefined;
+      const streamingText = typeof candidate.streamingText === 'string' ? candidate.streamingText : undefined;
+      const messages: RawMessage[] = summary && !streamingText
+        ? [{ role: 'assistant', content: [{ type: 'text', text: summary }] }]
+        : [];
+      return [{
+        agent,
+        task,
+        exitCode,
+        messages,
+        ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
+        ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),
+        ...(typeof candidate.activityDetail === 'string' ? { activityDetail: candidate.activityDetail } : {}),
+        ...(typeof candidate.activitySince === 'number' ? { activitySince: candidate.activitySince } : {}),
+        ...(typeof candidate.lastProgressAt === 'number' ? { lastProgressAt: candidate.lastProgressAt } : {}),
+        ...(typeof candidate.inactivityBudgetMs === 'number' ? { inactivityBudgetMs: candidate.inactivityBudgetMs } : {}),
+        ...(typeof candidate.streaming === 'boolean' ? { streaming: candidate.streaming } : {}),
+        ...(streamingText ? { streamingText } : {}),
+        ...(typeof candidate.streamingReasoning === 'string' ? { streamingReasoning: candidate.streamingReasoning } : {}),
+        ...(Array.isArray(candidate.runningTools)
+          ? { runningTools: candidate.runningTools.filter((tool): tool is string => typeof tool === 'string') }
+          : {}),
+        activityPhase: phase === 'cancelled'
+          ? 'cancelled'
+          : phase === 'failed' ? 'failed'
+          : phase === 'completed' ? 'completed'
+          : phase === 'queued' ? 'queued'
+          : 'streaming',
+      }];
+    });
+    if (results.length > 0) return { mode, results };
+  }
 
   if (raw && typeof raw === 'object' && Array.isArray(raw.results) && raw.results.length > 0) {
     return raw as SubagentResult;

@@ -20,14 +20,14 @@
 
 ## Backend Failure Recovery
 
-- Backend JSONL records share a 20 MiB byte limit. An overlong stdout record is a fatal transport fault: the host terminates the backend rather than continuing with potentially desynchronized state. Overlong stdin records are discarded through LF; when the bounded preview contains a request ID, the backend returns a correlated `REQUEST_TOO_LARGE` response. Subsequent requests remain readable.
+- Backend JSONL records share a 32 MiB byte limit. An overlong correlated stdout response is replaced before writing with a `RESPONSE_TOO_LARGE` error carrying the same request ID, so the stream remains synchronized and the backend stays available. An overlong stdout event remains a fatal transport fault. Overlong stdin records are discarded through LF; when the bounded preview contains a request ID, the backend returns a correlated `REQUEST_TOO_LARGE` response. Subsequent requests remain readable.
 - Intentional stops do not produce public unexpected-exit events, but an intentional stop during startup still rejects that child’s readiness promise. Process generations prevent an old exit from clearing a replacement. Backend restart is manual; there is no automatic restart.
-- Affected session paths are deduplicated. Crash cleanup interrupts streaming messages and queued user messages, terminalizes running tools, and clears pending extension-UI, retry, wait, interrupt, and queued transient state even when no transcript is loaded.
+- Affected session paths are deduplicated. Crash cleanup materializes each host-owned live turn as interrupted, preserves only durability-confirmed terminal tools, interrupts queued user messages, and clears pending extension-UI, retry, wait, interrupt, checkpoint, and queued transient state even when no transcript is loaded.
 - The short exit notice contains the interrupted-session count and reliable activity classification; raw stderr is exposed only as `noticeRaw` with `noticeKind: backend-exit`.
 
 ## Session Cleanup
 
-- Closing or invalidating a session clears transcript state, alias state, current-turn state, busy dedup state, pending composer inputs, and queued per-session operations.
+- Closing or invalidating a session clears durable transcript cache, `LivePipelineState` turn/tool/pending-owner/tombstone state, alias state, current-turn correlation metadata, busy dedup state, pending composer inputs, and queued per-session operations.
 - Pending composer inputs are session-scoped host state: close/invalidate clears them for that session; extension restart/shutdown clears all remaining pending inputs.
 - Pending-session placeholders are cleaned up one session at a time; overlapping creates must not share teardown.
 - Pending session identifiers must be collision-safe under rapid repeated creation.
@@ -38,27 +38,26 @@
 - A full snapshot contains the currently loaded transcript window (`transcript`) plus explicit window metadata (`transcriptWindow`), not necessarily the entire historical transcript.
 - State-envelope revisions are global and advance on each full snapshot; they continue to detect host-instance counter resets in combination with `hostInstanceId`.
 - Every envelope carries `protocolVersion` matching `WEBVIEW_PROTOCOL_VERSION`.
-- A `stateApplied` acknowledgement is semantic, not revision-only: the host
-  compares its expected transcript-tail/activity signature with the signature
-  committed into the webview DOM. A stale visible transcript cannot clear the
-  watchdog merely because the renderer processed the envelope; it remains
-  dirty and follows the bounded resnapshot/force-reload recovery path.
+- Delivery evidence is split: `stateReceived` proves receipt, `appCommitted` proves the app tree committed, `transcriptCommitted` proves the signed displayed transcript leaves match the host expectation, and `paintObserved` records the next visible paint. Only a valid accepted-ledger `transcriptCommitted` identity advances transcript correctness.
+- The semantic identity is bounded-cost and computed from the projected `TranscriptView`: durable rows joined with the host-owned active turn/tool records. It signs the last three transcript leaves plus bounded live/terminal tool aggregates. Queued follow-ups cannot push an active owner outside the signed live-tool aggregate.
 - Transport is snapshots-only. Full snapshots carry the complete ViewState. When the view is hidden or not ready, the host marks globalDirty; the next flush emits a full snapshot.
 - When visibility returns, the next host-to-webview sync is a full snapshot.
 - The webview clears overlay/transient UI when the host instance changes or the active session changes.
-- Streaming tool-call arguments are host-owned transcript state (`ChatMessage.draftingToolCall`). The backend forwards provider `toolcall_start`/`toolcall_delta` events, the host accumulates their raw argument text, and snapshots expose that transient draft so the activity indicator can name the tool and estimate drafted tokens. The authoritative `message.finished` replacement removes the draft before execution state takes over.
-- A busy `session.opened` refresh may update tab/session metadata, but it must not discard in-memory optimistic or streaming transcript state that is newer than the backend snapshot.
-- **Watchdog force-reload escalation while streaming is bounded, not indefinite.** The `StateAppliedWatchdog` first does revision-gated **resnapshots** (re-post the dirty snapshot) on missed acks — up to `RESNAPSHOT_MAX_RETRIES` retries, each re-arming the watchdog for the freshly-posted revision. This runs regardless of running count and is the self-healing path for a slow-but-functional webview (its acks reset the retry budget). Only after the resnapshot budget is exhausted does the watchdog escalate to a **force-reload**, and that escalation is now permitted *even while `runningCount > 0`* — previously the force-reload was suppressed *indefinitely* while any session was running, which trapped a hung renderer for the entire turn (the "transcript frozen until I reload the panel" symptom: the host keeps posting, the webview never renders, nothing short of a manual panel reload recovered it). A mid-stream reload does discard transient streaming state and can flash the "old + new at once" frame, but a bounded, throttled reload (`STATE_APPLIED_RELOAD_LIMIT` per `STATE_APPLIED_RELOAD_WINDOW_MS`) is strictly better than a freeze that lasts the whole turn. Do not raise `RESNAPSHOT_MAX_RETRIES` so high that a genuinely-hung renderer takes too long to recover, or lower it so far that a slow-but-functional webview gets reloaded mid-stream. Lowering streaming debounce (Brief G-enabled) and making webview revision/length-identity guards total remain the correct levers for the slow-but-functional case; the watchdog owns the genuinely-hung case.
+- Active text, reasoning, tool-call drafts, typed bounded previews, tool lifecycle, producer phase, sequence, and extension-UI ownership live only in host `LivePipelineState`. `ArchState.transcript` is the durable history cache, not a second live authority. Projection purely joins the two.
+- Backend semantic envelopes use live protocol **v4**, independently of the RPC transport wire version. They are monotonic per turn/attempt; version skew, missing, rejected, illegal-owner, or out-of-order events trigger rejection or the effect-owned `liveTurn.checkpoint` RPC. Checkpoints are structurally validated, bounded, and in-memory only; terminal lifecycle watermarks expose a lost final event. Repeated repair failure interrupts locally and never replays tool execution.
+- Tool and assistant terminal envelopes are withheld until the patched SDK append returns a stable session-entry ID. The reducer atomically appends the durability-confirmed terminal message and removes its live turn/tools. A fresh session branch wins on reopen; dangling persisted work is shown as interrupted.
+- A busy `session.opened` refresh may update tab/session metadata and durable paging state, but it cannot erase the separately-owned active live turn. Webview reload also restores that host state through the next full snapshot.
+- The delivery controller retains one unsettled post, lazily coalesces the newest desired snapshot, times settlement out locally, ignores late settlements from stale view generations, and maintains one monotonic accepted-revision/commit ledger. Recovery resnapshots the latest desired state before bounded reload escalation; reload does not discard host-owned live work.
 - **A stale `webviewReady=false` belief self-heals via `WebviewReadinessProbe`.** `canPostSnapshotToView()` gates posting on `hasView && webviewReady`, and `webviewReady` is the host's *belief*: it flips `false` on every webview reload (asset-version mismatch, hot reload, watchdog force-reload) and is restored only by an inbound `ready`/`refreshState` reaching the readiness setter. If that handshake does not restore it (a lost `ready`, or an asset-version reload loop whose handshake is consumed by the mismatch branch before the setter), the host marks `globalDirty` and posts nothing indefinitely — the agent advances host-side while the webview freezes on its last frame, recovered only when the user refocuses. The probe breaks that stall: while the view exists, readiness is believed false, and state is dirty, it periodically pushes the pending snapshot directly and adopts `postMessage`'s `delivered=true` as the readiness signal. Bounded by `READINESS_PROBE_MAX_ATTEMPTS`; a genuinely-unresponsive webview is left to the watchdog force-reload / visibility transitions. The probe's reload-skip is time-bounded: it bails for the first few ticks of a genuine reload (don't post to a renderer being replaced) but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale (a reload loop whose every `ready` is consumed by the asset-mismatch branch, or a lost `ready` from a renderer that never finished loading), force-clears it, and probes — otherwise the bail would trap the probe forever (`attempts` never increments on a reloading-skip) and, with the watchdog force-reload throttled rather than suppressed while streaming, leave the webview stuck for the throttle window until the probe self-healed it.
 
 ## Execution Ordering
 
 - Lifecycle requests (`create`, `open`) are serialized through a host lifecycle queue.
 - Session mutations (`send`, `edit`, `truncateAfter`, `interrupt`) are serialized per session path.
-- `message.interrupt` is an abort-completion barrier: its RPC resolves only after `session.abort()` settles (or rejects after the bounded teardown watchdog). While it is pending, `runningSessionPaths` and `interruptInFlightBySession` keep the composer in `Stopping…`; button and keyboard submission are blocked so stop→send cannot accidentally enter the dying turn as a queued follow-up. Interrupting an already-idle session is an idempotent success to tolerate host/backend boundary races.
+- `message.interrupt` is a bounded abort-completion barrier. While pending, `runningSessionPaths` and `interruptInFlightBySession` keep the composer in `Stopping…`; submission is blocked so stop→send cannot enter the dying turn. If remote teardown does not settle, the backend terminalizes locally, reports the classified timeout, replaces the session runtime, and gates the next send on that replacement rather than waiting forever. Interrupting an already-idle session is idempotent.
 - Editing has restart semantics. `EditRpc` performs idempotent interrupt → truncate → send inside one serialized session operation, so editing a prior message cannot race a live assistant turn.
 - Optimistic UI writes must be reversible when the authoritative operation fails.
-- The EffectRunner routes session-scoped RPC effects through `enqueueLifecycle → enqueueSessionOperation(sessionPath, ...)` to guarantee FIFO ordering with respect to other session operations.
+- The EffectRunner routes session-scoped RPC effects through `enqueueSessionOperation(sessionPath, ...)` to guarantee per-session FIFO ordering without holding the global lifecycle queue. A slow prepass, interrupt, or checkpoint for one session cannot block opening, creating, or interacting with another session.
 - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle(...)` directly (no inner session queue).
 - Non-session effects (`PersistTabs`, `Log`) execute directly without queueing.
 - Backend stdout has separate ordered control and event lanes. Correlated RPC
@@ -68,6 +67,14 @@
 - Concurrent cold opens/preloads for the same session share one in-flight
   runtime creation. Slow SDK service initialization cannot build and replace
   duplicate contexts for a single session path.
+- Tool-call lifecycle is monotonic in `LivePipelineState`: late progress/start envelopes cannot replace a durability-confirmed terminal or revive its tombstoned attempt. Stable parallel-group IDs, execution/sequence/phase commit metadata, and typed bounded previews are carried by the canonical live record. Supported semantic consumers skip legacy transcript `ToolCall`/terminal mutation while retaining analytics, file-change, and notice side effects. Raw/cyclic/BigInt SDK `onUpdate` values never cross into the host. Opaque transport-bound progress markers cannot replace an earlier
+  renderable live result; cyclic/BigInt progress is converted to JSON-safe data
+  while preserving subagent lifecycle details.
+- A subagent child's `exitCode` owns its running/terminal lifecycle;
+  `runningTools` is activity detail only. Every terminal path clears live tool
+  and streaming flags. Parent interruption is retained as `stopReason: aborted`
+  and renders as `Interrupted`, distinct from a failed child. A failed parallel
+  tool does not relabel siblings whose own child results completed.
 - A retry that exceeds the backend's existing delay-plus-grace watchdog is
   terminalized automatically: all exposed billable windows are aborted, SDK
   teardown gets a bounded five-second grace, and the backend emits an
@@ -122,7 +129,7 @@
 
 A post-ack, pre-commit `PreflightFailed` must: remove the optimistic transcript entry by `pending.promoted[corrId].localId`, restore `pending.promoted[corrId].previousSummary`, restore `pendingComposerInputsBySession[sessionPath]` from `pending.promoted[corrId].inputs`, clear `pending.requestIdToLocalId[requestId]`, fire a `sendRejected` imperative (carrying `inputs`), and surface a plain-language error.
 
-**Timer ownership:** a send has two phase-scoped timers, never racing. A short `RequestTracker` timeout owns the pre-ack (queue-time) RPC (`message.send` is sized ~10s in `RPC_TIMEOUTS_MS`); its rejection is the pre-ack failure window. One send-timer owns the pre-ack-to-first-delta phase; it is started at RPC dispatch and cleared at the commit point (first streaming `MessageStarted` for the `requestId` — the same commit point at which `handleMessageStarted` drops `pending.promoted[corrId]` and emits a `ClearSendTimer` effect), and on fire it dispatches `PreflightFailed` *with `corrId`* (the reducer's explicit-corrId path short-circuits its `requestId` scan). Both timers are short-circuited by the same commit-point event, so they can never both fire for one send; the pre-ack rejection also clears the send-timer (no commit will come), and `handlePreflightFailed` no-ops if `promoted` was already dropped (commit happened) — so a late fire cannot double-rollback. `edit` follows the same phase-scoped shape. *(Implemented in Brief B: the send-timer lives in `EffectRunner` (`startInFlightSend`/`clearInFlightSend`/`onSendTimerFire`), the `ClearSendTimer` effect is emitted by `handleMessageStarted`, and the `AbortController` passed to `backend.request` is abortable via `EffectRunner.abortInFlightSend(sessionPath)` — Brief E's interrupt hook.)*
+**Timer ownership:** a send has phase-scoped timers, never racing. A short `RequestTracker` timeout owns the pre-ack (queue-time) RPC (`message.send` is sized ~10s in `RPC_TIMEOUTS_MS`); its rejection is the pre-ack failure window. One send-timer owns the post-ack-to-first-delta interval. It starts in the **prepass** phase; when the backend's explicit internal `preflight-succeeded` message arrives, `MarkPrepassSucceeded` replaces that timer with a fresh **model-start** budget. This boundary is also what makes timeout diagnosis truthful: the first phase reports pruning timeout, while the second reports model-start timeout. The timer is cleared at the commit point (first streaming `MessageStarted` for the `requestId` — where `handleMessageStarted` drops `pending.promoted[corrId]` and emits `ClearSendTimer`), and on fire it dispatches `PreflightFailed` *with `corrId`*. The pre-ack rejection also clears it, and `handlePreflightFailed` no-ops if `promoted` was already dropped, so a late fire cannot double-rollback. `edit` follows the same shape. Independently, the backend forwards the persisted pruning-result at `agent_start`, `turn_start`, or the first assistant `message_start` (whichever first observes it) using its stable session-entry id, with duplicate suppression for a later SDK `message_end/custom`. Thus timeout phase tracking does not depend on the summary, and the reply-header summary does not depend on an optional live custom-message event.
 
 ## Webview-Local State
 
@@ -134,12 +141,25 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 - **input focus / caret position** — DOM focus state
 - **drag state** — transient tab drag-and-drop position
 - **animation / transition state** — CSS transition tracking
-- **protocol-sync bookkeeping** — `lastRevisionRef`, `awaitingSnapshotRef`, `hostInstanceIdRef`, pending-draft-restore tracking, pending-composer-inputs-restore tracking (Brief C: a transient render override of `pendingComposerInputs` staged between a `sendRejected` imperative and the next confirming snapshot — the analog of draft-restore), in-flight `corrId` set for UI gating
+- **protocol-sync bookkeeping** — `lastRevisionRef`, `awaitingSnapshotRef`, `hostInstanceIdRef`, mounted-inline-prompt request counts (DOM-presence only; host pending requests remain authoritative), pending-draft-restore tracking, pending-composer-inputs-restore tracking (Brief C: a transient render override of `pendingComposerInputs` staged between a `sendRejected` imperative and the next confirming snapshot — the analog of draft-restore), in-flight `corrId` set for UI gating
 - **derived UI telemetry** — FPS counters, render-timing buffers. (Token-rate measurement is no longer webview-local: it runs host-side in `TokenRateService`, which ticks every running session — including ones that are not the active/selected tab — using the transcripts the host already holds, and posts the per-session states as `ViewState.tokenRateBySession`. The webview just displays the active session's pre-computed state.)
 - **per-keystroke draft buffer** inside an active input (the committed draft on blur/send/tab-switch is host state; the live keystroke buffer is not)
 - **optimistic user message overlay** — pending user messages shown instantly before the host confirms them. The webview generates a `localId`, sends it with the `send` protocol message, and displays the message in the transcript immediately. When the host state arrives containing a message with that `localId`, the optimistic overlay entry is reconciled away. On `sendRejected`, the overlay entry is removed and the draft is restored.
 
 All other state (editing, outcome dialogs, draft content, session selection, model settings, prefs) lives in the host store and reaches the webview via ViewState snapshots.
+
+## Extension UI Requests
+
+- Every pending interactive extension-UI request for the active session has an
+  actionable surface. A tool/subagent-owned request renders inline when its
+  exact prompt is mounted; otherwise a fixed fallback appears above the
+  composer. Inline ownership alone is insufficient because the card can be
+  collapsed, virtualized, delayed, or stale while the tab already signals that
+  the session is waiting for input.
+- Requests without an inline owner retain priority when several requests are
+  pending; if all requests are inline-owned, the fixed fallback uses the oldest
+  request whose exact inline prompt is not mounted. One visible sibling must
+  not hide another collapsed/virtualized question.
 
 ## Notice Surfacing
 

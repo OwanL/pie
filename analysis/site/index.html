@@ -62,8 +62,8 @@
             </select>
           </label>
           <label class="toggle">
-            <input id="filter-scored-only" type="checkbox" checked />
-            <span>Scored runs only</span>
+            <input id="filter-scored-only" type="checkbox" />
+            <span>Outcome-scored only</span>
           </label>
           <label class="toggle">
             <input id="filter-pure-only" type="checkbox" />
@@ -73,16 +73,24 @@
         </form>
       </section>
 
+      <section id="coverage-banner" class="coverage-banner" aria-live="polite"></section>
+
       <section class="cards" id="overview-cards"></section>
 
       <div class="charts">
+        <header class="dashboard-section span-2">
+          <p class="section-kicker">Outcomes &amp; model choice</p>
+          <h2>Choose models from attributable outcome evidence</h2>
+          <p>The leaderboard estimates observed user-rated outcome strength, not causal capability. It ranks only models with at least 10 rated tasks, at least 40% task-level rating coverage, and sufficient per-band evidence when case-mix adjustment is active. Gate-excluded models remain visible after ranked rows with a provisional status and reason. Process metrics and post-treatment workload remain diagnostic.</p>
+        </header>
+
         <section class="chart span-2">
           <h3>Outcome trend <span class="note" id="timeline-note">—</span></h3>
           <div id="chart-timeline" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Model leaderboard <span class="note" id="leaderboard-note">—</span></h3>
+          <h3>Bias-aware model strength leaderboard <span class="note" id="leaderboard-note">—</span></h3>
           <div id="chart-leaderboard" class="chart-slot"></div>
           <div id="leaderboard-table" class="leaderboard-table-shell" aria-live="polite"></div>
         </section>
@@ -118,7 +126,7 @@
         </section>
 
         <section class="chart">
-          <h3>Verification cost vs payoff <span class="note" id="verification-cost-note">—</span></h3>
+          <h3>Observed time and outcomes by verification depth <span class="note" id="verification-cost-note">—</span></h3>
           <div id="chart-verification-cost" class="chart-slot"></div>
         </section>
 
@@ -128,12 +136,12 @@
         </section>
 
         <section class="chart">
-          <h3>Verification lift <span class="note" id="verification-note">—</span></h3>
+          <h3>Observed outcomes by verification state <span class="note" id="verification-note">—</span></h3>
           <div id="chart-verification-impact" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Tool reliability vs outcome <span class="note" id="tool-note">—</span></h3>
+          <h3>Observed outcomes by tool use and reliability <span class="note" id="tool-note">—</span></h3>
           <div id="chart-tool-failure-rate" class="chart-slot"></div>
         </section>
 
@@ -153,12 +161,12 @@
         </section>
 
         <section class="chart span-2">
-          <h3>Change size vs outcome <span class="note" id="mutation-note">—</span></h3>
+          <h3>Observed outcomes by change size <span class="note" id="mutation-note">—</span></h3>
           <div id="chart-file-mutation" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Task complexity &amp; subagent delegation <span class="note" id="complexity-subagent-note">—</span></h3>
+          <h3>Workload intensity &amp; subagent delegation <span class="note" id="complexity-subagent-note">—</span></h3>
           <div id="chart-complexity-subagent" class="chart-slot"></div>
         </section>
 
@@ -200,7 +208,7 @@
         </section>
 
         <section class="chart span-2">
-          <h3>Subagent ROI by task size <span class="note" id="subagent-roi-tier-note">—</span></h3>
+          <h3>Observed outcomes by subagent use and workload size <span class="note" id="subagent-roi-tier-note">—</span></h3>
           <div id="chart-subagent-roi-tier" class="chart-slot"></div>
         </section>
 
@@ -210,12 +218,12 @@
         </section>
 
         <section class="chart">
-          <h3>Task size distribution <span class="note" id="task-size-distribution-note">—</span></h3>
+          <h3>Workload-size distribution <span class="note" id="task-size-distribution-note">—</span></h3>
           <div id="chart-task-size-distribution" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Task size vs busy time <span class="note" id="task-size-time-note">—</span></h3>
+          <h3>Workload size vs busy time <span class="note" id="task-size-time-note">—</span></h3>
           <div id="chart-task-size-time" class="chart-slot"></div>
         </section>
 
@@ -240,6 +248,12 @@
         </section>
 
         <!-- ── Cost & token economics ────────────────────────────────────────── -->
+
+        <header class="dashboard-section span-2">
+          <p class="section-kicker">Cost/speed</p>
+          <h2>Understand spend, latency, and throughput</h2>
+          <p>Operational charts use the full filtered cohort. Costs prefer total parent-plus-subagent estimates and fall back to parent-only pricing.</p>
+        </header>
 
         <section class="chart span-2">
           <h3>Cost by model <span class="note" id="cost-by-model-note">—</span></h3>
@@ -343,6 +357,12 @@
 
         <!-- ── Work & efficiency ─────────────────────────────────────────────── -->
 
+        <header class="dashboard-section span-2">
+          <p class="section-kicker">Reliability/diagnostics</p>
+          <h2>Trace failures, telemetry gaps, and workflow friction</h2>
+          <p>Use these observed signals to diagnose reliability and coverage; associations do not establish causation.</p>
+        </header>
+
         <section class="chart span-2">
           <h3>Verification kind breakdown <span class="note" id="verification-kind-breakdown-note">—</span></h3>
           <div id="chart-verification-kind-breakdown" class="chart-slot"></div>
@@ -386,7 +406,7 @@
         </section>
 
         <section class="chart">
-          <h3>Pruning recovery rate <span class="note" id="pruning-recovery-rate-note">—</span></h3>
+          <h3>Over-pruning signals <span class="note" id="pruning-recovery-rate-note">—</span></h3>
           <div id="chart-pruning-recovery-rate" class="chart-slot"></div>
         </section>
 
@@ -432,25 +452,31 @@
           <div id="chart-multimodal-inputs" class="chart-slot"></div>
         </section>
 
-        <!-- ── Functional settings impact ──────────────────────────────────── -->
+        <!-- ── Functional settings and experiments ─────────────────────────── -->
+
+        <header class="dashboard-section span-2">
+          <p class="section-kicker">Settings/experiments</p>
+          <h2>Compare observed outcomes across configurations</h2>
+          <p>Review filtered contrasts for settings and experiments as descriptive evidence, with sample sizes and intervals where available.</p>
+        </header>
 
         <section class="chart span-2">
-          <h3>Subagent parent-model impact <span class="note" id="settings-subagent-parent-note">—</span></h3>
+          <h3>Observed outcomes by subagent parent-model setting <span class="note" id="settings-subagent-parent-note">—</span></h3>
           <div id="chart-settings-subagent-parent" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Pruning mode impact <span class="note" id="settings-pruning-mode-note">—</span></h3>
+          <h3>Observed outcomes by skill-pruning mode <span class="note" id="settings-pruning-mode-note">—</span></h3>
           <div id="chart-settings-pruning-mode" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Extension toggle impact <span class="note" id="settings-extension-toggles-note">—</span></h3>
+          <h3>Observed outcomes by extension toggle <span class="note" id="settings-extension-toggles-note">—</span></h3>
           <div id="chart-settings-extension-toggles" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Tool-result pruning impact <span class="note" id="settings-tool-result-pruning-note">—</span></h3>
+          <h3>Observed outcomes by tool-result pruning <span class="note" id="settings-tool-result-pruning-note">—</span></h3>
           <div id="chart-settings-tool-result-pruning" class="chart-slot"></div>
         </section>
       </div>

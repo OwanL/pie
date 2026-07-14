@@ -2,14 +2,14 @@
  * Stratified leaderboard for subagent model selection (v2).
  *
  * Computes on-demand from the analytics data store:
- *   1. Per-run complexity scores (6 heuristics, percentile-normalized)
+ *   1. Per-run ex-ante complexity scores (message size, attachments, context files)
  *   2. Splits runs into complexity terciles (low / medium / high)
  *   3. Computes outcome scores per model per band (point estimates)
  *   4. Rank by quality composite only (cost is not a ranking factor)
  *   5. Assigns models to buckets (small / medium / frontier)
  *
- * Used by the subagent extension via bridge.ts. The existing global
- * leaderboard (leaderboard.ts) is unchanged.
+ * This remains an offline/advisory experiment; runtime bucket selection does not read it.
+ * The canonical dashboard strength ranking lives in leaderboard.ts.
  */
 
 import {
@@ -62,15 +62,15 @@ const BAND_TO_BUCKET: Record<BandName, keyof BucketAssignments> = {
   high: "frontier",
 };
 
-// --- Complexity scoring (shared via complexity-scoring.ts) ---
-// The primitives live in complexity-scoring.ts so the global leaderboard and the
-// dashboard use the exact same complexity definition. Re-exported here for the
-// subagent bucket path and its tests.
+// --- Ex-ante complexity scoring ---
+// Never use post-treatment workload (tokens, tools, duration, mutations, verification) to define
+// difficulty bands: those values are downstream of model assignment and would bias the ranker.
 
-import { computeComplexityScores } from './complexity-scoring.ts';
+import { computePreTaskComplexityScores as computeComplexityScores } from './pre-task-complexity.ts';
 
-export { computeComplexityScores, extractSignals, percentileRanks } from './complexity-scoring.ts';
-export type { ComplexitySignals } from './complexity-scoring.ts';
+export { computePreTaskComplexityScores as computeComplexityScores, extractPreTaskSignals as extractSignals } from './pre-task-complexity.ts';
+export type { PreTaskComplexitySignals as ComplexitySignals } from './pre-task-complexity.ts';
+export { percentileRanks } from './complexity-scoring.ts';
 
 // --- Band assignment ---
 
@@ -84,7 +84,13 @@ export function assignBands(
   complexityScores: Map<string, number>,
 ): BandAssignment[] {
   const scored = runs
-    .filter((r) => r.scored)
+    .filter((r) => (
+      r.scored
+      && r.satisfaction !== null
+      && r.outcomeSource === 'user'
+      && !r.mixedModelConfig
+      && !r.mixedTreatmentConfig
+    ))
     .map((r) => ({ run: r, score: complexityScores.get(r.runId) ?? 0 }));
 
   if (scored.length === 0) {
@@ -140,7 +146,11 @@ export function computeOutcomeScores(
   modelRuns: PreparedRunRow[],
 ): ModelOutcomeScores | null {
   const scored = modelRuns.filter(
-    (r) => r.scored && r.satisfaction !== null,
+    (r) => r.scored
+      && r.satisfaction !== null
+      && r.outcomeSource === 'user'
+      && !r.mixedModelConfig
+      && !r.mixedTreatmentConfig,
   );
   if (scored.length === 0) return null;
 
@@ -431,7 +441,13 @@ export async function computeBucketAssignments(
     return { small: [], medium: [], frontier: [] };
   }
 
-  const scoredRuns = prepared.runs.filter((r) => r.scored);
+  const scoredRuns = prepared.runs.filter((r) => (
+    r.scored
+    && r.satisfaction !== null
+    && r.outcomeSource === 'user'
+    && !r.mixedModelConfig
+    && !r.mixedTreatmentConfig
+  ));
 
   // Bootstrap gate: need at least 40 scored runs
   if (scoredRuns.length < BOOTSTRAP_MIN_RUNS) {

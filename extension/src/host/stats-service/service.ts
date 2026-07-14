@@ -84,8 +84,8 @@ export class StatsService implements RunObserver {
     }
   }
 
-  prepareForSend(sessionPath: string, inputs: ComposerInput[]): string {
-    return this.tracker.prepareForSend(sessionPath, inputs);
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
+    return this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
   }
 
   onAssistantTurnStarted(sessionPath: string, turnId: string): void {

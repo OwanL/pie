@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { renderMarkdown } from '../markdown';
 import { useBufferedText } from './use-buffered-text';
+import { useCommittedTextLeaf } from './commit-registry';
 
 interface BufferedTextPartProps {
   messageId: string;
@@ -56,7 +57,8 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
  */
 export function BufferedTextPart({ messageId, index, text, streaming, onContextMenu }: BufferedTextPartProps) {
   const visibleText = useBufferedText(text, streaming);
-  const [html, setHtml] = useState(() => renderMarkdown(streaming ? visibleText : text));
+  const initialText = streaming ? visibleText : text;
+  const [rendered, setRendered] = useState(() => ({ html: renderMarkdown(initialText), text: initialText }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   const visibleTextRef = useRef(visibleText);
@@ -65,19 +67,19 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
   // Selection-aware update machinery: the body element, the latest desired
   // html, and a deferred-apply timer used while a selection is active.
   const bodyRef = useRef<HTMLDivElement>(null);
-  const pendingHtmlRef = useRef<string | null>(null);
+  const pendingHtmlRef = useRef<{ html: string; text: string } | null>(null);
   const deferTimerRef = useRef<number | null>(null);
   const deferStartedAtRef = useRef(0);
 
   /** Apply `nextHtml` now unless the user is mid-selection in the body, in
    *  which case defer it (re-checked on a poll, force-applied after a timeout). */
-  function applyHtml(nextHtml: string) {
-    pendingHtmlRef.current = nextHtml;
+  function applyHtml(nextHtml: string, representedText: string) {
+    pendingHtmlRef.current = { html: nextHtml, text: representedText };
     // A deferred apply is already scheduled — it will pick up the latest
     // pending html when it fires, so don't schedule another.
     if (deferTimerRef.current !== null) return;
     if (!hasSelectionInBody(bodyRef.current)) {
-      setHtml(nextHtml);
+      setRendered({ html: nextHtml, text: representedText });
       pendingHtmlRef.current = null;
       return;
     }
@@ -91,7 +93,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
       if (pendingHtmlRef.current === null) return;
       const elapsed = Date.now() - deferStartedAtRef.current;
       if (elapsed >= SELECTION_FORCE_APPLY_MS || !hasSelectionInBody(bodyRef.current)) {
-        setHtml(pendingHtmlRef.current);
+        setRendered(pendingHtmlRef.current);
         pendingHtmlRef.current = null;
         return;
       }
@@ -108,14 +110,14 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      applyHtml(renderMarkdown(visibleTextRef.current));
+      applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
       return;
     }
 
     const now = Date.now();
     if (now - lastParseAtRef.current >= MARKDOWN_PARSE_THROTTLE_MS) {
       lastParseAtRef.current = now;
-      applyHtml(renderMarkdown(visibleTextRef.current));
+      applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
       return;
     }
 
@@ -126,7 +128,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
       timerRef.current = window.setTimeout(() => {
         timerRef.current = null;
         lastParseAtRef.current = Date.now();
-        applyHtml(renderMarkdown(visibleTextRef.current));
+        applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
       }, MARKDOWN_PARSE_THROTTLE_MS);
     }
   }, [visibleText, streaming]);
@@ -143,12 +145,14 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
     }
   }, []);
 
+  useCommittedTextLeaf(messageId, index, rendered.text);
+
   return (
     <div
       key={`text-${messageId}-${index}`}
       class={`message-body${streaming ? ' streaming-text' : ''}`}
       ref={bodyRef}
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: rendered.html }}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(e);

@@ -7,11 +7,20 @@ SELECT
   scored,
   resolution,
   satisfaction,
+  outcome_source,
   model_id,
+  model_family,
   thinking_level,
   experiment_assignment,
+  mixed_model_config,
   mixed_treatment_config,
+  initial_user_message_chars,
+  context_file_count,
+  filesystem_path_ref_count,
+  image_input_count,
   tool_call_count,
+  tool_duration_ms,
+  timed_tool_call_count,
   tool_failure_count,
   verification_total_count,
   verification_failure_count,
@@ -22,6 +31,8 @@ SELECT
   cache_read_tokens,
   cache_write_tokens,
   token_reported_turn_count,
-  estimated_cost_usd
+  estimated_cost_usd,
+  subagent_estimated_cost_usd,
+  total_estimated_cost_usd
 FROM runs
 ORDER BY started_at DESC;

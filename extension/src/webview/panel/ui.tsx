@@ -26,6 +26,7 @@ import type {
   WebviewToHostMessage,
 } from '../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
+import type { LiveTurnPhase } from '../../shared/live-pipeline-protocol';
 import { describeComposerInputSummary } from './composer/inputs';
 import { ComposerAttachments } from './composer/attachments';
 import { ComposerToolbar } from './composer/toolbar';
@@ -52,6 +53,7 @@ interface ComposerProps {
    *  (Cancel reuses `onInterrupt` — `session.abort()` aborts the retry sleep
    *  via `abortRetry()`, emitting `auto_retry_end` "Retry cancelled"). */
   retryStatus: RetryStatus | null;
+  liveTurnPhase: LiveTurnPhase | null;
   sessionPath: string | null;
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
@@ -109,6 +111,7 @@ function ComposerView({
   busy,
   interrupting,
   retryStatus,
+  liveTurnPhase,
   sessionPath,
   draftText,
   draftRestore,
@@ -266,6 +269,7 @@ function ComposerView({
     <div class="composer-area flex shrink-0 flex-col gap-1.5 border-t border-border/50 bg-surface px-3 py-2 pb-2.5" ref={composerAreaRef}>
       <div class="composer-rail flex flex-col gap-1.5">
       <ComposerToolbar
+        sessionPath={sessionPath}
         prefs={prefs}
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
@@ -302,6 +306,14 @@ function ComposerView({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {!retryStatus && busy && liveTurnPhase && liveTurnPhase !== 'streaming' && (
+          <div class="composer-provider-phase flex items-center gap-2" role="status" aria-live="polite">
+            <span class="composer-retry-label flex items-center gap-1.5">
+              <span class="composer-retry-spinner" aria-hidden="true" />
+              {describeLiveTurnPhase(liveTurnPhase)}
+            </span>
+          </div>
+        )}
         {retryStatus && (
           <div class="composer-retry-row flex items-center gap-2" role="status" aria-live="polite">
             <span class="composer-retry-label flex items-center gap-1.5">
@@ -365,6 +377,20 @@ function ComposerView({
       </div>
     </div>
   );
+}
+
+function describeLiveTurnPhase(phase: LiveTurnPhase): string {
+  switch (phase) {
+    case 'queued': return 'Queued for provider capacity…';
+    case 'preparing': return 'Preparing the next provider request…';
+    case 'waiting_provider': return 'Waiting for the provider…';
+    case 'running_tool': return 'Running a tool…';
+    case 'waiting_input': return 'Waiting for input…';
+    case 'retry_wait': return 'Waiting to retry the provider…';
+    case 'aborting': return 'Stopping provider work…';
+    case 'reconciling_gap': return 'Recovering live response state…';
+    case 'streaming': return 'Receiving provider response…';
+  }
 }
 
 export const Composer = memo(ComposerView);

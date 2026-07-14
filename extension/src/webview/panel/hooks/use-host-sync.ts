@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'preact/hooks';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks';
 
 import { playCompletionSound } from '../completion-sound';
 import { validateViewState } from '../state-validator';
@@ -24,7 +24,8 @@ import { EMPTY_AGGREGATE_STATS } from '../../../shared/protocol';
 import { pickStable } from '../utils/view-state-stabilize';
 import { pickStableModelList } from '../utils/model-list-stabilize';
 import { webviewLog } from '../utils/log';
-import { transcriptRenderSignature } from '../../../shared/transcript-render-signature';
+import type { TranscriptCommitTarget } from '../transcript/commit-registry';
+import { recordRenderEvidenceTarget } from '../render-error';
 
 export const EMPTY_VIEW_STATE: ViewState = {
   sessions: [],
@@ -46,6 +47,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   deferredTriggers: [],
   busy: false,
   retryStatus: null,
+  liveTurnPhase: null,
   notice: null,
   noticeKind: null,
   backendReady: false,
@@ -86,6 +88,8 @@ export interface HostSyncState {
   viewState: ViewState;
   /** Transcript with optimistic user messages merged in. */
   mergedTranscript: ChatMessage[];
+  /** Latest validated protocol-v4 envelope awaiting renderer evidence. */
+  commitTarget: TranscriptCommitTarget | null;
   draftRestore: { text: string; nonce: number } | null;
   activeSessionPathRef: { current: string | null };
   setDraftRestore: (v: { text: string; nonce: number } | null) => void;
@@ -201,48 +205,6 @@ function useMergedTranscript(viewState: ViewState, optimisticMessages: Optimisti
   }, [viewState.transcript, viewState.activeSession?.path, optimisticMessages]);
 }
 
-interface PendingStateApplied {
-  revision: number;
-  backendReady: boolean;
-  transcriptLoaded: boolean;
-  openTabCount: number;
-  transcriptCount: number;
-  systemPromptCount: number;
-  renderSignature: string;
-}
-
-function useStateAppliedDiagnostics(
-  pendingStateApplied: PendingStateApplied | null,
-  postMessage: (msg: WebviewToHostMessage) => void,
-) {
-  const sentStateAppliedRevisionRef = useRef<number>(-1);
-
-  useLayoutEffect(() => {
-    if (!pendingStateApplied) {
-      return;
-    }
-    if (pendingStateApplied.revision === sentStateAppliedRevisionRef.current) {
-      return;
-    }
-
-    sentStateAppliedRevisionRef.current = pendingStateApplied.revision;
-    postMessage({
-      type: 'stateApplied',
-      payload: {
-        revision: pendingStateApplied.revision,
-        backendReady: pendingStateApplied.backendReady,
-        transcriptLoaded: pendingStateApplied.transcriptLoaded,
-        openTabCount: pendingStateApplied.openTabCount,
-        transcriptCount: pendingStateApplied.transcriptCount,
-        systemPromptCount: pendingStateApplied.systemPromptCount,
-        renderSignature: pendingStateApplied.renderSignature,
-        domRenderSignature: document.querySelector<HTMLElement>('[data-render-signature]')?.dataset.renderSignature ?? null,
-        domTranscriptLoaderPresent: document.querySelector('.transcript-loading') !== null,
-        domTabsConnectingPresent: document.querySelector('.session-tabs-connecting') !== null,
-      },
-    });
-  }, [pendingStateApplied, postMessage]);
-}
 
 function useFocusRefresh(postMessage: (msg: WebviewToHostMessage) => void) {
   useEffect(() => {
@@ -297,6 +259,7 @@ interface HostMessageContext {
   hydrateViewState: (raw: ViewState) => ViewState;
   resetPerSessionState: () => void;
   hostInstanceIdRef: { current: string };
+  viewGenerationRef: { current: number };
   /** Last applied snapshot revision (Brief D). Allowlisted webview-local
    *  protocol-sync bookkeeping (STATE_CONTRACT § Webview-Local State). */
   lastRevisionRef: { current: number };
@@ -307,7 +270,8 @@ interface HostMessageContext {
   draftOps: DraftRestoreOps;
   inputsOps: InputsRestoreOps;
   setViewState: (v: ViewState) => void;
-  setPendingStateApplied: (v: PendingStateApplied | null) => void;
+  setCommitTarget: (v: TranscriptCommitTarget | null) => void;
+  postMessage: (msg: WebviewToHostMessage) => void;
 }
 
 /** Tracks whether the webview has already warned about a host/webview
@@ -358,10 +322,38 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // host revisions are 1-based.)
   const prevHostInstanceId = ctx.hostInstanceIdRef.current;
   const hostChanged = !!prevHostInstanceId && m.hostInstanceId !== prevHostInstanceId;
-  if (!hostChanged && m.revision <= ctx.lastRevisionRef.current) {
+  const generationChanged = ctx.viewGenerationRef.current !== 0 && m.viewGeneration !== ctx.viewGenerationRef.current;
+  if (!hostChanged && m.viewGeneration < ctx.viewGenerationRef.current) return;
+  if (!hostChanged && !generationChanged && m.revision <= ctx.lastRevisionRef.current) {
     return; // stale / duplicate — discard totally (no flicker, no overlay regression)
   }
+
+  // Hydration validates the complete ViewState. Receipt evidence is emitted
+  // only after this succeeds, and before scheduling any renderer state update.
+  const hydratedState = ctx.hydrateViewState(m.state);
   ctx.lastRevisionRef.current = m.revision;
+  ctx.viewGenerationRef.current = m.viewGeneration;
+  const commitTarget: TranscriptCommitTarget = {
+    revision: m.revision,
+    viewGeneration: m.viewGeneration,
+    expectedTranscriptIdentity: m.expectedTranscriptIdentity,
+    acceptedAt: performance.now(),
+    state: {
+      transcript: m.state.transcript,
+      transcriptWindow: m.state.transcriptWindow,
+      activeSessionPath: m.state.activeSession?.path ?? null,
+      openTabPaths: m.state.openTabPaths,
+    },
+  };
+  recordRenderEvidenceTarget(commitTarget, 'app');
+  ctx.postMessage({
+    type: 'stateReceived',
+    payload: {
+      revision: m.revision,
+      viewGeneration: m.viewGeneration,
+      snapshotBytes: m.snapshotBytes,
+    },
+  });
 
   ctx.resetPerSessionState();
   const nextActiveSessionPath = m.state.activeSession?.path ?? null;
@@ -407,16 +399,8 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // has done its job — clear it so the authoritative snapshot takes over.
   ctx.inputsOps.clear();
 
-  ctx.setViewState(ctx.hydrateViewState(m.state));
-  ctx.setPendingStateApplied({
-    revision: m.revision,
-    backendReady: m.state.backendReady,
-    transcriptLoaded: m.state.transcriptLoaded,
-    openTabCount: m.state.openTabPaths.length,
-    transcriptCount: m.state.transcript.length,
-    systemPromptCount: m.state.systemPrompts.length,
-    renderSignature: transcriptRenderSignature(m.state),
-  });
+  ctx.setViewState(hydratedState);
+  ctx.setCommitTarget(commitTarget);
 }
 
 function handlePlayCompletionSound(msg: HostToWebviewMessage) {
@@ -481,13 +465,14 @@ export function useHostSync(
   const [draftRestore, setDraftRestore] = useState<{ text: string; nonce: number } | null>(null);
   const [inputsRestore, setInputsRestore] = useState<{ inputs: ComposerInput[]; nonce: number } | null>(null);
   const [optimisticMessages, setOptimisticMessages] = useState<OptimisticUserMessage[]>([]);
-  const [pendingStateApplied, setPendingStateApplied] = useState<PendingStateApplied | null>(null);
+  const [commitTarget, setCommitTarget] = useState<TranscriptCommitTarget | null>(null);
 
   const hostInstanceIdRef = useRef('');
   // Brief D: last applied snapshot revision. Revisions are 1-based on the
   // host (globalRevision starts at 0, buildStateEnvelope does +1), so 0 means
   // "no snapshot applied yet" — the first envelope always passes the guard.
   const lastRevisionRef = useRef(0);
+  const viewGenerationRef = useRef(0);
   const activeSessionPathRef = useRef<string | null>(null);
   const committedSessionPathRef = useRef<string | null>(null);
   const pendingDraftRestoreRef = useRef(new Map<string, { text: string }>());
@@ -584,6 +569,7 @@ export function useHostSync(
         hydrateViewState,
         resetPerSessionState,
         hostInstanceIdRef,
+        viewGenerationRef,
         lastRevisionRef,
         activeSessionPathRef,
         committedSessionPathRef,
@@ -592,7 +578,8 @@ export function useHostSync(
         draftOps: draftOpsRef.current,
         inputsOps: inputsOpsRef.current,
         setViewState,
-        setPendingStateApplied,
+        setCommitTarget,
+        postMessage,
       });
     };
 
@@ -602,8 +589,6 @@ export function useHostSync(
     return () => window.removeEventListener('message', handleMessage);
   }, [clearTransientUi, postMessage, resetPerSessionState, hydrateViewState]);
 
-  useStateAppliedDiagnostics(pendingStateApplied, postMessage);
-
   useFocusRefresh(postMessage);
 
   const effectiveViewState = useMemo<ViewState>(
@@ -611,5 +596,5 @@ export function useHostSync(
     [viewState, inputsRestore],
   );
 
-  return { viewState: effectiveViewState, mergedTranscript, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage };
+  return { viewState: effectiveViewState, mergedTranscript, commitTarget, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage };
 }

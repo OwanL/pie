@@ -8,6 +8,8 @@
 import { parseJsonOrThrow } from "../../../shared/error-message.js";
 
 export const PROVIDER_TOGGLES_ENV = "PIE_PROVIDER_TOGGLES_JSON";
+export const SUBAGENT_PROVIDER_DEFAULTS_ENV = "PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON";
+export const SUBAGENT_PROVIDER_TOGGLES_ENV = "PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON";
 
 export interface ModelProviderRef {
   id: string;
@@ -32,6 +34,33 @@ export function parseProviderToggles(
   } catch {
     return {};
   }
+}
+
+export function parseSessionProviderToggles(
+  raw: string | undefined,
+  sessionPath: string | undefined,
+): Record<string, boolean> {
+  if (!raw || !sessionPath) return {};
+  try {
+    const parsed = parseJsonOrThrow<unknown>(raw, "per-session subagent provider toggles");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const sessionValue = (parsed as Record<string, unknown>)[sessionPath];
+    if (!sessionValue || typeof sessionValue !== "object" || Array.isArray(sessionValue)) return {};
+    const result: Record<string, boolean> = {};
+    for (const [provider, enabled] of Object.entries(sessionValue)) {
+      if (typeof enabled === "boolean") result[provider] = enabled;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function resolveSubagentProviderToggles(
+  defaults: Record<string, boolean>,
+  sessionOverrides: Record<string, boolean>,
+): Record<string, boolean> {
+  return { ...defaults, ...sessionOverrides };
 }
 
 export function getDisabledProviders(

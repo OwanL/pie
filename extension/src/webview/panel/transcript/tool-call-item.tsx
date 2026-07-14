@@ -17,6 +17,8 @@ import { ResizeHandle } from '../components/resize-handle';
 import { useResizableHeight } from '../components/use-resizable-height';
 import {
   getRenderableSubagentResultFromToolCall,
+  isSubagentSingleResultInterrupted,
+  isSubagentSingleResultRunning,
   subagentSingleResultToChatMessages,
   type SubagentResult,
   type SubagentSingleResult,
@@ -35,6 +37,7 @@ import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
 import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-tail-preview';
+import { useCommittedToolLeaf } from './commit-registry';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -54,10 +57,6 @@ interface SubagentBlockProps {
   onContextMenu: (e: MouseEvent) => void;
   onNestedContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
-}
-
-function isRunning(result: SubagentSingleResult): boolean {
-  return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
 }
 
 function formatActivityDuration(ms: number): string {
@@ -84,7 +83,7 @@ interface SubagentActivity {
 }
 
 export function subagentActivity(result: SubagentSingleResult, now: number): SubagentActivity | undefined {
-  if (!isRunning(result)) return undefined;
+  if (!isSubagentSingleResultRunning(result)) return undefined;
   const labels: Record<string, string> = {
     queued: 'Waiting for concurrency',
     preparing: 'Starting',
@@ -121,7 +120,7 @@ export function subagentActivity(result: SubagentSingleResult, now: number): Sub
 }
 
 function isFailed(result: SubagentSingleResult): boolean {
-  if (isRunning(result)) return false;
+  if (isSubagentSingleResultRunning(result)) return false;
   return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted';
 }
 
@@ -130,7 +129,7 @@ function subagentErrorDetail(result: SubagentSingleResult): string | undefined {
   if (!isFailed(result)) return undefined;
   const parts: string[] = [];
   const label =
-    result.stopReason === 'aborted' ? 'Aborted'
+    isSubagentSingleResultInterrupted(result) ? 'Interrupted'
     : result.stopReason === 'error' ? 'Error'
     : result.exitCode > 0 ? `Exit code ${result.exitCode}`
     : 'Failed';
@@ -208,11 +207,15 @@ function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
   const tokensPerSecond = latestThroughput
     ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)
     : undefined;
+  const hasInput = typeof usage?.input === 'number' && usage.input > 0;
   const hasOutput = typeof usage?.output === 'number' && usage.output > 0;
-  const hasRetries = typeof result.retryCount === 'number' && result.retryCount > 0;
-  if (!hasContext && !hasOutput && tokensPerSecond == null && !hasRetries) return null;
-
   const cacheTokens = (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
+  const hasCache = cacheTokens > 0;
+  const hasTurns = typeof usage?.turns === 'number' && usage.turns > 0;
+  const hasCost = typeof usage?.cost === 'number' && usage.cost > 0;
+  const hasRetries = typeof result.retryCount === 'number' && result.retryCount > 0;
+  if (!hasContext && !hasInput && !hasOutput && !hasCache && !hasTurns && !hasCost && tokensPerSecond == null && !hasRetries) return null;
+
   const title = [
     hasContext ? `Context: ${contextTokens!.toLocaleString()} / ${contextWindow!.toLocaleString()} tokens (${formatContextPercent(contextTokens!, contextWindow!)})` : undefined,
     usage ? `Usage: ${usage.input.toLocaleString()} input, ${usage.output.toLocaleString()} output, ${cacheTokens.toLocaleString()} cached` : undefined,
@@ -230,24 +233,31 @@ function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
           <span class="subagent-telemetry-percent"> {formatContextPercent(contextTokens!, contextWindow!)}</span>
         </span>
       )}
+      {hasInput && <span class="subagent-telemetry-item subagent-telemetry-input">in {compactTelemetryNumber(usage!.input)}</span>}
       {hasOutput && <span class="subagent-telemetry-item subagent-telemetry-output">out {compactTelemetryNumber(usage!.output)}</span>}
+      {hasCache && <span class="subagent-telemetry-item subagent-telemetry-cache">cache {compactTelemetryNumber(cacheTokens)}</span>}
+      {hasTurns && <span class="subagent-telemetry-item subagent-telemetry-turns">{usage!.turns}t</span>}
       {tokensPerSecond != null && <span class="subagent-telemetry-item subagent-telemetry-rate">last {tokensPerSecond.toFixed(1)} tok/s</span>}
+      {hasCost && <span class="subagent-telemetry-item subagent-telemetry-cost">${usage!.cost!.toFixed(3)}</span>}
       {hasRetries && <span class="subagent-telemetry-item subagent-telemetry-retries">retry {result.retryCount}</span>}
     </span>
   );
 }
 
+type SubagentVisualStatus = 'idle' | 'running' | 'interrupted' | 'failed' | 'completed';
+
 /** Status indicator chip at the right side of the header. */
-function StatusIndicator({ status, errorDetail }: { status: 'idle' | 'running' | 'failed' | 'completed'; errorDetail?: string }) {
-  if (status !== 'failed') return null;
+function StatusIndicator({ status, errorDetail }: { status: SubagentVisualStatus; errorDetail?: string }) {
+  if (status !== 'failed' && status !== 'interrupted') return null;
+  const interrupted = status === 'interrupted';
 
   return (
     <StatusChip
-      tone="failed"
-      label="Failed"
+      tone={interrupted ? 'interrupted' : 'failed'}
+      label={interrupted ? 'Interrupted' : 'Failed'}
       className="status-chip-fixed"
       copyText={errorDetail}
-      copyAriaLabel="Copy subagent error detail"
+      copyAriaLabel={`Copy subagent ${interrupted ? 'interruption' : 'error'} detail`}
     />
   );
 }
@@ -256,21 +266,24 @@ export function singleResultStatus(
   result: SubagentSingleResult,
   toolCallStatus: ToolCall['status'],
   multipleResults: boolean,
-): 'idle' | 'running' | 'failed' | 'completed' {
+): SubagentVisualStatus {
+  // A child interruption is distinct from a provider/tool failure. Check it
+  // before the outer tool status because pi reports interrupted tool calls as
+  // failed at the generic lifecycle layer.
+  if (isSubagentSingleResultInterrupted(result)) return 'interrupted';
+
   // The outer tool lifecycle is authoritative once terminal. Older or raced
   // child results can retain a stale runningTools entry even though execution
-  // has finished; do not leave those cards visually running forever.
+  // has finished; do not leave those cards visually running forever. In a
+  // parallel call, however, one failed sibling makes the outer tool fail, so a
+  // child that explicitly completed must stay completed.
   if (toolCallStatus !== 'running') {
-    if (
-      toolCallStatus === 'failed'
-      || result.exitCode !== 0
-      || result.stopReason === 'error'
-      || result.stopReason === 'aborted'
-    ) return 'failed';
+    if (isFailed(result)) return 'failed';
+    if (toolCallStatus === 'failed' && (!multipleResults || result.exitCode === -1)) return 'failed';
     return 'completed';
   }
   if (isFailed(result)) return 'failed';
-  if (isRunning(result)) {
+  if (isSubagentSingleResultRunning(result)) {
     // A running call that has produced no activity yet is "idle" (queued /
     // not started).
     if (isIdle(result)) return 'idle';
@@ -444,18 +457,22 @@ function SubagentSingleBlock({
     : `subagent:${toolCall.id}`;
   const [open, setOpen] = useCollapsibleOpen(collapsibleKey, prefs.autoExpandSubagentCalls);
   const status = singleResultStatus(singleResult, toolCall.status, multipleResults);
-  const errorDetail = status === 'failed' ? subagentErrorDetail(singleResult) : undefined;
+  const errorDetail = status === 'failed' || status === 'interrupted'
+    ? subagentErrorDetail(singleResult)
+    : undefined;
   // Lifecycle events do not necessarily arrive every second. Tick locally so
   // elapsed time remains visibly alive during concurrency/provider waits and
   // active streaming alike (queued children have the visual `idle` status).
   const [activityNow, setActivityNow] = useState(Date.now());
   useEffect(() => {
-    if (!isRunning(singleResult)) return;
+    if (status !== 'running' && status !== 'idle') return;
     setActivityNow(Date.now());
     const timer = setInterval(() => setActivityNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [status, singleResult.activityPhase, singleResult.activitySince]);
-  const activity = subagentActivity(singleResult, activityNow);
+  const activity = status === 'running' || status === 'idle'
+    ? subagentActivity(singleResult, activityNow)
+    : undefined;
   // Collapsed cards keep a compact task/live-output preview. Expanded cards
   // already show the full child transcript, so repeating the preview there is
   // redundant.
@@ -577,7 +594,7 @@ function SubagentSingleBlock({
         <div
           class="subagent-live-preview"
           role="status"
-          aria-label={`${singleResult.agent} live output`}
+          aria-label={`${singleResult.agent} ${status === 'running' || status === 'idle' ? 'live' : status} output`}
         >
           <TurnActivityTailBody tail={previewTail} />
         </div>
@@ -692,6 +709,10 @@ export function ToolCallItem({
   onContextMenu,
   renderToolCall,
 }: ToolCallItemProps) {
+  // ToolCallItem is the common lifecycle boundary for every renderer. Keeping
+  // commit evidence here ensures specialized subagent/ask-user/web-search
+  // renderers cannot bypass the canonical tool leaf.
+  useCommittedToolLeaf(toolCall);
   const subagentResult = getRenderableSubagentResultFromToolCall(toolCall);
   const rendererName = toolCall.name === 'subagent' || !!subagentResult ? 'subagent' : toolCall.name;
   const Renderer = getToolRenderer(rendererName) ?? getToolRenderer('__default');

@@ -89,6 +89,11 @@ import {
 import { handleAvailableModelsChanged, handleModelSettingsHydrated } from './reducer/set-model-handlers.js';
 import { handleFileChangesUpdated } from './reducer/file-handlers.js';
 import {
+  handleTurnSemanticEvent,
+  handleLiveLifecycleWatermark,
+  handleLiveTurnCheckpointResult,
+} from './reducer/live-pipeline-handlers.js';
+import {
   handleActiveRunSummaryChanged,
   handleComposerInputsReplaced,
 } from './reducer/composer-handlers.js';
@@ -129,7 +134,19 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
       return handleClearQueueResult(state, event);
     }
 
+    case 'LiveTurnCheckpointResult': {
+      return handleLiveTurnCheckpointResult(state, event);
+    }
+
     // ─── Backend streaming events ─────────────────────────────────────────
+
+    case 'TurnSemanticEventReceived': {
+      return handleTurnSemanticEvent(state, event);
+    }
+
+    case 'LiveLifecycleWatermarkReceived': {
+      return handleLiveLifecycleWatermark(state, event);
+    }
 
     case 'MessageStarted':
     case 'MessageAborted':
