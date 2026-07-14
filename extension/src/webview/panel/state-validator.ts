@@ -53,32 +53,6 @@ function checkType(value: unknown, expectedType: FieldSpec['type']): boolean {
   return typeof value === expectedType;
 }
 
-/** Recursively scan an object/array for Promise values and return paths. */
-function findPromisePaths(value: unknown, path = 'ViewState'): string[] {
-  const seen = new Set<unknown>();
-  const paths: string[] = [];
-  function walk(v: unknown, p: string) {
-    if (v instanceof Promise) {
-      paths.push(`${p} = Promise`);
-      return;
-    }
-    if (v == null || typeof v !== 'object') return;
-    if (seen.has(v)) return;
-    seen.add(v);
-    if (Array.isArray(v)) {
-      for (let i = 0; i < v.length; i += 1) {
-        walk(v[i], `${p}[${i}]`);
-      }
-    } else {
-      for (const [key, child] of Object.entries(v)) {
-        walk(child, `${p}.${key}`);
-      }
-    }
-  }
-  walk(value, path);
-  return paths;
-}
-
 /** Validate incoming ViewState. Returns list of violations (empty = valid). */
 export function validateViewState(state: ViewState): string[] {
   const violations: string[] = [];
@@ -92,11 +66,6 @@ export function validateViewState(state: ViewState): string[] {
     } else if (value instanceof Promise) {
       violations.push(`ViewState.${spec.path} is a Promise`);
     }
-  }
-
-  const promisePaths = findPromisePaths(state);
-  if (promisePaths.length > 0) {
-    violations.push(`Promise found in ViewState: ${promisePaths.join('; ')}`);
   }
 
   if (violations.length > 0) {

@@ -2,7 +2,7 @@
 -- Excludes open (in-progress) runs so daily aggregates reflect finalized work.
 SELECT
   started_day AS bucket_start,
-  COALESCE(model_id, '(unknown)') AS model_id,
+  COALESCE(model_family, model_id, '(unknown)') AS model_id,
   COUNT(*) AS run_count,
   COUNT(*) FILTER (WHERE satisfaction IS NOT NULL) AS scored_run_count,
   ROUND(AVG(satisfaction), 2) AS average_satisfaction,

@@ -316,10 +316,12 @@ export function check(root = repoRoot()) {
       diffLines = deepDiff(generated, committed, key);
     }
     // Trailing-newline check: caught by no parsed-JSON mechanism since both
-    // parsed values are identical. sync-models always appends \\n to derived files,
-    // so a committed file missing the newline would silently diverge.
+    // parsed values are identical. Exclude settings.json because it is also a
+    // runtime preference store and may be rewritten by pi while this check runs;
+    // its formatting must not block commits or pushes.
     if (
       !changed &&
+      key !== 'settingsJson' &&
       (rel.endsWith('.json') || rel.endsWith('.yaml'))
     ) {
       const committedRaw = readFileSync(path.join(root, rel), 'utf8');

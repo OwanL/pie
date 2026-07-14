@@ -1,957 +1,335 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createModelLeaderboard } from '../scripts/leaderboard.ts';
+import type { PreparedRunRow } from '../scripts/contracts.ts';
+import { createModelLeaderboard, createModelLeaderboardFromRuns } from '../scripts/leaderboard.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
-test('leaderboard produces ranked rows from fixture data', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
+test('family leaderboard ranks every observed non-unknown family with regularized source channels', async () => {
+  const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
-
-  assert.equal(leaderboard.schemaVersion, 1);
-  assert.ok(leaderboard.rows.length > 0, 'should produce at least one row');
-  assert.equal(leaderboard.minimumScoredRuns, 3);
-  assert.deepEqual(Object.keys(leaderboard.weights).sort(), [
-    'fileChurn', 'resolutionRate', 'satisfaction', 'tokenEfficiency', 'toolReliability', 'verificationPassRate',
-  ]);
-
-  // Every row has required fields
-  for (const row of leaderboard.rows) {
-    assert.ok(typeof row.modelId === 'string');
-    assert.ok(typeof row.thinkingLevel === 'string');
-    assert.ok(typeof row.runCount === 'number' && row.runCount > 0);
-    assert.ok(typeof row.scoredRunCount === 'number');
-    assert.ok(row.dimensions !== null && typeof row.dimensions === 'object');
-    for (const dim of Object.values(row.dimensions)) {
-      assert.ok(typeof dim.n === 'number' && dim.n >= 0);
-    }
-    assert.ok(typeof row.reliabilityFactor === 'number' || row.reliabilityFactor === null);
-  }
-});
-
-test('leaderboard excludes open runs from grouping', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const totalLeaderboardRuns = leaderboard.rows.reduce((sum, row) => sum + row.runCount, 0);
-  const completedRuns = prepared.runs.filter((run) => run.status !== 'open').length;
-  assert.equal(totalLeaderboardRuns, completedRuns);
-});
-
-test('leaderboard assigns null rank and composite when scored runs < minimum', async () => {
-  const fixture = deepClone(await loadFixture());
-  // Keep only 1 scored run per model by unscoring most
-  let kept = 0;
-  for (const run of fixture.completedRuns) {
-    if (kept >= 1) {
-      run.scored = false;
-      delete (run as Partial<typeof run>).outcome;
-    } else if (run.scored) {
-      kept++;
-    }
-  }
-  fixture.outcomes = fixture.outcomes.slice(0, 1);
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  for (const row of leaderboard.rows) {
-    if (row.scoredRunCount < 3) {
-      assert.equal(row.compositeScore, null, `model ${row.modelId} should have null composite with ${row.scoredRunCount} scored runs`);
-      assert.equal(row.rank, null, `model ${row.modelId} should have null rank`);
-    }
-  }
-});
-
-test('leaderboard handles all-unscored edge case', async () => {
-  const fixture = deepClone(await loadFixture());
-  fixture.completedRuns.forEach((run) => {
-    run.scored = false;
-    delete (run as Partial<typeof run>).outcome;
-  });
-  fixture.outcomes = [];
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  assert.ok(leaderboard.rows.length > 0, 'should still produce rows for completed runs');
-  for (const row of leaderboard.rows) {
-    assert.equal(row.scoredRunCount, 0);
-    assert.equal(row.compositeScore, null);
-    assert.equal(row.rank, null);
-    assert.equal(row.dimensions.satisfaction.value, null);
-    assert.equal(row.dimensions.satisfaction.lowerBound, null);
-    assert.equal(row.reliabilityFactor, null);
-  }
-});
-
-test('leaderboard collapses experiment assignments into model+thinking groups', async () => {
-  const fixture = deepClone(await loadFixture());
-  // Give the same model different experiment assignments
-  for (const run of fixture.completedRuns) {
-    run.modelId = 'test-model';
-    run.thinkingLevel = 'medium';
-    run.experimentAssignment = run.runId === 'run-001' ? 'exp-a' : 'exp-b';
-  }
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  // Should collapse into one row since model+thinking are the same
-  const testRows = leaderboard.rows.filter((row) => row.modelId === 'test-model');
-  assert.equal(testRows.length, 1, 'experiment assignments should be collapsed');
-  assert.equal(testRows[0]!.runCount, fixture.completedRuns.length);
-});
-
-test('leaderboard ranks are sorted descending by composite score', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const ranked = leaderboard.rows.filter((row) => row.rank !== null);
-  for (let index = 1; index < ranked.length; index++) {
-    const previous = ranked[index - 1]!;
-    const current = ranked[index]!;
-    assert.ok(previous.rank! <= current.rank!, 'ranks should be ascending');
-    assert.ok(previous.compositeScore! >= current.compositeScore!, 'composite scores should be descending');
-  }
-
-  // Unranked rows come after ranked rows
-  const unranked = leaderboard.rows.filter((row) => row.rank === null);
-  if (ranked.length > 0 && unranked.length > 0) {
-    const lastRankedIdx = leaderboard.rows.indexOf(ranked[ranked.length - 1]!);
-    const firstUnrankedIdx = leaderboard.rows.indexOf(unranked[0]!);
-    assert.ok(lastRankedIdx < firstUnrankedIdx, 'unranked rows should come after ranked rows');
-  }
-});
-
-test('leaderboard dimension values are within expected bounds', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  for (const row of leaderboard.rows) {
-    const { satisfaction, resolutionRate, fileChurn, toolReliability, verificationPassRate, tokenEfficiency } = row.dimensions;
-
-    if (satisfaction.value !== null) {
-      assert.ok(satisfaction.value >= 1 && satisfaction.value <= 5, `satisfaction value ${satisfaction.value} out of [1,5]`);
-    }
-    if (satisfaction.lowerBound !== null) {
-      assert.ok(satisfaction.lowerBound >= 1 && satisfaction.lowerBound <= 5, `satisfaction lowerBound ${satisfaction.lowerBound} out of [1,5]`);
-    }
-
-    for (const dim of [resolutionRate, fileChurn, toolReliability, verificationPassRate]) {
-      if (dim.value !== null) {
-        assert.ok(dim.value >= 0 && dim.value <= 1, `dimension value ${dim.value} out of [0,1]`);
-      }
-      if (dim.lowerBound !== null) {
-        assert.ok(dim.lowerBound >= 0 && dim.lowerBound <= 1, `dimension lowerBound ${dim.lowerBound} out of [0,1]`);
-      }
-    }
-
-    if (tokenEfficiency.value !== null) {
-      assert.ok(tokenEfficiency.value >= 0 && tokenEfficiency.value <= 50, `tokenEfficiency value ${tokenEfficiency.value} out of [0,50]`);
-    }
-    if (tokenEfficiency.lowerBound !== null) {
-      assert.ok(tokenEfficiency.lowerBound >= 0 && tokenEfficiency.lowerBound <= 50, `tokenEfficiency lowerBound ${tokenEfficiency.lowerBound} out of [0,50]`);
-    }
-  }
-});
-
-test('leaderboard tracks subagent context from fixture data', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  // Fixture has exactly 1 run with subagent calls (run-003)
-  const totalSubagentRuns = leaderboard.rows.reduce((sum, row) => sum + row.subagentRunCount, 0);
-  assert.equal(totalSubagentRuns, 1, 'fixture should have 1 run with subagent usage');
-
-  for (const row of leaderboard.rows) {
-    assert.ok(row.subagentUsageRate !== null);
-    if (row.subagentRunCount === 0) {
-      assert.equal(row.avgSubagentTasksPerRun, null);
-    } else {
-      assert.ok(typeof row.avgSubagentTasksPerRun === 'number');
-    }
-  }
-});
-
-test('leaderboard weights sum to 1.0', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const sum = Object.values(leaderboard.weights).reduce((acc, w) => acc + w, 0);
-  assert.ok(Math.abs(sum - 1.0) < 0.001, `weights sum to ${sum}, expected 1.0`);
-});
-
-test('leaderboard reliability factor reports sample confidence n/(n+k)', async () => {
-  const fixture = deepClone(await loadFixture());
-  // Create two models: one with 3 scored runs, one with 10+
-  const baseRun = fixture.completedRuns[0]!;
-  const fewRuns: typeof fixture.completedRuns = [];
-  const manyRuns: typeof fixture.completedRuns = [];
-
-  // Model with only 3 scored runs (minimum)
-  for (let i = 0; i < 3; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `few-run-${i}`;
-    r.taskGroupId = `few-task-${i}`;
-    r.modelId = 'few-scored-model';
-    r.thinkingLevel = 'high';
-    r.scored = true;
-    r.outcome = { resolution: 'resolved' as const, satisfaction: 5 };
-    fewRuns.push(r);
-  }
-
-  // Model with 12 scored runs (well above target)
-  for (let i = 0; i < 12; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `many-run-${i}`;
-    r.taskGroupId = `many-task-${i}`;
-    r.modelId = 'many-scored-model';
-    r.thinkingLevel = 'high';
-    r.scored = true;
-    r.outcome = { resolution: 'resolved' as const, satisfaction: 4 };
-    manyRuns.push(r);
-  }
-
-  fixture.completedRuns.push(...fewRuns, ...manyRuns);
-  fixture.outcomes.push(
-    ...fewRuns.map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-    ...manyRuns.map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-  );
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const fewRow = leaderboard.rows.find((row) => row.modelId === 'few-scored-model');
-  const manyRow = leaderboard.rows.find((row) => row.modelId === 'many-scored-model');
-
-  assert.ok(fewRow, 'few-scored-model should appear');
-  assert.ok(manyRow, 'many-scored-model should appear');
-
-  // reliabilityFactor now reports sample confidence = scoredRunCount / (scoredRunCount + SHRINKAGE_K),
-  // with SHRINKAGE_K = 4. It is a display-only indicator and is NOT a multiplicative score penalty.
-  assert.ok(fewRow!.reliabilityFactor !== null, 'reliabilityFactor should not be null for scored model');
-  assert.equal(fewRow!.reliabilityFactor, 0.4286, '3 scored runs → confidence 3/(3+4) = 0.4286');
-
-  assert.ok(manyRow!.reliabilityFactor !== null, 'reliabilityFactor should not be null for scored model');
-  assert.equal(manyRow!.reliabilityFactor, 0.75, '12 scored runs → confidence 12/(12+4) = 0.75');
-
-  // Confidence rises with sample size but no longer hard-cliffs the composite (no multiplicative penalty).
-  assert.ok(manyRow!.reliabilityFactor! > fewRow!.reliabilityFactor!, 'more runs → higher confidence');
-  assert.ok(fewRow!.rank !== null && manyRow!.rank !== null, 'both should be ranked');
-});
-
-test('leaderboard shrinkage curbs cherry-picked extremes without burying stronger models', async () => {
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-
-  // Weak model with many mediocre runs (10 scored, satisfaction 3)
-  const manyMediocre: typeof fixture.completedRuns = [];
-  for (let i = 0; i < 10; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `mediocre-run-${i}`;
-    r.taskGroupId = `mediocre-task-${i}`;
-    r.modelId = 'mediocre-model';
-    r.thinkingLevel = 'high';
-    r.scored = true;
-    r.outcome = { resolution: 'partially_resolved' as const, satisfaction: 3 };
-    manyMediocre.push(r);
-  }
-
-  // Cherry-picked mini model with 4 perfect runs
-  const cherryPicked: typeof fixture.completedRuns = [];
-  for (let i = 0; i < 4; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `cherry-run-${i}`;
-    r.taskGroupId = `cherry-task-${i}`;
-    r.modelId = 'cherry-model';
-    r.thinkingLevel = 'high';
-    r.scored = true;
-    r.outcome = { resolution: 'resolved' as const, satisfaction: 5 };
-    cherryPicked.push(r);
-  }
-
-  fixture.completedRuns.push(...manyMediocre, ...cherryPicked);
-  fixture.outcomes.push(
-    ...manyMediocre.map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-    ...cherryPicked.map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-  );
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const cherryRow = leaderboard.rows.find((row) => row.modelId === 'cherry-model');
-  const mediocreRow = leaderboard.rows.find((row) => row.modelId === 'mediocre-model');
-
-  assert.ok(cherryRow, 'cherry-model should appear');
-  assert.ok(mediocreRow, 'mediocre-model should appear');
-
-  // reliabilityFactor = scoredRunCount / (scoredRunCount + SHRINKAGE_K), SHRINKAGE_K = 4.
-  assert.equal(cherryRow!.reliabilityFactor, 0.5, '4 scored runs → confidence 4/(4+4) = 0.5');
-  assert.equal(mediocreRow!.reliabilityFactor, 0.7143, '10 scored runs → confidence 10/(10+4) = 0.7143');
-
-  // Empirical-Bayes shrinkage pulls the cherry-picked model's perfect estimates toward the grand
-  // mean (which the mediocre model drags below 1.0), so shrunk < observed perfection ...
-  assert.ok(cherryRow!.dimensions.satisfaction.shrunk !== null && cherryRow!.dimensions.satisfaction.shrunk! < 1,
-    'cherry satisfaction shrunk below perfect 1.0 toward the grand mean');
-  assert.ok(cherryRow!.dimensions.resolutionRate.shrunk !== null && cherryRow!.dimensions.resolutionRate.shrunk! < 1,
-    'cherry resolution shrunk below perfect 1.0 toward the grand mean');
-  // ... while preserving that the genuinely stronger model still scores higher on each dimension.
-  assert.ok(cherryRow!.dimensions.satisfaction.shrunk! > mediocreRow!.dimensions.satisfaction.shrunk!,
-    'cherry (sat 5) still shrinks above mediocre (sat 3)');
-  assert.ok(cherryRow!.dimensions.resolutionRate.shrunk! > mediocreRow!.dimensions.resolutionRate.shrunk!,
-    'cherry (resolved) still shrinks above mediocre (partially_resolved)');
-});
-
-test('leaderboard proportion dimensions use scored runs only', async () => {
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-
-  // Create a model with 3 scored runs + 7 unscored runs, then assert every dimension's n is
-  // drawn from scored runs only (never the full total of 10).
-  const runs: typeof fixture.completedRuns = [];
-  // 3 scored runs (resolved, satisfaction 4)
-  for (let i = 0; i < 3; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `scored-fas-run-${i}`;
-    r.taskGroupId = `scored-fas-task-${i}`;
-    r.modelId = 'pop-test-model';
-    r.thinkingLevel = 'high';
-    r.scored = true;
-    r.outcome = { resolution: 'resolved' as const, satisfaction: 4 };
-    runs.push(r);
-  }
-  // 7 unscored runs
-  for (let i = 0; i < 7; i++) {
-    const r = deepClone(baseRun);
-    r.runId = `unscored-no-fas-run-${i}`;
-    r.taskGroupId = `unscored-no-fas-task-${i}`;
-    r.modelId = 'pop-test-model';
-    r.thinkingLevel = 'high';
-    r.scored = false;
-    delete (r as Partial<typeof r>).outcome;
-    runs.push(r);
-  }
-
-  fixture.completedRuns.push(...runs);
-  fixture.outcomes.push(
-    ...runs.filter((r) => r.scored).map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-  );
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const row = leaderboard.rows.find((r) => r.modelId === 'pop-test-model');
-  assert.ok(row, 'pop-test-model should appear');
-
-  // fileChurn counts scored runs with attributable edits (a subset of scored, possibly empty for
-  // legacy data without per-file edit tracking), never the full total of 10.
-  assert.ok(row!.dimensions.fileChurn.n <= 3, 'fileChurn dimension should use scored runs only (n <= 3, not total)');
-  // toolReliability n should also be scored-only
-  assert.equal(row!.dimensions.toolReliability.n, 3, 'toolReliability dimension should use scored runs only (n=3)');
-  // verificationPassRate counts scored runs that performed verification (a subset of scored),
-  // never the full total of 10.
-  assert.ok(row!.dimensions.verificationPassRate.n <= 3, 'verificationPassRate dimension should use scored runs only (n <= 3, not total)');
-  // runCount should still reflect total (10)
-  assert.equal(row!.runCount, 10, 'runCount should reflect all runs, not just scored');
-  assert.equal(row!.scoredRunCount, 3, 'scoredRunCount should be 3');
-});
-
-test('leaderboard token efficiency dimension is populated when token data exists', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  let hasTokenEfficiencyData = false;
-  for (const row of leaderboard.rows) {
-    assert.ok(row.dimensions.tokenEfficiency !== undefined, 'tokenEfficiency dimension should exist');
-    if (row.dimensions.tokenEfficiency.value !== null) {
-      hasTokenEfficiencyData = true;
-      assert.ok(row.dimensions.tokenEfficiency.value >= 0, 'tokenEfficiency value should be non-negative');
-    }
-  }
-  assert.ok(hasTokenEfficiencyData, 'at least one row should have token efficiency data from fixture');
-});
-
-test('leaderboard reliability factor is null for unranked models', async () => {
-  const fixture = await loadFixture();
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  for (const row of leaderboard.rows) {
-    if (row.scoredRunCount < 3) {
-      assert.equal(row.reliabilityFactor, null, `model ${row.modelId} with ${row.scoredRunCount} scored runs should have null reliabilityFactor`);
-    } else {
-      assert.ok(row.reliabilityFactor !== null, `ranked model ${row.modelId} should have non-null reliabilityFactor`);
-      assert.ok(row.reliabilityFactor! > 0, `ranked model ${row.modelId} reliabilityFactor should be positive`);
-      assert.ok(row.reliabilityFactor! <= 1, `ranked model ${row.modelId} reliabilityFactor should be at most 1.0`);
-    }
-  }
-});
-
-test('leaderboard correctly orders ranked before unranked with mixed data', async () => {
-  const fixture = deepClone(await loadFixture());
-  // Create a model with enough scored runs to be ranked by duplicating runs
-  const baseRun = fixture.completedRuns[0]!;
-  const extraRuns = [];
-  for (let i = 0; i < 4; i++) {
-    const extra = deepClone(baseRun);
-    extra.runId = `synth-run-${i}`;
-    extra.taskGroupId = `synth-task-${i}`;
-    extra.modelId = 'ranked-model';
-    extra.thinkingLevel = 'high';
-    extra.scored = true;
-    extra.outcome = { resolution: 'resolved' as const, satisfaction: 4 };
-    extraRuns.push(extra);
-  }
-  fixture.completedRuns.push(...extraRuns);
-  fixture.outcomes.push(...extraRuns.map((run) => ({
-    schemaVersion: 1,
-    kind: 'run_outcome' as const,
-    recordedAt: '2026-05-10T14:19:00.000Z',
-    sessionPath: baseRun.sessionPath,
-    runId: run.runId,
-    taskGroupId: run.taskGroupId,
-    outcome: run.outcome!,
-  })));
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const ranked = leaderboard.rows.filter((row) => row.rank !== null);
-  const unranked = leaderboard.rows.filter((row) => row.rank === null);
-
-  assert.ok(ranked.length > 0, 'should have at least one ranked model');
-  assert.ok(unranked.length > 0, 'should have at least one unranked model');
-
-  // Ranked come first
-  const lastRankedIdx = leaderboard.rows.indexOf(ranked[ranked.length - 1]!);
-  const firstUnrankedIdx = leaderboard.rows.indexOf(unranked[0]!);
-  assert.ok(lastRankedIdx < firstUnrankedIdx, 'ranked rows must precede unranked rows');
-
-  // Ranked model should be our synthetic one
-  assert.ok(ranked.some((row) => row.modelId === 'ranked-model'), 'ranked-model should be ranked');
+  assert.equal(leaderboard.schemaVersion, 4);
+  assert.deepEqual(leaderboard.sourceWeights, { user: 0.6, agent: 0.25, process: 0.15 });
+  assert.deepEqual(leaderboard.shrinkage, { user: 4, agent: 8, process: 20 });
+  const ranked = leaderboard.rows.filter((row) => row.modelId !== '(unknown)');
+  assert.ok(ranked.length > 0);
+  assert.deepEqual(ranked.map((row) => row.rank), ranked.map((_, index) => index + 1));
   for (const row of ranked) {
-    assert.ok(row.compositeScore !== null, 'ranked rows must have compositeScore');
-    assert.ok(row.rank! >= 1, 'rank must be positive');
+    assert.equal(row.thinkingLevel, '(all)');
+    assert.ok(row.compositeScore !== null && row.compositeScore >= 0 && row.compositeScore <= 1);
+    assert.ok(row.scoreInterval80 && row.scoreInterval80.lower <= row.compositeScore && row.scoreInterval80.upper >= row.compositeScore);
+    assert.ok(['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(row.evidenceTier));
   }
 });
 
-test('leaderboard normalizes blank identifiers and sorts unranked ties deterministically', async () => {
-  const source = await loadFixture();
-  const baseRun = deepClone(source.completedRuns[0]!);
-  const fixture = deepClone(source);
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  function makeUnscoredRun(runId: string, modelId: string | null, thinkingLevel: string | null) {
-    const run = deepClone(baseRun) as any;
-    run.runId = runId;
-    run.taskGroupId = `${runId}-task`;
-    run.status = 'closed_unscored';
-    run.scored = false;
-    run.finalizationReason = 'closed_unscored';
-    run.finalizedAt = '2026-05-10T14:19:00.000Z';
-    delete run.outcome;
-    if (modelId === null) {
-      delete run.modelId;
-    } else {
-      run.modelId = modelId;
-    }
-    if (thinkingLevel === null) {
-      run.thinkingLevel = '   ';
-    } else {
-      run.thinkingLevel = thinkingLevel;
-    }
-    return run;
-  }
-
-  fixture.completedRuns.push(
-    makeUnscoredRun('alpha-run-xhigh', 'alpha-model', 'xhigh'),
-    makeUnscoredRun('alpha-run-medium', 'alpha-model', 'medium'),
-    makeUnscoredRun('beta-run-2', 'beta-model', 'low'),
-    makeUnscoredRun('beta-run-1', 'beta-model', 'low'),
-    makeUnscoredRun('unknown-run', null, null),
-  );
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  assert.equal(leaderboard.rows[0]?.modelId, 'beta-model');
-  assert.equal(leaderboard.rows[0]?.thinkingLevel, 'low');
-  assert.equal(leaderboard.rows[0]?.runCount, 2);
-  assert.deepEqual(
-    leaderboard.rows.slice(1).map((row) => `${row.modelId}:${row.thinkingLevel}`),
-    ['(unknown):(unspecified)', 'alpha-model:medium', 'alpha-model:xhigh'],
-  );
+test('run-only compatibility path collapses thinking levels to one family row', async () => {
+  const prepared = prepareSourceAnalytics(await loadFixture());
+  const first = prepared.runs.find((run) => run.modelFamily !== null)!;
+  const altered = { ...first, runId: `${first.runId}-thinking`, taskGroupId: `${first.taskGroupId}-thinking`, thinkingLevel: first.thinkingLevel === 'high' ? 'low' as const : 'high' as const };
+  const data = createModelLeaderboardFromRuns([first, altered]);
+  assert.equal(data.rows.length, 1);
+  assert.equal(data.rows[0]!.thinkingLevel, '(all)');
+  assert.equal(data.rows[0]!.thinkingLevels.length, 2);
 });
 
-test('leaderboard handles large scored samples and ranked rows without token efficiency data', async () => {
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  function addScoredRuns(
-    modelId: string,
-    runCount: number,
-    tokenMode: 'normal' | 'none' | 'clamped',
-  ): void {
-    for (let index = 0; index < runCount; index += 1) {
-      const run = deepClone(baseRun);
-      run.runId = `${modelId}-run-${index}`;
-      run.taskGroupId = `${modelId}-task-${index}`;
-      run.modelId = modelId;
-      run.thinkingLevel = 'high';
-      run.status = 'scored';
-      run.scored = true;
-      run.finalizationReason = 'scored';
-      run.finalizedAt = '2026-05-10T14:19:00.000Z';
-      run.outcome = { resolution: 'resolved', satisfaction: tokenMode === 'none' ? 5 : 4 };
-      if (tokenMode === 'none') {
-        run.fileMutation.lineAdditions = 0;
-        run.fileMutation.lineDeletions = 0;
-        run.fileMutation.lineModifications = 0;
-      } else if (tokenMode === 'clamped') {
-        run.fileMutation.lineAdditions = 1;
-        run.fileMutation.lineDeletions = 0;
-        run.fileMutation.lineModifications = 0;
-        run.outputTokens = 500;
-      } else {
-        run.fileMutation.lineAdditions = 10;
-        run.fileMutation.lineDeletions = 0;
-        run.fileMutation.lineModifications = 0;
-        run.outputTokens = 100;
-      }
-      fixture.completedRuns.push(run);
-      fixture.outcomes.push({
-        schemaVersion: 1,
-        kind: 'run_outcome',
-        recordedAt: '2026-05-10T14:19:00.000Z',
-        sessionPath: baseRun.sessionPath,
-        runId: run.runId,
-        taskGroupId: run.taskGroupId,
-        outcome: run.outcome,
-      });
-    }
-  }
-
-  addScoredRuns('df-35-model', 35, 'normal');
-  addScoredRuns('df-55-model', 55, 'normal');
-  addScoredRuns('df-121-model', 121, 'normal');
-  addScoredRuns('df-122-model', 122, 'clamped');
-  addScoredRuns('no-token-model', 3, 'none');
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  for (const modelId of ['df-35-model', 'df-55-model', 'df-121-model', 'df-122-model']) {
-    const row = leaderboard.rows.find((candidate) => candidate.modelId === modelId);
-    assert.ok(row?.rank !== null, `${modelId} should be ranked`);
-    // Large samples yield high sample confidence n/(n+4), approaching (but never hard-capping at) 1.
-    assert.ok(row?.reliabilityFactor !== null && row!.reliabilityFactor! > 0.85, `${modelId} should have high confidence`);
-  }
-
-  const clampedRow = leaderboard.rows.find((row) => row.modelId === 'df-122-model');
-  assert.equal(clampedRow?.dimensions.tokenEfficiency.value, 50);
-  assert.ok((clampedRow?.dimensions.tokenEfficiency.lowerBound ?? 0) <= 50);
-
-  const noTokenRow = leaderboard.rows.find((row) => row.modelId === 'no-token-model');
-  assert.ok(noTokenRow, 'no-token-model should appear');
-  assert.equal(noTokenRow.dimensions.tokenEfficiency.n, 0);
-  assert.equal(noTokenRow.dimensions.tokenEfficiency.value, null);
-  assert.equal(noTokenRow.dimensions.tokenEfficiency.lowerBound, null);
-  assert.ok(noTokenRow.rank !== null, 'models without token efficiency data should still be rankable');
-});
-
-test('leaderboard ranks the genuinely stronger model #1 by expected strength', async () => {
-  const source = await loadFixture();
-  const baseRun = deepClone(source.completedRuns[0]!);
-  const fixture = deepClone(source);
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  function addModelRuns(modelId: string, count: number, resolution: 'resolved' | 'unresolved', satisfaction: number): void {
-    for (let i = 0; i < count; i++) {
-      const run = deepClone(baseRun);
-      run.runId = `${modelId}-run-${i}`;
-      run.taskGroupId = `${modelId}-task-${i}`;
-      run.modelId = modelId;
-      run.thinkingLevel = 'high';
-      run.status = 'scored';
-      run.scored = true;
-      run.finalizationReason = 'scored';
-      run.finalizedAt = '2026-05-10T14:19:00.000Z';
-      run.outcome = { resolution, satisfaction };
-      fixture.completedRuns.push(run);
-      fixture.outcomes.push({
-        schemaVersion: 1,
-        kind: 'run_outcome',
-        recordedAt: '2026-05-10T14:19:00.000Z',
-        sessionPath: baseRun.sessionPath,
-        runId: run.runId,
-        taskGroupId: run.taskGroupId,
-        outcome: run.outcome,
-      });
-    }
-  }
-
-  // Strong model: resolved, top satisfaction. Weak model: unresolved, low satisfaction.
-  // Both have enough scored runs to rank; other dimensions are inherited identically from the
-  // same base run and cancel out, so the ranking reflects genuine outcome strength.
-  addModelRuns('strong-model', 6, 'resolved', 5);
-  addModelRuns('weak-model', 6, 'unresolved', 2);
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const strong = leaderboard.rows.find((row) => row.modelId === 'strong-model');
-  const weak = leaderboard.rows.find((row) => row.modelId === 'weak-model');
-  assert.ok(strong && weak, 'both models should appear');
-  assert.equal(strong!.rank, 1, 'strong model should rank #1');
-  assert.equal(weak!.rank, 2, 'weak model should rank #2');
-  assert.ok(strong!.compositeScore! > weak!.compositeScore!, 'strong composite should exceed weak');
-  // Cost is surfaced separately and does not affect the ranking.
-  assert.ok(strong!.medianCostUsd === null || typeof strong!.medianCostUsd === 'number');
-});
-
-test('leaderboard difficulty-emphasizes so easy-task models do not outrank hard-task performers', async () => {
-  const source = await loadFixture();
-  const baseRun = deepClone(source.completedRuns[0]!);
-  const fixture = deepClone(source);
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  let counter = 0;
-  function addRun(modelId: string, lineAdd: number, resolution: 'resolved' | 'unresolved', satisfaction: number): void {
-    const run = deepClone(baseRun);
-    counter += 1;
-    run.runId = `${modelId}-run-${counter}`;
-    run.taskGroupId = `${modelId}-task-${counter}`;
-    run.modelId = modelId;
-    run.thinkingLevel = 'high';
-    run.status = 'scored';
-    run.scored = true;
-    run.finalizationReason = 'scored';
-    run.finalizedAt = '2026-05-10T14:19:00.000Z';
-    run.outcome = { resolution, satisfaction };
-    // Vary five of the six complexity signals with `lineAdd` (a difficulty proxy) so task complexity
-    // spans the full 0–1 range — lineMutations, touchedFileCount, toolCallCount, busyDurationMs,
-    // inputTokens. Keep token efficiency constant (~5 tok/line: outputTokens = 5 × lineMutations) and
-    // verification inherited from the base run, so those dims cancel across models and the ranking
-    // isolates the difficulty emphasis.
-    run.fileMutation.lineAdditions = lineAdd;
-    run.fileMutation.lineDeletions = 0;
-    run.fileMutation.lineModifications = 0;
-    run.fileMutation.touchedFileCount = Math.max(1, Math.round(lineAdd / 5));
-    run.toolUsage.totalCount = Math.max(1, Math.round(lineAdd / 2));
-    run.busyDurationMs = lineAdd * 1000;
-    run.inputTokens = lineAdd * 50;
-    run.outputTokens = lineAdd * 5;
-    fixture.completedRuns.push(run);
-    fixture.outcomes.push({
-      schemaVersion: 1,
-      kind: 'run_outcome',
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome,
-    });
-  }
-
-  // mini-model: aces EASY tasks (low complexity) — raw resolution/satisfaction look perfect.
-  for (const la of [2, 4, 6, 8]) addRun('mini-model', la, 'resolved', 5);
-  // strong-model: performs well on HARD tasks (high complexity) — raw rates slightly below mini.
-  // One unresolved run keeps strong's raw rate below mini's, so pre-adjustment mini would lead.
-  [30, 34, 38, 42, 46, 50].forEach((la, i) => addRun('strong-model', la, i === 5 ? 'unresolved' : 'resolved', i === 5 ? 4 : 5));
-  // weak-model: fails HARD tasks at complexities overlapping strong's — this drags the hard-task
-  // baseline down so strong earns a positive residual (the crux of the adjustment).
-  for (const la of [32, 36, 40, 44, 48, 52]) addRun('weak-model', la, 'unresolved', 2);
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-  const mini = leaderboard.rows.find((r) => r.modelId === 'mini-model')!;
-  const strong = leaderboard.rows.find((r) => r.modelId === 'strong-model')!;
-  const weak = leaderboard.rows.find((r) => r.modelId === 'weak-model')!;
-
-  // Emphasis is enabled (the population has task-complexity variance).
-  assert.equal(mini.difficultyEmphasized, true, 'population has complexity variance → emphasis enabled');
-  assert.equal(strong.difficultyEmphasized, true);
-
-  // Headline: the hard-task performer outranks the easy-task model despite worse raw rates —
-  // completing complex tasks is the hallmark of strength under difficulty emphasis.
-  assert.ok(strong.rank! < mini.rank!, `strong (rank ${strong.rank}) should outrank mini (rank ${mini.rank}) under difficulty emphasis`);
-  assert.ok(strong.compositeScore! > mini.compositeScore!, 'emphasized strong composite should exceed mini');
-  // A model that fails hard tasks lands below the easy-task model (failing hard work is not rewarded).
-  assert.ok(weak.rank! > mini.rank!, `weak (rank ${weak.rank}) should rank below mini (rank ${mini.rank})`);
-
-  // Isolation of the emphasis: raw mini > strong on resolution, but complexity-weighted strong > mini.
-  assert.ok(mini.dimensions.resolutionRate.value! > strong.dimensions.resolutionRate.value!,
-    'mini raw resolution (1.0) should exceed strong (~0.83)');
-  assert.ok(strong.dimensions.resolutionRate.shrunk! > mini.dimensions.resolutionRate.shrunk!,
-    'strong complexity-weighted resolution mastery should exceed mini after difficulty emphasis');
-
-  // Verification pass rate is also complexity-weighted (regression guard): mini and strong share an
-  // equal 100% raw pass rate (inherited from the base run), but strong verifies on harder tasks so
-  // its mastery estimate must exceed mini's. A raw-proportion bug would tie these at the grand mean.
-  assert.equal(mini.dimensions.verificationPassRate.value, strong.dimensions.verificationPassRate.value,
-    'mini and strong share an equal raw verification pass rate (both 100%)');
-  assert.ok(strong.dimensions.verificationPassRate.shrunk! > mini.dimensions.verificationPassRate.shrunk!,
-    'strong verification pass mastery should exceed mini after difficulty emphasis');
-
-  // meanTaskComplexity is exposed, bounded, and reflects task mix (mini easier than strong).
-  for (const row of [mini, strong, weak]) {
-    assert.ok(row.meanTaskComplexity !== null && row.meanTaskComplexity >= 0 && row.meanTaskComplexity <= 1,
-      `${row.modelId} meanTaskComplexity should be in [0,1]`);
-  }
-  assert.ok(mini.meanTaskComplexity! < strong.meanTaskComplexity!, 'mini tasks should be lower-complexity than strong');
-});
-
-test('leaderboard difficulty emphasis is a no-op when the population has no complexity variance', async () => {
-  const source = await loadFixture();
-  const baseRun = deepClone(source.completedRuns[0]!);
-  const fixture = deepClone(source);
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  // Two models, 6 scored runs each, all cloned from the same base run → identical complexity signals
-  // → zero complexity variance → residual control disables (bit-identical to pre-adjustment).
-  let counter = 0;
-  function addRun(modelId: string, satisfaction: number): void {
-    const run = deepClone(baseRun);
-    counter += 1;
-    run.runId = `${modelId}-run-${counter}`;
-    run.taskGroupId = `${modelId}-task-${counter}`;
-    run.modelId = modelId;
-    run.thinkingLevel = 'high';
-    run.status = 'scored';
-    run.scored = true;
-    run.finalizationReason = 'scored';
-    run.finalizedAt = '2026-05-10T14:19:00.000Z';
-    run.outcome = { resolution: 'resolved' as const, satisfaction };
-    fixture.completedRuns.push(run);
-    fixture.outcomes.push({
-      schemaVersion: 1,
-      kind: 'run_outcome',
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome,
-    });
-  }
-  for (let i = 0; i < 6; i++) addRun('model-x', 5);
-  for (let i = 0; i < 6; i++) addRun('model-y', 4);
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  // All runs share identical complexity → no variance → emphasis disabled for every row
-  // (mastery collapses to a uniform rescaling of raw outcomes, so ordering is preserved).
-  for (const row of leaderboard.rows) {
-    assert.equal(row.difficultyEmphasized, false, `${row.modelId} should not be difficulty-emphasized (zero variance)`);
-  }
-  // model-x (sat 5) still outranks model-y (sat 4) via the unadjusted expected-strength composite.
-  const x = leaderboard.rows.find((r) => r.modelId === 'model-x')!;
-  const y = leaderboard.rows.find((r) => r.modelId === 'model-y')!;
-  assert.ok(x.rank! < y.rank!, 'higher-satisfaction model should still rank higher (no-op adjustment)');
-});
-
-test('leaderboard is provider-agnostic: collapses provider-specific ids sharing a family into one row', async () => {
-  // The same underlying model is offered by multiple providers under different ids (e.g.
-  // `umans-glm-5.2` via Umans and `glm-5.2:cloud` via Ollama Cloud are both GLM 5.2). models.json
-  // declares them as siblings via the optional `family` field; prepare resolves `modelFamily` and
-  // the leaderboard groups by it, while the backend keeps storing each provider-specific `modelId`.
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-  fixture.completedRuns = [];
-  fixture.openRuns = [];
-  fixture.outcomes = [];
-
-  function addScoredRun(runId: string, modelId: string): void {
-    const run = deepClone(baseRun);
-    run.runId = runId;
-    run.taskGroupId = `${runId}-task`;
-    run.modelId = modelId;
-    run.thinkingLevel = 'high';
-    run.status = 'scored';
-    run.scored = true;
-    run.finalizationReason = 'scored';
-    run.finalizedAt = '2026-05-10T14:19:00.000Z';
-    run.outcome = { resolution: 'resolved' as const, satisfaction: 5 };
-    fixture.completedRuns.push(run);
-    fixture.outcomes.push({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome,
-    });
-  }
-
-  // GLM 5.2 across two providers (3 scored runs each) — must collapse into ONE row.
-  addScoredRun('umans-glm-a', 'umans-glm-5.2');
-  addScoredRun('umans-glm-b', 'umans-glm-5.2');
-  addScoredRun('umans-glm-c', 'umans-glm-5.2');
-  addScoredRun('ollama-glm-a', 'glm-5.2:cloud');
-  addScoredRun('ollama-glm-b', 'glm-5.2:cloud');
-  addScoredRun('ollama-glm-c', 'glm-5.2:cloud');
-  // A distinct model (different family) must NOT collapse with GLM 5.2.
-  addScoredRun('gpt-a', 'gpt-5.2');
-  addScoredRun('gpt-b', 'gpt-5.2');
-  addScoredRun('gpt-c', 'gpt-5.2');
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const leaderboard = createModelLeaderboard(prepared);
-
-  const glmRow = leaderboard.rows.find((row) => row.modelId === 'glm-5.2');
-  assert.ok(glmRow, 'GLM 5.2 should appear as a single provider-agnostic row');
-  assert.equal(glmRow!.runCount, 6, 'both providers collapsed into one row');
-  assert.equal(glmRow!.scoredRunCount, 6);
-  assert.ok(glmRow!.rank !== null, 'collapsed row should be ranked');
-
-  // Provider breakdown: both provider-specific ids surfaced so provider differences stay investigable.
-  assert.equal(glmRow!.providers.length, 2, 'providers breakdown lists both provider-specific ids');
-  assert.deepEqual(
-    glmRow!.providers.map((p) => p.modelId).sort(),
-    ['glm-5.2:cloud', 'umans-glm-5.2'],
-  );
-  for (const p of glmRow!.providers) {
-    assert.equal(p.runCount, 3);
-    assert.equal(p.scoredRunCount, 3);
-  }
-  // Breakdown reconciles with row totals — every run is attributed to exactly one provider id.
-  assert.equal(glmRow!.providers.reduce((sum, p) => sum + p.runCount, 0), glmRow!.runCount);
-  assert.equal(glmRow!.providers.reduce((sum, p) => sum + p.scoredRunCount, 0), glmRow!.scoredRunCount);
-
-  // Distinct family stays a separate row (no over-collapsing).
-  const gptRow = leaderboard.rows.find((row) => row.modelId === 'gpt-5.2');
-  assert.ok(gptRow, 'GPT-5.2 should appear as its own row');
-  assert.equal(gptRow!.runCount, 3);
-  assert.equal(gptRow!.providers.length, 1);
-  assert.equal(gptRow!.providers[0]!.modelId, 'gpt-5.2');
-
-  // No provider-specific id leaks as its own row.
-  assert.ok(
-    !leaderboard.rows.some((row) => row.modelId === 'umans-glm-5.2'),
-    'umans-glm-5.2 must not appear as its own row',
-  );
-  assert.ok(
-    !leaderboard.rows.some((row) => row.modelId === 'glm-5.2:cloud'),
-    'glm-5.2:cloud must not appear as its own row',
-  );
-});
-
-test('leaderboard fileChurn dimension penalizes re-editing the same files', async () => {
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-
-  const makeChurnRuns = (modelId: string, map: Record<string, number>) => {
-    const runs: typeof fixture.completedRuns = [];
-    for (let i = 0; i < 3; i++) {
-      const r = deepClone(baseRun);
-      r.runId = `${modelId}-churn-${i}`;
-      r.taskGroupId = `${modelId}-churn-task-${i}`;
-      r.modelId = modelId;
-      r.thinkingLevel = 'medium';
-      r.scored = true;
-      r.outcome = { resolution: 'resolved' as const, satisfaction: 4 };
-      (r as any).fileMutation.editCountsByFile = map;
-      runs.push(r);
-    }
-    return runs;
+/** Build a minimal PreparedRunRow for synthetic leaderboard tests. */
+function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: string }): PreparedRunRow {
+  return {
+    runId: overrides.runId,
+    taskGroupId: overrides.taskGroupId ?? `${overrides.runId}-task`,
+    sessionPathHash: overrides.sessionPathHash ?? `hash-${overrides.runId}`,
+    status: overrides.status ?? 'scored',
+    scored: overrides.scored ?? true,
+    startedAt: overrides.startedAt ?? '2026-05-10T12:00:00.000Z',
+    startedDay: overrides.startedDay ?? '2026-05-10',
+    updatedAt: overrides.updatedAt ?? '2026-05-10T12:00:00.000Z',
+    finalizedAt: overrides.finalizedAt ?? '2026-05-10T12:00:00.000Z',
+    finalizationReason: overrides.finalizationReason ?? 'scored',
+    resolution: overrides.resolution ?? 'resolved',
+    satisfaction: overrides.satisfaction ?? 4,
+    outcomeSource: overrides.outcomeSource ?? 'user',
+    modelId: overrides.modelId,
+    modelFamily: overrides.modelFamily ?? overrides.modelId,
+    provider: overrides.provider ?? null,
+    thinkingLevel: overrides.thinkingLevel ?? 'high',
+    mixedModelConfig: overrides.mixedModelConfig ?? false,
+    mixedTreatmentConfig: overrides.mixedTreatmentConfig ?? false,
+    experimentAssignment: overrides.experimentAssignment ?? null,
+    promptFamily: overrides.promptFamily ?? null,
+    promptHashPrefix: overrides.promptHashPrefix ?? null,
+    promptCapturedAt: overrides.promptCapturedAt ?? null,
+    toolSetHashPrefix: overrides.toolSetHashPrefix ?? null,
+    skillSetHashPrefix: overrides.skillSetHashPrefix ?? null,
+    skillEntries: overrides.skillEntries ?? [],
+    activeExtensions: overrides.activeExtensions ?? [],
+    selectedToolCount: overrides.selectedToolCount ?? 0,
+    skillCount: overrides.skillCount ?? 0,
+    contextFileCount: overrides.contextFileCount ?? 0,
+    promptGuidelineCount: overrides.promptGuidelineCount ?? 0,
+    initialUserMessageChars: overrides.initialUserMessageChars ?? 100,
+    fsSubagentAlwaysParentModel: overrides.fsSubagentAlwaysParentModel ?? null,
+    fsPruningMode: overrides.fsPruningMode ?? null,
+    fsPruningEnabled: overrides.fsPruningEnabled ?? null,
+    fsExtensionToggles: overrides.fsExtensionToggles ?? {},
+    fsToolResultPruningEnabled: overrides.fsToolResultPruningEnabled ?? null,
+    fsToolResultPruningProfile: overrides.fsToolResultPruningProfile ?? null,
+    sendCount: overrides.sendCount ?? 1,
+    assistantTurnCount: overrides.assistantTurnCount ?? 1,
+    assistantTurnDurationMs: overrides.assistantTurnDurationMs ?? 5000,
+    busyDurationMs: overrides.busyDurationMs ?? 6000,
+    busyPeriodCount: overrides.busyPeriodCount ?? 1,
+    interruptedCount: overrides.interruptedCount ?? 0,
+    messageEditCount: overrides.messageEditCount ?? 0,
+    truncatedAfterCount: overrides.truncatedAfterCount ?? 0,
+    backendErrorCount: overrides.backendErrorCount ?? 0,
+    contextTokens: overrides.contextTokens ?? 10000,
+    contextLimit: overrides.contextLimit ?? 100000,
+    inputTokens: overrides.inputTokens ?? 1000,
+    outputTokens: overrides.outputTokens ?? 500,
+    cacheReadTokens: overrides.cacheReadTokens ?? 0,
+    cacheWriteTokens: overrides.cacheWriteTokens ?? 0,
+    tokenReportedTurnCount: overrides.tokenReportedTurnCount ?? 1,
+    filesystemPathRefCount: overrides.filesystemPathRefCount ?? 0,
+    imageInputCount: overrides.imageInputCount ?? 0,
+    imageInputBytes: overrides.imageInputBytes ?? 0,
+    unsupportedInputCount: overrides.unsupportedInputCount ?? 0,
+    inputKindsUsed: overrides.inputKindsUsed ?? [],
+    toolCallCount: overrides.toolCallCount ?? 0,
+    toolDurationMs: overrides.toolDurationMs ?? 0,
+    timedToolCallCount: overrides.timedToolCallCount ?? 0,
+    toolFailureCount: overrides.toolFailureCount ?? 0,
+    resultIssueCount: overrides.resultIssueCount ?? 0,
+    subagentCallCount: overrides.subagentCallCount ?? 0,
+    subagentTaskCount: overrides.subagentTaskCount ?? 0,
+    subagentAgentCount: overrides.subagentAgentCount ?? 0,
+    subagentScoredTaskCount: overrides.subagentScoredTaskCount ?? 0,
+    subagentMeanPrecision: overrides.subagentMeanPrecision ?? null,
+    subagentMeanCreativity: overrides.subagentMeanCreativity ?? null,
+    subagentMeanReasoning: overrides.subagentMeanReasoning ?? null,
+    subagentMeanThoroughness: overrides.subagentMeanThoroughness ?? null,
+    subagentMaxPrecision: overrides.subagentMaxPrecision ?? null,
+    subagentMaxCreativity: overrides.subagentMaxCreativity ?? null,
+    subagentMaxReasoning: overrides.subagentMaxReasoning ?? null,
+    subagentMaxThoroughness: overrides.subagentMaxThoroughness ?? null,
+    subagentCompositeMean: overrides.subagentCompositeMean ?? null,
+    subagentInputTokens: overrides.subagentInputTokens ?? 0,
+    subagentOutputTokens: overrides.subagentOutputTokens ?? 0,
+    subagentCacheReadTokens: overrides.subagentCacheReadTokens ?? 0,
+    subagentCacheWriteTokens: overrides.subagentCacheWriteTokens ?? 0,
+    subagentEstimatedCostUsd: overrides.subagentEstimatedCostUsd ?? null,
+    totalEstimatedCostUsd: overrides.totalEstimatedCostUsd ?? null,
+    compactionCount: overrides.compactionCount ?? 0,
+    autoRetryCount: overrides.autoRetryCount ?? 0,
+    verificationTotalCount: overrides.verificationTotalCount ?? 0,
+    verificationFailureCount: overrides.verificationFailureCount ?? 0,
+    verificationState: overrides.verificationState ?? 'none',
+    verificationCountBucket: overrides.verificationCountBucket ?? '0',
+    verificationCountsByKind: overrides.verificationCountsByKind ?? { test: 0, build: 0, lint: 0, typecheck: 0, format: 0, other: 0 },
+    fileWriteCount: overrides.fileWriteCount ?? 0,
+    fileEditCount: overrides.fileEditCount ?? 0,
+    fileDeleteCount: overrides.fileDeleteCount ?? 0,
+    fileRenameCount: overrides.fileRenameCount ?? 0,
+    touchedFileCount: overrides.touchedFileCount ?? 0,
+    lineAdditions: overrides.lineAdditions ?? 0,
+    lineDeletions: overrides.lineDeletions ?? 0,
+    lineModifications: overrides.lineModifications ?? 0,
+    lineMutationTotal: overrides.lineMutationTotal ?? 0,
+    tokenEfficiency: overrides.tokenEfficiency ?? null,
+    contextUtilization: overrides.contextUtilization ?? null,
+    cacheHitRatio: overrides.cacheHitRatio ?? null,
+    firstAttemptSuccess: overrides.firstAttemptSuccess ?? true,
+    editRevisitRate: overrides.editRevisitRate ?? null,
+    filesReviewedCount: overrides.filesReviewedCount ?? 0,
+    readRevisitRate: overrides.readRevisitRate ?? null,
+    estimatedCostUsd: overrides.estimatedCostUsd ?? null,
   };
+}
 
-  // Low churn: one edit to one distinct file per run → revisit rate 0.
-  // High churn: 5 edits to a single file per run → revisit rate 0.8.
-  const lowRuns = makeChurnRuns('churn-low', { 'file-a': 1 });
-  const highRuns = makeChurnRuns('churn-high', { 'file-a': 5 });
-  const allRuns = [...lowRuns, ...highRuns];
-  fixture.completedRuns.push(...allRuns);
-  fixture.outcomes.push(
-    ...allRuns.map((run) => ({
-      schemaVersion: 1,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-05-10T14:19:00.000Z',
-      sessionPath: baseRun.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome: run.outcome!,
-    })),
-  );
+test('dimension native bounds: all dimension values stay within their native ranges', () => {
+  const runs: PreparedRunRow[] = [];
+  for (let i = 0; i < 5; i++) {
+    runs.push(makeRun({
+      runId: `strong-${i}`, modelId: 'strong-model',
+      satisfaction: 5, resolution: 'resolved',
+      editRevisitRate: 0.8, tokenEfficiency: 40,
+      toolCallCount: 10, toolFailureCount: 2,
+      verificationTotalCount: 3, verificationState: 'passing',
+    }));
+  }
+  const leaderboard = createModelLeaderboardFromRuns(runs);
+  const row = leaderboard.rows[0]!;
+  const dims = row.dimensions;
+  // satisfaction is mapped to [1, 5]
+  assert.ok(dims.satisfaction.value! >= 1 && dims.satisfaction.value! <= 5, `satisfaction ${dims.satisfaction.value} in [1,5]`);
+  // resolutionRate is [0, 1]
+  assert.ok(dims.resolutionRate.value! >= 0 && dims.resolutionRate.value! <= 1, `resolutionRate ${dims.resolutionRate.value} in [0,1]`);
+  // fileChurn is [0, 1] (re-edit rate)
+  assert.ok(dims.fileChurn.value! >= 0 && dims.fileChurn.value! <= 1, `fileChurn ${dims.fileChurn.value} in [0,1]`);
+  // toolReliability is [0, 1]
+  assert.ok(dims.toolReliability.value! >= 0 && dims.toolReliability.value! <= 1, `toolReliability ${dims.toolReliability.value} in [0,1]`);
+  // verificationPassRate is [0, 1]
+  assert.ok(dims.verificationPassRate.value! >= 0 && dims.verificationPassRate.value! <= 1, `verificationPassRate ${dims.verificationPassRate.value} in [0,1]`);
+  // tokenEfficiency is capped at 50
+  assert.ok(dims.tokenEfficiency.value! >= 0 && dims.tokenEfficiency.value! <= 50, `tokenEfficiency ${dims.tokenEfficiency.value} in [0,50]`);
+});
 
-  const prepared = prepareSourceAnalytics(fixture);
+test('subagent context fields: subagentRunCount, usageRate, and avgTasks are populated', () => {
+  const runs: PreparedRunRow[] = [
+    makeRun({ runId: 'sub-1', modelId: 'sub-model', subagentCallCount: 2, subagentTaskCount: 5 }),
+    makeRun({ runId: 'sub-2', modelId: 'sub-model', subagentCallCount: 0, subagentTaskCount: 0 }),
+    makeRun({ runId: 'sub-3', modelId: 'sub-model', subagentCallCount: 1, subagentTaskCount: 3 }),
+  ];
+  const leaderboard = createModelLeaderboardFromRuns(runs);
+  const row = leaderboard.rows[0]!;
+  assert.equal(row.subagentRunCount, 2, 'two of three runs used subagents');
+  assert.ok(Math.abs(row.subagentUsageRate! - 2 / 3) < 0.001, 'subagentUsageRate is 2/3');
+  // avgSubagentTasksPerRun is mean over runs that used subagents: (5 + 3) / 2 = 4
+  assert.equal(row.avgSubagentTasksPerRun, 4);
+});
+
+test('stronger equal-evidence synthetic model ranks above weaker', () => {
+  const strong: PreparedRunRow[] = [];
+  const weak: PreparedRunRow[] = [];
+  for (let i = 0; i < 6; i++) {
+    strong.push(makeRun({ runId: `strong-${i}`, modelId: 'strong-model', satisfaction: 5, resolution: 'resolved' }));
+    weak.push(makeRun({ runId: `weak-${i}`, modelId: 'weak-model', satisfaction: 1, resolution: 'unresolved' }));
+  }
+  const leaderboard = createModelLeaderboardFromRuns([...strong, ...weak]);
+  const strongRow = leaderboard.rows.find((row) => row.modelId === 'strong-model')!;
+  const weakRow = leaderboard.rows.find((row) => row.modelId === 'weak-model')!;
+  assert.ok(strongRow.rank !== null && weakRow.rank !== null);
+  assert.ok(strongRow.rank! < weakRow.rank!, `strong (${strongRow.rank}) should rank above weak (${weakRow.rank})`);
+  assert.ok(strongRow.compositeScore! > weakRow.compositeScore!, 'strong composite should exceed weak');
+});
+
+test('fileChurn diagnostic direction: value is re-edit rate, shrunk inverts for display', () => {
+  const runs: PreparedRunRow[] = [
+    makeRun({ runId: 'churn-1', modelId: 'churn-model', editRevisitRate: 0.9 }),
+    makeRun({ runId: 'churn-2', modelId: 'churn-model', editRevisitRate: 0.9 }),
+  ];
+  const leaderboard = createModelLeaderboardFromRuns(runs);
+  const dim = leaderboard.rows[0]!.dimensions.fileChurn;
+  assert.equal(dim.value, 0.9, 'fileChurn value is the raw re-edit rate (higher = worse)');
+  assert.equal(dim.shrunk, 0.1, 'fileChurn shrunk inverts (1 - value) so higher churn = lower score');
+});
+
+test('EB shrinkage: sparse extreme shrinks toward pool, dense stays closer to observed', () => {
+  // A pool model with low satisfaction creates a prior below the extreme, so EB shrinkage
+  // pulls sparse evidence more strongly toward the pool than dense evidence.
+  const pool: PreparedRunRow[] = [];
+  for (let i = 0; i < 10; i++) {
+    pool.push(makeRun({ runId: `pool-${i}`, modelId: 'pool-model', satisfaction: 1, resolution: 'unresolved' }));
+  }
+  const sparse: PreparedRunRow[] = [
+    makeRun({ runId: 'sparse-0', modelId: 'sparse-model', satisfaction: 5, resolution: 'resolved' }),
+  ];
+  const dense: PreparedRunRow[] = [];
+  for (let i = 0; i < 8; i++) {
+    dense.push(makeRun({ runId: `dense-${i}`, modelId: 'dense-model', satisfaction: 5, resolution: 'resolved' }));
+  }
+  const leaderboard = createModelLeaderboardFromRuns([...pool, ...sparse, ...dense]);
+  const sparseRow = leaderboard.rows.find((row) => row.modelId === 'sparse-model')!;
+  const denseRow = leaderboard.rows.find((row) => row.modelId === 'dense-model')!;
+  // Both have the same observed mean (satisfaction=5), but the sparse model has lower
+  // evidenceWeight (n/(n+K) is smaller), so its estimate shrinks more toward the pool.
+  assert.ok(sparseRow.evidenceWeight! < denseRow.evidenceWeight!, 'sparse model has lower evidence weight');
+  // The dense model's user channel score should be closer to the observed extreme (higher)
+  // than the sparse model's, which shrinks more toward the pooled prior.
+  assert.ok(denseRow.userChannelScore! > sparseRow.userChannelScore!, 'dense model stays closer to observed extreme');
+});
+
+test('open runs excluded from leaderboard run counts', () => {
+  const runs: PreparedRunRow[] = [
+    makeRun({ runId: 'completed-1', modelId: 'excl-model', status: 'scored', satisfaction: 4 }),
+    makeRun({ runId: 'open-1', modelId: 'excl-model', status: 'open', scored: false, satisfaction: null, resolution: null, outcomeSource: null }),
+  ];
+  const leaderboard = createModelLeaderboardFromRuns(runs);
+  const row = leaderboard.rows.find((row) => row.modelId === 'excl-model')!;
+  assert.equal(row.runCount, 1, 'open run is excluded from runCount');
+  assert.equal(row.scoredRunCount, 1);
+});
+
+test('null telemetry produces finite leaderboard values (no NaN/Infinity)', () => {
+  const runs: PreparedRunRow[] = [
+    makeRun({
+      runId: 'null-telemetry-1', modelId: 'null-model',
+      tokenEfficiency: null, editRevisitRate: null, contextUtilization: null,
+      cacheHitRatio: null, totalEstimatedCostUsd: null, estimatedCostUsd: null,
+      verificationTotalCount: 0, verificationState: 'none', toolCallCount: 0,
+    }),
+    makeRun({
+      runId: 'null-telemetry-2', modelId: 'null-model',
+      tokenEfficiency: null, editRevisitRate: null, contextUtilization: null,
+      cacheHitRatio: null, totalEstimatedCostUsd: null, estimatedCostUsd: null,
+      verificationTotalCount: 0, verificationState: 'none', toolCallCount: 0,
+    }),
+  ];
+  const leaderboard = createModelLeaderboardFromRuns(runs);
+  const row = leaderboard.rows[0]!;
+  for (const value of [row.compositeScore, row.unadjustedCompositeScore, row.evidenceWeight, row.reliabilityFactor, row.caseMixOverlap]) {
+    assert.ok(value === null || Number.isFinite(value), `leaderboard numeric field is finite or null: ${value}`);
+  }
+  for (const dim of Object.values(row.dimensions)) {
+    assert.ok(dim.value === null || Number.isFinite(dim.value), 'dimension value is finite or null');
+    assert.ok(dim.shrunk === null || Number.isFinite(dim.shrunk), 'dimension shrunk is finite or null');
+  }
+  assert.equal(row.dimensions.fileChurn.value, null, 'no edits → null fileChurn');
+  assert.equal(row.dimensions.tokenEfficiency.value, null, 'no token efficiency → null');
+  assert.equal(row.medianCostUsd, null, 'no cost → null');
+});
+
+test('provider canonical sums: runCount and scoredRunCount sum to row totals', async () => {
+  const fixture = deepClone(await loadFixture());
+  const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
+  for (const row of leaderboard.rows) {
+    const runSum = row.providers.reduce((sum, provider) => sum + provider.runCount, 0);
+    const scoredSum = row.providers.reduce((sum, provider) => sum + provider.scoredRunCount, 0);
+    assert.equal(runSum, row.runCount, `provider runCount sum matches row.runCount for ${row.modelId}`);
+    assert.equal(scoredSum, row.scoredRunCount, `provider scoredRunCount sum matches row.scoredRunCount for ${row.modelId}`);
+    // Transcript fields are always present and non-negative.
+    for (const provider of row.providers) {
+      assert.ok(typeof provider.transcriptOnlySessionCount === 'number' && provider.transcriptOnlySessionCount >= 0);
+      assert.ok(typeof provider.transcriptEvidenceMass === 'number' && Number.isFinite(provider.transcriptEvidenceMass) && provider.transcriptEvidenceMass >= 0);
+    }
+  }
+});
+
+test('userOutcomeCount and agentOutcomeCount are rounded consistently with evidence mass', async () => {
+  const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
+  for (const row of leaderboard.rows) {
+    assert.equal(row.userOutcomeCount, row.userEvidenceMass, 'userOutcomeCount matches userEvidenceMass (both rounded)');
+    assert.equal(row.agentOutcomeCount, row.agentEvidenceMass, 'agentOutcomeCount matches agentEvidenceMass (both rounded)');
+  }
+});
 
-  const low = leaderboard.rows.find((r) => r.modelId === 'churn-low')!;
-  const high = leaderboard.rows.find((r) => r.modelId === 'churn-high')!;
-  assert.ok(low, 'churn-low row should exist');
-  assert.ok(high, 'churn-high row should exist');
+test('unknown family has null compositeScore and null rank, sorted after ranked rows', async () => {
+  const fixture = deepClone(await loadFixture());
+  // Ensure an unknown family exists by deleting a modelId.
+  delete (fixture.completedRuns[0] as Partial<typeof fixture.completedRuns[0]>).modelId;
+  const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
+  const unknownRow = leaderboard.rows.find((row) => row.modelId === '(unknown)');
+  if (unknownRow) {
+    assert.equal(unknownRow.compositeScore, null, 'unknown family has null compositeScore');
+    assert.equal(unknownRow.rank, null, 'unknown family has null rank');
+    // Unknown row should be after all ranked rows.
+    const unknownIndex = leaderboard.rows.indexOf(unknownRow);
+    for (let i = 0; i < unknownIndex; i++) {
+      assert.ok(leaderboard.rows[i]!.rank !== null, `row ${i} before unknown is ranked`);
+    }
+  }
+});
 
-  // Native value = mean revisit rate (lower = less churn); shrunk is inverted (higher = better).
-  assert.ok(low.dimensions.fileChurn.value! < high.dimensions.fileChurn.value!,
-    'low-churn model should have a lower native re-edit rate');
-  assert.ok(low.dimensions.fileChurn.shrunk! > high.dimensions.fileChurn.shrunk!,
-    'low-churn model should score higher (less churn = better)');
-  assert.equal(low.dimensions.fileChurn.n, 3, 'fileChurn n = scored runs with edit data');
-  assert.equal(high.dimensions.fileChurn.n, 3);
-
-  // All other dimensions equal, the low-churn model should rank above the high-churn model.
-  assert.ok(low.compositeScore! > high.compositeScore!,
-    'low-churn model should rank higher than high-churn model');
+test('score interval contains composite score and rank range is valid', async () => {
+  const prepared = prepareSourceAnalytics(await loadFixture());
+  const leaderboard = createModelLeaderboard(prepared);
+  const ranked = leaderboard.rows.filter((row) => row.rank !== null);
+  for (const row of ranked) {
+    const interval = row.scoreInterval80!;
+    assert.ok(interval.lower <= row.compositeScore! && row.compositeScore! <= interval.upper,
+      `composite ${row.compositeScore} within [${interval.lower}, ${interval.upper}]`);
+    assert.ok(interval.bestRank >= 1 && interval.bestRank <= row.rank!, `bestRank ${interval.bestRank} <= rank ${row.rank}`);
+    assert.ok(interval.worstRank >= row.rank! && interval.worstRank <= ranked.length, `worstRank ${interval.worstRank} >= rank ${row.rank}`);
+  }
 });

@@ -44,6 +44,22 @@ function assertCountField(value: unknown, label: string): void {
   assertFiniteNonNegative(value, label);
 }
 
+function assertNonNegativeInteger(value: unknown, label: string): void {
+  if (!isFiniteNumber(value) || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} must be a finite non-negative integer, got ${value}.`);
+  }
+}
+
+function assertUnitInterval(value: unknown, label: string): void {
+  if (!isFiniteNumber(value) || value < 0 || value > 1) {
+    throw new Error(`${label} must be a finite number in [0, 1], got ${value}.`);
+  }
+}
+
+function assertNullableUnitInterval(value: unknown, label: string): void {
+  if (value !== null) assertUnitInterval(value, label);
+}
+
 /**
  * Post-validation pass that rejects NaN, Infinity, and clearly invalid negative
  * values in numeric fields. This complements the structural checks in
@@ -75,12 +91,16 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
   for (const [index, row] of bundle.runSummary.rows.entries()) {
     const prefix = `run-summary.json row ${index}`;
     assertCountField(row.toolCallCount, `${prefix}.toolCallCount`);
+    assertFiniteNonNegative(row.toolDurationMs, `${prefix}.toolDurationMs`);
+    assertCountField(row.timedToolCallCount, `${prefix}.timedToolCallCount`);
     assertCountField(row.toolFailureCount, `${prefix}.toolFailureCount`);
     assertCountField(row.inputTokens, `${prefix}.inputTokens`);
     assertCountField(row.outputTokens, `${prefix}.outputTokens`);
     assertCountField(row.cacheReadTokens, `${prefix}.cacheReadTokens`);
     assertCountField(row.cacheWriteTokens, `${prefix}.cacheWriteTokens`);
     assertFiniteNullableNonNegative(row.estimatedCostUsd, `${prefix}.estimatedCostUsd`);
+    assertFiniteNullableNonNegative(row.subagentEstimatedCostUsd, `${prefix}.subagentEstimatedCostUsd`);
+    assertFiniteNullableNonNegative(row.totalEstimatedCostUsd, `${prefix}.totalEstimatedCostUsd`);
     assertFiniteNonNegative(row.assistantTurnDurationMs, `${prefix}.assistantTurnDurationMs`);
     assertFiniteNonNegative(row.busyDurationMs, `${prefix}.busyDurationMs`);
     assertCountField(row.sendCount, `${prefix}.sendCount`);
@@ -105,6 +125,10 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
       assertCountField(count, `${prefix}.verificationCountsByKind.${kind}`);
     }
     assertSatisfaction(row.satisfaction, `${prefix}.satisfaction`);
+    assert(
+      row.outcomeSource === null || row.outcomeSource === 'user' || row.outcomeSource === 'agent',
+      `${prefix}.outcomeSource must be user, agent, or null.`,
+    );
     assertFiniteNullable(row.subagentMeanPrecision, `${prefix}.subagentMeanPrecision`);
     assertFiniteNullable(row.subagentMeanCreativity, `${prefix}.subagentMeanCreativity`);
     assertFiniteNullable(row.subagentMeanReasoning, `${prefix}.subagentMeanReasoning`);
@@ -118,6 +142,7 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     assertCountField(row.skillCount, `${prefix}.skillCount`);
     assertCountField(row.contextFileCount, `${prefix}.contextFileCount`);
     assertCountField(row.promptGuidelineCount, `${prefix}.promptGuidelineCount`);
+    assertFiniteNullableNonNegative(row.initialUserMessageChars, `${prefix}.initialUserMessageChars`);
     assertCountField(row.fileWriteCount, `${prefix}.fileWriteCount`);
     assertCountField(row.fileEditCount, `${prefix}.fileEditCount`);
     assertCountField(row.fileDeleteCount, `${prefix}.fileDeleteCount`);
@@ -139,6 +164,15 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     const prefix = `model-quality.json row ${index}`;
     assertCountField(row.runCount, `${prefix}.runCount`);
     assertCountField(row.scoredRunCount, `${prefix}.scoredRunCount`);
+    if (row.agentOutcomeCount !== undefined) {
+      assertCountField(row.agentOutcomeCount, `${prefix}.agentOutcomeCount`);
+    }
+    if (row.mixedModelExcludedOutcomeCount !== undefined) {
+      assertCountField(row.mixedModelExcludedOutcomeCount, `${prefix}.mixedModelExcludedOutcomeCount`);
+    }
+    if (row.mixedTreatmentExcludedOutcomeCount !== undefined) {
+      assertCountField(row.mixedTreatmentExcludedOutcomeCount, `${prefix}.mixedTreatmentExcludedOutcomeCount`);
+    }
     assertSatisfaction(row.averageSatisfaction, `${prefix}.averageSatisfaction`);
     assertFiniteNullableNonNegative(row.averageBusyDurationMs, `${prefix}.averageBusyDurationMs`);
     assertFiniteNullableNonNegative(row.medianBusyDurationMs, `${prefix}.medianBusyDurationMs`);
@@ -202,15 +236,49 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     const prefix = `model-leaderboard.json row ${index}`;
     assertCountField(row.runCount, `${prefix}.runCount`);
     assertCountField(row.scoredRunCount, `${prefix}.scoredRunCount`);
+    assertNonNegativeInteger(row.effectiveTaskCount, `${prefix}.effectiveTaskCount`);
+    assertCountField(row.attributableRunCount, `${prefix}.attributableRunCount`);
+    assertNonNegativeInteger(row.attributableTaskCount, `${prefix}.attributableTaskCount`);
+    assertFiniteNonNegative(row.userOutcomeCount, `${prefix}.userOutcomeCount`);
+    assertFiniteNonNegative(row.agentOutcomeCount, `${prefix}.agentOutcomeCount`);
+    assertCountField(row.userEvidenceCount, `${prefix}.userEvidenceCount`);
+    assertFiniteNonNegative(row.userEvidenceMass, `${prefix}.userEvidenceMass`);
+    assertCountField(row.agentEvidenceCount, `${prefix}.agentEvidenceCount`);
+    assertFiniteNonNegative(row.agentEvidenceMass, `${prefix}.agentEvidenceMass`);
+    assertCountField(row.processEvidenceCount, `${prefix}.processEvidenceCount`);
+    assertFiniteNonNegative(row.processEvidenceMass, `${prefix}.processEvidenceMass`);
+    assertCountField(row.canonicalTaskCount, `${prefix}.canonicalTaskCount`);
+    assertCountField(row.transcriptOnlySessionCount, `${prefix}.transcriptOnlySessionCount`);
+    assertFiniteNonNegative(row.mixedAttributionMass, `${prefix}.mixedAttributionMass`);
+    for (const [channel, value] of Object.entries({ user: row.userChannelScore, agent: row.agentChannelScore, process: row.processChannelScore })) {
+      assertNullableUnitInterval(value, `${prefix}.${channel}ChannelScore`);
+    }
+    if (!['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(row.evidenceTier)) throw new Error(`${prefix}.evidenceTier is invalid.`);
+    if (row.compositeScore !== null) {
+      assertUnitInterval(row.scoreInterval80?.lower, `${prefix}.scoreInterval80.lower`);
+      assertUnitInterval(row.scoreInterval80?.upper, `${prefix}.scoreInterval80.upper`);
+    }
+    assertCountField(row.mixedModelExcludedCount, `${prefix}.mixedModelExcludedCount`);
+    assertCountField(row.mixedTreatmentExcludedCount, `${prefix}.mixedTreatmentExcludedCount`);
     assertCountField(row.subagentRunCount, `${prefix}.subagentRunCount`);
     assertFiniteNullable(row.compositeScore, `${prefix}.compositeScore`);
-    assertFiniteNullable(row.reliabilityFactor, `${prefix}.reliabilityFactor`);
+    assertFiniteNullable(row.unadjustedCompositeScore, `${prefix}.unadjustedCompositeScore`);
+    assertFiniteNullable(row.caseMixAdjustment, `${prefix}.caseMixAdjustment`);
+    assertFiniteNullableNonNegative(row.evidenceWeight, `${prefix}.evidenceWeight`);
+    assertFiniteNullableNonNegative(row.reliabilityFactor, `${prefix}.reliabilityFactor`);
+    assertNullableUnitInterval(row.scoringCoverage, `${prefix}.scoringCoverage`);
+    assertFiniteNullableNonNegative(row.caseMixOverlap, `${prefix}.caseMixOverlap`);
     assertFiniteNullable(row.subagentUsageRate, `${prefix}.subagentUsageRate`);
     assertFiniteNullable(row.avgSubagentTasksPerRun, `${prefix}.avgSubagentTasksPerRun`);
     assertFiniteNullableNonNegative(row.medianDurationMs, `${prefix}.medianDurationMs`);
     assertFiniteNullable(row.medianTokenEfficiency, `${prefix}.medianTokenEfficiency`);
     assertFiniteNullableNonNegative(row.medianCostUsd, `${prefix}.medianCostUsd`);
-    assertFiniteNullable(row.meanTaskComplexity, `${prefix}.meanTaskComplexity`);
+    assertFiniteNullableNonNegative(row.meanPreTaskComplexity, `${prefix}.meanPreTaskComplexity`);
+    assertFiniteNullableNonNegative(row.meanWorkloadIntensity, `${prefix}.meanWorkloadIntensity`);
+    assertFiniteNullableNonNegative(row.meanTaskComplexity, `${prefix}.meanTaskComplexity`);
+    for (const [band, count] of Object.entries(row.taskComplexityBandCounts)) {
+      assertNonNegativeInteger(count, `${prefix}.taskComplexityBandCounts.${band}`);
+    }
     for (const [dimName, dim] of Object.entries(row.dimensions)) {
       assertFiniteNullable(dim.value, `${prefix}.dimensions.${dimName}.value`);
       assertFiniteNullable(dim.lowerBound, `${prefix}.dimensions.${dimName}.lowerBound`);
@@ -221,7 +289,41 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
       const pPrefix = `${prefix}.providers[${pIndex}]`;
       assertCountField(provider.runCount, `${pPrefix}.runCount`);
       assertCountField(provider.scoredRunCount, `${pPrefix}.scoredRunCount`);
+      assertCountField(provider.transcriptOnlySessionCount, `${pPrefix}.transcriptOnlySessionCount`);
+      assertFiniteNonNegative(provider.transcriptEvidenceMass, `${pPrefix}.transcriptEvidenceMass`);
     }
+  }
+
+  const weights = bundle.modelLeaderboard.weights;
+  for (const [dimension, weight] of Object.entries(weights)) {
+    if (!isFiniteNumber(weight)) {
+      throw new Error(`model-leaderboard.json weights.${dimension} must be finite, got ${weight}.`);
+    }
+  }
+  for (const [source, weight] of Object.entries(bundle.modelLeaderboard.sourceWeights)) {
+    assertUnitInterval(weight, `model-leaderboard.json sourceWeights.${source}`);
+  }
+  if (Math.abs(Object.values(bundle.modelLeaderboard.sourceWeights).reduce((sum, value) => sum + value, 0) - 1) > 1e-9) {
+    throw new Error('model-leaderboard.json sourceWeights must sum to 1.');
+  }
+  if (weights.fileChurn !== 0 || weights.toolReliability !== 0 || weights.verificationPassRate !== 0 || weights.tokenEfficiency !== 0) {
+    throw new Error('model-leaderboard.json process weights must be zero.');
+  }
+  if (Math.abs(weights.satisfaction + weights.resolutionRate - 1) > 1e-9) {
+    throw new Error('model-leaderboard.json satisfaction and resolution weights must sum to 1.');
+  }
+  assertNonNegativeInteger(bundle.modelLeaderboard.minimumScoredRuns, 'model-leaderboard.json minimumScoredRuns');
+  assertNonNegativeInteger(bundle.modelLeaderboard.minimumEffectiveTasks, 'model-leaderboard.json minimumEffectiveTasks');
+  assertUnitInterval(bundle.modelLeaderboard.minimumTaskScoringCoverage, 'model-leaderboard.json minimumTaskScoringCoverage');
+  assertNonNegativeInteger(bundle.modelLeaderboard.caseMix.minimumRatedTasksPerBand, 'model-leaderboard.json caseMix.minimumRatedTasksPerBand');
+  assertNonNegativeInteger(bundle.modelLeaderboard.caseMix.minimumModelRatedTasksPerBand, 'model-leaderboard.json caseMix.minimumModelRatedTasksPerBand');
+  assertFiniteNonNegative(bundle.modelLeaderboard.caseMix.minimumTargetBandWeight, 'model-leaderboard.json caseMix.minimumTargetBandWeight');
+  assertFiniteNonNegative(bundle.modelLeaderboard.caseMix.initialUserMessageCoverage, 'model-leaderboard.json caseMix.initialUserMessageCoverage');
+  for (const [band, weight] of Object.entries(bundle.modelLeaderboard.caseMix.targetBandWeights)) {
+    assertFiniteNonNegative(weight, `model-leaderboard.json caseMix.targetBandWeights.${band}`);
+  }
+  for (const [band, count] of Object.entries(bundle.modelLeaderboard.caseMix.scoredBandCounts)) {
+    assertNonNegativeInteger(count, `model-leaderboard.json caseMix.scoredBandCounts.${band}`);
   }
 
   const pruningSummary = bundle.pruningImpact.summary;

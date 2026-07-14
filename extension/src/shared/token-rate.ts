@@ -4,6 +4,7 @@ import { estimateTextTokens } from './tokenize';
 import {
   getRenderableSubagentResultFromToolCall,
   getRenderableSubagentResult,
+  isSubagentSingleResultRunning,
   type SubagentSingleResult,
 } from './subagent-result';
 import {
@@ -193,10 +194,6 @@ function latestReportedTurnRate(transcript: ChatMessage[]): number | null {
   return null;
 }
 
-function isSubagentRunning(result: SubagentSingleResult): boolean {
-  return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
-}
-
 function estimatedSubagentOutputTokens(result: SubagentSingleResult): number {
   let tokens = 0;
   if (Array.isArray(result.messages)) {
@@ -250,7 +247,7 @@ function findRunningSubagents(transcript: ChatMessage[]): RunningSubagent[] {
       const subagentResult = getRenderableSubagentResultFromToolCall(toolCall as ToolCall);
       if (!subagentResult) continue;
       subagentResult.results.forEach((single, index) => {
-        if (isSubagentRunning(single)) {
+        if (isSubagentSingleResultRunning(single)) {
           const key = `${toolCall.id}#${index}`;
           running.push({ key, result: single });
           running.push(...findNestedRunningSubagents(single, key, 1));
@@ -285,7 +282,7 @@ function findNestedRunningSubagents(
       if (!nestedResult) continue;
       const tcId = typeof part.id === 'string' ? part.id : '';
       nestedResult.results.forEach((single, index) => {
-        if (isSubagentRunning(single)) {
+        if (isSubagentSingleResultRunning(single)) {
           const key = `${parentKey}>${tcId}#${index}`;
           running.push({ key, result: single });
           running.push(...findNestedRunningSubagents(single, key, depth + 1));

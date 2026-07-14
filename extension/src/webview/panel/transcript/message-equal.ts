@@ -47,6 +47,7 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
     a.modelId !== b.modelId ||
     a.thinkingLevel !== b.thinkingLevel ||
     a.errorDetail !== b.errorDetail ||
+    a.toolStateRevision !== b.toolStateRevision ||
     a.durationMs !== b.durationMs ||
     a.turnLatencyMs !== b.turnLatencyMs ||
     a.overheadMs !== b.overheadMs ||
@@ -114,7 +115,7 @@ export function chatMessageEqual(a: ChatMessage, b: ChatMessage): boolean {
  *   - arrays: equal length + element-wise equality
  *   - objects: same own-enumerable string keys + per-key value equality
  *
- * Correctness is pinned by `test/message-equal.test.ts`, which enumerates a
+ * Correctness is pinned by `test/webview/transcript/messages/message-equal.test.ts`, which enumerates a
  * difference in every single `ChatMessage` field (including nested
  * `parts`/`toolCalls`/`userParts`/`usage`/`customDetails` mutations and
  * absent-vs-present optionals).

@@ -23,6 +23,11 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 import {
+	installProviderCapacityBridge,
+	type ProviderCapacitySnapshot,
+} from '../../../shared/provider-capacity-bridge.js';
+import { publishProviderTransportObservation } from './provider-progress-bus.js';
+import {
 	PROVIDER_GATE_REQUEST_CLASS_HEADER,
 	type ProviderGateRequestClass,
 } from '../../../shared/provider-gate-request-class.js';
@@ -148,6 +153,29 @@ class ProviderPool {
 
 	isPaused(): boolean {
 		return Date.now() < this.circuitBreaker.pausedUntil;
+	}
+
+	/** Whether a new, unrelated session can claim a slot without queueing.
+	 *  In-flight and afterburn-held slots are unavailable; queued waiters keep
+	 *  priority over a new unrelated session. */
+	canClaimImmediatelyForUnrelatedSession(): boolean {
+		if (this.isPaused() || this.waiters.length > 0) return false;
+		const now = this.now();
+		return this.slots.some((slot) =>
+			!slot.inFlight && (slot.holder === null || slot.holdUntil <= now),
+		);
+	}
+
+	/** Exact pre-acquire classification for one session (includes afterburn). */
+	canClaimImmediately(sessionId: string | null): boolean {
+		if (this.isPaused() || this.waiters.length > 0) return false;
+		const now = this.now();
+		if (sessionId && this.afterburnMs > 0 && this.slots.some((slot) =>
+			!slot.inFlight && slot.holder === sessionId && slot.holdUntil > now,
+		)) return true;
+		return this.slots.some((slot) =>
+			!slot.inFlight && (slot.holder === null || slot.holdUntil <= now),
+		);
 	}
 
 	/** Epoch-ms until which the provider is paused (0 = not paused). */
@@ -431,6 +459,7 @@ export class ProviderGate {
 	private configs: ProviderConcurrencyConfig[] = [];
 	private idleTimeoutMs: number;
 	private defaultHeaderWaitMs: number;
+	private uninstallCapacityBridge: (() => void) | null = null;
 
 	private constructor(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds: number) {
 		this.configs = configs;
@@ -450,6 +479,7 @@ export class ProviderGate {
 		}
 		ProviderGate.instance = new ProviderGate(configs, idleTimeoutSeconds);
 		ProviderGate.instance.wrapFetch();
+		ProviderGate.instance.installCapacityBridge();
 		return ProviderGate.instance;
 	}
 
@@ -460,9 +490,13 @@ export class ProviderGate {
 
 	/** Remove the fetch wrapper (for tests / disposal). */
 	static uninstall(): void {
-		if (ProviderGate.instance && ProviderGate.instance.originalFetch) {
-			globalThis.fetch = ProviderGate.instance.originalFetch;
-			ProviderGate.instance.originalFetch = null;
+		if (ProviderGate.instance) {
+			ProviderGate.instance.uninstallCapacityBridge?.();
+			ProviderGate.instance.uninstallCapacityBridge = null;
+			if (ProviderGate.instance.originalFetch) {
+				globalThis.fetch = ProviderGate.instance.originalFetch;
+				ProviderGate.instance.originalFetch = null;
+			}
 		}
 		ProviderGate.instance = null;
 	}
@@ -529,6 +563,22 @@ export class ProviderGate {
 		this.originalFetch = globalThis.fetch;
 		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
 			this.handleFetch(input, init)) as typeof globalThis.fetch;
+	}
+
+	private installCapacityBridge(): void {
+		this.uninstallCapacityBridge?.();
+		this.uninstallCapacityBridge = installProviderCapacityBridge(() => this.getCapacitySnapshot());
+	}
+
+	/** Snapshot used by subagent pre-request model/provider routing. */
+	getCapacitySnapshot(): ProviderCapacitySnapshot {
+		const snapshot: Record<string, { immediatelyClaimable: boolean }> = {};
+		for (const [provider, entry] of this.pools) {
+			snapshot[provider] = {
+				immediatelyClaimable: entry.pool.canClaimImmediatelyForUnrelatedSession(),
+			};
+		}
+		return snapshot;
 	}
 
 	/** Match a request URL to a configured provider and return its pool. */
@@ -601,8 +651,12 @@ export class ProviderGate {
 			throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 		}
 
-		// Acquire a concurrency slot.
+		// Acquire a concurrency slot. Queue and header waits are separate phases.
+		if (sessionId && !pool.canClaimImmediately(sessionId)) {
+			publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'gate_queue' });
+		}
 		const slotIndex = await pool.acquire(sessionId, signal, requestClass);
+		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_wait' });
 
 		try {
 			// Header-phase bound: race the upstream fetch against a timeout so
@@ -610,6 +664,7 @@ export class ProviderGate {
 			// concurrency slot indefinitely. The idle-chunk watchdog (armed in
 			// wrapStream) only covers the BODY phase — headers must arrive first.
 			const response = await this.fetchWithHeaderTimeout(input, init, config.provider, headerWaitMs, signal);
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
 
 			// Account-pause detection: 429/403 with suspension body.
 			const pauseInfo = await this.extractAccountPause(response, config.provider);
@@ -638,6 +693,7 @@ export class ProviderGate {
 			pool.release(slotIndex, sessionId, true);
 			return response;
 		} catch (error) {
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
@@ -830,6 +886,7 @@ export class ProviderGate {
 					timer = setTimeout(() => {
 						if (settled) return;
 						settled = true;
+						if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_error' });
 						reader.cancel().catch(() => {});
 						try {
 							controller.error(
@@ -851,17 +908,20 @@ export class ProviderGate {
 						clearTimer();
 						if (settled) return;
 						if (done) {
+							if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_terminal' });
 							controller.close();
 							settled = true;
 							releaseSlot();
 							return;
 						}
 						if (value) {
+							if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'raw_chunk' });
 							controller.enqueue(value);
 						}
 						armTimer();
 					}
 				} catch (err) {
+					if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_error' });
 					clearTimer();
 					if (!settled) {
 						settled = true;

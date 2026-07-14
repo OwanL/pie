@@ -135,7 +135,7 @@ function renderSingleExpanded(r: SingleResult, theme: Theme, mdTheme: any): Cont
 	const icon = resultIcon(theme, r);
 	const isError = isErrorResult(r);
 	const displayItems = getDisplayItems(r.messages);
-	const finalOutput = getFinalOutput(r.messages);
+	const finalOutput = r.finalOutput ?? getFinalOutput(r.messages);
 
 	const container = new Container();
 	let header = resultHeader(theme, r, icon);
@@ -227,7 +227,7 @@ function chainCollapsedHeader(theme: Theme, results: SingleResult[]): string {
 function renderChainStepExpanded(container: Container, r: SingleResult, theme: Theme, mdTheme: any): void {
 	const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 	const displayItems = getDisplayItems(r.messages);
-	const finalOutput = getFinalOutput(r.messages);
+	const finalOutput = r.finalOutput ?? getFinalOutput(r.messages);
 
 	const header = chainStepHeader(theme, r, rIcon) + (r.task ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}` : "");
 	container.addChild(new Text(header, 0, 0));
@@ -310,7 +310,7 @@ function parallelHeader(theme: Theme, results: SingleResult[]): string {
 function renderParallelStepExpanded(container: Container, r: SingleResult, theme: Theme, mdTheme: any): void {
 	const rIcon = parallelStepIcon(theme, r);
 	const displayItems = getDisplayItems(r.messages);
-	const finalOutput = getFinalOutput(r.messages);
+	const finalOutput = r.finalOutput ?? getFinalOutput(r.messages);
 
 	const header = parallelStepHeader(theme, r, rIcon) + (r.task ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", r.task)}` : "");
 	container.addChild(new Text(header, 0, 0));

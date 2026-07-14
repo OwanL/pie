@@ -28,15 +28,22 @@ function textOf(res: any): string {
 /** Build a temp session JSONL (well-formed) whose cwd is the temp dir and
  *  that "created" `created.ts` there — so `diff` on it resolves to a file that
  *  exists and produces a synthetic all-additions body (no git needed). */
-async function makeSession(): Promise<{ dir: string; file: string; sessionPath: string }> {
+interface SessionOptions {
+  toolPath?: string | ((dir: string) => string);
+  cwd?: string | null | ((dir: string) => string);
+}
+
+async function makeSession(options: SessionOptions = {}): Promise<{ dir: string; file: string; sessionPath: string }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-exec-'));
   const file = path.join(dir, 'created.ts');
+  const toolPath = typeof options.toolPath === 'function' ? options.toolPath(dir) : options.toolPath;
+  const cwd = typeof options.cwd === 'function' ? options.cwd(dir) : options.cwd === undefined ? dir : options.cwd;
   await fs.writeFile(file, 'hello\nworld\n');
   const entries = [
-    { type: 'session', version: 3, id: 's', timestamp: 't', cwd: dir },
+    { type: 'session', version: 3, id: 's', timestamp: 't', ...(cwd === null ? {} : { cwd }) },
     {
       type: 'message', id: 'm1', timestamp: 't',
-      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'write', arguments: { path: 'created.ts', content: 'hello\nworld\n' } }] },
+      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'write', arguments: { path: toolPath ?? 'created.ts', content: 'hello\nworld\n' } }] },
     },
     { type: 'message', id: 'tr1', timestamp: 't', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'write', content: 'ok', isError: false } },
   ];
@@ -70,6 +77,97 @@ test('execute: list with explicit sessionPath', async () => {
   }
 });
 
+test('execute: list renders absolute paths inside the session cwd as relative', async () => {
+  const session = await makeSession({ toolPath: (dir) => path.join(dir, 'created.ts') });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /A\tcreated\.ts\t\+2\t-0/);
+    assert.equal(textOf(res).includes(session.dir), false);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list keeps paths outside the session cwd absolute', async () => {
+  const outsidePath = path.join(os.tmpdir(), `pie-sc-outside-${Date.now()}.ts`);
+  const session = await makeSession({ toolPath: outsidePath });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.equal(textOf(res).includes(outsidePath), true);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list makes relative traversal outside cwd explicitly absolute', async () => {
+  const session = await makeSession({ toolPath: path.join('..', 'outside.ts') });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    const expected = path.resolve(session.dir, '..', 'outside.ts');
+    assert.equal(res.isError, false);
+    assert.equal(textOf(res).includes(expected), true);
+    assert.equal(textOf(res).includes(`\t..${path.sep}outside.ts\t`), false);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list does not confuse a sibling sharing the cwd name prefix for a descendant', async () => {
+  const session = await makeSession({
+    toolPath: (dir) => path.join(path.dirname(dir), `${path.basename(dir)}-sibling`, 'file.ts'),
+  });
+  try {
+    const expected = path.join(path.dirname(session.dir), `${path.basename(session.dir)}-sibling`, 'file.ts');
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.equal(textOf(res).includes(expected), true);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list handles a session cwd with a trailing separator', async () => {
+  const session = await makeSession({
+    cwd: (dir) => `${dir}${path.sep}`,
+    toolPath: (dir) => path.join(dir, 'created.ts'),
+  });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /A\tcreated\.ts\t\+2\t-0/);
+    assert.equal(textOf(res).includes(session.dir), false);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list preserves an absolute path when the session header has no cwd', async () => {
+  const session = await makeSession({ cwd: null, toolPath: (dir) => path.join(dir, 'created.ts') });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.equal(textOf(res).includes(session.file), true);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list handles Windows path casing and slash variants', { skip: process.platform !== 'win32' }, async () => {
+  const session = await makeSession({
+    toolPath: (dir) => path.join(dir.toUpperCase().replaceAll('\\', '/'), 'created.ts'),
+  });
+  try {
+    const res = await exe({ action: 'list', sessionPath: session.sessionPath });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /A\tcreated\.ts\t\+2\t-0/i);
+    assert.equal(textOf(res).toLowerCase().includes(session.dir.toLowerCase()), false);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
 // ─── diff: path arrays (single + multi) ────────────────────────────────────
 
 test('execute: diff accepts a single-element path array', async () => {
@@ -92,6 +190,18 @@ test('execute: diff accepts a string[] path', async () => {
     assert.match(textOf(res), /^A created\.ts /m);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff renders an absolute manifest path inside cwd as relative', async () => {
+  const session = await makeSession({ toolPath: (dir) => path.join(dir, 'created.ts') });
+  try {
+    const res = await exe({ action: 'diff', sessionPath: session.sessionPath, path: ['created.ts'] });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /^A created\.ts /m);
+    assert.equal(textOf(res).includes(session.dir), false);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
   }
 });
 

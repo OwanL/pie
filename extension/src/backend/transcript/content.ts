@@ -145,6 +145,7 @@ export function applyToolResultToParts(
   toolCallId: string | undefined,
   result: unknown,
   status: ToolCall['status'],
+  durableEntryId?: string,
 ): void {
   if (!parts || !toolCallId) {
     return;
@@ -160,6 +161,7 @@ export function applyToolResultToParts(
 
   part.toolCall.result = result;
   part.toolCall.status = status;
+  if (durableEntryId) part.toolCall.durableEntryId = durableEntryId;
 }
 
 export function assistantStatus(message: MessageLike): ChatMessage['status'] {

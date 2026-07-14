@@ -9,6 +9,7 @@ export function backendExitEvents(
   runningSessionPaths: readonly string[],
   code: number | null,
   stderr: string,
+  occurredAt: number,
   activityBySession: Readonly<Record<string, InterruptedSessionActivity>> = {},
 ): Event[] {
   const paths = [...new Set(runningSessionPaths)];
@@ -31,7 +32,7 @@ export function backendExitEvents(
     noticeRaw: stderr || null,
   }];
   if (paths.length > 0) {
-    events.push({ kind: 'SessionsInterrupted', sessionPaths: paths, reason });
+    events.push({ kind: 'SessionsInterrupted', sessionPaths: paths, reason, occurredAt });
   }
   events.push({ kind: 'BackendReadyChanged', ready: false });
   events.push({ kind: 'RunningSessionsChanged', sessionPaths: [] });

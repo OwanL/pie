@@ -13,9 +13,8 @@
  *   - REQUIRED nested object fields are checked to be objects with their own
  *     required primitives shallowly verified.
  *   - OPTIONAL fields are NOT required; an absent optional field is valid.
- *   - `unknown`-typed fields (`input`, `result`, `partialResult`) are not
- *     narrowed — any value (including `undefined`) is accepted, matching the
- *     downstream `unknown` contract.
+ *   - terminal `input`/`result` fields remain opaque durable values. Live tool
+ *     progress is instead validated as the closed, bounded `ToolPreview` union.
  *
  * Behavior: well-formed payloads pass unchanged; malformed payloads fail the
  * guard and the caller drops them with a loud `console.warn`.
@@ -47,6 +46,7 @@ import type {
 } from './sessions.js';
 import type { ExtensionUIRequestPayload } from './webview.js';
 import type { ContextWindowUsage } from './models.js';
+import { isToolPreview } from '../live-pipeline-protocol.js';
 
 // ─── shared primitives ───────────────────────────────────────────────────────
 
@@ -232,6 +232,7 @@ export function isToolStartedPayload(value: unknown): value is ToolStartedPayloa
     && isString(value.toolCallId)
     && isString(value.name)
     && isFiniteNumber(value.startedAt)
+    && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
   );
 }
 
@@ -242,8 +243,12 @@ export function isToolFinishedPayload(value: unknown): value is ToolFinishedPayl
     && isString(value.sessionPath)
     && isString(value.messageId)
     && isString(value.toolCallId)
+    && (value.name === undefined || isString(value.name))
     && (value.status === 'completed' || value.status === 'failed')
     && isOptionalFiniteNumber(value.durationMs)
+    && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
+    && (value.durableEntryId === undefined || isString(value.durableEntryId))
+    && (value.canonicalLive === undefined || typeof value.canonicalLive === 'boolean')
   );
 }
 
@@ -254,6 +259,7 @@ export function isToolProgressPayload(value: unknown): value is ToolProgressPayl
     && isString(value.sessionPath)
     && isString(value.messageId)
     && isString(value.toolCallId)
+    && isToolPreview(value.preview)
   );
 }
 

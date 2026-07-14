@@ -21,6 +21,7 @@ import { getToolCallPresentation } from '../tool-call-summary';
 import { textFromToolResult } from './highlight';
 import {
   getRenderableSubagentResultFromToolCall,
+  isSubagentSingleResultRunning,
   type SubagentSingleResult,
 } from './subagent';
 
@@ -224,10 +225,6 @@ export function deriveToolTail(toolCall: ToolCall, lineBudget: number = ACTIVITY
   };
 }
 
-function subagentSingleResultRunning(result: SubagentSingleResult): boolean {
-  return result.exitCode === -1 || (result.runningTools?.length ?? 0) > 0;
-}
-
 function compactDuration(ms: number): string {
   if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
@@ -253,7 +250,7 @@ export function subagentDetailLines(result: SubagentSingleResult, now = Date.now
   };
   const phase = result.activityPhase
     ? phaseLabels[result.activityPhase]
-    : (subagentSingleResultRunning(result) ? 'Waiting for status update' : undefined);
+    : (isSubagentSingleResultRunning(result) ? 'Waiting for status update' : undefined);
   const stateFor = result.activitySince ? compactDuration(now - result.activitySince) : undefined;
   const progressAgo = result.lastProgressAt ? compactDuration(now - result.lastProgressAt) : undefined;
   const stallLimit = result.inactivityBudgetMs ? compactDuration(result.inactivityBudgetMs) : undefined;
@@ -323,7 +320,7 @@ export function deriveSubagentTail(toolCall: ToolCall, lineBudget: number = ACTI
   const sub = getRenderableSubagentResultFromToolCall(toolCall);
   if (!sub) return null;
 
-  const running = sub.results.filter(subagentSingleResultRunning);
+  const running = sub.results.filter(isSubagentSingleResultRunning);
   if (running.length === 0) return null;
 
   const primary = running[0]!;

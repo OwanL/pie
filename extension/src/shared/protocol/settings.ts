@@ -159,6 +159,9 @@ export interface ChatPrefs {
   showPruningMessages: boolean;
   /** When true, sub-agents always use the parent's active model (skip bucket selection). */
   subagentAlwaysParentModel: boolean;
+  /** When true, bucket selection softly routes around enabled providers whose
+   *  live ProviderGate has no immediately claimable slot. Default false. */
+  subagentRouteAroundSaturatedProviders: boolean;
   /** When true, host-side `auditLog` events are emitted to the extension host
    *  console (exthost.log) even in production/installed mode. Off by default;
    *  dev mode (`extensionMode === 1`) always emits regardless of this flag.
@@ -177,12 +180,6 @@ export interface ChatPrefs {
   /** Max concurrent in-flight subagent sessions across the whole process.
    *  Default 2. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
   subagentMaxInflight: number;
-  /** Max concurrency within one parallel `tasks[]` array. Default 2.
-   *  Mirrored via PIE_SUBAGENT_MAX_CONCURRENCY. */
-  subagentMaxConcurrency: number;
-  /** Max parallel tasks allowed in a single `subagent` call. Default 4.
-   *  Mirrored via PIE_SUBAGENT_MAX_PARALLEL_TASKS. */
-  subagentMaxParallelTasks: number;
   /** Size of the per-session warm bash pool (pre-warmed bash processes that
    *  hide shell-spawn latency). 0 disables warm bash (today's fresh-spawn
    *  behaviour). Default 2. Mirrored via PIE_BASH_WARM_POOL. Applies on the
@@ -281,6 +278,15 @@ export interface ChatPrefs {
   extensionToggles: Record<string, boolean>;
   /** Per-provider enabled/disabled toggles. Keys are provider names. */
   providerToggles: Record<string, boolean>;
+  /** Default enabled state for providers in the per-session subagent provider
+   *  selector. Missing entries mean enabled. A session-specific toggle takes
+   *  precedence over this default. This does not affect the parent model picker. */
+  subagentProviderDefaults: Record<string, boolean>;
+  /** Per-session subagent-only provider toggles. The outer key is the session
+   *  path; inner keys are provider names. Missing entries inherit from
+   *  {@link subagentProviderDefaults}. This does not affect the parent
+   *  session's model picker. */
+  subagentProviderTogglesBySession: Record<string, Record<string, boolean>>;
   /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
    *  queueWaitSeconds, headerWaitSeconds). A provider absent from this map uses
    *  its models.json `concurrency` defaults. Mirrored to the backend via
@@ -322,6 +328,15 @@ export interface ChatPrefs {
 /** Environment key used to expose pie provider toggles to in-process pi extensions. */
 export const PROVIDER_TOGGLES_ENV = 'PIE_PROVIDER_TOGGLES_JSON';
 
+/** Default provider toggles used only by subagent model selection. */
+export const SUBAGENT_PROVIDER_DEFAULTS_ENV = 'PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON';
+
+/** Per-session provider toggles used only by subagent model selection. */
+export const SUBAGENT_PROVIDER_TOGGLES_ENV = 'PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON';
+
+/** Opt-in live-capacity routing for subagent model/provider selection. */
+export const SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV = 'PIE_SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS';
+
 /** Environment key used to expose pie extension toggles to in-process pi extensions. */
 export const EXTENSION_TOGGLES_ENV = 'PIE_EXTENSION_TOGGLES_JSON';
 
@@ -345,11 +360,14 @@ export interface ActiveRunSummary {
 }
 
 export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
+export type RunOutcomeSource = 'user' | 'agent';
 
 export interface RunOutcome {
   resolution: RunOutcomeResolution;
   /** Intended to be a user-facing ordinal score (e.g. 1–5). */
   satisfaction: number;
+  /** Who supplied the outcome. Absent denotes a user-authored outcome for wire compatibility. */
+  source?: RunOutcomeSource;
 }
 
 export const DEFAULT_CHAT_PREFS: ChatPrefs = {
@@ -359,12 +377,11 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   suppressCompletionNotifications: false,
   showPruningMessages: true,
   subagentAlwaysParentModel: false,
+  subagentRouteAroundSaturatedProviders: false,
   runtimeAuditLog: false,
   subagentMaxDepth: 3,
   subagentMaxTreeSessions: 10,
   subagentMaxInflight: 2,
-  subagentMaxConcurrency: 2,
-  subagentMaxParallelTasks: 4,
   bashWarmPoolSize: 2,
   bashFastPath: true,
   bashShellPath: '',
@@ -392,6 +409,8 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   uiDensity: 'comfortable',
   extensionToggles: {},
   providerToggles: {},
+  subagentProviderDefaults: {},
+  subagentProviderTogglesBySession: {},
   providerConcurrency: {},
   activityTailLines: 2,
   uiMessageRailSize: 20,
@@ -413,7 +432,9 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   provider: 'github-copilot',
   thinkingLevel: 'minimal',
   prepassTimeoutSec: null,
-  autoSkipBelowTokens: null,
+  // Keep this aligned with skill-pruner/config.ts: an omitted on-disk value
+  // enables the extension's 1,200-token small-turn optimization.
+  autoSkipBelowTokens: 1200,
 };
 
 export interface ToolResultPruningRuleToggles {
@@ -592,6 +613,8 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
       ...DEFAULT_CHAT_PREFS.providerToggles,
       ...(prefs?.providerToggles ?? {}),
     },
+    subagentProviderDefaults: normalizeBooleanMap(prefs?.subagentProviderDefaults),
+    subagentProviderTogglesBySession: normalizeNestedBooleanMap(prefs?.subagentProviderTogglesBySession),
     providerConcurrency: normalizeProviderConcurrency(prefs?.providerConcurrency),
     subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
     subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
@@ -608,15 +631,39 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
  * Shared between the live `setPrefs` path and startup restore so a pref field
  * is never mirrored on one path but missing on the other.
  */
+export function normalizeBooleanMap(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, boolean> = {};
+  for (const [key, enabled] of Object.entries(value as Record<string, unknown>)) {
+    if (key && typeof enabled === 'boolean') result[key] = enabled;
+  }
+  return result;
+}
+
+export function normalizeNestedBooleanMap(value: unknown): Record<string, Record<string, boolean>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const result: Record<string, Record<string, boolean>> = {};
+  for (const [outerKey, innerValue] of Object.entries(value as Record<string, unknown>)) {
+    if (!outerKey || !innerValue || typeof innerValue !== 'object' || Array.isArray(innerValue)) continue;
+    const inner: Record<string, boolean> = {};
+    for (const [key, enabled] of Object.entries(innerValue as Record<string, unknown>)) {
+      if (key && typeof enabled === 'boolean') inner[key] = enabled;
+    }
+    result[outerKey] = inner;
+  }
+  return result;
+}
+
 export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   providerToggles: Record<string, boolean>;
+  subagentProviderDefaults?: Record<string, boolean>;
+  subagentProviderTogglesBySession?: Record<string, Record<string, boolean>>;
   extensionToggles: Record<string, boolean>;
   subagentAlwaysParentModel?: boolean;
+  subagentRouteAroundSaturatedProviders?: boolean;
   subagentMaxDepth?: number;
   subagentMaxTreeSessions?: number;
   subagentMaxInflight?: number;
-  subagentMaxConcurrency?: number;
-  subagentMaxParallelTasks?: number;
   bashWarmPoolSize?: number;
   bashFastPath?: boolean;
   bashShellPath?: string;
@@ -630,13 +677,14 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
 } {
   return {
     providerToggles: prefs.providerToggles,
+    subagentProviderDefaults: prefs.subagentProviderDefaults,
+    subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
     extensionToggles: prefs.extensionToggles,
     subagentAlwaysParentModel: prefs.subagentAlwaysParentModel,
+    subagentRouteAroundSaturatedProviders: prefs.subagentRouteAroundSaturatedProviders,
     subagentMaxDepth: prefs.subagentMaxDepth,
     subagentMaxTreeSessions: prefs.subagentMaxTreeSessions,
     subagentMaxInflight: prefs.subagentMaxInflight,
-    subagentMaxConcurrency: prefs.subagentMaxConcurrency,
-    subagentMaxParallelTasks: prefs.subagentMaxParallelTasks,
     bashWarmPoolSize: prefs.bashWarmPoolSize,
     bashFastPath: prefs.bashFastPath,
     bashShellPath: prefs.bashShellPath,

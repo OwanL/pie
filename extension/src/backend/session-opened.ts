@@ -60,11 +60,17 @@ export async function buildSessionOpenedPayload(
   const mode: TranscriptMode = transcript === 'skip' && !streaming ? 'skip' : 'tail';
 
   const cache = ensureDisplayTranscriptCache(context);
-  const transcriptSlice = mode === 'skip'
+  const rawTranscriptSlice = mode === 'skip'
     ? { transcript: [] as SessionOpenedPayload['transcript'], transcriptWindow: emptySkipWindow(cache) }
     : buildTailTranscriptWindow(cache, {
         pinnedMessageId: deps.getPinnedStreamingMessageId(context),
       });
+  const transcriptSlice = {
+    ...rawTranscriptSlice,
+    transcript: streaming
+      ? stripActiveAssistantTail(rawTranscriptSlice.transcript)
+      : normalizeDanglingTranscript(rawTranscriptSlice.transcript),
+  };
 
   return {
     session: buildCurrentSummary(context, deps.startupCwd),
@@ -79,6 +85,42 @@ export async function buildSessionOpenedPayload(
     availableModels: listAvailableModels(context, deps.agentDir),
     contextUsage: contextUsage ?? undefined,
   };
+}
+
+export function stripActiveAssistantTail(
+  transcript: SessionOpenedPayload['transcript'],
+): SessionOpenedPayload['transcript'] {
+  let assistantIndex = -1;
+  let userIndex = -1;
+  for (let row = transcript.length - 1; row >= 0 && (assistantIndex < 0 || userIndex < 0); row -= 1) {
+    if (assistantIndex < 0 && transcript[row]?.role === 'assistant') assistantIndex = row;
+    if (userIndex < 0 && transcript[row]?.role === 'user') userIndex = row;
+  }
+  return assistantIndex <= userIndex
+    ? transcript
+    : transcript.filter((_message, row) => row !== assistantIndex);
+}
+
+export function normalizeDanglingTranscript(
+  transcript: SessionOpenedPayload['transcript'],
+): SessionOpenedPayload['transcript'] {
+  return transcript.map((message) => {
+    const hasDanglingTool = message.toolCalls?.some((tool) => tool.status === 'running') ?? false;
+    if (!hasDanglingTool && message.status !== 'streaming') return message;
+    const toolCalls = message.toolCalls?.map((tool) => tool.status === 'running'
+      ? { ...tool, status: 'failed' as const }
+      : tool);
+    const parts = message.parts?.map((part) => part.kind === 'toolCall'
+      ? { kind: 'toolCall' as const, toolCall: toolCalls?.find((tool) => tool.id === part.toolCall.id) ?? part.toolCall }
+      : part);
+    return {
+      ...message,
+      status: 'interrupted' as const,
+      errorDetail: message.errorDetail ?? 'The prior process ended before this turn completed.',
+      toolCalls,
+      parts,
+    };
+  });
 }
 
 /** Sentinel window for a skipped-transcript response. The host ignores these

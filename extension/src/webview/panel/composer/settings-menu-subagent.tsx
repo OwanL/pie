@@ -3,7 +3,15 @@
 
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import type { ChatPrefs, ModelInfo } from '../../../shared/protocol';
-import { setBucketModels, setNestedAllowedBucket, setSubagentDropTools, toggleChatPref } from '../chat-prefs';
+import {
+  getSubagentBucketProviders,
+  isSubagentProviderEnabled,
+  setBucketModels,
+  setNestedAllowedBucket,
+  setSubagentDropTools,
+  setSubagentProviderDefaultEnabled,
+  toggleChatPref,
+} from '../chat-prefs';
 import { orderModelsForPicker } from './model-list';
 import { PickerTag } from '../components/PickerTag';
 import { UiGroupLabel } from './ui-appearance-settings';
@@ -205,6 +213,14 @@ interface SubagentSettingsProps {
  * as the skill-pruner expansion.
  */
 export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentSettingsProps) {
+  const subagentProviders = useMemo(
+    () => getSubagentBucketProviders(prefs, availableModels),
+    [availableModels, prefs.subagentBuckets],
+  );
+  const defaultEnabledCount = subagentProviders.filter(
+    (provider) => isSubagentProviderEnabled(prefs, provider),
+  ).length;
+
   return (
     <div class="toolbar-settings-ext-settings">
       <button
@@ -221,6 +237,55 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
         </span>
         <span class="toolbar-settings-item-label">Always use parent model</span>
       </button>
+
+      <button
+        class={`toolbar-settings-item${prefs.subagentRouteAroundSaturatedProviders ? ' checked' : ''}`}
+        type="button"
+        role="checkbox"
+        aria-checked={prefs.subagentRouteAroundSaturatedProviders}
+        onClick={() => onSetPrefs(toggleChatPref(prefs, 'subagentRouteAroundSaturatedProviders'))}
+      >
+        <span class="toolbar-settings-item-check" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={prefs.subagentRouteAroundSaturatedProviders ? '' : 'opacity:0'}>
+            <polyline points="2.5,6.5 5,9 10.5,3.5" />
+          </svg>
+        </span>
+        <span class="toolbar-settings-item-label">Route around busy providers</span>
+      </button>
+      <div class="toolbar-settings-item-hint">
+        Prefer another enabled model/provider in the requested bucket when its ProviderGate has an immediate slot. If capacity is unavailable or every candidate is busy, keep normal selection and queue. “Always use parent model” takes precedence.
+      </div>
+
+      <UiGroupLabel label="Default providers" />
+      <div class="toolbar-settings-item-hint">
+        Sets the initial selection in each chat's subagent provider selector. Per-chat changes override these defaults. Only providers assigned to a model bucket are listed.
+      </div>
+      {subagentProviders.length === 0 && (
+        <div class="toolbar-settings-item-hint">Add models to the buckets below to configure provider defaults.</div>
+      )}
+      {subagentProviders.map((provider) => {
+        const enabled = isSubagentProviderEnabled(prefs, provider);
+        const lastEnabled = enabled && defaultEnabledCount === 1;
+        return (
+          <button
+            key={provider}
+            class={`toolbar-settings-item${enabled ? ' checked' : ''}`}
+            type="button"
+            role="checkbox"
+            aria-checked={enabled}
+            disabled={lastEnabled}
+            title={lastEnabled ? 'At least one subagent provider must remain enabled by default' : undefined}
+            onClick={() => onSetPrefs(setSubagentProviderDefaultEnabled(prefs, provider, !enabled))}
+          >
+            <span class="toolbar-settings-item-check" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={enabled ? '' : 'opacity:0'}>
+                <polyline points="2.5,6.5 5,9 10.5,3.5" />
+              </svg>
+            </span>
+            <span class="toolbar-settings-item-label">{provider}</span>
+          </button>
+        );
+      })}
 
       <UiGroupLabel label="Dropped tools" />
       <DropToolsEditor
@@ -307,7 +372,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
 
       <UiGroupLabel label="Throughput" />
       <div class="toolbar-settings-item-hint">
-        These caps throttle subagent fan-out to protect providers from bursts. Lower values reduce concurrency; 0 is not allowed.
+        Native sibling subagent calls run concurrently. This cap protects providers from bursts; 0 is not allowed.
       </div>
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">
@@ -324,41 +389,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
           onInput={(e) => onSetPrefs({ subagentMaxInflight: Number((e.target as HTMLInputElement).value) })}
           aria-label="Max concurrent root subagent trees"
         />
-        <div class="toolbar-settings-item-hint">Global cap on independent root subagent trees across all sessions. Nested descendants borrow their root's permit, so this throttle cannot deadlock recursive delegation.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Max concurrency</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxConcurrency}</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="1"
-          max="16"
-          step="1"
-          value={prefs.subagentMaxConcurrency}
-          onInput={(e) => onSetPrefs({ subagentMaxConcurrency: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Max concurrency within one parallel subagent call"
-        />
-        <div class="toolbar-settings-item-hint">How many tasks inside one parallel subagent call may run at the same time.</div>
-      </div>
-      <div class="toolbar-settings-ui-control">
-        <div class="toolbar-settings-ui-control-head">
-          <span class="toolbar-settings-ui-control-label">Max parallel tasks</span>
-          <span class="toolbar-settings-ui-control-value">{prefs.subagentMaxParallelTasks}</span>
-        </div>
-        <input
-          type="range"
-          class="toolbar-settings-slider toolbar-settings-ui-slider"
-          min="1"
-          max="16"
-          step="1"
-          value={prefs.subagentMaxParallelTasks}
-          onInput={(e) => onSetPrefs({ subagentMaxParallelTasks: Number((e.target as HTMLInputElement).value) })}
-          aria-label="Max parallel tasks per subagent call"
-        />
-        <div class="toolbar-settings-item-hint">Maximum number of tasks allowed in a single parallel subagent call.</div>
+        <div class="toolbar-settings-item-hint">Global cap on independent root subagent trees across all sessions and on sibling subagent calls emitted in one turn. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle.</div>
       </div>
     </div>
   );

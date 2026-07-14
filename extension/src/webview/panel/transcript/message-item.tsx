@@ -12,6 +12,7 @@ import { chatMessageEqual } from './message-equal';
 import { useCaptureHeight, useMessageEntrance, useMessageItemDerived, useMessageParts } from './message-item/hooks';
 import { MessageItemInner, MessageItemShell } from './message-item/inner';
 import { userImagePartsToInputs } from './parts';
+import { MessageCommitContext, useCommittedMessageLeaf } from './commit-registry';
 
 export { ReasoningBlock } from './message-item/reasoning-block';
 
@@ -86,6 +87,11 @@ export function MessageItemView({
   const entered = useMessageEntrance(message.id, sessionKey);
 
   const initialInputs = useMemo(() => userImagePartsToInputs(message), [message]);
+  const commitOwner = useMemo(() => ({
+    messageId: message.id,
+    toolStateRevision: message.toolStateRevision ?? 0,
+  }), [message.id, message.toolStateRevision]);
+  useCommittedMessageLeaf(message);
 
   const derived = useMessageItemDerived({
     message,
@@ -114,6 +120,7 @@ export function MessageItemView({
       entered={entered}
       handleMessageClick={derived.handleMessageClick}
     >
+      <MessageCommitContext.Provider value={commitOwner}>
       <MessageItemInner
         message={message}
         isEditing={derived.isEditing}
@@ -145,6 +152,7 @@ export function MessageItemView({
         onEditCancel={onEditCancel}
         onCancelPrepass={onCancelPrepass}
       />
+      </MessageCommitContext.Provider>
     </MessageItemShell>
   );
 }

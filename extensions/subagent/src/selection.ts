@@ -24,6 +24,8 @@ import {
 	downgradeBucketForNested,
 } from "./bucket-config.js";
 import { selectModel } from "../bucket-selector.js";
+import { getCapacityAvailableModelIds } from "./provider-capacity.js";
+import type { ModelProviderRef } from "./provider-toggles.js";
 
 /** Context for model selection settings and restrictions. */
 export interface SelectionContext {
@@ -34,6 +36,10 @@ export interface SelectionContext {
 	bucketAssignments: BucketAssignments | undefined;
 	/** When true, skip bucket selection and always use the parent's active model. */
 	alwaysParentModel: boolean;
+	/** Opt-in soft routing around providers without an immediately claimable slot. */
+	routeAroundSaturatedProviders?: boolean;
+	/** Enabled/configured registry models used to map duplicate ids to providers. */
+	registryModels?: ModelProviderRef[];
 	/** Per-tier allowlist restricting which buckets *nested* subagents (depth ≥ 1)
 	 *  may use. Read once from the env mirror (PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON).
 	 *  All-true (the default) leaves behaviour unchanged. */
@@ -120,6 +126,12 @@ export async function resolveModel(
 	// assignments so selectModel falls through to the active model.
 	const assignments = selectionCtx.bucketAssignments ?? { small: [], medium: [], frontier: [] };
 
+	const capacityAvailableModelIds = selectionCtx.routeAroundSaturatedProviders
+		? getCapacityAvailableModelIds(
+			selectionCtx.registryModels ?? [],
+			selectionCtx.disabledProviders,
+		)
+		: undefined;
 	const selection = selectModel(
 		bucket,
 		thinkingLevel,
@@ -128,6 +140,7 @@ export async function resolveModel(
 		selectionCtx.allowedModelIds,
 		excludeModels,
 		activeModelId,
+		capacityAvailableModelIds,
 	);
 
 	return {

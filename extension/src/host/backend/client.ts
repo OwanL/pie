@@ -9,6 +9,12 @@ import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
+import {
+  getLivePipelineTraceHmacKey,
+  getLivePipelineTraceRunId,
+  isLivePipelineTraceEnabled,
+  recordLivePipelineTrace,
+} from '../util/live-pipeline-trace-runtime';
 import { classifyBackendStderrLine } from './stderr-classifier';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import {
@@ -25,6 +31,11 @@ export interface BackendStartOptions {
   backendPath: string;
   sdkPath: string;
   cwd: string;
+}
+
+export interface BackendClientOptions {
+  /** Test/diagnostic override; production uses BACKEND_READY_TIMEOUT_MS. */
+  readyTimeoutMs?: number;
 }
 
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
@@ -76,6 +87,7 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'settings.get': 15_000,
   'models.list': 15_000,
   'app.ping': 10_000,
+  'diagnostics.livePipeline.setEnabled': 5_000,
   'message.send': 10_000,
   'message.interrupt': 15_000,
   'message.clearQueue': 10_000,
@@ -99,6 +111,8 @@ export class BackendClient implements vscode.Disposable {
 
   readonly onEvent = this.events.event;
   readonly onExit = this.exits.event;
+
+  constructor(private readonly options: BackendClientOptions = {}) {}
 
   /**
    * Start the backend. Safe to call again after a previous backend exited
@@ -143,6 +157,8 @@ export class BackendClient implements vscode.Disposable {
           ...(sessionDirEnv ? { PI_CODING_AGENT_SESSION_DIR: sessionDirEnv } : {}),
           ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
           ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
+          PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
+          PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),
           ...trustedRootEnv,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -171,6 +187,18 @@ export class BackendClient implements vscode.Disposable {
     proc.stderr.on('data', (chunk: string) => {
       if (generation === this.generation) this.appendStderr(chunk);
     });
+    // EPIPE on child stdin is emitted on the stream, not necessarily on the
+    // ChildProcess. Observe it so a backend that loses its control pipe cannot
+    // crash the extension host or leave every RPC waiting for its timeout.
+    proc.stdin.on('error', (error) => {
+      if (generation !== this.generation || this.proc !== proc) return;
+      this.requests.rejectAll(new Error(`Backend stdin failed: ${toErrorMessage(error)}`));
+      appendPieLog('error', 'backend', 'backend stdin failed; terminating backend', {
+        generation,
+        error: toErrorMessage(error),
+      });
+      proc.kill();
+    });
 
     proc.on('exit', (code) => {
       const intentional = this.intentionalStops.has(proc);
@@ -191,8 +219,15 @@ export class BackendClient implements vscode.Disposable {
           new Error(`Backend exited unexpectedly${code === null ? '' : ` with code ${code}`}.`),
         );
       }
-      appendPieLog(intentional ? 'info' : 'error', 'backend', intentional ? 'backend process stopped' : 'backend process exited', {
-        code,
+      if (!intentional && current && isLivePipelineTraceEnabled()) {
+        recordLivePipelineTrace({
+          process: 'host',
+          stage: 'host.recovery.action',
+          kind: 'failure',
+          reasonCode: 'backend_exit',
+        });
+      }
+      appendPieLog(intentional ? 'info' : 'error', 'backend', intentional ? 'backend process stopped' : 'backend process exited', {        code,
         generation,
         current,
         stderrTail: current ? this.stderrBuffer.trim().slice(-4000) || null : null,
@@ -282,7 +317,13 @@ export class BackendClient implements vscode.Disposable {
 
       const timeout = setTimeout(() => {
         finishReject(new Error('Timed out waiting for the pie backend to become ready.'));
-      }, READY_TIMEOUT_MS);
+        // A child that never reaches ready is unusable. Stop this exact
+        // generation so a retry is possible instead of leaving start() failed
+        // while `proc` remains permanently "already running".
+        if (generation === this.generation && this.proc === proc) {
+          void this.stop().catch(() => undefined);
+        }
+      }, this.options.readyTimeoutMs ?? READY_TIMEOUT_MS);
 
       // Attach stdout after the ready/exit/error listeners are armed. A fast
       // backend can emit `backend.ready` immediately on startup; attaching the
@@ -322,7 +363,13 @@ export class BackendClient implements vscode.Disposable {
     const responsePromise = this.requests.create(id, timeoutMs, options?.signal);
 
     bootTraceSync('backend-client', 'request.sent', { id, method, timeoutMs });
-    this.proc.stdin.write(serializeJsonLine({ id, method, params }));
+    try {
+      this.proc.stdin.write(serializeJsonLine({ id, method, params }), (error) => {
+        if (error) this.requests.reject(id, new Error(`Failed to write backend request ${id}: ${toErrorMessage(error)}`));
+      });
+    } catch (error) {
+      this.requests.reject(id, new Error(`Failed to write backend request ${id}: ${toErrorMessage(error)}`));
+    }
 
     try {
       const response = await responsePromise;
@@ -355,7 +402,9 @@ export class BackendClient implements vscode.Disposable {
     const proc = this.proc;
     this.intentionalStops.add(proc);
     this.proc = undefined;
-    proc.kill();
+    // Arm escalation before SIGTERM: test doubles and some wrappers can emit
+    // exit synchronously from kill(), and the exit handler must be able to
+    // clear the timer rather than leaving a needless five-second handle.
     this.killEscalationProcess = proc;
     this.killEscalationTimer = setTimeout(() => {
       if (this.killEscalationProcess === proc) {
@@ -365,9 +414,11 @@ export class BackendClient implements vscode.Disposable {
       appendPieLog('warn', 'backend', 'backend did not exit on SIGTERM, escalating to SIGKILL');
       proc.kill('SIGKILL');
     }, STOP_KILL_TIMEOUT_MS);
+    proc.kill();
   }
 
   private handleLine(line: string): void {
+    const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
     let value: unknown;
     let parseError: Error | undefined;
 
@@ -379,17 +430,21 @@ export class BackendClient implements vscode.Disposable {
 
     if (parseError === undefined) {
       if (isResponseEnvelope(value)) {
+        this.traceLineReceipt(value, traceStartedAt, line, 'success');
         this.requests.resolve(value.id, value);
         return;
       }
 
       if (isEventEnvelope(value)) {
+        this.traceLineReceipt(value, traceStartedAt, line, 'success');
         this.events.fire(value);
         return;
       }
       // Parsed JSON but not a recognized envelope — fall through to
       // correlation (it may carry an `id` for a pending request).
     }
+
+    this.traceLineReceipt(value, traceStartedAt, line, 'failure');
 
     // Dropped line (non-JSON or an unrecognized envelope). The backend should
     // only emit valid JSON-RPC envelopes on stdout; a stray log line or a
@@ -412,6 +467,36 @@ export class BackendClient implements vscode.Disposable {
     const preview = line.length > 200 ? `${line.slice(0, 200)}…` : line;
     const reason = parseError ? toErrorMessage(parseError) : 'unrecognized envelope';
     appendPieLog('warn', 'backend-client', 'dropped unparseable backend line', { reason, preview });
+  }
+
+  private traceLineReceipt(
+    envelope: unknown,
+    startedAt: number,
+    line: string,
+    kind: 'success' | 'failure',
+  ): void {
+    if (!isLivePipelineTraceEnabled()) return;
+    const payload = envelope && typeof envelope === 'object'
+      ? (envelope as { id?: unknown; payload?: unknown }).payload
+      : undefined;
+    const scoped = payload && typeof payload === 'object' ? payload as Record<string, unknown> : undefined;
+    const outer = envelope && typeof envelope === 'object' ? envelope as Record<string, unknown> : undefined;
+    recordLivePipelineTrace({
+      process: 'host',
+      stage: 'host.line.received',
+      kind,
+      identifiers: {
+        ...(typeof scoped?.sessionPath === 'string' ? { session: scoped.sessionPath } : {}),
+        ...(typeof scoped?.requestId === 'string' ? { request: scoped.requestId } : typeof outer?.id === 'string' ? { request: outer.id } : {}),
+        ...(typeof scoped?.turnId === 'string' ? { turn: scoped.turnId } : {}),
+        ...(typeof scoped?.attemptId === 'string' ? { attempt: scoped.attemptId } : {}),
+        ...(typeof scoped?.messageId === 'string' ? { message: scoped.messageId } : {}),
+        ...(typeof scoped?.toolCallId === 'string' ? { tool: scoped.toolCallId } : {}),
+      },
+      durationMs: Math.max(0, performance.now() - startedAt),
+      queueBytes: Buffer.byteLength(line, 'utf8'),
+      reasonCode: kind === 'failure' ? 'malformed_payload' : undefined,
+    });
   }
 
   /** Build a descriptive rejection error for a dropped line correlated to a

@@ -6,10 +6,9 @@
  * `Event`s (specifically `*Result` variants) via a `dispatch` callback.
  *
  * Routing rules (binding for all later phases — see plan §Phase 2):
- *  - `*Rpc` effects use the **double-wrap**
- *    `enqueueLifecycle(() => enqueueSessionOperation(sessionPath, do_rpc))` so
- *    they serialize correctly with legacy `send`/`edit` paths during the
- *    multi-phase migration.
+ *  - Session-scoped `*Rpc` effects use
+ *    `enqueueSessionOperation(sessionPath, do_rpc)` so operations remain FIFO
+ *    within one session without occupying the global create/open queue.
  *  - Lifecycle effects (`OpenSession`, `CreateSession`) use `enqueueLifecycle`
  *    only (the session may not exist yet, so the inner per-session queue
  *    cannot be addressed).
@@ -34,6 +33,7 @@ import type {
   SendRpcEffect,
   EditRpcEffect,
   InterruptRpcEffect,
+  RequestLiveTurnCheckpointEffect,
   ClearQueueRpcEffect,
   TruncateRpcEffect,
   ExtensionUiResponseRpcEffect,
@@ -54,8 +54,10 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
+import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
+import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 
 /** Minimal backend surface the runner needs. Matches `BackendClient.request`. */
 export interface BackendLike {
@@ -104,7 +106,7 @@ export interface ModalSink {
 
 export interface SessionServiceLike {
   hydrateModelState(sessionPath: string): Promise<void>;
-  setPrefs(prefs: Partial<ChatPrefs>): void;
+  setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
   /** Push the complete disabled-entry set for a session's system prompts to the
    *  backend (`systemPromptToggles.set`). Fire-and-forget: the backend re-emits
    *  `session.opened` to update host state, so no *Result event is expected. */
@@ -132,7 +134,7 @@ export interface SessionServiceLike {
 }
 
 export interface StatsServiceLike {
-  prepareForSend(sessionPath: string, inputs: ComposerInput[]): void;
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   recordOutcome(sessionPath: string, outcome: RunOutcome): void;
@@ -203,7 +205,11 @@ export interface EffectRunnerDeps {
    * when `prepassTimeoutSec` is null/invalid (SDK-owned default, presumed well
    * under 120s).
    */
-  getSendTimerTimeoutMs?: () => number;
+  getSendTimerTimeoutMs?: (sessionPath: string) => number;
+  /** Live provider-gate state used to distinguish legitimate queue/pause wait. */
+  getProviderGateMetrics?: () => ProviderGateStats;
+  /** Resolve the provider serving the session's current request. */
+  resolveSessionProvider?: (sessionPath: string) => string | undefined;
   /**
    * Timer sink used for the backend-ready watchdog + send-timer.
    * Defaults to real `setTimeout`/`clearTimeout`. Tests inject a fake to
@@ -240,6 +246,9 @@ interface InFlightSend {
   /** The budget this send's timer was armed with (prepass-aware when
    *  `getSendTimerTimeoutMs` is wired); surfaces in the fire error message. */
   budgetMs: number;
+  /** Distinguishes a genuine prepass timeout from a post-prepass model-start
+   * timeout so the recovery notice never falsely blames pruning. */
+  phase: 'prepass' | 'model-start';
   /** Caller-owned cancel controller passed to `backend.request` as the signal. */
   abort: AbortController;
   /** Backend-assigned request id, stamped after early-ack so the fire callback
@@ -274,6 +283,17 @@ export class EffectRunner {
    *  (one at a time under FIFO serialization). Used by `abortInFlightSend`. */
   private inFlightSendBySession: Map<string, string> = new Map();
 
+  /** At most one queued/in-flight checkpoint RPC per semantic attempt. Newer
+   *  events are already retained by the reducer and the backend checkpoint is
+   *  authoritative at execution time, so duplicate RPCs only create storms. */
+  private readonly liveCheckpointAttempts = new Set<string>();
+
+  /** Preference writes are partial patches but persistence/backend payloads
+   * are complete merged snapshots. Serialize them on their own queue so rapid
+   * provider toggles cannot complete out of order and restore stale settings.
+   * This queue is deliberately independent of session lifecycle work. */
+  private prefsQueue: Promise<void> = Promise.resolve();
+
   /** Injectable timer sink (real timers in production, fake in tests). */
   private readonly timer: TimerSink;
 
@@ -293,7 +313,7 @@ export class EffectRunner {
     this.sendTimerTimeoutMs = deps.sendTimerTimeoutMs ?? EffectRunner.SEND_TIMER_TIMEOUT_MS;
     this.timer = deps.timer ?? defaultTimerSink;
     this.handlers = {
-      // ── RPC kinds: route through the double-wrap. `runRpc` short-circuits
+      // ── RPC kinds: route through the target session queue. `runRpc` short-circuits
       //    Send→runSendRpc / Edit→runEditRpc; Interrupt sets the host-local
       //    completion-suppression flag synchronously before enqueue; Truncate /
       //    ExtensionUiResponse take the generic rpcMethodFor/rpcParamsFor/
@@ -301,6 +321,7 @@ export class EffectRunner {
       SendRpc: (e) => this.runRpc(e),
       EditRpc: (e) => this.runRpc(e),
       InterruptRpc: (e) => this.runRpc(e),
+      RequestLiveTurnCheckpoint: (e) => this.handleRequestLiveTurnCheckpoint(e),
       ClearQueueRpc: (e) => this.runRpc(e),
       TruncateRpc: (e) => this.runRpc(e),
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
@@ -320,6 +341,7 @@ export class EffectRunner {
       DrainBackendReadyQueue: (e) => this.handleDrainBackendReadyQueue(e),
       StartBackendReadyWatchdog: (e) => this.handleStartBackendReadyWatchdog(e),
       CancelBackendReadyWatchdog: (e) => this.handleCancelBackendReadyWatchdog(e),
+      MarkPrepassSucceeded: (e) => this.markPrepassSucceeded(e.corrId),
       // ── Send-timer (Brief B): clear the post-ack send-timer at the commit
       //    point (the reducer emits this in `handleMessageStarted` where it
       //    drops `pending.promoted`). ──
@@ -392,6 +414,72 @@ export class EffectRunner {
     this.deps.log.log('info', 'effect.dispatch', payload);
   }
 
+  private handleRequestLiveTurnCheckpoint(effect: RequestLiveTurnCheckpointEffect): void {
+    const attemptKey = `${effect.sessionPath}\u0000${effect.turnId}\u0000${effect.attemptId}`;
+    if (this.liveCheckpointAttempts.has(attemptKey)) return;
+    this.liveCheckpointAttempts.add(attemptKey);
+    if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
+      process: 'host', stage: 'host.checkpoint.requested', kind: 'start',
+      identifiers: { session: effect.sessionPath, turn: effect.turnId, attempt: effect.attemptId },
+      eventKind: 'checkpoint',
+    });
+    // Checkpoint repair is scoped to one already-existing session. It must
+    // serialize with mutations for that session, but it must never occupy the
+    // global lifecycle queue: a slow or repeatedly-requested repair previously
+    // sat ahead of tab switches and session creation, making every navigation
+    // control appear dead while an active turn was recovering.
+    void this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      try {
+          const response = await this.deps.backend.request<{
+            status: 'active' | 'terminal_grace' | 'inactive' | 'backend_restarted' | 'oversize';
+            checkpoint: LiveTurnCheckpoint | null;
+            watermark: LiveLifecycleWatermark | null;
+          }>('liveTurn.checkpoint', { sessionPath: effect.sessionPath }, { timeoutMs: 5_000 });
+          if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
+            process: 'host',
+            stage: response.checkpoint ? 'host.checkpoint.received' : 'host.checkpoint.failed',
+            kind: response.checkpoint ? 'success' : 'failure',
+            identifiers: { session: effect.sessionPath, turn: effect.turnId, attempt: effect.attemptId },
+            eventKind: 'checkpoint',
+            eventSeq: response.checkpoint?.checkpointSeq,
+            reasonCode: response.checkpoint
+              ? undefined
+              : response.status === 'backend_restarted'
+                ? 'backend_exit'
+                : response.status === 'oversize' ? 'checkpoint_oversize' : 'owner_missing',
+          });
+          this.deps.dispatch({
+            kind: 'LiveTurnCheckpointResult',
+            corrId: effect.corrId,
+            sessionPath: effect.sessionPath,
+            turnId: effect.turnId,
+            attemptId: effect.attemptId,
+            ok: true,
+            occurredAt: Date.now(),
+            ...response,
+          });
+      } catch (error) {
+          if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
+            process: 'host', stage: 'host.checkpoint.failed', kind: 'failure',
+            identifiers: { session: effect.sessionPath, turn: effect.turnId, attempt: effect.attemptId },
+            eventKind: 'checkpoint', reasonCode: 'checkpoint_timeout',
+          });
+          this.deps.dispatch({
+            kind: 'LiveTurnCheckpointResult',
+            corrId: effect.corrId,
+            sessionPath: effect.sessionPath,
+            turnId: effect.turnId,
+            attemptId: effect.attemptId,
+            ok: false,
+            occurredAt: Date.now(),
+            error: toErrorMessage(error),
+          });
+      }
+    }).finally(() => {
+      this.liveCheckpointAttempts.delete(attemptKey);
+    });
+  }
+
   // ─── Template rows ────────────────────────────────────────────────────────
 
   /** Build the standard async-IIFE + try/catch + `dispatch({kind, corrId,
@@ -458,7 +546,7 @@ export class EffectRunner {
   }
 
   /** `SetModelRpc` — 3 sequential dep calls (settings.set → bumpSessionDataEpoch
-   *  → onModelConfigChanged). `enqueueLifecycle`-only (NOT via `runRpc`).
+   *  → onModelConfigChanged). Serialized on the target session queue.
    *  Result `SetModelResult` with `sessionPath`+`ok`+`error?`. */
   private handleSetModelRpc(effect: SetModelRpcEffect): void {
     // The reducer owns every ArchState transition (global default, per-session
@@ -466,9 +554,10 @@ export class EffectRunner {
     // runner only performs the backend write + the two Effect-side concerns
     // that are not ArchState: the host-local data epoch (transcript paging
     // staleness) and the disk-persisting run-analytics observer. Serialized
-    // through the lifecycle queue to match the pre-migration service path.
+    // through the target session queue. A model change must stay ordered with
+    // sends for that session, but must not block create/open for another tab.
     const { backend, queues, dispatch, service } = this.deps;
-    void queues.enqueueLifecycle(async () => {
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
       try {
         const setParams: Record<string, unknown> = {
           sessionPath: effect.sessionPath,
@@ -496,14 +585,15 @@ export class EffectRunner {
   /** `SetPrefsRpc` — IIFE (not queued), `service.setPrefs(prefs)`. Result
    *  `SetPrefsResult` (NO `sessionPath`). */
   private handleSetPrefsRpc(effect: SetPrefsRpcEffect): void {
-    void (async () => {
+    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
       try {
         await this.deps.service.setPrefs(effect.prefs);
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: true });
       } catch (err) {
         this.deps.dispatch({ kind: 'SetPrefsResult', corrId: effect.corrId, ok: false, error: toErrorMessage(err) });
       }
-    })();
+    });
+    this.prefsQueue = operation.then(() => undefined, () => undefined);
   }
 
   /** `SetSystemPromptTogglesRpc` — IIFE (not queued),
@@ -689,7 +779,7 @@ export class EffectRunner {
     const abort = new AbortController();
     // Prepass-aware budget (read fresh each send so a runtime prepassTimeoutSec
     // change takes effect); falls back to the static override/default.
-    const budgetMs = this.deps.getSendTimerTimeoutMs?.() ?? this.sendTimerTimeoutMs;
+    const budgetMs = this.deps.getSendTimerTimeoutMs?.(sessionPath) ?? this.sendTimerTimeoutMs;
     const send: InFlightSend = {
       corrId,
       sessionPath,
@@ -699,6 +789,7 @@ export class EffectRunner {
       userParts,
       timer: null,
       budgetMs,
+      phase: 'prepass',
       abort,
       disposed: false,
       fired: false,
@@ -740,7 +831,9 @@ export class EffectRunner {
         corrId: send.corrId,
         sessionPath: send.sessionPath,
         requestId: send.requestId,
-        error: `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`,
+        error: send.phase === 'model-start'
+          ? `Timed out waiting for the model to start streaming (${send.budgetMs / 1000}s)`
+          : `Timed out waiting for the turn to start streaming (${send.budgetMs / 1000}s)`,
       });
       return;
     }
@@ -748,6 +841,18 @@ export class EffectRunner {
       'warn',
       `send-timer fired before early-ack for corrId=${send.corrId} session=${send.sessionPath} (pre-ack RequestTracker timer should have fired first)`,
     );
+  }
+
+  /** Move a live send into the model-start phase and give that phase its own
+   * full first-token budget. The backend's preflight-succeeded event is the
+   * phase signal; duplicate delivery is idempotent. */
+  private markPrepassSucceeded(corrId: string): void {
+    const send = this.inFlightSends.get(corrId);
+    if (!send || send.disposed || send.phase === 'model-start') return;
+    if (send.timer) this.timer.cancel(send.timer);
+    send.phase = 'model-start';
+    send.budgetMs = EffectRunner.SEND_TIMER_TIMEOUT_MS;
+    send.timer = this.timer.schedule(() => this.onSendTimerFire(send), send.budgetMs);
   }
 
   /** Clear the send-timer + abort context for a corrId. Called on pre-ack
@@ -844,9 +949,10 @@ export class EffectRunner {
   }
 
   /**
-   * Route `*Rpc` effects through the double-wrap. The outer `enqueueLifecycle`
-   * exists to preserve serialization with legacy `send`/`edit` callers that
-   * still use the same lifecycle queue directly.
+   * Route session mutations through the target session's FIFO queue. The
+   * migration no longer has legacy callers on the global lifecycle queue, so
+   * holding that queue while a slow prepass/checkpoint is pending only creates
+   * cross-session head-of-line blocking.
    */
   private runRpc(effect: SendRpcEffect | EditRpcEffect | InterruptRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect): void {
     if (effect.kind === 'EditRpc') {
@@ -878,15 +984,13 @@ export class EffectRunner {
       this.abortInFlightSend(effect.sessionPath);
     }
     const { queues, backend, dispatch } = this.deps;
-    void queues.enqueueLifecycle(async () => {
-      await queues.enqueueSessionOperation(effect.sessionPath, async () => {
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
         try {
           await backend.request(rpcMethodFor(effect), rpcParamsFor(effect));
           dispatch(rpcResultFor(effect, { ok: true }));
         } catch (err) {
           dispatch(rpcResultFor(effect, { ok: false, error: toErrorMessage(err) }));
         }
-      });
     });
   }
 
@@ -896,14 +1000,13 @@ export class EffectRunner {
    */
   private runSendRpc(effect: Extract<Effect, { kind: 'SendRpc' }>): void {
     const { queues, backend, dispatch, service, statsService } = this.deps;
-    void queues.enqueueLifecycle(async () => {
-      await queues.enqueueSessionOperation(effect.sessionPath, async () => {
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
         // Start the send-timer at RPC dispatch (queue time) + arm the abort
         // controller (Brief E cancels an in-flight message.send on interrupt).
         const send = this.startInFlightSend(effect.corrId, effect.sessionPath, 'send', effect.localId, effect.composedText, effect.userParts, effect.priorPruningMode);
         try {
           service.bumpSessionDataEpoch(effect.sessionPath);
-          statsService.prepareForSend(effect.sessionPath, effect.inputs);
+          statsService.prepareForSend(effect.sessionPath, effect.inputs, effect.text);
           const response = await backend.request<{ requestId?: string; queued?: boolean }>('message.send', {
             sessionPath: effect.sessionPath,
             text: effect.text,
@@ -946,7 +1049,6 @@ export class EffectRunner {
             error: toErrorMessage(err),
           });
         }
-      });
     });
   }
 
@@ -957,8 +1059,7 @@ export class EffectRunner {
    */
   private runEditRpc(effect: Extract<Effect, { kind: 'EditRpc' }>): void {
     const { queues, backend, dispatch, service, statsService } = this.deps;
-    void queues.enqueueLifecycle(async () => {
-      await queues.enqueueSessionOperation(effect.sessionPath, async () => {
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
         // edit follows the same phase-scoped shape as send (STATE_CONTRACT §
         // Optimistic Reconciliation "Timer ownership"): one send-timer owns the
         // post-ack, pre-commit phase; the abort controller covers the whole
@@ -968,7 +1069,7 @@ export class EffectRunner {
           service.bumpSessionDataEpoch(effect.sessionPath);
           statsService.onTruncatedAfter(effect.sessionPath, effect.messageId);
           statsService.onMessageEdited(effect.sessionPath, effect.messageId);
-          statsService.prepareForSend(effect.sessionPath, []);
+          statsService.prepareForSend(effect.sessionPath, [], effect.composedText ?? effect.text);
           await backend.request('session.truncateAfter', {
             sessionPath: effect.sessionPath,
             entryId: effect.messageId,
@@ -989,7 +1090,6 @@ export class EffectRunner {
           this.clearInFlightSend(effect.corrId);
           dispatch({ kind: 'EditResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
         }
-      });
     });
   }
 

@@ -1,95 +1,83 @@
 import type { HostToWebviewMessage, ViewState } from '../../shared/protocol';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
+import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
+import { isStreamDiagEnabled } from '../util/stream-telemetry';
 
-/**
- * Sync state held by `SidebarViewProvider`. `hostInstanceId` and
- * `globalRevision` are process-wide — `globalRevision` advances on each
- * state envelope (full snapshot) so the webview can detect host counter
- * resets in conjunction with `hostInstanceId`.
- */
+/** Process-wide envelope identity. Delivery/dirty ownership lives exclusively
+ * in StateDeliveryController. */
 export type SidebarSyncState = {
   hostInstanceId: string;
   globalRevision: number;
-  globalDirty: boolean;
 };
 
-export function createSidebarSyncState(hostInstanceId: string): SidebarSyncState {
-  return {
-    hostInstanceId,
-    globalRevision: 0,
-    globalDirty: false,
-  };
+export interface StateEnvelopeContext {
+  revision: number;
+  viewGeneration: number;
 }
 
-export function canPostSnapshotToWebview(hasView: boolean, webviewReady: boolean): boolean {
-  return hasView && webviewReady;
+export function createSidebarSyncState(hostInstanceId: string): SidebarSyncState {
+  return { hostInstanceId, globalRevision: 0 };
+}
+
+/** Measure the final wire envelope only for opt-in stream diagnostics. */
+function measureSnapshotBytes(message: Extract<HostToWebviewMessage, { type: 'state' }>): number {
+  try {
+    // `snapshotBytes` is itself serialized, so settle its digit width before
+    // reporting the final UTF-8 size. Two passes cover any practical boundary.
+    for (let pass = 0; pass < 2; pass += 1) {
+      const bytes = Buffer.byteLength(JSON.stringify(message), 'utf8');
+      if (message.snapshotBytes === bytes) return bytes;
+      message.snapshotBytes = bytes;
+    }
+    return message.snapshotBytes;
+  } catch {
+    // Diagnostics must not make a recoverable snapshot build fail.
+    return 0;
+  }
 }
 
 /**
- * Build a global state-snapshot envelope. On a successful post the snapshot is
- * authoritative: the global dirty flag clears (the webview rebuilds its state
- * from the snapshot).
+ * Builds one authoritative full snapshot for a controller-owned operation.
+ * The expected identity is bounded by transcriptRenderSignature for Phase 1.
  */
 export function buildStateEnvelope(
   syncState: SidebarSyncState,
   viewState: ViewState,
-  canPost: boolean,
-): { nextSyncState: SidebarSyncState; message?: HostToWebviewMessage } {
-  if (!canPost) {
-    return {
-      nextSyncState: { ...syncState, globalDirty: true },
-    };
+  context: StateEnvelopeContext | boolean,
+): {
+  nextSyncState: SidebarSyncState;
+  message: Extract<HostToWebviewMessage, { type: 'state' }>;
+  expectedTranscriptIdentity: string;
+} {
+  // Boolean support is retained only for existing synthetic perf callers; the
+  // provider always supplies controller-owned revision/generation context.
+  const envelopeContext = typeof context === 'boolean'
+    ? { revision: syncState.globalRevision + 1, viewGeneration: 1 }
+    : context;
+  if (envelopeContext.revision <= syncState.globalRevision) {
+    throw new Error('State envelope revisions must increase monotonically.');
   }
 
-  const revision = syncState.globalRevision + 1;
-  return {
-    nextSyncState: {
-      ...syncState,
-      globalRevision: revision,
-      globalDirty: false,
-    },
-    message: {
-      type: 'state',
-      protocolVersion: WEBVIEW_PROTOCOL_VERSION,
-      hostInstanceId: syncState.hostInstanceId,
-      revision,
-      state: viewState,
-    },
+  const expectedTranscriptIdentity = transcriptRenderSignature(viewState);
+  const message: Extract<HostToWebviewMessage, { type: 'state' }> = {
+    type: 'state',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    hostInstanceId: syncState.hostInstanceId,
+    viewGeneration: envelopeContext.viewGeneration,
+    revision: envelopeContext.revision,
+    expectedTranscriptIdentity,
+    snapshotBytes: 0,
+    state: viewState,
   };
-}
-
-/**
- * Emit a recovery snapshot when the global state is dirty.
- */
-export function flushDirtySnapshot(
-  syncState: SidebarSyncState,
-  viewState: ViewState,
-  canPost: boolean,
-): { nextSyncState: SidebarSyncState; message?: HostToWebviewMessage } {
-  if (!syncState.globalDirty) {
-    return { nextSyncState: syncState };
+  if (isStreamDiagEnabled()) {
+    // This intentionally stays host-side: serializing a live snapshot in the
+    // renderer just to report diagnostics is expensive during streaming.
+    message.snapshotBytes = measureSnapshotBytes(message);
   }
 
-  return buildStateEnvelope(syncState, viewState, canPost);
-}
-
-/**
- * A host->webview post can fail even after we've decided the view is ready
- * enough to attempt delivery. Treat that as dropped state and force snapshot
- * recovery on the next explicit resync or visibility transition.
- */
-export function reconcilePostedMessageDelivery(
-  syncState: SidebarSyncState,
-  message: HostToWebviewMessage,
-  delivered: boolean,
-): SidebarSyncState {
-  if (delivered) {
-    return syncState;
-  }
-
-  if (message.type === 'state' || message.type === 'sendRejected') {
-    return { ...syncState, globalDirty: true };
-  }
-
-  return syncState;
+  return {
+    nextSyncState: { ...syncState, globalRevision: envelopeContext.revision },
+    expectedTranscriptIdentity,
+    message,
+  };
 }

@@ -43,8 +43,8 @@ test('resolveLocalTsx throws when no tsx exists above the start dir', () => {
 });
 
 test('normalizeRepoRelative converts absolute and relative inputs to repo-relative forward slashes', () => {
-  const rel = normalizeRepoRelative(repoRoot, 'extension/test/app-smoke.test.ts');
-  assert.equal(rel.repoRel, 'extension/test/app-smoke.test.ts');
+  const rel = normalizeRepoRelative(repoRoot, 'extension/test/webview/components/app-smoke.test.ts');
+  assert.equal(rel.repoRel, 'extension/test/webview/components/app-smoke.test.ts');
   assert.ok(path.isAbsolute(rel.abs));
 
   const abs = normalizeRepoRelative(repoRoot, path.join(repoRoot, 'analysis', 'test', 'pricing.test.ts'));
@@ -56,12 +56,12 @@ test('normalizeRepoRelative rejects paths outside the repo', () => {
 });
 
 test('classifyTestFile classifies extension files (cwd=extension/, no tsxConfig)', () => {
-  const d = classifyTestFile(repoRoot, 'extension/test/app-smoke.test.ts');
+  const d = classifyTestFile(repoRoot, 'extension/test/webview/components/app-smoke.test.ts');
   assert.equal(d.id, 'extension');
   assert.equal(fwd(d.cwd), fwd(path.join(repoRoot, 'extension')));
   assert.equal(d.tsxConfig, undefined);
-  assert.equal(d.repoRel, 'extension/test/app-smoke.test.ts');
-  assert.equal(d.relativeFilePath, 'test/app-smoke.test.ts');
+  assert.equal(d.repoRel, 'extension/test/webview/components/app-smoke.test.ts');
+  assert.equal(d.relativeFilePath, 'test/webview/components/app-smoke.test.ts');
   assert.match(fwd(d.tsxBin), /extension\/node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
@@ -98,7 +98,7 @@ test('classifyTestFile throws for unclassifiable paths', () => {
 
 test('groupFilesByPackage groups real files by package (sorted) and sets subagent tsxConfig', () => {
   const groups = groupFilesByPackage(repoRoot, [
-    'extension/test/app-smoke.test.ts',
+    'extension/test/webview/components/app-smoke.test.ts',
     'extensions/subagent/test/agents.test.ts',
     'analysis/test/pricing.test.ts',
   ]);
@@ -108,13 +108,13 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
   assert.deepEqual(subagent.files, ['extensions/subagent/test/agents.test.ts']);
   const ext = groups.find((g) => g.id === 'extension');
   assert.equal(ext.tsxConfig, undefined);
-  assert.deepEqual(ext.files, ['test/app-smoke.test.ts']);
+  assert.deepEqual(ext.files, ['test/webview/components/app-smoke.test.ts']);
 });
 
 test('groupFilesByPackage de-duplicates repeated files', () => {
   const groups = groupFilesByPackage(repoRoot, [
-    'extension/test/app-smoke.test.ts',
-    'extension/test/app-smoke.test.ts',
+    'extension/test/webview/components/app-smoke.test.ts',
+    'extension/test/webview/components/app-smoke.test.ts',
   ]);
   assert.equal(groups.length, 1);
   assert.equal(groups[0].files.length, 1);

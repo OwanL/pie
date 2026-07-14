@@ -1,4 +1,8 @@
 import type { ArchState } from './core/arch-state';
+import { projectTranscriptView } from './core/live-pipeline/projection';
+import { createEmptyLivePipelineState } from './core/live-pipeline/model';
+
+const EMPTY_LIVE_PIPELINE_STATE = createEmptyLivePipelineState();
 import {
   computeIdleDisplayState,
   createAccumulator,
@@ -107,7 +111,11 @@ export class TokenRateService {
     let activeChanged = false;
 
     for (const sessionPath of toMeasure) {
-      const transcript = state.transcript.bySession[sessionPath] ?? [];
+      const transcript = projectTranscriptView(
+        state.transcript.bySession[sessionPath] ?? [],
+        state.livePipeline ?? EMPTY_LIVE_PIPELINE_STATE,
+        sessionPath,
+      ).messages;
       const runSummary = state.composer.activeRunSummaryBySession[sessionPath] ?? null;
       const runId = runSummary?.runId ?? null;
       const existingRunId = this.runIdsBySession.get(sessionPath);
@@ -156,7 +164,11 @@ export class TokenRateService {
     // static while idle) and retained until a run replaces it.
     for (const path of openTabs) {
       if (this.statesBySession.has(path)) continue;
-      const transcript = state.transcript.bySession[path] ?? [];
+      const transcript = projectTranscriptView(
+        state.transcript.bySession[path] ?? [],
+        state.livePipeline ?? EMPTY_LIVE_PIPELINE_STATE,
+        path,
+      ).messages;
       const idleState = computeIdleDisplayState(transcript);
       this.statesBySession.set(path, idleState);
       if (path === activePath && idleState !== IDLE_STATE) {

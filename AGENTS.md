@@ -5,7 +5,7 @@ Personal pi config stack: VS Code extension GUI ("pie"), custom pi extensions, a
 - `extension/` — VS Code extension
 - `extensions/` — Custom pi tools ie `subagent`
 - `docs/` — Internal design docs; `STATE_CONTRACT.md` is authoritative for host↔webview sync
-- `models.yaml` — single source of truth for the provider catalog, pricing, eligibility, concurrency, retry policy, and initial model selections. Run `npm run sync-models` after editing it; that regenerates `models.json` and `model-profiles.yaml`, and merges into `settings.json`. Existing chat/pruning selections are user-owned and preserved. Do not edit generated files directly — `extension/test/model-config-sync.test.ts` fails on drift.
+- `models.yaml` — single source of truth for the provider catalog, pricing, eligibility, concurrency, retry policy, and initial model selections. Run `npm run sync-models` after editing it; that regenerates `models.json` and `model-profiles.yaml`, and merges into `settings.json`. Existing chat/pruning selections are user-owned and preserved. Do not edit generated files directly — `extension/test/integration/model-config-sync.test.ts` fails on drift.
 
 **Always rebuild after editing `extension/src/`** — build auto-syncs output to the installed VS Code extension.
 

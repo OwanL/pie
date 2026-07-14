@@ -75,22 +75,49 @@ export class FileDiffService {
     // both sides" bug). `resolveBaselineRef` walks the file's git history to
     // the most recent commit whose content DIFFERS from the working tree —
     // the pre-change baseline — falling back to `HEAD` when none is found.
+    const fileExists = await fs.access(resolvedPath).then(() => true, () => false);
     const baselineRef =
-      kind === 'created' ? 'HEAD' : await this.resolveBaselineRef(resolvedPath);
-    const originalUri = kind === 'created' ? emptyUri : this.toGitUri(uri, baselineRef);
-    const modifiedUri = kind === 'deleted' ? emptyUri : uri;
+      kind === 'created' ? undefined : await this.resolveBaselineRef(resolvedPath);
+    // A non-HEAD ref came from the file's history and therefore contains a
+    // usable snapshot. HEAD is also usable when git still tracks the path.
+    // Without this guard, VS Code's git content provider receives a bogus
+    // `git:` URI for non-git/untracked files and renders "file was not found".
+    const hasGitBaseline = baselineRef !== undefined && (
+      baselineRef !== 'HEAD' || await isTrackedByGit(resolvedPath)
+    );
 
-    try {
-      await vscode.commands.executeCommand(
-        'vscode.diff',
-        originalUri,
-        modifiedUri,
-        `${path.basename(resolvedPath)} — agent changes`,
-        { preview: true },
+    if (!fileExists && !hasGitBaseline) {
+      const reason = kind === 'deleted'
+        ? 'No Git baseline is available for this deleted file.'
+        : 'The file no longer exists on disk.';
+      void vscode.window.showWarningMessage(
+        `Cannot show agent changes for ${resolvedPath}. ${reason}`,
       );
-    } catch {
-      await vscode.commands.executeCommand('git.openChange', uri);
+      return;
     }
+
+    if (!fileExists) {
+      void vscode.window.showWarningMessage(
+        `${resolvedPath} no longer exists on disk. Showing its last available Git version.`,
+      );
+    } else if (!hasGitBaseline && kind !== 'created') {
+      void vscode.window.showWarningMessage(
+        `No Git baseline is available for ${resolvedPath}. Showing the current file as newly created.`,
+      );
+    }
+
+    const originalUri = hasGitBaseline
+      ? this.toGitUri(uri, baselineRef)
+      : emptyUri;
+    const modifiedUri = fileExists ? uri : emptyUri;
+
+    await vscode.commands.executeCommand(
+      'vscode.diff',
+      originalUri,
+      modifiedUri,
+      `${path.basename(resolvedPath)} — agent changes`,
+      { preview: true },
+    );
   }
 
   /**

@@ -120,9 +120,20 @@ export function appendContinuationSeparator(message: ChatMessage): void {
   }
 }
 
+function isOpaqueToolProgressMarker(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const marker = value as Record<string, unknown>;
+  return (marker.$toolProgress === 'unserializable' || marker.$toolProgress === 'truncated')
+    && marker.details === undefined;
+}
+
 export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall): void {
   const parts = ensureAssistantParts(message);
   const nextToolCall = cloneToolCall(toolCall);
+  // An opaque marker is transport metadata, not tool state. Strip it even when
+  // progress races ahead of tool.started and this is the first observed call.
+  const opaqueProgressMarker = isOpaqueToolProgressMarker(nextToolCall.result);
+  if (opaqueProgressMarker) nextToolCall.result = undefined;
   const existingToolCalls = message.toolCalls ?? [];
   const toolIndex = existingToolCalls.findIndex((item) => item.id === nextToolCall.id);
 
@@ -133,6 +144,10 @@ export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall
   } else {
     const existing = existingToolCalls[toolIndex]!;
     mergedToolCall = { ...existing };
+    // Tool lifecycle is monotonic. A late tool.progress/tool.started event must
+    // not revive a completed/failed call or replace its final result with a
+    // partial snapshot.
+    const wouldReviveTerminalCall = existing.status !== 'running' && nextToolCall.status === 'running';
 
     if (nextToolCall.name) {
       mergedToolCall.name = nextToolCall.name;
@@ -142,11 +157,16 @@ export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall
       mergedToolCall.input = nextToolCall.input;
     }
 
-    if (nextToolCall.result !== undefined) {
+    // A bounded transport marker carries no renderable state. Never let one
+    // bad/oversized live partial erase an earlier valid result — in particular,
+    // that would send an active subagent card back to "Starting…" while its
+    // child continues working. Renderable compact partials also carry
+    // $toolProgress, but retain `details` and are intentionally accepted.
+    if (nextToolCall.result !== undefined && !wouldReviveTerminalCall) {
       mergedToolCall.result = nextToolCall.result;
     }
 
-    if (nextToolCall.status !== undefined) {
+    if (nextToolCall.status !== undefined && !wouldReviveTerminalCall) {
       mergedToolCall.status = nextToolCall.status;
     }
 
@@ -160,6 +180,10 @@ export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall
 
     if (nextToolCall.parallelGroupId !== undefined) {
       mergedToolCall.parallelGroupId = nextToolCall.parallelGroupId;
+    }
+
+    if (nextToolCall.durableEntryId !== undefined) {
+      mergedToolCall.durableEntryId = nextToolCall.durableEntryId;
     }
 
     message.toolCalls = existingToolCalls.map((item) =>

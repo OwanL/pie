@@ -2,127 +2,189 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import { assertInvariant, auditLog, bootLog, isBootLogEnabled } from '../util/audit';
+import { auditLog, bootLog, isBootLogEnabled } from '../util/audit';
 import { recordSnapshotPost } from '../util/stream-telemetry';
-import { toErrorMessage } from '../util/error-message';
 import { appendPieError, appendPieLog } from '../util/pie-log';
 import {
-  buildStateEnvelope,
-  canPostSnapshotToWebview,
-  createSidebarSyncState,
-  flushDirtySnapshot,
-  reconcilePostedMessageDelivery,
-  type SidebarSyncState,
-} from './sync';
+  isLivePipelineTraceEnabled,
+  recordLivePipelineTrace,
+} from '../util/live-pipeline-trace-runtime';
 import { resolveWebviewHtml, getWebviewRoots } from '../webview/assets';
-import { SidebarHotReloader } from './hot-reloader';
+import { injectViewGenerationMeta, SidebarHotReloader } from './hot-reloader';
 import { StateAppliedWatchdog } from './state-applied-watchdog';
-import { WebviewReadinessProbe } from './readiness-probe';
-import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
+import { WebviewReadinessProbe, READINESS_PROBE_MAX_ATTEMPTS } from './readiness-probe';
+import {
+  PROVISIONAL_ACCEPTED_REVISION_LEDGER_CAPACITY,
+  PROVISIONAL_STATE_POST_SETTLEMENT_TIMEOUT_MS,
+  PROVISIONAL_STATE_RETRY_DELAY_MS,
+  PROVISIONAL_STATE_RETRY_MAX_ATTEMPTS,
+  PROVISIONAL_TRANSCRIPT_COMMIT_TIMEOUT_MS,
+  StateDeliveryController,
+  type StateDeliveryClock,
+  type StateDeliveryRecovery,
+  type StateDeliveryTelemetry,
+} from './state-delivery-controller';
+import { buildStateEnvelope, createSidebarSyncState, type SidebarSyncState } from './sync';
+import type { HostToWebviewMessage, ViewState, WebviewToHostMessage } from '../../shared/protocol';
 import type {
-  HostToWebviewMessage,
-  ViewState,
-  WebviewToHostMessage,
-} from '../../shared/protocol';
+  LivePipelineTraceKind,
+  LivePipelineTraceProcess,
+  LivePipelineTraceReasonCode,
+  LivePipelineTraceStage,
+} from '../../shared/live-pipeline-trace';
 import { validateWebviewToHostMessage } from '../../shared/protocol-validation';
 
-/** Debounce window for batching rapid store changes into a single snapshot post. */
 const SCHEDULE_DEBOUNCE_MS = 50;
-/**
- * Debounce window while sessions are actively streaming.
- *
- * ── Brief D seam (UX-reliability remediation §6) ───────────────────────────
- * Brief D may lower this toward 50–80 now that Brief G memoizes
- * `selectViewState`: unchanged-delta posts (token-rate ticks, no-op events,
- * background-session streaming) are O(1) amortized, so posting more often no
- * longer pays the O(transcript) projection cost. Lower it ONLY from Brief D,
- * alongside that brief's webview revision/length-identity guard work which
- * owns this constant — Brief G deliberately leaves the number unchanged.
- *
- * Brief D update: lowered to 60 (see the UX-reliability remediation §6). The webview
- * revision guard (use-host-sync.ts) makes the higher post frequency safe
- * against out-of-order/duplicate envelopes.
- */
-const STREAMING_SCHEDULE_DEBOUNCE_MS = 60;
+// Full snapshots cross the Chromium structured-clone boundary and commit a
+// transcript tree. Posting them at 60 ms starved pointer/click handling on
+// tool-heavy turns. 150 ms is the established UI cadence (~7 fps): live text
+// remains fluid through the webview's buffered reveal while controls retain
+// main-thread time.
+const STREAMING_SCHEDULE_DEBOUNCE_MS = 150;
 
-/**
- * Implements the VS Code WebviewView for the pie sidebar.
- *
- * Responsibilities:
- * - Resolves the webview HTML once and handles incoming messages.
- * - Posts full-state snapshots (`state`) on demand or on a debounced schedule.
- * - Posts imperative messages (e.g. `sendRejected`) outside the state flow.
- *
- * Each outgoing envelope carries a monotonically increasing `revision` and a
- * stable `hostInstanceId` so the webview can detect missed snapshots and
- * host-side counter resets.
- *
- * The provider is the orchestrator: it owns the shared webview state (`view`,
- * `webviewReady`, `syncState`, `context`, `getRunningSessionCount`,
- * `hostInstanceId`) and delegates two concerns to sibling helpers:
- * - {@link SidebarHotReloader} — asset watching + hot reload + asset-version
- *   mismatch reload.
- * - {@link StateAppliedWatchdog} — state-applied ack tracking, timeout, and
- *   resnapshot/reload throttling.
- */
+type ResolvedWebviewHtml = Awaited<ReturnType<typeof resolveWebviewHtml>>;
+
+const SYSTEM_CLOCK: StateDeliveryClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+export interface SidebarViewProviderOptions {
+  clock?: StateDeliveryClock;
+  resolveAssets?(context: vscode.ExtensionContext, webview: vscode.Webview): Promise<ResolvedWebviewHtml>;
+  getRoots?(context: vscode.ExtensionContext): readonly vscode.Uri[];
+  settlementTimeoutMs?: number;
+  commitTimeoutMs?: number;
+  retryDelayMs?: number;
+  maxRetryAttempts?: number;
+  acceptedLedgerCapacity?: number;
+}
+
+/** VS Code sidebar orchestration around the explicit state-delivery owner. */
 export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
   private readonly hostInstanceId: string;
   private syncState: SidebarSyncState;
   private visibilityDisposable?: vscode.Disposable;
+  private viewDisposeDisposable?: vscode.Disposable;
   private scheduleTimer?: ReturnType<typeof setTimeout>;
   private messageDisposable?: vscode.Disposable;
   private webviewReady = false;
-  /** State-bearing imperatives (sendRejected) queued while the view was not
-   *  ready, re-delivered on ready (Brief D §4). See `postImperative` /
-   *  `flushPendingImperatives`. */
-  private pendingImperatives: HostToWebviewMessage[] = [];
+  private lastTranscriptCommitBlockedReason?: string;
+  private pendingImperatives: Array<Exclude<HostToWebviewMessage, { type: 'state' }>> = [];
+  private readonly providerOptions: SidebarViewProviderOptions;
   private readonly hotReloader: SidebarHotReloader;
   private readonly watchdog: StateAppliedWatchdog;
   private readonly readinessProbe: WebviewReadinessProbe;
+  private readonly delivery: StateDeliveryController<Extract<HostToWebviewMessage, { type: 'state' }>>;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly getViewState: () => ViewState,
     private readonly onMessage: (msg: WebviewToHostMessage) => void,
     private readonly getRunningSessionCount: () => number = () => 0,
+    options: SidebarViewProviderOptions = {},
   ) {
     this.hostInstanceId = crypto.randomUUID();
     this.syncState = createSidebarSyncState(this.hostInstanceId);
+    this.providerOptions = options;
+    const clock = options.clock ?? SYSTEM_CLOCK;
+
     this.hotReloader = new SidebarHotReloader({
       getContext: () => this.context,
       getView: () => this.view,
-      getWebviewReady: () => this.webviewReady,
-      setWebviewReady: (value) => {
-        this.webviewReady = value;
-      },
-      getSyncState: () => this.syncState,
-      setSyncState: (state) => {
-        this.syncState = state;
-      },
-      onReloadWebviewReadyReset: () => {
-        this.watchdog.clear();
-        this.readinessProbe.clear();
-      },
+      onReloadStart: (reason) => this.handleReloadStart(reason),
+      getViewGeneration: () => this.delivery.getDebugState().viewGeneration,
+      resolveAssets: options.resolveAssets,
     });
     this.watchdog = new StateAppliedWatchdog({
-      getWebviewReady: () => this.webviewReady,
-      getViewVisible: () => !!this.view?.visible,
-      getRunningSessionCount: () => this.getRunningSessionCount(),
       getHostInstanceId: () => this.hostInstanceId,
-      onResnapshot: () => {
-        this.syncState = { ...this.syncState, globalDirty: true };
-        this.flushDirtyState();
-      },
-      onForceReload: (revision) => this.hotReloader.reloadForStateAppliedTimeout(revision),
+      getRunningSessionCount: () => this.getRunningSessionCount(),
+      onForceReload: (recovery) => this.hotReloader.reloadForRecovery(recovery.reason, recovery.revision),
+      now: () => clock.now(),
     });
     this.readinessProbe = new WebviewReadinessProbe({
       getViewExists: () => !!this.view,
+      getViewVisible: () => !!this.view?.visible,
       getWebviewReady: () => this.webviewReady,
-      getGlobalDirty: () => this.syncState.globalDirty,
+      getGlobalDirty: () => this.delivery.getDebugState().dirty,
       isReloading: () => this.hotReloader.isReloading(),
-      onProbe: () => this.probePost(),
+      onProbe: () => this.delivery.probe(),
       onForceClearReloading: () => this.hotReloader.clearReloading(),
+      onExhausted: () => this.handleReadinessExhausted(),
+    });
+    this.delivery = new StateDeliveryController({
+      clock,
+      buildSnapshot: (buildContext) => {
+        const startedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
+        const result = buildStateEnvelope(this.syncState, this.getViewState(), buildContext);
+        this.syncState = result.nextSyncState;
+        if (isLivePipelineTraceEnabled()) {
+          recordLivePipelineTrace({
+            process: 'host',
+            stage: 'host.snapshot.built',
+            kind: 'success',
+            identifiers: { hostInstance: this.hostInstanceId },
+            revision: buildContext.revision,
+            viewGeneration: buildContext.viewGeneration,
+            durationMs: Math.max(0, performance.now() - startedAt),
+            snapshotBytes: result.message.snapshotBytes,
+            transcriptCount: result.message.state.transcript.length,
+          });
+        }
+        return { payload: result.message, expectedTranscriptIdentity: result.expectedTranscriptIdentity };
+      },
+      isEligible: () => this.canPostSnapshotToView(),
+      post: (snapshot, postContext) => {
+        const view = this.view;
+        if (!view || postContext.viewGeneration !== this.delivery.getDebugState().viewGeneration) return false;
+        return Promise.resolve(view.webview.postMessage(snapshot.payload));
+      },
+      onAccepted: (postContext) => {
+        recordSnapshotPost();
+        if (postContext.readinessProbe && postContext.viewGeneration === this.delivery.getDebugState().viewGeneration) {
+          this.webviewReady = true;
+          this.hotReloader.clearReloading();
+          this.readinessProbe.clear();
+          this.watchdog.resetRecoveryEpisode();
+          const flushedImperatives = this.flushPendingImperatives();
+          // A confirming full snapshot follows any imperatives that were queued
+          // while readiness was stale.
+          if (flushedImperatives) this.delivery.markDirty();
+          bootLog('sidebar-provider', 'readinessProbe.adopted', {
+            revision: postContext.revision,
+            viewGeneration: postContext.viewGeneration,
+          });
+        }
+      },
+      onCommitAdvanced: () => this.watchdog.recordCommitAdvanced(),
+      onDeliveryBlocked: () => this.armReadinessProbeIfStuck(),
+      onRecovery: (recovery) => this.handleDeliveryRecovery(recovery),
+      onProtocolDefect: (defect) => {
+        appendPieLog('warn', 'sidebar-provider', 'webview render evidence protocol defect', {
+          currentViewGeneration: defect.currentViewGeneration,
+          evidenceViewGeneration: defect.evidenceViewGeneration,
+          reason: defect.reason,
+          revision: defect.revision,
+          stage: defect.stage,
+        });
+      },
+      onTelemetry: (event) => {
+        bootLog('sidebar-provider', `delivery.${event.kind}`, {
+          desiredGeneration: event.desiredGeneration ?? null,
+          detail: event.detail ?? null,
+          operationId: event.operationId ?? null,
+          revision: event.revision ?? null,
+          viewGeneration: event.viewGeneration,
+        });
+        this.recordDeliveryTrace(event);
+      },
+      settlementTimeoutMs: options.settlementTimeoutMs ?? PROVISIONAL_STATE_POST_SETTLEMENT_TIMEOUT_MS,
+      commitTimeoutMs: options.commitTimeoutMs ?? PROVISIONAL_TRANSCRIPT_COMMIT_TIMEOUT_MS,
+      retryDelayMs: options.retryDelayMs ?? PROVISIONAL_STATE_RETRY_DELAY_MS,
+      maxRetryAttempts: options.maxRetryAttempts ?? PROVISIONAL_STATE_RETRY_MAX_ATTEMPTS,
+      acceptedLedgerCapacity: options.acceptedLedgerCapacity ?? PROVISIONAL_ACCEPTED_REVISION_LEDGER_CAPACITY,
     });
   }
 
@@ -134,10 +196,13 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     this.webviewReady = false;
     this.pendingImperatives = [];
     this.visibilityDisposable?.dispose();
+    this.viewDisposeDisposable?.dispose();
     this.messageDisposable?.dispose();
+    this.view = undefined;
     this.hotReloader.dispose();
     this.watchdog.dispose();
     this.readinessProbe.dispose();
+    this.delivery.dispose();
   }
 
   async resolveWebviewView(
@@ -148,125 +213,43 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     this.view = webviewView;
     this.webviewReady = false;
     this.hotReloader.resetReloadFlags();
-    this.watchdog.clear();
     this.readinessProbe.clear();
+    this.watchdog.resetRecoveryEpisode();
+    this.delivery.invalidateView();
+    this.delivery.setVisible(webviewView.visible);
+    this.readinessProbe.setVisible(webviewView.visible);
 
     webviewView.webview.options = {
       enableScripts: true,
-      localResourceRoots: getWebviewRoots(this.context),
+      localResourceRoots: [...this.getRoots()],
     };
 
-    // Resolve the immutable Vite manifest once for both the asset-version
-    // handshake and generated HTML. Reading/parsing/hashing it twice adds
-    // avoidable filesystem work directly to first-paint latency.
-    const resolvedAssets = await resolveWebviewHtml(this.context, webviewView.webview);
+    const resolver = this.getResolveAssets();
+    const resolvedAssets = await resolver(this.context, webviewView.webview);
+    if (this.view !== webviewView) return;
     this.hotReloader.setCurrentAssetVersion(resolvedAssets.assetVersion);
 
     bootLog('sidebar-provider', 'view.resolved', {
       hostInstanceId: this.hostInstanceId,
       visible: webviewView.visible,
-      webviewReady: this.webviewReady,
+      viewGeneration: this.delivery.getDebugState().viewGeneration,
     });
 
-    this.messageDisposable?.dispose();
-    this.messageDisposable = webviewView.webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
-      try {
-        const incomingAssetVersion = this.hotReloader.getIncomingAssetVersion(msg);
-        if (this.hotReloader.shouldReloadForAssetMismatch(msg, incomingAssetVersion)) {
-          bootLog('sidebar-provider', 'assetVersion.mismatch', {
-            actualAssetVersion: incomingAssetVersion ?? null,
-            expectedAssetVersion: this.hotReloader.getCurrentAssetVersion(),
-            hostInstanceId: this.hostInstanceId,
-            type: msg.type,
-            visible: this.view?.visible ?? false,
-          });
-          void this.hotReloader.reloadForAssetMismatch();
-          return;
-        }
-
-        if (msg.type === 'stateApplied') {
-          const payload = msg.payload as any;
-          if (payload.renderError) {
-            bootLog('sidebar-provider', 'webview.renderError', { error: payload.renderError });
-          }
-          const signatureMatches = msg.payload.renderSignature === msg.payload.domRenderSignature;
-          this.watchdog.recordStateApplied(
-            msg.payload.revision,
-            signatureMatches ? msg.payload.domRenderSignature : null,
-          );
-        }
-
-        if (!this.webviewReady) {
-          this.webviewReady = true;
-          this.watchdog.resetResnapshotFlag();
-          this.readinessProbe.clear();
-          this.hotReloader.clearReloading();
-          bootLog('sidebar-provider', 'message.bridgeReady', {
-            hostInstanceId: this.hostInstanceId,
-            type: msg.type,
-            visible: this.view?.visible ?? false,
-          });
-          // Deliver imperatives buffered during the (re)load BEFORE the inbound
-          // message routes to postState() — imperatives first, then the
-          // confirming snapshot. Covers the "sendRejected fired while the webview
-          // was reloading" case (draft/overlay restore would otherwise be lost).
-          this.flushPendingImperatives();
-        }
-
-        // Audit-only validation: log invalid envelopes but still pass through so
-        // unrecognised future additions don't break older host builds. Promote
-        // to rejection once the audit log is clean.
-        const validation = validateWebviewToHostMessage(msg);
-        if (!validation.ok) {
-          auditLog('sidebar-provider', 'message.invalid', {
-            reason: validation.reason,
-            type: (msg as { type?: unknown })?.type ?? null,
-          });
-        }
-        if (msg.type === 'ready') {
-          bootLog('sidebar-provider', 'message.ready', {
-            hostInstanceId: this.hostInstanceId,
-            visible: this.view?.visible ?? false,
-          });
-        } else if (msg.type === 'refreshState' || msg.type === 'requestSnapshot') {
-          bootLog('sidebar-provider', `message.${msg.type}`, {
-            hostInstanceId: this.hostInstanceId,
-            visible: this.view?.visible ?? false,
-            webviewReady: this.webviewReady,
-          });
-        }
-        this.onMessage(msg);
-      } catch (err) {
-        appendPieError('webview', 'onDidReceiveMessage prelude failed', err);
-        // Do not acknowledge a stateApplied message that failed processing.
-        // The watchdog must retain ownership and recover by resnapshot/reload.
-      }
-    });
-
-    this.visibilityDisposable?.dispose();
-    this.visibilityDisposable = webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        this.flushDirtyState();
-      }
-    });
-
+    this.installMessageHandler(webviewView);
+    this.installViewLifecycleHandlers(webviewView);
     this.hotReloader.ensureAssetWatcher();
-    webviewView.webview.html = resolvedAssets.html;
-
-    // Cold-start restore can accumulate a fully loaded dirty snapshot before
-    // the view is resolved. Flush it as soon as the HTML is assigned so the
-    // fresh webview does not depend on an inbound handshake to escape the
-    // initial loading shell.
-    this.flushDirtyState();
+    webviewView.webview.html = injectViewGenerationMeta(
+      resolvedAssets.html,
+      this.delivery.getDebugState().viewGeneration,
+    );
+    this.armReadinessProbeIfStuck();
   }
 
-  /** Show the sidebar panel, preserving editor focus. */
   reveal(): void {
     if (this.view) {
       this.view.show(true);
       return;
     }
-
     void vscode.commands.executeCommand('workbench.view.extension.pie');
   }
 
@@ -278,305 +261,430 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     globalRevision: number;
     lastStateAppliedRevision: number;
     pendingStateAppliedRevision: number | null;
+    viewGeneration: number;
     hostInstanceId: string;
   } {
+    const delivery = this.delivery.getDebugState();
     return {
       hasView: !!this.view,
       visible: this.view?.visible ?? false,
       webviewReady: this.webviewReady,
-      globalDirty: this.syncState.globalDirty,
+      globalDirty: delivery.dirty,
       globalRevision: this.syncState.globalRevision,
-      lastStateAppliedRevision: this.watchdog.getLastStateAppliedRevision(),
-      pendingStateAppliedRevision: this.watchdog.getPendingStateAppliedRevision(),
+      lastStateAppliedRevision: delivery.lastTranscriptCommittedRevision,
+      pendingStateAppliedRevision: delivery.acceptedRevisions[0] ?? null,
+      viewGeneration: delivery.viewGeneration,
       hostInstanceId: this.hostInstanceId,
     };
   }
 
-  /**
-   * Post a full state snapshot immediately. The snapshot is authoritative:
-   * the webview rebuilds its state from the snapshot.
-   */
+  /** Request one immediate authoritative full snapshot. */
   postState(): void {
     if (this.scheduleTimer !== undefined) {
       clearTimeout(this.scheduleTimer);
       this.scheduleTimer = undefined;
     }
-
-    const previousRevision = this.syncState.globalRevision;
-    const viewState = this.getViewState();
-    const result = buildStateEnvelope(
-      this.syncState,
-      viewState,
-      this.canPostSnapshotToView(),
-    );
-    this.syncState = result.nextSyncState;
-
-    // Note: `postState` runs on every debounced snapshot post (the high-
-    // frequency happy path), so it intentionally has no `auditLog` entry —
-    // that channel is reserved for notable snapshot transitions (markDirty /
-    // flushDirty). Detailed per-post tracing is available via the opt-in
-    // `bootLog` (PI_BOOT_LOG=1) below.
-    bootLog('sidebar-provider', 'snapshot.postState', {
-      activeSessionPath: viewState.activeSession?.path ?? null,
-      backendReady: viewState.backendReady,
-      globalDirty: this.syncState.globalDirty,
-      notice: viewState.notice,
-      openTabCount: viewState.openTabPaths.length,
-      posted: !!result.message,
-      ready: this.webviewReady,
-      revision: this.syncState.globalRevision,
-      transcriptLoaded: viewState.transcriptLoaded,
-      visible: this.view?.visible ?? false,
-    });
-
-    assertInvariant(
-      'sidebar-provider',
-      !result.message || this.syncState.globalRevision > previousRevision,
-      'State snapshots must advance revision monotonically.',
-      { previousRevision, nextRevision: this.syncState.globalRevision },
-    );
-
-    if (result.message && this.view) {
-      this.postToWebview(result.message);
-    }
+    this.delivery.markDirty();
+    this.armReadinessProbeIfStuck();
   }
 
-  /**
-   * Schedule a debounced state snapshot. Multiple rapid calls within the
-   * debounce window are collapsed into a single post.
-   */
+  /** Debounce only while eligible; blocked/hidden state records dirty now. */
   scheduleState(): void {
-    if (!this.canPostSnapshotToView()) {
-      this.syncState = { ...this.syncState, globalDirty: true };
-      auditLog('sidebar-provider', 'snapshot.markDirty', {
-        reason: 'scheduleState',
-        ready: this.webviewReady,
-        revision: this.syncState.globalRevision,
-        visible: this.view?.visible ?? false,
-      });
+    if (!this.canPostSnapshotToView() || !this.view?.visible) {
+      this.delivery.markDirty();
+      this.armReadinessProbeIfStuck();
       if (isBootLogEnabled()) {
-        const viewState = this.getViewState();
         bootLog('sidebar-provider', 'snapshot.markDirty', {
-          activeSessionPath: viewState.activeSession?.path ?? null,
-          backendReady: viewState.backendReady,
-          globalDirty: this.syncState.globalDirty,
-          notice: viewState.notice,
-          openTabCount: viewState.openTabPaths.length,
           ready: this.webviewReady,
           revision: this.syncState.globalRevision,
           visible: this.view?.visible ?? false,
         });
       }
-      this.armReadinessProbeIfStuck();
       return;
     }
-
-    if (this.scheduleTimer !== undefined) {
-      return;
-    }
-
+    if (this.scheduleTimer !== undefined) return;
     const debounceMs = this.getRunningSessionCount() > 0
       ? STREAMING_SCHEDULE_DEBOUNCE_MS
       : SCHEDULE_DEBOUNCE_MS;
-
     this.scheduleTimer = setTimeout(() => {
       this.scheduleTimer = undefined;
-      this.postState();
+      this.delivery.markDirty();
     }, debounceMs);
   }
 
-  /**
-   * Post an imperative message that does not carry a revision. The webview
-   * handles these independently from the state flow.
-   */
+  /** Imperatives remain separate from authoritative full snapshots. */
   postImperative(msg: HostToWebviewMessage): void {
-    if (!this.view || !this.webviewReady) {
-      // State-bearing imperatives (sendRejected) carry effects the next full
-      // snapshot cannot reproduce on its own: the webview's optimistic-overlay
-      // removal and the draft-text restore (`sendRejected.text`). The reducer's
-      // rollback restores `pendingComposerInputsBySession` (so the snapshot
-      // carries inputs) but does NOT restore `draftTextBySession` (cleared at
-      // send time) — that restore rides solely on this imperative. If the view
-      // is not ready (webview reloading), buffer the imperative for re-delivery
-      // on ready (flushPendingImperatives) AND mark globalDirty so a
-      // confirming snapshot also flushes. Fire-and-forget imperatives
-      // (playCompletionSound) are dropped.
+    if (msg.type === 'state') {
+      throw new Error('State envelopes must be posted by StateDeliveryController.');
+    }
+    if (!this.view || !this.webviewReady || this.hotReloader.isReloading()) {
       if (msg.type === 'sendRejected') {
         this.pendingImperatives.push(msg);
-        this.syncState = { ...this.syncState, globalDirty: true };
+        this.delivery.markDirty();
+        this.armReadinessProbeIfStuck();
       }
       return;
     }
-    this.postToWebview(msg);
+    this.postImperativeToWebview(msg);
   }
 
-  /** Re-deliver state-bearing imperatives queued while the view was not ready.
-   *  Idempotent: a no-op when the queue is empty or the view is still not
-   *  ready. Called on bridge-ready and at the start of `flushDirtyState` so
-   *  imperatives land before the confirming snapshot. */
-  private flushPendingImperatives(): void {
-    if (this.pendingImperatives.length === 0) {
-      return;
+  private getResolveAssets(): NonNullable<SidebarViewProviderOptions['resolveAssets']> {
+    return this.providerOptions.resolveAssets ?? resolveWebviewHtml;
+  }
+
+  private getRoots(): readonly vscode.Uri[] {
+    return this.providerOptions.getRoots?.(this.context) ?? getWebviewRoots(this.context);
+  }
+
+  private installMessageHandler(webviewView: vscode.WebviewView): void {
+    this.messageDisposable?.dispose();
+    this.messageDisposable = webviewView.webview.onDidReceiveMessage((msg: WebviewToHostMessage) => {
+      if (this.view !== webviewView) return;
+      try {
+        const validation = validateWebviewToHostMessage(msg);
+        if (!validation.ok) {
+          auditLog('sidebar-provider', 'message.invalid', {
+            reason: validation.reason,
+            type: (msg as { type?: unknown })?.type ?? null,
+          });
+          if (isRenderEvidenceType((msg as { type?: unknown })?.type)) return;
+        }
+
+        const incomingAssetVersion = this.hotReloader.getIncomingAssetVersion(msg);
+        if (this.hotReloader.shouldReloadForAssetMismatch(msg, incomingAssetVersion)) {
+          bootLog('sidebar-provider', 'assetVersion.mismatch', {
+            actualAssetVersion: incomingAssetVersion,
+            expectedAssetVersion: this.hotReloader.getCurrentAssetVersion(),
+            type: msg.type,
+          });
+          void this.hotReloader.reloadForAssetMismatch();
+          return;
+        }
+
+        if (isRenderEvidenceMessage(msg)) {
+          const currentGeneration = this.delivery.getDebugState().viewGeneration;
+          if (msg.payload.viewGeneration === currentGeneration) {
+            this.markBridgeReady(msg.type, msg.payload.viewGeneration);
+          }
+          switch (msg.type) {
+            case 'stateReceived': this.delivery.stateReceived(msg.payload); break;
+            case 'appCommitted': this.delivery.appCommitted(msg.payload); break;
+            case 'transcriptCommitted':
+              this.lastTranscriptCommitBlockedReason = undefined;
+              this.delivery.transcriptCommitted(msg.payload);
+              break;
+            case 'transcriptCommitBlocked':
+              if (this.lastTranscriptCommitBlockedReason !== msg.payload.reason) {
+                this.lastTranscriptCommitBlockedReason = msg.payload.reason;
+                appendPieLog('warn', 'sidebar-provider', 'transcript commit blocked', {
+                  reason: msg.payload.reason,
+                  revision: msg.payload.revision,
+                  viewGeneration: msg.payload.viewGeneration,
+                });
+              }
+              if (isLivePipelineTraceEnabled()) recordLivePipelineTrace({
+                process: 'webview', stage: 'webview.transcript.committed', kind: 'failure',
+                identifiers: { hostInstance: this.hostInstanceId },
+                revision: msg.payload.revision,
+                viewGeneration: msg.payload.viewGeneration,
+                reasonCode: msg.payload.reason === 'window_mismatch'
+                  ? 'commit_window_mismatch'
+                  : msg.payload.reason === 'structure_mismatch'
+                    ? 'commit_structure_mismatch'
+                    : msg.payload.reason === 'leaf_missing'
+                      ? 'commit_leaf_missing' : 'commit_leaf_mismatch',
+              });
+              break;
+            case 'paintObserved': this.delivery.paintObserved(msg.payload); break;
+            case 'renderFailure': this.delivery.renderFailure(msg.payload); break;
+          }
+          return;
+        }
+
+        const readinessGeneration = getReadinessViewGeneration(msg);
+        const messageGeneration = msg.viewGeneration;
+        const currentGeneration = this.delivery.getDebugState().viewGeneration;
+        if (messageGeneration !== undefined && messageGeneration !== currentGeneration) {
+          auditLog('sidebar-provider', 'message.staleGenerationIgnored', {
+            type: msg.type,
+            messageGeneration,
+            viewGeneration: currentGeneration,
+          });
+          return;
+        }
+        if (this.hotReloader.isReloading() && messageGeneration === undefined) {
+          // The renderer being replaced may still emit commands while its HTML
+          // is swapping. Generation-stamped commands from the replacement are
+          // safe to route; unstamped legacy/stale commands are ignored.
+          return;
+        }
+        const becameReady = readinessGeneration === undefined
+          ? false
+          : this.markBridgeReady(msg.type, readinessGeneration);
+        this.onMessage(msg);
+        if (becameReady && this.webviewReady) this.delivery.notifyEligibilityChanged();
+      } catch (error: unknown) {
+        appendPieError('webview', 'onDidReceiveMessage prelude failed', sanitizeError(error));
+      }
+    });
+  }
+
+  private installViewLifecycleHandlers(webviewView: vscode.WebviewView): void {
+    this.visibilityDisposable?.dispose();
+    this.visibilityDisposable = webviewView.onDidChangeVisibility(() => {
+      if (this.view !== webviewView) return;
+      const retainedDirty = this.delivery.getDebugState().dirty;
+      this.delivery.setVisible(webviewView.visible);
+      this.readinessProbe.setVisible(webviewView.visible);
+      if (webviewView.visible) {
+        // Resume retained hidden intent, or force one fresh authoritative
+        // snapshot when no hidden change was recorded. Never mint both.
+        if (!retainedDirty) this.delivery.markDirty();
+        this.delivery.notifyEligibilityChanged();
+        this.armReadinessProbeIfStuck();
+      }
+    });
+
+    this.viewDisposeDisposable?.dispose();
+    this.viewDisposeDisposable = webviewView.onDidDispose(() => {
+      if (this.view !== webviewView) return;
+      this.view = undefined;
+      this.webviewReady = false;
+      this.readinessProbe.clear();
+      this.delivery.invalidateView();
+    });
+  }
+
+  private markBridgeReady(type: string, viewGeneration?: number): boolean {
+    if (this.webviewReady) return false;
+    const currentViewGeneration = this.delivery.getDebugState().viewGeneration;
+    if (viewGeneration !== currentViewGeneration) {
+      bootLog('sidebar-provider', 'message.bridgeReadyIgnored', {
+        generation: viewGeneration === undefined ? 'missing' : 'stale',
+        type,
+        viewGeneration: currentViewGeneration,
+      });
+      return false;
     }
-    if (!this.view || !this.webviewReady) {
-      return;
+    this.webviewReady = true;
+    this.hotReloader.clearReloading();
+    if (isLivePipelineTraceEnabled()) {
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.readiness.transition',
+        kind: 'transition',
+        identifiers: { hostInstance: this.hostInstanceId },
+        viewGeneration: currentViewGeneration,
+        readiness: 'ready',
+      });
     }
+    this.readinessProbe.clear();
+    this.watchdog.resetRecoveryEpisode();
+    this.flushPendingImperatives();
+    bootLog('sidebar-provider', 'message.bridgeReady', {
+      type,
+      viewGeneration: currentViewGeneration,
+    });
+    return true;
+  }
+
+  private flushPendingImperatives(): boolean {
+    if (this.pendingImperatives.length === 0 || !this.view || !this.webviewReady) return false;
     const queued = this.pendingImperatives;
     this.pendingImperatives = [];
-    for (const imperative of queued) {
-      this.postToWebview(imperative);
-    }
+    for (const imperative of queued) this.postImperativeToWebview(imperative);
+    return true;
+  }
+
+  private postImperativeToWebview(message: Exclude<HostToWebviewMessage, { type: 'state' }>): void {
+    const view = this.view;
+    if (!view) return;
+    void Promise.resolve(view.webview.postMessage(message)).then((delivered) => {
+      if (!delivered && message.type === 'sendRejected' && this.view === view) {
+        this.pendingImperatives.push(message);
+        this.delivery.markDirty();
+        this.armReadinessProbeIfStuck();
+      }
+    }, (error: unknown) => {
+      appendPieLog('warn', 'sidebar-provider', 'imperative post rejected', {
+        errorType: error instanceof Error ? error.name : typeof error,
+        messageType: message.type,
+      });
+      if (message.type === 'sendRejected' && this.view === view) {
+        this.pendingImperatives.push(message);
+        this.delivery.markDirty();
+      }
+    });
   }
 
   private canPostSnapshotToView(): boolean {
-    return canPostSnapshotToWebview(!!this.view, this.webviewReady);
+    return !!this.view && this.webviewReady && !this.hotReloader.isReloading();
   }
 
-  private flushDirtyState(): void {
-    // Deliver any state-bearing imperatives buffered while the view was not
-    // ready BEFORE the confirming snapshot, so the webview's optimistic overlay
-    // is removed and the draft/inputs restore is staged before the
-    // authoritative snapshot confirms them. (No-op when the queue is empty or
-    // the view is still not ready — e.g. the cold-start flush in
-    // resolveWebviewView runs before the bridge is ready.)
-    this.flushPendingImperatives();
-
-    const viewState = this.getViewState();
-    const result = flushDirtySnapshot(this.syncState, viewState, this.canPostSnapshotToView());
-    this.syncState = result.nextSyncState;
-
-    auditLog('sidebar-provider', 'snapshot.flushDirty', {
-      globalDirty: this.syncState.globalDirty,
-      posted: !!result.message,
-      ready: this.webviewReady,
-      revision: this.syncState.globalRevision,
-      visible: this.view?.visible ?? false,
-    });
-
-    bootLog('sidebar-provider', 'snapshot.flushDirty', {
-      activeSessionPath: viewState.activeSession?.path ?? null,
-      backendReady: viewState.backendReady,
-      globalDirty: this.syncState.globalDirty,
-      notice: viewState.notice,
-      openTabCount: viewState.openTabPaths.length,
-      posted: !!result.message,
-      ready: this.webviewReady,
-      revision: this.syncState.globalRevision,
-      transcriptLoaded: viewState.transcriptLoaded,
-      visible: this.view?.visible ?? false,
-    });
-
-    if (result.message && this.view) {
-      this.postToWebview(result.message);
-    } else {
-      this.armReadinessProbeIfStuck();
-    }
-  }
-
-  private postToWebview(message: HostToWebviewMessage): void {
-    const view = this.view;
-    if (!view) {
-      return;
-    }
-
-    void Promise.resolve(view.webview.postMessage(message))
-      .then((delivered) => {
-        this.syncState = reconcilePostedMessageDelivery(this.syncState, message, delivered);
-        if (delivered && message.type === 'state') {
-          recordSnapshotPost();
-          this.watchdog.armStateAppliedWatchdog(message.revision, transcriptRenderSignature(message.state));
-        }
-        if (!delivered) {
-          bootLog('sidebar-provider', 'message.deliveryFailed', {
-            hostInstanceId: this.hostInstanceId,
-            messageType: message.type,
-            revision: message.type === 'state' ? message.revision : null,
-            visible: this.view?.visible ?? false,
-            webviewReady: this.webviewReady,
-          });
-        }
-      })
-      .catch((error: unknown) => {
-        this.syncState = reconcilePostedMessageDelivery(this.syncState, message, false);
-        appendPieLog('warn', 'sidebar-provider', `failed to post ${message.type} message to webview`, {
-          error: toErrorMessage(error),
-        });
-      });
-  }
-
-  /**
-   * Arm the readiness probe when posting is blocked purely by a stale
-   * `webviewReady=false` belief (view exists, dirty, believed not ready).
-   * No-op otherwise. See {@link WebviewReadinessProbe}.
-   */
   private armReadinessProbeIfStuck(): void {
-    if (this.view && !this.webviewReady && this.syncState.globalDirty) {
+    if (
+      this.view
+      && this.view.visible
+      && !this.webviewReady
+      && this.delivery.getDebugState().dirty
+    ) {
       this.readinessProbe.arm();
     }
   }
 
-  /**
-   * Push the pending snapshot to the webview despite a stale `webviewReady=false`
-   * belief (the readiness probe's `onProbe` callback). Adopts `postMessage`'s
-   * `delivered=true` as the readiness signal — the webview was ready after all
-   * — restoring the normal post loop without waiting for a user refocus.
-   */
-  private async probePost(): Promise<boolean> {
-    const view = this.view;
-    if (!view) {
-      return false;
-    }
-    // Force canPost=true: the probe exists to test the stale belief, so it
-    // must mint + post an envelope the `canPost` gate would otherwise suppress.
-    const result = buildStateEnvelope(this.syncState, this.getViewState(), true);
-    this.syncState = result.nextSyncState;
-    const message = result.message;
-    if (!message || message.type !== 'state') {
-      return false;
-    }
-
-    try {
-      const delivered = await view.webview.postMessage(message);
-      // A reload may have started during the await — the posted message may be
-      // bound for a renderer being replaced. Do not adopt readiness or arm the
-      // watchdog; treat as undelivered so the probe retries after the reload
-      // settles, and let the reload's `ready` handshake own readiness.
-      if (this.hotReloader.isReloading()) {
-        this.syncState = reconcilePostedMessageDelivery(this.syncState, message, false);
-        bootLog('sidebar-provider', 'readinessProbe.skippedReload', {
-          hostInstanceId: this.hostInstanceId,
-          revision: message.revision,
-        });
-        return false;
-      }
-      this.syncState = reconcilePostedMessageDelivery(this.syncState, message, delivered);
-      if (delivered) {
-        if (!this.webviewReady) {
-          this.webviewReady = true;
-          this.watchdog.resetResnapshotFlag();
-          this.flushPendingImperatives();
-          bootLog('sidebar-provider', 'readinessProbe.adopted', {
-            hostInstanceId: this.hostInstanceId,
-            revision: message.revision,
-            visible: this.view?.visible ?? false,
-          });
-        }
-        recordSnapshotPost();
-        this.watchdog.armStateAppliedWatchdog(message.revision, transcriptRenderSignature(message.state));
-      } else {
-        bootLog('sidebar-provider', 'readinessProbe.notDelivered', {
-          hostInstanceId: this.hostInstanceId,
-          revision: message.revision,
-          visible: this.view?.visible ?? false,
-        });
-      }
-      return delivered;
-    } catch (error: unknown) {
-      this.syncState = reconcilePostedMessageDelivery(this.syncState, message, false);
-      appendPieLog('warn', 'sidebar-provider', 'readiness probe post failed', {
-        error: toErrorMessage(error),
+  private handleReloadStart(reason: string): void {
+    this.webviewReady = false;
+    if (isLivePipelineTraceEnabled()) {
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.readiness.transition',
+        kind: 'transition',
+        identifiers: { hostInstance: this.hostInstanceId },
+        viewGeneration: this.delivery.getDebugState().viewGeneration,
+        readiness: 'reloading',
+        reasonCode: reason.startsWith('recovery:') ? 'commit_timeout' : 'readiness_lost',
       });
-      return false;
+    }
+    this.watchdog.resetRecoveryEpisode();
+    // A started reload is a new bounded readiness episode. Hot-reloader keeps
+    // `reloading=true` until ready/force-clear, so clearing here cannot mask a
+    // repeated reload skip loop.
+    this.readinessProbe.clear();
+    this.delivery.invalidateView();
+    this.armReadinessProbeIfStuck();
+    bootLog('sidebar-provider', 'reload.started', {
+      reason,
+      viewGeneration: this.delivery.getDebugState().viewGeneration,
+    });
+  }
+
+  private handleDeliveryRecovery(recovery: StateDeliveryRecovery): void {
+    if (isLivePipelineTraceEnabled()) {
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.recovery.action',
+        kind: 'recovery',
+        identifiers: { hostInstance: this.hostInstanceId },
+        revision: recovery.revision,
+        viewGeneration: recovery.viewGeneration,
+        reasonCode: recoveryReasonCode(recovery),
+      });
+    }
+    this.watchdog.handleRecovery(recovery);
+    if (
+      this.watchdog.getLastDecision() === 'throttled'
+      && (recovery.reason === 'ledger-overflow'
+        || recovery.reason === 'retry-exhausted'
+        || recovery.reason === 'commit-timeout')
+    ) {
+      // Storm throttling still needs bounded in-process recovery; rotating the
+      // generation clears the suspended ledger/retry episode without reusing
+      // any old settlement.
+      this.delivery.invalidateView();
     }
   }
+
+  private recordDeliveryTrace(event: StateDeliveryTelemetry): void {
+    if (!isLivePipelineTraceEnabled()) return;
+    const mapped = deliveryTraceMapping(event.kind);
+    if (!mapped) return;
+    recordLivePipelineTrace({
+      process: mapped.process,
+      stage: mapped.stage,
+      kind: mapped.kind,
+      identifiers: { hostInstance: this.hostInstanceId },
+      revision: event.revision,
+      viewGeneration: event.viewGeneration,
+      operationId: event.operationId,
+      postResult: mapped.postResult,
+      reasonCode: mapped.reasonCode,
+    });
+  }
+
+  private handleReadinessExhausted(): void {
+    const debug = this.delivery.getDebugState();
+    const recovery: StateDeliveryRecovery = {
+      reason: 'retry-exhausted',
+      attempts: READINESS_PROBE_MAX_ATTEMPTS,
+      desiredGeneration: debug.desiredGeneration,
+      viewGeneration: debug.viewGeneration,
+    };
+    // Exhaustion is terminal for this bounded probe episode. Reset its counter
+    // before a successful reload starts a fresh episode; when reload storm
+    // protection declines the request, remain explicitly exhausted until a
+    // later host change or visibility transition begins another episode.
+    this.readinessProbe.clear();
+    this.watchdog.handleRecovery(recovery);
+  }
+}
+
+function getReadinessViewGeneration(msg: WebviewToHostMessage): number | undefined {
+  return msg.type === 'ready' || msg.type === 'refreshState' || msg.type === 'requestSnapshot'
+    ? msg.viewGeneration
+    : undefined;
+}
+
+function isRenderEvidenceType(type: unknown): boolean {
+  return type === 'stateReceived'
+    || type === 'appCommitted'
+    || type === 'transcriptCommitted'
+    || type === 'transcriptCommitBlocked'
+    || type === 'paintObserved'
+    || type === 'renderFailure';
+}
+
+function isRenderEvidenceMessage(msg: WebviewToHostMessage): msg is Extract<
+  WebviewToHostMessage,
+  { type: 'stateReceived' | 'appCommitted' | 'transcriptCommitted' | 'transcriptCommitBlocked' | 'paintObserved' | 'renderFailure' }
+> {
+  return isRenderEvidenceType(msg.type);
+}
+
+type DeliveryTraceMapping = {
+  process: LivePipelineTraceProcess;
+  stage: LivePipelineTraceStage;
+  kind: LivePipelineTraceKind;
+  postResult?: 'true' | 'false' | 'rejected' | 'timeout' | 'late';
+  reasonCode?: LivePipelineTraceReasonCode;
+};
+
+function deliveryTraceMapping(kind: StateDeliveryTelemetry['kind']): DeliveryTraceMapping | null {
+  switch (kind) {
+    case 'post-started': return { process: 'host', stage: 'host.post.started', kind: 'start' };
+    case 'post-accepted': return { process: 'host', stage: 'host.post.settled', kind: 'success', postResult: 'true' };
+    case 'post-false': return { process: 'host', stage: 'host.post.settled', kind: 'false', postResult: 'false', reasonCode: 'post_false' };
+    case 'post-rejected': return { process: 'host', stage: 'host.post.settled', kind: 'rejected', postResult: 'rejected', reasonCode: 'post_rejected' };
+    case 'post-timeout': return { process: 'host', stage: 'host.post.timeout', kind: 'timeout', postResult: 'timeout', reasonCode: 'post_timeout' };
+    case 'post-late-settlement': return { process: 'host', stage: 'host.post.late', kind: 'late', postResult: 'late', reasonCode: 'late_settlement' };
+    case 'state-received': return { process: 'webview', stage: 'webview.state.received', kind: 'success' };
+    case 'app-committed': return { process: 'webview', stage: 'webview.app.committed', kind: 'success' };
+    case 'transcript-committed':
+    case 'commit-advanced': return { process: 'webview', stage: 'webview.transcript.committed', kind: 'success' };
+    case 'paint-observed': return { process: 'webview', stage: 'webview.paint.observed', kind: 'success' };
+    case 'commit-timeout': return { process: 'host', stage: 'host.recovery.action', kind: 'timeout', reasonCode: 'commit_timeout' };
+    case 'ledger-overflow': return { process: 'host', stage: 'host.recovery.action', kind: 'failure', reasonCode: 'ledger_overflow' };
+    case 'retry-exhausted': return { process: 'host', stage: 'host.recovery.action', kind: 'failure', reasonCode: 'readiness_exhausted' };
+    case 'protocol-defect': return { process: 'host', stage: 'host.recovery.action', kind: 'failure', reasonCode: 'commit_identity_mismatch' };
+    default: return null;
+  }
+}
+
+function recoveryReasonCode(recovery: StateDeliveryRecovery): LivePipelineTraceReasonCode {
+  switch (recovery.reason) {
+    case 'commit-timeout': return 'commit_timeout';
+    case 'ledger-overflow': return 'ledger_overflow';
+    case 'retry-exhausted': return 'readiness_exhausted';
+    case 'render-failure':
+      switch (recovery.renderFailure?.classification) {
+        case 'component_error': return 'render_component_error';
+        case 'uncaught_error': return 'render_uncaught_error';
+        case 'unhandled_rejection': return 'render_unhandled_rejection';
+        default: return 'unknown_unattributable';
+      }
+  }
+}
+
+/** Avoid forwarding arbitrary error bodies into logs/telemetry. */
+function sanitizeError(error: unknown): Error {
+  return new Error(error instanceof Error ? error.name : typeof error);
 }

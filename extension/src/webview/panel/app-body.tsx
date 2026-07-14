@@ -13,7 +13,7 @@ import { SessionTabs } from './ui';
 import { AggregateStatsStrip } from './ui';
 import { DeferredTriggersMenu } from './aggregate-stats-strip/deferred-triggers-menu';
 import { NoticeContext } from './hooks/notice-context';
-import { AskUserContext } from './hooks/ask-user-context';
+import { AskUserContext, selectFixedPromptRequest } from './hooks/ask-user-context';
 import { useHostSync } from './hooks/use-host-sync';
 import { useAppHandlers } from './use-app-handlers';
 import { useSessionRecovery } from './use-session-recovery';
@@ -23,7 +23,7 @@ import { BottomSection } from './bottom-section';
 import { useNoticeAction } from './use-notice-action';
 import { useChatPrefsCss } from './use-chat-prefs-css';
 import { useWarmupAudio } from './use-warmup-audio';
-import { transcriptRenderSignature } from '../../shared/transcript-render-signature';
+import { TranscriptCommitProvider } from './transcript/commit-registry';
 
 export interface AppBodyProps {
   adapter: {
@@ -34,11 +34,34 @@ export interface AppBodyProps {
 
 export function AppBody({ adapter }: AppBodyProps) {
   const { postMessage } = adapter;
-  const { viewState, mergedTranscript, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage } =
+  const { viewState, mergedTranscript, commitTarget, draftRestore, activeSessionPathRef, setDraftRestore, addOptimisticMessage } =
     useHostSync(postMessage, adapter.initialState);
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  // Tracks which request IDs have an interactive inline prompt actually
+  // mounted in the transcript. This is ephemeral DOM-presence bookkeeping,
+  // not request logic: host state remains authoritative. A count (rather than
+  // a Set) keeps registration correct if the same request is briefly mounted
+  // twice during a transition.
+  const [inlinePromptRequestCounts, setInlinePromptRequestCounts] = useState<Record<string, number>>({});
+  const registerInlineRequest = useCallback((requestId: string) => {
+    setInlinePromptRequestCounts((current) => ({
+      ...current,
+      [requestId]: (current[requestId] ?? 0) + 1,
+    }));
+  }, []);
+  const unregisterInlineRequest = useCallback((requestId: string) => {
+    setInlinePromptRequestCounts((current) => {
+      const count = current[requestId] ?? 0;
+      if (count <= 0) return current;
+      const next = { ...current };
+      if (count === 1) delete next[requestId];
+      else next[requestId] = count - 1;
+      return next;
+    });
+  }, []);
 
   // Brief E: optimistic one-frame "stopping…" flag for interrupt. Set
   // synchronously in `handleInterrupt` (use-app-handlers) so the click reflects
@@ -70,7 +93,22 @@ export function AppBody({ adapter }: AppBodyProps) {
 
   useWarmupAudio();
 
-  const derived = useAppBodyDerivedState(viewState, postMessage);
+  const derived = useAppBodyDerivedState(
+    viewState,
+    postMessage,
+    registerInlineRequest,
+    unregisterInlineRequest,
+  );
+  const fixedPendingExtensionUIRequest = useMemo(() => selectFixedPromptRequest(
+    derived.activeSessionPath
+      ? (viewState.pendingExtensionUIRequestsBySession[derived.activeSessionPath] ?? {})
+      : {},
+    inlinePromptRequestCounts,
+  ), [
+    derived.activeSessionPath,
+    viewState.pendingExtensionUIRequestsBySession,
+    inlinePromptRequestCounts,
+  ]);
 
   // Brief E: clear the optimistic "stopping…" flag once the host confirms the
   // abort (`busy` flips false — the abort round-trip completed) or the active
@@ -110,12 +148,17 @@ export function AppBody({ adapter }: AppBodyProps) {
     () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
     [viewState.sessions],
   );
-  const renderSignature = transcriptRenderSignature({ ...viewState, transcript: mergedTranscript });
+  const appCommitSurface = derived.panelSurface === 'loading' || derived.needsSessionRecovery
+    ? 'loading'
+    : !derived.hasActiveTabs
+      ? 'empty'
+      : 'transcript-suspense';
 
   return (
     <NoticeContext.Provider value={derived.noticeValue}>
+    <TranscriptCommitProvider target={commitTarget} postMessage={postMessage} appSurface={appCommitSurface}>
     <AskUserContext.Provider value={derived.askUserContextValue}>
-    <div id="app" data-render-signature={renderSignature}>
+    <div id="app">
       {viewState.showOutcomeDialog && viewState.activeSession && (
         <RunOutcomeDialog
           sessionLabel={viewState.activeSession.name}
@@ -194,18 +237,17 @@ export function AppBody({ adapter }: AppBodyProps) {
         workspaceCwd={viewState.workspaceCwd}
         openTabPaths={viewState.openTabPaths}
         onCancelPrepass={handlers.handleInterrupt}
-        renderSignature={renderSignature}
       />
 
       <BottomSection
         hasActiveTabs={derived.hasActiveTabs}
         needsSessionRecovery={derived.needsSessionRecovery}
-        pendingExtensionUIRequest={viewState.pendingExtensionUIRequest}
+        pendingExtensionUIRequest={fixedPendingExtensionUIRequest}
         activeSessionPath={derived.activeSessionPath}
-        isAskUserHandledInline={derived.isAskUserHandledInline}
         postMessage={postMessage}
         busy={viewState.busy}
         retryStatus={viewState.retryStatus}
+        liveTurnPhase={viewState.liveTurnPhase}
         interrupting={interrupting}
         activeSession={viewState.activeSession}
         modelSettings={viewState.modelSettings}
@@ -250,6 +292,7 @@ export function AppBody({ adapter }: AppBodyProps) {
       )}
     </div>
     </AskUserContext.Provider>
+    </TranscriptCommitProvider>
     </NoticeContext.Provider>
   );
 }

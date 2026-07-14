@@ -147,6 +147,14 @@ export function evictSession(
   const { [sp]: _psq, ...remainingPendingSendQueue } = state.pending.sendQueueBySession;
   const { [sp]: _brq, ...remainingBackendReadyQueue } = state.pending.backendReadyQueueBySession;
   const { [sp]: _pp, ...remainingPrepass } = state.pending.prepassBySession;
+  const { [sp]: _liveTurn, ...remainingLiveTurns } = state.livePipeline.turnsBySession;
+  const { [sp]: _liveRevision, ...remainingLiveRevisions } = state.livePipeline.revisionBySession;
+  const remainingLiveTools = Object.fromEntries(Object.entries(state.livePipeline.toolsByExecutionId)
+    .filter(([, tool]) => tool.turnId !== _liveTurn?.turnId));
+  const remainingPendingOwnerEvents = Object.fromEntries(Object.entries(state.livePipeline.pendingOwnerEvents)
+    .filter(([, events]) => !events.some((event) => event.sessionPath === sp)));
+  const remainingTerminalAttempts = Object.fromEntries(Object.entries(state.livePipeline.terminalAttempts)
+    .filter(([, attempt]) => attempt.sessionPath !== sp));
 
   // ── corrId / requestId / messageId-keyed pending collections (filtered) ──
   // Drop in-flight send/edit ops for the evicted session. Without this, a
@@ -173,6 +181,10 @@ export function evictSession(
   for (const [corrId, entry] of Object.entries(state.pending.setModelByCorrId)) {
     if (entry.sessionPath !== sp) remainingSetModel[corrId] = entry;
   }
+
+  const remainingExtensionUiResponses = Object.fromEntries(
+    Object.entries(state.pending.extensionUiResponseByCorrId).filter(([, entry]) => entry.sessionPath !== sp),
+  );
 
   const remainingRequestIdToLocalId: Record<string, { sessionPath: string; localId: string }> = {};
   for (const [requestId, mapping] of Object.entries(state.pending.requestIdToLocalId)) {
@@ -260,6 +272,14 @@ export function evictSession(
         expandedBySession: remainingFileChangesExpanded,
         readFilePathsBySession: remainingReadFilePaths,
       },
+      livePipeline: {
+        ...state.livePipeline,
+        turnsBySession: remainingLiveTurns,
+        toolsByExecutionId: remainingLiveTools,
+        pendingOwnerEvents: remainingPendingOwnerEvents,
+        terminalAttempts: remainingTerminalAttempts,
+        revisionBySession: remainingLiveRevisions,
+      },
       pending: {
         ...state.pending,
         ops: remainingOps,
@@ -268,6 +288,7 @@ export function evictSession(
         messageIdAlias: remainingMessageIdAlias,
         requestIdToLocalId: remainingRequestIdToLocalId,
         setModelByCorrId: remainingSetModel,
+        extensionUiResponseByCorrId: remainingExtensionUiResponses,
         sendQueueBySession: remainingPendingSendQueue,
         backendReadyQueueBySession: remainingBackendReadyQueue,
         prepassBySession: remainingPrepass,

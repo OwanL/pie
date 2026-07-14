@@ -60,6 +60,30 @@ function resolveAgainstCwd(relPath: string, cwd: string | undefined): string {
   return cwd ? path.resolve(cwd, relPath) : relPath;
 }
 
+/** Render paths inside the session cwd relative to it. The cwd is already part
+ *  of pi's system prompt, so repeating its absolute prefix on every manifest
+ *  row wastes context. Paths outside the cwd stay absolute: making them `..`
+ *  paths would obscure that the session edited outside its working tree. */
+function displayPath(filePath: string, cwd: string | undefined): string {
+  if (!cwd) return filePath;
+  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
+  const relative = path.relative(cwd, absolute);
+  if (
+    !relative ||
+    path.isAbsolute(relative) ||
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    // Relative `../outside` inputs must not remain deceptively relative to the
+    // agent's cwd; make the outside-working-tree boundary explicit.
+    return path.isAbsolute(filePath) ? filePath : absolute;
+  }
+  // Preserve an already-relative in-cwd spelling (including `/` separators)
+  // so manifest paths remain stable across platforms. Only absolute inputs
+  // need conversion.
+  return path.isAbsolute(filePath) ? relative : filePath;
+}
+
 /** Find the manifest entry for a requested path: exact string match first, then
  *  a resolved-against-cwd match (so `src/x.ts` matches `./src/x.ts` or an
  *  absolute form). Returns undefined when the path isn't in the manifest
@@ -85,9 +109,10 @@ async function diffOne(
   const cwd = parsed.cwd;
   const entry = findManifestEntry(parsed.changes, relPath, cwd);
   const kind: DiffKind = entry?.kind ?? 'modified';
+  const manifestPath = entry?.path ?? relPath;
   return computeFileDiff({
-    relPath: entry?.path ?? relPath,
-    absPath: resolveAgainstCwd(entry?.path ?? relPath, cwd),
+    relPath: displayPath(manifestPath, cwd),
+    absPath: resolveAgainstCwd(manifestPath, cwd),
     kind,
     additions: entry?.additions,
     deletions: entry?.deletions,
@@ -134,7 +159,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (p.action === 'list') {
-        return ok(renderList(parsed.changes));
+        const displayChanges = parsed.changes.map((change) => ({
+          ...change,
+          path: displayPath(change.path, parsed.cwd),
+        }));
+        return ok(renderList(displayChanges));
       }
 
       // action === 'diff'

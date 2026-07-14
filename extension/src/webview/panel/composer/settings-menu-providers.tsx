@@ -4,6 +4,7 @@
 import { useState } from 'preact/hooks';
 import type { ChatPrefs, ProviderGateStats, ProviderGateProviderMetrics } from '../../../shared/protocol';
 import { setProviderEnabled } from '../chat-prefs';
+import { CollapsibleChevron } from '../components/chevron';
 import type { OnSetPrefs } from './settings-menu-types';
 
 interface ProviderItemProps {
@@ -152,33 +153,34 @@ function ProviderItem({ provider, prefs, onSetPrefs, metrics, expanded, onToggle
   const checked = prefs.providerToggles[provider] !== false;
   const hasConcurrency = !!metrics || provider in prefs.providerConcurrency;
   return (
-    <div>
-      <button
-        class={`toolbar-settings-item${checked ? ' checked' : ''}`}
-        type="button"
-        role="checkbox"
-        aria-checked={checked}
-        onClick={() => onSetPrefs(setProviderEnabled(prefs, provider, !checked))}
-      >
-        <span class="toolbar-settings-item-check" aria-hidden="true">
-          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={checked ? '' : 'opacity:0'}>
-            <polyline points="2.5,6.5 5,9 10.5,3.5" />
-          </svg>
-        </span>
-        <span class="toolbar-settings-item-label">{provider}</span>
-        {hasConcurrency && (
-          <span
-            class="toolbar-settings-item-chevron"
-            style={`margin-left: auto; transition: transform 0.15s; transform: ${expanded ? 'rotate(90deg)' : 'rotate(0)'}`}
-            onClick={(e) => { e.stopPropagation(); onToggleExpand(); }}
-            aria-label={expanded ? 'Collapse concurrency settings' : 'Expand concurrency settings'}
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3,1 7,5 3,9" />
+    <div class="toolbar-settings-ext-group">
+      <div class="toolbar-settings-ext-row">
+        <button
+          class={`toolbar-settings-item${checked ? ' checked' : ''}`}
+          type="button"
+          role="checkbox"
+          aria-checked={checked}
+          onClick={() => onSetPrefs(setProviderEnabled(prefs, provider, !checked))}
+        >
+          <span class="toolbar-settings-item-check" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={checked ? '' : 'opacity:0'}>
+              <polyline points="2.5,6.5 5,9 10.5,3.5" />
             </svg>
           </span>
+          <span class="toolbar-settings-item-label">{provider}</span>
+        </button>
+        {hasConcurrency && (
+          <button
+            class="toolbar-settings-ext-chevron"
+            type="button"
+            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${provider} concurrency settings`}
+            aria-expanded={expanded}
+            onClick={onToggleExpand}
+          >
+            <CollapsibleChevron open={expanded} size={12} />
+          </button>
         )}
-      </button>
+      </div>
       {expanded && hasConcurrency && (
         <ProviderConcurrencyControls provider={provider} prefs={prefs} onSetPrefs={onSetPrefs} metrics={metrics} />
       )}

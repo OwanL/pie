@@ -203,6 +203,8 @@ export interface ProviderGateProviderMetrics {
   queuedRequests: number;
   maxConcurrentRequests: number;
   afterburnSeconds: number;
+  /** Configured maximum queue wait before provider-gate saturation fails. */
+  queueWaitSeconds?: number;
   paused: boolean;
   pausedUntilMs: number;
   strikeCount: number;

@@ -24,6 +24,14 @@ export interface ToolCall {
    * historical sessions render without the strip.
    */
   parallelGroupId?: string;
+  /** Host-only live execution identity used by transcript commit evidence. */
+  executionId?: string;
+  /** Host-only sequenced lifecycle revision used by transcript commit evidence. */
+  seq?: number;
+  /** Host-only live phase used by transcript commit evidence. */
+  phase?: string;
+  /** Stable SDK session entry containing this terminal result. */
+  durableEntryId?: string;
 }
 
 export interface FilesystemPathComposerInput {
@@ -130,6 +138,13 @@ export interface ChatMessage {
   /** Human-readable error detail when status is 'error'. */
   errorDetail?: string;
   toolCalls?: ToolCall[];
+  /**
+   * Host-owned monotonic revision for live tool-call state on this message.
+   * Incremented for every ToolCall event so render acknowledgements can detect
+   * arbitrary partial-result/status updates in O(1), without hashing complete
+   * tool results or scanning every tool call on each streaming snapshot.
+   */
+  toolStateRevision?: number;
   /** How long the response took to complete, in milliseconds. Only set on finished assistant messages. */
   durationMs?: number;
   /**
@@ -158,6 +173,8 @@ export interface ChatMessage {
   customType?: string;
   /** Structured details from a custom_message entry, when provided by the source extension. Typed per customType. */
   customDetails?: CustomMessageDetails;
+  /** Stable SDK session entry for a durability-confirmed terminal message. */
+  durableEntryId?: string;
 }
 
 /** Details for a `deferred-trigger` custom user message (the wake-up text the

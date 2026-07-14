@@ -5,7 +5,6 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 import type { SystemPromptEntry } from '../../../shared/protocol';
-import { CollapsibleChevron } from '../components/chevron';
 import { Tooltip } from '../components/tooltip';
 import { cx } from '../utils/cx';
 
@@ -192,7 +191,6 @@ export function SystemPromptToggleMenu({ prompts, onSetToggles }: SystemPromptTo
           {disabledCount > 0 && (
             <span class="system-prompt-toggle-badge" aria-label={`${disabledCount} disabled`}>{disabledCount}</span>
           )}
-          <CollapsibleChevron open={open} size={10} class="system-prompt-toggle-caret" />
         </button>
       </Tooltip>
 

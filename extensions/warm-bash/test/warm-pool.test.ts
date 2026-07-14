@@ -60,6 +60,14 @@ function sink() {
   return { onData, text };
 }
 
+async function waitForReadyWorkers(pool: { getStats(): { ready: number } }, count: number, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (pool.getStats().ready < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(pool.getStats().ready >= count, `expected ${count} ready workers, got ${pool.getStats().ready}`);
+}
+
 const BASH = findTestBash();
 
 describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => {
@@ -270,7 +278,12 @@ describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => 
   test('pool reuses across sequential calls (size 2 keeps a spare warm)', async () => {
     const pool = new Pool({ size: 2, shellPath: BASH, env: process.env });
     try {
-      await pool.ready();
+      // `ready()` intentionally resolves after the first worker because
+      // production may start using the acceleration cache immediately. This
+      // test specifically asserts the size-2 spare behavior, so wait for both
+      // workers instead of racing the second warmup under suite-wide process
+      // contention.
+      await waitForReadyWorkers(pool, 2);
       for (let i = 0; i < 5; i++) {
         const { onData, text } = sink();
         const res = await pool.exec({ command: `echo iter${i}`, cwd: tmp, env: process.env, onData });

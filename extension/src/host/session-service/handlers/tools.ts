@@ -43,7 +43,16 @@ interface HandlerDeps {
   requireEventSessionPath: (eventName: string, sessionPath: string | undefined) => string | null;
 }
 
-export function onToolStarted(payload: ToolStartedPayload, deps: HandlerDeps): void {
+interface ToolHandlerOptions {
+  /** Canonical live semantic path already mutated LivePipelineState. */
+  skipTranscriptMutation?: boolean;
+}
+
+export function onToolStarted(
+  payload: ToolStartedPayload,
+  deps: HandlerDeps,
+  options: ToolHandlerOptions = {},
+): void {
   const sessionPath = deps.requireEventSessionPath('tool.started', payload.sessionPath);
   if (!sessionPath) {
     return;
@@ -65,7 +74,7 @@ export function onToolStarted(payload: ToolStartedPayload, deps: HandlerDeps): v
   const runningSibling = ownerMessage?.toolCalls?.find(
     (toolCall) => toolCall.status === 'running' && toolCall.id !== payload.toolCallId,
   );
-  const parallelGroupId = runningSibling?.parallelGroupId ?? crypto.randomUUID();
+  const parallelGroupId = payload.parallelGroupId ?? runningSibling?.parallelGroupId ?? crypto.randomUUID();
 
   const toolCall = {
     id: payload.toolCallId,
@@ -76,12 +85,14 @@ export function onToolStarted(payload: ToolStartedPayload, deps: HandlerDeps): v
     parallelGroupId,
   };
 
-  deps.dispatchArch({
-    kind: 'ToolCall',
-    sessionPath,
-    messageId: payload.messageId,
-    toolCall,
-  });
+  if (!options.skipTranscriptMutation) {
+    deps.dispatchArch({
+      kind: 'ToolCall',
+      sessionPath,
+      messageId: payload.messageId,
+      toolCall,
+    });
+  }
   deps.runObserver.onToolStarted(sessionPath, toolCall);
 
   // Track file changes from file-modifying tools
@@ -103,7 +114,11 @@ export function onToolStarted(payload: ToolStartedPayload, deps: HandlerDeps): v
   deps.state.touchSessionTranscript(sessionPath);
 }
 
-export function onToolFinished(payload: ToolFinishedPayload, deps: HandlerDeps): void {
+export function onToolFinished(
+  payload: ToolFinishedPayload,
+  deps: HandlerDeps,
+  options: ToolHandlerOptions = {},
+): void {
   const sessionPath = deps.requireEventSessionPath('tool.finished', payload.sessionPath);
   if (!sessionPath) {
     return;
@@ -123,27 +138,31 @@ export function onToolFinished(payload: ToolFinishedPayload, deps: HandlerDeps):
       : transcript?.find((message) => message.id === payload.messageId);
   const existing = ownerMessage?.toolCalls?.find((toolCall) => toolCall.id === payload.toolCallId);
 
+  const payloadName = payload.name?.trim();
   const toolCall = {
     id: payload.toolCallId,
-    name: existing?.name ?? '',
-    input: existing?.input,
+    name: payloadName || existing?.name || '',
+    input: payload.input !== undefined ? payload.input : existing?.input,
     result: payload.result,
     status: payload.status,
     startedAt: existing?.startedAt,
     durationMs: payload.durationMs,
-    parallelGroupId: existing?.parallelGroupId,
+    parallelGroupId: payload.parallelGroupId ?? existing?.parallelGroupId,
+    durableEntryId: payload.durableEntryId,
   };
 
-  deps.dispatchArch({
-    kind: 'ToolCall',
-    sessionPath,
-    messageId: payload.messageId,
-    toolCall,
-  });
+  if (!options.skipTranscriptMutation) {
+    deps.dispatchArch({
+      kind: 'ToolCall',
+      sessionPath,
+      messageId: payload.messageId,
+      toolCall,
+    });
+  }
   deps.runObserver.onToolFinished(sessionPath, toolCall);
 
   // Track file changes from subagent inner tool calls
-  if (existing?.name === 'subagent' && isRecord(payload.result)) {
+  if (toolCall.name === 'subagent' && isRecord(payload.result)) {
     const subagentChanges = deriveFileChangesFromSubagentResult(
       payload.result,
       payload.messageId,
@@ -188,7 +207,7 @@ export function onToolProgress(payload: ToolProgressPayload, deps: HandlerDeps):
     id: payload.toolCallId,
     name: existing?.name ?? '',
     input: existing?.input,
-    result: payload.partialResult,
+    result: payload.preview,
     status: 'running' as const,
     startedAt: existing?.startedAt,
     parallelGroupId: existing?.parallelGroupId,

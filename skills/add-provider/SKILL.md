@@ -102,7 +102,7 @@ Run the focused model-config test:
 
 ```bash
 cd extension
-npx tsx --test test/model-config-sync.test.ts
+npx tsx --test test/integration/model-config-sync.test.ts
 ```
 
 If `extension/src/` was changed for provider-specific runtime behavior, also run the required extension build:

@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import type { AgentReviewSourceEvent, SourceAnalyticsPayload } from '../scripts/contracts.ts';
 import { coerceSourceAnalyticsPayload, loadSourceAnalytics } from '../scripts/source.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
+import { LEADERBOARD_MINIMUM_SCORED_RUNS } from '../scripts/leaderboard-scoring.ts';
 import { buildSiteDataBundle, readSiteDataBundle, validateSiteDataBundle, writeSiteData } from '../scripts/site-data.ts';
 import { deepClone, loadFixture, withTempDir } from './helpers.ts';
 
@@ -104,6 +105,62 @@ test('prepareSourceAnalytics joins agent reviews to runs by sessionPathHash + ru
   assert.equal(unjoined.runId, 'run-does-not-exist');
   assert.equal(unjoined.modelFamily, null, 'unjoined row has null model family');
   assert.equal(unjoined.userSatisfaction, null, 'unjoined row has null user satisfaction');
+});
+
+test('completed agent reviews backfill supplemental outcomes without entering user-primary ranking', async () => {
+  const fixture = deepClone(await loadFixture());
+  const template = fixture.completedRuns.find((run) => run.status === 'closed_unscored')!;
+  assert.ok(template, 'fixture must contain an unscored completed run');
+
+  fixture.completedRuns = Array.from({ length: LEADERBOARD_MINIMUM_SCORED_RUNS }, (_, index) => ({
+    ...deepClone(template),
+    runId: `agent-run-${index}`,
+    taskGroupId: `agent-task-${index}`,
+    sessionPath: `${template.sessionPath}.agent-${index}`,
+  }));
+  fixture.openRuns = [];
+  fixture.outcomes = [];
+  fixture.agentReviews = fixture.completedRuns.map((run, index) => makeReview(
+    run.sessionPath,
+    run.runId,
+    {
+      rating: index === 0 ? 5 : 4,
+      completion: index === 2 ? 'partial' : 'fully',
+      taskGroupId: run.taskGroupId,
+      recordedAt: `2026-07-04T09:00:0${index}.000Z`,
+    },
+  ));
+
+  const prepared = prepareSourceAnalytics(fixture);
+  assert.equal(prepared.runs.length, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  for (const run of prepared.runs) {
+    assert.equal(run.status, 'scored');
+    assert.equal(run.scored, true);
+    assert.equal(run.outcomeSource, 'agent');
+    assert.notEqual(run.satisfaction, null);
+  }
+  assert.equal(prepared.runs[2]!.resolution, 'partially_resolved');
+
+  const bundle = buildSiteDataBundle(prepared);
+  assert.equal(bundle.manifest.scoredRunCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  const modelId = prepared.runs[0]!.modelFamily!;
+  const leaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === modelId)!;
+  assert.ok(leaderboard, 'agent-scored model remains visible in the leaderboard');
+  assert.equal(leaderboard.scoredRunCount, 0);
+  assert.equal(leaderboard.userOutcomeCount, 0);
+  assert.equal(leaderboard.agentOutcomeCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  assert.ok(leaderboard.rank !== null, 'done sidecar reviews contribute their own calibrated agent channel');
+  assert.equal(leaderboard.userChannelScore, null);
+  assert.ok(leaderboard.agentChannelScore !== null);
+
+  const quality = bundle.modelQuality.rows.find((row) => row.modelId === modelId)!;
+  assert.equal(quality.scoredRunCount, 0);
+  assert.equal(quality.agentOutcomeCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+
+  const comparison = bundle.agentReviewComparison.perModel.find((row) => row.modelId === modelId)!;
+  assert.equal(comparison.agentReviewCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  assert.equal(comparison.userOutcomeCount, 0, 'agent provenance is not mislabeled as user feedback');
+  assert.equal(comparison.bothScoredCount, 0);
 });
 
 test('buildAgentReviewComparison compares agent vs user outcomes and reviewer coverage', async () => {

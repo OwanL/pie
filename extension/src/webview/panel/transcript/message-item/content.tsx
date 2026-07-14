@@ -9,6 +9,7 @@ import type { ChatMessage, ChatMessagePart, ChatPrefs } from '../../../../shared
 import { renderMarkdown } from '../../markdown';
 import { toMouseEvent } from '../../utils/preact-events';
 import { BufferedTextPart } from '../buffered-text-part';
+import { useCommittedTextLeaf } from '../commit-registry';
 import {
   assistantPartsFromMessage,
   getRenderableUserParts,
@@ -172,6 +173,7 @@ interface UserTextPartProps {
  *  ref so the inline editor's height capture keeps working. */
 const UserTextPart = memo(function UserTextPart({ messageId, index, text, messageBodyRef }: UserTextPartProps) {
   const html = useMemo(() => renderMarkdown(text), [text]);
+  useCommittedTextLeaf(messageId, index, text);
   return (
     <div
       key={`user-text-${messageId}-${index}`}
@@ -221,6 +223,31 @@ function UserParts({
         )
       ))}
     </>
+  );
+}
+
+interface StaticMessageBodyProps {
+  messageId: string;
+  text: string;
+  html: string;
+  role: ChatMessage['role'];
+  messageBodyRef: RefObject<HTMLDivElement>;
+  onContextMenu: TranscriptContextMenuHandler;
+  getMessageRaw: () => string;
+}
+
+function StaticMessageBody({ messageId, text, html, role, messageBodyRef, onContextMenu, getMessageRaw }: StaticMessageBodyProps) {
+  useCommittedTextLeaf(messageId, 0, text);
+  return (
+    <div
+      class="message-body"
+      ref={role === 'user' ? messageBodyRef : undefined}
+      dangerouslySetInnerHTML={{ __html: html }}
+      onContextMenu={role === 'assistant' ? (e) => {
+        e.preventDefault();
+        onContextMenu('message', getMessageRaw(), toMouseEvent(e));
+      } : undefined}
+    />
   );
 }
 
@@ -274,14 +301,14 @@ export function MessageContent({
     );
   }
   return (
-    <div
-      class="message-body"
-      ref={role === 'user' ? messageBodyRef : undefined}
-      dangerouslySetInnerHTML={{ __html: html }}
-      onContextMenu={role === 'assistant' ? (e) => {
-        e.preventDefault();
-        onContextMenu('message', getMessageRaw(), toMouseEvent(e));
-      } : undefined}
+    <StaticMessageBody
+      messageId={messageId}
+      text={getMessageRaw()}
+      html={html}
+      role={role}
+      messageBodyRef={messageBodyRef}
+      onContextMenu={onContextMenu}
+      getMessageRaw={getMessageRaw}
     />
   );
 }

@@ -5,9 +5,14 @@ import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, removeFromArray, removeMessage, restoreRemovedTail, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
-import type { SessionSummary } from '../../../shared/protocol.js';
+import type { ChatMessage, SessionSummary } from '../../../shared/protocol.js';
+import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js';
 import { reorderOpenTabsPinnedFirst } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
+import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
+import { pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
+
+const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
 
 function mergeSessionSummaryPreservingLocalName(
   existing: SessionSummary | undefined,
@@ -263,6 +268,14 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
   }
 
   const wasRunning = state.sessions.runningSessionPaths.includes(event.sessionPath);
+  const liveTurn = state.livePipeline.turnsBySession[event.sessionPath];
+  const terminalRepairEffects: Effect[] = liveTurn ? [{
+    kind: 'RequestLiveTurnCheckpoint',
+    corrId: `live-checkpoint:${liveTurn.turnId}:${liveTurn.attemptId}:busy-false`,
+    sessionPath: event.sessionPath,
+    turnId: liveTurn.turnId,
+    attemptId: liveTurn.attemptId,
+  }] : [];
 
   if (!wasRunning) {
     return {
@@ -273,7 +286,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
           runningSessionPaths: removeFromArray(state.sessions.runningSessionPaths, event.sessionPath),
         },
       },
-      effects: [],
+      effects: terminalRepairEffects,
     };
   }
 
@@ -295,7 +308,7 @@ export function handleBusyChanged(state: ArchState, event: Extract<Event, { kind
             }),
       },
     },
-    effects: [],
+    effects: terminalRepairEffects,
   };
 }
 
@@ -415,11 +428,16 @@ export function handleRetryEnded(state: ArchState, event: Extract<Event, { kind:
  */
 export function handleSessionsInterrupted(state: ArchState, event: Extract<Event, { kind: 'SessionsInterrupted' }>): ReducerResult {
   const { sessionPaths, reason } = event;
+  const occurredAt = event.occurredAt ?? 0;
   if (sessionPaths.length === 0) {
     return { state, effects: [] };
   }
 
   const affectedPaths = new Set(sessionPaths);
+  const liveInterruptedBySession: Record<string, ChatMessage> = Object.fromEntries(sessionPaths.flatMap((sessionPath) => {
+    const message = materializeInterruptedLiveTurn(state.livePipeline, sessionPath);
+    return message ? [[sessionPath, { ...message, errorDetail: message.errorDetail ?? reason }]] : [];
+  }));
   const rollbackOps = [
     ...Object.entries(state.pending.ops),
     ...Object.entries(state.pending.promoted),
@@ -448,6 +466,42 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
       delete draft.pending.sendQueueBySession[sessionPath];
       delete draft.pending.backendReadyQueueBySession[sessionPath];
       delete draft.pending.prepassBySession[sessionPath];
+
+      const liveTurn = draft.livePipeline.turnsBySession[sessionPath];
+      if (liveTurn) {
+        for (const executionId of liveTurn.toolExecutionIds) {
+          delete draft.livePipeline.toolsByExecutionId[executionId];
+        }
+        delete draft.livePipeline.turnsBySession[sessionPath];
+        draft.livePipeline.terminalAttempts[terminalAttemptKey(liveTurn.turnId, liveTurn.attemptId)] = {
+          sessionPath,
+          turnId: liveTurn.turnId,
+          attemptId: liveTurn.attemptId,
+          finalSeq: liveTurn.seq,
+          terminalKind: 'interrupted',
+          expiresAt: occurredAt + BACKEND_EXIT_TOMBSTONE_GRACE_MS,
+        };
+        draft.livePipeline.revisionBySession[sessionPath] =
+          (draft.livePipeline.revisionBySession[sessionPath] ?? 0) + 1;
+      }
+      for (const [key, pendingEvents] of Object.entries(draft.livePipeline.pendingOwnerEvents)) {
+        const pending = pendingEvents.find((candidate) => candidate.sessionPath === sessionPath);
+        if (!pending) continue;
+        draft.livePipeline.terminalAttempts[key] = {
+          sessionPath,
+          turnId: pending.turnId,
+          attemptId: pending.attemptId,
+          finalSeq: Math.max(...pendingEvents.map((candidate) => candidate.seq)),
+          terminalKind: 'interrupted',
+          expiresAt: occurredAt + BACKEND_EXIT_TOMBSTONE_GRACE_MS,
+        };
+        delete draft.livePipeline.pendingOwnerEvents[key];
+      }
+      draft.livePipeline.terminalAttempts = pruneExpiredTerminalAttempts(
+        draft.livePipeline.terminalAttempts,
+        occurredAt,
+        LIVE_PIPELINE_LIMITS.terminalTombstones,
+      );
 
       // Reconcile optimistic mutations before dropping their snapshots. This
       // mirrors SendResult/EditResult failure and makes late RPC rejection a
@@ -480,9 +534,20 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
       for (const [requestId, pending] of Object.entries(draft.pending.requestIdToLocalId)) {
         if (pending.sessionPath === sessionPath) delete draft.pending.requestIdToLocalId[requestId];
       }
+      for (const [corrId, pending] of Object.entries(draft.pending.extensionUiResponseByCorrId)) {
+        if (pending.sessionPath === sessionPath) delete draft.pending.extensionUiResponseByCorrId[corrId];
+      }
 
-      const list = draft.transcript.bySession[sessionPath];
+      const interruptedLive = liveInterruptedBySession[sessionPath];
+      const list = draft.transcript.bySession[sessionPath] ?? (interruptedLive
+        ? (draft.transcript.bySession[sessionPath] = [])
+        : undefined);
       if (!list) continue;
+      if (interruptedLive) {
+        const existingIndex = list.findIndex((message) => message.id === interruptedLive.id);
+        if (existingIndex >= 0) list[existingIndex] = interruptedLive;
+        else list.push(interruptedLive);
+      }
       // The SDK steering queue is in-memory. After backend death delivery is
       // unknowable, so queued messages become explicitly interrupted rather
       // than remaining immortal optimistic rows.

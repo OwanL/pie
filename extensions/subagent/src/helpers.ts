@@ -6,7 +6,6 @@ import type { AgentScope } from "../agents.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
 /** Cap on sub-agent sessions spawned within a single subagent tool call (one reply). */
-export const MAX_SESSIONS_PER_CALL = 20;
 export const MAX_DEPTH = 3;
 
 export function makeDetails(

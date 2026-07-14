@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type {
   CustomMessagePayload,
   MessageAbortedPayload,
@@ -14,9 +16,13 @@ import type {
   ToolStartedPayload,
 } from '../shared/protocol';
 import type { SdkSessionEvent } from './sdk';
-import { mapAssistantMessage, mapCustomMessage } from './transcript';
+import type { BackendSemanticCandidate } from './live-turn-accumulator';
+import type { TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
+import { normalizeToolProgress } from './tool-progress-normalizer';
+import { mapAssistantMessage, mapCustomMessage, mapTranscript, type SessionEntryLike } from './transcript';
 import type { SessionContext } from './server-types';
 import { backendLog, type BackendLogLevel } from './log';
+import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 
 /**
  * Assistant-message streaming event types that count as the provider "replying
@@ -27,18 +33,132 @@ import { backendLog, type BackendLogLevel } from './log';
  */
 export const TOOL_PROGRESS_MAX_BYTES = 256 * 1024;
 
+/** Produce a transport-safe clone only when native JSON serialization fails.
+ * Live tool partials can contain BigInts or cycles from nested/custom tools;
+ * replacing the whole partial with an opaque marker would discard subagent
+ * lifecycle state and leave the parent card stuck at its initial placeholder. */
+function serializeToolProgress(value: unknown): { serialized: string; safeValue: unknown } | undefined {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? undefined : { serialized, safeValue: value };
+  } catch {
+    const seen = new WeakSet<object>();
+    try {
+      const serialized = JSON.stringify(value, (_key, candidate) => {
+        if (typeof candidate === 'bigint') return `${candidate}n`;
+        if (typeof candidate === 'object' && candidate !== null) {
+          if (seen.has(candidate)) return '[Circular]';
+          seen.add(candidate);
+        }
+        return candidate;
+      });
+      return serialized === undefined
+        ? undefined
+        : { serialized, safeValue: JSON.parse(serialized) as unknown };
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 /** Keep high-frequency progress events transport-safe. The terminal
  * tool.finished result remains authoritative and is never bounded here. */
 export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_BYTES): unknown {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    return { $toolProgress: 'unserializable' };
-  }
-  if (serialized === undefined) return { $toolProgress: 'unserializable' };
+  const serializedProgress = serializeToolProgress(value);
+  if (!serializedProgress) return { $toolProgress: 'unserializable' };
+  const { serialized, safeValue } = serializedProgress;
   const bytes = Buffer.byteLength(serialized, 'utf8');
-  if (bytes <= maxBytes) return value;
+  if (bytes <= maxBytes) return safeValue;
+
+  // Subagent progress is itself a renderable tool result. Replacing it with a
+  // generic truncation marker makes details.results disappear, so the live
+  // subagent card (including its expanded transcript and activity state)
+  // vanishes until tool.finished. Preserve a compact renderable skeleton and
+  // discard old child messages first; the terminal result remains authoritative.
+  if (safeValue && typeof safeValue === 'object') {
+    const partial = safeValue as Record<string, unknown>;
+    const details = partial.details;
+    if (details && typeof details === 'object' && Array.isArray((details as Record<string, unknown>).results)) {
+      const compactResults = ((details as Record<string, unknown>).results as unknown[]).map((entry) => {
+        if (!entry || typeof entry !== 'object') return entry;
+        const result = entry as Record<string, unknown>;
+        const streamingText = typeof result.streamingText === 'string'
+          ? result.streamingText.slice(-32 * 1024)
+          : result.streamingText;
+        const streamingReasoning = typeof result.streamingReasoning === 'string'
+          ? result.streamingReasoning.slice(-32 * 1024)
+          : result.streamingReasoning;
+        return {
+          ...result,
+          messages: [{
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Earlier live transcript omitted while progress exceeded the transport limit.' }],
+          }],
+          streamingText,
+          streamingReasoning,
+          progressTranscriptTruncated: true,
+        };
+      });
+      const compact = {
+        ...partial,
+        content: [{ type: 'text', text: '(live subagent transcript compacted; current activity preserved)' }],
+        details: { ...(details as Record<string, unknown>), results: compactResults },
+        $toolProgress: 'truncated',
+        originalBytes: bytes,
+      };
+      try {
+        const compactBytes = Buffer.byteLength(JSON.stringify(compact), 'utf8');
+        if (compactBytes <= maxBytes) return compact;
+
+        // A pathological field outside `messages` can still make the first
+        // compact form too large. Keep a strict lifecycle allowlist as a final
+        // renderable subagent fallback. With the tree session cap this remains
+        // far below the production limit, regardless of transcript/tool data.
+        const boundedText = (candidate: unknown, chars: number): unknown =>
+          typeof candidate === 'string' ? candidate.slice(0, chars) : candidate;
+        const minimalResults = compactResults.map((entry) => {
+          if (!entry || typeof entry !== 'object') return entry;
+          const result = entry as Record<string, unknown>;
+          return {
+            agent: boundedText(result.agent, 256),
+            task: boundedText(result.task, 2_048),
+            exitCode: result.exitCode,
+            stopReason: boundedText(result.stopReason, 256),
+            errorMessage: boundedText(result.errorMessage, 2_048),
+            model: boundedText(result.model, 256),
+            provider: boundedText(result.provider, 256),
+            activityPhase: result.activityPhase,
+            activityDetail: boundedText(result.activityDetail, 1_024),
+            activitySince: result.activitySince,
+            progressGeneration: result.progressGeneration,
+            lastProgressAt: result.lastProgressAt,
+            inactivityBudgetMs: result.inactivityBudgetMs,
+            streaming: result.streaming,
+            streamingText: boundedText(result.streamingText, 8_192),
+            streamingReasoning: boundedText(result.streamingReasoning, 8_192),
+            runningTools: Array.isArray(result.runningTools) ? result.runningTools.slice(0, 20) : undefined,
+            messages: [{
+              role: 'assistant',
+              content: [{ type: 'text', text: 'Live transcript omitted while progress exceeded the transport limit.' }],
+            }],
+            progressTranscriptTruncated: true,
+          };
+        });
+        const minimal = {
+          content: [{ type: 'text', text: '(live subagent transcript compacted; current activity preserved)' }],
+          details: {
+            mode: (details as Record<string, unknown>).mode,
+            results: minimalResults,
+          },
+          $toolProgress: 'truncated',
+          originalBytes: bytes,
+        };
+        if (Buffer.byteLength(JSON.stringify(minimal), 'utf8') <= maxBytes) return minimal;
+      } catch {
+        // Fall through to the generic bounded marker.
+      }
+    }
+  }
 
   const prefix = Buffer.from(serialized, 'utf8').subarray(0, Math.max(0, maxBytes - 160)).toString('utf8');
   return {
@@ -283,19 +403,181 @@ export interface BackendSessionEventHandlerDeps {
   recoverStuckSession?(context: SessionContext, reason: string): void;
 }
 
+function emitLatestPruningResult(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  finalAttempt = false,
+): void {
+  const active = context.activeRequest;
+  if (!active || active.pruningResultLookupComplete || active.emittedPruningResultEntryId) return;
+  const branch = (context.session.sessionManager?.getBranch?.() ?? []) as SessionEntryLike[];
+  let entry: SessionEntryLike | undefined;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const candidate = branch[index];
+    if (candidate.type === 'custom_message' && candidate.customType === 'pruning-result') {
+      entry = candidate;
+      break;
+    }
+  }
+  if (!entry) {
+    if (finalAttempt) active.pruningResultLookupComplete = true;
+    return;
+  }
+  // Do not replay the previous turn's summary while the current prepass is
+  // still running and its custom entry has not been appended yet.
+  const entryTimestamp = Date.parse(entry.timestamp);
+  if (active.turnBoundaryAt !== undefined && Number.isFinite(entryTimestamp) && entryTimestamp < active.turnBoundaryAt) {
+    if (finalAttempt) active.pruningResultLookupComplete = true;
+    return;
+  }
+  const message = mapCustomMessage(entry.id, {
+    content: entry.content,
+    timestamp: entry.timestamp,
+    customType: entry.customType,
+    display: entry.display,
+    details: entry.details,
+  });
+  if (!message) {
+    if (finalAttempt) active.pruningResultLookupComplete = true;
+    return;
+  }
+  active.emittedPruningResultEntryId = entry.id;
+  active.pruningResultLookupComplete = true;
+  deps.emit('message.custom', {
+    requestId: active.id,
+    sessionPath: context.sessionPath,
+    message,
+  } satisfies CustomMessagePayload);
+}
+
+const PROVIDER_SEMANTIC_INACTIVITY_MS = 120_000;
+const TOOL_INACTIVITY_MS = 30 * 60_000;
+function configuredLeaseMs(envName: string, fallback: number): number {
+  const value = Number(process.env[envName]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function clearSemanticLease(context: SessionContext): void {
+  const active = context.activeRequest;
+  if (!active?.semanticLeaseTimer) return;
+  clearTimeout(active.semanticLeaseTimer);
+  active.semanticLeaseTimer = undefined;
+}
+
+function renewSemanticLease(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  budgetMs = configuredLeaseMs('PIE_PROVIDER_SEMANTIC_INACTIVITY_MS', PROVIDER_SEMANTIC_INACTIVITY_MS),
+  leaseKind: 'provider' | 'tool' = 'provider',
+): void {
+  const active = context.activeRequest;
+  if (!active) return;
+  clearSemanticLease(context);
+  const generation = (active.semanticLeaseGeneration ?? 0) + 1;
+  active.semanticLeaseGeneration = generation;
+  const requestId = active.id;
+  active.semanticLeaseTimer = setTimeout(() => {
+    const current = context.activeRequest;
+    if (!current || current.id !== requestId || current.semanticLeaseGeneration !== generation) return;
+    current.semanticLeaseTimer = undefined;
+    emitSemanticCandidate(deps, context, {
+      kind: 'turn.phase', phase: 'aborting', inactivityBudgetMs: 5_000,
+    });
+    const messageId = current.lastAssistantMessageId ?? current.currentMessageId;
+    const reason = leaseKind === 'tool'
+      ? 'The running tool stopped producing progress.'
+      : 'The provider stopped producing semantic response events.';
+    current.pendingDurableToolTerminals?.clear();
+    context.activeRequest = undefined;
+    context.session.clearQueue();
+    context.queuedLocalIds = [];
+    context.session.abortRetry?.();
+    void context.session.abort().catch(() => undefined);
+    deps.emit('operational-error', {
+      code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT', message: reason,
+      sessionPath: context.sessionPath, requestId,
+    });
+    deps.emit('message.aborted', {
+      requestId, sessionPath: context.sessionPath, messageId,
+      userInitiated: false, reason,
+    } satisfies MessageAbortedPayload);
+    deps.emitBusyChanged(context, false);
+    void deps.emitSessionOpened(context.sessionPath);
+    void deps.emitSessionListChanged();
+  }, budgetMs);
+  active.semanticLeaseTimer.unref?.();
+}
+
+function emitSemanticCandidate(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  candidate: BackendSemanticCandidate,
+  occurredAt = Date.now(),
+): TurnSemanticEnvelope | undefined {
+  const accumulator = context.activeRequest?.liveTurnAccumulator;
+  if (!accumulator) return undefined;
+  const envelope = accumulator.observe(candidate, occurredAt);
+  deps.emit('live.semantic', envelope);
+  if (envelope.kind === 'observation.rejected' && envelope.reason === 'payload_oversize') {
+    logBackendDiagnostic('warn', 'semantic.payloadOversize', { candidateKind: candidate.kind });
+    deps.emit('operational-error', {
+      code: 'TURN_TOO_LARGE',
+      message: 'The active response exceeded the bounded live-pipeline record limit and was interrupted.',
+      sessionPath: context.sessionPath,
+      requestId: context.activeRequest?.id,
+    });
+    void context.session.abort().catch(() => undefined);
+  }
+  return envelope;
+}
+
+function emitRejectedObservation(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  reason: 'unsupported_observation' | 'malformed_observation' | 'malformed_payload' | 'owner_missing',
+): void {
+  const accumulator = context.activeRequest?.liveTurnAccumulator;
+  if (accumulator) deps.emit('live.semantic', accumulator.reject(reason, Date.now()));
+}
+
+function liveExecutionId(context: SessionContext, toolCallId: string): string {
+  const checkpoint = context.activeRequest?.liveTurnAccumulator?.checkpoint();
+  return `${checkpoint?.attemptId ?? 'unknown'}:${toolCallId}`;
+}
+
 export function handleSdkSessionEvent(
   deps: BackendSessionEventHandlerDeps,
   context: SessionContext,
   event: SdkSessionEvent,
 ): void {
+  if (isBackendLivePipelineTraceEnabled()) {
+    const active = context.activeRequest;
+    recordBackendLivePipelineTrace({
+      stage: 'sdk.observed',
+      kind: 'observation',
+      identifiers: {
+        session: context.sessionPath,
+        ...(active?.id ? { request: active.id } : {}),
+        ...(active?.currentMessageId ? { message: active.currentMessageId } : {}),
+      },
+      eventKind: sdkTraceEventKind(event.type),
+    });
+  }
   switch (event.type) {
     case 'agent_start': {
+      // before_agent_start extensions persist their injected custom message
+      // before agent_start. Read it from the authoritative branch so pruning
+      // summaries do not depend on the SDK also producing message_end/custom.
+      emitLatestPruningResult(deps, context);
       deps.emitBusyChanged(context, true);
       deps.emitContextUsageChanged(context);
       return;
     }
 
     case 'turn_start': {
+      // Some SDK versions append the before_agent_start custom entry just after
+      // agent_start. Re-check at turn_start; stable-id dedupe makes this cheap.
+      emitLatestPruningResult(deps, context);
       // `turn_start` fires at the start of every turn, before request building
       // (`convertToLlm`, auth resolution) and the provider HTTP dispatch. It is
       // the cleanest observable boundary between serial inter-turn work on our
@@ -305,6 +587,17 @@ export function handleSdkSessionEvent(
         return;
       }
       context.activeRequest.turnStartedAt = Date.now();
+      const liveSeq = context.activeRequest.liveTurnAccumulator?.checkpoint().checkpointSeq ?? 0;
+      if (liveSeq === 0) {
+        emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
+        emitSemanticCandidate(deps, context, {
+          kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: 120_000,
+        }, context.activeRequest.turnStartedAt);
+      } else {
+        emitSemanticCandidate(deps, context, {
+          kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000,
+        }, context.activeRequest.turnStartedAt);
+      }
       return;
     }
 
@@ -337,8 +630,13 @@ export function handleSdkSessionEvent(
         return;
       }
       if (event.message?.role !== 'assistant' || !context.activeRequest) {
+        if (context.activeRequest && event.message?.role === 'assistant') emitRejectedObservation(deps, context, 'malformed_observation');
         return;
       }
+      // Last pre-commit opportunity to recover an injected pruning result if
+      // this SDK did not expose it at agent_start/turn_start. After this point
+      // the prepass is complete, so later turns must not rescan the branch.
+      emitLatestPruningResult(deps, context, true);
       context.activeRequest.messageIndex += 1;
       context.activeRequest.currentMessageId = `${context.activeRequest.id}:${context.activeRequest.messageIndex}`;
       context.activeRequest.lastAssistantMessageId = context.activeRequest.currentMessageId;
@@ -359,24 +657,38 @@ export function handleSdkSessionEvent(
         context.activeRequest.promptSafetyTimer = undefined;
       }
 
-      deps.emit('message.started', {
+      if ((context.activeRequest.liveTurnAccumulator?.checkpoint().checkpointSeq ?? 0) === 0) {
+        emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.currentMessageStartedAt);
+      }
+      emitSemanticCandidate(deps, context, {
+        kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: PROVIDER_SEMANTIC_INACTIVITY_MS,
+      }, context.activeRequest.currentMessageStartedAt);
+      renewSemanticLease(deps, context);
+
+      if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.started', {
         requestId: context.activeRequest.id,
         messageId: context.activeRequest.currentMessageId,
         sessionPath: context.sessionPath,
         modelId: context.activeRequest.modelId,
         thinkingLevel: context.activeRequest.thinkingLevel,
       } satisfies MessageStartedPayload);
-      deps.emitContextUsageChanged(context);
+      // Context usage is based on the latest completed assistant usage and has
+      // not changed at message_start. Avoid an O(branch) SDK walk here.
       return;
     }
 
     case 'message_update': {
       if (event.message?.role !== 'assistant' || !context.activeRequest?.currentMessageId) {
+        if (context.activeRequest && event.message?.role === 'assistant') emitRejectedObservation(deps, context, 'owner_missing');
         return;
       }
 
       if (event.assistantMessageEvent?.type === 'text_delta') {
-        deps.emit('message.delta', {
+        renewSemanticLease(deps, context);
+        emitSemanticCandidate(deps, context, {
+          kind: 'turn.text', delta: event.assistantMessageEvent.delta ?? '',
+        });
+        if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.delta', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
           messageId: context.activeRequest.currentMessageId,
@@ -388,7 +700,12 @@ export function handleSdkSessionEvent(
         const thinkingContent: string =
           event.assistantMessageEvent.thinking ?? event.assistantMessageEvent.delta ?? '';
         if (thinkingContent) {
-          deps.emit('message.thinking', {
+          renewSemanticLease(deps, context);
+          emitSemanticCandidate(deps, context, {
+            kind: 'turn.reasoning',
+            delta: event.assistantMessageEvent.delta ?? thinkingContent,
+          });
+          if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.thinking', {
             requestId: context.activeRequest.id,
             sessionPath: context.sessionPath,
             messageId: context.activeRequest.currentMessageId,
@@ -404,7 +721,14 @@ export function handleSdkSessionEvent(
           ? undefined
           : toolCallEvent.partial?.content?.[contentIndex];
         if (content?.type === 'toolCall' && content.id && content.name) {
-          deps.emit('message.toolCallDelta', {
+          renewSemanticLease(deps, context);
+          emitSemanticCandidate(deps, context, {
+            kind: 'turn.toolDraft',
+            toolCallId: content.id,
+            name: content.name,
+            argumentsJson: toolCallEvent.type === 'toolcall_delta' ? toolCallEvent.delta ?? '' : '',
+          });
+          if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.toolCallDelta', {
             requestId: context.activeRequest.id,
             sessionPath: context.sessionPath,
             messageId: context.activeRequest.currentMessageId,
@@ -441,9 +765,12 @@ export function handleSdkSessionEvent(
 
     case 'tool_execution_start': {
       if (!context.activeRequest || !context.activeRequest.lastAssistantMessageId) {
+        if (context.activeRequest) emitRejectedObservation(deps, context, 'owner_missing');
         return;
       }
 
+      clearSemanticLease(context);
+      renewSemanticLease(deps, context, configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS), 'tool');
       // Diagnostic: log tool execution start to stderr for debugging file-changes tracking.
       // Raw argument values are intentionally omitted to avoid leaking secrets/PII.
       logBackendDiagnostic('debug', 'tool_execution_start', {
@@ -455,10 +782,33 @@ export function handleSdkSessionEvent(
       const toolCallId = event.toolCallId ?? '';
       const startedAt = Date.now();
       const toolStartTimes = context.activeRequest.toolStartTimes ?? new Map<string, number>();
+      const parallelGroups = context.activeRequest.toolParallelGroupByCallId ?? new Map<string, string>();
+      const runningSiblingId = toolStartTimes.keys().next().value as string | undefined;
+      const parallelGroupId = runningSiblingId
+        ? parallelGroups.get(runningSiblingId) ?? randomUUID()
+        : randomUUID();
       toolStartTimes.set(toolCallId, startedAt);
+      parallelGroups.set(toolCallId, parallelGroupId);
       context.activeRequest.toolStartTimes = toolStartTimes;
+      context.activeRequest.toolParallelGroupByCallId = parallelGroups;
+      const toolStartMetadata = context.activeRequest.toolStartMetadata
+        ?? new Map<string, { name: string; input: unknown }>();
+      toolStartMetadata.set(toolCallId, { name: event.toolName ?? '', input: event.args });
+      context.activeRequest.toolStartMetadata = toolStartMetadata;
 
-      deps.emit('tool.started', {
+      emitSemanticCandidate(deps, context, {
+        kind: 'tool.started',
+        executionId: liveExecutionId(context, toolCallId),
+        parentExecutionId: null,
+        rootExecutionId: liveExecutionId(context, toolCallId),
+        toolCallId,
+        name: event.toolName ?? '',
+        input: event.args,
+        startedAt,
+        parallelGroupId,
+      }, startedAt);
+
+      if (!context.activeRequest.liveTurnAccumulator) deps.emit('tool.started', {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
         messageId: context.activeRequest.lastAssistantMessageId,
@@ -466,22 +816,31 @@ export function handleSdkSessionEvent(
         name: event.toolName ?? '',
         input: event.args,
         startedAt,
+        parallelGroupId,
       } satisfies ToolStartedPayload);
-      deps.emitContextUsageChanged(context);
+      // Starting a tool does not change the latest completed assistant usage.
       return;
     }
 
     case 'tool_execution_update': {
       if (!context.activeRequest || !context.activeRequest.lastAssistantMessageId) {
+        if (context.activeRequest) emitRejectedObservation(deps, context, 'owner_missing');
         return;
       }
 
-      deps.emit('tool.progress', {
+      renewSemanticLease(deps, context, configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS), 'tool');
+      emitSemanticCandidate(deps, context, {
+        kind: 'tool.progress',
+        executionId: liveExecutionId(context, event.toolCallId ?? ''),
+        preview: normalizeToolProgress(event.toolName ?? '', event.partialResult),
+      });
+
+      if (!context.activeRequest.liveTurnAccumulator) deps.emit('tool.progress', {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
         messageId: context.activeRequest.lastAssistantMessageId,
         toolCallId: event.toolCallId ?? '',
-        partialResult: boundToolProgress(event.partialResult),
+        preview: normalizeToolProgress(event.toolName ?? '', event.partialResult),
       } satisfies ToolProgressPayload);
       // Same rationale as message_update above: the context-window footprint
       // is static during tool execution (no new assistant usage until
@@ -493,54 +852,84 @@ export function handleSdkSessionEvent(
 
     case 'tool_execution_end': {
       if (!context.activeRequest || !context.activeRequest.lastAssistantMessageId) {
+        if (context.activeRequest) emitRejectedObservation(deps, context, 'owner_missing');
         return;
       }
 
+      clearSemanticLease(context);
       // Advance the turn-latency window origin to this tool's finish time. The
       // most recent `tool_execution_end` wins, so parallel/sequential batches
       // anchor on the last tool to finish.
       context.activeRequest.turnBoundaryAt = Date.now();
 
+      const toolCallId = event.toolCallId ?? '';
+      const startMetadata = context.activeRequest.toolStartMetadata?.get(toolCallId);
+      context.activeRequest.toolStartMetadata?.delete(toolCallId);
+      const toolName = event.toolName?.trim() || startMetadata?.name || '';
+
       if (event.isError) {
         logBackendDiagnostic('warn', 'tool.failed', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
-          toolCallId: event.toolCallId ?? '',
-          toolName: event.toolName ?? '',
+          toolCallId,
+          toolName,
           result: summarizeToolResult(event.result),
         });
       }
 
-      deps.emit('tool.finished', {
+      const durationMs = resolveToolDurationMs(context, toolCallId);
+      const terminal: ToolFinishedPayload = {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
         messageId: context.activeRequest.lastAssistantMessageId,
-        toolCallId: event.toolCallId ?? '',
+        toolCallId,
+        name: toolName,
+        input: event.args !== undefined ? event.args : startMetadata?.input,
         result: event.result,
         status: event.isError ? 'failed' : 'completed',
-        durationMs: resolveToolDurationMs(context, event.toolCallId ?? ''),
-      } satisfies ToolFinishedPayload);
-      deps.emitContextUsageChanged(context);
+        durationMs,
+      };
+      const pending = context.activeRequest.pendingDurableToolTerminals
+        ?? new Map<string, ToolFinishedPayload>();
+      pending.set(toolCallId, terminal);
+      context.activeRequest.pendingDurableToolTerminals = pending;
+      // The observed end consumes a semantic sequence immediately while its
+      // terminal remains durability-gated. Parallel siblings still executing
+      // keep the turn in running_tool; only the last execution enters the
+      // inter-turn preparation phase.
+      emitSemanticCandidate(deps, context, {
+        kind: 'turn.phase',
+        phase: (context.activeRequest.toolStartTimes?.size ?? 0) > 0 ? 'running_tool' : 'preparing',
+        inactivityBudgetMs: 120_000,
+      });
+      // Publication is deliberately withheld until the SDK's persisted
+      // toolResult message_end arrives with its stable sessionEntryId.
+      // Tool results do not change the prompt footprint until the next
+      // assistant usage lands at message_end. This call used to perform an
+      // O(branch) SDK walk directly on the inter-turn critical path.
       return;
     }
 
     case 'message_end': {
       if (!context.activeRequest || !event.message) {
+        if (context.activeRequest) emitRejectedObservation(deps, context, 'malformed_observation');
         return;
       }
 
       if (event.message.role === 'custom') {
+        if ((event.message as { customType?: string }).customType === 'pruning-result' && context.activeRequest.emittedPruningResultEntryId) {
+          return;
+        }
         // before_agent_start extensions (like skill-pruner) surface transcript
         // entries as message_end/custom events. Forward them live so the webview
         // can render pruning summaries before the assistant turn starts.
         const customMessageIndex = (context.activeRequest.customMessageIndex ?? 0) + 1;
         context.activeRequest.customMessageIndex = customMessageIndex;
         const message = mapCustomMessage(
-          `${context.activeRequest.id}:custom:${customMessageIndex}`,
+          event.sessionEntryId ?? `${context.activeRequest.id}:custom:${customMessageIndex}`,
           event.message,
         );
         if (!message) {
-          deps.emitContextUsageChanged(context);
           return;
         }
 
@@ -549,14 +938,77 @@ export function handleSdkSessionEvent(
           sessionPath: context.sessionPath,
           message,
         } satisfies CustomMessagePayload);
-        deps.emitContextUsageChanged(context);
+        // Custom messages carry no assistant usage, so context usage is stable.
         return;
       }
 
-      if (event.message.role !== 'assistant') {
+      if (event.message.role === 'toolResult') {
+        const toolCallId = typeof (event.message as { toolCallId?: unknown }).toolCallId === 'string'
+          ? (event.message as { toolCallId: string }).toolCallId
+          : '';
+        const terminal = context.activeRequest.pendingDurableToolTerminals?.get(toolCallId);
+        if (!terminal || !event.sessionEntryId) {
+          if (isBackendLivePipelineTraceEnabled()) {
+            recordBackendLivePipelineTrace({
+              stage: 'backend.observation.rejected',
+              kind: 'failure',
+              identifiers: {
+                session: context.sessionPath,
+                request: context.activeRequest.id,
+                ...(toolCallId ? { tool: toolCallId } : {}),
+              },
+              eventKind: 'tool_terminal',
+              reasonCode: terminal ? 'durability_mismatch' : 'owner_missing',
+            });
+          }
+          emitRejectedObservation(deps, context, terminal ? 'malformed_payload' : 'owner_missing');
+          return;
+        }
+        context.activeRequest.pendingDurableToolTerminals?.delete(toolCallId);
+        emitSemanticCandidate(deps, context, {
+          kind: 'tool.terminal',
+          executionId: liveExecutionId(context, toolCallId),
+          status: terminal.status,
+          result: terminal.result,
+          durationMs: terminal.durationMs,
+          durableEntryId: event.sessionEntryId,
+        });
+        deps.emit('tool.finished', {
+          ...terminal,
+          durableEntryId: event.sessionEntryId,
+          ...(context.activeRequest.liveTurnAccumulator ? { canonicalLive: true } : {}),
+        } satisfies ToolFinishedPayload);
+        if (isBackendLivePipelineTraceEnabled()) {
+          recordBackendLivePipelineTrace({
+            stage: 'backend.persistence.confirmed',
+            kind: 'success',
+            identifiers: {
+              session: context.sessionPath,
+              request: context.activeRequest.id,
+              message: event.sessionEntryId,
+              tool: toolCallId,
+            },
+            eventKind: 'tool_terminal',
+          });
+        }
         return;
       }
 
+      if (event.message.role !== 'assistant' || !event.sessionEntryId) {
+        if (event.message.role === 'assistant' && isBackendLivePipelineTraceEnabled()) {
+          recordBackendLivePipelineTrace({
+            stage: 'backend.observation.rejected',
+            kind: 'failure',
+            identifiers: { session: context.sessionPath, request: context.activeRequest.id },
+            eventKind: 'turn_terminal',
+            reasonCode: 'durability_mismatch',
+          });
+        }
+        if (event.message.role === 'assistant') emitRejectedObservation(deps, context, 'malformed_payload');
+        return;
+      }
+
+      clearSemanticLease(context);
       const messageId =
         context.activeRequest.currentMessageId
         ?? context.activeRequest.lastAssistantMessageId
@@ -596,19 +1048,65 @@ export function handleSdkSessionEvent(
         ? event.message
         : { ...event.message, errorMessage: mergedErrorMessage };
 
-      const message = mapAssistantMessage(messageId, assistantEventMessage as any, durationMs, {
-        modelId: context.activeRequest.modelId,
+      const message = mapAssistantMessage(messageId, assistantEventMessage as any, durationMs, {        modelId: context.activeRequest.modelId,
         thinkingLevel: context.activeRequest.thinkingLevel,
         turnLatencyMs,
         overheadMs,
         providerLatencyMs,
       });
 
-      if (message.status !== 'error') {
-        context.activeRequest.lastRetryErrorMessage = undefined;
+      message.durableEntryId = event.sessionEntryId;
+      if (isBackendLivePipelineTraceEnabled()) {
+        recordBackendLivePipelineTrace({
+          stage: 'backend.persistence.confirmed',
+          kind: 'success',
+          identifiers: {
+            session: context.sessionPath,
+            request: context.activeRequest.id,
+            message: event.sessionEntryId,
+          },
+          eventKind: 'turn_terminal',
+        });
       }
 
-      deps.emit('message.finished', {
+      if (message.status !== 'error') {        context.activeRequest.lastRetryErrorMessage = undefined;
+      }
+
+      const stopReason = typeof event.message.stopReason === 'string' ? event.message.stopReason : '';
+      const expectsToolExecution = stopReason === 'toolUse' || stopReason === 'tool_use';
+      if (!expectsToolExecution && context.activeRequest.liveTurnAccumulator) {
+        const branch = context.session.sessionManager?.getBranch?.() as SessionEntryLike[] | undefined;
+        const durableTurnFromBranch = branch
+          ? [...mapTranscript(branch)].reverse().find((entry) => entry.role === 'assistant') ?? message
+          : message;
+        // The branch projection owns complete durable text/tool history, while
+        // the just-finished message owns runtime-only timing/model metadata.
+        const durableTurn = {
+          ...durableTurnFromBranch,
+          modelId: message.modelId ?? durableTurnFromBranch.modelId,
+          thinkingLevel: message.thinkingLevel ?? durableTurnFromBranch.thinkingLevel,
+          durationMs: message.durationMs ?? durableTurnFromBranch.durationMs,
+          turnLatencyMs: message.turnLatencyMs,
+          overheadMs: message.overheadMs,
+          providerLatencyMs: message.providerLatencyMs,
+          errorDetail: message.errorDetail ?? durableTurnFromBranch.errorDetail,
+          durableEntryId: event.sessionEntryId,
+        };
+        emitSemanticCandidate(deps, context, {
+          kind: 'turn.terminal',
+          terminalKind: message.status === 'interrupted'
+            ? 'interrupted'
+            : message.status === 'error' ? 'error' : 'completed',
+          userInitiated: message.status === 'interrupted' ? context.activeRequest.aborted === true : undefined,
+          reason: message.status === 'interrupted' && context.activeRequest.aborted !== true
+            ? resolveUnexpectedInterruptReason(message.errorDetail)
+            : undefined,
+          durableMessage: durableTurn,
+          durableEntryId: event.sessionEntryId,
+        });
+      }
+
+      if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.finished', {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
         message,
@@ -625,7 +1123,7 @@ export function handleSdkSessionEvent(
             reason: resolveUnexpectedInterruptReason(message.errorDetail),
           });
         }
-        deps.emit('message.aborted', {
+        if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.aborted', {
           requestId: context.activeRequest.id,
           sessionPath: context.sessionPath,
           messageId,
@@ -661,11 +1159,18 @@ export function handleSdkSessionEvent(
         context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, 0);
         return;
       }
+      clearSemanticLease(context);
       const requestId = context.activeRequest?.id;
       const messageId = context.activeRequest?.lastAssistantMessageId;
       const modelId = context.activeRequest?.modelId;
       const userInitiated = context.activeRequest?.aborted === true;
       const interruptedWithoutMessage = !!requestId && !messageId;
+      const liveAccumulator = context.activeRequest?.liveTurnAccumulator;
+      const watermark = liveAccumulator?.lifecycleWatermark();
+      if (watermark) deps.emit('live.lifecycle', watermark);
+      if (liveAccumulator) {
+        context.terminalLiveTurn = { accumulator: liveAccumulator, expiresAt: Date.now() + 10_000 };
+      }
 
       deps.emitBusyChanged(context, false);
       deps.emitContextUsageChanged(context);
@@ -733,6 +1238,7 @@ export function handleSdkSessionEvent(
       return;
     }
     case 'auto_retry_start': {
+      clearSemanticLease(context);
       if (context.activeRequest) {
         context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.errorMessage)
           ?? context.activeRequest.lastRetryErrorMessage;
@@ -743,6 +1249,11 @@ export function handleSdkSessionEvent(
       if (context.willRetryWatchdogClear !== undefined) {
         context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, event.delayMs ?? 0);
       }
+      emitSemanticCandidate(deps, context, {
+        kind: 'turn.phase',
+        phase: 'retry_wait',
+        inactivityBudgetMs: (event.delayMs ?? 0) + resolveWillRetryWatchdogGraceMs(),
+      });
       deps.emit('retry.started', {
         sessionPath: context.sessionPath,
         attempt: event.attempt ?? 0,
@@ -768,6 +1279,9 @@ export function handleSdkSessionEvent(
         context.willRetryWatchdogClear();
         context.willRetryWatchdogClear = undefined;
       }
+      emitSemanticCandidate(deps, context, {
+        kind: 'turn.phase', phase: event.success === true ? 'waiting_provider' : 'aborting', inactivityBudgetMs: 120_000,
+      });
       deps.emit('retry.ended', {
         sessionPath: context.sessionPath,
         success: event.success === true,
@@ -777,9 +1291,23 @@ export function handleSdkSessionEvent(
       return;
     }
 
+    case 'turn_end':
+      return;
+
     default:
+      emitRejectedObservation(deps, context, 'unsupported_observation');
       return;
   }
+}
+
+function sdkTraceEventKind(eventType: string) {
+  if (eventType === 'message_update') return 'text' as const;
+  if (eventType === 'tool_execution_start') return 'tool_start' as const;
+  if (eventType === 'tool_execution_update') return 'tool_progress' as const;
+  if (eventType === 'tool_execution_end') return 'tool_terminal' as const;
+  if (eventType === 'message_start') return 'turn_start' as const;
+  if (eventType === 'message_end' || eventType === 'agent_end') return 'turn_terminal' as const;
+  return 'control' as const;
 }
 
 /**
@@ -795,6 +1323,7 @@ function resolveUnexpectedInterruptReason(reason: string | undefined): string {
 function resolveToolDurationMs(context: SessionContext, toolCallId: string): number {
   const startedAt = context.activeRequest?.toolStartTimes?.get(toolCallId);
   context.activeRequest?.toolStartTimes?.delete(toolCallId);
+  context.activeRequest?.toolParallelGroupByCallId?.delete(toolCallId);
   if (startedAt === undefined) {
     return 0;
   }

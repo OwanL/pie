@@ -78,8 +78,10 @@ export function nearestSupportedThinking(
  *    through `PIE_SUBAGENT_BUCKETS_JSON`)
  * 2. Filter by thinkingLevel support (if provided)
  * 3. Filter by provider allowlist + excludeModels
- * 4. Pick uniformly at random from remaining entries
- * 5. Fall back to active model if bucket is empty
+ * 4. Soft-filter providers with no immediate capacity, but only when another
+ *    candidate remains (all busy/unknown preserves the original pool)
+ * 5. Pick uniformly at random from remaining entries
+ * 6. Fall back to active model if bucket is empty
  *
  * @param bucket - Bucket hint: "small", "medium", or "frontier"
  * @param thinkingLevel - Optional thinking level hint
@@ -88,6 +90,8 @@ export function nearestSupportedThinking(
  * @param allowedModelIds - Models allowed by provider toggles
  * @param excludeModels - Models to exclude (e.g., previously failed)
  * @param activeModelId - The caller's active model (fallback)
+ * @param capacityAvailableModelIds - Soft live-capacity allowlist. Applied only
+ *   when it leaves at least one otherwise-eligible bucket candidate.
  */
 export function selectModel(
   bucket: string,
@@ -97,6 +101,7 @@ export function selectModel(
   allowedModelIds: Set<string> | undefined,
   excludeModels: Set<string> | undefined,
   activeModelId: string,
+  capacityAvailableModelIds?: Set<string>,
 ): BucketSelection {
   const bucketKey = bucket as keyof BucketAssignments;
   let pool = assignments[bucketKey] ?? [];
@@ -150,6 +155,15 @@ export function selectModel(
   // Filter by excludeModels
   if (excludeModels && pool.length > 0) {
     pool = pool.filter((id) => !excludeModels.has(id));
+  }
+
+  // Live capacity is a soft exclusion, distinct from disabled providers. Route
+  // around saturated candidates only when at least one candidate remains; if
+  // every otherwise-eligible model is busy (or no state is available), retain
+  // the old pool so the selected provider can queue normally.
+  if (capacityAvailableModelIds && pool.length > 0) {
+    const capacityFiltered = pool.filter((id) => capacityAvailableModelIds.has(id));
+    if (capacityFiltered.length > 0) pool = capacityFiltered;
   }
 
   // If pool is empty, fall back to active model

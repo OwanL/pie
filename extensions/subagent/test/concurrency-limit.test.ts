@@ -5,13 +5,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { Semaphore, getMaxInflight, getMaxConcurrency, getMaxParallelTasks, DEFAULT_MAX_INFLIGHT } from "../src/concurrency-limit.js";
-import { MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "../types.js";
+import { Semaphore, getMaxInflight, DEFAULT_MAX_INFLIGHT } from "../src/concurrency-limit.js";
 
 const ENV_KEYS = [
 	"PIE_SUBAGENT_MAX_INFLIGHT",
-	"PIE_SUBAGENT_MAX_CONCURRENCY",
-	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 ] as const;
 
 const snapshot: Record<string, string | undefined> = {};
@@ -163,26 +160,4 @@ test("getMaxInflight: override honoured", () => {
 test("getMaxInflight: below 1 falls back to default", () => {
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "0";
 	assert.equal(getMaxInflight(), DEFAULT_MAX_INFLIGHT);
-});
-
-test("getMaxConcurrency: unset → MAX_CONCURRENCY", () => {
-	delete process.env.PIE_SUBAGENT_MAX_CONCURRENCY;
-	assert.equal(getMaxConcurrency(), MAX_CONCURRENCY);
-	assert.equal(MAX_CONCURRENCY, 2);
-});
-
-test("getMaxConcurrency: override honoured", () => {
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "3";
-	assert.equal(getMaxConcurrency(), 3);
-});
-
-test("getMaxParallelTasks: unset → MAX_PARALLEL_TASKS", () => {
-	delete process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
-	assert.equal(getMaxParallelTasks(), MAX_PARALLEL_TASKS);
-	assert.equal(MAX_PARALLEL_TASKS, 4);
-});
-
-test("getMaxParallelTasks: override honoured", () => {
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "6";
-	assert.equal(getMaxParallelTasks(), 6);
 });

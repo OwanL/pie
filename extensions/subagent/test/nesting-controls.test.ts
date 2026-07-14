@@ -197,10 +197,10 @@ test("execute: tree budget exhaustion surfaces the tree-limit error", async () =
 	process.env.PIE_SUBAGENT_MAX_TREE_SESSIONS = "1";
 	// Pre-seed the shared budget so the single-mode slot consumption (the first
 	// slot this call would consume) already exceeds the cap of 1.
-	const res: any = await subagentRuntime.run(
-		{ depth: 0, trail: [], budget: { sessions: 1 } },
-		() =>
-			execute(
+	await assert.rejects(
+		() => subagentRuntime.run(
+			{ depth: 0, trail: [], budget: { sessions: 1 } },
+			() => execute(
 				"tc-tree",
 				{ agent: "worker", task: "x" } as any,
 				noSignal(),
@@ -209,8 +209,7 @@ test("execute: tree budget exhaustion surfaces the tree-limit error", async () =
 				{} as any,
 				() => false,
 			),
+		),
+		/tree session limit reached.*max 1/i,
 	);
-	assert.equal(res.isError, true);
-	assert.match(res.content[0].text, /tree session limit reached/i);
-	assert.match(res.content[0].text, /max 1/);
 });

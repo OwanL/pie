@@ -14,7 +14,7 @@ export type {
 
 import type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
-  RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
@@ -23,7 +23,7 @@ import type {
 
 export type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
-  RunOutcomeResolution, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
@@ -32,7 +32,7 @@ export type {
 
 export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
 
-export const SITE_DATA_SCHEMA_VERSION = 1;
+export const SITE_DATA_SCHEMA_VERSION = 4;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
 export const GENERATOR_VERSION = 'analysis-v1';
 
@@ -96,6 +96,52 @@ export interface AgentReviewSourceEvent {
   reviewerCount: number;
 }
 
+export type TranscriptSourceProvenance = 'legacy' | 'configured' | 'portable-export';
+
+export interface HistoricalSessionAttribution {
+  modelId: string;
+  thinkingLevel: ThinkingLevel | null;
+  /** Fraction of successful work attributed to this model+thinking cell. */
+  share: number;
+  successfulAssistantTurns: number;
+  attributedTokens: number;
+}
+
+/** Review-sidecar fields safe for analysis. Free-text reasons are intentionally absent. */
+export interface HistoricalSessionReview {
+  rating: number;
+  completion: AgentReviewCompletion;
+  done: boolean;
+  evaluatedAt: string;
+  reviewerBuckets: string[];
+  reviewerCount: number;
+}
+
+/** Content-free transcript evidence retained while loading an analytics source. */
+export interface HistoricalSessionSourceSummary {
+  sessionId: string;
+  /** Normalized private path used only for canonical/review joins; never emitted in site data. */
+  normalizedSessionPath: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  firstUserMessageChars: number | null;
+  attributions: HistoricalSessionAttribution[];
+  successfulAssistantTurns: number;
+  errorAssistantTurns: number;
+  abortedAssistantTurns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reportedCostUsd: number | null;
+  toolCallCount: number;
+  toolErrorCount: number;
+  terminalStatus: 'success' | 'error' | 'aborted' | 'none';
+  mixedModel: boolean;
+  sourceProvenance: TranscriptSourceProvenance[];
+  review: HistoricalSessionReview | null;
+}
+
 export interface SourceAnalyticsPayload {
   schemaVersion: number;
   exportedAt: string;
@@ -105,6 +151,8 @@ export interface SourceAnalyticsPayload {
   outcomes: OutcomeHistoryLogEntry[];
   /** Raw agent-authored session reviews read from <store>/agent-reviews.jsonl. */
   agentReviews: AgentReviewSourceEvent[];
+  /** Optional content-free evidence reconstructed from historical session transcripts. */
+  historicalSessions?: HistoricalSessionSourceSummary[];
   /** Raw pruning decisions read from data/pruning.jsonl. */
   pruningDecisions: PruningSourceDecision[];
   /** Raw pruning quality-signal events read from data/pruning.jsonl. */
@@ -148,6 +196,8 @@ export interface PreparedRunRow {
   finalizationReason: RunFinalizationReason | null;
   resolution: RunOutcomeResolution | null;
   satisfaction: number | null;
+  /** Outcome provenance; historical outcomes without a source are normalized to `user`. */
+  outcomeSource: RunOutcomeSource | null;
   /** Provider-specific model id as recorded (e.g. 'umans-glm-5.2', 'glm-5.2:cloud'). Stored distinctly so provider differences remain investigable. */
   modelId: string | null;
   /** Canonical, provider-agnostic model family (e.g. 'glm-5.2') resolved from `models.json`'s optional `family` field; falls back to `modelId` when unset, null when `modelId` is null. The leaderboard groups by this, not `modelId`. */
@@ -170,6 +220,8 @@ export interface PreparedRunRow {
   skillCount: number;
   contextFileCount: number;
   promptGuidelineCount: number;
+  /** Privacy-safe size of the user-authored message that started the run; null for historical snapshots. */
+  initialUserMessageChars: number | null;
   /** Sub-agent parent-model toggle at run start (null = untracked). */
   fsSubagentAlwaysParentModel: boolean | null;
   /** Pruning mode at run start (null = untracked). */
@@ -204,6 +256,10 @@ export interface PreparedRunRow {
   unsupportedInputCount: number;
   inputKindsUsed: InputKind[];
   toolCallCount: number;
+  /** Cumulative wall-clock duration reported by timed tool calls. */
+  toolDurationMs: number;
+  /** Number of tool calls that reported an execution duration. */
+  timedToolCallCount: number;
   toolFailureCount: number;
   resultIssueCount: number;
   subagentCallCount: number;
@@ -227,9 +283,9 @@ export interface PreparedRunRow {
   subagentCacheReadTokens: number;
   /** Cumulative cache-write tokens consumed by spawned sub-agent sessions (0 when none). */
   subagentCacheWriteTokens: number;
-  /** Estimated USD cost of spawned sub-agent sessions (null when pricing unknown). */
+  /** Estimated USD cost of spawned sub-agent sessions. Zero means no subagent calls or fully priced free usage; null means calls occurred but canonical token usage or complete model pricing was unavailable. */
   subagentEstimatedCostUsd: number | null;
-  /** Total estimated USD cost = parent estimatedCostUsd + subagentEstimatedCostUsd (null when both null). */
+  /** Complete parent + subagent estimated USD cost. Null unless reported parent usage and every applicable subagent component can be priced; an explicit null must not fall back to a partial parent-only cost. */
   totalEstimatedCostUsd: number | null;
   /** Number of history-compaction (`/compact`) LLM calls in this run (0 when untracked). */
   compactionCount: number;
@@ -268,7 +324,7 @@ export interface PreparedRunRow {
    *   when the run had no attributable reads or lacked per-file attribution (legacy runs). Derived
    *   from `fileMutation.readCountsByFile`. Higher = more churn = worse. */
   readRevisitRate: number | null;
-  /** Estimated USD cost derived from token usage × model pricing (null when pricing is unknown for the model). */
+  /** Parent-session estimated USD cost derived from reported token usage × model pricing. Null when parent usage was not reported or pricing is unknown; reported usage on a known free model is 0. */
   estimatedCostUsd: number | null;
 }
 
@@ -372,7 +428,10 @@ export interface PreparedTurnThroughputRow {
   runId: string;
   endedAt: string;
   startedDay: string;
+  /** Provider-specific model used for this turn. */
   modelId: string | null;
+  /** Canonical provider-agnostic family for this turn's model. */
+  modelFamily: string | null;
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   outputTokens: number;
@@ -583,6 +642,21 @@ export interface PreparedPruningEventRow {
   codeVersion?: string;
 }
 
+export interface PreparedHistoricalSessionAttribution extends HistoricalSessionAttribution {
+  /** Canonical family resolved during preparation via models.json. */
+  modelFamily: string;
+}
+
+export interface PreparedHistoricalSessionSummary extends Omit<HistoricalSessionSourceSummary, 'normalizedSessionPath' | 'attributions'> {
+  attributions: PreparedHistoricalSessionAttribution[];
+  /** Privacy-safe join identity. Raw/normalized paths are not part of prepared/public data. */
+  sessionPathHash: string;
+  /** A canonical run exists for this normalized session path. */
+  matchedCanonical: boolean;
+  /** Eligible for transcript-only fallback evidence (the inverse of matchedCanonical). */
+  transcriptOnly: boolean;
+}
+
 export interface PreparedAnalyticsData {
   sourceSchemaVersion: number;
   sourceExportedAt: string;
@@ -600,6 +674,8 @@ export interface PreparedAnalyticsData {
   warmBashRewrites: PreparedWarmBashRewriteRow[];
   warmBashSummaries: PreparedWarmBashSummaryRow[];
   agentReviews: PreparedAgentReviewRow[];
+  /** Privacy-safe historical transcript evidence used by the family-level leaderboard. */
+  historicalSessions: PreparedHistoricalSessionSummary[];
 }
 
 export interface SiteManifest {
@@ -654,7 +730,14 @@ export interface ModelQualityAggregateRow {
    *  family row; sorted and deduplicated. Optional for backward compatibility with older
    *  model-quality.json artifacts that predate family grouping. */
   providerModelIds?: string[];
+  /** Non-mixed user outcomes eligible for model-quality scoring. */
   scoredRunCount: number;
+  /** Supplemental non-mixed agent outcomes, excluded from scoredRunCount and outcome aggregates. Optional only for backward compatibility with older generated artifacts. */
+  agentOutcomeCount?: number;
+  /** Outcome-bearing mixed-model runs excluded from model attribution. Optional only for backward compatibility with older generated artifacts. */
+  mixedModelExcludedOutcomeCount?: number;
+  /** Outcome-bearing stable-model runs excluded because treatment changed mid-run. Optional only for backward compatibility. */
+  mixedTreatmentExcludedOutcomeCount?: number;
   averageSatisfaction: number | null;
   averageBusyDurationMs: number | null;
   medianBusyDurationMs: number | null;
@@ -753,31 +836,107 @@ export interface TimelineData {
   rows: TimelineRow[];
 }
 
+export type TaskComplexityBand = 'low' | 'medium' | 'high';
+export type PreTaskComplexitySignal = 'initialUserMessageChars' | 'attachmentCount' | 'contextFileCount';
+
 export interface LeaderboardDimension {
   /** Observed point estimate (mean / rate / normalized efficiency). */
   value: number | null;
-  /** 95% confidence-interval lower bound, surfaced as an uncertainty indicator (not used for ranking). */
+  /** Conservative range-aware one-sided 95% Hoeffding lower bound on the bounded mean; null for absent or invalid observations. Surfaced only as an uncertainty indicator, not used for ranking. */
   lowerBound: number | null;
-  /** Empirical-Bayes shrunk estimate toward the cross-model grand mean; this is the value used in the composite. */
+  /** Fixed-strength regularized/standardized estimate; diagnostic for all dimensions and used in the composite only when its weight is non-zero. */
   shrunk: number | null;
+  /** Number of terminal task-group values. Missing optional telemetry on a terminal representative has n=0 and receives the pooled prior. */
   n: number;
 }
 
 export interface ModelLeaderboardProviderBreakdown {
-  /** Provider-specific model id (e.g. 'umans-glm-5.2', 'glm-5.2:cloud') collapsed into this row; distinct per provider so provider differences remain investigable. */
+  /** Provider-specific model id collapsed into this family row. */
   modelId: string;
   runCount: number;
   scoredRunCount: number;
+  /** Distinct transcript-only sessions attributed to this provider-specific id (fractional attribution does not inflate this count). */
+  transcriptOnlySessionCount: number;
+  /** Fractional transcript evidence mass attributed to this provider-specific id (sum of prepared attribution shares). */
+  transcriptEvidenceMass: number;
+}
+
+export interface ModelLeaderboardThinkingBreakdown {
+  thinkingLevel: string;
+  runCount: number;
+  /** Fractional transcript attribution mass plus canonical run count. */
+  attributionMass: number;
+}
+
+export type ModelLeaderboardEvidenceTier = 'outcome-backed' | 'thin-outcome' | 'telemetry-only';
+
+export interface ModelLeaderboardScoreInterval {
+  lower: number;
+  upper: number;
+  level: 0.8;
+  /** Rank range implied by overlap with other rows' score intervals. */
+  bestRank: number;
+  worstRank: number;
 }
 
 export interface ModelLeaderboardRow {
   /** Canonical, provider-agnostic model family the row is grouped by (e.g. 'glm-5.2'). Provider-specific ids that collapsed into this row are listed in `providers`. */
   modelId: string;
-  thinkingLevel: string;
+  /** Compatibility display value: family rows combine every thinking level. */
+  thinkingLevel: '(all)';
+  /** Thinking-level usage remains inspectable after family-level collapse. */
+  thinkingLevels: ModelLeaderboardThinkingBreakdown[];
+  /** All completed runs recorded in this group, including mixed-model runs retained for transparency. */
   runCount: number;
+  /** Non-mixed, stable-treatment user outcomes attributed to this model and eligible for dimensions, priors, evidence weight, and ranking. */
   scoredRunCount: number;
+  /** Distinct task groups represented by eligible user outcomes; the rank gate and evidence weight use this effective count. */
+  effectiveTaskCount: number;
+  /** Completed stable model/treatment runs that could have received a user outcome; retained for provenance. */
+  attributableRunCount: number;
+  /** Distinct task groups among attributable completed stable model/treatment runs. */
+  attributableTaskCount: number;
+  /** effectiveTaskCount / attributableTaskCount; null when there are no attributable task groups. */
+  scoringCoverage: number | null;
+  /** Whether task-level user-rating coverage is below the minimum required for ranking. */
+  scoringCoverageGateFailed: boolean;
+  /** Outcome-bearing mixed-model runs excluded from model-attributed scoring. */
+  mixedModelExcludedCount: number;
+  /** Outcome-bearing stable-model runs excluded because prompt/tool/skill/extension treatment changed mid-run. */
+  mixedTreatmentExcludedCount: number;
+  /** Canonical stable user outcomes, after task/family retry collapse. */
+  userOutcomeCount: number;
+  /** Deduplicated done agent-review effective mass. */
+  agentOutcomeCount: number;
+  userEvidenceCount: number;
+  userEvidenceMass: number;
+  agentEvidenceCount: number;
+  agentEvidenceMass: number;
+  processEvidenceCount: number;
+  processEvidenceMass: number;
+  canonicalTaskCount: number;
+  transcriptOnlySessionCount: number;
+  mixedAttributionMass: number;
+  evidenceTier: ModelLeaderboardEvidenceTier;
+  /** Direct-evidence channel estimates. Null means the family has no direct evidence in that channel. */
+  userChannelScore: number | null;
+  agentChannelScore: number | null;
+  processChannelScore: number | null;
+  /** Regularized cohort-relative composite. Non-unknown observed families are always ranked. */
   compositeScore: number | null;
+  scoreInterval80: ModelLeaderboardScoreInterval | null;
+  /** Regularized score before ex-ante task-complexity standardization. */
+  unadjustedCompositeScore: number | null;
+  /** Standardized score - unadjustedCompositeScore; remains diagnostic when the band-overlap gate excludes the standardized score. */
+  caseMixAdjustment: number | null;
+  /** Whether this row's ranked score was standardized over the shared ex-ante task mix. */
+  caseMixAdjusted: boolean;
+  /** True when a row passing the overall evidence gate is excluded under active case-mix adjustment because any represented target band has too few model-rated tasks. */
+  caseMixBandOverlapGateFailed: boolean;
   rank: number | null;
+  /** n/(n+k): how much the row's own outcome evidence determines its regularized estimates. */
+  evidenceWeight: number | null;
+  /** @deprecated Compatibility alias for evidenceWeight; not a score multiplier. */
   reliabilityFactor: number | null;
   dimensions: {
     satisfaction: LeaderboardDimension;
@@ -787,11 +946,19 @@ export interface ModelLeaderboardRow {
     verificationPassRate: LeaderboardDimension;
     tokenEfficiency: LeaderboardDimension;
   };
-  /** Median estimated USD cost per run (over completed runs with known pricing); shown separately, not in the composite. */
+  /** Median complete total estimated USD cost per run. Parent-only estimates are never substituted for unknown totals; not in the composite. */
   medianCostUsd: number | null;
-  /** Mean task complexity (0–1) of the model's scored runs; transparency only, not part of the composite. */
+  /** Mean ex-ante task-complexity percentile (0–1) of eligible user outcomes. */
+  meanPreTaskComplexity: number | null;
+  /** Distinct eligible user-rated task-group counts by ex-ante complexity band. */
+  taskComplexityBandCounts: Record<TaskComplexityBand, number>;
+  /** Share of the common target task mix covered by bands with direct evidence for this model. */
+  caseMixOverlap: number | null;
+  /** Mean post-treatment workload intensity (0–1) of eligible user-outcome runs; descriptive only. */
+  meanWorkloadIntensity: number | null;
+  /** @deprecated Compatibility alias for meanWorkloadIntensity; not used in the composite. */
   meanTaskComplexity: number | null;
-  /** Whether the outcome dimensions were complexity-weighted (mastery) for this row — true when the scored population has task-complexity variance, so difficulty-emphasis actually differentiates runs. */
+  /** @deprecated Compatibility field retained as false; workload intensity is never score-emphasized. */
   difficultyEmphasized: boolean;
   subagentRunCount: number;
   subagentUsageRate: number | null;
@@ -802,9 +969,29 @@ export interface ModelLeaderboardRow {
   providers: ModelLeaderboardProviderBreakdown[];
 }
 
+export interface ModelLeaderboardCaseMixAdjustment {
+  method: 'direct_standardization';
+  applied: boolean;
+  /** Global distinct attributable user-rated tasks required in each represented band to activate adjustment. */
+  minimumRatedTasksPerBand: number;
+  /** Model-specific rated tasks required in every represented band for an adjusted row to rank. */
+  minimumModelRatedTasksPerBand: number;
+  /** Bands below this target-population share do not gate activation; their sparse priors fall back to the overall pool. */
+  minimumTargetBandWeight: number;
+  targetBandWeights: Record<TaskComplexityBand, number>;
+  scoredBandCounts: Record<TaskComplexityBand, number>;
+  activeSignals: PreTaskComplexitySignal[];
+  initialUserMessageCoverage: number;
+  notes: string[];
+}
+
 export interface ModelLeaderboardData {
   schemaVersion: number;
   rows: ModelLeaderboardRow[];
+  sourceWeights: { user: 0.6; agent: 0.25; process: 0.15 };
+  sourcePriors: { user: number; agent: number; process: number };
+  sourceLogitSpreads: { user: number; agent: number; process: number };
+  shrinkage: { user: 4; agent: 8; process: 20 };
   weights: {
     satisfaction: number;
     resolutionRate: number;
@@ -814,6 +1001,11 @@ export interface ModelLeaderboardData {
     tokenEfficiency: number;
   };
   minimumScoredRuns: number;
+  /** Rank gate expressed as distinct task groups; equal to minimumScoredRuns for compatibility. */
+  minimumEffectiveTasks: number;
+  /** Minimum effectiveTaskCount / attributableTaskCount required for ranking. */
+  minimumTaskScoringCoverage: number;
+  caseMix: ModelLeaderboardCaseMixAdjustment;
   notes: string[];
 }
 

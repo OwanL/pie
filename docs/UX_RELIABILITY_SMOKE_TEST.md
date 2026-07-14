@@ -156,17 +156,13 @@ The prepass is the `skill-pruner` `before_agent_start` LLM call. To slow it:
 
 ---
 
-## Scenario 5 — Second prompt while a turn is in-flight: clear rejection, no queue
+## Scenario 5 — Four queued follow-ups: exact delivery or explicit interruption
 
-**Briefs:** E (rapid multi-prompt), H (error messaging).
-
-1. Start a streaming turn (busy).
-2. Type a second prompt and send **while the first turn is still running**.
-3. **Expected:** a clear, actionable rejection — **no** `req-NN`, **no** deferred-
-   prompt queue built. The notice names the next action in prose ("A turn is
-   already running — interrupt it first, or wait"). The composer draft is
-   preserved (not cleared) so the user can send once the turn finishes.
-4. Interrupt the running turn, then send the queued draft — it sends normally.
+1. Start a tool-using turn and send at least four follow-up prompts while it is busy.
+2. **Expected:** each prompt appears immediately as a distinct optimistic `queued` row. The backend mirrors the SDK steering/follow-up FIFO with each row's `localId`.
+3. Let the tool finish. Each SDK user-role delivery promotes the exact correlated row to `completed`; no row disappears merely because the active owner moves outside the durable transcript tail.
+4. Repeat and press **Stop** before delivery. The backend clears the SDK queue and the host removes/interrupts every queued optimistic row; none may execute during a later unrelated send.
+5. Reload the webview mid-queue. Host-owned queued/live state returns in the next authoritative snapshot; webview-local overlays do not become a second queue authority.
 
 ---
 
@@ -180,24 +176,18 @@ The prepass is the `skill-pruner` `before_agent_start` LLM call. To slow it:
 
 1. Start a streaming turn.
 2. **Wedge the transport:** in the webview DevTools console, intercept the
-   `message` event handler so acks (`stateApplied`) are delayed (e.g. wrap
+   `message` event handler so transcript commit evidence (`transcriptCommitted`) is delayed (e.g. wrap
    `window.postMessage` / the host's `postMessage` to defer delivery by ~500ms).
    Alternatively, throttle the VS Code webview to simulate a slow host→webview
    post.
-3. While acks are delayed, let the host continue posting streaming deltas +
-   snapshots (the host's `globalDirty` flag will mark the snapshot dirty on a
-   failed/undelivered post).
+3. While commit evidence is delayed, let the host continue producing sequenced semantic events and full snapshots. The delivery controller allows only one unsettled `postMessage`, coalesces the newest desired state lazily, and keeps the state dirty until acceptance.
 4. **Expected:**
    - The view **converges** to the authoritative state without showing old + new
      messages simultaneously. Out-of-order / duplicate envelopes are **discarded**
      by the webview revision guard (`revision <= lastApplied` → drop).
-   - The watchdog's **resnapshot** self-heals (re-posts the dirty snapshot with a
-     **strictly-higher** revision — `buildStateEnvelope` always does
-     `globalRevision + 1`; verified by `sidebar-sync.test.ts`).
-   - The watchdog's consecutive-timeout **force-reload is suppressed while
-     streaming** (`runningCount > 0`) — this is a **correct invariant**: a
-     mid-stream reload would discard transient streaming state and produce the
-     exact "old + new at once" symptom. **Do not "fix" this suppression.**
+   - `stateReceived` and `appCommitted` alone do not clear transcript correctness. Only a signed leaf-displayed `transcriptCommitted` entry in the accepted-revision ledger advances progress; `paintObserved` remains separate telemetry.
+   - The monotonic commit-progress watchdog resnapshots the latest desired state without resetting its deadline on every newer accepted post. Bounded reload escalation remains available while streaming.
+   - Reload restores the host-owned `LivePipelineState`; it does not discard active text/tools or flash a separately-owned old streaming row.
 5. Restore normal ack delivery. The view settles to the final authoritative
    state with no leftover stale overlay.
 
@@ -237,14 +227,21 @@ The prepass is the `skill-pruner` `before_agent_start` LLM call. To slow it:
 
 ---
 
+## Scenario 8 — Live-pipeline fault matrix
+
+Run each fault independently: missing `turn.started`, missing middle sequence, malformed observation, raw heartbeat without semantics, delayed/false/rejected/never-settling post, dropped transcript commit, render exception, lost readiness, backend exit during a pending post, large preview/checkpoint, nested subagent siblings, and interrupted modifying tool. Each run must end in exact durable/live equality, an explicit interrupted message, or a classified bounded protocol fault. The next send must remain usable. Do not count Node synthetic timing as Chromium evidence.
+
+---
+
 ## Done-criteria for this checklist
 
-- All 7 scenarios pass with the expected behavior.
+- All 8 scenarios pass with the expected behavior.
 - No `req-NN` id appears anywhere in the UI across any scenario.
 - No "old + new message at once" during scenario 6.
 - Pruning is restored to the user's prior mode after a "retry without pruning"
   (scenario 7) — verify in settings after the retried turn commits.
 - `cd extension && npm run typecheck && npm run test && npm run build` green.
+- Real VS Code trace evidence records snapshot bytes and receipt→app commit→transcript commit→paint budgets for small and 240-row sessions; synthetic reports remain labelled synthetic.
 
 Record any deviation as a follow-up note (no active `TODO.md` exists in the
 repo; track in your issue tracker or a fresh note).

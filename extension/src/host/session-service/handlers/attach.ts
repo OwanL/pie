@@ -335,7 +335,7 @@ export function attach(
       notice: `PI backend stopped${code !== null ? ` (code ${code})` : ''}`,
       runningSessionPaths,
     });
-    for (const event of backendExitEvents(runningSessionPaths, code, stderr, activityBySession)) {
+    for (const event of backendExitEvents(runningSessionPaths, code, stderr, Date.now(), activityBySession)) {
       deps.dispatchArch(event);
     }
     deps.scheduleRender();

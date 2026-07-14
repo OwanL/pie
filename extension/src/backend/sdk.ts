@@ -22,11 +22,12 @@ export interface SdkSessionEvent {
     | 'tool_execution_end'
     | string;
   message?: {
-    role?: 'user' | 'assistant' | 'custom';
+    role?: 'user' | 'assistant' | 'toolResult' | 'custom';
     content?: unknown;
     stopReason?: string;
     errorMessage?: string;
     usage?: MessageLike['usage'];
+    toolCallId?: string;
   };
   assistantMessageEvent?: {
     type: 'text_delta' | 'thinking_delta' | 'toolcall_start' | 'toolcall_delta' | string;
@@ -62,10 +63,13 @@ export interface SdkSessionEvent {
   success?: boolean;
   /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
   finalError?: string;
+  /** Stable SDK session-entry ID, attached by Pie's persistence-order patch. */
+  sessionEntryId?: string;
 }
 
 export interface SdkSessionManager {
   getCwd: () => string;
+  getSessionId?: () => string;
   getSessionFile: () => string | undefined;
   getSessionName: () => string | undefined;
   getBranch: () => SessionEntryLike[];
@@ -394,8 +398,56 @@ export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHo
   return foundAnyFile ? 'unsupported-shape' : 'missing-target';
 }
 
+export type SdkTerminalDurabilityPatchResult =
+  | 'patched'
+  | 'already-present'
+  | 'missing-target'
+  | 'unsupported-shape';
+
+/**
+ * Patch SDK 0.80.x so message_end subscribers run only after the session entry
+ * append returns, and receive its stable `sessionEntryId`. Extension hooks still
+ * run before persistence; Pie's backend subscriber uses the post-persistence
+ * public event. This changes no session format and introduces no journal.
+ */
+export async function applySdkTerminalDurabilityPatch(
+  sdkPath: string,
+): Promise<SdkTerminalDurabilityPatchResult> {
+  assertAllowedSdkPath(sdkPath);
+  const filePath = path.join(sdkPath, 'dist', 'core', 'agent-session.js');
+  let source: string;
+  try {
+    source = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing-target';
+    throw error;
+  }
+  if (source.includes('sessionEntryId = this.sessionManager.appendMessage')) return 'already-present';
+
+  const notifyNeedle = `        // Notify all listeners\n        this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);\n        // Handle session persistence`;
+  const notifyReplacement = `        // Notify non-terminal events immediately. message_end is published only\n        // after append returns below, with its stable sessionEntryId.\n        const emittedEvent = event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event;\n        if (event.type !== "message_end")\n            this._emit(emittedEvent);\n        // Handle session persistence`;
+  const customNeedle = `                this.sessionManager.appendCustomMessageEntry(event.message.customType, event.message.content, event.message.display, event.message.details);`;
+  const customReplacement = `                const sessionEntryId = this.sessionManager.appendCustomMessageEntry(event.message.customType, event.message.content, event.message.display, event.message.details);\n                this._emit({ ...emittedEvent, sessionEntryId });`;
+  const regularNeedle = `                this.sessionManager.appendMessage(event.message);\n            }\n            // Other message types`;
+  const regularReplacement = `                const sessionEntryId = this.sessionManager.appendMessage(event.message);\n                this._emit({ ...emittedEvent, sessionEntryId });\n            }\n            else {\n                this._emit(emittedEvent);\n            }\n            // Other message types`;
+
+  if (!source.includes(notifyNeedle) || !source.includes(customNeedle) || !source.includes(regularNeedle)) {
+    return 'unsupported-shape';
+  }
+  source = source
+    .replace(notifyNeedle, notifyReplacement)
+    .replace(customNeedle, customReplacement)
+    .replace(regularNeedle, regularReplacement);
+  await fs.writeFile(filePath, source, 'utf8');
+  return 'patched';
+}
+
 export async function loadSdk(sdkPath: string): Promise<SdkModule> {
   assertAllowedSdkPath(sdkPath);
+  const durabilityPatchResult = await applySdkTerminalDurabilityPatch(sdkPath);
+  if (durabilityPatchResult === 'missing-target' || durabilityPatchResult === 'unsupported-shape') {
+    throw new Error(`SDK terminal durability patch failed: ${durabilityPatchResult}.`);
+  }
   const patchResult = await applySdkRetryHotPatch(sdkPath);
   logRetryHotPatchResult(sdkPath, patchResult);
 

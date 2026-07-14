@@ -25,7 +25,12 @@ import type {
   PruningSettings,
   ToolResultPruningSettings,
   RunOutcome,
-  StateAppliedPayload,
+  AppCommittedPayload,
+  PaintObservedPayload,
+  RenderFailurePayload,
+  StateReceivedPayload,
+  TranscriptCommittedPayload,
+  TranscriptCommitBlockedPayload,
   ThinkingLevel,
   WebviewToHostMessage,
 } from './protocol';
@@ -51,24 +56,85 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string';
 }
 
+function isOptionalNonNegativeSafeInteger(value: unknown): value is number | undefined {
+  return value === undefined || isNonNegativeSafeInteger(value);
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
-function validateStateAppliedPayload(value: unknown): value is StateAppliedPayload {
-  return (
-    isObject(value)
-    && isFiniteNumber(value.revision)
-    && typeof value.backendReady === 'boolean'
-    && typeof value.transcriptLoaded === 'boolean'
-    && isFiniteNumber(value.openTabCount)
-    && isFiniteNumber(value.transcriptCount)
-    && isFiniteNumber(value.systemPromptCount)
-    && typeof value.domTranscriptLoaderPresent === 'boolean'
-    && typeof value.domTabsConnectingPresent === 'boolean'
-    && typeof value.renderSignature === 'string'
-    && (value.domRenderSignature === null || typeof value.domRenderSignature === 'string')
-  );
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function validateRenderEvidenceBase(
+  value: unknown,
+): value is Record<string, unknown> & { revision: number; viewGeneration: number } {
+  return isObject(value)
+    && isNonNegativeSafeInteger(value.revision)
+    && isNonNegativeSafeInteger(value.viewGeneration);
+}
+
+function validateStateReceivedPayload(value: unknown): value is StateReceivedPayload {
+  return validateRenderEvidenceBase(value)
+    && hasOnlyKeys(value, ['revision', 'viewGeneration', 'snapshotBytes'])
+    && isNonNegativeSafeInteger(value.snapshotBytes);
+}
+
+function validateAppCommittedPayload(value: unknown): value is AppCommittedPayload {
+  return validateRenderEvidenceBase(value)
+    && hasOnlyKeys(value, ['revision', 'viewGeneration', 'surface'])
+    && (value.surface === 'app'
+      || value.surface === 'loading'
+      || value.surface === 'empty'
+      || value.surface === 'transcript-suspense'
+      || value.surface === 'transcript');
+}
+
+function validateTranscriptCommittedPayload(
+  value: unknown,
+): value is TranscriptCommittedPayload & Record<string, unknown> {
+  return validateRenderEvidenceBase(value)
+    && hasOnlyKeys(value, ['revision', 'viewGeneration', 'identity', 'mountGeneration', 'evidence'])
+    && typeof value.identity === 'string'
+    && value.identity.length > 0
+    && value.identity.length <= 256
+    && isNonNegativeSafeInteger(value.mountGeneration)
+    && (value.evidence === 'displayed' || value.evidence === 'offscreen' || value.evidence === 'no-transcript');
+}
+
+function validateTranscriptCommitBlockedPayload(value: unknown): value is TranscriptCommitBlockedPayload {
+  return validateRenderEvidenceBase(value)
+    && hasOnlyKeys(value, ['revision', 'viewGeneration', 'reason'])
+    && (value.reason === 'window_mismatch'
+      || value.reason === 'structure_mismatch'
+      || value.reason === 'leaf_missing'
+      || value.reason === 'leaf_mismatch');
+}
+
+function validatePaintObservedPayload(value: unknown): value is PaintObservedPayload {
+  return validateRenderEvidenceBase(value)
+    && hasOnlyKeys(value, ['revision', 'viewGeneration', 'identity', 'mountGeneration', 'evidence', 'latencyMs'])
+    && typeof value.identity === 'string'
+    && value.identity.length > 0
+    && value.identity.length <= 256
+    && isNonNegativeSafeInteger(value.mountGeneration)
+    && (value.evidence === 'displayed' || value.evidence === 'offscreen' || value.evidence === 'no-transcript')
+    && isFiniteNumber(value.latencyMs)
+    && value.latencyMs >= 0;
+}
+
+function validateRenderFailurePayload(value: unknown): value is RenderFailurePayload {
+  return isObject(value)
+    && hasOnlyKeys(value, ['viewGeneration', 'revision', 'surface', 'classification'])
+    && isNonNegativeSafeInteger(value.viewGeneration)
+    && (value.revision === null || isNonNegativeSafeInteger(value.revision))
+    && (value.surface === 'app' || value.surface === 'transcript' || value.surface === 'transcript-suspense' || value.surface === 'unknown')
+    && (value.classification === 'component_error'
+      || value.classification === 'uncaught_error'
+      || value.classification === 'unhandled_rejection'
+      || value.classification === 'unknown');
 }
 
 function validateComposerInputDraft(value: unknown): value is ComposerInputDraft {
@@ -108,6 +174,7 @@ function validateRunOutcome(value: unknown): value is RunOutcome {
       || value.resolution === 'partially_resolved'
       || value.resolution === 'unresolved')
     && isFiniteNumber(value.satisfaction)
+    && (value.source === undefined || value.source === 'user' || value.source === 'agent')
   );
 }
 
@@ -121,6 +188,11 @@ function isStringBooleanRecord(value: unknown): value is Record<string, boolean>
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 /** A valid `SubagentBuckets` patch: object with optional `small`/`medium`/
@@ -156,6 +228,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'suppressCompletionNotifications',
     'showPruningMessages',
     'subagentAlwaysParentModel',
+    'subagentRouteAroundSaturatedProviders',
     'runtimeAuditLog',
     'bashFastPath',
     'hideStatusStrip',
@@ -168,14 +241,13 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
   const toggleKeys: Array<keyof ChatPrefs> = [
     'extensionToggles',
     'providerToggles',
+    'subagentProviderDefaults',
   ];
   const numericRanges: Record<string, [number, number]> = {
     completionSoundVolume: [0, 100],
     subagentMaxDepth: [0, 8],
     subagentMaxTreeSessions: [5, 200],
     subagentMaxInflight: [1, 16],
-    subagentMaxConcurrency: [1, 16],
-    subagentMaxParallelTasks: [1, 16],
     bashWarmPoolSize: [0, 8],
     bashWarmupTimeoutMs: [0, 60000],
     bashDefaultTimeout: [1, 600],
@@ -208,6 +280,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     }
     if (key === 'subagentBuckets') {
       if (v !== undefined && !isSubagentBucketsPatch(v)) return false;
+      continue;
+    }
+    if (key === 'subagentProviderTogglesBySession') {
+      if (v !== undefined && (!isObject(v) || Object.values(v).some((entry) => !isStringBooleanRecord(entry)))) return false;
       continue;
     }
     if (key === 'subagentNestedAllowedBuckets') {
@@ -304,15 +380,18 @@ export function validateWebviewToHostMessage(
   if (!isObject(value)) return fail('not an object');
   const type = value.type;
   if (!isString(type)) return fail('missing string `type`');
+  if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail(`${type}: invalid \`viewGeneration\``);
 
   switch (type) {
     case 'ready':
     case 'refreshState':
       if (!isOptionalString(value.assetVersion)) return fail(`${type}: invalid \`assetVersion\``);
+      if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail(`${type}: invalid \`viewGeneration\``);
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'requestSnapshot':
       if (!isOptionalString(value.assetVersion)) return fail('requestSnapshot: invalid `assetVersion`');
+      if (!isOptionalNonNegativeSafeInteger(value.viewGeneration)) return fail('requestSnapshot: invalid `viewGeneration`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'openFilePicker':
@@ -444,8 +523,28 @@ export function validateWebviewToHostMessage(
       if (!isString(value.sessionPath)) return fail('closeOutcomeDialog: missing string `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
-    case 'stateApplied':
-      if (!validateStateAppliedPayload(value.payload)) return fail('stateApplied: invalid `payload`');
+    case 'stateReceived':
+      if (!validateStateReceivedPayload(value.payload)) return fail('stateReceived: invalid `payload`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'appCommitted':
+      if (!validateAppCommittedPayload(value.payload)) return fail('appCommitted: invalid `payload`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'transcriptCommitted':
+      if (!validateTranscriptCommittedPayload(value.payload)) return fail('transcriptCommitted: invalid `payload`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'transcriptCommitBlocked':
+      if (!validateTranscriptCommitBlockedPayload(value.payload)) return fail('transcriptCommitBlocked: invalid `payload`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'paintObserved':
+      if (!validatePaintObservedPayload(value.payload)) return fail('paintObserved: invalid `payload`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'renderFailure':
+      if (!validateRenderFailurePayload(value.payload)) return fail('renderFailure: invalid `payload`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'extensionUiResponse':

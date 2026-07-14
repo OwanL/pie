@@ -3,7 +3,7 @@ import test from 'node:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { loadModelFamilyMap, resolveModelFamily } from '../scripts/model-family.ts';
+import { loadModelFamilyMap, resolveModelFamily, resolveModelProvider } from '../scripts/model-family.ts';
 import { withTempDir } from './helpers.ts';
 
 /**
@@ -98,5 +98,73 @@ test('resolveModelFamily: returns the declared family, or the model id when unre
     // Blank / null → null (caller mirrors its null-model handling).
     assert.equal(resolveModelFamily(null, map), null);
     assert.equal(resolveModelFamily('   ', map), null);
+  });
+});
+
+test('resolveModelFamily: path-prefixed id resolves via suffix when the suffix is a known model', async () => {
+  await withTempDir(async (dir) => {
+    const modelsJsonPath = path.join(dir, 'models.json');
+    await fs.writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          umans: { models: [{ id: 'umans-glm-5.2', family: 'glm-5.2' }] },
+          ollama: { models: [{ id: 'glm-5.2:cloud', family: 'glm-5.2' }] },
+        },
+      }),
+    );
+    const map = loadModelFamilyMap(modelsJsonPath);
+
+    // Path-prefixed id whose suffix is a known model → resolves to the suffix's family.
+    assert.equal(resolveModelFamily('umans/umans-glm-5.2', map), 'glm-5.2');
+    assert.equal(resolveModelFamily('ollama/glm-5.2:cloud', map), 'glm-5.2');
+    // Multi-segment path: only the last segment is tried as a suffix.
+    assert.equal(resolveModelFamily('prefix/umans/umans-glm-5.2', map), 'glm-5.2');
+  });
+});
+
+test('resolveModelFamily: unknown slash ids remain distinct when the suffix is not in the registry', async () => {
+  await withTempDir(async (dir) => {
+    const modelsJsonPath = path.join(dir, 'models.json');
+    await fs.writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          umans: { models: [{ id: 'umans-glm-5.2', family: 'glm-5.2' }] },
+        },
+      }),
+    );
+    const map = loadModelFamilyMap(modelsJsonPath);
+
+    // Suffix not in registry → full id returned (no spurious collapse).
+    assert.equal(resolveModelFamily('umans/unknown-model', map), 'umans/unknown-model');
+    assert.equal(resolveModelFamily('provider/some-other', map), 'provider/some-other');
+    // A slash id whose suffix happens to be a known model id with no declared family
+    // resolves to the suffix id itself (its own family).
+    assert.equal(resolveModelFamily('foo/umans-glm-5.2', map), 'glm-5.2');
+  });
+});
+
+test('resolveModelProvider: path-prefixed id resolves provider via suffix, mirroring resolveModelFamily', async () => {
+  await withTempDir(async (dir) => {
+    const modelsJsonPath = path.join(dir, 'models.json');
+    await fs.writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          umans: { models: [{ id: 'umans-glm-5.2', family: 'glm-5.2' }] },
+        },
+      }),
+    );
+    const map = loadModelFamilyMap(modelsJsonPath);
+
+    // Direct lookup.
+    assert.equal(resolveModelProvider('umans-glm-5.2', map), 'umans');
+    // Path-prefixed id resolves provider via suffix.
+    assert.equal(resolveModelProvider('umans/umans-glm-5.2', map), 'umans');
+    // Unknown slash id → null (provider unattributable).
+    assert.equal(resolveModelProvider('umans/unknown-model', map), null);
+    // Blank → null.
+    assert.equal(resolveModelProvider(null, map), null);
   });
 });

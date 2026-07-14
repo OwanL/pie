@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { ToolFailureKind, ToolResultIssueKind } from '../scripts/contracts.js';
 
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
+import { LEADERBOARD_MINIMUM_SCORED_RUNS } from '../scripts/leaderboard-scoring.ts';
 import { buildSiteDataBundle, validateSiteDataBundle, writeSiteData, readSiteDataBundle } from '../scripts/site-data.ts';
 import { loadFixture, withTempDir } from './helpers.ts';
 import type {
@@ -270,12 +271,8 @@ test('cross-ref: every modelId in modelQuality appears in modelLeaderboard', asy
   const prepared = prepareSourceAnalytics(fixture);
   const bundle = buildSiteDataBundle(prepared);
 
-  const qualityKeys = new Set(
-    bundle.modelQuality.rows.map((row) => `${row.modelId}::${row.thinkingLevel}`),
-  );
-  const leaderboardKeys = new Set(
-    bundle.modelLeaderboard.rows.map((row) => `${row.modelId}::${row.thinkingLevel}`),
-  );
+  const qualityKeys = new Set(bundle.modelQuality.rows.map((row) => row.modelId));
+  const leaderboardKeys = new Set(bundle.modelLeaderboard.rows.map((row) => row.modelId));
 
   for (const key of qualityKeys) {
     assert.ok(
@@ -874,16 +871,15 @@ test('synthetic: multi-model payload with known values produces expected calcula
   assert.equal(bashUsage!.failureCount, 7);
   assert.equal(bashUsage!.affectedRunCount, 6);
 
-  // Verify leaderboard presence (both models should be ranked with >= 3 scored runs each)
+  // Both models appear; sparse evidence is ranked without a minimum gate.
   const modelALeaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === 'model-a');
   const modelBLeaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === 'model-b');
 
   assert.ok(modelALeaderboard, 'model-a should appear in leaderboard');
   assert.ok(modelBLeaderboard, 'model-b should appear in leaderboard');
-  assert.notEqual(modelALeaderboard!.rank, null, 'model-a should be ranked');
-  assert.notEqual(modelBLeaderboard!.rank, null, 'model-b should be ranked');
-  assert.notEqual(modelALeaderboard!.compositeScore, null, 'model-a should have compositeScore');
-  assert.notEqual(modelBLeaderboard!.compositeScore, null, 'model-b should have compositeScore');
+  assert.ok(modelALeaderboard!.rank !== null && modelBLeaderboard!.rank !== null, 'sparse families remain ranked');
+  assert.ok(modelALeaderboard!.compositeScore !== null && modelBLeaderboard!.compositeScore !== null);
+  assert.equal(modelALeaderboard!.evidenceTier, 'thin-outcome');
 });
 
 // ============================================================================
@@ -957,7 +953,7 @@ test('edge: payload where every run has max satisfaction produces averageSatisfa
   assert.equal(bundle.overview.averageSatisfaction, 5);
 });
 
-test('edge: payload with single scored run produces valid unranked leaderboard', async () => {
+test('edge: payload with single scored run produces valid ranked leaderboard', async () => {
   const run = createMinimalRunSnapshot({ 
     outcome: { resolution: 'resolved', satisfaction: 4 },
   });
@@ -968,11 +964,12 @@ test('edge: payload with single scored run produces valid unranked leaderboard',
 
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
-  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, null, 'single run should be unranked');
-  assert.equal(bundle.modelLeaderboard.rows[0]!.compositeScore, null, 'single run should have null compositeScore');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, 1, 'single sparse family is regularized and ranked');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.evidenceTier, 'thin-outcome');
+  assert.ok(bundle.modelLeaderboard.rows[0]!.scoreInterval80 !== null);
 });
 
-test('edge: payload with two scored runs (below minimum) produces unranked leaderboard', async () => {
+test('edge: payload with two scored runs (sparse evidence) produces ranked leaderboard', async () => {
   const runs = [
     createMinimalRunSnapshot({ 
       modelId: 'test-model',
@@ -990,25 +987,18 @@ test('edge: payload with two scored runs (below minimum) produces unranked leade
 
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
-  assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, 2);
-  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, null, 'below minimum scored runs should be unranked');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, 1, 'canonical retries collapse to the latest task observation');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, 1, 'thin evidence is ranked rather than hard-excluded');
 });
 
-test('edge: payload with exactly minimum scored runs (3) produces ranked leaderboard', async () => {
-  const runs = [
-    createMinimalRunSnapshot({ 
+test('edge: payload with sparse scored runs produces ranked leaderboard', async () => {
+  const satisfactionValues = [4, 5, 3];
+  const runs = Array.from({ length: LEADERBOARD_MINIMUM_SCORED_RUNS }, (_, index) =>
+    createMinimalRunSnapshot({
       modelId: 'test-model',
-      outcome: { resolution: 'resolved', satisfaction: 4 },
-    }),
-    createMinimalRunSnapshot({ 
-      modelId: 'test-model',
-      outcome: { resolution: 'resolved', satisfaction: 5 },
-    }),
-    createMinimalRunSnapshot({ 
-      modelId: 'test-model',
-      outcome: { resolution: 'resolved', satisfaction: 3 },
-    }),
-  ];
+      taskGroupId: `minimum-task-${index}`,
+      outcome: { resolution: 'resolved', satisfaction: satisfactionValues[index % satisfactionValues.length]! },
+    }));
 
   const payload = createMinimalPayload(runs, runs);
   const prepared = prepareSourceAnalytics(payload);
@@ -1016,7 +1006,7 @@ test('edge: payload with exactly minimum scored runs (3) produces ranked leaderb
 
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
-  assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, 3);
-  assert.notEqual(bundle.modelLeaderboard.rows[0]!.rank, null, 'exactly minimum scored runs should be ranked');
-  assert.notEqual(bundle.modelLeaderboard.rows[0]!.compositeScore, null, 'exactly minimum scored runs should have compositeScore');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  assert.notEqual(bundle.modelLeaderboard.rows[0]!.rank, null, 'sparse scored runs are ranked without a minimum gate');
+  assert.notEqual(bundle.modelLeaderboard.rows[0]!.compositeScore, null, 'sparse scored runs produce a composite score');
 });

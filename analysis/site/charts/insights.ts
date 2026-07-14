@@ -3,7 +3,9 @@ import {
   CHART_COLORS,
   categoricalHeight,
   completedRuns,
+  estimatedRunCostUsd,
   median,
+  modelFamilyKey,
   selectedRunIds,
   sortNatural,
   uniqueNonEmpty,
@@ -13,25 +15,26 @@ import type { VerificationCommandKind } from '../../scripts/contracts.ts';
 
 const VERIFICATION_KINDS: VerificationCommandKind[] = ['test', 'build', 'lint', 'typecheck', 'format', 'other'];
 
-function modelLabel(run: { modelId: string | null }): string {
-  return run.modelId?.trim() || '(unknown)';
-}
+type FamilyTurnThroughputRow = PreparedTurnThroughputRow & { modelFamily: string };
 
-function filteredThroughputRows(ctx: ChartContext): PreparedTurnThroughputRow[] {
+function filteredThroughputRows(ctx: ChartContext): FamilyTurnThroughputRow[] {
   const runIds = selectedRunIds(ctx.runs);
-  return ctx.turnThroughputRows.filter(
-    (row) =>
-      runIds.has(row.runId) &&
-      row.turnLatencyMs !== null &&
-      row.overheadMs !== null &&
-      row.providerLatencyMs !== null,
-  );
+  const familyByRun = new Map(ctx.runs.map((run) => [run.runId, modelFamilyKey(run)]));
+  return ctx.turnThroughputRows
+    .filter(
+      (row) =>
+        runIds.has(row.runId) &&
+        row.turnLatencyMs !== null &&
+        row.overheadMs !== null &&
+        row.providerLatencyMs !== null,
+    )
+    .map((row) => ({ ...row, modelFamily: familyByRun.get(row.runId) ?? modelFamilyKey(row) }));
 }
 
-function latencyDecompositionTable(rows: PreparedTurnThroughputRow[]) {
+function latencyDecompositionTable(rows: FamilyTurnThroughputRow[]) {
   const byModel = new Map<string, { overhead: number[]; provider: number[]; count: number }>();
   for (const row of rows) {
-    const model = modelLabel(row);
+    const model = modelFamilyKey(row);
     const entry = byModel.get(model) ?? { overhead: [], provider: [], count: 0 };
     entry.overhead.push(row.overheadMs!);
     entry.provider.push(row.providerLatencyMs!);
@@ -121,17 +124,14 @@ interface CostEfficiencyRow {
 function costEfficiencyTable(runs: PreparedRunRow[]): CostEfficiencyRow[] {
   const byModel = new Map<string, { costPerLine: number[]; costPerRun: number[]; linesPerRun: number[] }>();
   for (const run of completedRuns(runs)) {
-    if (
-      run.estimatedCostUsd === null ||
-      run.estimatedCostUsd <= 0 ||
-      run.lineMutationTotal <= 0
-    ) {
+    const cost = estimatedRunCostUsd(run);
+    if (cost === null || cost <= 0 || run.lineMutationTotal <= 0) {
       continue;
     }
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? { costPerLine: [], costPerRun: [], linesPerRun: [] };
-    entry.costPerLine.push(run.estimatedCostUsd / run.lineMutationTotal);
-    entry.costPerRun.push(run.estimatedCostUsd);
+    entry.costPerLine.push(cost / run.lineMutationTotal);
+    entry.costPerRun.push(cost);
     entry.linesPerRun.push(run.lineMutationTotal);
     byModel.set(model, entry);
   }
@@ -202,12 +202,13 @@ interface CostPerMinuteRow {
 function costPerMinuteTable(runs: PreparedRunRow[]): CostPerMinuteRow[] {
   const byModel = new Map<string, number[]>();
   for (const run of completedRuns(runs)) {
-    if (run.estimatedCostUsd === null || run.estimatedCostUsd <= 0 || run.busyDurationMs <= 0) {
+    const cost = estimatedRunCostUsd(run);
+    if (cost === null || cost <= 0 || run.busyDurationMs <= 0) {
       continue;
     }
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? [];
-    entry.push(run.estimatedCostUsd / (run.busyDurationMs / 60000));
+    entry.push(cost / (run.busyDurationMs / 60000));
     byModel.set(model, entry);
   }
   return [...byModel.entries()]
@@ -348,7 +349,7 @@ function netMutationTable(runs: PreparedRunRow[]): NetMutationRow[] {
     if (run.lineAdditions + run.lineDeletions + run.lineModifications <= 0) {
       continue;
     }
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? { additions: 0, deletions: 0, modifications: 0 };
     entry.additions += run.lineAdditions;
     entry.deletions += run.lineDeletions;
@@ -436,7 +437,7 @@ function busyFragmentationPoints(runs: PreparedRunRow[]): { points: BusyFragment
     .filter((run) => run.busyDurationMs > 0)
     .map((run) => ({
       runId: run.runId,
-      model: modelLabel(run),
+      model: modelFamilyKey(run),
       busyMinutes: Math.round((run.busyDurationMs / 60000) * 10) / 10,
       periods: run.busyPeriodCount,
     }));
@@ -507,7 +508,7 @@ function tokenCoverageTable(runs: PreparedRunRow[]): TokenCoverageRow[] {
     if (run.assistantTurnCount <= 0) {
       continue;
     }
-    const model = modelLabel(run);
+    const model = modelFamilyKey(run);
     const entry = byModel.get(model) ?? { ratios: [], turns: [] };
     entry.ratios.push(run.tokenReportedTurnCount / run.assistantTurnCount);
     entry.turns.push(run.assistantTurnCount);

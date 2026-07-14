@@ -101,8 +101,6 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
 	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
-	"PIE_SUBAGENT_MAX_CONCURRENCY",
-	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
 	"PI_SUBAGENT_TIMEOUT_MS",
@@ -114,8 +112,6 @@ test.before(() => {
 	for (const k of ENV_KEYS) snapshot[k] = process.env[k];
 	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "4";
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "8";
 	// Per-prompt + settlement nets OFF so the only path under test is the
 	// session completing promptly (the leak/reclaim lifecycle around reload).
 	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";

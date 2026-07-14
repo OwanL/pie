@@ -12,7 +12,7 @@ pie is a VS Code extension that provides a chat interface to a local PI (Program
 
 ## Transport and Backend Lifecycle
 
-Stdio uses UTF-8 JSONL with a shared 20 MiB per-record limit, enough for a supported 10 MiB raw image after base64 encoding plus envelope headroom. Readers retain bounded memory, discard an overlong record through LF, and then recover. Oversized stdin requests receive a correlated `REQUEST_TOO_LARGE` response when their ID is present in the bounded preview; backend stdout overflow is fatal because dropping an event could desynchronize host state. Backend stdout writes are serialized with bounded application buffering; stale queued `tool.progress` events are coalesced while responses and terminal events are never silently dropped.
+Stdio uses UTF-8 JSONL with a shared **32 MiB per-record limit**, enough for a supported 10 MiB raw image after base64 encoding plus envelope headroom. Readers retain bounded memory, discard an overlong record through LF, and then recover. Oversized stdin requests receive a correlated `REQUEST_TOO_LARGE` response when their ID is present in the bounded preview; an oversized correlated response is replaced with `RESPONSE_TOO_LARGE`; an oversized critical event is fatal. Backend stdout writes are serialized with bounded response/event lanes. Only typed bounded sequenced tool-progress envelopes may coalesce (newest sequence wins); a terminal supersedes queued progress and is never silently dropped. The host detects the resulting sequence gap and repairs from a bounded in-memory checkpoint.
 
 The host distinguishes intentional stops from unexpected, generation-tagged exits. Intentional stop during startup rejects that child’s readiness wait, and an old-generation exit cannot clear a replacement process. Unexpected exits terminalize orphaned in-flight state and preserve a classified interruption notice. There is no automatic backend restart; restart remains an explicit user action.
 
@@ -76,7 +76,9 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 **Projection** — the pure function `ArchState → ViewState` that computes what the webview should display. Located at `extension/src/host/core/projection.ts`.
 
-**Snapshot** — a full `ViewState` used for initial load and recovery. Delivered over the host → webview channel.
+**LivePipelineState** — the sole host authority for active assistant text/reasoning, tool drafts/executions/previews, producer phase, sequence/checkpoint state, and extension-UI ownership. Durable `ArchState.transcript` contains completed/interrupted history only.
+
+**Snapshot** — a full `ViewState` used for normal rendering, initial load, and recovery. It projects durable history joined with `LivePipelineState`; no direct delta channel exists.
 
 **Mirror** — the webview-side cache of `ViewState` per session. Managed in `extension/src/webview/panel/hooks/use-host-sync.ts`.
 
@@ -97,12 +99,13 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 ### Streaming assistant reply
 
-1. PI backend emits line-by-line JSON events (`message.delta`, `tool.started`, `message.finished`, etc.).
-2. `extension/src/host/backend/client.ts` parses each line into a typed `BackendEvent`.
-3. The event is dispatched to the reducer.
-4. Reducer updates `ArchState.transcript` (append delta, upsert tool call, finalize message).
-5. Projection computes a ViewState; `sidebar/provider.ts` posts it to the webview.
-6. Webview applies the snapshot to `mirror[sessionPath]` and re-renders.
+1. Before the provider call, the backend creates an in-memory turn accumulator with opaque turn/attempt IDs and a monotonic sequence.
+2. Provider transport observations classify gate queue, header wait, headers received, raw chunks, retry, tool work, and teardown. Raw chunks never renew the semantic inactivity lease.
+3. SDK observations become typed `live.semantic` envelopes. Invalid observations consume a sequence as `observation.rejected`; tool progress is normalized to a bounded `ToolPreview`.
+4. The host validates each envelope and reduces it into `ArchState.livePipeline`. Gaps, rejected observations, unknown owners, and a missing final sequence request `liveTurn.checkpoint` through the EffectRunner.
+5. Projection joins durable transcript rows with the active live turn and posts a full `ViewState` through the one-post delivery controller.
+6. The webview reports receipt, app commit, signed transcript-leaf commit, and paint as separate protocol-v4 evidence.
+7. SDK assistant/tool terminal callbacks are hot-patched to publish only after durable append returns a stable entry ID. The host then commits the durable terminal message and clears live state in one reducer transaction. Restart/reopen never replays a tool and normalizes dangling persisted work to interrupted.
 
 ### Tab switching
 
@@ -177,7 +180,7 @@ Full allowlist of webview-local state: see `STATE_CONTRACT.md § Webview-Local S
 1. Add to the `ViewState` interface in `extension/src/shared/protocol.ts`.
 2. Populate in the projection function (`selectViewState`).
 3. Consume in webview components.
-4. Update test ViewState literals in `extension/test/sidebar-sync.test.ts` and `extension/test/sync-contract.test.ts`.
+4. Update test ViewState literals in `extension/test/host/sidebar/sidebar-sync.test.ts` and `extension/test/shared/protocol/sync-contract.test.ts`.
 
 ### Adding a new Effect type
 

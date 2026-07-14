@@ -33,8 +33,16 @@ import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
 import type { Event } from './core/events';
 import { selectViewState } from './core/projection';
-import { auditLog, bootLog, isRuntimeAuditLogEnabled } from './util/audit';
+import { auditLog, bootLog } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
+import {
+  disposeLivePipelineTrace,
+  getLivePipelineTraceHealth,
+  getLivePipelineTracePath,
+  isLivePipelineTraceEnabled,
+  recordLivePipelineTrace,
+  setLivePipelineTraceEnabled,
+} from './util/live-pipeline-trace-runtime';
 import {
   getPieLogDir,
   getPieLogPath,
@@ -195,13 +203,34 @@ export class PieExtension implements vscode.Disposable {
       // orphan a late `MessageStarted` reply). Falls back to the 120s default
       // when `prepassTimeoutSec` is unset/invalid (SDK default, presumed < 120s).
       // Read fresh each send so a runtime settings change takes effect.
-      getSendTimerTimeoutMs: () => {
+      getSendTimerTimeoutMs: (sessionPath: string) => {
         const p = this.archState.settings.pruningSettings.prepassTimeoutSec;
         const HEADROOM_SEC = 30;
+        // FP-C3: real per-provider queueWaitSeconds headroom. A send whose
+        // provider is saturated spends up to `queueWaitSeconds` queued for a
+        // concurrency slot BEFORE its prepass even begins; that wait is inside
+        // this timer's window (the clock starts at issue, before the slot is
+        // acquired). Use the real configured value from aggregateStats.providerGate
+        // (polled from the backend's ProviderGate), falling back to a
+        // conservative 30s when unavailable (fail-safe — never under-size the
+        // headroom and trip a spurious PreflightFailed mid-queue).
+        const QUEUE_WAIT_HEADROOM_MS = this.resolveQueueWaitHeadroomMs(sessionPath);
         return typeof p === 'number' && Number.isFinite(p) && p > 0
-          ? (p + HEADROOM_SEC) * 1000
-          : 120_000;
+          ? (p + HEADROOM_SEC) * 1000 + QUEUE_WAIT_HEADROOM_MS
+          : 120_000 + QUEUE_WAIT_HEADROOM_MS;
       },
+      // Metric-gated re-arm for the model-start send-timer: when the in-flight
+      // request's provider is legitimately QUEUED waiting for a concurrency
+      // slot (or PAUSED by the circuit breaker), the model-start timer (whose
+      // clock starts at issue, before the slot is acquired) would otherwise
+      // fire a false-positive PreflightFailed. `getProviderGateMetrics` reads
+      // the live signal (cached in AggregateStats.providerGate, polled from the
+      // backend's ProviderGate); `resolveSessionProvider` resolves the
+      // request's provider via the session's model → available-models table
+      // (mirroring host/core/model-capability.ts). Both optional + fail-open:
+      // the runner fires as today if either is absent or yields no match.
+      getProviderGateMetrics: () => this.aggregateStatsService.getAggregateStats().providerGate,
+      resolveSessionProvider: (sessionPath: string) => this.resolveSessionProvider(sessionPath),
       queues: this.service.queues,
       tabs: {
         // PersistTabs: write openTabPaths + activeSessionPath to globalState,
@@ -256,8 +285,13 @@ export class PieExtension implements vscode.Disposable {
       },
       log: {
         log: (level, message, data) => {
-          auditLog('arch-effect-runner', message, (data as Record<string, unknown>) ?? {});
-          if (level !== 'info' || isRuntimeAuditLogEnabled()) {
+          if (level === 'info') {
+            // `auditLog` already writes through the unified pie logger when
+            // runtime auditing is enabled. Writing via `appendPieLog` as well
+            // duplicated every effect breadcrumb and doubled synchronous disk
+            // I/O precisely when a recovery/checkpoint loop was busiest.
+            auditLog('arch-effect-runner', message, (data as Record<string, unknown>) ?? {});
+          } else {
             appendPieLog(level, 'arch-effect-runner', message, data);
           }
         },
@@ -284,11 +318,46 @@ export class PieExtension implements vscode.Disposable {
     this.statusBar.show();
   }
 
+  /** Resolve the provider name for a session's in-flight request, mirroring
+   *  host/core/model-capability.ts: the session summary's `modelId` (falling
+   *  back to the global default model) → the available-models table's
+   *  `.provider`. Returns `undefined` when the model/provider can't be
+   *  resolved (fail-open). Shared by the FP-C2a model-start re-arm gate and
+   *  the FP-C3 send-timer queue-wait headroom. */
+  private resolveSessionProvider(sessionPath: string): string | undefined {
+    const archState = this.archState;
+    const modelId = archState.sessions.sessions.find((s) => s.path === sessionPath)?.modelId
+      ?? archState.settings.modelSettings?.defaultModel;
+    if (!modelId) return undefined;
+    const directModels = archState.settings.availableModelsBySession[sessionPath] ?? [];
+    const fallbackModels = Object.values(archState.settings.availableModelsBySession).flatMap((models) => models);
+    return [...directModels, ...fallbackModels].find((m) => m.id === modelId)?.provider;
+  }
+
+  /** FP-C3: resolve the real per-provider `queueWaitSeconds` headroom for a
+   *  send's provider, read from the live `aggregateStats.providerGate`
+   *  (polled from the backend's `ProviderGate`). Falls back to a conservative
+   *  30s default when the gate is disabled, the provider can't be resolved, no
+   *  matching provider metric exists, or the configured value is 0/unbounded —
+   *  fail-safe so the send-timer never under-sizes the headroom and trips a
+   *  spurious `PreflightFailed` mid-queue. */
+  private resolveQueueWaitHeadroomMs(sessionPath: string): number {
+    const DEFAULT_HEADROOM_MS = 30_000;
+    const providerGate = this.aggregateStatsService.getAggregateStats().providerGate;
+    if (!providerGate.enabled) return DEFAULT_HEADROOM_MS;
+    const provider = this.resolveSessionProvider(sessionPath);
+    if (!provider) return DEFAULT_HEADROOM_MS;
+    const metric = providerGate.providers.find((p) => p.provider === provider);
+    const queueWaitSeconds = metric?.queueWaitSeconds;
+    if (typeof queueWaitSeconds !== 'number' || queueWaitSeconds <= 0) return DEFAULT_HEADROOM_MS;
+    return queueWaitSeconds * 1000;
+  }
+
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
     this.tokenRateService.start();
-    await this.statsService.start();
     this.aggregateStatsService.start();
+    await this.statsService.start();
     await this.service.start();
     // Push the restored open-tab summaries to the backend so the
     // `session_review` tool's listOpen works immediately after startup
@@ -331,6 +400,7 @@ export class PieExtension implements vscode.Disposable {
    * This is the single point where the new CQRS spine integrates with the extension.
    */
   private dispatchArchEvent(event: Event): void {
+    const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
     // Pre-reducer side effects for specific event types.
     if (event.kind === 'SendResult' && event.ok && event.requestId) {
       this.service.bindRequestSessionPath(event.requestId, event.sessionPath);
@@ -338,6 +408,17 @@ export class PieExtension implements vscode.Disposable {
 
     const result = dispatch(this.archState, event);
     this.archState = result.state;
+    if (isLivePipelineTraceEnabled()) {
+      const trace = eventTraceMetadata(event);
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.reducer.applied',
+        kind: 'success',
+        identifiers: trace.identifiers,
+        eventSeq: trace.eventSeq,
+        durationMs: Math.max(0, performance.now() - traceStartedAt),
+      });
+    }
     for (const effect of result.effects) {
       this.effectRunner.run(effect);
     }
@@ -379,8 +460,11 @@ export class PieExtension implements vscode.Disposable {
       }),
       vscode.commands.registerCommand('pie.toggleStreamDiag', () => {
         const next = setStreamDiagEnabled(!isStreamDiagEnabled());
+        setLivePipelineTraceEnabled(next);
+        void this.backend.request('diagnostics.livePipeline.setEnabled', { enabled: next }, { timeoutMs: 5_000 }).catch(() => undefined);
+        const health = getLivePipelineTraceHealth();
         void vscode.window.showInformationMessage(
-          `pie stream diagnostics: ${next ? 'ON' : 'OFF'} — log: ${getDiagPath()}`,
+          `pie stream diagnostics: ${next ? 'ON' : 'OFF'} — aggregate: ${getDiagPath()} — pipeline: ${getLivePipelineTracePath()} — health e/s/d/u ${health.emitted}/${health.sampled}/${health.dropped}/${health.unflushed}`,
         );
       }),
       vscode.commands.registerCommand('pie.setLogLevel', async () => {
@@ -583,6 +667,7 @@ export class PieExtension implements vscode.Disposable {
    * pure projection).
    */
   private buildViewState(): ViewState {
+    const traceStartedAt = isLivePipelineTraceEnabled() ? performance.now() : 0;
     // Spread (do NOT mutate) so the memoized projection returned by
     // selectViewState is never corrupted: `tokenRateBySession` is host-side
     // and varies every tick independently of the cached signature, so override
@@ -600,28 +685,17 @@ export class PieExtension implements vscode.Disposable {
       // `tokenRateBySession` so the pure projection stays service-free.
       deferredTriggers: this.service.getDeferredTriggers(),
     };
-    this.checkForPromise(viewState);
+    if (isLivePipelineTraceEnabled()) {
+      recordLivePipelineTrace({
+        process: 'host',
+        stage: 'host.projection.completed',
+        kind: 'success',
+        identifiers: viewState.activeSession?.path ? { session: viewState.activeSession.path } : undefined,
+        durationMs: Math.max(0, performance.now() - traceStartedAt),
+        transcriptCount: viewState.transcript.length,
+      });
+    }
     return viewState;
-  }
-
-  /** Temporary diagnostic: detect Promise values in the ViewState before posting. */
-  private checkForPromise(state: unknown, path = 'ViewState', seen = new Set<unknown>()): void {
-    if (state instanceof Promise) {
-      auditLog('extension-host', 'buildViewState.promiseDetected', { path });
-      return;
-    }
-    if (state == null || typeof state !== 'object') return;
-    if (seen.has(state)) return;
-    seen.add(state);
-    if (Array.isArray(state)) {
-      for (let i = 0; i < state.length; i += 1) {
-        this.checkForPromise(state[i], `${path}[${i}]`, seen);
-      }
-    } else {
-      for (const [key, value] of Object.entries(state)) {
-        this.checkForPromise(value, `${path}.${key}`, seen);
-      }
-    }
   }
 
   private scheduleRender(): void {
@@ -767,6 +841,7 @@ export class PieExtension implements vscode.Disposable {
       this.service.dispose();
       this.sidebarProvider.dispose();
       this.backend.dispose();
+      await disposeLivePipelineTrace();
       this.statusBar.dispose();
     })();
 
@@ -776,4 +851,27 @@ export class PieExtension implements vscode.Disposable {
   dispose(): void {
     void this.shutdown();
   }
+}
+
+function eventTraceMetadata(event: Event): {
+  identifiers?: { session?: string; request?: string; turn?: string; attempt?: string; message?: string; tool?: string };
+  eventSeq?: number;
+} {
+  const value = event as unknown as Record<string, unknown>;
+  const cmd = value.cmd && typeof value.cmd === 'object' ? value.cmd as Record<string, unknown> : undefined;
+  const source = cmd ?? value;
+  const identifiers = {
+    ...(typeof source.sessionPath === 'string' ? { session: source.sessionPath } : {}),
+    ...(typeof source.requestId === 'string' ? { request: source.requestId } : {}),
+    ...(typeof source.turnId === 'string' ? { turn: source.turnId } : {}),
+    ...(typeof source.attemptId === 'string' ? { attempt: source.attemptId } : {}),
+    ...(typeof source.messageId === 'string' ? { message: source.messageId } : {}),
+    ...(typeof source.toolCallId === 'string' ? { tool: source.toolCallId } : {}),
+  };
+  return {
+    identifiers: Object.keys(identifiers).length > 0 ? identifiers : undefined,
+    eventSeq: typeof source.seq === 'number' && Number.isSafeInteger(source.seq) && source.seq >= 0
+      ? source.seq
+      : undefined,
+  };
 }

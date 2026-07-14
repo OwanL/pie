@@ -13,7 +13,7 @@ export const PROTOCOL_VERSION = 10;
  * not refuse to load (the webview is shipped together with the host so the
  * mismatch generally indicates a stale hot-reload).
  */
-export const WEBVIEW_PROTOCOL_VERSION = 3;
+export const WEBVIEW_PROTOCOL_VERSION = 4;
 
 export function assertProtocolVersion(peerLabel: string, protocolVersion: unknown): void {
   if (!Number.isInteger(protocolVersion)) {

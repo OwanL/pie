@@ -36,10 +36,19 @@ interface SubagentContentPart {
 interface SubagentMessage {
   role: string;
   content?: SubagentContentPart[];
+  toolName?: string;
+  details?: unknown;
 }
 
 interface SubagentSingleResult {
   messages?: SubagentMessage[];
+  fileChanges?: Array<{
+    path: string;
+    kind: FileChangeEntry['kind'];
+    description?: string;
+    additions?: number;
+    deletions?: number;
+  }>;
 }
 
 interface SubagentDetails {
@@ -280,10 +289,36 @@ export function deriveFileChangesFromSubagentResult(
 
   for (let rIdx = 0; rIdx < details.results.length; rIdx++) {
     const singleResult = details.results[rIdx];
+    if (Array.isArray(singleResult?.fileChanges)) {
+      for (let changeIdx = 0; changeIdx < singleResult.fileChanges.length; changeIdx++) {
+        const change = singleResult.fileChanges[changeIdx];
+        if (!change?.path || !change.kind) continue;
+        changes.push({
+          path: change.path,
+          kind: change.kind,
+          toolCallId: `${toolCallId}-sa${rIdx}-fc${changeIdx}`,
+          messageId,
+          description: change.description ?? change.kind,
+          timestamp,
+          ...(typeof change.additions === 'number' ? { additions: change.additions } : {}),
+          ...(typeof change.deletions === 'number' ? { deletions: change.deletions } : {}),
+        });
+      }
+      continue;
+    }
     if (!singleResult?.messages) continue;
 
     for (let mIdx = 0; mIdx < singleResult.messages.length; mIdx++) {
       const msg = singleResult.messages[mIdx];
+      if (msg.role === 'toolResult' && msg.toolName === 'subagent' && msg.details !== undefined) {
+        changes.push(...deriveFileChangesFromSubagentResult(
+          { details: msg.details },
+          messageId,
+          timestamp,
+          `${toolCallId}-sa${rIdx}-m${mIdx}`,
+        ));
+        continue;
+      }
       if (msg.role !== 'assistant') continue;
       if (!Array.isArray(msg.content)) continue;
 

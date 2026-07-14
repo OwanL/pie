@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 
 import { DEFAULT_PRUNING_SETTINGS, type PruningMode, type PruningSettings, type ThinkingLevel } from '../../shared/protocol';
 import { THINKING_LEVEL_SET } from '../../shared/thinking-level.js';
+import { updateSettingsJsonObject } from '../../shared/settings-json-update';
 import { parseJsonOrThrow } from '../util/error-message';
 import { resolveSettingsPath } from '../util/settings-path';
 
@@ -117,74 +118,54 @@ export async function writePruningSettings(
     throw new Error('PI_CODING_AGENT_DIR is not set; cannot write pruning settings (set it to the pi config directory that contains settings.json).');
   }
 
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = parseJsonOrThrow<Record<string, unknown>>(await fs.readFile(settingsPath, 'utf8'), settingsPath);
-  } catch {
-    // File may not exist yet — start fresh.
-  }
-
-  const pruning = (existing.pruning && typeof existing.pruning === 'object'
-    ? { ...(existing.pruning as Record<string, unknown>) }
-    : {}) as Record<string, unknown>;
-
-  if (updates.mode !== undefined) {
-    pruning.mode = updates.mode;
-  }
-
-  if (updates.skillCeiling !== undefined) {
-    const skills = (pruning.skills && typeof pruning.skills === 'object'
-      ? { ...(pruning.skills as Record<string, unknown>) }
+  await updateSettingsJsonObject(settingsPath, (existing) => {
+    const pruning = (existing.pruning && typeof existing.pruning === 'object'
+      ? { ...(existing.pruning as Record<string, unknown>) }
       : {}) as Record<string, unknown>;
-    skills.ceiling = updates.skillCeiling;
-    pruning.skills = skills;
-  }
 
-  if (updates.toolCeiling !== undefined) {
-    const tools = (pruning.tools && typeof pruning.tools === 'object'
-      ? { ...(pruning.tools as Record<string, unknown>) }
-      : {}) as Record<string, unknown>;
-    tools.ceiling = updates.toolCeiling;
-    pruning.tools = tools;
-  }
+    if (updates.mode !== undefined) {
+      pruning.mode = updates.mode;
+    }
 
-  if (updates.skillAlwaysKeep !== undefined) {
-    const skills = (pruning.skills && typeof pruning.skills === 'object'
-      ? { ...(pruning.skills as Record<string, unknown>) }
-      : {}) as Record<string, unknown>;
-    skills.alwaysKeep = [...updates.skillAlwaysKeep];
-    pruning.skills = skills;
-  }
+    if (updates.skillCeiling !== undefined) {
+      const skills = (pruning.skills && typeof pruning.skills === 'object'
+        ? { ...(pruning.skills as Record<string, unknown>) }
+        : {}) as Record<string, unknown>;
+      skills.ceiling = updates.skillCeiling;
+      pruning.skills = skills;
+    }
 
-  if (updates.toolAlwaysKeep !== undefined) {
-    const tools = (pruning.tools && typeof pruning.tools === 'object'
-      ? { ...(pruning.tools as Record<string, unknown>) }
-      : {}) as Record<string, unknown>;
-    tools.alwaysKeep = [...updates.toolAlwaysKeep];
-    pruning.tools = tools;
-  }
+    if (updates.toolCeiling !== undefined) {
+      const tools = (pruning.tools && typeof pruning.tools === 'object'
+        ? { ...(pruning.tools as Record<string, unknown>) }
+        : {}) as Record<string, unknown>;
+      tools.ceiling = updates.toolCeiling;
+      pruning.tools = tools;
+    }
 
-  if (updates.model !== undefined) {
-    pruning.model = updates.model;
-  }
+    if (updates.skillAlwaysKeep !== undefined) {
+      const skills = (pruning.skills && typeof pruning.skills === 'object'
+        ? { ...(pruning.skills as Record<string, unknown>) }
+        : {}) as Record<string, unknown>;
+      skills.alwaysKeep = [...updates.skillAlwaysKeep];
+      pruning.skills = skills;
+    }
 
-  if (updates.provider !== undefined) {
-    pruning.provider = updates.provider;
-  }
+    if (updates.toolAlwaysKeep !== undefined) {
+      const tools = (pruning.tools && typeof pruning.tools === 'object'
+        ? { ...(pruning.tools as Record<string, unknown>) }
+        : {}) as Record<string, unknown>;
+      tools.alwaysKeep = [...updates.toolAlwaysKeep];
+      pruning.tools = tools;
+    }
 
-  if (updates.thinkingLevel !== undefined) {
-    pruning.thinkingLevel = updates.thinkingLevel;
-  }
+    if (updates.model !== undefined) pruning.model = updates.model;
+    if (updates.provider !== undefined) pruning.provider = updates.provider;
+    if (updates.thinkingLevel !== undefined) pruning.thinkingLevel = updates.thinkingLevel;
+    if (updates.prepassTimeoutSec !== undefined) pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
+    if (updates.autoSkipBelowTokens !== undefined) pruning.autoSkipBelowTokens = updates.autoSkipBelowTokens;
 
-  if (updates.prepassTimeoutSec !== undefined) {
-    pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
-  }
-
-  if (updates.autoSkipBelowTokens !== undefined) {
-    pruning.autoSkipBelowTokens = updates.autoSkipBelowTokens;
-  }
-
-  existing.pruning = pruning;
-  await fs.writeFile(settingsPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+    return { ...existing, pruning };
+  });
   return await readPruningSettings();
 }

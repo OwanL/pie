@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveModel, readAlwaysParentModel, type SelectionContext } from "../src/execute.js";
 import type { AgentConfig } from "../agents.js";
+import { installProviderCapacityBridge } from "../../../shared/provider-capacity-bridge.js";
 
 const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = "PIE_SUBAGENT_ALWAYS_PARENT_MODEL";
 
@@ -45,6 +46,76 @@ test("resolveModel short-circuits to parent model when alwaysParentModel is true
 	assert.equal(resolved.modelOverride, "parent-model");
 	assert.equal(resolved.selection.fallback, true);
 	assert.equal(resolved.selection.modelId, "parent-model");
+	assert.deepEqual(resolved.selection.pool, []);
+});
+
+test("resolveModel routes around saturated providers when enabled", async (t) => {
+	const uninstall = installProviderCapacityBridge(() => ({
+		busy: { immediatelyClaimable: false },
+		open: { immediatelyClaimable: true },
+	}));
+	t.after(uninstall);
+	const resolved = await resolveModel(
+		makeAgent(),
+		makeSelectionCtx({
+			routeAroundSaturatedProviders: true,
+			registryModels: [
+				{ id: "busy-model", provider: "busy" },
+				{ id: "open-model", provider: "open" },
+			],
+			bucketAssignments: { small: [], medium: ["busy-model", "open-model"], frontier: [] },
+		}),
+		"parent-model",
+		"medium",
+	);
+
+	assert.equal(resolved.modelOverride, "open-model");
+	assert.deepEqual(resolved.selection.pool, ["open-model"]);
+});
+
+test("resolveModel keeps the original bucket when every provider is saturated", async (t) => {
+	const uninstall = installProviderCapacityBridge(() => ({
+		busyA: { immediatelyClaimable: false },
+		busyB: { immediatelyClaimable: false },
+	}));
+	t.after(uninstall);
+	const resolved = await resolveModel(
+		makeAgent(),
+		makeSelectionCtx({
+			routeAroundSaturatedProviders: true,
+			registryModels: [
+				{ id: "model-a", provider: "busyA" },
+				{ id: "model-b", provider: "busyB" },
+			],
+			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+		}),
+		"parent-model",
+		"medium",
+	);
+
+	assert.deepEqual(resolved.selection.pool, ["model-a", "model-b"]);
+	assert.equal(resolved.selection.fallback, false);
+});
+
+test("alwaysParentModel takes precedence over live capacity routing", async (t) => {
+	const uninstall = installProviderCapacityBridge(() => ({
+		parent: { immediatelyClaimable: false },
+		open: { immediatelyClaimable: true },
+	}));
+	t.after(uninstall);
+	const resolved = await resolveModel(
+		makeAgent(),
+		makeSelectionCtx({
+			alwaysParentModel: true,
+			routeAroundSaturatedProviders: true,
+			registryModels: [{ id: "open-model", provider: "open" }],
+			bucketAssignments: { small: [], medium: ["open-model"], frontier: [] },
+		}),
+		"parent-model",
+		"medium",
+	);
+
+	assert.equal(resolved.modelOverride, "parent-model");
 	assert.deepEqual(resolved.selection.pool, []);
 });
 

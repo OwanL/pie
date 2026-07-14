@@ -38,6 +38,99 @@ function topPrunedNames(rows: PreparedPruningEventRow[], field: 'prunedSkillName
     .slice(0, limit);
 }
 
+export interface PruningRecoveryMetrics {
+  toolRecoveries: number;
+  toolPruningDecisions: number;
+  toolRecoveriesPerDecision: number | null;
+  skillMisses: number;
+  skillReadAttempts: number;
+  skillMissRate: number | null;
+}
+
+export function pruningRecoveryMetrics(
+  decisionRows: PreparedPruningEventRow[],
+  signals: PreparedPruningSignalRow[],
+): PruningRecoveryMetrics {
+  let skillMisses = 0;
+  let toolRecoveries = 0;
+  let successfulSkillReads = 0;
+  for (const signal of signals) {
+    if (signal.event === 'skill_miss' || signal.event === 'shadow_miss_candidate') skillMisses += 1;
+    else if (signal.event === 'tool_recovered') toolRecoveries += 1;
+    else if (signal.event === 'skill_read') successfulSkillReads += 1;
+  }
+  const toolPruningDecisions = decisionRows.filter((row) => row.toolCountPruned >= 1).length;
+  const skillReadAttempts = successfulSkillReads + skillMisses;
+  return {
+    toolRecoveries,
+    toolPruningDecisions,
+    toolRecoveriesPerDecision: toolPruningDecisions > 0 ? toolRecoveries / toolPruningDecisions : null,
+    skillMisses,
+    skillReadAttempts,
+    skillMissRate: skillReadAttempts > 0 ? skillMisses / skillReadAttempts : null,
+  };
+}
+
+/** Separate views preserve the distinct ratio and percentage units. */
+export function pruningRecoverySpec(metrics: PruningRecoveryMetrics) {
+  const views: Array<Record<string, unknown>> = [];
+  if (metrics.toolRecoveriesPerDecision !== null) {
+    views.push({
+      width: 'container',
+      height: 85,
+      title: 'Tool recovery frequency',
+      data: {
+        values: [{
+          label: 'Tool recoveries',
+          value: metrics.toolRecoveriesPerDecision,
+          events: metrics.toolRecoveries,
+          decisions: metrics.toolPruningDecisions,
+        }],
+      },
+      mark: { type: 'bar' as const, cornerRadiusEnd: 3, opacity: 0.85, color: CHART_COLORS.accent },
+      encoding: {
+        y: { field: 'label', type: 'nominal' as const, title: null },
+        x: { field: 'value', type: 'quantitative' as const, title: 'Tool recoveries per tool-pruning decision', axis: { format: '.2f' } },
+        tooltip: [
+          { field: 'value', type: 'quantitative' as const, title: 'Recoveries / decision', format: '.2f' },
+          { field: 'events', type: 'quantitative' as const, title: 'Tool recovery events' },
+          { field: 'decisions', type: 'quantitative' as const, title: 'Tool-pruning decisions' },
+        ],
+      },
+    });
+  }
+  if (metrics.skillMissRate !== null) {
+    views.push({
+      width: 'container',
+      height: 85,
+      title: 'Skill miss share',
+      data: {
+        values: [{
+          label: 'Skill misses',
+          value: metrics.skillMissRate,
+          misses: metrics.skillMisses,
+          attempts: metrics.skillReadAttempts,
+        }],
+      },
+      mark: { type: 'bar' as const, cornerRadiusEnd: 3, opacity: 0.85, color: CHART_COLORS.coral },
+      encoding: {
+        y: { field: 'label', type: 'nominal' as const, title: null },
+        x: { field: 'value', type: 'quantitative' as const, title: 'Skill miss rate (misses / read attempts)', scale: { domain: [0, 1] }, axis: { format: '.0%' } },
+        tooltip: [
+          { field: 'value', type: 'quantitative' as const, title: 'Miss rate', format: '.0%' },
+          { field: 'misses', type: 'quantitative' as const, title: 'Skill misses' },
+          { field: 'attempts', type: 'quantitative' as const, title: 'Skill read attempts' },
+        ],
+      },
+    });
+  }
+  return views.length === 0 ? null : {
+    vconcat: views,
+    spacing: 24,
+    resolve: { scale: { x: 'independent' as const } },
+  };
+}
+
 export const pruningCharts: ChartEntry[] = [
   {
     id: 'chart-pruning-tokens-trend',
@@ -149,74 +242,19 @@ export const pruningCharts: ChartEntry[] = [
   {
     id: 'chart-pruning-recovery-rate',
     render: async (ctx: ChartContext) => {
-      const decisionRows = filteredPruning(ctx);
-      const signals = filteredPruningSignals(ctx);
-      let skillMiss = 0;
-      let shadowMiss = 0;
-      let toolRecovered = 0;
-      let skillRead = 0;
-      for (const s of signals) {
-        if (s.event === 'skill_miss') skillMiss += 1;
-        else if (s.event === 'shadow_miss_candidate') shadowMiss += 1;
-        else if (s.event === 'tool_recovered') toolRecovered += 1;
-        else if (s.event === 'skill_read') skillRead += 1;
-      }
-      // "Prunes that were recovered" rate = tool_recovered events / decisions that pruned >=1 tool.
-      const decisionsThatPrunedTools = decisionRows.filter((r) => r.toolCountPruned >= 1).length;
-      const recoveredRate = decisionsThatPrunedTools > 0 ? toolRecovered / decisionsThatPrunedTools : null;
-      const missDenominator = skillRead + skillMiss + shadowMiss;
-      const missRate = missDenominator > 0 ? (skillMiss + shadowMiss) / missDenominator : null;
-      const rateText = recoveredRate === null ? 'n/a (no tool-pruning decisions)' : `${Math.round(recoveredRate * 100)}%`;
-      const missRateText = missRate === null ? 'n/a (no skill reads)' : `${Math.round(missRate * 100)}%`;
+      const metrics = pruningRecoveryMetrics(filteredPruning(ctx), filteredPruningSignals(ctx));
+      const recoveriesText = metrics.toolRecoveriesPerDecision === null
+        ? 'n/a (no tool-pruning decisions)'
+        : metrics.toolRecoveriesPerDecision.toFixed(2);
+      const missRateText = metrics.skillMissRate === null
+        ? 'n/a (no skill read attempts)'
+        : `${Math.round(metrics.skillMissRate * 100)}%`;
       ctx.setNote(
         'pruning-recovery-rate-note',
-        `Over-pruning signals: ${toolRecovered} tool recoveries across ${decisionsThatPrunedTools} tool-pruning decisions (recovered rate ${rateText}); ${skillMiss + shadowMiss} skill misses of ${missDenominator} skill reads (miss rate ${missRateText}).`,
+        `Over-pruning signals: ${metrics.toolRecoveries} tool recoveries across ${metrics.toolPruningDecisions} tool-pruning decisions (${recoveriesText} recoveries/decision); ${metrics.skillMisses} skill misses across ${metrics.skillReadAttempts} read attempts (${missRateText}). Separate views use ratio and percent units respectively.`,
         ctx.renderToken,
       );
-      const recoveredRateValue = recoveredRate === null ? 0 : recoveredRate;
-      const missRateValue = missRate === null ? 0 : missRate;
-      const values = [
-        {
-          signal: 'Recovered rate',
-          rate: recoveredRateValue,
-          count: toolRecovered,
-          denominator: decisionsThatPrunedTools,
-        },
-        {
-          signal: 'Miss rate',
-          rate: missRateValue,
-          count: skillMiss + shadowMiss,
-          denominator: missDenominator,
-        },
-      ];
-      const signalDomain = ['Recovered rate', 'Miss rate'];
-      const signalRange = [CHART_COLORS.accent, CHART_COLORS.coral];
-      const spec = values.every((v) => v.count === 0) ? null : {
-        width: 'container',
-        height: categoricalHeight(values.length, 32),
-        data: { values },
-        mark: { type: 'bar' as const, cornerRadiusEnd: 3, opacity: 0.85 },
-        encoding: {
-          y: { field: 'signal', type: 'nominal' as const, sort: signalDomain, title: null, axis: { labelLimit: 300 } },
-          x: {
-            field: 'rate',
-            type: 'quantitative' as const,
-            title: 'Rate',
-            // `recoveredRate` is a ratio (tool recoveries ÷ tool-pruning decisions),
-            // not a proportion — one decision can recover multiple tools, so it
-            // can exceed 1.0. Size the domain to the data so >100% bars don't clip.
-            scale: { domain: [0, Math.max(1, recoveredRateValue, missRateValue)] },
-            axis: { format: '.0%' },
-          },
-          color: { field: 'signal', type: 'nominal' as const, scale: { domain: signalDomain, range: signalRange }, legend: null },
-          tooltip: [
-            { field: 'signal', type: 'nominal' as const, title: 'Signal' },
-            { field: 'rate', type: 'quantitative' as const, title: 'Rate', format: '.0%' },
-            { field: 'count', type: 'quantitative' as const, title: 'Events' },
-            { field: 'denominator', type: 'quantitative' as const, title: 'Denominator' },
-          ],
-        },
-      };
+      const spec = pruningRecoverySpec(metrics);
       await ctx.renderSpec('chart-pruning-recovery-rate', spec, 'No over-pruning signals match the current filters.', ctx.renderToken);
     },
   },

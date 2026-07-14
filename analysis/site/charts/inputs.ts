@@ -1,5 +1,5 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight } from '../lib.ts';
+import { CHART_COLORS, categoricalHeight, modelFamilyKey } from '../lib.ts';
 
 export const inputCharts: ChartEntry[] = [
   {
@@ -11,7 +11,7 @@ export const inputCharts: ChartEntry[] = [
         if (run.imageInputCount <= 0) {
           continue;
         }
-        const model = run.modelId?.trim() || '(unknown)';
+        const model = modelFamilyKey(run);
         const e = map.get(model) ?? { images: 0, bytes: 0, runs: 0 };
         e.images += run.imageInputCount;
         e.bytes += run.imageInputBytes;
@@ -27,7 +27,7 @@ export const inputCharts: ChartEntry[] = [
         }))
         .sort((a, b) => b.images - a.images);
       const totalImages = rows.reduce((s, r) => s + r.images, 0);
-      ctx.setNote('multimodal-inputs-note', `Image inputs by model; ${totalImages} images across ${rows.length} models.`, ctx.renderToken);
+      ctx.setNote('multimodal-inputs-note', `Image inputs by model family; ${totalImages} images across ${rows.length} families.`, ctx.renderToken);
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: categoricalHeight(rows.length, 36, 180),

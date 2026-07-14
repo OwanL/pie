@@ -10,6 +10,7 @@ import { ResizeHandle } from '../../components/resize-handle';
 import { useResizableHeight } from '../../components/use-resizable-height';
 import { useCollapsibleOpen } from '../use-collapsible-open';
 import { countTextLines } from '../../../../shared/tool-call-analysis';
+import { useCommittedReasoningLeaf } from '../commit-registry';
 
 interface ReasoningBlockProps {
   text: string;
@@ -30,6 +31,16 @@ const REASONING_PARSE_THROTTLE_MS = 100;
  *  always rendered, even without an explicit streaming-end signal. */
 const REASONING_PARSE_TRAILING_MS = 120;
 
+/** The commit leaf must describe the text actually visible under its policy. */
+export function reasoningCommitEvidence(text: string, open: boolean): {
+  text: string;
+  policy: 'displayed' | 'collapsed';
+} {
+  return open
+    ? { text, policy: 'displayed' }
+    : { text: reasoningSummary(text), policy: 'collapsed' };
+}
+
 export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu, streaming = false }: ReasoningBlockProps) {
   const [open, setOpen] = useCollapsibleOpen(collapsibleKey, autoExpand);
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
@@ -40,7 +51,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
   // is always rendered. When closed, render '' (no parse). This mirrors the
   // BufferedTextPart throttle but reasoning reveals the full text immediately
   // (no progressive reveal), so only the parse is throttled.
-  const [html, setHtml] = useState(() => (open ? renderMarkdown(text) : ''));
+  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(text) : '', text }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   // Latest text read by the scheduled (trailing) parse so it always reflects
@@ -54,7 +65,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      setHtml('');
+      setRendered({ html: '', text: textRef.current });
       return;
     }
 
@@ -66,7 +77,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      setHtml(renderMarkdown(textRef.current));
+      setRendered({ html: renderMarkdown(textRef.current), text: textRef.current });
       return;
     }
 
@@ -77,7 +88,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       lastParseAtRef.current = Date.now();
-      setHtml(renderMarkdown(textRef.current));
+      setRendered({ html: renderMarkdown(textRef.current), text: textRef.current });
     }, REASONING_PARSE_TRAILING_MS);
   }, [text, open]);
 
@@ -98,8 +109,13 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
   // markdown while the assistant is still emitting reasoning tokens. Appended
   // after sanitization so the trusted span survives DOMPurify.
   const renderedHtml = streaming && open
-    ? `${html}<span class="reasoning-stream-cursor" aria-hidden="true"></span>`
-    : html;
+    ? `${rendered.html}<span class="reasoning-stream-cursor" aria-hidden="true"></span>`
+    : rendered.html;
+  const keyMatch = /^reasoning:(.*):(\d+)$/.exec(collapsibleKey);
+  const messageId = keyMatch?.[1] ?? collapsibleKey;
+  const partIndex = Number(keyMatch?.[2] ?? 0);
+  const commitEvidence = reasoningCommitEvidence(open ? rendered.text : text, open);
+  useCommittedReasoningLeaf(messageId, partIndex, commitEvidence.text, commitEvidence.policy);
 
   return (
     <Collapsible

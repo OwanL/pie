@@ -1,9 +1,10 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
+import { rewritePieHarnessPrompt } from '../../../shared/pie-harness-prompt.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
+import { updateSettingsJsonObject } from '../shared/settings-json-update';
 import {
   PROTOCOL_VERSION,
   type BusyChangedPayload,
@@ -44,7 +45,9 @@ import {
   type SdkSystemPromptModule,
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
+import { observeProviderTransport } from './provider-progress-bus.js';
 import { extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
+import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 import {
   type SessionContext,
   type SessionContextCreationReason,
@@ -66,7 +69,7 @@ import {
 import type { SessionEntryLike } from './transcript';
 import { createRuntimeFactory } from './runtime-factory.js';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
-import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper } from './session-opened.js';
+import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -152,6 +155,7 @@ export class BackendServer {
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
+  private stopProviderProgressObserver?: () => void;
 
   constructor(options: { sdkPath: string; cwd: string }) {
     this.sdkPath = options.sdkPath;
@@ -190,6 +194,40 @@ export class BackendServer {
         // Non-fatal: if models.json is missing or unreadable, the gate is
         // simply not installed — requests go direct (no concurrency cap).
         backendInfo('backend', 'providerGate.notInstalled', { error: (error as Error).message });
+      }
+    });
+
+    this.stopProviderProgressObserver = observeProviderTransport((observation) => {
+      const context = [...this.sessionContexts.values()].find((candidate) =>
+        candidate.session.sessionManager.getSessionId?.() === observation.sessionId,
+      );
+      const accumulator = context?.activeRequest?.liveTurnAccumulator;
+      const checkpointSeq = accumulator?.checkpoint().checkpointSeq ?? 0;
+      if (context && accumulator && checkpointSeq > 0) {
+        if (observation.kind === 'gate_queue') {
+          this.emit('live.semantic', accumulator.observe({ kind: 'turn.phase', phase: 'queued', inactivityBudgetMs: 120_000 }, observation.occurredAt));
+        } else if (observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
+          this.emit('live.semantic', accumulator.observe({ kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000 }, observation.occurredAt));
+        }
+      }
+      if (context && isBackendLivePipelineTraceEnabled()) {
+        recordBackendLivePipelineTrace({
+          stage: 'provider.phase.transition',
+          kind: 'transition',
+          identifiers: {
+            session: context.sessionPath,
+            ...(context.activeRequest?.id ? { request: context.activeRequest.id } : {}),
+          },
+          phase: observation.kind === 'gate_queue'
+            ? 'provider_gate_queue'
+            : observation.kind === 'headers_wait'
+              ? 'headers'
+              : observation.kind === 'headers_received'
+                ? 'pre_first_semantic'
+                : observation.kind === 'raw_chunk'
+                  ? 'semantic_stream'
+                  : 'terminal',
+        });
       }
     });
 
@@ -298,7 +336,13 @@ export class BackendServer {
       existing.willRetryWatchdogClear?.();
       existing.uiBridge?.cancelAll();
       existing.unsubscribe();
-      await existing.runtime.dispose();
+      // A provider teardown can wedge the old runtime. The replacement becomes
+      // authoritative immediately; old disposal is bounded best-effort and
+      // must not block local recovery or the next send.
+      void Promise.race([
+        existing.runtime.dispose(),
+        new Promise<void>((resolve) => { const timer = setTimeout(resolve, 5_000); timer.unref?.(); }),
+      ]).catch(() => undefined);
     }
 
     this.sessionContexts.set(context.sessionPath, context);
@@ -415,11 +459,12 @@ export class BackendServer {
       pinnedMessageId: this.getPinnedStreamingMessageId(context),
     });
 
+    const busy = context.session.isStreaming || !!context.activeRequest;
     return {
       sessionPath: context.sessionPath,
-      transcript: page.transcript,
+      transcript: busy ? page.transcript : normalizeDanglingTranscript(page.transcript),
       transcriptWindow: page.transcriptWindow,
-      busy: context.session.isStreaming || !!context.activeRequest,
+      busy,
     };
   }
 
@@ -519,20 +564,23 @@ export class BackendServer {
     const promptState = this.getSessionPromptState(context);
     const options = promptState._baseSystemPromptOptions;
     if (!options) {
-      return normalizePromptText(promptState._baseSystemPrompt);
+      const basePrompt = normalizePromptText(promptState._baseSystemPrompt);
+      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
     }
 
     try {
       const { buildSystemPrompt } = await this.getSystemPromptModule();
-      return normalizePromptText(buildSystemPrompt({
+      const basePrompt = normalizePromptText(buildSystemPrompt({
         cwd: options.cwd,
         selectedTools: options.selectedTools,
         toolSnippets: options.toolSnippets,
         promptGuidelines: options.promptGuidelines,
       }));
+      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
     } catch (error) {
       backendTrace('systemPrompt', 'harnessRead.failed', { level: 'debug', error: toErrorMessage(error) });
-      return normalizePromptText(promptState._baseSystemPrompt);
+      const basePrompt = normalizePromptText(promptState._baseSystemPrompt);
+      return basePrompt ? rewritePieHarnessPrompt(basePrompt, this.agentDir) : undefined;
     }
   }
 
@@ -691,25 +739,10 @@ export class BackendServer {
 
   private async writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings> {
     const settingsPath = path.join(this.agentDir, 'settings.json');
-    let existing: Record<string, unknown> = {};
-    try {
-      const raw = await fs.readFile(settingsPath, 'utf8');
-      existing = parseJsonOrThrow<Record<string, unknown>>(raw, settingsPath);
-    } catch (error) {
-      // may not exist yet
-      backendTrace('modelSettings', 'readExisting.failed', { level: 'warn', error: toErrorMessage(error) });
-    }
-    const merged = { ...existing, ...updates };
-    // Publish the complete JSON in one rename so concurrent session creation
-    // never observes the truncate/write window of writeFile(settingsPath).
-    // The unique sibling also allows overlapping backend instances safely.
-    const tempPath = `${settingsPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    try {
-      await fs.writeFile(tempPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
-      await fs.rename(tempPath, settingsPath);
-    } finally {
-      await fs.rm(tempPath, { force: true }).catch(() => undefined);
-    }
+    // Model updates run in the backend while pruning updates run in the
+    // extension host. Share the same cross-process lock so their
+    // read-modify-write cycles cannot silently overwrite each other.
+    await updateSettingsJsonObject(settingsPath, (existing) => ({ ...existing, ...updates }));
     return await this.readModelSettings();
   }
 
@@ -758,6 +791,41 @@ export class BackendServer {
   }
 
   private emit(event: string, payload?: unknown): void {
+    if (event === 'extension_ui.request' && payload && typeof payload === 'object') {
+      const request = payload as { sessionPath?: unknown; id?: unknown };
+      if (typeof request.sessionPath === 'string' && typeof request.id === 'string') {
+        const context = this.sessionContexts.get(request.sessionPath);
+        const accumulator = context?.activeRequest?.liveTurnAccumulator;
+        if (accumulator) {
+          if (context?.activeRequest?.semanticLeaseTimer) {
+            clearTimeout(context.activeRequest.semanticLeaseTimer);
+            context.activeRequest.semanticLeaseTimer = undefined;
+          }
+          this.emit('live.semantic', accumulator.observe({
+            kind: 'turn.extensionUi', uiRequestId: request.id, action: 'opened',
+          }, Date.now()));
+        }
+      }
+    }
+    if (isBackendLivePipelineTraceEnabled()) {
+      const scoped = payload && typeof payload === 'object' ? payload as Record<string, unknown> : undefined;
+      recordBackendLivePipelineTrace({
+        stage: 'backend.mapped',
+        kind: 'success',
+        identifiers: {
+          ...(typeof scoped?.sessionPath === 'string' ? { session: scoped.sessionPath } : {}),
+          ...(typeof scoped?.requestId === 'string' ? { request: scoped.requestId } : {}),
+          ...(typeof scoped?.turnId === 'string' ? { turn: scoped.turnId } : {}),
+          ...(typeof scoped?.attemptId === 'string' ? { attempt: scoped.attemptId } : {}),
+          ...(typeof scoped?.messageId === 'string' ? { message: scoped.messageId } : {}),
+          ...(typeof scoped?.toolCallId === 'string' ? { tool: scoped.toolCallId } : {}),
+        },
+        eventKind: backendTraceEventKind(event),
+        eventSeq: typeof scoped?.seq === 'number' && Number.isSafeInteger(scoped.seq) && scoped.seq >= 0
+          ? scoped.seq
+          : undefined,
+      });
+    }
     writeStdout({ event, payload });
   }
 
@@ -887,6 +955,8 @@ export class BackendServer {
 
     this.stopReviewWatcher?.();
     this.stopReviewWatcher = undefined;
+    this.stopProviderProgressObserver?.();
+    this.stopProviderProgressObserver = undefined;
 
     for (const context of contexts) {
       context.willRetryWatchdogClear?.();
@@ -895,4 +965,16 @@ export class BackendServer {
       await context.runtime.dispose();
     }
   }
+}
+
+function backendTraceEventKind(event: string) {
+  if (event === 'message.delta') return 'text' as const;
+  if (event === 'message.thinking') return 'reasoning' as const;
+  if (event === 'message.toolCallDelta') return 'tool_draft' as const;
+  if (event === 'tool.started') return 'tool_start' as const;
+  if (event === 'tool.progress') return 'tool_progress' as const;
+  if (event === 'tool.finished') return 'tool_terminal' as const;
+  if (event === 'message.started') return 'turn_start' as const;
+  if (event === 'message.finished' || event === 'message.aborted') return 'turn_terminal' as const;
+  return 'control' as const;
 }

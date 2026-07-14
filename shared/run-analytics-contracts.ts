@@ -58,11 +58,14 @@ export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
 export type PruningMode = 'auto' | 'shadow' | 'off' | 'custom';
 
 export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
+export type RunOutcomeSource = 'user' | 'agent';
 
 export interface RunOutcome {
   resolution: RunOutcomeResolution;
   /** Intended to be a user-facing ordinal score (e.g. 1–5). */
   satisfaction: number;
+  /** Who supplied the outcome. Absent denotes a user-authored outcome for wire compatibility. */
+  source?: RunOutcomeSource;
 }
 
 /** The kind of composer input attached to a user send; equal to `ComposerInput['kind']` in the extension protocol. */
@@ -377,6 +380,8 @@ export interface RunSnapshot {
   analyticsFactors: SessionAnalyticsFactors | null;
   /** Functional settings snapshot captured at run start; null for runs recorded before tracking existed. */
   functionalSettings: FunctionalSettingsSnapshot | null;
+  /** Privacy-safe size of the user-authored message that started this run, in Unicode code points. Optional for historical snapshots; content is never stored here. */
+  initialUserMessageChars?: number;
   sendCount: number;
   assistantTurnCount: number;
   assistantTurnDurationMs: number;

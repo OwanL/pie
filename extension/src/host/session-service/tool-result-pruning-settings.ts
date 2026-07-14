@@ -6,6 +6,7 @@ import {
   type ToolResultPruningRuleToggles,
   type ToolResultPruningSettings,
 } from '../../shared/protocol';
+import { updateSettingsJsonObject } from '../../shared/settings-json-update';
 import { parseJsonOrThrow } from '../util/error-message';
 import { resolveSettingsPath } from '../util/settings-path';
 
@@ -102,44 +103,38 @@ export async function writeToolResultPruningSettings(
     throw new Error('PI_CODING_AGENT_DIR is not set; cannot write tool-result pruning settings (set it to the pi config directory that contains settings.json).');
   }
 
-  let existing: Record<string, unknown> = {};
-  try {
-    existing = parseJsonOrThrow<Record<string, unknown>>(await fs.readFile(settingsPath, 'utf8'), settingsPath);
-  } catch {
-    // File may not exist yet — start fresh.
-  }
+  await updateSettingsJsonObject(settingsPath, (existing) => {
+    const toolResultPruning = (existing.toolResultPruning && typeof existing.toolResultPruning === 'object'
+      ? { ...(existing.toolResultPruning as Record<string, unknown>) }
+      : {}) as Record<string, unknown>;
 
-  const toolResultPruning = (existing.toolResultPruning && typeof existing.toolResultPruning === 'object'
-    ? { ...(existing.toolResultPruning as Record<string, unknown>) }
-    : {}) as Record<string, unknown>;
+    if (updates.enabled !== undefined) {
+      toolResultPruning.enabled = updates.enabled;
+    }
 
-  if (updates.enabled !== undefined) {
-    toolResultPruning.enabled = updates.enabled;
-  }
+    if (updates.profile !== undefined) {
+      toolResultPruning.profile = updates.profile;
+    }
 
-  if (updates.profile !== undefined) {
-    toolResultPruning.profile = updates.profile;
-  }
+    if (updates.rules !== undefined) {
+      const mergedRules = parseRuleToggles(toolResultPruning.rules);
+      const incoming = parseRuleToggles(updates.rules);
+      toolResultPruning.rules = {
+        ansi: updates.rules.ansi !== undefined ? incoming.ansi : mergedRules.ansi,
+        whitespace: updates.rules.whitespace !== undefined ? incoming.whitespace : mergedRules.whitespace,
+        blankRun: updates.rules.blankRun !== undefined ? incoming.blankRun : mergedRules.blankRun,
+        jsonMinify: updates.rules.jsonMinify !== undefined ? incoming.jsonMinify : mergedRules.jsonMinify,
+        lsLong: updates.rules.lsLong !== undefined ? incoming.lsLong : mergedRules.lsLong,
+        gitLog: updates.rules.gitLog !== undefined ? incoming.gitLog : mergedRules.gitLog,
+        grepGroup: updates.rules.grepGroup !== undefined ? incoming.grepGroup : mergedRules.grepGroup,
+      };
+    }
 
-  if (updates.rules !== undefined) {
-    const mergedRules = parseRuleToggles(toolResultPruning.rules);
-    const incoming = parseRuleToggles(updates.rules);
-    toolResultPruning.rules = {
-      ansi: updates.rules.ansi !== undefined ? incoming.ansi : mergedRules.ansi,
-      whitespace: updates.rules.whitespace !== undefined ? incoming.whitespace : mergedRules.whitespace,
-      blankRun: updates.rules.blankRun !== undefined ? incoming.blankRun : mergedRules.blankRun,
-      jsonMinify: updates.rules.jsonMinify !== undefined ? incoming.jsonMinify : mergedRules.jsonMinify,
-      lsLong: updates.rules.lsLong !== undefined ? incoming.lsLong : mergedRules.lsLong,
-      gitLog: updates.rules.gitLog !== undefined ? incoming.gitLog : mergedRules.gitLog,
-      grepGroup: updates.rules.grepGroup !== undefined ? incoming.grepGroup : mergedRules.grepGroup,
-    };
-  }
+    if (updates.tools !== undefined) {
+      toolResultPruning.tools = parseToolsAllowlist(updates.tools);
+    }
 
-  if (updates.tools !== undefined) {
-    toolResultPruning.tools = parseToolsAllowlist(updates.tools);
-  }
-
-  existing.toolResultPruning = toolResultPruning;
-  await fs.writeFile(settingsPath, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+    return { ...existing, toolResultPruning };
+  });
   return await readToolResultPruningSettings();
 }

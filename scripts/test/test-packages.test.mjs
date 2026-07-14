@@ -23,7 +23,7 @@ test('PACKAGE_DIRECTIVES covers the 13 run-tests.mjs package ids', () => {
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {
-  assert.equal(classifyFileToPackage('extension/test/app-smoke.test.ts'), 'extension');
+  assert.equal(classifyFileToPackage('extension/test/webview/components/app-smoke.test.ts'), 'extension');
   assert.equal(classifyFileToPackage('extension/src/backend/sdk.ts'), 'extension');
   assert.equal(classifyFileToPackage('analysis/test/pricing.test.ts'), 'analysis');
   assert.equal(classifyFileToPackage('analysis/scripts/build-db.ts'), 'analysis');

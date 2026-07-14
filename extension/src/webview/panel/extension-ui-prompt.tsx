@@ -21,7 +21,8 @@ interface ExtensionUIPromptProps {
    *  input); the bottom-bar prompt has none. */
   context?: string;
   /** Optional source label for the eyebrow (e.g. "worker · depth 2") so the
-   *  user can tell which subagent is asking. Supplied by the inline renderer. */
+   *  user can tell which subagent is asking. Inline cards provide the agent
+   *  name; the fixed reliability fallback uses a generic Subagent label. */
   sourceLabel?: string;
 }
 

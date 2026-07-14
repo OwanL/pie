@@ -14,6 +14,7 @@ import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
 import { ComposerSettingsMenu } from './settings-menu';
+import { SubagentProviderMenu } from './subagent-provider-menu';
 
 interface ComposerToolbarStatus {
   text: string;
@@ -22,6 +23,7 @@ interface ComposerToolbarStatus {
 }
 
 interface ComposerToolbarProps {
+  sessionPath: string | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
@@ -47,6 +49,7 @@ interface ComposerToolbarProps {
 }
 
 export function ComposerToolbar({
+  sessionPath,
   prefs,
   pruningSettings,
   pruningCatalog,
@@ -127,10 +130,17 @@ export function ComposerToolbar({
         )}
 
         <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
+
+        <SubagentProviderMenu
+          sessionPath={sessionPath}
+          prefs={prefs}
+          availableModels={availableModels}
+          onSetPrefs={onSetPrefs}
+        />
       </div>
 
       <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">
-        {/* Cumulative cost, then live stats; context window pinned rightmost */}
+        {/* Cumulative cost, then live stats; context window pinned rightmost. */}
         {sessionCostIndicator && !prefs.hideSessionCost && (
           <ToolbarIndicatorChip
             kind="cost"

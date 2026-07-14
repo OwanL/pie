@@ -1,5 +1,5 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, categoricalHeight } from '../lib.ts';
+import { CHART_COLORS, categoricalHeight, modelFamilyKey } from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
 
 function firstAttemptByModel(runs: PreparedRunRow[]) {
@@ -8,7 +8,7 @@ function firstAttemptByModel(runs: PreparedRunRow[]) {
     if (run.status === 'open') {
       continue;
     }
-    const model = run.modelId?.trim() || '(unknown)';
+    const model = modelFamilyKey(run);
     const e = map.get(model) ?? { success: 0, total: 0 };
     e.total += 1;
     if (run.firstAttemptSuccess) {
@@ -58,7 +58,7 @@ export const interruptionCharts: ChartEntry[] = [
     id: 'chart-first-attempt-by-model',
     render: async (ctx: ChartContext) => {
       const rows = firstAttemptByModel(ctx.runs);
-      ctx.setNote('first-attempt-by-model-note', `First-attempt success rate by model (≥2 runs): no interruptions, edits, or truncations and resolved.`, ctx.renderToken);
+      ctx.setNote('first-attempt-by-model-note', `First-attempt success rate by model family (≥2 runs): no interruptions, edits, or truncations and resolved.`, ctx.renderToken);
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: categoricalHeight(rows.length),

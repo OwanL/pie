@@ -1,7 +1,8 @@
-import type { ContextWindowUsage, ThinkingLevel } from '../shared/protocol';
+import type { ContextWindowUsage, ThinkingLevel, ToolFinishedPayload } from '../shared/protocol';
 import type { DisplayTranscriptCache } from './transcript-window';
 import type { ExtensionUIBridge } from './extension-ui-bridge';
 import type { SdkBuildSystemPromptOptions, SdkRuntime, SdkSession } from './sdk';
+import type { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 
 export interface ActiveRequest {
   id: string;
@@ -12,8 +13,21 @@ export interface ActiveRequest {
   lastAssistantMessageId?: string;
   currentMessageStartedAt?: number;
   customMessageIndex?: number;
+  /** Stable session-entry id of the pruning-result already forwarded live. */
+  emittedPruningResultEntryId?: string;
   /** Epoch ms when each in-flight tool call began, keyed by toolCallId. */
   toolStartTimes?: Map<string, number>;
+  /** Host-render grouping assigned before semantic tool publication. */
+  toolParallelGroupByCallId?: Map<string, string>;
+  /** Tool name/input captured at execution start. Repeated on tool.finished so
+   *  the host never has to recover analytics metadata from a transcript window. */
+  toolStartMetadata?: Map<string, { name: string; input: unknown }>;
+  /** Terminal candidates withheld until the SDK publishes the persisted
+   * toolResult message_end with its stable sessionEntryId. */
+  pendingDurableToolTerminals?: Map<string, ToolFinishedPayload>;
+  /** Once true, this request no longer rescans the SDK branch for the single
+   *  pruning-result entry on every agentic turn. */
+  pruningResultLookupComplete?: boolean;
   /**
    * Epoch ms when the current turn-latency window opened: the last
    * `tool_execution_end` (overwritten per tool so the most recent wins), or the
@@ -48,6 +62,11 @@ export interface ActiveRequest {
    *  is actively streaming. Cleared in `session-event-handler.ts` on the first
    *  `message_start`, and defensively in `clearActiveRequest`. */
   promptSafetyTimer?: ReturnType<typeof setTimeout>;
+  /** In-memory sequenced authority for the current live turn. Never persisted. */
+  liveTurnAccumulator?: BackendLiveTurnAccumulator;
+  /** Provider semantic inactivity lease; raw HTTP chunks never renew it. */
+  semanticLeaseTimer?: ReturnType<typeof setTimeout>;
+  semanticLeaseGeneration?: number;
 }
 
 export interface SessionContext {
@@ -84,6 +103,10 @@ export interface SessionContext {
    *  back to the exact optimistic message. Cleared on interrupt/clearQueue.
    *  Absent/empty → fall back to FIFO matching in the host reducer. */
   queuedLocalIds?: string[];
+  /** Short-lived in-memory terminal checkpoint retained for host gap repair. */
+  terminalLiveTurn?: { accumulator: BackendLiveTurnAccumulator; expiresAt: number };
+  /** Replacement runtime created after provider abort teardown failed. */
+  recoveryPromise?: Promise<SessionContext>;
 }
 
 export interface SessionPromptState {

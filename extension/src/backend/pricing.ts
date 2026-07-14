@@ -26,8 +26,8 @@ import type { ModelPricingRecord } from '../../../shared/pricing-core.js';
 import { parseJsonOrThrow } from '../shared/error-message';
 
 // Re-export the shared core under the original public names so existing
-// consumers (subagent-profiles.ts, extension/test/pricing.test.ts,
-// extension/test/backend-pricing-units.test.ts) keep working unchanged.
+// consumers (subagent-profiles.ts, extension/test/backend/models/pricing.test.ts,
+// extension/test/backend/models/backend-pricing-units.test.ts) keep working unchanged.
 export { estimateNormalizedCost, parseModelPricing } from '../../../shared/pricing-core.js';
 export type { ModelPricingRecord, ModelTokenPricing } from '../../../shared/pricing-core.js';
 

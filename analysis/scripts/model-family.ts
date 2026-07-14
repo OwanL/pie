@@ -91,6 +91,11 @@ export function loadModelFamilyMap(modelsJsonPath?: string): Map<string, ModelFa
  * Resolve the canonical family for a model id. Returns the declared family, or the model id
  * itself when the model is not in the registry (preserving distinctness for unknown models).
  * Returns `null` when `modelId` is null/blank so callers can mirror their null-model handling.
+ *
+ * Unknown path-prefixed ids (e.g. `umans/umans-glm-5.2`) try registry resolution of the suffix
+ * after the last `/` so provider-prefixed variants collapse into their declared family when the
+ * suffix is a known model id. Unknown slash ids whose suffix is not in the registry remain
+ * distinct (the full id is returned, no spurious collapse).
  */
 export function resolveModelFamily(
   modelId: string | null | undefined,
@@ -98,7 +103,15 @@ export function resolveModelFamily(
 ): string | null {
   const trimmed = modelId?.trim();
   if (!trimmed) return null;
-  return familyMap.get(trimmed)?.family ?? trimmed;
+  const direct = familyMap.get(trimmed);
+  if (direct) return direct.family;
+  const slashIndex = trimmed.lastIndexOf('/');
+  if (slashIndex >= 0) {
+    const suffix = trimmed.slice(slashIndex + 1);
+    const suffixEntry = familyMap.get(suffix);
+    if (suffixEntry) return suffixEntry.family;
+  }
+  return trimmed;
 }
 
 /**
@@ -107,7 +120,8 @@ export function resolveModelFamily(
  * when the model is not in the registry (provider unattributable). Mirrors
  * {@link resolveModelFamily} so the two lookups stay in lockstep: `modelFamily`
  * collapses provider-specific ids into one canonical family, while `provider`
- * retains the per-provider dimension for cost-rollup analytics.
+ * retains the per-provider dimension for cost-rollup analytics. Path-prefixed
+ * ids try suffix resolution just like {@link resolveModelFamily}.
  */
 export function resolveModelProvider(
   modelId: string | null | undefined,
@@ -115,5 +129,13 @@ export function resolveModelProvider(
 ): string | null {
   const trimmed = modelId?.trim();
   if (!trimmed) return null;
-  return familyMap.get(trimmed)?.provider ?? null;
+  const direct = familyMap.get(trimmed);
+  if (direct) return direct.provider;
+  const slashIndex = trimmed.lastIndexOf('/');
+  if (slashIndex >= 0) {
+    const suffix = trimmed.slice(slashIndex + 1);
+    const suffixEntry = familyMap.get(suffix);
+    if (suffixEntry) return suffixEntry.provider;
+  }
+  return null;
 }

@@ -2,20 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { PreparedRunRow } from '../scripts/contracts.ts';
-import { costTrendByProviderRows, groupCostByModel } from '../site/charts/cost.ts';
+import { costTrendByProviderRows, groupCostByModel, groupCostPerSessionByModel } from '../site/charts/cost.ts';
 
 /**
- * Minimal run factory: `groupCostByModel` only reads `status`, `modelId`,
- * `sessionPathHash`, and `estimatedCostUsd`, so the other PreparedRunRow fields
- * are irrelevant to this unit and are omitted via an `unknown` cast.
+ * Minimal run factory: the other PreparedRunRow fields are irrelevant to this
+ * transform unit and are omitted via an `unknown` cast.
  */
-function mkRun(model: string, session: string, cost: number | null, status = 'completed'): PreparedRunRow {
-  return { status, modelId: model, sessionPathHash: session, estimatedCostUsd: cost } as unknown as PreparedRunRow;
+function mkRun(
+  model: string,
+  session: string,
+  cost: number | null,
+  status = 'completed',
+  family: string | null = model,
+  totalCost: number | null = cost,
+): PreparedRunRow {
+  return {
+    status,
+    modelId: model,
+    modelFamily: family,
+    sessionPathHash: session,
+    estimatedCostUsd: cost,
+    totalEstimatedCostUsd: totalCost,
+  } as unknown as PreparedRunRow;
 }
 
 /** Like {@link mkRun} but also sets the fields `costTrendByProviderRows` reads (`startedDay`, `provider`). */
 function mkProviderRun(day: string, provider: string | null, cost: number | null, status = 'completed'): PreparedRunRow {
-  return { status, startedDay: day, provider, estimatedCostUsd: cost, sessionPathHash: 's', modelId: 'm' } as unknown as PreparedRunRow;
+  return { status, startedDay: day, provider, estimatedCostUsd: cost, totalEstimatedCostUsd: cost, sessionPathHash: 's', modelId: 'm', modelFamily: 'm' } as unknown as PreparedRunRow;
 }
 
 function approx(actual: number, expected: number, epsilon = 1e-9): void {
@@ -59,17 +72,22 @@ test('groupCostByModel treats each single-run session as its own unit', () => {
   assert.equal(beta.sessionCount, 3);
 });
 
-test('groupCostByModel reports zero cost and zero sessions for models with no pricing', () => {
+test('groupCostByModel omits models with no priced rows but keeps reported free runs at $0', () => {
+  assert.deepEqual(groupCostByModel([
+    mkRun('unpriced', 's1', null),
+    mkRun('unpriced', 's2', null),
+  ]), []);
+
   const rows = groupCostByModel([
-    mkRun('gamma', 's1', null),
-    mkRun('gamma', 's2', null),
+    mkRun('free', 's1', 99, 'completed', 'free', 0),
   ]);
-  const gamma = rows[0]!;
-  assert.equal(gamma.totalCostUsd, 0);
-  assert.equal(gamma.avgCostUsdPerSession, 0);
-  assert.equal(gamma.sessionCount, 0);
-  assert.equal(gamma.withCostCount, 0);
-  assert.equal(gamma.runCount, 2);
+  assert.equal(rows.length, 1);
+  const free = rows[0]!;
+  assert.equal(free.totalCostUsd, 0);
+  assert.equal(free.avgCostUsdPerSession, 0);
+  assert.equal(free.sessionCount, 1);
+  assert.equal(free.withCostCount, 1);
+  assert.equal(free.runCount, 1);
 });
 
 test('groupCostByModel excludes open runs', () => {
@@ -83,15 +101,46 @@ test('groupCostByModel excludes open runs', () => {
   approx(rows[0]!.totalCostUsd, 0.10);
 });
 
-test('groupCostByModel sorts by total spend descending and caps at 12 models', () => {
+test('groupCostByModel sorts by total spend descending and caps at 12 model families', () => {
   const runs: PreparedRunRow[] = [];
   for (let i = 0; i < 13; i += 1) {
-    // Higher index → higher cost, so model 12 should top the list.
-    runs.push(mkRun(`model-${i}`, `s-${i}`, i + 1));
+    // Higher index → higher cost, so family 12 should top the list.
+    runs.push(mkRun(`provider-model-${i}`, `s-${i}`, i + 1, 'completed', `family-${i}`));
   }
   const rows = groupCostByModel(runs);
-  assert.equal(rows.length, 12, 'should cap at 12 models');
-  assert.equal(rows[0]!.model, 'model-12', 'highest-spend model first');
+  assert.equal(rows.length, 12, 'should cap at 12 model families');
+  assert.equal(rows[0]!.model, 'family-12', 'highest-spend family first');
+});
+
+test('cost grouping collapses provider ids by family and requires complete totals', () => {
+  const rows = groupCostByModel([
+    mkRun('provider-a-model', 's-1', 0.10, 'completed', 'shared-family', 0.30),
+    mkRun('provider-b-model', 's-2', 0.20, 'completed', 'shared-family'),
+    mkRun('provider-c-model', 's-3', 50, 'completed', 'shared-family', null),
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.model, 'shared-family');
+  approx(rows[0]!.totalCostUsd, 0.50);
+  approx(rows[0]!.avgCostUsdPerSession, 0.25);
+  assert.equal(rows[0]!.withCostCount, 2, 'unknown total must not expose partial parent cost');
+  assert.equal(rows[0]!.runCount, 3);
+});
+
+test('per-session cost is independently top-12 instead of inheriting total-spend selection', () => {
+  const runs: PreparedRunRow[] = [];
+  for (let i = 0; i < 12; i += 1) {
+    // $60 total but only $30/session: these occupy the total-spend top 12.
+    runs.push(mkRun(`bulk-${i}`, `bulk-${i}-a`, 30));
+    runs.push(mkRun(`bulk-${i}`, `bulk-${i}-b`, 30));
+  }
+  // $50 total ranks 13th on spend, but $50/session is the highest per-session value.
+  runs.push(mkRun('rare-expensive', 'rare-session', 50));
+
+  assert.ok(!groupCostByModel(runs).some((row) => row.model === 'rare-expensive'));
+  const perSession = groupCostPerSessionByModel(runs);
+  assert.equal(perSession.length, 12);
+  assert.equal(perSession[0]!.model, 'rare-expensive');
+  assert.equal(perSession[0]!.avgCostUsdPerSession, 50);
 });
 
 test('costTrendByProviderRows groups daily cost by provider and sums across runs', () => {

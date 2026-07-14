@@ -98,7 +98,14 @@ export default function (pi: ExtensionAPI) {
         const maxTurns = typeof p.maxTurns === 'number' ? p.maxTurns : 40;
         try {
           const parsed = parseSessionTranscript(p.sessionPath, maxTurns);
-          return ok(renderTranscript(parsed), parsed);
+          // The rendered transcript is already the model-facing payload. Do not
+          // persist the same parsed messages again in tool details.
+          return ok(renderTranscript(parsed), {
+            sessionPath: p.sessionPath,
+            maxTurns,
+            returnedTurns: parsed.turns.length,
+            truncated: parsed.truncated,
+          });
         } catch (e) {
           return err((e as Error).message);
         }

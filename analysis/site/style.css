@@ -8,6 +8,7 @@
   --text-muted: #b9b1a3;
   --accent: #8de3ff;
   --accent2: #c0ff72;
+  --gold: #ffd479;
   --accent-light: rgba(141,227,255,0.10);
   --shadow: 0 18px 52px rgba(0,0,0,0.28);
   --radius: 14px;
@@ -55,6 +56,7 @@ body::before {
 
 .header,
 .filters,
+.coverage-banner,
 .metric-card,
 .chart,
 .notes {
@@ -219,6 +221,54 @@ button:hover {
   color: #07140b;
 }
 
+.coverage-banner {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(0, 2.2fr);
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  margin-bottom: 14px;
+  border-color: rgba(141,227,255,0.2);
+}
+
+.coverage-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.coverage-copy > strong {
+  font-size: 0.95rem;
+}
+
+.coverage-copy > span,
+.coverage-item > span {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.coverage-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.coverage-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(0,0,0,0.14);
+}
+
+.coverage-item > strong {
+  color: var(--accent);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .cards {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -277,6 +327,38 @@ button:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.dashboard-section {
+  margin: 22px 2px 0;
+  padding: 4px 2px 4px 16px;
+  border-left: 3px solid var(--accent2);
+}
+
+.dashboard-section:first-child {
+  margin-top: 6px;
+}
+
+.section-kicker {
+  margin: 0 0 3px;
+  color: var(--accent2);
+  font-size: 0.7rem;
+  font-weight: 780;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.dashboard-section h2 {
+  margin: 0;
+  font-size: clamp(1.15rem, 1.8vw, 1.45rem);
+  letter-spacing: -0.025em;
+}
+
+.dashboard-section > p:last-child {
+  max-width: 880px;
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.88rem;
 }
 
 .chart,
@@ -366,7 +448,7 @@ button:hover {
 
 .data-table {
   width: 100%;
-  min-width: 980px;
+  min-width: 1380px;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 0.82rem;
@@ -408,6 +490,15 @@ button:hover {
   background: var(--accent-light);
 }
 
+.data-table tbody tr.unranked-row {
+  background: rgba(255, 212, 121, 0.035);
+  color: var(--text-muted);
+}
+
+.data-table tbody tr.unranked-start > * {
+  border-top: 2px solid var(--gold);
+}
+
 .data-table tbody th {
   text-align: left;
 }
@@ -422,6 +513,14 @@ button:hover {
 .strong-cell {
   color: var(--accent2);
   font-weight: 760;
+}
+
+.unranked-row .rank-cell,
+.unranked-row .strong-cell,
+.eligibility-cell {
+  color: var(--gold);
+  font-weight: 720;
+  white-space: nowrap;
 }
 
 .model-name,
@@ -459,6 +558,14 @@ button:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .coverage-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .cards {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -484,6 +591,7 @@ button:hover {
 
   .header,
   .filters,
+  .coverage-banner,
   .chart,
   .notes {
     border-radius: 11px;
@@ -492,8 +600,14 @@ button:hover {
 
   .cards,
   .filters-grid,
-  .meta {
+  .meta,
+  .coverage-metrics {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-section {
+    margin-top: 14px;
+    padding-left: 12px;
   }
 
   .chart h3,

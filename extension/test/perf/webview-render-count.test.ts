@@ -47,7 +47,7 @@ import { installDom } from '../_helpers/dom';
 installDom();
 
 // MessageItemView renders markdown, which routes through DOMPurify. Stub it to
-// identity (same as test/app-smoke.test.ts) so we don't need a real sanitizer.
+// identity (same as test/webview/components/app-smoke.test.ts) so we don't need a real sanitizer.
 import DOMPurify from 'dompurify';
 DOMPurify.sanitize = ((html: string) => html) as typeof DOMPurify.sanitize;
 

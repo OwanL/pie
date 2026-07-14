@@ -15,6 +15,7 @@
 
 import type { Command } from './commands';
 import type { NoticeKind } from '../../shared/error-mapping';
+import type { LiveLifecycleWatermark, LiveTurnCheckpoint, TurnSemanticEnvelope } from '../../shared/live-pipeline-protocol';
 import type {
   ChatMessage,
   ToolCall,
@@ -263,7 +264,22 @@ export interface DuplicateSessionResultEvent {
   error?: string;
 }
 
+export interface LiveTurnCheckpointResultEvent {
+  kind: 'LiveTurnCheckpointResult';
+  corrId: string;
+  sessionPath: string;
+  turnId: string;
+  attemptId: string;
+  ok: boolean;
+  occurredAt: number;
+  status?: 'active' | 'terminal_grace' | 'inactive' | 'backend_restarted' | 'oversize';
+  checkpoint?: LiveTurnCheckpoint | null;
+  watermark?: LiveLifecycleWatermark | null;
+  error?: string;
+}
+
 export type EffectResultEvent =
+  | LiveTurnCheckpointResultEvent
   | SendResultEvent
   | EditResultEvent
   | InterruptResultEvent
@@ -673,6 +689,8 @@ export interface SessionsInterruptedEvent {
   sessionPaths: string[];
   /** Plain-language reason shown to the user (e.g. backend exit detail). */
   reason: string;
+  /** Effect-owned timestamp used for deterministic terminal tombstone expiry. */
+  occurredAt?: number;
 }
 
 /** Steering (FollowUp): the agent loop injected a queued follow-up user
@@ -685,6 +703,7 @@ export interface QueuedDeliveredEvent {
   kind: 'QueuedDelivered';
   sessionPath: string;
   text: string;
+  localId?: string;
 }
 
 /** The SDK began an auto-retry attempt (transient provider error). The
@@ -712,7 +731,19 @@ export interface RetryEndedEvent {
   finalError?: string;
 }
 
+export interface TurnSemanticEventReceived {
+  kind: 'TurnSemanticEventReceived';
+  envelope: TurnSemanticEnvelope;
+}
+
+export interface LiveLifecycleWatermarkReceived {
+  kind: 'LiveLifecycleWatermarkReceived';
+  watermark: LiveLifecycleWatermark;
+}
+
 export type BackendEvent =
+  | TurnSemanticEventReceived
+  | LiveLifecycleWatermarkReceived
   | MessageStartedEvent
   | MessageAbortedEvent
   | MessageDeltaEvent

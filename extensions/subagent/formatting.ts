@@ -4,7 +4,7 @@
 
 import * as os from "node:os";
 import type { Message } from "@mariozechner/pi-ai";
-import { PARALLEL_SUMMARY_PREVIEW, type DisplayItem } from "./types.js";
+import type { DisplayItem } from "./types.js";
 
 /** Max characters shown in a bash command preview. */
 const COMMAND_PREVIEW_MAX_LENGTH = 60;
@@ -120,35 +120,6 @@ export function getFinalOutput(messages: Message[]): string {
 		}
 	}
 	return "";
-}
-
-/** Environment key for overriding the parallel result preview length. */
-const PARALLEL_PREVIEW_ENV = "PI_SUBAGENT_PARALLEL_PREVIEW";
-
-/**
- * Resolve the max characters shown for each parallel result summary.
- *
- * Reads `PI_SUBAGENT_PARALLEL_PREVIEW` from the environment, falling back to
- * the `PARALLEL_SUMMARY_PREVIEW` default. A value of `0` disables truncation
- * entirely (full output per task — use with care for large outputs).
- */
-export function resolveParallelPreviewLimit(): number {
-	const raw = process.env[PARALLEL_PREVIEW_ENV];
-	if (raw === undefined || raw === "") return PARALLEL_SUMMARY_PREVIEW;
-	const n = Number(raw);
-	if (!Number.isFinite(n) || n < 0) return PARALLEL_SUMMARY_PREVIEW;
-	return n;
-}
-
-/**
- * Build a preview of `text` for parallel summary lines. Truncates to the
- * resolved preview limit and notes how many characters were elided so the
- * parent LLM knows the output was cut. A limit of `0` disables truncation.
- */
-export function previewText(text: string): string {
-	const limit = resolveParallelPreviewLimit();
-	if (limit === 0 || text.length <= limit) return text;
-	return `${text.slice(0, limit)}... (+${text.length - limit} chars)`;
 }
 
 export function getDisplayItems(messages: Message[]): DisplayItem[] {

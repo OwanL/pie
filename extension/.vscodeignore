@@ -1,0 +1,8 @@
+# Package only compiled runtime artifacts. package.json and README.md are
+# always retained by vsce.
+**
+!media/**
+!out/*.js
+!out/assets/**
+!out/webview/panel/.vite/manifest.json
+!out/webview/panel/assets/**

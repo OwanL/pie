@@ -227,10 +227,18 @@
   opacity: 0.7;
 }
 
+/* ── Expanded pruning diagnostics panel ─────────────────────────────────── */
+/* Replaces the former flat label/value grid with a scannable layout: a stat
+   tile row (kept/total + tokens saved + prepass meta), color-coded skill/tool
+   tag sections, contextual banners, and collapsed sub-sections for the
+   reasoning and raw prepass prompts/output. The collapsed chip
+   (PruningHeaderButton) is unchanged. */
+
 .pruning-detail-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
+  min-width: 0;
 }
 
 .pruning-diagnostics-panel {
@@ -253,16 +261,193 @@
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
 }
 
-.pruning-detail-row {
-  display: grid;
-  grid-template-columns: minmax(82px, auto) minmax(0, 1fr);
-  align-items: start;
-  min-width: 0;
-  column-gap: 10px;
-  row-gap: 2px;
+/* ── Banners: prepass error / keep-all safeguard ────────────────────────── */
+.pruning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--panel-radius-sm);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
-.pruning-detail-hint {
+.pruning-banner-icon {
+  flex: 0 0 auto;
+  line-height: 1.4;
+}
+
+.pruning-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pruning-banner-danger {
+  background: color-mix(in srgb, var(--panel-danger) 10%, transparent);
+  color: var(--panel-danger);
+}
+
+.pruning-banner-warning {
+  background: color-mix(in srgb, var(--panel-warning) 10%, transparent);
+  color: var(--panel-warning);
+}
+
+/* ── Stat row: at-a-glance kept/total tiles + prepass provenance ────────── */
+.pruning-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pruning-stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 9px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 50%, transparent);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-code-surface);
+}
+
+.pruning-stat-value {
+  font-family: var(--panel-font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--panel-foreground);
+}
+
+.pruning-stat-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--panel-muted);
+}
+
+.pruning-stat-tile-accent .pruning-stat-value {
+  color: var(--panel-accent);
+}
+
+.pruning-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  margin-left: auto;
+  text-align: right;
+}
+
+.pruning-meta-line {
+  font-family: var(--panel-font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--panel-muted);
+}
+
+.pruning-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-control-surface);
+  color: var(--panel-muted);
+  font-family: var(--panel-font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pruning-mode-shadow {
+  border-color: color-mix(in srgb, var(--panel-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+  color: var(--panel-accent);
+}
+
+.pruning-mode-off {
+  border-color: color-mix(in srgb, var(--panel-danger) 30%, transparent);
+  background: color-mix(in srgb, var(--panel-danger) 12%, transparent);
+  color: var(--panel-danger);
+}
+
+/* ── Category sections: Skills / Tools with kept + pruned tags ──────────── */
+.pruning-category {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.pruning-category-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pruning-category-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.45;
+  text-transform: uppercase;
+  color: var(--panel-muted);
+}
+
+.pruning-category-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--panel-muted) 80%, transparent);
+}
+
+.pruning-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pruning-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: var(--panel-radius-sm);
+  font-family: var(--panel-font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pruning-tag-kept {
+  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
+  color: color-mix(in srgb, var(--panel-accent) 88%, var(--panel-foreground));
+}
+
+.pruning-tag-pruned {
+  background: color-mix(in srgb, var(--panel-control-surface) 70%, transparent);
+  color: var(--panel-muted);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--panel-muted) 55%, transparent);
+}
+
+/* ── Raw output blocks (system/user prompt, raw LLM output, reasoning) ──── */
+.pruning-raw-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pruning-raw-label {
   color: var(--panel-muted);
   font-size: 10px;
   font-weight: 600;
@@ -270,18 +455,6 @@
   line-height: 1.45;
   text-transform: uppercase;
   white-space: nowrap;
-}
-
-.pruning-detail-text {
-  color: color-mix(in srgb, var(--panel-foreground) 70%, transparent);
-  font-size: 11px;
-  line-height: 1.35;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.pruning-detail-text-danger {
-  color: var(--panel-danger);
 }
 
 .pruning-raw-pre {
@@ -298,39 +471,21 @@
   overflow-wrap: anywhere;
 }
 
-.pruning-raw-toggle-button {
-  width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+/* ── Collapsible sub-sections (Reasoning, Prepass prompts and output) ───── */
+.pruning-sub-collapsible {
+  margin-top: 2px;
+}
+
+.pruning-sub-header {
   padding: 4px 6px;
-  border: none;
-  border-radius: var(--panel-radius-sm);
-  background: transparent;
-  color: var(--panel-muted);
-  cursor: pointer;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
-  text-align: left;
   text-transform: uppercase;
+  color: var(--panel-muted);
 }
 
-.pruning-raw-toggle-button:hover {
-  background: var(--panel-control-hover);
-}
-
-.pruning-raw-toggle-button:focus-visible {
-  outline: 1px solid var(--panel-accent);
-  outline-offset: 1px;
-}
-
-.pruning-raw-toggle {
-  margin-top: 4px;
-  border-radius: var(--panel-radius-sm);
-}
-
-.pruning-raw-content {
+.pruning-sub-body {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -339,15 +494,11 @@
   border-top: 1px solid color-mix(in srgb, var(--panel-border) 60%, transparent);
 }
 
-.pruning-raw-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
 @media (max-width: 520px) {
-  .pruning-detail-row {
-    grid-template-columns: 1fr;
+  .pruning-meta {
+    margin-left: 0;
+    align-items: flex-start;
+    text-align: left;
   }
 }
 

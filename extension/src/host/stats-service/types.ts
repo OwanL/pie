@@ -27,7 +27,7 @@ export interface SessionRunState {
 }
 
 export interface RunObserver {
-  prepareForSend(sessionPath: string, inputs: ComposerInput[]): string;
+  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): string;
   onAssistantTurnStarted(sessionPath: string, turnId: string): void;
   onSkillPruningUsage(
     sessionPath: string,

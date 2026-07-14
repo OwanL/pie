@@ -5,7 +5,6 @@ import { useMemo, useCallback } from 'preact/hooks';
 import type {
   ViewState,
   WebviewToHostMessage,
-  ChatMessageToolCallPart,
 } from '../../shared/protocol';
 import { resolvePanelSurface, resolveLoadingStatus } from './panel-state';
 import { isTranscriptHydrating } from './transcript/state';
@@ -15,6 +14,8 @@ import { isPendingTabPath } from '../../shared/tab-behavior';
 export function useAppBodyDerivedState(
   viewState: ViewState,
   postMessage: (msg: WebviewToHostMessage) => void,
+  registerInlineRequest: (requestId: string) => void,
+  unregisterInlineRequest: (requestId: string) => void,
 ) {
   const {
     sessions,
@@ -25,7 +26,6 @@ export function useAppBodyDerivedState(
     modelSettings,
     availableModels,
     pendingExtensionUIRequestsBySession,
-    pendingExtensionUIRequest,
     transcript,
     systemPrompts,
     transcriptLoaded,
@@ -64,35 +64,21 @@ export function useAppBodyDerivedState(
     availableModels,
   }), [activeModelId, activeThinkingLevel, settingsDefaultModel, settingsDefaultThinkingLevel, modelCount]);
 
-  // Only suppress the bottom-bar prompt when the request that would be shown
-  // there is itself a `select` that is rendered inline in the transcript. With
-  // toolCallId linking, only ask_user requests owned by a running tool call are
-  // handled inline; legacy or non-tool select prompts stay in the bottom bar.
-  //
-  // Memoized: the host posts a fresh `transcript` array reference on every
-  // snapshot (~7/sec while streaming), so an un-memoized `transcript.some()`
-  // would walk the whole transcript on every render even when nothing relevant
-  // changed. The deps are the three values this actually depends on.
-  const isAskUserHandledInline = useMemo(
-    () =>
-      !!activeSessionPath &&
-      pendingExtensionUIRequest?.method === 'select' &&
-      !!pendingExtensionUIRequest?.toolCallId &&
-      transcript.some((msg) =>
-        msg.parts?.some((p): p is ChatMessageToolCallPart =>
-          p.kind === 'toolCall' && p.toolCall.name === 'ask_user' && p.toolCall.status === 'running'
-        ),
-      ),
-    [activeSessionPath, pendingExtensionUIRequest, transcript],
-  );
-
   const askUserContextValue = useMemo(() => ({
     sessionPath: activeSessionPath,
     postMessage,
     pendingRequests: activeSessionPath
       ? (pendingExtensionUIRequestsBySession[activeSessionPath] ?? {})
       : {},
-  }), [activeSessionPath, postMessage, pendingExtensionUIRequestsBySession]);
+    registerInlineRequest,
+    unregisterInlineRequest,
+  }), [
+    activeSessionPath,
+    postMessage,
+    pendingExtensionUIRequestsBySession,
+    registerInlineRequest,
+    unregisterInlineRequest,
+  ]);
 
   // Stable signature of the active deferred-trigger set so the derived
   // `deferredSessionPaths` array + `activeSessionHasDeferredTriggers` boolean
@@ -129,7 +115,6 @@ export function useAppBodyDerivedState(
     needsSessionRecovery,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-    isAskUserHandledInline,
     askUserContextValue,
     noticeValue,
     transcriptHydrating,

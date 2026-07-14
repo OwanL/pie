@@ -10,6 +10,26 @@ import { reapTempLogs } from './host/util/temp-log-reaper';
 let extensionInstance: PieExtension | null = null;
 let processErrorHandlersRegistered = false;
 
+/** Normalize a filesystem path for case- and separator-insensitive comparison
+ *  (Windows stacks use backslashes; pie's extensionPath may differ in case). */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/').toLowerCase();
+}
+
+/** True if the error's stack trace contains a frame inside pie's own extension
+ *  directory. The extension host runs every extension in one Node.js process,
+ *  so a global `uncaughtException` handler catches other extensions' crashes
+ *  too (e.g. Copilot). This lets us distinguish pie's own crashes from foreign
+ *  ones so we don't mislabel them as "pie: uncaught exception". When the stack
+ *  is missing/ambiguous we conservatively return true so pie's own crashes are
+ *  still surfaced. */
+function originatesFromPie(err: unknown, piePath: string): boolean {
+  if (!piePath) return true;
+  const stack = err instanceof Error ? err.stack : undefined;
+  if (!stack) return true;
+  return normalizePath(stack).includes(piePath);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   initPieLogger({ devMode: context.extensionMode === 1 });
   // Apply the user-configured log verbosity. The level can also be changed
@@ -49,12 +69,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   if (!processErrorHandlersRegistered) {
     processErrorHandlersRegistered = true;
+    // Capture pie's own extension path once so the global uncaughtException
+    // handler can tell pie's own crashes apart from those thrown by *other*
+    // extensions sharing the extension-host process. Without this, pie
+    // misattributes foreign crashes (e.g. Copilot's) as "pie: uncaught
+    // exception". Foreign exceptions are still logged for diagnostics but
+    // left to VS Code's native extension-host error handling, which attributes
+    // them correctly.
+    const piePath = normalizePath(context.extensionPath);
     process.on('unhandledRejection', (reason) => {
       appendPieError('process', 'unhandledRejection', reason);
     });
     process.on('uncaughtException', (err) => {
       appendPieError('process', 'uncaughtException', err);
-      void vscode.window.showErrorMessage('pie: uncaught exception: ' + toErrorMessage(err));
+      if (originatesFromPie(err, piePath)) {
+        void vscode.window.showErrorMessage('pie: uncaught exception: ' + toErrorMessage(err));
+      }
     });
   }
 

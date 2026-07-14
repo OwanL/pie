@@ -38,6 +38,7 @@ import type {
   UserContentPart,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
+import type { LivePipelineState, LiveTurnPhase } from '../../shared/live-pipeline-protocol.js';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_PRUNING_SETTINGS,
@@ -377,6 +378,12 @@ export interface PendingState {
   promoted: Record<string, PendingOp>;
   /** In-flight `SetModel` lifecycles keyed by `corrId` (modal-confirm + RPC). */
   setModelByCorrId: Record<string, SetModelPending>;
+  /** Optimistically answered extension UI requests, restored if RPC fails. */
+  extensionUiResponseByCorrId: Record<string, {
+    sessionPath: string;
+    request: ExtensionUIRequestPayload;
+    priorPhase?: LiveTurnPhase;
+  }>;
   /** Maps aliased message IDs to { canonicalId, sessionPath } (for multi-turn continuations). */
   messageIdAlias: Record<string, { canonicalId: string; sessionPath: string }>;
   /** Tracks the first message of the current streaming turn per session. */
@@ -413,6 +420,8 @@ export interface ArchState {
   composer: ComposerState;
   fileChanges: FileChangesState;
   pending: PendingState;
+  /** Canonical host authority for active turn/tool work. */
+  livePipeline: LivePipelineState;
 }
 
 /** Returns a fresh `ArchState` with all sub-states at their defaults. */
@@ -462,10 +471,18 @@ export function createInitialArchState(): ArchState {
       expandedBySession: {},
       readFilePathsBySession: {},
     },
+    livePipeline: {
+      turnsBySession: {},
+      toolsByExecutionId: {},
+      pendingOwnerEvents: {},
+      terminalAttempts: {},
+      revisionBySession: {},
+    },
     pending: {
       ops: {},
       promoted: {},
       setModelByCorrId: {},
+      extensionUiResponseByCorrId: {},
       messageIdAlias: {},
       currentTurnBySession: {},
       requestIdToLocalId: {},

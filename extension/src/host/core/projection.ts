@@ -30,6 +30,7 @@ import type {
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
+import { projectTranscriptView } from './live-pipeline/projection.js';
 import type {
   ArchState,
   ComposerState,
@@ -209,6 +210,7 @@ interface ProjectionSignature {
   activeTranscriptWindow: TranscriptWindow;
   activeSystemPrompts: SystemPromptEntry[];
   activeEditingMessageId: string | null;
+  activeLiveRevision: number;
   // ── Brief F ───────────────────────────────────────────────────────────────
   // `prepassPhase` / `prepassStartedAt` / `prepassLatencyMs` are derived from
   // the active session's promoted op (`pending.promoted`, startedAt) and its
@@ -244,6 +246,7 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
     activeEditingMessageId: activePath
       ? state.transcript.editingMessageIdBySession[activePath] ?? null
       : null,
+    activeLiveRevision: activePath ? state.livePipeline.revisionBySession[activePath] ?? 0 : 0,
     activePromotedOp: activePath
       ? findPromotedForSession(state.pending.promoted, activePath) ?? null
       : null,
@@ -265,6 +268,7 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
     a.activeTranscriptWindow === b.activeTranscriptWindow &&
     a.activeSystemPrompts === b.activeSystemPrompts &&
     a.activeEditingMessageId === b.activeEditingMessageId &&
+    a.activeLiveRevision === b.activeLiveRevision &&
     a.activePromotedOp === b.activePromotedOp &&
     a.activePrepassPhase === b.activePrepassPhase
   );
@@ -317,8 +321,13 @@ function projectViewState(state: ArchState): ViewState {
       : null;
 
   // ── Per-active-session lookups ──
-  const activeTranscript: ChatMessage[] =
-    activePath ? transcript.bySession[activePath] ?? EMPTY_TRANSCRIPT : EMPTY_TRANSCRIPT;
+  const activeTranscript: ChatMessage[] = activePath
+    ? projectTranscriptView(
+        transcript.bySession[activePath] ?? EMPTY_TRANSCRIPT,
+        state.livePipeline,
+        activePath,
+      ).messages
+    : EMPTY_TRANSCRIPT;
 
   const activeTranscriptWindow: TranscriptWindow =
     activePath ? transcript.windowBySession[activePath] ?? EMPTY_TRANSCRIPT_WINDOW : EMPTY_TRANSCRIPT_WINDOW;
@@ -413,6 +422,7 @@ function projectViewState(state: ArchState): ViewState {
     draftText: activeDraftText,
     busy,
     retryStatus,
+    liveTurnPhase: activePath ? state.livePipeline.turnsBySession[activePath]?.phase ?? null : null,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
     noticeRaw: settings.noticeRaw,
@@ -441,14 +451,17 @@ function projectViewState(state: ArchState): ViewState {
       ? (() => {
           const sessionMap = settings.pendingExtensionUIRequestsBySession[activePath];
           if (!sessionMap) return null;
-          // Return the first pending request WITHOUT an inline owner for the
-          // bottom-bar prompt. Subagent-scoped requests (subagentCallId) render
-          // inline inside their subagent cards; ask_user requests linked to a
-          // running tool call (toolCallId) render inline in the transcript.
-          for (const req of Object.values(sessionMap)) {
-            if (!req.subagentCallId && !req.toolCallId) return req;
-          }
-          return null;
+          const requests = Object.values(sessionMap);
+          // Preserve the bottom bar's existing priority for requests without
+          // an inline owner. If every request is tool/subagent-owned, still
+          // surface the oldest one as a fixed fallback. Inline transcript
+          // rendering is not reliable enough to be the only answer surface:
+          // the owning card can be collapsed, virtualized, delayed behind the
+          // extension_ui event, or stale while the session tab already shows
+          // its pending-question attention state.
+          return requests.find((req) => !req.subagentCallId && !req.toolCallId)
+            ?? requests[0]
+            ?? null;
         })()
       : null,
   };

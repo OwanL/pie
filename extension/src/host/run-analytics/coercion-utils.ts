@@ -5,12 +5,16 @@ export function isObjectRecord(value: unknown): value is Record<string, unknown>
 }
 
 export function isRunOutcome(value: unknown): value is RunOutcome {
-  return !!value
-    && typeof value === 'object'
-    && 'resolution' in value
-    && 'satisfaction' in value
-    && typeof (value as { resolution: unknown }).resolution === 'string'
-    && typeof (value as { satisfaction: unknown }).satisfaction === 'number';
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const outcome = value as { resolution?: unknown; satisfaction?: unknown; source?: unknown };
+  return (outcome.resolution === 'resolved'
+      || outcome.resolution === 'partially_resolved'
+      || outcome.resolution === 'unresolved')
+    && typeof outcome.satisfaction === 'number'
+    && Number.isFinite(outcome.satisfaction)
+    && (outcome.source === undefined || outcome.source === 'user' || outcome.source === 'agent');
 }
 
 export function isInputKindArray(value: unknown): value is Array<ComposerInput['kind']> {

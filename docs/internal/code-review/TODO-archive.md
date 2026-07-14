@@ -209,7 +209,7 @@ unchanged):
   of the nested header bleeding over); `.subagent-messages-scroll-nested {
   max-height: none; min-height: 0; overflow-y: visible; }` (flows inside the
   parent's single bounded scroll region).
-- `test/nested-subagent-expand.test.ts` (NEW, 10 tests): nested recursion
+- `test/webview/transcript/tools/nested-subagent-expand.test.ts` (NEW, 10 tests): nested recursion
   expand/collapse + toggle independence, depth-1-vs-nested class/CSS
   assertions, and a depth-3 fixture proving `subagentDepth` keeps
   incrementing so every level ≥ 2 is nested.
@@ -285,7 +285,7 @@ Goal: make agents trigger nested subagents more often, safely.
   heavy), `aria-controls` is set ONLY when the body is actually mounted and
   omitted when collapsed — so the reference never points at a missing element
   (WAI-ARIA-correct). No mount-strategy / perf change. Pinned by
-  `extension/test/aria-controls-wiring.test.ts`.
+  `extension/test/webview/components/aria-controls-wiring.test.ts`.
 - Composite headers (`ToolCallHeader`, `SubagentSingleBlock`) use a
   `role="button"` div rather than a real `<button>` because they contain nested
   interactive controls (copy-error `StatusChip`, file/path buttons). A real
@@ -441,7 +441,7 @@ New deferred follow-ups (from this pass):
   split. **DONE 2026-06-25** (commit `d49fbcf`-1): extracted `SidebarHotReloader`
   (`hot-reloader.ts`, 186loc) + `StateAppliedWatchdog` (`state-applied-watchdog.ts`,
   198loc) into siblings; provider.ts now 422loc as the orchestrator. Behavior-
-  preserving; added `test/state-applied-watchdog.test.ts` for the throttle
+  preserving; added `test/host/sidebar/state-applied-watchdog.test.ts` for the throttle
   window + ack-clearing logic.
 - **`extensions/skill-pruner` has no `tsconfig.json`** → no standing typecheck
   gate; 2 genuine pre-existing type issues were undetected by CI. **DONE

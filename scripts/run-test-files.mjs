@@ -212,7 +212,7 @@ function printHelp() {
       `  --help, -h   Show this help.\n` +
       `  --           Treat the rest of the args as file paths.\n\n` +
       `Examples:\n` +
-      `  node scripts/run-test-files.mjs extension/test/app-smoke.test.ts\n` +
+      `  node scripts/run-test-files.mjs extension/test/webview/components/app-smoke.test.ts\n` +
       `  node scripts/run-test-files.mjs extensions/subagent/test/schema.test.ts analysis/test/pricing.test.ts\n`,
   );
 }

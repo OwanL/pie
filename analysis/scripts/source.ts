@@ -15,6 +15,10 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseJsonOrThrow } from '../../shared/error-message.js';
 import { listStorageDirCandidates } from './source-auto.ts';
+import {
+  coerceHistoricalSessionSummaries,
+  discoverHistoricalSessions,
+} from './transcript-source.ts';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
@@ -107,6 +111,10 @@ const LEGACY_RESULT_ISSUE_KIND_MAP: Record<string, ToolResultIssueKind> = {
 export interface SourceSelection {
   exportPath?: string;
   storageDir?: string;
+  /** Test/embedding overrides for local transcript discovery. */
+  legacySessionsDir?: string;
+  configuredSessionsDir?: string;
+  reviewSidecarPath?: string;
   /**
    * Aggregate every run store found under this directory. When omitted (and no
    * exportPath/storageDir is given), defaults to {@link DEFAULT_OUTCOMES_ROOT}.
@@ -754,13 +762,16 @@ function coerceRunOutcome(value: unknown): RunOutcome | null {
     (value.resolution !== 'resolved' && value.resolution !== 'partially_resolved' && value.resolution !== 'unresolved')
     || typeof value.satisfaction !== 'number'
     || !Number.isFinite(value.satisfaction)
+    || (value.source !== undefined && value.source !== 'user' && value.source !== 'agent')
   ) {
     return null;
   }
 
+  const source = value.source === 'user' || value.source === 'agent' ? value.source : undefined;
   return {
     resolution: value.resolution,
     satisfaction: value.satisfaction,
+    ...(source ? { source } : {}),
   };
 }
 
@@ -859,6 +870,9 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
       : null,
     analyticsFactors: coerceSessionAnalyticsFactors(value.analyticsFactors),
     functionalSettings: coerceFunctionalSettings(value.functionalSettings),
+    ...(typeof value.initialUserMessageChars === 'number' && Number.isFinite(value.initialUserMessageChars)
+      ? { initialUserMessageChars: toNonNegativeInteger(value.initialUserMessageChars) }
+      : {}),
     sendCount: toNonNegativeInteger(value.sendCount),
     assistantTurnCount: toNonNegativeInteger(value.assistantTurnCount),
     assistantTurnDurationMs: toNonNegativeInteger(value.assistantTurnDurationMs),
@@ -979,6 +993,7 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     pruningEvents: coercePruningEvents(value.pruningEvents),
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
     agentReviews: coerceAgentReviews(value.agentReviews),
+    historicalSessions: coerceHistoricalSessionSummaries(value.historicalSessions),
   };
 }
 
@@ -1393,6 +1408,30 @@ async function queryAllRunAnalyticsStores(
   return { source, storeCount: candidates.length };
 }
 
+async function configuredSessionsDir(selection: SourceSelection): Promise<string | undefined> {
+  if (selection.configuredSessionsDir) return selection.configuredSessionsDir;
+  try {
+    const settings = parseJsonOrThrow<unknown>(await fs.readFile(path.join(CONFIG_ROOT, 'settings.json'), 'utf8'), 'settings.json');
+    if (isRecord(settings) && typeof settings.sessionDir === 'string' && settings.sessionDir.trim()) {
+      if (path.isAbsolute(settings.sessionDir)) return settings.sessionDir;
+      // The runtime resolves sessionDir from the workspace/root location, not analysis/.
+      return path.resolve(CONFIG_ROOT, '..', settings.sessionDir);
+    }
+  } catch {
+    // Missing/invalid settings simply means no configured transcript root.
+  }
+  return undefined;
+}
+
+async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, selection: SourceSelection): Promise<void> {
+  source.historicalSessions = await discoverHistoricalSessions({
+    legacySessionsDir: selection.legacySessionsDir ?? path.join(CONFIG_ROOT, 'sessions'),
+    configuredSessionsDir: await configuredSessionsDir(selection),
+    reviewSidecarPath: selection.reviewSidecarPath
+      ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl'),
+  });
+}
+
 export async function loadSourceAnalytics(selection: SourceSelection = {}): Promise<LoadedSourceAnalytics> {
   const configRoot = CONFIG_ROOT;
   if (selection.exportPath) {
@@ -1403,6 +1442,7 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
 
   if (selection.storageDir) {
     const source = await querySourceAnalyticsPayloadFromStorageDir(selection.storageDir);
+    await attachLocalHistoricalSessions(source, selection);
     attachGlobalSideChannelLogs(source, configRoot);
     return { source, sourceKind: 'storage-dir', sourcePath: selection.storageDir };
   }
@@ -1414,11 +1454,13 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   const outcomesRoot = selection.outcomesRoot ?? DEFAULT_OUTCOMES_ROOT;
   const { source, storeCount } = await queryAllRunAnalyticsStores(outcomesRoot);
   if (storeCount > 0) {
+    await attachLocalHistoricalSessions(source, selection);
     attachGlobalSideChannelLogs(source, configRoot);
     return { source, sourceKind: 'all-stores', sourcePath: outcomesRoot };
   }
 
   const fixtureSource = await readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
+  await attachLocalHistoricalSessions(fixtureSource, selection);
   attachGlobalSideChannelLogs(fixtureSource, configRoot);
   return { source: fixtureSource, sourceKind: 'fixture', sourcePath: DEFAULT_FIXTURE_PATH };
 }

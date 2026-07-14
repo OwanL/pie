@@ -34,10 +34,11 @@ interface PruningHeaderPanelProps {
 function formatPruningChipLabel(details: PruningDetails, fallbackText?: string): string {
   if (details.prepassError) return 'Pruning failed';
 
-  const { skillsKept, skillsTotal, toolsKept, toolsTotal } = pruningTotals(details);
+  const { skillsKept, skillsTotal, toolsKept, toolsTotal, tokensSaved } = pruningTotals(details);
   const parts: string[] = [];
   if (skillsTotal > 0) parts.push(`${skillsKept}/${skillsTotal} skills`);
   if (toolsTotal > 0) parts.push(`${toolsKept}/${toolsTotal} tools`);
+  if (parts.length > 0) parts.push(`✂ ${tokensSaved}`);
 
   return parts.length > 0 ? parts.join(' · ') : fallbackText || 'Pruning complete';
 }

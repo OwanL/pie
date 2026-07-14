@@ -20,6 +20,9 @@ import type { Event, BackendEvent } from '../events.js';
 import type { Effect } from '../effects.js';
 
 export function handleMessageStarted(state: ArchState, event: Extract<Event, { kind: 'MessageStarted' }>): ReducerResult {
+  // Atomic live-pipeline cutover: the sequenced turn.started event owns active
+  // lifecycle and optimistic-send commit. Legacy events remain analytics-only.
+  if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
   const { sessionPath, messageId, requestId, modelId, thinkingLevel, timestamp } = event;
   const currentTurn = state.pending.currentTurnBySession[sessionPath];
 
@@ -127,6 +130,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
 }
 
 export function handleMessageDelta(state: ArchState, event: Extract<Event, { kind: 'MessageDelta' }>): ReducerResult {
+  if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
   // Defense-in-depth: while a user-initiated Stop's abort is in flight
   // (`interruptInFlightBySession`), drop late deltas as a pure no-op. The
   // optimistic `interrupted` mark on streaming messages (handleInterrupt)
@@ -158,6 +162,7 @@ export function handleMessageDelta(state: ArchState, event: Extract<Event, { kin
 }
 
 export function handleMessageThinking(state: ArchState, event: Extract<Event, { kind: 'MessageThinking' }>): ReducerResult {
+  if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
   // Defense-in-depth: mirror handleMessageDelta's in-flight-abort gate so
   // late thinking deltas are dropped while a Stop's abort is settling.
   if (state.sessions.interruptInFlightBySession[event.sessionPath]) {
@@ -182,6 +187,7 @@ export function handleMessageThinking(state: ArchState, event: Extract<Event, { 
 }
 
 export function handleToolCall(state: ArchState, event: Extract<Event, { kind: 'ToolCall' }>): ReducerResult {
+  if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
   const messageId = resolveAlias(state, event.messageId);
   const cachedIndex = state.pending.currentTurnBySession[event.sessionPath]?.firstMessageIndex;
   const nextState = produce(state, (draft) => {
@@ -193,6 +199,7 @@ export function handleToolCall(state: ArchState, event: Extract<Event, { kind: '
         : list.find((m: ChatMessage) => m.id === messageId);
     if (message) {
       message.draftingToolCall = undefined;
+      message.toolStateRevision = (message.toolStateRevision ?? 0) + 1;
       upsertAssistantToolCall(message, event.toolCall);
     }
   });
@@ -201,6 +208,10 @@ export function handleToolCall(state: ArchState, event: Extract<Event, { kind: '
 }
 
 export function handleMessageFinished(state: ArchState, event: Extract<Event, { kind: 'MessageFinished' }>): ReducerResult {
+  if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
+  if (event.message.durableEntryId && state.transcript.bySession[event.sessionPath]?.some(
+    (message) => message.durableEntryId === event.message.durableEntryId,
+  )) return { state, effects: [] };
   const messageId = resolveAlias(state, event.message.id);
   const isAlias = messageId !== event.message.id;
   const normalizedMessage = withAssistantParts(event.message);
@@ -244,6 +255,9 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
         const previousMessage = list[index];
         if (previousMessage) {
           mergeAssistantToolCallsPreservingResolvedState(normalizedMessage, previousMessage);
+          if (previousMessage.toolStateRevision !== undefined) {
+            normalizedMessage.toolStateRevision = previousMessage.toolStateRevision;
+          }
           // Preserve errorDetail set by onError if the replacement doesn't carry its own
           if (normalizedMessage.status === 'error' && !normalizedMessage.errorDetail && previousMessage.errorDetail) {
             normalizedMessage.errorDetail = previousMessage.errorDetail;
@@ -321,7 +335,11 @@ export function handleQueuedDelivered(state: ArchState, event: Extract<Event, { 
   const list = state.transcript.bySession[event.sessionPath];
   if (!list) return { state, effects: [] };
 
-  const idx = list.findIndex((m) => m.role === 'user' && m.status === 'queued');
+  const idx = event.localId
+    ? list.findIndex((message) => message.id === event.localId && message.role === 'user' && message.status === 'queued')
+    : list.findIndex((message) => message.role === 'user' && message.status === 'queued');
+  // A correlated duplicate/mismatch is never allowed to promote a different
+  // queued row. FIFO fallback exists only for legacy producers without id.
   if (idx < 0) return { state, effects: [] };
   const localId = list[idx].id;
   const nextState = produce(state, (draft) => {

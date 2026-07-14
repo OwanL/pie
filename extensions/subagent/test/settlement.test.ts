@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { execute } from "../src/execute.js";
+import { createProgressObserver, execute } from "../src/execute.js";
 
 // ---------------------------------------------------------------------------
 // In-memory mock SDK + ESM resolve hook (redirect @mariozechner/pi-coding-agent)
@@ -94,8 +94,6 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_SETTLEMENT_GRACE_MS",
 	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
-	"PIE_SUBAGENT_MAX_CONCURRENCY",
-	"PIE_SUBAGENT_MAX_PARALLEL_TASKS",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
 	"PI_CODING_AGENT_DIR",
 	"PI_SUBAGENT_TIMEOUT_MS",
@@ -137,8 +135,6 @@ function setMockBehavior(b: unknown): void {
 afterEach(() => {
 	setMockBehavior(undefined);
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "8";
-	delete process.env.PIE_SUBAGENT_MAX_CONCURRENCY;
-	delete process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS;
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "200";
 });
 
@@ -210,37 +206,8 @@ test("execute(): a dispatch that never reports progress is force-settled after P
 	// are acceptable "loud" outcomes — what matters is execute() returned.
 	assert.match(text, /force-settled|settle|abort/i);
 	assert.equal(response.details.results.length, 1);
-	assert.equal(response.details.results[0]?.streamingText, "partial progress");
+	assert.equal(response.details.results[0]?.finalOutput, "partial progress");
 	assert.equal(response.details.results[0]?.exitCode, 1);
-});
-
-test("execute(): high configured concurrency does not weaken bounded settlement", async () => {
-	// Correctness must not depend on reducing concurrency to 2. Exercise the
-	// maximum supported local cap with several completely silent children.
-	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "16";
-	process.env.PIE_SUBAGENT_MAX_CONCURRENCY = "16";
-	process.env.PIE_SUBAGENT_MAX_PARALLEL_TASKS = "16";
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50";
-	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
-	setMockBehavior(hangingPromptBehavior());
-
-	const tasks = Array.from({ length: 4 }, (_, index) => ({
-		agent: "worker",
-		task: `silent work ${index + 1}`,
-	}));
-	const response = await within(2000, execute(
-		"tool-settle-high-concurrency",
-		{ tasks } as never,
-		new AbortController().signal,
-		() => undefined,
-		makeCtx() as never,
-		{ getAllTools: () => [] } as never,
-		() => false,
-	));
-
-	assert.equal(response.isError, true);
-	assert.equal(response.details.results.length, 4);
-	assert.ok(response.details.results.every((result) => result.exitCode === 1));
 });
 
 test("execute(): periodic credible progress renews the inactivity deadline", async () => {
@@ -280,6 +247,136 @@ test("execute(): periodic credible progress renews the inactivity deadline", asy
 
 	assert.equal(response.isError, undefined);
 	assert.equal((response.content?.[0] as { text?: string } | undefined)?.text, "done after sustained progress");
+});
+
+test("createProgressObserver rejects stale 5 → 4 → 5 generations within one attempt", () => {
+	const observe = createProgressObserver();
+	const details = (progressGeneration: number, provider = "provider-a", model = "model-a") => ({
+		results: [{
+			agent: "scout", task: "nested", step: 1, provider, model, progressGeneration,
+			messages: [], usage: { input: 0, output: 0, turns: 0 },
+		}],
+	}) as never;
+
+	assert.equal(observe(details(5)), true, "the first snapshot establishes the attempt");
+	assert.equal(observe(details(4)), false, "a decreasing generation is stale");
+	assert.equal(observe(details(5)), false, "returning to the high-water mark is still stale");
+	assert.equal(observe(details(6)), true, "only a value above the high-water mark renews");
+	assert.equal(observe(details(0, "provider-a", "model-b")), true, "a model change starts a new attempt");
+	assert.equal(observe(details(0, "provider-a", "model-b")), false, "the reset cannot repeat on the same model");
+	assert.equal(observe(details(0, "provider-b", "model-b")), true, "a provider change also starts a new attempt");
+});
+
+test("execute(): repeated identical tool updates do not indefinitely renew the settlement lease", async () => {
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "55";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	const identicalNestedPartial = {
+		content: [{ type: "text", text: "nested still waiting" }],
+		details: {
+			mode: "single",
+			results: [{ agent: "scout", task: "nested", exitCode: -1, messages: [], progressGeneration: 3 }],
+		},
+	};
+	setMockBehavior({
+		onPrompt: async (emit: (event: unknown) => void) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "nested-call", name: "subagent", arguments: {} }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "tool_execution_start", toolCallId: "nested-call", toolName: "subagent" });
+			// These callbacks continue past the 55ms lease, but carry the exact
+			// same nested generation and payload every time: they are not progress.
+			for (let i = 0; i < 8; i++) {
+				await sleep(15);
+				emit({ type: "tool_execution_update", toolCallId: "nested-call", partialResult: identicalNestedPartial });
+			}
+			await new Promise<void>(() => {});
+		},
+	});
+
+	const response = await within(2000, execute(
+		"tool-settle-identical-updates",
+		{ agent: "worker", task: "do work" } as never,
+		new AbortController().signal,
+		() => undefined,
+		makeCtx() as never,
+		{ getAllTools: () => [] } as never,
+		() => false,
+	));
+
+	// The only configured failure path is the settlement net: identical updates
+	// continued beyond the lease, yet the dispatch still returned as an error.
+	assert.equal(response.isError, true);
+});
+
+test("execute(): nested descendant progress renews the root settlement lease", async () => {
+	// Keep a wide wall-clock margin for the all-package test runner, where many
+	// real child processes can temporarily delay Node timers. Total duration is
+	// still greater than the lease, so this continues to distinguish a renewed
+	// inactivity deadline from a fixed total-duration deadline.
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "1000";
+	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+	setMockBehavior({
+		onPrompt: async (emit: (event: unknown) => void) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "nested-call", name: "subagent", arguments: {} }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "tool_execution_start", toolCallId: "nested-call", toolName: "subagent" });
+			// Total duration is greater than the lease. Each changed descendant
+			// generation reaches this root runner via tool_execution_update.
+			for (let generation = 1; generation <= 6; generation++) {
+				await sleep(200);
+				emit({
+					type: "tool_execution_update",
+					toolCallId: "nested-call",
+					partialResult: {
+						content: [{ type: "text", text: `nested step ${generation}` }],
+						details: {
+							mode: "single",
+							results: [{ agent: "scout", task: "nested", exitCode: -1, messages: [], progressGeneration: generation }],
+						},
+					},
+				});
+			}
+			emit({ type: "tool_execution_end", toolCallId: "nested-call", toolName: "subagent" });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "nested work complete" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "m",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const response = await within(5000, execute(
+		"tool-settle-nested-progress",
+		{ agent: "worker", task: "do nested work" } as never,
+		new AbortController().signal,
+		() => undefined,
+		makeCtx() as never,
+		{ getAllTools: () => [] } as never,
+		() => false,
+	));
+
+	assert.equal(response.isError, undefined);
+	assert.match((response.content?.[0] as { text?: string } | undefined)?.text ?? "", /nested work complete/);
 });
 
 test("execute(): parent abort settles even when child abort never resolves and the settlement net is disabled", async () => {

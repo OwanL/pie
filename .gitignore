@@ -96,7 +96,8 @@ nul
 # If you want to ignore all local VS Code state, uncomment the next line:
 # .vscode/
 
-# Installer-generated backups
+# Installer-generated backups and transient cross-process settings lock
 /settings.json.session-dir.*.bak
 /settings.json.extensions.*.bak
+/settings.json.pie-lock
 .skylos/cache/grep_results.json

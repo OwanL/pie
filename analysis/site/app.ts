@@ -1,14 +1,7 @@
 import embed from 'vega-embed';
 
-import {
-  LEADERBOARD_MINIMUM_SCORED_RUNS as LEADERBOARD_MIN_SCORED,
-  LEADERBOARD_SHRINKAGE_K,
-  LEADERBOARD_TOKEN_EFFICIENCY_MAX,
-  LEADERBOARD_WEIGHTS,
-  LEADERBOARD_OUTCOME_EXPONENT,
-  LEADERBOARD_MASTERY_COMPLEXITY_WEIGHT,
-} from '../scripts/leaderboard-scoring.ts';
-import { computeComplexityScores, complexityWeightedMean, hasComplexityVariance } from '../scripts/complexity-scoring.ts';
+import { LEADERBOARD_WEIGHTS } from '../scripts/leaderboard-scoring.ts';
+import { createModelLeaderboardFromRuns } from '../scripts/leaderboard.ts';
 import { meanDifferenceInterval, meanInterval, wilsonInterval } from './chart-stats.ts';
 import { renderChartEntries, type ChartContext } from './lib.ts';
 import { newCharts } from './charts/index.ts';
@@ -17,6 +10,8 @@ import { toErrorMessage } from '../../shared/error-message.js';
 import type {
   BackendErrorData,
   FileExtensionData,
+  ModelLeaderboardData,
+  ModelLeaderboardRow,
   ModelQualityData,
   OverviewData,
   PruningImpactData,
@@ -44,9 +39,10 @@ interface DashboardData {
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;
+  modelLeaderboard: ModelLeaderboardData;
 }
 
-interface FilterState {
+export interface FilterState {
   startDate: string;
   endDate: string;
   modelId: string;
@@ -58,7 +54,7 @@ interface FilterState {
   pureOnly: boolean;
 }
 
-const DEFAULT_FILTERS: FilterState = {
+export const DEFAULT_FILTERS: FilterState = {
   startDate: '',
   endDate: '',
   modelId: '',
@@ -66,7 +62,7 @@ const DEFAULT_FILTERS: FilterState = {
   experimentAssignment: '',
   subagentParentModel: '',
   pruningMode: '',
-  scoredOnly: true,
+  scoredOnly: false,
   pureOnly: false,
 };
 
@@ -198,7 +194,7 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
 }
 
 function scoredRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
-  return runs.filter((run) => run.satisfaction !== null);
+  return runs.filter((run) => run.scored && run.satisfaction !== null);
 }
 
 /**
@@ -241,7 +237,7 @@ export function applyFilters(runs: PreparedRunRow[], filters: FilterState): Prep
     if (filters.pruningMode && run.fsPruningMode !== filters.pruningMode) {
       return false;
     }
-    if (filters.scoredOnly && run.satisfaction === null) {
+    if (filters.scoredOnly && (!run.scored || run.satisfaction === null)) {
       return false;
     }
     if (filters.pureOnly && run.mixedTreatmentConfig) {
@@ -249,6 +245,80 @@ export function applyFilters(runs: PreparedRunRow[], filters: FilterState): Prep
     }
     return true;
   });
+}
+
+function estimatedRunCostUsd(run: PreparedRunRow): number | null {
+  return typeof run.totalEstimatedCostUsd === 'number' && Number.isFinite(run.totalEstimatedCostUsd)
+    ? run.totalEstimatedCostUsd
+    : null;
+}
+
+function hasReportedParentTokenUsage(run: PreparedRunRow): boolean {
+  return run.tokenReportedTurnCount > 0
+    || run.inputTokens > 0
+    || run.outputTokens > 0
+    || run.cacheReadTokens > 0
+    || run.cacheWriteTokens > 0;
+}
+
+export interface CoverageMetric {
+  count: number;
+  percentage: number | null;
+}
+
+export interface CoverageSummary {
+  selectedRunCount: number;
+  completed: CoverageMetric;
+  outcomeScored: CoverageMetric;
+  priced: CoverageMetric;
+  tokenTelemetry: CoverageMetric;
+  mixedModel: CoverageMetric;
+}
+
+/** Coverage after global filters. Non-completion metrics use completed runs as their denominator. */
+export function coverageSummary(runs: PreparedRunRow[]): CoverageSummary {
+  const completed = runs.filter((run) => run.status !== 'open');
+  const completedCount = completed.length;
+  const metric = (count: number, denominator: number): CoverageMetric => ({
+    count,
+    percentage: denominator === 0 ? null : count / denominator,
+  });
+
+  return {
+    selectedRunCount: runs.length,
+    completed: metric(completedCount, runs.length),
+    outcomeScored: metric(
+      completed.filter((run) => run.scored && run.satisfaction !== null).length,
+      completedCount,
+    ),
+    priced: metric(completed.filter((run) => estimatedRunCostUsd(run) !== null).length, completedCount),
+    tokenTelemetry: metric(completed.filter(hasReportedParentTokenUsage).length, completedCount),
+    mixedModel: metric(completed.filter((run) => run.mixedModelConfig).length, completedCount),
+  };
+}
+
+function renderCoverageBanner(runs: PreparedRunRow[]): void {
+  const coverage = coverageSummary(runs);
+  const item = (label: string, metric: CoverageMetric, detail = '') => `
+    <span class="coverage-item">
+      <strong>${label}</strong>
+      <span>${metric.count}/${label === 'Completed' ? coverage.selectedRunCount : coverage.completed.count} (${percentage(metric.percentage)})${detail}</span>
+    </span>
+  `;
+
+  byId('coverage-banner').innerHTML = `
+    <div class="coverage-copy">
+      <strong>Filtered cohort: ${coverage.selectedRunCount} runs</strong>
+      <span>Global filters define the base cohort for cards and charts; outcome charts narrow to scored outcomes locally.</span>
+    </div>
+    <div class="coverage-metrics">
+      ${item('Completed', coverage.completed)}
+      ${item('Outcome-scored', coverage.outcomeScored)}
+      ${item('Priced', coverage.priced)}
+      ${item('Token telemetry', coverage.tokenTelemetry)}
+      ${item('Mixed-model', coverage.mixedModel, '; excluded from model scoring')}
+    </div>
+  `;
 }
 
 function selectedRunIds(runs: PreparedRunRow[]): Set<string> {
@@ -294,24 +364,26 @@ function renderCards(runs: PreparedRunRow[], overview: OverviewData, usePrecompu
     ? null
     : scored.filter((run) => run.resolution === 'resolved').length / scored.length;
   const medianBusyTime = median(completedRunsList.map((run) => run.busyDurationMs));
-  const costValues = completedRunsList.map((run) => run.estimatedCostUsd).filter((v): v is number => v !== null);
+  const costValues = completedRunsList
+    .map(estimatedRunCostUsd)
+    .filter((value): value is number => value !== null);
 
   const cards = usePrecomputed
     ? [
         {
           label: 'Runs',
           value: String(overview.totalCompletedRuns + overview.totalOpenRuns),
-          detail: `${overview.totalScoredRuns} scored, ${overview.totalOpenRuns} open`,
+          detail: `${overview.totalScoredRuns} outcome-scored, ${overview.totalOpenRuns} open`,
         },
         {
           label: 'Avg satisfaction',
           value: overview.averageSatisfaction?.toFixed(2) ?? '—',
-          detail: 'scored runs',
+          detail: 'outcome-scored runs',
         },
         {
           label: 'Resolved',
           value: overview.totalScoredRuns === 0 ? '—' : percentage(overview.resolutionCounts.resolved / overview.totalScoredRuns),
-          detail: 'of scored runs',
+          detail: 'of outcome-scored runs',
         },
         {
           label: 'Verification',
@@ -338,17 +410,17 @@ function renderCards(runs: PreparedRunRow[], overview: OverviewData, usePrecompu
         {
           label: 'Runs',
           value: String(runs.length),
-          detail: `${scored.length} scored, ${runs.filter((run) => run.status === 'open').length} open`,
+          detail: `${scored.length} outcome-scored, ${runs.filter((run) => run.status === 'open').length} open`,
         },
         {
           label: 'Avg satisfaction',
           value: average(scored.map((run) => run.satisfaction ?? 0))?.toFixed(2) ?? '—',
-          detail: 'scored runs',
+          detail: 'outcome-scored runs',
         },
         {
           label: 'Resolved',
           value: percentage(resolvedRate),
-          detail: 'of scored runs',
+          detail: 'of outcome-scored runs',
         },
         {
           label: 'Verification',
@@ -693,8 +765,9 @@ function outcomeEstimateRow(
   label: string,
   detail: string,
   runs: PreparedRunRow[],
+  scoredOverride?: PreparedRunRow[],
 ): OutcomeEstimateRow | null {
-  const scored = scoredRuns(runs);
+  const scored = scoredOverride ?? scoredRuns(runs);
   const interval = meanInterval(scored.map((run) => run.satisfaction ?? 0), { min: 1, max: 5 });
   if (!interval) {
     return null;
@@ -789,6 +862,16 @@ function dailyOutcomeRows(runs: PreparedRunRow[]): DailyOutcomeRow[] {
     });
 }
 
+function userPrimaryModelOutcomes(runs: PreparedRunRow[]): PreparedRunRow[] {
+  return runs.filter((run) => (
+    run.scored
+    && run.satisfaction !== null
+    && !run.mixedModelConfig
+    && !run.mixedTreatmentConfig
+    && run.outcomeSource === 'user'
+  ));
+}
+
 export function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] {
   const groups = groupRunsBy(selectedCompletedRuns(runs), (run) => JSON.stringify([
     modelFamilyKey(run),
@@ -798,7 +881,12 @@ export function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] 
   return [...groups.entries()]
     .map(([key, groupedRuns]) => {
       const [modelId, thinkingLevel] = JSON.parse(key) as [string, string];
-      const row = outcomeEstimateRow(`${modelId} [${thinkingLevel}]`, `Model ${modelId} at thinking=${thinkingLevel}`, groupedRuns);
+      const row = outcomeEstimateRow(
+        `${modelId} [${thinkingLevel}]`,
+        `Model ${modelId} at thinking=${thinkingLevel}`,
+        groupedRuns,
+        userPrimaryModelOutcomes(groupedRuns),
+      );
       if (row) {
         row.modelId = modelId;
         row.thinkingLevel = thinkingLevel;
@@ -814,7 +902,7 @@ export function modelThinkingRows(runs: PreparedRunRow[]): OutcomeEstimateRow[] 
 }
 
 export function compositionByModelRows(runs: PreparedRunRow[]): CompositionRow[] {
-  const groups = groupRunsBy(selectedScoredCompletedRuns(runs), (run) => modelFamilyKey(run));
+  const groups = groupRunsBy(userPrimaryModelOutcomes(selectedCompletedRuns(runs)), (run) => modelFamilyKey(run));
   const ranked = [...groups.entries()]
     .sort(([, leftRuns], [, rightRuns]) => rightRuns.length - leftRuns.length)
     .slice(0, 12);
@@ -1904,7 +1992,7 @@ function taskSizeTimeRows(runs: PreparedRunRow[]): OutcomeTimeBucketRow[] {
   return labels
     .map((label, idx) => {
       const groupedRuns = completed.filter((r) => tierFor(r.lineMutationTotal) === idx);
-      const summary = outcomeTimeSummary(label, `task size tier ${label}`, groupedRuns);
+      const summary = outcomeTimeSummary(label, `workload-size tier ${label}`, groupedRuns);
       if (!summary) return null;
       return { ...summary, bucket: label, bucketIndex: idx };
     })
@@ -1922,15 +2010,27 @@ interface LeaderboardCompositeRow {
   modelId: string;
   thinkingLevel: string;
   sortOrder: number;
-  compositeScore: number;
-  rank: number;
+  compositeScore: number | null;
+  rank: number | null;
   rankLabel: string;
   scoreLabel: string;
+  eligibilityLabel: string;
+  unadjustedScoreLabel: string;
+  adjustmentLabel: string;
   barLabel: string;
-  reliabilityLabel: string;
+  evidenceWeightLabel: string;
   runCount: number;
   scoredRunCount: number;
+  effectiveTaskCount: number;
+  attributableTaskCount: number;
+  scoringCoverageLabel: string;
+  caseMixOverlapLabel: string;
+  userOutcomeCount: number;
+  agentOutcomeCount: number;
+  mixedModelExcludedCount: number;
+  mixedTreatmentExcludedCount: number;
   nLabel: string;
+  outcomeSourceLabel: string;
   avgSatisfaction: string;
   resolutionRate: string;
   fileChurnRate: string;
@@ -1938,10 +2038,23 @@ interface LeaderboardCompositeRow {
   verificationPassRate: string;
   tokenEfficiencyRate: string;
   medianCostUsd: string;
-  meanTaskComplexity: string;
-  difficultyEmphasized: boolean;
+  meanPreTaskComplexity: string;
+  taskMixLabel: string;
+  meanWorkloadIntensity: string;
   subagentRate: string;
   providersLabel: string;
+  intervalLabel: string;
+  rankRangeLabel: string;
+  evidenceTier: string;
+  userChannelLabel: string;
+  agentChannelLabel: string;
+  processChannelLabel: string;
+  userEvidenceLabel: string;
+  agentEvidenceLabel: string;
+  processEvidenceLabel: string;
+  canonicalTaskCount: number;
+  transcriptOnlySessionCount: number;
+  thinkingMixLabel: string;
 }
 
 interface LeaderboardDimensionRow {
@@ -1953,206 +2066,160 @@ interface LeaderboardDimensionRow {
   rawLabel: string;
 }
 
-function leaderboardRows(runs: PreparedRunRow[]): {
+function leaderboardRows(runs: PreparedRunRow[], precomputed?: ModelLeaderboardData): {
+  /** Ranked-only chart/summary rows. */
   composite: LeaderboardCompositeRow[];
+  /** Ranked family rows plus an optional separately disclosed unknown row. */
+  tableRows: LeaderboardCompositeRow[];
   dimensions: LeaderboardDimensionRow[];
   unrankedCount: number;
+  rows: ModelLeaderboardRow[];
+  caseMix: ModelLeaderboardData['caseMix'];
+  minimumTaskScoringCoverage: number;
 } {
-  const completed = runs.filter((r) => r.status !== 'open');
-  const groups = new Map<string, PreparedRunRow[]>();
-  for (const run of completed) {
-    // Group by canonical model family (provider-agnostic), not the provider-specific modelId —
-    // e.g. 'umans-glm-5.2' and 'glm-5.2:cloud' collapse into one 'glm-5.2' row. modelFamily is
-    // resolved at prepare time; falls back to modelId when unset (and '(unknown)' when missing).
-    const mid = run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
-    const tl = normalizeThinkingLevel(run.thinkingLevel) ?? '(unspecified)';
-    const key = `${mid}::${tl}`;
-    const existing = groups.get(key) ?? [];
-    existing.push(run);
-    groups.set(key, existing);
-  }
+  // This generated implementation is the only scoring path. Everything below is display mapping.
+  const leaderboard = precomputed ?? createModelLeaderboardFromRuns(runs);
+  const ranked = leaderboard.rows.filter(
+    (row): row is ModelLeaderboardRow & { compositeScore: number; rank: number } => (
+      row.compositeScore !== null && row.rank !== null
+    ),
+  );
+  const fmtPct = (value: number | null | undefined): string => (
+    value !== null && value !== undefined ? `${(value * 100).toFixed(0)}%` : '—'
+  );
+  const axisLabel = (label: string, rank: number): string => `#${rank} · ${label}`;
+  const displayLabel = (row: ModelLeaderboardRow): string => (
+    `${row.modelId} / ${formatThinkingLevelLabel(row.thinkingLevel)}`
+  );
+  const providersLabel = (row: ModelLeaderboardRow): string => {
+    const providerModelIds = row.providers.map((provider) => provider.modelId);
+    if (providerModelIds.length > 1) {
+      return `${providerModelIds.length} providers · ${providerModelIds.join(', ')}`;
+    }
+    return providerModelIds[0] && providerModelIds[0] !== row.modelId ? providerModelIds[0] : '';
+  };
 
-  type DimKey = 'satisfaction' | 'resolutionRate' | 'fileChurn' | 'toolReliability' | 'verificationPassRate' | 'tokenEfficiency';
-  const DIM_KEYS: DimKey[] = ['satisfaction', 'resolutionRate', 'fileChurn', 'toolReliability', 'verificationPassRate', 'tokenEfficiency'];
-  type Pair = { complexity: number; outcome: number };
+  const eligibilityLabel = (row: ModelLeaderboardRow): string => row.modelId === '(unknown)' ? 'Unknown / unranked' : row.evidenceTier;
 
-  // Pass 0: per-run complexity scores. Outcome dimensions are blended mastery
-  // ((1-W)×rawSuccessRate + W×mean(complexity × outcome^EXPONENT)) so that actual success dominates
-  // task complexity while still rewarding completion of the hardest tasks — the top of the board is
-  // the model that demonstrably completes the most complex work, not merely the one assigned it.
-  const allScored = completed.filter((r) => r.scored && r.satisfaction !== null);
-  const complexityScores = computeComplexityScores(allScored);
-  const complexityOf = (r: PreparedRunRow): number => complexityScores.get(r.runId) ?? 0.5;
-  const difficultyEmphasized = hasComplexityVariance(allScored.map((r) => complexityOf(r)));
-
-  // Pass 1: per-group observed (normalized) point estimates, sample sizes, and display values.
-  const entries = [...groups.entries()].map(([key, groupRuns]) => {
-    const [modelId, thinkingLevel] = key.split('::');
-    const label = `${modelId} / ${formatThinkingLevelLabel(thinkingLevel!)}`;
-    const scored = groupRuns.filter((r) => r.scored && r.satisfaction !== null);
-
-    const satValues = scored.map((r) => r.satisfaction!);
-    const satMean = satValues.length > 0 ? satValues.reduce((s, v) => s + v, 0) / satValues.length : null;
-
-    const resValues = scored.map((r) => r.resolution === 'resolved' ? 1 : r.resolution === 'partially_resolved' ? 0.5 : 0);
-    const resMean = resValues.length > 0 ? resValues.reduce<number>((s, v) => s + v, 0) / resValues.length : null;
-
-    const toolSuccesses = scored.filter((r) => r.toolFailureCount === 0).length;
-    const verifying = scored.filter((r) => r.verificationTotalCount > 0);
-    const verPass = verifying.filter((r) => r.verificationState === 'passing').length;
-
-    const tokenEffValues = scored.map((r) => r.tokenEfficiency).filter((v): v is number => v !== null);
-    const tokenEffMedian = tokenEffValues.length > 0
-      ? Math.max(0, Math.min(LEADERBOARD_TOKEN_EFFICIENCY_MAX, median(tokenEffValues) ?? 0))
-      : null;
-
-    // File churn: mean re-edit rate (fraction of edits that revisited an already-edited file).
-    // Lower = less churn = better; inverted for the composite. Null for runs with no attributable
-    // edits (incl. legacy runs). MEAN (not median) because churn is a long-tail signal.
-    const churnValues = scored.map((r) => r.editRevisitRate).filter((v): v is number => v !== null);
-    const churnMean = churnValues.length > 0 ? churnValues.reduce((s, v) => s + v, 0) / churnValues.length : null;
-
-    // Per-run (complexity, outcome) pairs for the complexity-weighted dimensions. The four
-    // outcome/process dimensions (satisfaction, resolution, verification pass, tool reliability)
-    // are mastery-weighted; token efficiency and file churn stay raw (process metrics, not
-    // "completing complex tasks").
-    const pairs: Record<DimKey, Pair[]> = {
-      satisfaction: scored.map((r) => ({ complexity: complexityOf(r), outcome: Math.max(0, Math.min(1, (r.satisfaction! - 1) / 4)) })),
-      resolutionRate: scored.map((r) => ({ complexity: complexityOf(r), outcome: r.resolution === 'resolved' ? 1 : r.resolution === 'partially_resolved' ? 0.5 : 0 })),
-      fileChurn: [],
-      verificationPassRate: verifying.map((r) => ({ complexity: complexityOf(r), outcome: r.verificationState === 'passing' ? 1 : 0 })),
-      toolReliability: scored.map((r) => ({ complexity: complexityOf(r), outcome: r.toolFailureCount === 0 ? 1 : 0 })),
-      tokenEfficiency: [],
-    };
-
-    // Blended mastery = (1-W)×rawSuccessRate + W×mean(complexity × outcome^OUTCOME_EXPONENT). The raw
-    // success component makes actual success matter directly on every dimension (including 0/1 outcome
-    // dims where the exponent is a no-op); the complexity-weighted component rewards completing the
-    // hardest tasks. Together, actual success dominates task complexity. Token efficiency stays raw.
-    const masteryOf = (rawRate: number | null, p: Pair[]): number | null => {
-      if (rawRate === null) return null;
-      const cwm = complexityWeightedMean(p, LEADERBOARD_OUTCOME_EXPONENT);
-      if (cwm === null) return null;
-      return Math.max(0, Math.min(1, (1 - LEADERBOARD_MASTERY_COMPLEXITY_WEIGHT) * rawRate + LEADERBOARD_MASTERY_COMPLEXITY_WEIGHT * cwm));
-    };
-
-    const observed: Record<DimKey, number | null> = {
-      satisfaction: masteryOf(satMean !== null ? Math.max(0, Math.min(1, (satMean - 1) / 4)) : null, pairs.satisfaction),
-      resolutionRate: masteryOf(resMean, pairs.resolutionRate),
-      fileChurn: churnMean !== null ? Math.max(0, Math.min(1, 1 - churnMean)) : null,
-      toolReliability: masteryOf(scored.length > 0 ? toolSuccesses / scored.length : null, pairs.toolReliability),
-      verificationPassRate: masteryOf(verifying.length > 0 ? verPass / verifying.length : null, pairs.verificationPassRate),
-      tokenEfficiency: tokenEffMedian !== null ? Math.max(0, Math.min(1, 1 - tokenEffMedian / LEADERBOARD_TOKEN_EFFICIENCY_MAX)) : null,
-    };
-    const n: Record<DimKey, number> = {
-      satisfaction: scored.length,
-      resolutionRate: scored.length,
-      fileChurn: churnValues.length,
-      toolReliability: scored.length,
-      verificationPassRate: verifying.length,
-      tokenEfficiency: tokenEffValues.length,
-    };
-    const meanTaskComplexity = scored.length > 0 ? scored.reduce((s, r) => s + complexityOf(r), 0) / scored.length : null;
+  const tableRows: LeaderboardCompositeRow[] = leaderboard.rows.map((row, index) => {
+    const label = displayLabel(row);
+    const rankLabel = row.rank === null ? '—' : `#${row.rank}`;
+    const scoreLabel = row.compositeScore === null ? '—' : `${(row.compositeScore * 100).toFixed(1)}%`;
+    const unadjustedScoreLabel = row.unadjustedCompositeScore !== null
+      ? `${(row.unadjustedCompositeScore * 100).toFixed(1)}%`
+      : '—';
+    const adjustmentLabel = row.caseMixAdjustment !== null
+      ? `${row.caseMixAdjustment >= 0 ? '+' : ''}${(row.caseMixAdjustment * 100).toFixed(1)} pp`
+      : 'inactive';
     return {
-      label, modelId: modelId!, thinkingLevel: formatThinkingLevelLabel(thinkingLevel!),
-      runCount: groupRuns.length, scoredRunCount: scored.length, observed, n, meanTaskComplexity,
-      satMean, resMean, churnMean, toolSuccesses, verifying, verPass, tokenEffMedian,
-      subagentUsageRate: groupRuns.length > 0 ? groupRuns.filter((r) => r.subagentCallCount > 0).length / groupRuns.length : 0,
-      costValues: groupRuns.map((r) => r.estimatedCostUsd).filter((v): v is number => v !== null && Number.isFinite(v)),
-      providerModelIds: [...new Set(groupRuns.map((r) => (r.modelId ?? '').trim() || '(unknown)'))].sort(),
+      label,
+      axisLabel: row.rank === null ? `Provisional · ${label}` : axisLabel(label, row.rank),
+      modelId: row.modelId,
+      thinkingLevel: formatThinkingLevelLabel(row.thinkingLevel),
+      sortOrder: index,
+      compositeScore: row.compositeScore,
+      rank: row.rank,
+      rankLabel,
+      scoreLabel,
+      eligibilityLabel: eligibilityLabel(row),
+      unadjustedScoreLabel,
+      adjustmentLabel,
+      barLabel: `${rankLabel} · ${scoreLabel}`,
+      evidenceWeightLabel: fmtPct(row.evidenceWeight),
+      runCount: row.runCount,
+      scoredRunCount: row.scoredRunCount,
+      effectiveTaskCount: row.effectiveTaskCount,
+      attributableTaskCount: row.attributableTaskCount,
+      scoringCoverageLabel: fmtPct(row.scoringCoverage),
+      caseMixOverlapLabel: fmtPct(row.caseMixOverlap),
+      userOutcomeCount: row.userOutcomeCount,
+      agentOutcomeCount: row.agentOutcomeCount,
+      mixedModelExcludedCount: row.mixedModelExcludedCount,
+      mixedTreatmentExcludedCount: row.mixedTreatmentExcludedCount,
+      nLabel: `${row.scoredRunCount} outcomes / ${row.effectiveTaskCount} rated tasks / ${row.attributableTaskCount} attributable tasks / ${row.runCount} runs`,
+      outcomeSourceLabel: `${row.userOutcomeCount} ranked user / ${row.agentOutcomeCount} supplemental agent`,
+      avgSatisfaction: row.dimensions.satisfaction.value?.toFixed(2) ?? '—',
+      resolutionRate: fmtPct(row.dimensions.resolutionRate.value),
+      fileChurnRate: row.dimensions.fileChurn.value !== null
+        ? `${(row.dimensions.fileChurn.value * 100).toFixed(0)}% re-edit`
+        : '—',
+      toolReliabilityRate: fmtPct(row.dimensions.toolReliability.value),
+      verificationPassRate: fmtPct(row.dimensions.verificationPassRate.value),
+      tokenEfficiencyRate: row.dimensions.tokenEfficiency.value !== null
+        ? `${row.dimensions.tokenEfficiency.value.toFixed(1)} tok/line`
+        : '—',
+      medianCostUsd: row.medianCostUsd !== null ? `$${row.medianCostUsd.toFixed(4)}` : '—',
+      meanPreTaskComplexity: fmtPct(row.meanPreTaskComplexity),
+      taskMixLabel: `L ${row.taskComplexityBandCounts.low} / M ${row.taskComplexityBandCounts.medium} / H ${row.taskComplexityBandCounts.high}`,
+      meanWorkloadIntensity: fmtPct(row.meanWorkloadIntensity),
+      subagentRate: fmtPct(row.subagentUsageRate),
+      providersLabel: providersLabel(row),
+      intervalLabel: row.scoreInterval80 ? `${(row.scoreInterval80.lower * 100).toFixed(1)}–${(row.scoreInterval80.upper * 100).toFixed(1)}%` : '—',
+      rankRangeLabel: row.scoreInterval80 ? `#${row.scoreInterval80.bestRank}–#${row.scoreInterval80.worstRank}` : '—',
+      evidenceTier: row.evidenceTier,
+      userChannelLabel: row.userChannelScore === null ? '—' : `${(row.userChannelScore * 100).toFixed(1)}%`,
+      agentChannelLabel: row.agentChannelScore === null ? '—' : `${(row.agentChannelScore * 100).toFixed(1)}%`,
+      processChannelLabel: row.processChannelScore === null ? '—' : `${(row.processChannelScore * 100).toFixed(1)}%`,
+      userEvidenceLabel: `${row.userEvidenceCount} (${row.userEvidenceMass.toFixed(1)} mass)`,
+      agentEvidenceLabel: `${row.agentEvidenceCount} (${row.agentEvidenceMass.toFixed(1)} mass)`,
+      processEvidenceLabel: `${row.processEvidenceCount} (${row.processEvidenceMass.toFixed(1)} mass)`,
+      canonicalTaskCount: row.canonicalTaskCount,
+      transcriptOnlySessionCount: row.transcriptOnlySessionCount,
+      thinkingMixLabel: row.thinkingLevels.map((item) => `${formatThinkingLevelLabel(item.thinkingLevel)} ${item.attributionMass.toFixed(1)}`).join(', '),
     };
   });
-
-  // Pass 2: grand mean per dimension (empirical-Bayes prior) over groups with data.
-  const grandMean: Record<DimKey, number | null> = {} as Record<DimKey, number | null>;
-  for (const dim of DIM_KEYS) {
-    const vals = entries.map((e) => e.observed[dim]).filter((v): v is number => v !== null);
-    grandMean[dim] = vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
-  }
-
-  // Pass 3: shrink each estimate toward the grand mean and assemble ranked rows.
-  const ranked = entries
-    .map((e) => {
-      let compositeScore: number | null = null;
-      let reliabilityFactor: number | null = null;
-      const shrunk: Record<DimKey, number | null> = {} as Record<DimKey, number | null>;
-      if (e.scoredRunCount >= LEADERBOARD_MIN_SCORED) {
-        let sum = 0;
-        for (const dim of DIM_KEYS) {
-          const obs = e.observed[dim];
-          const gm = grandMean[dim];
-          if (obs === null || gm === null) { shrunk[dim] = null; continue; }
-          // Difficulty emphasis: outcome dims are already blended mastery estimates (raw success +
-          // shrink toward the grand mean by n/(n+k) to curb small-sample cherry-picking.
-          const s = Math.max(0, Math.min(1, (e.n[dim] * obs + LEADERBOARD_SHRINKAGE_K * gm) / (e.n[dim] + LEADERBOARD_SHRINKAGE_K)));
-          shrunk[dim] = s;
-          sum += LEADERBOARD_WEIGHTS[dim] * s;
-        }
-        reliabilityFactor = Math.min(1, Math.max(0, e.scoredRunCount / (e.scoredRunCount + LEADERBOARD_SHRINKAGE_K)));
-        compositeScore = Math.round(sum * 10000) / 10000;
-      }
-      return { e, compositeScore, reliabilityFactor, shrunk };
-    })
-    .filter((r) => r.compositeScore !== null)
-    .sort((a, b) => (
-      b.compositeScore! - a.compositeScore!
-      || b.e.scoredRunCount - a.e.scoredRunCount
-      || b.e.runCount - a.e.runCount
-      || a.e.label.localeCompare(b.e.label, undefined, { numeric: true, sensitivity: 'base' })
-    ));
-
-  const fmtPct = (v: number | null | undefined) => v != null ? `${(v * 100).toFixed(0)}%` : '—';
-  const axisLabel = (label: string, index: number) => `#${index + 1} · ${label}`;
-
-  const composite: LeaderboardCompositeRow[] = ranked.map(({ e, compositeScore, reliabilityFactor }, idx) => {
-    const rankLabel = `#${idx + 1}`;
-    const scoreLabel = `${(compositeScore! * 100).toFixed(1)}%`;
-    const costMedian = e.costValues.length > 0 ? median(e.costValues) : null;
-    // Label the provider-specific ids that collapsed into this provider-agnostic row, so the
-    // collapse is visible and provider differences stay investigable.
-    const providerModelIds = e.providerModelIds;
-    const providersLabel = providerModelIds.length > 1
-      ? `${providerModelIds.length} providers · ${providerModelIds.join(', ')}`
-      : (providerModelIds[0] && providerModelIds[0] !== e.modelId ? providerModelIds[0] : '');
-    return {
-      label: e.label, axisLabel: axisLabel(e.label, idx), modelId: e.modelId, thinkingLevel: e.thinkingLevel,
-      sortOrder: idx, compositeScore: compositeScore!,
-      rank: idx + 1, rankLabel, scoreLabel, barLabel: `${rankLabel} · ${scoreLabel}`,
-      reliabilityLabel: reliabilityFactor != null ? `${(reliabilityFactor * 100).toFixed(0)}%` : '—',
-      runCount: e.runCount, scoredRunCount: e.scoredRunCount,
-      nLabel: `${e.scoredRunCount} scored / ${e.runCount} total`,
-      avgSatisfaction: e.satMean != null ? e.satMean.toFixed(2) : '—',
-      resolutionRate: fmtPct(e.resMean),
-      fileChurnRate: e.churnMean != null ? `${(e.churnMean * 100).toFixed(0)}% re-edit` : '—',
-      toolReliabilityRate: fmtPct(e.scoredRunCount > 0 ? e.toolSuccesses / e.scoredRunCount : null),
-      verificationPassRate: fmtPct(e.verifying.length > 0 ? e.verPass / e.verifying.length : null),
-      tokenEfficiencyRate: e.tokenEffMedian != null ? `${e.tokenEffMedian.toFixed(1)} tok/line` : '—',
-      medianCostUsd: costMedian != null ? `$${costMedian.toFixed(4)}` : '—',
-      meanTaskComplexity: e.meanTaskComplexity != null ? `${(e.meanTaskComplexity * 100).toFixed(0)}%` : '—',
-      difficultyEmphasized,
-      subagentRate: fmtPct(e.subagentUsageRate),
-      providersLabel,
-    };
-  });
+  const composite = tableRows.filter(
+    (row): row is LeaderboardCompositeRow & { compositeScore: number; rank: number } => (
+      row.compositeScore !== null && row.rank !== null
+    ),
+  );
 
   const dimensions: LeaderboardDimensionRow[] = [];
-  ranked.forEach(({ e, shrunk }, idx) => {
-    const lbl = axisLabel(e.label, idx);
-    const add = (dim: string, score: number | null | undefined, raw: string) => {
-      if (score != null) dimensions.push({ label: e.label, axisLabel: lbl, sortOrder: idx, dimension: dim, score, rawLabel: raw });
+  ranked.forEach((row) => {
+    const label = displayLabel(row);
+    const rowAxisLabel = axisLabel(label, row.rank);
+    const add = (
+      dimension: string,
+      metric: ModelLeaderboardRow['dimensions'][keyof ModelLeaderboardRow['dimensions']],
+      rawLabel: (value: number) => string,
+    ): void => {
+      if (metric.shrunk === null) return;
+      dimensions.push({
+        label,
+        axisLabel: rowAxisLabel,
+        sortOrder: row.rank - 1,
+        dimension,
+        score: metric.shrunk,
+        rawLabel: metric.value === null || metric.n === 0
+          ? 'No telemetry · pooled prior'
+          : rawLabel(metric.value),
+      });
     };
-    add('Satisfaction', shrunk.satisfaction, `${e.satMean != null ? e.satMean.toFixed(2) : '—'} avg`);
-    add('Resolution', shrunk.resolutionRate, `${fmtPct(e.resMean)} rate`);
-    add('File churn', shrunk.fileChurn, `${e.churnMean != null ? (e.churnMean * 100).toFixed(0) + '% re-edit' : '—'}`);
-    add('Tool reliability', shrunk.toolReliability, `${fmtPct(e.scoredRunCount > 0 ? e.toolSuccesses / e.scoredRunCount : null)} clean`);
-    add('Verification', shrunk.verificationPassRate, `${fmtPct(e.verifying.length > 0 ? e.verPass / e.verifying.length : null)} pass`);
-    add('Token efficiency', shrunk.tokenEfficiency, `${e.tokenEffMedian != null ? e.tokenEffMedian.toFixed(1) : '—'} tok/line`);
+    add('Satisfaction', row.dimensions.satisfaction, (value) => `${value.toFixed(2)} avg`);
+    add('Resolution', row.dimensions.resolutionRate, (value) => `${fmtPct(value)} rate`);
+    add('File churn', row.dimensions.fileChurn, (value) => `${(value * 100).toFixed(0)}% re-edit`);
+    add('Tool reliability', row.dimensions.toolReliability, (value) => `${fmtPct(value)} clean`);
+    add('Verification', row.dimensions.verificationPassRate, (value) => `${fmtPct(value)} pass`);
+    add('Token efficiency', row.dimensions.tokenEfficiency, (value) => `${value.toFixed(1)} tok/line`);
   });
 
-  return { composite, dimensions, unrankedCount: entries.length - ranked.length };
+  return {
+    composite,
+    tableRows,
+    dimensions,
+    unrankedCount: leaderboard.rows.length - ranked.length,
+    rows: leaderboard.rows,
+    caseMix: leaderboard.caseMix,
+    minimumTaskScoringCoverage: leaderboard.minimumTaskScoringCoverage,
+  };
 }
 
-function renderLeaderboardTable(rows: LeaderboardCompositeRow[], renderToken: number): void {
+function renderLeaderboardTable(
+  rows: LeaderboardCompositeRow[],
+  minimumTaskScoringCoverage: number,
+  minimumModelRatedTasksPerBand: number,
+  renderToken: number,
+): void {
   if (!isCurrentRender(renderToken)) {
     return;
   }
@@ -2165,35 +2232,63 @@ function renderLeaderboardTable(rows: LeaderboardCompositeRow[], renderToken: nu
 
   target.innerHTML = `
     <table class="data-table leaderboard-table">
-      <caption>Ranked first to last by expected strength on the hardest work, gated by actual success. Composite = blended mastery empirical-Bayes shrunk estimates (raw success + complexity-weighted) — actual success dominates task complexity; cost & task difficulty shown separately.</caption>
+      <caption>Observational family ranks relative to the current model cohort and ex-ante task mix—not universal benchmark capability. Ranks reflect point-estimate order; models with overlapping 80% score intervals have unresolved relative order (see the rank range column). Every observed family is shown; sparse evidence shrinks toward pooled source priors and is labelled.</caption>
       <thead>
         <tr>
           <th scope="col">Rank</th>
           <th scope="col">Model / thinking</th>
-          <th scope="col">Score</th>
-          <th scope="col">Runs</th>
+          <th scope="col">Evidence tier</th>
+          <th scope="col">Composite</th>
+          <th scope="col">80% score / rank interval</th>
+          <th scope="col">U score / evidence</th>
+          <th scope="col">A score / evidence</th>
+          <th scope="col">P score / evidence</th>
+          <th scope="col">Canonical / transcript-only</th>
+          <th scope="col">Raw score</th>
+          <th scope="col">Case-mix Δ</th>
+          <th scope="col">Case-mix overlap</th>
+          <th scope="col">Evidence weight</th>
+          <th scope="col">Outcomes / rated tasks / attributable tasks / runs</th>
+          <th scope="col">Task rating coverage</th>
+          <th scope="col">Ranked / supplemental</th>
+          <th scope="col">Mixed model / treatment excluded</th>
           <th scope="col">Sat.</th>
           <th scope="col">Resolved</th>
           <th scope="col">File churn</th>
           <th scope="col">Tool clean</th>
           <th scope="col">Ver. pass</th>
           <th scope="col">Tok/line</th>
-          <th scope="col">Med. cost</th>
-          <th scope="col">Task diff.</th>
+          <th scope="col">Med. total cost</th>
+          <th scope="col">Ex-ante complexity</th>
+          <th scope="col">Task mix L/M/H</th>
+          <th scope="col">Workload intensity</th>
           <th scope="col">Subagents</th>
         </tr>
       </thead>
       <tbody>
-        ${rows.map((row) => `
-          <tr>
+        ${rows.map((row, index) => `
+          <tr class="${row.rank === null ? `unranked-row${index > 0 && rows[index - 1]?.rank !== null ? ' unranked-start' : ''}` : 'ranked-row'}">
             <td class="rank-cell">${escapeHtml(row.rankLabel)}</td>
             <th scope="row">
               <span class="model-name">${escapeHtml(row.modelId)}</span>
               <span class="model-detail">${escapeHtml(row.thinkingLevel)}</span>
               ${row.providersLabel ? `<span class="model-providers">${escapeHtml(row.providersLabel)}</span>` : ''}
             </th>
+            <td class="eligibility-cell">${escapeHtml(row.evidenceTier)}</td>
             <td class="numeric strong-cell">${escapeHtml(row.scoreLabel)}</td>
+            <td class="numeric">${escapeHtml(row.intervalLabel)} / ${escapeHtml(row.rankRangeLabel)}</td>
+            <td class="numeric">${escapeHtml(row.userChannelLabel)} / ${escapeHtml(row.userEvidenceLabel)}</td>
+            <td class="numeric">${escapeHtml(row.agentChannelLabel)} / ${escapeHtml(row.agentEvidenceLabel)}</td>
+            <td class="numeric">${escapeHtml(row.processChannelLabel)} / ${escapeHtml(row.processEvidenceLabel)}</td>
+            <td class="numeric">${row.canonicalTaskCount} / ${row.transcriptOnlySessionCount}</td>
+            <td class="numeric">${escapeHtml(row.unadjustedScoreLabel)}</td>
+            <td class="numeric">${escapeHtml(row.adjustmentLabel)}</td>
+            <td class="numeric">${escapeHtml(row.caseMixOverlapLabel)}</td>
+            <td class="numeric">${escapeHtml(row.evidenceWeightLabel)}</td>
             <td class="numeric">${escapeHtml(row.nLabel)}</td>
+            <td class="numeric">${escapeHtml(row.scoringCoverageLabel)}</td>
+            <td class="numeric">${escapeHtml(row.outcomeSourceLabel)}</td>
+            <td class="numeric">${row.mixedModelExcludedCount} / ${row.mixedTreatmentExcludedCount}</td>
             <td class="numeric">${escapeHtml(row.avgSatisfaction)}</td>
             <td class="numeric">${escapeHtml(row.resolutionRate)}</td>
             <td class="numeric">${escapeHtml(row.fileChurnRate)}</td>
@@ -2201,7 +2296,9 @@ function renderLeaderboardTable(rows: LeaderboardCompositeRow[], renderToken: nu
             <td class="numeric">${escapeHtml(row.verificationPassRate)}</td>
             <td class="numeric">${escapeHtml(row.tokenEfficiencyRate)}</td>
             <td class="numeric">${escapeHtml(row.medianCostUsd)}</td>
-            <td class="numeric">${escapeHtml(row.meanTaskComplexity)}</td>
+            <td class="numeric">${escapeHtml(row.meanPreTaskComplexity)}</td>
+            <td class="numeric">${escapeHtml(row.taskMixLabel)}</td>
+            <td class="numeric">${escapeHtml(row.meanWorkloadIntensity)}</td>
             <td class="numeric">${escapeHtml(row.subagentRate)}</td>
           </tr>
         `).join('')}
@@ -2495,15 +2592,34 @@ async function renderCharts(
   await renderSpec('chart-timeline', timelineSpec, 'No runs match the current filters.', renderToken);
 
   // ── 1b. Model leaderboard (composite ranking) ──────────────────────────────
-  const lb = leaderboardRows(runs);
+  // Historical transcript/review evidence is intentionally not present in run-summary.json, so the
+  // canonical family leaderboard always uses its generated all-evidence artifact. Run filters still
+  // apply to the surrounding run-level diagnostics.
+  const lb = leaderboardRows(runs, data.modelLeaderboard);
+  const leaderboardUserOutcomes = lb.rows.reduce((sum, row) => sum + row.userOutcomeCount, 0);
+  const leaderboardAgentOutcomes = lb.rows.reduce((sum, row) => sum + row.agentOutcomeCount, 0);
+  const leaderboardMixedModelExcluded = lb.rows.reduce((sum, row) => sum + row.mixedModelExcludedCount, 0);
+  const leaderboardMixedTreatmentExcluded = lb.rows.reduce((sum, row) => sum + row.mixedTreatmentExcludedCount, 0);
+  const targetMix = lb.caseMix.targetBandWeights;
+  const caseMixSignalLabels = lb.caseMix.activeSignals.map((signal) => ({
+    initialUserMessageChars: 'initial message size',
+    attachmentCount: 'attachments',
+    contextFileCount: 'context files',
+  })[signal]);
+  const caseMixSummary = `Standardized to the full privacy-safe ex-ante task distribution (L ${(targetMix.low * 100).toFixed(0)}% / M ${(targetMix.medium * 100).toFixed(0)}% / H ${(targetMix.high * 100).toFixed(0)}%)${caseMixSignalLabels.length ? ` using ${caseMixSignalLabels.join(', ')}` : ''}; missing family-band cells use source-band priors.`;
   setNote(
     'leaderboard-note',
     lb.composite.length === 0
-      ? `No models with ≥${LEADERBOARD_MIN_SCORED} scored runs.`
-      : `${lb.composite.length} ranked models ordered #1 → #${lb.composite.length}; ${lb.unrankedCount} unranked. Composite = blended mastery empirical-Bayes shrunk estimates (raw success + complexity-weighted; actual success dominates task complexity so mediocre performers on hard tasks don't outrank strong consistent ones); cost & task difficulty shown separately, not in score.`,
+      ? `No attributable model families are available. ${caseMixSummary}`
+      : `${lb.composite.length} observed families ranked relative to this cohort and task mix; sparse rows shrink toward pooled source priors. ${caseMixSummary} Evidence: ${leaderboardUserOutcomes} canonical user mass; ${leaderboardAgentOutcomes} deduplicated agent-review mass; ${leaderboardMixedModelExcluded} mixed-model and ${leaderboardMixedTreatmentExcluded} mixed-treatment canonical outcomes omitted from user attribution. This is observational, not universal benchmark capability.`,
     renderToken,
   );
-  renderLeaderboardTable(lb.composite, renderToken);
+  renderLeaderboardTable(
+    lb.tableRows,
+    lb.minimumTaskScoringCoverage,
+    lb.caseMix.minimumModelRatedTasksPerBand,
+    renderToken,
+  );
 
   const leaderboardOrder = lb.composite.map((row) => row.axisLabel);
   const leaderboardSpec: Record<string, unknown> | null = lb.composite.length === 0 ? null : {
@@ -2515,7 +2631,7 @@ async function renderCharts(
         mark: { type: 'bar', cornerRadiusEnd: 3, opacity: 0.82 },
         encoding: {
           y: { field: 'axisLabel', type: 'nominal', sort: leaderboardOrder, title: null, axis: { labelLimit: 320, labelPadding: 8 } },
-          x: { field: 'compositeScore', type: 'quantitative', title: 'Composite score (expected, shrunk)', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
+          x: { field: 'compositeScore', type: 'quantitative', title: 'Regularized cohort-relative composite', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
           color: {
             field: 'thinkingLevel', type: 'nominal', title: 'Reasoning',
             scale: { domain: THINKING_LEVEL_DOMAIN, range: THINKING_LEVEL_RANGE },
@@ -2524,17 +2640,26 @@ async function renderCharts(
           tooltip: [
             { field: 'rankLabel', type: 'nominal', title: 'Rank' },
             { field: 'label', type: 'nominal', title: 'Model' },
-            { field: 'scoreLabel', type: 'nominal', title: 'Composite score' },
-            { field: 'reliabilityLabel', type: 'nominal', title: 'Confidence' },
-            { field: 'nLabel', type: 'nominal', title: 'Runs' },
+            { field: 'scoreLabel', type: 'nominal', title: 'Strength score' },
+            { field: 'unadjustedScoreLabel', type: 'nominal', title: 'Raw regularized score' },
+            { field: 'adjustmentLabel', type: 'nominal', title: 'Case-mix adjustment' },
+            { field: 'caseMixOverlapLabel', type: 'nominal', title: 'Case-mix overlap' },
+            { field: 'evidenceWeightLabel', type: 'nominal', title: 'Evidence weight' },
+            { field: 'nLabel', type: 'nominal', title: 'Outcomes / rated / attributable tasks / runs' },
+            { field: 'scoringCoverageLabel', type: 'nominal', title: 'Task-level user-rating coverage' },
+            { field: 'outcomeSourceLabel', type: 'nominal', title: 'Ranked / supplemental outcomes' },
+            { field: 'mixedModelExcludedCount', type: 'quantitative', title: 'Mixed-model outcomes excluded' },
+            { field: 'mixedTreatmentExcludedCount', type: 'quantitative', title: 'Mixed-treatment outcomes excluded' },
             { field: 'avgSatisfaction', type: 'nominal', title: 'Avg satisfaction' },
             { field: 'resolutionRate', type: 'nominal', title: 'Resolution rate' },
             { field: 'fileChurnRate', type: 'nominal', title: 'File churn' },
             { field: 'toolReliabilityRate', type: 'nominal', title: 'Tool reliability' },
             { field: 'verificationPassRate', type: 'nominal', title: 'Verification pass' },
             { field: 'tokenEfficiencyRate', type: 'nominal', title: 'Token efficiency' },
-            { field: 'medianCostUsd', type: 'nominal', title: 'Median cost / run' },
-            { field: 'meanTaskComplexity', type: 'nominal', title: 'Mean task difficulty' },
+            { field: 'medianCostUsd', type: 'nominal', title: 'Median total cost / run' },
+            { field: 'meanPreTaskComplexity', type: 'nominal', title: 'Mean ex-ante complexity' },
+            { field: 'taskMixLabel', type: 'nominal', title: 'Observed task mix' },
+            { field: 'meanWorkloadIntensity', type: 'nominal', title: 'Mean workload intensity (descriptive)' },
             { field: 'subagentRate', type: 'nominal', title: 'Subagent usage' },
           ],
         },
@@ -2550,14 +2675,14 @@ async function renderCharts(
       },
     ],
   };
-  await renderSpec('chart-leaderboard', leaderboardSpec, `No models with ≥${LEADERBOARD_MIN_SCORED} scored runs match the current filters.`, renderToken);
+  await renderSpec('chart-leaderboard', leaderboardSpec, 'No attributable model families match the current filters.', renderToken);
 
   // ── 1c. Leaderboard dimension profile ─────────────────────────────────────
   setNote(
     'leaderboard-dimension-note',
     lb.dimensions.length === 0
       ? 'No ranked models to show.'
-      : `6 dimensions per model; dot = empirical-Bayes shrunk estimate (0–1), the value used in the composite. Four non-efficiency dimensions (satisfaction, resolution, verification pass, tool reliability) are blended mastery = ${(1 - LEADERBOARD_MASTERY_COMPLEXITY_WEIGHT).toFixed(1)}×raw success rate + ${LEADERBOARD_MASTERY_COMPLEXITY_WEIGHT}×mean(complexity × outcome^${LEADERBOARD_OUTCOME_EXPONENT}); the raw-success component makes actual success dominate task complexity on every dimension (incl. 0/1 outcome dims where the exponent is a no-op), so a mediocre performer on hard tasks can't outrank a strong consistent one. fileChurn (re-edit rate, lower churn = better) and token efficiency stay raw. Weights: sat ${(LEADERBOARD_WEIGHTS.satisfaction * 100).toFixed(0)}%, res ${(LEADERBOARD_WEIGHTS.resolutionRate * 100).toFixed(0)}%, churn ${(LEADERBOARD_WEIGHTS.fileChurn * 100).toFixed(0)}%, tool ${(LEADERBOARD_WEIGHTS.toolReliability * 100).toFixed(0)}%, ver ${(LEADERBOARD_WEIGHTS.verificationPassRate * 100).toFixed(0)}%, tok ${(LEADERBOARD_WEIGHTS.tokenEfficiency * 100).toFixed(0)}%. Estimates shrink toward the grand mean by n/(n+${LEADERBOARD_SHRINKAGE_K}).`,
+      : `Diagnostic dimensions are shown alongside the separately calibrated channels. User evidence combines satisfaction ${(LEADERBOARD_WEIGHTS.satisfaction * 100).toFixed(1)}% and resolution ${(LEADERBOARD_WEIGHTS.resolutionRate * 100).toFixed(1)}%; standardized user, agent, and process evidence combine at 60% / 25% / 15%. Cost, tokens, duration, file churn, and tool volume are diagnostic only.`,
     renderToken,
   );
 
@@ -2568,7 +2693,7 @@ async function renderCharts(
     mark: { type: 'point', filled: true, size: 180, opacity: 0.88, strokeWidth: 0.6 },
     encoding: {
       y: { field: 'axisLabel', type: 'nominal', sort: leaderboardOrder, title: null, axis: { labelLimit: 320, labelPadding: 8 } },
-      x: { field: 'score', type: 'quantitative', title: 'Shrunk score (0–1)', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
+      x: { field: 'score', type: 'quantitative', title: 'Regularized estimate (0–1)', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
       color: {
         field: 'dimension', type: 'nominal', title: 'Dimension',
         scale: { domain: DIMENSION_NAMES, range: DIMENSION_COLORS },
@@ -2577,7 +2702,7 @@ async function renderCharts(
       tooltip: [
         { field: 'label', type: 'nominal', title: 'Model' },
         { field: 'dimension', type: 'nominal', title: 'Dimension' },
-        { field: 'score', type: 'quantitative', title: 'Shrunk score', format: '.3f' },
+        { field: 'score', type: 'quantitative', title: 'Regularized estimate', format: '.3f' },
         { field: 'rawLabel', type: 'nominal', title: 'Raw value' },
       ],
     },
@@ -2647,7 +2772,7 @@ async function renderCharts(
     renderToken,
   );
 
-  // ── 4. Verification cost vs payoff ────────────────────────────────────────
+  // ── 4. Observed time and outcomes by verification depth ───────────────────
   const verificationCost = verificationCostRows(runs);
   setNote(
     'verification-cost-note',
@@ -2740,7 +2865,7 @@ async function renderCharts(
 
   // ── 2. Model/thinking scorecard — dot plot with 95% CIs ─────────────────────
   const modelRows = modelThinkingRows(runs);
-  setNote('model-note', `${modelRows.length} groups; CI shows uncertainty, point size = scored n.`, renderToken);
+  setNote('model-note', `${modelRows.length} groups; model outcomes use non-mixed user ratings only, CI shows uncertainty, and point size = user-outcome n. Agent ratings remain supplemental.`, renderToken);
 
   const modelSpec: Record<string, unknown> | null = modelRows.length === 0 ? null : {
     width: 'container',
@@ -2756,7 +2881,7 @@ async function renderCharts(
           color: { value: CHART_COLORS.accent2 },
           tooltip: [
             { field: 'label', type: 'nominal', title: 'Group' },
-            { field: 'nLabel', type: 'nominal', title: 'Scored / total' },
+            { field: 'nLabel', type: 'nominal', title: 'User outcomes / total' },
             { field: 'meanSatisfaction', type: 'quantitative', title: 'Mean satisfaction', format: '.2f' },
             { field: 'ciLabel', type: 'nominal', title: 'Interval' },
             { field: 'resolveRate', type: 'quantitative', title: 'Resolved rate', format: '.0%' },
@@ -2769,7 +2894,7 @@ async function renderCharts(
         encoding: {
           y: { field: 'label', type: 'nominal', sort: { field: 'meanSatisfaction', order: 'descending' }, title: null, axis: { labelLimit: 220 } },
           x: { field: 'meanSatisfaction', type: 'quantitative', scale: { domain: [1, 5] } },
-          size: { field: 'scoredRunCount', type: 'quantitative', title: 'Scored runs', scale: { range: [70, 420] }, legend: { orient: 'bottom', gradientLength: 120, labelLimit: 160 } },
+          size: { field: 'scoredRunCount', type: 'quantitative', title: 'User outcomes', scale: { range: [70, 420] }, legend: { orient: 'bottom', gradientLength: 120, labelLimit: 160 } },
           color: { field: 'thinkingLevel', type: 'nominal', title: 'Reasoning', scale: { domain: THINKING_LEVEL_DOMAIN, range: THINKING_LEVEL_RANGE }, legend: { orient: 'bottom', direction: 'horizontal', columns: 6, symbolLimit: 6, labelLimit: 160 } },
         },
       },
@@ -2784,12 +2909,12 @@ async function renderCharts(
       },
     ],
   };
-  await renderSpec('chart-model-quality', modelSpec, 'No scored model/thinking groups match the current filters.', renderToken);
+  await renderSpec('chart-model-quality', modelSpec, 'No model/thinking groups with non-mixed user outcomes match the current filters.', renderToken);
 
   // ── 3. Outcome composition by model ─────────────────────────────────────────
   const composition = compositionByModelRows(runs);
   const compositionModels = new Set(composition.map((row) => row.modelId));
-  setNote('resolution-note', `${compositionModels.size} models; stacked by resolution type.`, renderToken);
+  setNote('resolution-note', `${compositionModels.size} models; non-mixed user outcomes stacked by resolution type.`, renderToken);
 
   const resolutionDomain = ['resolved', 'partially_resolved', 'unresolved', 'unknown'];
   const resolutionRange = [CHART_COLORS.accent, CHART_COLORS.gold, CHART_COLORS.coral, CHART_COLORS.muted];
@@ -2870,7 +2995,7 @@ async function renderCharts(
     renderToken,
   );
 
-  // ── 8. Verification lift — compare against no-verification baseline ─────────
+  // ── 8. Observed outcomes by verification state ─────────────────────────────
   const verificationContrast = verificationContrastRows(runs);
   const verificationMeans = verificationMeanRows(runs);
   const showVerificationContrast = verificationContrast.length > 0;
@@ -2895,7 +3020,7 @@ async function renderCharts(
         mark: { type: 'rule', strokeWidth: 2.4, opacity: 0.78 },
         encoding: {
           y: { field: 'label', type: 'nominal', sort: ['Passing checks', 'At least one failing check'], title: null, axis: { labelLimit: 220 } },
-          x: { field: 'ciLower', type: 'quantitative', title: 'Satisfaction lift vs no verification (95% CI)', scale: { domain: [-4, 4] } },
+          x: { field: 'ciLower', type: 'quantitative', title: 'Observed satisfaction difference vs no verification (95% CI)', scale: { domain: [-4, 4] } },
           x2: { field: 'ciUpper' },
           color: { value: CHART_COLORS.accent2 },
           tooltip: [
@@ -3572,14 +3697,14 @@ async function renderCharts(
   };
   await renderSpec('chart-subagent-task-depth', subagentTaskSpec, 'No scored subagent task buckets match the current filters.', renderToken);
 
-  // ── 13. Task complexity & subagent delegation ──
+  // ── 13. Workload intensity & subagent delegation ──
   const complexityScatter = complexitySubagentScatterRows(runs);
   const complexityTiers = complexitySubagentTierRows(complexityScatter, runs);
   setNote(
     'complexity-subagent-note',
     complexityTiers
-      ? `${complexityScatter.length} scored runs; ${complexityTiers.filter((t) => t.scoredRunCount > 0).length} complexity tiers by line mutation quartiles.`
-      : `${complexityScatter.length} scored runs; scatter shows delegation vs task size.`,
+      ? `${complexityScatter.length} scored runs; ${complexityTiers.filter((t) => t.scoredRunCount > 0).length} workload-intensity tiers by line-mutation quartiles.`
+      : `${complexityScatter.length} scored runs; scatter shows delegation vs workload size.`,
     renderToken,
   );
 
@@ -3599,7 +3724,7 @@ async function renderCharts(
             {
               mark: { type: 'rule', strokeWidth: 2.2, opacity: 0.72 },
               encoding: {
-                y: { field: 'bucket', type: 'nominal', sort: tierLabels, title: 'Complexity tier' },
+                y: { field: 'bucket', type: 'nominal', sort: tierLabels, title: 'Workload-intensity tier' },
                 x: { field: 'ciLower', type: 'quantitative', title: 'Mean satisfaction (95% CI)', scale: { domain: [1, 5] } },
                 x2: { field: 'ciUpper' },
                 color: { value: CHART_COLORS.accent2 },
@@ -3641,7 +3766,7 @@ async function renderCharts(
             {
               mark: { type: 'rule', strokeWidth: 2.2, opacity: 0.78 },
               encoding: {
-                y: { field: 'bucket', type: 'nominal', sort: tierLabels, title: 'Complexity tier' },
+                y: { field: 'bucket', type: 'nominal', sort: tierLabels, title: 'Workload-intensity tier' },
                 x: { field: 'subagentUseCiLower', type: 'quantitative', title: 'Subagent use rate (Wilson 95% CI)', axis: { format: '.0%' }, scale: { domain: [0, 1] } },
                 x2: { field: 'subagentUseCiUpper' },
                 color: { value: CHART_COLORS.gold },
@@ -3825,7 +3950,7 @@ async function renderCharts(
   };
   await renderSpec('chart-subagent-trend', subagentTrendSpec, 'No completed runs match the current filters.', renderToken);
 
-  // ── 15. Subagent ROI by task size tier ────────────────────────────────────────────────────────
+  // ── 15. Observed outcomes by subagent use and workload size ────────────────
   const roiTierRows = subagentRoiTierRows(runs);
   const roiBucketLabels = [...new Set(roiTierRows.map((r) => r.bucket))];
   const roiContrastBuckets = roiBucketLabels.filter((label) => {
@@ -3836,7 +3961,7 @@ async function renderCharts(
     'subagent-roi-tier-note',
     roiTierRows.length === 0
       ? 'Need at least 8 completed runs to bucket by line-mutation quartiles.'
-      : `${roiTierRows.length} groups across ${roiBucketLabels.length} task-size tiers; ${roiContrastBuckets} tier(s) compare both subagent presence groups.`,
+      : `${roiTierRows.length} groups across ${roiBucketLabels.length} workload-size tiers; ${roiContrastBuckets} tier(s) compare both subagent presence groups.`,
     renderToken,
   );
   const roiTierSpec: Record<string, unknown> | null = roiTierRows.length === 0 ? null : {
@@ -3847,7 +3972,7 @@ async function renderCharts(
       {
         mark: { type: 'rule', strokeWidth: 2.4, opacity: 0.75 },
         encoding: {
-          x: { field: 'bucket', type: 'ordinal', sort: { field: 'bucketIndex' }, title: 'Task size tier (line mutations)', axis: { labelAngle: 0 } },
+          x: { field: 'bucket', type: 'ordinal', sort: { field: 'bucketIndex' }, title: 'Workload-size tier (line mutations)', axis: { labelAngle: 0 } },
           xOffset: { field: 'group', type: 'nominal' },
           y: { field: 'ciLower', type: 'quantitative', title: 'Mean satisfaction (95% CI)', scale: { domain: [1, 5] } },
           y2: { field: 'ciUpper' },
@@ -3862,7 +3987,7 @@ async function renderCharts(
           y: { field: 'meanSatisfaction', type: 'quantitative', scale: { domain: [1, 5] } },
           color: { field: 'group', type: 'nominal', legend: null, scale: { domain: ['No subagents', 'With subagents'], range: [CHART_COLORS.coral, CHART_COLORS.accent] } },
           tooltip: [
-            { field: 'bucket', type: 'nominal', title: 'Task size' },
+            { field: 'bucket', type: 'nominal', title: 'Workload size' },
             { field: 'group', type: 'nominal', title: 'Group' },
             { field: 'nLabel', type: 'nominal', title: 'Scored / total' },
             { field: 'meanSatisfaction', type: 'quantitative', title: 'Mean satisfaction', format: '.2f' },
@@ -3884,7 +4009,7 @@ async function renderCharts(
       },
     ],
   };
-  await renderSpec('chart-subagent-roi-tier', roiTierSpec, 'Not enough completed runs to compare subagent presence across task-size tiers.', renderToken);
+  await renderSpec('chart-subagent-roi-tier', roiTierSpec, 'Not enough completed runs to compare subagent presence across workload-size tiers.', renderToken);
 
   // ── 16. Subagent agent diversity dose response ────────────────────────────────────────────────
   const diversityRows = subagentDiversityRows(runs);
@@ -3941,7 +4066,7 @@ async function renderCharts(
   };
   await renderSpec('chart-subagent-diversity', diversitySpec, 'No completed runs match the current filters.', renderToken);
 
-  // ── 17. Task size distribution by resolution ──────────────────────────────────────────────────
+  // ── 17. Workload-size distribution by resolution ──────────────────────────
   const taskSizeDist = taskSizeDistributionRows(runs);
   const totalTaskSizeRuns = taskSizeDist.reduce((sum, r) => sum + r.count, 0);
   setNote(
@@ -3973,17 +4098,17 @@ async function renderCharts(
   };
   await renderSpec('chart-task-size-distribution', taskSizeDistSpec, 'No completed runs match the current filters.', renderToken);
 
-  // ── 18. Task size vs busy time ──────────────────────────────────────────────────────────────────────
+  // ── 18. Workload size vs busy time ─────────────────────────────────────────
   const taskSizeTime = taskSizeTimeRows(runs);
   setNote(
     'task-size-time-note',
     taskSizeTime.length === 0
       ? 'Need at least 8 completed runs with duration to bucket by line-mutation quartiles.'
-      : `${taskSizeTime.length} task-size tiers; rule = busy-time IQR, point = median; bottom panel = resolved share with Wilson 95% CI.`,
+      : `${taskSizeTime.length} workload-size tiers; rule = busy-time IQR, point = median; bottom panel = resolved share with Wilson 95% CI.`,
     renderToken,
   );
   const taskSizeTimeSpec = outcomeTimeBucketSpec(taskSizeTime, {
-    bucketTitle: 'Task size tier (line mutations)',
+    bucketTitle: 'Workload-size tier (line mutations)',
     timeTitle: 'Busy minutes (log)',
     rateTitle: 'Resolved share',
   });
@@ -4380,7 +4505,7 @@ async function main(): Promise<void> {
     fetchJson<RunSummaryData>('./data/run-summary.json'),
   ]);
 
-  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput] = await Promise.all([
+  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput, modelLeaderboard] = await Promise.all([
     fetchOptionalJson<OverviewData>('./data/overview.json'),
     fetchOptionalJson<ModelQualityData>('./data/model-quality.json'),
     fetchOptionalJson<VerificationImpactData>('./data/verification-impact.json'),
@@ -4391,10 +4516,11 @@ async function main(): Promise<void> {
     fetchOptionalJson<BackendErrorData>('./data/backend-errors.json'),
     fetchOptionalJson<FileExtensionData>('./data/file-types.json'),
     fetchOptionalJson<TokenThroughputData>('./data/token-throughput.json'),
+    fetchOptionalJson<ModelLeaderboardData>('./data/model-leaderboard.json'),
   ]);
 
   const precomputedAvailable = Boolean(
-    overview && modelQuality && verificationImpact && toolUsage && treatmentComparison && timeline && pruningImpact && backendErrors && fileExtensions && tokenThroughput,
+    overview && modelQuality && verificationImpact && toolUsage && treatmentComparison && timeline && pruningImpact && backendErrors && fileExtensions && tokenThroughput && modelLeaderboard,
   );
 
   if (!precomputedAvailable) {
@@ -4414,6 +4540,7 @@ async function main(): Promise<void> {
     backendErrors: backendErrors ?? emptyBackendErrorsData(manifest.schemaVersion),
     fileExtensions: fileExtensions ?? emptyFileExtensionsData(manifest.schemaVersion),
     tokenThroughput: tokenThroughput ?? emptyTokenThroughputData(manifest.schemaVersion),
+    modelLeaderboard: modelLeaderboard ?? createModelLeaderboardFromRuns(runSummary.rows),
   };
 
   setText('generated-at', formatDateTime(data.manifest.generatedAt));
@@ -4456,6 +4583,7 @@ async function main(): Promise<void> {
     const filters = currentFilters();
     const filteredRuns = applyFilters(data.runSummary.rows, filters);
     const usePrecomputed = precomputedAvailable && isDefaultFilterState(filters);
+    renderCoverageBanner(filteredRuns);
     renderCards(filteredRuns, data.overview, usePrecomputed);
     await renderCharts(filteredRuns, data.toolUsage.rows, data, usePrecomputed, renderToken);
   };

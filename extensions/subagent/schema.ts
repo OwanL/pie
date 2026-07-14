@@ -11,7 +11,7 @@
 // `StringEnum` and `Type.Object` — so the subagent's parameter schema must
 // source both from the same pi-ai entrypoint. This also keeps the schema on
 // the exact TypeBox instance pi-ai's tool-parameter API expects.
-import { StringEnum, Type } from "@mariozechner/pi-ai";
+import { StringEnum, Type, type Static } from "@mariozechner/pi-ai";
 
 export const BUCKET_GUIDANCE = "Model bucket: 'small' for trivial work, 'medium' for normal development (default), or 'frontier' only for exceptional difficulty.";
 
@@ -26,42 +26,12 @@ const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium"
 	description: THINKING_LEVEL_GUIDANCE,
 }));
 
-const TaskItem = Type.Object(
-	{
-		agent: Type.String({
-			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
-		}),
-		task: Type.String({ description: "Task to delegate to the agent" }),
-		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-		bucket: BucketSchema,
-		thinkingLevel: ThinkingLevelSchema,
-	},
-	{ additionalProperties: false },
-);
-
-const ChainItem = Type.Object(
-	{
-		agent: Type.String({
-			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
-		}),
-		task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
-		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-		bucket: BucketSchema,
-		thinkingLevel: ThinkingLevelSchema,
-	},
-	{ additionalProperties: false },
-);
-
 export const SubagentParams = Type.Object(
 	{
-		agent: Type.Optional(
-			Type.String({
-				description: "Exact discovered agent name to invoke for single mode (e.g. 'worker', 'scout', 'reviewer').",
-			}),
-		),
-		task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
-		tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
-		chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
+		agent: Type.String({
+			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
+		}),
+		task: Type.String({ description: "One concrete task to delegate to the agent" }),
 		confirmProjectAgents: Type.Optional(
 			Type.Boolean({
 				description:
@@ -69,9 +39,35 @@ export const SubagentParams = Type.Object(
 				default: true,
 			}),
 		),
-		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 		bucket: BucketSchema,
 		thinkingLevel: ThinkingLevelSchema,
 	},
 	{ additionalProperties: false },
 );
+
+/** Resume compatibility for removed fields/routes. One-item legacy batches
+ * can be migrated without ambiguity; multi-item orchestration must be reissued
+ * as sibling calls or later turns. */
+export function prepareSubagentArguments(raw: unknown): Static<typeof SubagentParams> {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return raw as Static<typeof SubagentParams>;
+	}
+	const { agentScope: _ignored, tasks, chain, ...rest } = raw as Record<string, unknown>;
+	if (typeof rest.agent === "string" && typeof rest.task === "string") {
+		return rest as Static<typeof SubagentParams>;
+	}
+	const legacyItems = Array.isArray(tasks) && tasks.length === 1
+		? tasks
+		: Array.isArray(chain) && chain.length === 1
+			? chain
+			: undefined;
+	const item = legacyItems?.[0];
+	if (item && typeof item === "object" && !Array.isArray(item)) {
+		return { ...rest, ...(item as Record<string, unknown>) } as Static<typeof SubagentParams>;
+	}
+	if ((Array.isArray(tasks) && tasks.length > 0) || (Array.isArray(chain) && chain.length > 0)) {
+		throw new Error("Subagent batch/chain calls were removed. Emit independent tasks as sibling subagent calls, or delegate dependent tasks in later turns.");
+	}
+	return rest as Static<typeof SubagentParams>;
+}

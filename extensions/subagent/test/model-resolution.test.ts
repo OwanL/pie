@@ -275,6 +275,103 @@ test("resolveExecutionModel: prefers caller's provider when model id exists ther
 	assert.equal(result.resolvedModel?.id, "shared-model");
 });
 
+test("resolveExecutionModel: skips a saturated caller provider for an immediately available duplicate", () => {
+	const models = [
+		model("provider-a", "shared-model"),
+		model("provider-b", "shared-model"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("provider-a", "caller-model"),
+		"shared-model",
+		undefined,
+		{
+			"provider-a": { immediatelyClaimable: false },
+			"provider-b": { immediatelyClaimable: true },
+		},
+	);
+
+	assert.equal(result.resolvedModel?.provider, "provider-b");
+});
+
+test("resolveExecutionModel: preserves caller provider when every duplicate is saturated", () => {
+	const models = [
+		model("provider-a", "shared-model"),
+		model("provider-b", "shared-model"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("provider-a", "caller-model"),
+		"shared-model",
+		undefined,
+		{
+			"provider-a": { immediatelyClaimable: false },
+			"provider-b": { immediatelyClaimable: false },
+		},
+	);
+
+	assert.equal(result.resolvedModel?.provider, "provider-a");
+});
+
+test("resolveExecutionModel: capacity-ranks duplicates when caller provider does not offer the id", () => {
+	const models = [
+		model("busy", "shared-model"),
+		model("open", "shared-model"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("caller", "caller-model"),
+		"shared-model",
+		undefined,
+		{
+			busy: { immediatelyClaimable: false },
+			open: { immediatelyClaimable: true },
+		},
+	);
+
+	assert.equal(result.resolvedModel?.provider, "open");
+});
+
+test("resolveExecutionModel: treats an ungated duplicate as available", () => {
+	const models = [
+		model("busy", "shared-model"),
+		model("ungated", "shared-model"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("caller", "caller-model"),
+		"shared-model",
+		undefined,
+		{ busy: { immediatelyClaimable: false } },
+	);
+
+	assert.equal(result.resolvedModel?.provider, "ungated");
+});
+
+test("resolveExecutionModel: never selects a disabled available duplicate", () => {
+	const models = [
+		model("busy", "shared-model"),
+		model("disabled-open", "shared-model"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("caller", "caller-model"),
+		"shared-model",
+		new Set(["disabled-open"]),
+		{
+			busy: { immediatelyClaimable: false },
+			"disabled-open": { immediatelyClaimable: true },
+		},
+	);
+
+	assert.equal(result.resolvedModel?.provider, "busy");
+});
+
 test("resolveExecutionModel: falls to any available provider when caller's provider doesn't have id", () => {
 	const models = [
 		model("provider-b", "unique-to-b"),

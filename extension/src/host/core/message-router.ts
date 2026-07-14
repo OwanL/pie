@@ -206,8 +206,16 @@ export class MessageRouter {
       case 'closeOutcomeDialog':
         return this.onCloseOutcomeDialog(msg as Extract<WebviewToHostMessage, { type: 'closeOutcomeDialog' }>);
 
-      case 'stateApplied':
-        return this.onStateApplied(msg as Extract<WebviewToHostMessage, { type: 'stateApplied' }>);
+      case 'stateReceived':
+      case 'appCommitted':
+      case 'transcriptCommitted':
+      case 'transcriptCommitBlocked':
+      case 'paintObserved':
+      case 'renderFailure':
+        // SidebarViewProvider owns transport/render evidence. It forwards the
+        // message here only to keep one inbound routing path; no reducer event
+        // or side effect belongs to application state.
+        return;
 
       case 'extensionUiResponse':
         return await this.onExtensionUiResponse(msg as Extract<WebviewToHostMessage, { type: 'extensionUiResponse' }>);
@@ -714,10 +722,6 @@ export class MessageRouter {
       kind: 'Command',
       cmd: { kind: 'SetOutcomeDialog', corrId, sessionPath: msg.sessionPath, visible: false },
     });
-  }
-
-  private onStateApplied(msg: Extract<WebviewToHostMessage, { type: 'stateApplied' }>): void {
-    bootLog('webview', 'state.applied', { ...msg.payload });
   }
 
   private onSetFileChangesExpanded(msg: Extract<WebviewToHostMessage, { type: 'setFileChangesExpanded' }>): void {

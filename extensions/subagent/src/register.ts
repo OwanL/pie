@@ -5,10 +5,8 @@
  * pi SDK (`createAgentSession`). The session shares the parent's auth and
  * model registry but gets its own context window, system prompt, and tools.
  *
- * Supports three modes:
- *   - Single: { agent: "name", task: "..." }
- *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
+ * One invocation delegates one task. Pi's native sibling-tool execution is the
+ * only parallel route; sequential delegation uses normal agent turns.
  *
  * Files:
  *   - ./types.ts        — shared interfaces and constants
@@ -22,10 +20,10 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverAgents } from "../agents.js";
-import { SubagentParams, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
-import type { Static } from "@mariozechner/pi-ai";
+import { SubagentParams, prepareSubagentArguments, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
+import { getMaxInflight } from "./concurrency-limit.js";
 
 const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, high, or xhigh.";
 const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
@@ -52,8 +50,8 @@ function buildDescription(disabled = false): string {
 	}
 
 	const lines = [
-		"Delegate a concrete task to a specialized agent with isolated context.",
-		"Use single mode normally, parallel only for independent tasks, or chain when one result feeds the next through {previous}.",
+		"Delegate one concrete task to a specialized agent with isolated context.",
+		"For independent work, issue multiple sibling subagent calls in the same response; for dependent work, call subagent sequentially after reading the prior result.",
 		"Agents are discovered automatically from both user and project directories; project-local agents require user confirmation before they run.",
 		BUCKET_GUIDANCE,
 	];
@@ -75,20 +73,7 @@ function buildPromptSnippet(disabled = false): string {
 	if (disabled) {
 		return "DISABLED: Sub agents are disabled.";
 	}
-	return "Delegate concrete, separable work to a discovered agent (single/parallel/chain); see description for available agents and bucket guidance.";
-}
-
-/**
- * Compatibility shim for resumed sessions and old transcripts that still pass
- * the removed `agentScope` parameter. It is stripped here so the rest of the
- * tool works against the current schema, while discovery remains automatic.
- */
-function prepareSubagentArguments(raw: unknown): Static<typeof SubagentParams> {
-	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-		const { agentScope: _ignored, ...rest } = raw as Record<string, unknown>;
-		return rest as Static<typeof SubagentParams>;
-	}
-	return {} as Static<typeof SubagentParams>;
+	return "Delegate one concrete task to a discovered agent; sibling calls run in parallel natively.";
 }
 
 /** Check whether subagent execution is disabled via flag or env var. */
@@ -110,12 +95,30 @@ export default function (pi: ExtensionAPI) {
 
 	const isDisabledFn = isDisabled(pi);
 	const disabled = isDisabledFn();
+	let callsThisAgentTurn = 0;
+
+	pi.on("before_agent_start", async () => {
+		callsThisAgentTurn = 0;
+	});
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "subagent") return undefined;
+		callsThisAgentTurn++;
+		const max = getMaxInflight();
+		if (callsThisAgentTurn <= max) return undefined;
+		return {
+			block: true,
+			reason: `At most ${max} subagent calls may be emitted in one agent turn. Keep only independent tasks as sibling calls; delegate remaining work in a later turn.`,
+		};
+	});
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: buildDescription(disabled),
 		promptSnippet: buildPromptSnippet(disabled),
+		promptGuidelines: [
+			"Use sibling subagent calls in one response only for independent work; for dependent work, wait for the prior subagent result before calling another.",
+		],
 		parameters: SubagentParams,
 		prepareArguments: prepareSubagentArguments,
 

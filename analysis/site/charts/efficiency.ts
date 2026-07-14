@@ -1,5 +1,5 @@
 import type { ChartEntry, ChartContext } from '../lib.ts';
-import { CHART_COLORS, average, categoricalHeight, median, percentile } from '../lib.ts';
+import { CHART_COLORS, average, categoricalHeight, median, modelFamilyKey, percentile } from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
 
 function cacheByModel(runs: PreparedRunRow[]) {
@@ -8,7 +8,7 @@ function cacheByModel(runs: PreparedRunRow[]) {
     if (run.status === 'open' || run.cacheHitRatio === null) {
       continue;
     }
-    const model = run.modelId?.trim() || '(unknown)';
+    const model = modelFamilyKey(run);
     const entry = map.get(model) ?? [];
     entry.push(run.cacheHitRatio);
     map.set(model, entry);
@@ -49,7 +49,7 @@ function tokenVolumeByModel(runs: PreparedRunRow[]) {
     if (run.inputTokens === 0 && run.outputTokens === 0 && run.cacheReadTokens === 0 && run.cacheWriteTokens === 0) {
       continue;
     }
-    const model = run.modelId?.trim() || '(unknown)';
+    const model = modelFamilyKey(run);
     const e = map.get(model) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, runs: 0 };
     e.input += run.inputTokens;
     e.output += run.outputTokens;
@@ -77,7 +77,7 @@ function tokenEfficiencyByModel(runs: PreparedRunRow[]) {
     if (run.status === 'open' || run.tokenEfficiency === null) {
       continue;
     }
-    const model = run.modelId?.trim() || '(unknown)';
+    const model = modelFamilyKey(run);
     const e = map.get(model) ?? [];
     e.push(run.tokenEfficiency);
     map.set(model, e);

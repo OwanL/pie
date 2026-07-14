@@ -19,9 +19,7 @@ import { SessionMessageActions } from './message-actions';
 import { SessionServiceState } from './state';
 import { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { startSessionBackend } from './startup';
-import { toErrorMessage } from '../util/error-message';
 import { setRuntimeAuditLogEnabled } from '../util/audit';
-import { appendPieLog } from '../util/pie-log';
 import { SessionTabActions } from './tab-actions';
 import type { OnSessionCompleted, PostImperative, ScheduleRender } from './types';
 import type { Event } from '../core/events';
@@ -238,7 +236,7 @@ export class SessionService implements vscode.Disposable {
     return this.messages.normalizeAttachUris(uris);
   }
 
-  setPrefs(prefs: Partial<ChatPrefs>): void {
+  async setPrefs(prefs: Partial<ChatPrefs>): Promise<void> {
     const current = this.getArchState().settings.prefs;
     const deepMerged: Partial<ChatPrefs> = {
       ...prefs,
@@ -247,6 +245,18 @@ export class SessionService implements vscode.Disposable {
       }),
       ...(prefs.providerToggles && {
         providerToggles: { ...current.providerToggles, ...prefs.providerToggles },
+      }),
+      ...(prefs.subagentProviderDefaults && {
+        subagentProviderDefaults: {
+          ...current.subagentProviderDefaults,
+          ...prefs.subagentProviderDefaults,
+        },
+      }),
+      ...(prefs.subagentProviderTogglesBySession && {
+        subagentProviderTogglesBySession: {
+          ...current.subagentProviderTogglesBySession,
+          ...prefs.subagentProviderTogglesBySession,
+        },
       }),
     };
     const merged = resolveChatPrefs({ ...current, ...deepMerged });
@@ -262,12 +272,16 @@ export class SessionService implements vscode.Disposable {
     // NOT dispatch another SetPrefs Command here — that would recurse through
     // the reducer → EffectRunner → service.setPrefs → Command → ... and
     // overflow the stack.
-    void Promise.resolve(this.context.globalState.update(PREFS_STORAGE_KEY, merged)).catch((error) => {
-      appendPieLog('warn', 'prefs', 'globalState.update failed for prefs', { error: toErrorMessage(error) });
-    });
-    void this.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(merged)).catch((error) => {
-      appendPieLog('warn', 'prefs', 'runtimePrefs.set failed', { error: toErrorMessage(error) });
-    });
+    await Promise.resolve(this.context.globalState.update(PREFS_STORAGE_KEY, merged));
+
+    // Cold-start restore intentionally reduces preferences before the backend
+    // is spawned. Persist them now, then let startup's authoritative full
+    // runtimePrefs.set apply them after readiness. For a live backend, await
+    // the RPC so the EffectRunner can report a real failure instead of
+    // acknowledging a provider toggle that never took effect.
+    if (this.getArchState().settings.backendReady) {
+      await this.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(merged));
+    }
   }
 
   /** Push the complete disabled-entry set for a session's system prompts to the
