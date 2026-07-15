@@ -36,6 +36,11 @@ suites (3,193 passed, 0 failed, 1 skipped).
 A sequential real-provider smoke using `umans/umans-glm-5.2` also returned the
 expected response in 23.4 seconds.
 
+The final code-and-report checkpoint `74df856` then passed the canonical
+pre-push gate in 305.1 seconds: generated models in sync, 14/14 configured
+TypeScript projects, lint, 15/15 packages (4,428 passed, 0 failed, 4 skipped),
+and the isolated production build. It was pushed without force.
+
 This evidence does **not** justify claiming that every long-running in-process
 operation is quarantined or that pie is fully ready for unattended real work.
 The highest residual risks are generation-unfenced SDK writes/side effects from
@@ -241,10 +246,10 @@ A future real-browser trace should measure host snapshot build through
   selected all packages while the test mapper was dirty and passed 4,427 tests
   with 0 failures and 4 skips.
 - Pre-push is the canonical release gate and now builds with `--no-sync`.
-- First pushed release-checkpoint totals: 15/15 packages, 4,410 passed, 0
-  failed, 4 skipped; extension coverage 90.3% lines / 84.3% branches;
-  subagent 98.0% / 90.1%. The post-review full-hook total before the shutdown
-  follow-up is 4,427 passed.
+- Final code-and-report checkpoint totals: 15/15 packages, 4,428 passed, 0
+  failed, 4 skipped; extension coverage 90.4% lines / 84.3% branches;
+  subagent 97.9% / 89.8%. The earlier pushed checkpoint had 4,410 tests; the
+  first four post-review full hooks had 4,427 before the shutdown test landed.
 - Configured typecheck is incremental and parallel (14 projects, 8.5 s in the
   first pushed checkpoint). The subagent package is not yet one of those projects;
   its existing tsconfig exposes unresolved SDK compatibility and stale test
@@ -312,6 +317,20 @@ Post-review implementation commits and their hook evidence:
 c9a5d3d  bounded/cancelled inspection branches + production gate teardown
 first four: 15/15 packages — 4427 passed, 0 failed, 4 skipped (each commit)
 c9a5d3d: extension + subagent — 3193 passed, 0 failed, 1 skipped
+```
+
+The canonical final gate at `74df856` reported:
+
+```text
+sync-models: all derived files in sync
+14/14 configured TypeScript projects passed in 8.3 s
+lint passed
+15/15 packages passed — 4428 passed, 0 failed, 4 skipped
+extension coverage: 90.4% lines / 84.3% branches
+subagent coverage: 97.9% lines / 89.8% branches
+no-sync production build passed
+gate elapsed: 305.1 s
+push: c4a5883..74df856 (no force)
 ```
 
 The real-provider check was an automated external smoke, distinct from the
