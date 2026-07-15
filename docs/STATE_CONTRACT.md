@@ -121,9 +121,12 @@
 > post-ack rollback restores host-side `pendingComposerInputsBySession`
 > from `pending.promoted[corrId].inputs` AND carries `inputs` on the
 > `sendRejected` imperative; the pre-ack `SendResult{ok:false}` path mirrors
-> it (restores from `pending.ops[corrId].inputs`). The webview stages the
-> imperative's `inputs` as a transient override of `pendingComposerInputs`
-> until the next snapshot confirms. The subsection below describes the full state.
+> it (restores from `pending.ops[corrId].inputs`). When the rejected session is
+> active, the webview stages the imperative's `inputs` as a transient override
+> of `pendingComposerInputs` until the next snapshot confirms. A background
+> rejection must not project those inputs into the active composer; its
+> host-owned per-session inputs appear when that session becomes active. The
+> subsection below describes the full state.
 
 `message.send` will resolve as soon as the prompt is *queued* (before the pruning prepass), so an optimistic send will have two failure windows, not one:
 
@@ -146,7 +149,7 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 - **input focus / caret position** — DOM focus state
 - **drag state** — transient tab drag-and-drop position
 - **animation / transition state** — CSS transition tracking
-- **protocol-sync bookkeeping** — `lastRevisionRef`, `awaitingSnapshotRef`, `hostInstanceIdRef`, mounted-inline-prompt request counts (DOM-presence only; host pending requests remain authoritative), pending-draft-restore tracking, pending-composer-inputs-restore tracking (Brief C: a transient render override of `pendingComposerInputs` staged between a `sendRejected` imperative and the next confirming snapshot — the analog of draft-restore), in-flight `corrId` set for UI gating
+- **protocol-sync bookkeeping** — `lastRevisionRef`, `awaitingSnapshotRef`, `hostInstanceIdRef`, mounted-inline-prompt request counts (DOM-presence only; host pending requests remain authoritative), pending-draft-restore tracking (keyed by session; it survives same-host tab switches and is cleared on host replacement), pending-composer-inputs-restore tracking (Brief C: for the active session only, a transient render override of `pendingComposerInputs` staged between a `sendRejected` imperative and the next confirming snapshot — the analog of draft-restore), in-flight `corrId` set for UI gating
 - **derived UI telemetry** — FPS counters, render-timing buffers. (Token-rate measurement is no longer webview-local: it runs host-side in `TokenRateService`, which ticks every running session — including ones that are not the active/selected tab — using the transcripts the host already holds, and posts the per-session states as `ViewState.tokenRateBySession`. The webview just displays the active session's pre-computed state.)
 - **per-keystroke draft buffer** inside an active input (the committed draft on blur/send/tab-switch is host state; the live keystroke buffer is not)
 - **optimistic user message overlay** — pending user messages shown instantly before the host confirms them. The webview generates a `localId`, sends it with the `send` protocol message, and displays the message in the transcript immediately. When the host state arrives containing a message with that `localId`, the optimistic overlay entry is reconciled away. On `sendRejected`, the overlay entry is removed and the draft is restored.

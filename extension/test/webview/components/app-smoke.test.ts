@@ -564,6 +564,41 @@ test('sendRejected.inputs restores composer attachments immediately (inputsResto
   assert.ok(container.querySelector('.attachment-card'), 'attachment still shown from the host snapshot after override clears');
 });
 
+test('background send rejection does not restore its draft or inputs into the active composer', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState();
+  act(() => { render(h(App, { adapter }), container); });
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, sessionViewState()) }));
+  });
+
+  const backgroundInput = {
+    id: 'background-input',
+    kind: 'filesystemPathRef' as const,
+    path: '/background-file',
+    name: 'background-file',
+    source: 'picker' as const,
+  };
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', {
+      data: {
+        type: 'sendRejected',
+        sessionPath: '/session/b',
+        localId: 'local:background',
+        text: 'background draft',
+        inputs: [backgroundInput],
+      } satisfies HostToWebviewMessage,
+    }));
+  });
+
+  assert.equal((container.querySelector('textarea') as HTMLTextAreaElement).value, '');
+  assert.equal(
+    container.querySelector('.attachment-card'),
+    null,
+    'a background rejection must not attach files to the active session composer',
+  );
+});
+
 test('Brief D: stale/duplicate state envelope is discarded without fresh receipt evidence', () => {
   // Transport is snapshots-only; a delayed or re-posted envelope whose
   // revision is not strictly newer than the last applied one (same host

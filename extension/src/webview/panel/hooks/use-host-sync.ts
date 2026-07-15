@@ -237,6 +237,7 @@ interface OptimisticMessageOps {
 
 interface DraftRestoreOps {
   applyQueued: (sessionPath: string) => boolean;
+  clearQueued: () => void;
   queueForSession: (sessionPath: string, text: string) => void;
   restoreNow: (text: string) => void;
 }
@@ -364,6 +365,9 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   ctx.committedSessionPathRef.current = nextActiveSessionPath;
 
   if (hostChanged || sessionChanged) {
+    if (hostChanged) {
+      ctx.draftOps.clearQueued();
+    }
     ctx.clearTransientUi();
     // The collapsible cache is keyed by globally-unique message/tool ids, so
     // it never goes stale across session switches. Clear it ONLY on a backend
@@ -423,11 +427,12 @@ function handleSendRejectedMessage(
   // loss on rejection). The host also restores `pendingComposerInputsBySession`
   // in the same transition; this override bridges the debounced-snapshot gap so
   // the attachments reappear instantly. Cleared on the next `state` message.
-  if (m.inputs && m.inputs.length > 0) {
+  const targetsActiveSession = m.sessionPath === ctx.activeSessionPathRef.current;
+  if (targetsActiveSession && m.inputs && m.inputs.length > 0) {
     ctx.inputsOps.restoreNow(m.inputs);
   }
 
-  if (m.sessionPath === ctx.activeSessionPathRef.current) {
+  if (targetsActiveSession) {
     ctx.draftOps.restoreNow(m.text);
   } else {
     ctx.draftOps.queueForSession(m.sessionPath, m.text);
@@ -442,7 +447,7 @@ const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
   sendRejected: handleSendRejectedMessage,
 };
 
-function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) {
+export function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) {
   const handler = HOST_MESSAGE_HANDLERS[msg.type];
   if (handler) {
     handler(msg, ctx);
@@ -483,7 +488,9 @@ export function useHostSync(
     setDraftRestore(null);
     setInputsRestore(null);
     setOptimisticMessages([]);
-    pendingDraftRestoreRef.current.clear();
+    // Background draft restorations are keyed by session and must survive a
+    // same-host tab switch. `handleStateMessage` clears them explicitly only
+    // when the host instance changes.
     // The collapsible cache is NOT cleared here. It is keyed by globally-unique
     // message/tool ids (`reasoning:<messageId>:<index>`, `tool:<toolCallId>`),
     // so it never goes stale across session switches — clearing it here would
@@ -507,8 +514,9 @@ export function useHostSync(
 
   const mergedTranscript = useMergedTranscript(viewState, optimisticMessages);
 
-  // When a `sendRejected` carries inputs, stage them as a transient override of
-  // `pendingComposerInputs` so the composer re-shows the attachments
+  // When an active session's `sendRejected` carries inputs, stage them as a
+  // transient override of `pendingComposerInputs` so its composer re-shows the
+  // attachments.
   // instantly (the host restores `pendingComposerInputsBySession` in the same
   // reducer transition, but its snapshot is debounced). The override is cleared
   // on the next `state` message (`handleStateMessage`), by which point the host
@@ -541,6 +549,9 @@ export function useHostSync(
         return true;
       }
       return false;
+    },
+    clearQueued: () => {
+      pendingDraftRestoreRef.current.clear();
     },
     queueForSession: (sessionPath, text) => {
       pendingDraftRestoreRef.current.set(sessionPath, { text });

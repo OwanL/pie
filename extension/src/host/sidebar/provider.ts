@@ -501,9 +501,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     if (!view) return;
     void Promise.resolve(view.webview.postMessage(message)).then((delivered) => {
       if (!delivered && message.type === 'sendRejected' && this.view === view) {
-        this.pendingImperatives.push(message);
-        this.delivery.markDirty();
-        this.armReadinessProbeIfStuck();
+        this.requeueRejectedImperative(message, view);
       }
     }, (error: unknown) => {
       appendPieLog('warn', 'sidebar-provider', 'imperative post rejected', {
@@ -511,10 +509,24 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
         messageType: message.type,
       });
       if (message.type === 'sendRejected' && this.view === view) {
-        this.pendingImperatives.push(message);
-        this.delivery.markDirty();
+        this.requeueRejectedImperative(message, view);
       }
     });
+  }
+
+  private requeueRejectedImperative(
+    message: Extract<HostToWebviewMessage, { type: 'sendRejected' }>,
+    view: vscode.WebviewView,
+  ): void {
+    if (this.view !== view) return;
+    this.pendingImperatives.push(message);
+    // A false/rejected post means the bridge did not accept an imperative even
+    // though our last handshake said it was ready. Re-enter the existing
+    // serialized readiness-probe path so the queued draft restoration gets a
+    // bounded retry instead of waiting forever for another ready message.
+    this.webviewReady = false;
+    this.delivery.markDirty();
+    this.armReadinessProbeIfStuck();
   }
 
   private canPostSnapshotToView(): boolean {

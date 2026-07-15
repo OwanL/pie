@@ -96,6 +96,7 @@ class FakeView {
   private disposeHandler?: () => void;
   readonly posted: import('../../../src/shared/protocol').HostToWebviewMessage[] = [];
   readonly stateOutcomes: Array<boolean | Promise<boolean>> = [];
+  readonly imperativeOutcomes: Array<boolean | Promise<boolean>> = [];
   showCalls = 0;
   webview = {
     options: {},
@@ -105,7 +106,7 @@ class FakeView {
     postMessage: (message: import('../../../src/shared/protocol').HostToWebviewMessage) => {
       this.posted.push(message);
       if (message.type === 'state') return this.stateOutcomes.shift() ?? true;
-      return true;
+      return this.imperativeOutcomes.shift() ?? true;
     },
     onDidReceiveMessage: (handler: (message: WebviewToHostMessage) => void) => {
       this.receive = handler;
@@ -392,5 +393,41 @@ test('hidden provider retains dirty state and posts a fresh full snapshot on rev
   view.setVisible(true);
   await settle();
   assert.equal(stateMessages(view).length, baselinePosts + 1);
+  provider.dispose();
+});
+
+test('an unaccepted sendRejected post enters readiness recovery and retries after a successful probe', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const { provider } = createProvider(clock, routed);
+  const view = new FakeView();
+  await resolveReady(provider, view);
+  view.imperativeOutcomes.push(false, true);
+
+  provider.postImperative({
+    type: 'sendRejected',
+    sessionPath: '/session/a',
+    localId: 'local:rejected',
+    text: 'restore me',
+  });
+  await settle();
+
+  assert.equal(provider.getDebugState().webviewReady, false, 'a rejected imperative invalidates stale readiness');
+  assert.equal(provider.getDebugState().globalDirty, true, 'recovery retains authoritative snapshot intent');
+
+  // Exercise the same serialized probe path the autonomous readiness timer
+  // invokes, without sleeping for its production interval.
+  const accepted = await (provider as unknown as {
+    delivery: { probe(): Promise<boolean> };
+  }).delivery.probe();
+  await settle();
+
+  assert.equal(accepted, true);
+  assert.equal(provider.getDebugState().webviewReady, true);
+  assert.equal(
+    view.posted.filter((message) => message.type === 'sendRejected').length,
+    2,
+    'the draft-restoration imperative is retried exactly once after readiness recovers',
+  );
   provider.dispose();
 });
