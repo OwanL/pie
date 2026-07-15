@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
+import { BackendError } from '../../../src/backend/server-io';
 import type { SessionContext } from '../../../src/backend/server-types';
 
 test('stuck recovery terminalizes once and replaces a runtime without awaiting abort', async () => {
@@ -89,4 +90,102 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
   ]);
   assert.equal(calls.includes('open'), true);
   assert.equal(calls.includes('createSessionContext'), true);
+});
+
+test('ensureSessionContext waits for the authoritative recovery runtime', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  let resolveRecovery: ((context: SessionContext) => void) | undefined;
+  const old = {
+    sessionPath: '/s',
+    retired: true,
+    recoveryPromise: new Promise<SessionContext>((resolve) => { resolveRecovery = resolve; }),
+  } as unknown as SessionContext;
+  const replacement = { sessionPath: '/s', retired: false } as unknown as SessionContext;
+  server.sessionContexts.set('/s', old);
+
+  let settled = false;
+  const ensured = server.ensureSessionContext('/s').then((context: SessionContext) => {
+    settled = true;
+    return context;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  resolveRecovery?.(replacement);
+  assert.equal(await ensured, replacement);
+});
+
+test('ensureSessionContext preserves the recovery-specific error when replacement fails', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const old = {
+    sessionPath: '/s',
+    retired: true,
+    recoveryPromise: Promise.reject(new Error('replacement failed')),
+  } as unknown as SessionContext;
+  server.sessionContexts.set('/s', old);
+
+  await assert.rejects(
+    server.ensureSessionContext('/s'),
+    (error: unknown) => error instanceof BackendError
+      && error.code === 'SESSION_RUNTIME_RECOVERY_FAILED'
+      && /replacement failed/.test(error.message),
+  );
+});
+
+test('createSessionContext preserves an unexpired terminal checkpoint across replacement', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const terminalLiveTurn = { accumulator: { kind: 'terminal' }, expiresAt: Date.now() + 10_000 };
+  const old = {
+    sessionPath: '/s',
+    busySeq: 7,
+    terminalLiveTurn,
+    willRetryWatchdogClear: () => { throw new Error('watchdog cleanup failed'); },
+    uiBridge: { cancelAll: () => { throw new Error('UI cleanup failed'); } },
+    unsubscribe: () => { throw new Error('unsubscribe failed'); },
+    runtime: { dispose: () => { throw new Error('runtime disposal failed'); } },
+  } as unknown as SessionContext;
+  const replacement = {
+    sessionPath: '/s',
+    busySeq: 0,
+  } as unknown as SessionContext;
+  server.sessionContexts.set('/s', old);
+  server.buildSessionContext = async () => replacement;
+
+  assert.equal(await server.createSessionContext({}, 'resume'), replacement);
+  assert.equal(replacement.busySeq, 7);
+  assert.equal(replacement.terminalLiveTurn, terminalLiveTurn);
+});
+
+test('throwing best-effort cleanup cannot strand a retired runtime without replacement', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const events: Array<{ event: string; payload: unknown }> = [];
+  const context = {
+    sessionPath: '/s',
+    busySeq: 0,
+    activeRequest: { id: 'request-throwing-cleanup', messageIndex: 1, aborted: false },
+    session: {
+      clearQueue: () => { throw new Error('clear queue failed'); },
+      abortRetry: () => { throw new Error('abort retry failed'); },
+      abortCompaction: () => undefined,
+      abortBranchSummary: () => undefined,
+      abortBash: () => undefined,
+      abort: async () => undefined,
+    },
+  } as unknown as SessionContext;
+  const replacement = { sessionPath: '/s', busySeq: 0, session: { isStreaming: false } } as unknown as SessionContext;
+  server.sdk = { SessionManager: { open: () => ({}) } };
+  server.createSessionContext = async () => {
+    server.sessionContexts.set('/s', replacement);
+    return replacement;
+  };
+  server.emit = (event: string, payload: unknown) => events.push({ event, payload });
+  server.emitBusyChanged = () => undefined;
+  server.emitSessionOpened = async () => undefined;
+  server.emitSessionListChanged = async () => undefined;
+  server.sessionContexts.set('/s', context);
+
+  assert.doesNotThrow(() => server.recoverStuckSession(context, 'stalled'));
+  assert.equal(context.retired, true);
+  assert.equal(events.filter((entry) => entry.event === 'message.aborted').length, 1);
+  assert.equal(await context.recoveryPromise, replacement);
 });

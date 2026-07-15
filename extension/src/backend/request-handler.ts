@@ -733,6 +733,7 @@ async function handleMessageSend(
         source: 'rpc',
         images: imagePayload,
         preflightResult: (success) => {
+          if (context.retired) return;
           if (preflightFailed) return;
           if (success) {
             // Explicit phase boundary for the host watchdog. This internal
@@ -769,7 +770,7 @@ async function handleMessageSend(
         // pre-commit failure → emit `preflight.failed` so the host reverts via
         // `pending.promoted`. `preflightFailed` guards a double emit when
         // `preflightResult(false)` already settled.
-        if (preflightFailed) return;
+        if (context.retired || preflightFailed) return;
         if (context.activeRequest?.currentMessageId) {
           reportPromptFailure(deps, context, requestId, error);
           return;
@@ -826,6 +827,9 @@ async function handleMessageInterrupt(
   const context = deps.getSessionContext(params.sessionPath);
   if (!context) {
     throw new BackendError('SESSION_NOT_FOUND', `Cannot interrupt an unopened session: ${params.sessionPath}`);
+  }
+  if (context.retired || context.recoveryPromise) {
+    return { interrupted: false, alreadyStopped: true, recoveryPending: true };
   }
   // Relaxed guard: an interrupt is valid whenever ANY billable window is
   // running — a streaming turn (activeRequest / isStreaming) OR one of the
@@ -901,6 +905,7 @@ async function handleMessageInterrupt(
   if (outcome === 'timeout') {
     const message = `Provider teardown did not settle within ${watchdogMs}ms. Pie interrupted the turn locally and is replacing the session runtime.`;
     const active = context.activeRequest;
+    context.retired = true;
     if (active?.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
     active?.pendingDurableToolTerminals?.clear();
     if (active?.liveTurnAccumulator) {

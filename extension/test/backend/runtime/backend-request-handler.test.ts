@@ -514,6 +514,61 @@ test('message.send rejects without steering when semantic-timeout replacement fa
   assert.equal(oldSteerCalls, 0);
 });
 
+test('message.interrupt does not start a second replacement while semantic recovery is pending', async () => {
+  let abortCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: true,
+      abort: async () => { abortCalls += 1; },
+    },
+  });
+  harness.context.retired = true;
+  harness.context.recoveryPromise = new Promise<SessionContext>(() => undefined);
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'interrupt-during-semantic-recovery',
+    method: 'message.interrupt',
+    params: { sessionPath: harness.context.sessionPath },
+  });
+
+  assert.deepEqual(result, {
+    interrupted: false,
+    alreadyStopped: true,
+    recoveryPending: true,
+  });
+  assert.equal(abortCalls, 0);
+  assert.equal(harness.createCalls.length, 0, 'the existing recovery remains the sole replacement owner');
+});
+
+test('late prompt rejection from a retired runtime cannot emit a second terminal event', async () => {
+  let rejectPrompt: ((error: Error) => void) | undefined;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+        return new Promise<void>((_resolve, reject) => { rejectPrompt = reject; });
+      },
+    },
+  });
+
+  await handleBackendRequest(harness.deps, {
+    id: 'send-before-semantic-retirement',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: 'start', inputs: [] },
+  });
+  harness.context.retired = true;
+  harness.context.activeRequest = undefined;
+  const emittedBeforeLateRejection = harness.emitted.length;
+  const busyBeforeLateRejection = harness.busyEvents.length;
+
+  rejectPrompt?.(new Error('abort settled after local retirement'));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.emitted.length, emittedBeforeLateRejection);
+  assert.equal(harness.busyEvents.length, busyBeforeLateRejection);
+  assert.equal(harness.emitted.some((entry) => entry.event === 'preflight.failed'), false);
+});
+
 test('message.interrupt defensively clears a stuck activeRequest when abort settles and streaming has stopped', async () => {
   // Reproduces the stuck-session bug: the SDK never fires `turn_end` (e.g. a
   // hung provider connection), so `activeRequest` would stay set forever and

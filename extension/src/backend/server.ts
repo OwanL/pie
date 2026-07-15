@@ -46,7 +46,7 @@ import {
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
 import { observeProviderTransport } from './provider-progress-bus.js';
-import { extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
+import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 import {
   type SessionContext,
@@ -334,16 +334,45 @@ export class BackendServer {
     const existing = this.sessionContexts.get(context.sessionPath);
     if (existing) {
       context.busySeq = existing.busySeq;
-      existing.willRetryWatchdogClear?.();
-      existing.uiBridge?.cancelAll();
-      existing.unsubscribe();
+      if (existing.terminalLiveTurn && existing.terminalLiveTurn.expiresAt > Date.now()) {
+        context.terminalLiveTurn = existing.terminalLiveTurn;
+      }
+      const cleanup = (operation: string, action: () => void): void => {
+        try {
+          action();
+        } catch (error) {
+          backendWarn('backend-session', `replaced runtime ${operation} failed`, {
+            sessionPath: context.sessionPath,
+            error: toErrorMessage(error),
+          });
+        }
+      };
+      cleanup('watchdog cleanup', () => existing.willRetryWatchdogClear?.());
+      cleanup('UI cancellation', () => existing.uiBridge?.cancelAll());
+      cleanup('unsubscribe', () => existing.unsubscribe());
       // A provider teardown can wedge the old runtime. The replacement becomes
       // authoritative immediately; old disposal is bounded best-effort and
       // must not block local recovery or the next send.
-      void Promise.race([
-        existing.runtime.dispose(),
-        new Promise<void>((resolve) => { const timer = setTimeout(resolve, 5_000); timer.unref?.(); }),
-      ]).catch(() => undefined);
+      let dispose: Promise<void>;
+      try {
+        dispose = Promise.resolve(existing.runtime.dispose());
+      } catch (error) {
+        backendWarn('backend-session', 'replaced runtime disposal failed', {
+          sessionPath: context.sessionPath,
+          error: toErrorMessage(error),
+        });
+        dispose = Promise.resolve();
+      }
+      let disposeGraceTimer: ReturnType<typeof setTimeout> | undefined;
+      const disposeGrace = new Promise<void>((resolve) => {
+        disposeGraceTimer = setTimeout(resolve, 5_000);
+        disposeGraceTimer.unref?.();
+      });
+      void Promise.race([dispose, disposeGrace])
+        .catch(() => undefined)
+        .finally(() => {
+          if (disposeGraceTimer) clearTimeout(disposeGraceTimer);
+        });
     }
 
     this.sessionContexts.set(context.sessionPath, context);
@@ -440,6 +469,22 @@ export class BackendServer {
   private async ensureSessionContext(sessionPath: string): Promise<SessionContext> {
     const existing = this.sessionContexts.get(sessionPath);
     if (existing) {
+      if (existing.recoveryPromise) {
+        try {
+          return await existing.recoveryPromise;
+        } catch (error) {
+          throw new BackendError(
+            'SESSION_RUNTIME_RECOVERY_FAILED',
+            `The session runtime could not be replaced: ${toErrorMessage(error)}`,
+          );
+        }
+      }
+      if (existing.retired) {
+        throw new BackendError(
+          'SESSION_RUNTIME_RECOVERY_FAILED',
+          `The session runtime for ${sessionPath} was retired without a replacement.`,
+        );
+      }
       return existing;
     }
 
@@ -916,7 +961,18 @@ export class BackendServer {
     const requestId = active.id;
     const messageId = active.lastAssistantMessageId ?? active.currentMessageId;
     context.retired = true;
-    context.willRetryWatchdogClear?.();
+    const bestEffort = (operation: string, action: () => void): void => {
+      try {
+        action();
+      } catch (error) {
+        backendWarn('backend-session', `stuck runtime ${operation} failed`, {
+          sessionPath: context.sessionPath,
+          requestId,
+          error: toErrorMessage(error),
+        });
+      }
+    };
+    bestEffort('watchdog cleanup', () => context.willRetryWatchdogClear?.());
     context.willRetryWatchdogClear = undefined;
     if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
     if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
@@ -931,13 +987,13 @@ export class BackendServer {
       };
     }
     context.activeRequest = undefined;
-    context.uiBridge?.cancelAll();
-    context.session.clearQueue();
+    bestEffort('UI cancellation', () => context.uiBridge?.cancelAll());
+    bestEffort('queue cleanup', () => { context.session.clearQueue(); });
     context.queuedLocalIds = [];
-    context.session.abortRetry?.();
-    context.session.abortCompaction?.();
-    context.session.abortBranchSummary?.();
-    context.session.abortBash?.();
+    bestEffort('retry abort', () => context.session.abortRetry?.());
+    bestEffort('compaction abort', () => context.session.abortCompaction?.());
+    bestEffort('branch-summary abort', () => context.session.abortBranchSummary?.());
+    bestEffort('bash abort', () => context.session.abortBash?.());
 
     this.emit('message.aborted', {
       requestId,
