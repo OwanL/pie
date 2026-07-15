@@ -133,10 +133,11 @@ export function useMessageItemDerived({
     // AssistantParts, which parse markdown per-part. Parsing the combined text
     // here too would duplicate marked+DOMPurify work on every streaming delta
     // for a result that is never consumed (MessageContent routes to
-    // AssistantParts when combinedParts exists). Skip the parse in that case.
-    if (message.role === 'assistant' && combinedParts) return '';
+    // AssistantParts when combinedParts exists). Compaction summaries likewise
+    // parse only after their collapsed card is opened.
+    if ((message.role === 'assistant' && combinedParts) || message.customType === 'compaction-summary') return '';
     return renderMarkdown(combinedMarkdown);
-  }, [message.role, combinedParts, combinedMarkdown]);
+  }, [message.role, message.customType, combinedParts, combinedMarkdown]);
   const getMessageRaw = useCallback(
     () => buildMessageRaw(message, combinedMarkdown, combinedThinking, combinedToolCalls, combinedParts as ReturnType<typeof assistantPartsFromMessage>),
     [

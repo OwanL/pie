@@ -28,6 +28,7 @@ function mergeSessionSummaryPreservingLocalName(
     name: keepExistingName ? existing.name : incoming.name,
     isPlaceholder: keepExistingName ? false : incoming.isPlaceholder,
     modelId: incoming.modelId ?? existing.modelId,
+    provider: incoming.provider ?? existing.provider,
     thinkingLevel: incoming.thinkingLevel ?? existing.thinkingLevel,
     // Review fields come from the session-review sidecar, which the backend
     // merges in. A backend list refresh that omits them (e.g. sidecar read
@@ -613,6 +614,7 @@ export function handleSessionSummaryUpserted(state: ArchState, event: Extract<Ev
       name: keepExistingName ? existing.name : event.summary.name,
       isPlaceholder: keepExistingName ? false : event.summary.isPlaceholder,
       modelId: event.summary.modelId ?? existing.modelId,
+      provider: event.summary.provider ?? existing.provider,
       thinkingLevel: event.summary.thinkingLevel ?? existing.thinkingLevel,
       done: event.summary.done ?? existing.done,
       rating: event.summary.rating ?? existing.rating,

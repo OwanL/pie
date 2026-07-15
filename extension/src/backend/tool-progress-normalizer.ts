@@ -3,7 +3,7 @@ import { estimateTextTokens } from '../shared/tokenize.js';
 
 const MAX_TAIL_CHARS = 8_192;
 const MAX_SUMMARY_CHARS = 1_024;
-const MAX_CHILDREN = 16;
+const MAX_TASK_CHARS = 4_096;
 
 export function normalizeToolProgress(toolName: string, value: unknown): ToolPreview {
   const normalizedName = toolName.trim().toLowerCase();
@@ -52,27 +52,22 @@ function normalizeSubagent(value: unknown): ToolPreview {
           ? record.details
           : [];
   const mode = normalizeSubagentMode(details?.mode ?? record?.mode);
-  const visibleChildren = rawChildren.slice(0, MAX_CHILDREN);
-  const textBudget = Math.max(512, Math.floor(12 * 1024 / Math.max(1, visibleChildren.length)));
-  const taskBudget = Math.max(256, Math.floor(4 * 1024 / Math.max(1, visibleChildren.length)));
   const children: SubagentChildPreview[] = [];
-  for (let index = 0; index < visibleChildren.length; index += 1) {
-    const child = asRecord(visibleChildren[index]);
+  for (let index = 0; index < rawChildren.length; index += 1) {
+    const child = asRecord(rawChildren[index]);
     if (!child) continue;
     const agent = boundedOptional(stringField(child, ['agent']), 256);
     const id = stringField(child, ['id', 'childId', 'sessionId']) ?? agent ?? `child-${index + 1}`;
     const phase = normalizeChildPhase(stringField(child, ['activityPhase', 'phase', 'status']), numberField(child, 'exitCode'));
-    const streamingText = boundedTailOptional(stringField(child, ['streamingText']), textBudget);
-    const streamingReasoning = boundedTailOptional(stringField(child, ['streamingReasoning']), Math.max(256, Math.floor(textBudget / 2)));
     const summary = boundedOptional(
       stringField(child, ['summary', 'finalOutput', 'text', 'detail']) ?? latestAssistantText(child.messages),
-      Math.max(256, Math.floor(textBudget / 2)),
+      MAX_SUMMARY_CHARS,
     );
     children.push({
       id: boundedHead(id, 128),
       phase,
       agent,
-      task: boundedOptional(stringField(child, ['task']), taskBudget),
+      task: boundedOptional(stringField(child, ['task']), MAX_TASK_CHARS),
       summary,
       exitCode: numberField(child, 'exitCode'),
       model: boundedOptional(stringField(child, ['model']), 256),
@@ -86,13 +81,14 @@ function normalizeSubagent(value: unknown): ToolPreview {
       lastProgressAt: numberField(child, 'lastProgressAt'),
       inactivityBudgetMs: numberField(child, 'inactivityBudgetMs'),
       streaming: typeof child.streaming === 'boolean' ? child.streaming : undefined,
-      streamingText,
-      streamingReasoning,
+      streamingText: stringField(child, ['streamingText']),
+      streamingReasoning: stringField(child, ['streamingReasoning']),
       cumulativeOutputTokens: estimateCumulativeSubagentTokens(child),
       runningTools: Array.isArray(child.runningTools)
         ? child.runningTools.filter((tool): tool is string => typeof tool === 'string').slice(0, 20).map((tool) => boundedHead(tool, 128))
         : undefined,
-      finalOutput: boundedTailOptional(stringField(child, ['finalOutput']), textBudget),
+      messages: Array.isArray(child.messages) ? (toJsonSafe(child.messages) as unknown[]) : undefined,
+      finalOutput: stringField(child, ['finalOutput']),
       transcriptCompacted: typeof child.transcriptCompacted === 'boolean' ? child.transcriptCompacted : undefined,
       contextWindow: numberField(child, 'contextWindow'),
       usage: normalizeUsage(child.usage),
@@ -109,14 +105,17 @@ function normalizeSubagent(value: unknown): ToolPreview {
       stderr: boundedTailOptional(stringField(child, ['stderr']), MAX_TAIL_CHARS),
     });
   }
-  return { kind: 'subagent', mode, children, omittedChildren: Math.max(0, rawChildren.length - children.length) };
+  return toJsonSafe({
+    kind: 'subagent', mode, children, omittedChildren: Math.max(0, rawChildren.length - children.length),
+  }) as ToolPreview;
 }
 
 function normalizeNumberRecord(value: unknown): Record<string, number> | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
   return Object.fromEntries(Object.entries(record).filter((entry): entry is [string, number] => (
-    typeof entry[1] === 'number' && Number.isFinite(entry[1])
+    !['__proto__', 'prototype', 'constructor'].includes(entry[0])
+    && typeof entry[1] === 'number' && Number.isFinite(entry[1])
   )));
 }
 
@@ -135,21 +134,22 @@ function normalizeUsage(value: unknown): SubagentChildPreview['usage'] {
 }
 
 /**
- * Use provider-reported cumulative usage when available. Otherwise estimate
- * from the current stream only. Walking the child transcript here would repeat
- * recursive work for every high-frequency progress update and defeats the live
- * transport's bounded-state contract.
+ * Live cumulative output tokens for a child: provider-reported completed output
+ * plus the tokens still streaming in the current (not-yet-reported) turn. A
+ * pre-computed `cumulativeOutputTokens` (set by the transport compactor) is
+ * reused as-is so high-frequency progress deltas do not re-tokenize the
+ * complete stream on every update.
  */
 export function estimateCumulativeSubagentTokens(child: Record<string, unknown>): number {
   const preserved = numberField(child, 'cumulativeOutputTokens');
   if (preserved !== undefined && preserved >= 0) return preserved;
 
   const usage = asRecord(child.usage);
-  const reportedOutput = numberField(usage, 'output');
+  const reportedOutput = numberField(usage, 'output') ?? 0;
   const streamingText = typeof child.streamingText === 'string' ? child.streamingText : '';
   const streamingReasoning = typeof child.streamingReasoning === 'string' ? child.streamingReasoning : '';
   const streamedTokens = estimatePossiblyLongTextTokens(streamingText) + estimatePossiblyLongTextTokens(streamingReasoning);
-  return Math.max(0, reportedOutput ?? streamedTokens);
+  return Math.max(0, reportedOutput + streamedTokens);
 }
 
 const TOKEN_SAMPLE_CHARS = 8_192;
@@ -233,6 +233,47 @@ function safeSummary(value: unknown): string {
     return json ?? Object.prototype.toString.call(value);
   } catch {
     return '[Unserializable progress]';
+  }
+}
+
+/**
+ * Recursively clone a value into a JSON-safe equivalent: cycles, BigInt,
+ * functions, symbols and throwing getters become stable markers so the
+ * renderable transcript survives `JSON.stringify` without losing the
+ * surrounding structure. The live transport's byte guard runs later; this only
+ * makes values serializable, it never truncates them.
+ */
+function toJsonSafe(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'function') return '[function]';
+  if (typeof value === 'symbol') return value.description ? `[symbol:${value.description}]` : '[symbol]';
+  if (typeof value === 'undefined') return null;
+  if (typeof value !== 'object') return null;
+  if (value === null) return null;
+  if (seen.has(value)) return '[Circular]';
+  if (value instanceof Date) {
+    try { return value.toISOString(); } catch { return '[Date]'; }
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return Array.from(value, (entry) => toJsonSafe(entry, seen));
+    }
+    const result: Record<string, unknown> = {};
+    let keys: string[];
+    try { keys = Object.keys(value); } catch { return '[unserializable]'; }
+    for (const key of keys) {
+      const safeKey = ['__proto__', 'prototype', 'constructor'].includes(key) ? `[${key}]` : key;
+      let entry: unknown;
+      try { entry = (value as Record<string, unknown>)[key]; } catch { result[safeKey] = '[unserializable]'; continue; }
+      if (entry === undefined) continue;
+      result[safeKey] = toJsonSafe(entry, seen);
+    }
+    return result;
+  } finally {
+    seen.delete(value);
   }
 }
 

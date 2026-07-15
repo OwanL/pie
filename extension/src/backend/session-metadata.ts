@@ -114,6 +114,7 @@ export function buildCurrentSummary(
     modifiedAt: new Date().toISOString(),
     messageCount,
     modelId: context.session.model?.id,
+    provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
   };
   return mergeReviewIntoSummary(summary, readReviews());
@@ -131,10 +132,11 @@ export interface ActiveModelInfo {
 /**
  * Resolve the session's active model and its provider from the model registry.
  *
- * `context.session.model` only carries the id (plus context-window metadata),
- * so the provider/name are looked up in the registry. Returns an empty object
- * when no model is selected yet or the registry is unavailable — callers
- * should render a neutral "not resolved" state rather than guessing a provider.
+ * `context.session.model` carries the selected provider when available; the
+ * registry supplies its display name and provides a legacy fallback for older
+ * id-only sessions. Returns an empty object when no model is selected yet or
+ * the registry is unavailable — callers should render a neutral "not resolved"
+ * state rather than guessing a provider.
  */
 export function resolveActiveModel(context: SessionContext): ActiveModelInfo {
   const modelId = context.session.model?.id;
@@ -144,12 +146,18 @@ export function resolveActiveModel(context: SessionContext): ActiveModelInfo {
 
   try {
     const available = context.runtime.services?.modelRegistry?.getAvailable() ?? [];
-    const match = available.find((model) => model.id === modelId);
-    // Only include provider/modelName when actually resolved so a present key
-    // means "known" (callers can branch on key presence rather than undefined).
+    // The session model carries its selected provider. Prefer that exact pair:
+    // model IDs such as GPT-5.6 are available through both Copilot and Codex,
+    // so an id-only registry lookup can attribute a Codex turn to Copilot.
+    const selectedProvider = context.session.model?.provider;
+    const match = selectedProvider
+      ? available.find((model) => model.id === modelId && model.provider === selectedProvider)
+      : available.find((model) => model.id === modelId);
+    // A provider recorded on the session remains authoritative even if the
+    // currently available registry no longer contains that model.
     return match
-      ? { modelId, provider: match.provider, modelName: match.name }
-      : { modelId };
+      ? { modelId, provider: selectedProvider ?? match.provider, modelName: match.name }
+      : selectedProvider ? { modelId, provider: selectedProvider } : { modelId };
   } catch (error) {
     backendTrace('sessionMetadata', 'resolveActiveModel.failed', { level: 'debug', error: toErrorMessage(error), modelId });
     return { modelId };

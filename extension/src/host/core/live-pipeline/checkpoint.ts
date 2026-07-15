@@ -1,6 +1,7 @@
 import {
   LIVE_PIPELINE_LIMITS,
   LIVE_PIPELINE_PROTOCOL_VERSION,
+  isToolPreview,
   type LivePipelineState,
   type LiveToolPhase,
   type LiveTurnCheckpoint,
@@ -169,6 +170,9 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     && Number.isFinite(tool.phaseSince)
     && typeof tool.lastProgressAt === 'number'
     && Number.isFinite(tool.lastProgressAt)
+    && (tool.progressRevision === undefined
+      || (Number.isSafeInteger(tool.progressRevision) && (tool.progressRevision as number) >= 0))
+    && (tool.preview === undefined || isToolPreview(tool.preview))
     && isLiveToolPhase(tool.phase)
     && (tool.terminal === undefined
       || (isRecord(tool.terminal)

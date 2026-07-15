@@ -45,6 +45,13 @@ export interface SessionReview {
   /** Number of sub-agent reviewers that fed the rating. Optional for backward
    *  compat; older records have no field. */
   reviewerCount?: number;
+  /** True when this review is a self-close marker written by the tool's
+   *  `closeSelf` action (the reviewer session closing its own tab once its
+   *  work is done). Carries `done: true` so the host's auto-close still closes
+   *  the tab, but the host skips recording it as a scored agent-review
+   *  outcome, since a session rating itself is not an objective performance
+   *  signal. Optional for backward compat. */
+  selfClose?: boolean;
 }
 
 export interface SessionSummary {
@@ -54,6 +61,8 @@ export interface SessionSummary {
   modifiedAt: string;
   messageCount: number;
   modelId?: string;
+  /** Provider serving `modelId`; distinguishes IDs shared by multiple providers. */
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
   /**
    * True when `name` is a backend-generated placeholder (not a user-meaningful
@@ -79,6 +88,10 @@ export interface SessionSummary {
   reviewerBuckets?: string[];
   /** Agent review: number of sub-agent reviewers that fed the rating. */
   reviewerCount?: number;
+  /** Agent review: true when this is a `closeSelf` self-close marker (the
+   *  reviewer session closing its own tab). The host skips scored
+   *  agent-review analytics for these. */
+  selfClose?: boolean;
   /** True when this tab is pinned (browser-style pinned tab). Populated by
    *  the host when pushing open-tab summaries so the `session_review` tool's
    *  listOpen can show which tabs are pinned and skip them during review. */

@@ -311,7 +311,9 @@ export class SessionRunStateManager {
     const modelSettings: ModelSettings | null = archState.settings.modelSettings;
     return {
       modelId: session?.modelId ?? modelSettings?.defaultModel,
-      provider: modelSettings?.defaultProvider,
+      // Session summaries retain the provider selected for their model. This
+      // must win over the global default for IDs served by both Codex/Copilot.
+      provider: session?.provider ?? modelSettings?.defaultProvider,
       thinkingLevel: session?.thinkingLevel ?? modelSettings?.defaultThinkingLevel,
     };
   }

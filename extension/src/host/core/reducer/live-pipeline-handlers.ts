@@ -150,7 +150,10 @@ function replayPendingAfterCheckpoint(
     const envelope = queued[index]!;
     const owner = state.livePipeline.turnsBySession[envelope.sessionPath];
     if (owner && envelope.seq <= owner.seq) continue;
-    if (!owner || envelope.seq !== owner.seq + 1) {
+    const followsOwner = owner && (envelope.kind === 'tool.progress'
+      ? envelope.baseSeq === owner.seq
+      : envelope.seq === owner.seq + 1);
+    if (!followsOwner) {
       state = {
         ...state,
         livePipeline: {

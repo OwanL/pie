@@ -130,6 +130,7 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   assert.equal(summary.isPlaceholder, false);
   assert.equal(summary.messageCount, 2);
   assert.equal(summary.modelId, 'claude-test');
+  assert.equal(summary.provider, undefined);
   assert.equal(summary.thinkingLevel, undefined);
 });
 
@@ -212,6 +213,31 @@ test('resolveActiveModel names the active provider/model from the registry and t
     provider: 'anthropic',
     modelName: 'Claude Sonnet',
   });
+
+  // A session provider disambiguates shared IDs. The registry order must not
+  // relabel a Codex session as Copilot just because Copilot appears first.
+  const sharedId = makeContext({
+    session: { ...makeContext().session, model: { id: 'gpt-5.6', provider: 'openai-codex' } } as unknown as SessionContext['session'],
+    runtime: {
+      session: {} as any,
+      dispose: async () => undefined,
+      services: {
+        modelRegistry: {
+          getAvailable: () => [
+            { id: 'gpt-5.6', name: 'Copilot GPT-5.6', provider: 'github-copilot', reasoning: true, input: ['text'] },
+            { id: 'gpt-5.6', name: 'Codex GPT-5.6', provider: 'openai-codex', reasoning: true, input: ['text'] },
+          ],
+          find: () => undefined,
+        },
+      },
+    } as SessionContext['runtime'],
+  });
+  assert.deepEqual(resolveActiveModel(sharedId), {
+    modelId: 'gpt-5.6',
+    provider: 'openai-codex',
+    modelName: 'Codex GPT-5.6',
+  });
+  assert.equal(buildCurrentSummary(sharedId, '/startup').provider, 'openai-codex');
 
   // Model selected but missing from the registry → modelId only, no provider guess.
   const orphan = makeContext({

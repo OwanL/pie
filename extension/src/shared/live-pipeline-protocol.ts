@@ -1,9 +1,14 @@
 import type { ChatMessage, ToolCall } from './protocol/messages.js';
 import type { ThinkingLevel } from './protocol/models.js';
 import { isThinkingLevel } from './thinking-level.js';
+import {
+  DEFAULT_JSON_PATCH_LIMITS,
+  isJsonSafeValue,
+  type JsonStructuralPatchOperation,
+} from './json-structural-patch.js';
 
 /** Transient live-pipeline protocol. Nothing in this file is a durable event log. */
-export const LIVE_PIPELINE_PROTOCOL_VERSION = 4;
+export const LIVE_PIPELINE_PROTOCOL_VERSION = 5;
 
 export const LIVE_PIPELINE_LIMITS = {
   textPartBytes: 512 * 1024,
@@ -13,10 +18,13 @@ export const LIVE_PIPELINE_LIMITS = {
   // Subagent previews carry the complete recursively renderable child transcript.
   // Generic tool normalizers remain independently tail-bounded; this larger
   // ceiling exists so transparency is not traded away for transport size.
-  previewBytes: 24 * 1024 * 1024,
-  toolPreviewAggregateBytes: 28 * 1024 * 1024,
-  checkpointBytes: 2 * 1024 * 1024,
-  terminalCheckpointBytes: 24 * 1024 * 1024,
+  previewBytes: 30 * 1024 * 1024,
+  toolPreviewAggregateBytes: 30 * 1024 * 1024,
+  // Recovery checkpoints carry the backend's complete assembled live state and
+  // therefore need headroom up to the aggregate preview ceiling. They remain
+  // one-shot RPC responses under the shared 32 MiB JSONL record limit.
+  checkpointBytes: 30 * 1024 * 1024,
+  terminalCheckpointBytes: 30 * 1024 * 1024,
   pendingOwnerEvents: 64,
   pendingOwnerBytes: 2 * 1024 * 1024,
   extensionUiRequests: 32,
@@ -161,6 +169,8 @@ export interface LiveToolRecord {
   detail?: string;
   blocker?: ToolBlocker;
   preview?: ToolPreview;
+  /** Monotonic revision of the assembled preview, independent of turn seq. */
+  progressRevision?: number;
   /** Present only after the SDK durable toolResult append is confirmed. */
   terminal?: {
     status: 'completed' | 'failed';
@@ -221,7 +231,17 @@ export type TurnSemanticEnvelope =
       startedAt: number;
       parallelGroupId?: string;
     })
-  | (SemanticEnvelopeBase & { kind: 'tool.progress'; executionId: string; preview: ToolPreview })
+  | (SemanticEnvelopeBase & {
+      kind: 'tool.progress';
+      executionId: string;
+      /** Turn sequence on which this replaceable progress range is based. */
+      baseSeq: number;
+      baseProgressRevision: number;
+      progressRevision: number;
+      update:
+        | { kind: 'snapshot'; preview: ToolPreview; operations?: JsonStructuralPatchOperation[] }
+        | { kind: 'patch'; operations: JsonStructuralPatchOperation[] };
+    })
   | (SemanticEnvelopeBase & {
       kind: 'tool.terminal';
       executionId: string;
@@ -297,7 +317,13 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
     case 'turn.toolDraft': return isRecord(value.draft) && typeof value.draft.toolCallId === 'string' && typeof value.draft.name === 'string' && typeof value.draft.argumentsJson === 'string';
     case 'turn.extensionUi': return typeof value.uiRequestId === 'string' && (value.action === 'opened' || value.action === 'closed');
     case 'tool.started': return typeof value.executionId === 'string' && (value.parentExecutionId === null || typeof value.parentExecutionId === 'string') && typeof value.rootExecutionId === 'string' && typeof value.toolCallId === 'string' && typeof value.name === 'string' && isFiniteNumber(value.startedAt) && (value.parallelGroupId === undefined || typeof value.parallelGroupId === 'string');
-    case 'tool.progress': return typeof value.executionId === 'string' && isToolPreview(value.preview);
+    case 'tool.progress': return typeof value.executionId === 'string'
+      && Number.isSafeInteger(value.baseSeq) && (value.baseSeq as number) >= 1
+      && Number.isSafeInteger(value.baseProgressRevision) && (value.baseProgressRevision as number) >= 0
+      && Number.isSafeInteger(value.progressRevision) && (value.progressRevision as number) > (value.baseProgressRevision as number)
+      && (value.seq as number) - (value.baseSeq as number)
+        === (value.progressRevision as number) - (value.baseProgressRevision as number)
+      && isToolProgressUpdate(value.update);
     case 'tool.terminal': return typeof value.executionId === 'string' && (value.status === 'completed' || value.status === 'failed') && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0 && optionalFiniteNumber(value.durationMs);
     case 'observation.rejected': return ['unsupported_observation', 'malformed_observation', 'malformed_payload', 'owner_missing', 'payload_oversize'].includes(String(value.reason));
     case 'turn.terminal': return ['completed', 'interrupted', 'error'].includes(String(value.terminalKind))
@@ -317,6 +343,28 @@ export function isLiveLifecycleWatermark(value: unknown): value is LiveLifecycle
     && typeof value.attemptId === 'string'
     && Number.isSafeInteger(value.finalSeq) && (value.finalSeq as number) >= 1
     && ['completed', 'interrupted', 'error'].includes(String(value.terminalKind));
+}
+
+function isToolProgressUpdate(value: unknown): boolean {
+  if (!isRecord(value) || (value.kind !== 'snapshot' && value.kind !== 'patch')) return false;
+  if (value.kind === 'snapshot' && (!isToolPreview(value.preview) || !isJsonSafeValue(value.preview))) return false;
+  if (!Array.isArray(value.operations) || value.operations.length > DEFAULT_JSON_PATCH_LIMITS.maxOperations) {
+    return value.kind === 'snapshot' && value.operations === undefined;
+  }
+  return value.operations.every(isJsonPatchOperation);
+}
+
+function isJsonPatchOperation(value: unknown): value is JsonStructuralPatchOperation {
+  if (!isRecord(value) || !Array.isArray(value.path)
+    || value.path.length > DEFAULT_JSON_PATCH_LIMITS.maxPathSegments
+    || !value.path.every((segment) => (typeof segment === 'string'
+      && !['__proto__', 'prototype', 'constructor'].includes(segment))
+      || (Number.isSafeInteger(segment) && (segment as number) >= 0))) return false;
+  if (value.op === 'delete') return true;
+  if (value.op === 'appendString') return typeof value.value === 'string';
+  if (value.op === 'appendArray') return Array.isArray(value.value)
+    && value.value.every((entry) => isJsonSafeValue(entry));
+  return value.op === 'set' && isJsonSafeValue(value.value);
 }
 
 export function isToolPreview(value: unknown): value is ToolPreview {

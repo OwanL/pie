@@ -117,6 +117,42 @@ test('readReviews omits provenance when the sidecar line has neither field', () 
   assert.equal(r!.reviewerCount, undefined);
 });
 
+test('readReviews keeps selfClose from a valid sidecar line', () => {
+  writeLines([rawLine({ selfClose: true })]);
+  const r = readReviews().get('/repo/sess.jsonl');
+  assert.ok(r, 'record present');
+  assert.equal(r!.selfClose, true);
+});
+
+test('readReviews drops malformed selfClose but keeps the rest of the record', () => {
+  writeLines([
+    { ...rawLine({ sessionPath: '/str.jsonl' }), selfClose: 'yes' }, // not a boolean
+    { ...rawLine({ sessionPath: '/num.jsonl' }), selfClose: 1 },      // not a boolean
+  ]);
+  const reviews = readReviews();
+  assert.equal(reviews.get('/str.jsonl')?.selfClose, undefined);
+  assert.equal(reviews.get('/num.jsonl')?.selfClose, undefined);
+  // rest of the record is still normalized
+  assert.equal(reviews.get('/str.jsonl')?.rating, 4);
+  assert.equal(reviews.get('/num.jsonl')?.done, true);
+});
+
+test('appendReview writes selfClose and readReviews reads it back', () => {
+  appendReview(record({ selfClose: true }));
+  const r = readReviews().get('/repo/sess.jsonl');
+  assert.ok(r);
+  assert.equal(r!.selfClose, true);
+});
+
+test('appendReview omits selfClose from the JSONL when not provided', () => {
+  appendReview(record());
+  const parsed = JSON.parse(fs.readFileSync(path.join(dir, REVIEWS_FILE), 'utf8').trim());
+  assert.equal('selfClose' in parsed, false);
+  const r = readReviews().get('/repo/sess.jsonl');
+  assert.ok(r);
+  assert.equal(r!.selfClose, undefined);
+});
+
 test('appendReview writes reviewerBuckets/reviewerCount and readReviews reads them back', () => {
   appendReview(record({ reviewerBuckets: ['frontier', 'medium'], reviewerCount: 2 }));
   const r = readReviews().get('/repo/sess.jsonl');

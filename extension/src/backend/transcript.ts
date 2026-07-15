@@ -389,11 +389,17 @@ function dispatchSummaryEntry(
   return {
     kind: 'push',
     resetAssistant: true,
-    message: systemMessage(
-      entry.id,
-      new Date(entry.timestamp).toISOString(),
-      `${heading}\n\n${entry.summary}`,
-    ),
+    message: {
+      ...systemMessage(
+        entry.id,
+        new Date(entry.timestamp).toISOString(),
+        entry.type === 'compaction' ? entry.summary : `${heading}\n\n${entry.summary}`,
+      ),
+      // Compaction entries are replacement context, not a conversational
+      // system instruction. Preserve that distinction so the webview can
+      // render their potentially large summary as a collapsed transcript row.
+      ...(entry.type === 'compaction' ? { customType: 'compaction-summary' } : {}),
+    },
   };
 }
 

@@ -6,7 +6,7 @@
  * the host/backend push and the tool persists.
  */
 
-export type ReviewAction = 'listOpen' | 'getTranscript' | 'setReview';
+export type ReviewAction = 'listOpen' | 'getTranscript' | 'setReview' | 'closeSelf';
 export type Completion = 'fully' | 'partial' | 'setback';
 
 /** A currently-open session summary pushed by the host via `PIE_OPEN_TABS`. */
@@ -26,6 +26,10 @@ export interface OpenTabSummary {
   /** True when this tab is pinned (browser-style pinned tab). Lets the
    *  listOpen output show which tabs are pinned so reviewers can skip them. */
   pinned?: boolean;
+  /** True when this session is currently running (streaming a turn). Lets the
+   *  listOpen output show which sessions are in-flight so the reviewer skips
+   *  them (their transcript is incomplete). */
+  isRunning?: boolean;
 }
 
 /** A review record the tool appends to the sidecar (`reviews.jsonl`). */
@@ -41,6 +45,12 @@ export interface ReviewRecord {
   reviewerBuckets?: string[];
   /** Number of sub-agent reviewers that fed the rating. Optional for backward compat. */
   reviewerCount?: number;
+  /** True when this review is a self-close marker written by the `closeSelf`
+   *  action (the reviewer session closing its own tab once its work is done).
+   *  Such records still drive tab auto-close (they carry `done: true`) but the
+   *  host skips recording them as scored agent-review analytics, since a
+   *  session rating itself is not an objective performance signal. */
+  selfClose?: boolean;
 }
 
 export interface SessionReviewParams {
@@ -71,11 +81,12 @@ export const sessionReviewSchema = {
   properties: {
     action: {
       type: 'string',
-      enum: ['listOpen', 'getTranscript', 'setReview'],
+      enum: ['listOpen', 'getTranscript', 'setReview', 'closeSelf'],
       description:
         'listOpen: list currently-open sessions with their review status. ' +
         'getTranscript: read a session\'s inputs/outputs from its JSONL file. ' +
-        'setReview: record a done/rating/completion/reason review for a session.',
+        'setReview: record a done/rating/completion/reason review for a session. ' +
+        'closeSelf: close THIS (the reviewer) session once its review work is complete.',
     },
     sessionPath: {
       type: 'string',

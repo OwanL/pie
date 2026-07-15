@@ -250,7 +250,7 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(typeof (accepted as { requestId: string }).requestId, 'string');
   assert.equal(acceptedHarness.busyEvents.at(-1), true);
   assert.ok(acceptedHarness.context.activeRequest?.id);
-  assert.equal(acceptedHarness.context.activeRequest?.liveTurnAccumulator?.checkpoint().protocolVersion, 4);
+  assert.equal(acceptedHarness.context.activeRequest?.liveTurnAccumulator?.checkpoint().protocolVersion, 5);
   const succeeded = acceptedHarness.emitted.find((e) =>
     e.event === 'message.custom'
     && (e.payload as { message?: { customType?: string } }).message?.customType === 'preflight-succeeded');
@@ -588,12 +588,29 @@ test('compaction_start/compaction_end re-arm busy so a compaction call stays int
 
   // The compaction handlers only call emitBusyChanged (which the harness deps
   // provide); cast across the narrower event-handler deps shape for the test.
-  const eventDeps = harness.deps as unknown as BackendSessionEventHandlerDeps;
+  const eventDeps: BackendSessionEventHandlerDeps = {
+    ...harness.deps,
+    async emitSessionOpened(sessionPath) {
+      harness.emitted.push({ event: 'session.opened', payload: { sessionPath } });
+    },
+  };
   handleSdkSessionEvent(eventDeps, harness.context, { type: 'compaction_start' });
   assert.deepEqual(harness.busyEvents, [true]);
 
-  handleSdkSessionEvent(eventDeps, harness.context, { type: 'compaction_end' });
+  handleSdkSessionEvent(eventDeps, harness.context, {
+    type: 'compaction_end',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100,
+      estimatedTokensAfter: 25,
+      details: { readFiles: [], modifiedFiles: [] },
+    },
+  });
   assert.deepEqual(harness.busyEvents, [true, false]);
+  assert.deepEqual(harness.emitContextUsageChangedCalls, [harness.context]);
+  assert.equal(harness.emitted.some((entry) => entry.event === 'session.opened'), true);
+  assert.equal(harness.emitted.some((entry) => entry.event === 'session.list.changed'), true);
 });
 
 test('session.truncateAfter rewrites the file and recreates the session context', async () => {
@@ -1139,7 +1156,7 @@ test('session.truncateAfter leaves the model untouched when the new context alre
 
 test('liveTurn.checkpoint returns active and terminal-grace in-memory authority', async () => {
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 4, sessionPath: '/repo/session.jsonl', requestId: 'request-live',
+    protocolVersion: 5, sessionPath: '/repo/session.jsonl', requestId: 'request-live',
     turnId: 'turn-live', attemptId: 'attempt-live', canonicalMessageId: 'message-live', startedAt: 100,
   });
   accumulator.observe({ kind: 'turn.started' }, 100);

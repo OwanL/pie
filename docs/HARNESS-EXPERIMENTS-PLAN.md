@@ -91,7 +91,7 @@ The plan distinguishes two processes:
 1. **Evaluator agent:** the agent helping develop the experiment in the normal pie session.
 2. **Target agent:** the headless agent being benchmarked.
 
-The MVP protects the maintainer's providers from accidental access by the **target agent**. It does not make a normal evaluator session hostile-safe: an evaluator running with the maintainer's ordinary shell permissions already has whatever filesystem/environment access the current pie session has.
+The implemented Docker boundary protects the maintainer's host and providers from the **target agent**. It does not make a normal evaluator session hostile-safe: an evaluator running with the maintainer's ordinary shell permissions already has whatever filesystem/environment access the current pie session has.
 
 If evaluator code or the evaluator model itself must be treated as malicious, the whole evaluator must run under a separate OS account, VM, or container with no normal auth directory and only the benchmark credential broker. That stronger boundary is optional for local trusted use but must be documented clearly.
 
@@ -139,16 +139,16 @@ The launcher should build a fresh environment from a cross-platform allowlist:
 
 The ephemeral broker token should be written into the run-local `models.json`, not inherited as an environment variable. The launcher must reject known provider-secret names and broad secret patterns in the child environment. Tests should plant fake `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, Copilot tokens, arbitrary `*_TOKEN`/`*_SECRET` values, and canary auth files in the real home/profile, then prove a target bash call cannot observe them through env or normal `~`/profile-derived paths.
 
-This is still protection against accidental discovery, not an OS sandbox: a hostile same-user process that already knows absolute host paths may reach them. Hostile-target protection requires the container/VM mode described in §4.7.
+The generated identity is mounted read-only into the target container. The target cannot address arbitrary host paths because only its workspace, identity, config, and declared treatment bundle are mounted. The evaluator/controller remains outside this boundary.
 
 ### 4.5 Umans credential broker
 
-Passing the real `UMANS_API_KEY` into the target process would still expose it through the target's bash/read capabilities. The preferred design is a small localhost benchmark broker owned by the controller:
+Passing the real `UMANS_API_KEY` into the target process would still expose it through the target's bash/read capabilities. The implemented design is a small broker container owned by the controller:
 
 1. The controller process reads the real `UMANS_API_KEY`.
-2. It starts a loopback-only HTTP server on a random port.
-3. It generates a short-lived random bearer token for one experiment/run.
-4. Target `models.json` points `umans.baseUrl` at the broker and contains only the ephemeral token.
+2. It starts a per-trial broker container attached to the target's internal network and a separate egress bridge.
+3. It generates a short-lived random bearer token for one trial.
+4. Target `models.json` points `umans.baseUrl` at the broker's internal Docker DNS name and contains only the ephemeral token.
 5. The broker accepts only the two allowed model IDs.
 6. The broker injects the real Umans credential upstream.
 7. It forwards the relevant OpenAI-compatible payload and Umans session-affinity/request-id headers transparently so the broker does not change routing behavior.
@@ -177,15 +177,16 @@ A trial fails with classification `provider_policy_violation` if it attempts ano
 
 ### 4.7 Network boundary
 
-The credential broker prevents use of paid configured providers, but unrestricted bash still permits ordinary outbound network access. The MVP should:
+Paid smoke/full runs require the hardened Docker mode and fail closed if Docker or the captured image digest is unavailable. For each trial the controller:
 
-- make benchmark tasks offline by default;
-- prohibit dependency installation in task manifests unless explicitly required;
-- record commands that invoke network-oriented executables;
-- classify unexpected network commands as policy violations;
-- document that command observation is not a hostile sandbox.
+- creates a dedicated `--internal` Docker network;
+- attaches the target only to that network;
+- attaches the broker to both the internal network and Docker's egress bridge;
+- mounts no Docker socket and no host paths except the trial workspace, generated identity, worker config, and declared treatment bundle;
+- runs the target non-root with all capabilities dropped, `no-new-privileges`, a read-only root filesystem, bounded CPU/memory/PIDs, and bounded tmpfs storage;
+- removes target/broker containers, network, and temporary credential file on completion or failure.
 
-A later hardened mode may run the target in a container/VM with egress restricted to the broker. This is required before treating target code as actively malicious, but not required for trusted local experimentation.
+The command policy remains defense in depth. Integration tests prove that the target reaches the broker but cannot reach ordinary internet or host endpoints. This boundary does not make the trusted host evaluator/controller safe to treat as malicious; that requires a separate VM or host.
 
 ## 5. Proposed repository layout
 
@@ -649,7 +650,7 @@ Acceptance:
 
 Only after the pilot:
 
-- add container/VM egress isolation if hostile-target testing is needed;
+- keep the mandatory target/broker container boundary and image digest under integration test; use a separate VM/host if evaluator code becomes untrusted;
 - add benchmark result summaries to the existing analytics preparation layer without mixing controlled and observational cohorts;
 - support pie backend treatments that cannot run in standalone pi;
 - add blind judge support for subjective tasks;
@@ -691,7 +692,7 @@ A fake local OpenAI-compatible provider should cover runner tests. Real Umans ca
 
 ## 13. Open questions before implementation
 
-1. **Evaluator boundary:** Is protection against accidental target access sufficient, or should evaluator sessions also run under a separate OS/container identity from day one?
+1. **Evaluator boundary (resolved for current scope):** target sessions require Docker isolation; evaluator/controller sessions remain trusted host processes. Move the whole evaluator to a separate VM/host before treating evaluator code as malicious.
 2. **Broker implementation:** Use a small purpose-built Node reverse proxy, or restore an off-the-shelf local gateway with virtual keys? A purpose-built broker has a smaller benchmark-specific surface; an off-the-shelf gateway has stronger mature policy controls.
 3. **Target interface:** SDK worker as primary with RPC acceptance tests, or RPC for every trial? SDK is easier to configure exactly; RPC exercises the public headless path.
 4. **Private scorers:** Keep them in a local path outside the pie checkout, or accept that the trusted evaluator can inspect them while only the target is isolated?

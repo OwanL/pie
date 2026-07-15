@@ -98,6 +98,11 @@ function normalizeReview(value: unknown): SessionReview | undefined {
   const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
     ? rawCount
     : undefined;
+  // selfClose marker (optional): a self-close review written by the tool's
+  // `closeSelf` action. Validated as a boolean so a corrupt sidecar line never
+  // breaks session listing/review; dropped (undefined) when malformed.
+  const rawSelfClose = v.selfClose;
+  const selfClose = typeof rawSelfClose === 'boolean' ? rawSelfClose : undefined;
   return {
     sessionPath: v.sessionPath,
     done: v.done,
@@ -107,6 +112,7 @@ function normalizeReview(value: unknown): SessionReview | undefined {
     evaluatedAt: typeof v.evaluatedAt === 'string' ? v.evaluatedAt : new Date(0).toISOString(),
     ...(reviewerBuckets !== undefined ? { reviewerBuckets } : {}),
     ...(reviewerCount !== undefined ? { reviewerCount } : {}),
+    ...(selfClose !== undefined ? { selfClose } : {}),
   };
 }
 
@@ -126,6 +132,7 @@ export function mergeReviewIntoSummary(summary: SessionSummary, reviews: Map<str
     evaluatedAt: review.evaluatedAt,
     ...(review.reviewerBuckets !== undefined ? { reviewerBuckets: review.reviewerBuckets } : {}),
     ...(review.reviewerCount !== undefined ? { reviewerCount: review.reviewerCount } : {}),
+    ...(review.selfClose !== undefined ? { selfClose: review.selfClose } : {}),
   };
 }
 

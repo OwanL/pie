@@ -1023,7 +1023,7 @@ test('tool execution and message end events cover completed payloads and fallbac
 test('sequenced production path emits only typed live envelopes with a durable terminal', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 4,
+    protocolVersion: 5,
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-live',
     turnId: 'turn-live',
@@ -1073,7 +1073,7 @@ test('sequenced production path emits only typed live envelopes with a durable t
 test('concurrent semantic tool starts carry one stable parallel group into live records', () => {
   const { deps, emitted } = createDeps({ captureLive: true });
   const accumulator = new BackendLiveTurnAccumulator({
-    protocolVersion: 4, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
+    protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'req-parallel',
     turnId: 'turn-parallel', attemptId: 'attempt-parallel', canonicalMessageId: 'req-parallel:1', startedAt: 100,
   });
   const context = createContext({
@@ -1115,7 +1115,7 @@ test('pre-first-semantic inactivity terminalizes locally and raw transport canno
       activeRequest: {
         id: 'req-semantic-timeout', messageIndex: 0, aborted: false,
         liveTurnAccumulator: new BackendLiveTurnAccumulator({
-          protocolVersion: 4, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
+          protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
           turnId: 'turn-timeout', attemptId: 'attempt-timeout', canonicalMessageId: 'req-semantic-timeout:1', startedAt: Date.now(),
         }),
       },

@@ -11,7 +11,7 @@ Use scripts as the enforcement plane. Never manually spawn a target agent or pas
 
 1. Run `npm run experiment:status -- <id>`. While a run is active, use `npm run experiment:watch -- <id>` for a polling view of the PID, current trial/model/treatment, completed/remaining counts, last event/tool, request counts, and update time.
 2. Read `data/experiments/<id>/experiment.json` and `journal.md` before editing.
-3. Confirm the immutable input manifest under `inputs/`; newly captured recipes are frozen when they become candidate-ready. Confirm one falsifiable hypothesis, one recipe, one suite, the pinned base commit, and the suite's numeric primary score. For optimization suites, preserve validity gates and compare paired score deltas rather than substituting subjective judgment.
+3. Run `npm run experiment:image:build` when the pinned runtime inputs change. Confirm the immutable input manifest under `inputs/`, including its Docker image digest; newly captured recipes are frozen when they become candidate-ready. Confirm one falsifiable hypothesis, one recipe, one suite, the pinned base commit, and the suite's numeric primary score. For optimization suites, preserve validity gates and compare paired score deltas rather than substituting subjective judgment.
 4. If creating:
    `npm run experiment:create -- --id <id> --hypothesis "<measurable claim>" --recipe <recipe> --suite <suite>`.
 
@@ -34,9 +34,9 @@ Treat `policy.allowedChangedPaths` as a hard boundary; generated files, benchmar
 
 ## Security rules
 
-The evaluator session is trusted; the target is protected from accidental credential/provider discovery, not hostile same-user filesystem access. The controller must own the real `UMANS_API_KEY`; a loopback broker gives each target an ephemeral token and rejects every model except `umans-glm-5.2` and `umans-kimi-k2.7`. Global resources, project trust, persistent sessions, compaction, retries, subagents, fallback models, and undeclared tools are disabled.
+The evaluator session and host controller are trusted. Paid runs require Docker and fail closed when the daemon or captured image digest is unavailable. Each target is a non-root, capability-free container with a read-only root, bounded resources, only its trial workspace/identity mounted, and an internal network. A separate broker container joins both that internal network and an egress bridge, owns the real `UMANS_API_KEY`, gives the target an ephemeral token, and rejects every model except `umans-glm-5.2` and `umans-kimi-k2.7`. The target has no Docker socket, host route, ordinary internet route, or normal host profile. Global resources, project trust, persistent sessions, compaction, retries, subagents, fallback models, and undeclared tools are disabled.
 
-Stop immediately on `provider_policy_violation`, unexpected available models/resources/tools, leaked canaries, broker redaction failure, or process-tree cleanup failure. Use a container/VM with broker-only egress for hostile targets.
+Stop immediately on `provider_policy_violation`, unexpected available models/resources/tools, leaked canaries, broker redaction failure, image-digest drift, or container/network cleanup failure. This isolates the target, not malicious evaluator/controller code; use a separate VM or host for that stronger threat model.
 
 ## Failure investigation
 

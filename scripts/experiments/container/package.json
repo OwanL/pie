@@ -1,0 +1,9 @@
+{
+  "name": "pie-benchmark-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6"
+  }
+}

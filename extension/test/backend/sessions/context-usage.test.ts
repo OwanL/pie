@@ -62,6 +62,37 @@ test('deriveContextUsageFromBranch falls back to total tokens and clamps percent
   });
 });
 
+test('deriveContextUsageFromBranch clears stale usage at a compaction boundary', () => {
+  const entries: SessionEntryLike[] = [
+    {
+      id: 'before',
+      type: 'message',
+      timestamp: new Date().toISOString(),
+      message: { role: 'assistant', usage: { input: 90, output: 5 } },
+    },
+    {
+      id: 'compact',
+      type: 'compaction',
+      timestamp: new Date().toISOString(),
+      summary: 'Condensed history',
+    },
+  ];
+
+  assert.equal(deriveContextUsageFromBranch(entries, 100), undefined);
+
+  entries.push({
+    id: 'after',
+    type: 'message',
+    timestamp: new Date().toISOString(),
+    message: { role: 'assistant', usage: { input: 25, output: 5 } },
+  });
+  assert.deepEqual(deriveContextUsageFromBranch(entries, 100), {
+    tokens: 25,
+    contextWindow: 100,
+    percent: 25,
+  });
+});
+
 test('deriveContextUsageFromBranch returns undefined when no assistant usage exists', () => {
   const entries: SessionEntryLike[] = [
     {

@@ -1,0 +1,8 @@
+**
+!scripts/experiments/container/package.json
+!scripts/experiments/container/package-lock.json
+!scripts/experiments/trial-worker.mjs
+!scripts/experiments/broker-container.mjs
+!scripts/experiments/broker.mjs
+!scripts/experiments/lib/policy.mjs
+!scripts/experiments/lib/core.mjs

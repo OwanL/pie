@@ -10,6 +10,11 @@ import {
 } from '../shared/live-pipeline-protocol.js';
 import type { ChatMessage } from '../shared/protocol/messages.js';
 import type { ThinkingLevel } from '../shared/protocol/models.js';
+import {
+  diffJsonValues,
+  isJsonSafeValue,
+  type JsonSafeValue,
+} from '../shared/json-structural-patch.js';
 import { normalizeToolProgress } from './tool-progress-normalizer.js';
 
 export interface BackendLiveTurnIdentity {
@@ -75,7 +80,11 @@ export class BackendLiveTurnAccumulator {
     };
   }
 
-  observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope {
+  observe(candidate: Exclude<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope;
+  observe(candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope | undefined;
+  observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope | undefined;
+  observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope | undefined {
+    if (candidate.kind === 'tool.progress') return this.observeToolProgress(candidate, occurredAt);
     const seq = ++this.seq;
     const base = { ...this.base(seq, occurredAt) };
     let envelope: TurnSemanticEnvelope;
@@ -192,22 +201,6 @@ export class BackendLiveTurnAccumulator {
         };
         break;
       }
-      case 'tool.progress': {
-        const tool = this.tools[candidate.executionId];
-        if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
-        const aggregatePreviewBytes = Object.values(this.tools).reduce((total, entry) =>
-          total + (entry.executionId === candidate.executionId
-            ? jsonByteLength(candidate.preview)
-            : jsonByteLength(entry.preview)),
-        0);
-        if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
-          return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
-        }
-        envelope = { ...base, ...candidate };
-        this.tools[candidate.executionId] = { ...tool, seq, preview: candidate.preview, lastProgressAt: occurredAt };
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
-        break;
-      }
       case 'tool.terminal': {
         const tool = this.tools[candidate.executionId];
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
@@ -291,6 +284,68 @@ export class BackendLiveTurnAccumulator {
 
   lifecycleWatermark(): LiveLifecycleWatermark | undefined {
     return this.watermark ? { ...this.watermark } : undefined;
+  }
+
+  private observeToolProgress(
+    candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>,
+    occurredAt: number,
+  ): TurnSemanticEnvelope | undefined {
+    const tool = this.tools[candidate.executionId];
+    if (!tool) {
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
+    }
+    if (tool.terminal) {
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
+    }
+    if (!isJsonSafeValue(candidate.preview)) {
+      const seq = ++this.seq;
+      return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
+    }
+
+    const previous = tool.preview;
+    const operations = previous
+      ? diffJsonValues(previous as JsonSafeValue, candidate.preview as JsonSafeValue)
+      : [];
+    if (previous && operations.length === 0) return undefined;
+
+    const seq = ++this.seq;
+    const baseSeq = seq - 1;
+    const aggregatePreviewBytes = Object.values(this.tools).reduce((total, entry) =>
+      total + (entry.executionId === candidate.executionId
+        ? jsonByteLength(candidate.preview)
+        : jsonByteLength(entry.preview)),
+    0);
+    if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
+      return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
+    }
+
+    const baseProgressRevision = tool.progressRevision ?? 0;
+    const progressRevision = baseProgressRevision + 1;
+    const snapshotUpdate = { kind: 'snapshot' as const, preview: candidate.preview };
+    const patchUpdate = { kind: 'patch' as const, operations };
+    const update = previous && jsonByteLength(patchUpdate) < jsonByteLength(snapshotUpdate)
+      ? patchUpdate
+      : snapshotUpdate;
+    const envelope: TurnSemanticEnvelope = {
+      ...this.base(seq, occurredAt),
+      kind: 'tool.progress',
+      executionId: candidate.executionId,
+      baseSeq,
+      baseProgressRevision,
+      progressRevision,
+      update,
+    };
+    this.tools[candidate.executionId] = {
+      ...tool,
+      seq,
+      preview: candidate.preview,
+      progressRevision,
+      lastProgressAt: occurredAt,
+    };
+    this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
+    return envelope;
   }
 
   private compactSettledToolHistory(): void {

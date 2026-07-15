@@ -520,6 +520,7 @@ function emitSemanticCandidate(
   const accumulator = context.activeRequest?.liveTurnAccumulator;
   if (!accumulator) return undefined;
   const envelope = accumulator.observe(candidate, occurredAt);
+  if (!envelope) return undefined;
   deps.emit('live.semantic', envelope);
   if (envelope.kind === 'observation.rejected' && envelope.reason === 'payload_oversize') {
     logBackendDiagnostic('warn', 'semantic.payloadOversize', { candidateKind: candidate.kind });
@@ -1235,6 +1236,15 @@ export function handleSdkSessionEvent(
       // Idempotent with the `agent_end` busy=false clear and the interrupt
       // handler's `.finally`.
       deps.emitBusyChanged(context, false);
+      // A successful compaction has now appended the CompactionEntry. Refresh
+      // both the context indicator and transcript so manual and automatic
+      // compaction visibly surface the generated summary instead of only
+      // appearing after reopen. Failed/aborted attempts append nothing.
+      if (event.result) {
+        deps.emitContextUsageChanged(context);
+        void deps.emitSessionOpened(context.sessionPath);
+        void deps.emitSessionListChanged();
+      }
       // Emit a host-facing signal so run-analytics can count this billable
       // compaction LLM call against the run.
       deps.emit('compaction.ended', { sessionPath: context.sessionPath });

@@ -109,3 +109,24 @@ test('mergeReviewIntoSummary leaves the summary unchanged when no review exists 
   assert.equal(merged.reviewerBuckets, undefined);
   assert.equal(merged.reviewerCount, undefined);
 });
+
+test('mergeReviewIntoSummary merges selfClose from the sidecar onto the summary', () => {
+  writeLines([rawReview({ selfClose: true })]);
+  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.done, true);
+  assert.equal(merged.selfClose, true);
+});
+
+test('mergeReviewIntoSummary drops malformed selfClose but keeps the rest of the review', () => {
+  writeLines([rawReview({ selfClose: 'yes' })]);
+  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.selfClose, undefined);
+  assert.equal(merged.done, true);
+  assert.equal(merged.rating, 4);
+});
+
+test('mergeReviewIntoSummary omits selfClose when the sidecar line has no field', () => {
+  writeLines([rawReview()]);
+  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.selfClose, undefined);
+});

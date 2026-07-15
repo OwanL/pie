@@ -6,7 +6,7 @@ import { createInitialArchState, reducer } from '../../../../src/host/core/reduc
 import type { TurnSemanticEnvelope } from '../../../../src/shared/live-pipeline-protocol';
 
 const base = {
-  protocolVersion: 4,
+  protocolVersion: 5,
   sessionPath: '/session.jsonl',
   requestId: 'request',
   turnId: 'turn',
@@ -76,7 +76,7 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
     status: 'terminal_grace',
     watermark: { ...base, finalSeq: 4, terminalKind: 'completed' },
     checkpoint: {
-      protocolVersion: 4,
+      protocolVersion: 5,
       sessionPath: base.sessionPath,
       turnId: base.turnId,
       attemptId: base.attemptId,
@@ -115,6 +115,48 @@ test('failed checkpoint for an ownerless event terminalizes the attempt and clea
   assert.equal(lateStart.state.livePipeline.turnsBySession[base.sessionPath], undefined);
 });
 
+test('checkpoint repair replays a coalesced v5 progress range from the checkpoint base', () => {
+  let state = createInitialArchState();
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 95,
+  }).state;
+  const queued = dispatch(state, {
+    ...base, kind: 'tool.progress', seq: 6, baseSeq: 4, executionId: 'execution',
+    baseProgressRevision: 2, progressRevision: 4,
+    update: { kind: 'patch', operations: [{
+      op: 'appendString', path: ['children', 0, 'streamingText'], value: 'cd',
+    }] },
+  });
+  assert.equal(queued.state.livePipeline.pendingOwnerEvents['turn\u0000attempt']?.length, 1);
+  const owner = queued.state.livePipeline.turnsBySession[base.sessionPath]!;
+  const tool = queued.state.livePipeline.toolsByExecutionId.execution!;
+  const repaired = reducer(queued.state, {
+    kind: 'LiveTurnCheckpointResult', corrId: 'checkpoint-range', sessionPath: base.sessionPath,
+    turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
+    status: 'active', watermark: null,
+    checkpoint: {
+      protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
+      attemptId: base.attemptId, checkpointSeq: 4, phase: 'running_tool',
+      turn: { ...owner, seq: 4, checkpointSeq: 4, phase: 'running_tool', reconciliation: undefined },
+      tools: [{
+        ...tool, seq: 4, progressRevision: 2,
+        preview: { kind: 'subagent', mode: 'single', omittedChildren: 0, children: [
+          { id: 'worker', phase: 'running', streamingText: 'ab' },
+        ] },
+      }],
+      pendingExtensionUiRequestIds: [],
+    },
+  });
+  assert.deepEqual(repaired.effects, []);
+  assert.equal(repaired.state.livePipeline.turnsBySession[base.sessionPath]?.seq, 6);
+  const preview = repaired.state.livePipeline.toolsByExecutionId.execution?.preview;
+  assert.equal(preview?.kind === 'subagent' ? preview.children[0]?.streamingText : undefined, 'abcd');
+});
+
 test('checkpoint repair replays a newer envelope that arrived after checkpoint creation', () => {
   let state = createInitialArchState();
   state = dispatch(state, {
@@ -128,7 +170,7 @@ test('checkpoint repair replays a newer envelope that arrived after checkpoint c
     turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 140,
     status: 'active', watermark: null,
     checkpoint: {
-      protocolVersion: 4, sessionPath: base.sessionPath, turnId: base.turnId,
+      protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 2, phase: 'streaming',
       turn: { ...turn, seq: 2, checkpointSeq: 2, phase: 'streaming', parts: [{ kind: 'text', text: 'before' }] },
       tools: [], pendingExtensionUiRequestIds: [],

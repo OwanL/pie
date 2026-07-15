@@ -1,6 +1,11 @@
 import type { Writable } from 'node:stream';
 import { JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../shared/jsonl';
 import type { ErrorPayload, EventEnvelope, ResponseEnvelope } from '../shared/protocol';
+import {
+  compactJsonPatchOperations,
+  DEFAULT_JSON_PATCH_LIMITS,
+  type JsonStructuralPatchOperation,
+} from '../shared/json-structural-patch';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 
 interface QueuedLine {
@@ -14,6 +19,19 @@ interface QueuedLine {
   response: boolean;
   queuedAt: number;
   trace?: WriterTraceMetadata;
+  semanticProgress?: SemanticProgressMetadata;
+}
+
+interface SemanticProgressMetadata {
+  key: string;
+  baseSeq: number;
+  seq: number;
+  baseProgressRevision: number;
+  progressRevision: number;
+  envelope: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  update: { kind: 'snapshot'; preview: unknown; operations?: JsonStructuralPatchOperation[] }
+    | { kind: 'patch'; operations: JsonStructuralPatchOperation[] };
 }
 
 interface WriterTraceMetadata {
@@ -73,6 +91,7 @@ export class OrderedJsonlWriter {
       response: isResponseEnvelope(value),
       queuedAt: performance.now(),
       trace: isBackendLivePipelineTraceEnabled() ? writerTraceMetadata(value) : undefined,
+      semanticProgress: semanticProgressMetadata(value),
     };
     if (entry.bytes > JSONL_MAX_LINE_BYTES) {
       if (entry.progressKey && !entry.sequencedSemantic) return;
@@ -98,6 +117,49 @@ export class OrderedJsonlWriter {
 
     const terminalKey = terminalToolKey(value);
     if (entry.progressKey && !entry.sequencedSemantic && this.terminalToolKeys.has(entry.progressKey)) return;
+
+    if (this.writing && entry.semanticProgress) {
+      const previousEventIndex = this.findLastQueuedEventIndex();
+      const previous = previousEventIndex >= 0 ? this.queue[previousEventIndex] : undefined;
+      if (previous?.semanticProgress
+        && previous.semanticProgress.key === entry.semanticProgress.key
+        && previous.semanticProgress.seq === entry.semanticProgress.baseSeq
+        && previous.semanticProgress.progressRevision === entry.semanticProgress.baseProgressRevision) {
+        const combined = combineSemanticProgress(previous.semanticProgress, entry.semanticProgress);
+        const combinedLine = serializeJsonLine(combined.envelope);
+        const combinedBytes = Buffer.byteLength(combinedLine);
+        const replacementBytes = this.queuedBytes - previous.bytes + combinedBytes;
+        const replacementEventBytes = replacementBytes - this.queuedResponseBytes;
+        const combinedOperations = combined.update.operations?.length ?? 0;
+        if (combinedOperations <= DEFAULT_JSON_PATCH_LIMITS.maxOperations
+          && combinedBytes <= JSONL_MAX_LINE_BYTES
+          && replacementEventBytes <= this.maxQueuedBytes) {
+          const replacement: QueuedLine = {
+            ...entry,
+            line: combinedLine,
+            bytes: combinedBytes,
+            semanticProgress: combined,
+            queuedAt: previous.queuedAt,
+          };
+          this.queue[previousEventIndex] = replacement;
+          this.queuedBytes = replacementBytes;
+          this.traceQueued(replacement);
+          return;
+        }
+        // The latest patch can safely replace an unwriteable contiguous range:
+        // its base revision will no longer match at the host, which triggers the
+        // checkpoint RPC. This bounds backlog without dropping a lifecycle
+        // record or pretending the patch was applicable.
+        const latestReplacementBytes = this.queuedBytes - previous.bytes + entry.bytes;
+        const latestEventBytes = latestReplacementBytes - this.queuedResponseBytes;
+        if (entry.bytes <= JSONL_MAX_LINE_BYTES && latestEventBytes <= this.maxQueuedBytes) {
+          this.queue[previousEventIndex] = entry;
+          this.queuedBytes = latestReplacementBytes;
+          this.traceQueued(entry);
+          return;
+        }
+      }
+    }
 
     if (this.writing && entry.progressKey && !entry.sequencedSemantic) {
       const staleIndex = this.queue.findIndex((queued) => queued.progressKey === entry.progressKey);
@@ -154,6 +216,13 @@ export class OrderedJsonlWriter {
 
   getDebugState(): { terminalToolKeys: number; queueDepth: number; queuedBytes: number } {
     return { terminalToolKeys: this.terminalToolKeys.size, queueDepth: this.queue.length, queuedBytes: this.queuedBytes };
+  }
+
+  private findLastQueuedEventIndex(): number {
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      if (!this.queue[index]?.response) return index;
+    }
+    return -1;
   }
 
   private rememberTerminalToolKey(key: string): void {
@@ -305,6 +374,79 @@ function semanticToolKey(value: unknown, expectedKind: string): string | undefin
     && typeof payload.executionId === 'string'
       ? `${payload.sessionPath}\u0000${payload.turnId}\u0000${payload.attemptId}\u0000${payload.executionId}`
       : undefined;
+}
+
+function semanticProgressMetadata(value: unknown): SemanticProgressMetadata | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const envelope = value as Record<string, unknown>;
+  if (envelope.event !== 'live.semantic' || !envelope.payload || typeof envelope.payload !== 'object') return undefined;
+  const payload = envelope.payload as Record<string, unknown>;
+  if (payload.kind !== 'tool.progress'
+    || typeof payload.sessionPath !== 'string'
+    || typeof payload.turnId !== 'string'
+    || typeof payload.attemptId !== 'string'
+    || typeof payload.executionId !== 'string'
+    || !Number.isSafeInteger(payload.baseSeq)
+    || !Number.isSafeInteger(payload.seq)
+    || !Number.isSafeInteger(payload.baseProgressRevision)
+    || !Number.isSafeInteger(payload.progressRevision)
+    || !payload.update || typeof payload.update !== 'object') return undefined;
+  const update = payload.update as SemanticProgressMetadata['update'];
+  if ((update.kind !== 'snapshot' && update.kind !== 'patch')
+    || (update.kind === 'patch' && !Array.isArray(update.operations))
+    || (update.kind === 'snapshot' && update.operations !== undefined && !Array.isArray(update.operations))) return undefined;
+  return {
+    key: `${payload.sessionPath}\u0000${payload.turnId}\u0000${payload.attemptId}\u0000${payload.executionId}`,
+    baseSeq: payload.baseSeq as number,
+    seq: payload.seq as number,
+    baseProgressRevision: payload.baseProgressRevision as number,
+    progressRevision: payload.progressRevision as number,
+    envelope,
+    payload,
+    update,
+  };
+}
+
+function combineSemanticProgress(
+  previous: SemanticProgressMetadata,
+  next: SemanticProgressMetadata,
+): SemanticProgressMetadata {
+  let update: SemanticProgressMetadata['update'];
+  if (next.update.kind === 'snapshot') {
+    update = next.update;
+  } else if (previous.update.kind === 'snapshot') {
+    update = {
+      kind: 'snapshot',
+      preview: previous.update.preview,
+      operations: compactJsonPatchOperations([
+        ...(previous.update.operations ?? []),
+        ...next.update.operations,
+      ]),
+    };
+  } else {
+    update = {
+      kind: 'patch',
+      operations: compactJsonPatchOperations([
+        ...previous.update.operations,
+        ...next.update.operations,
+      ]),
+    };
+  }
+  const payload: Record<string, unknown> = {
+    ...next.payload,
+    baseSeq: previous.baseSeq,
+    baseProgressRevision: previous.baseProgressRevision,
+    update,
+  };
+  const envelope = { ...next.envelope, payload };
+  return {
+    ...next,
+    baseSeq: previous.baseSeq,
+    baseProgressRevision: previous.baseProgressRevision,
+    envelope,
+    payload,
+    update,
+  };
 }
 
 function isSequencedSemanticEnvelope(value: unknown): boolean {

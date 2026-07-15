@@ -402,6 +402,78 @@ test('onSessionListChanged records agent-review analytics on a fresh done transi
   assert.equal(review.reviewerCount, 1);
 });
 
+test('onSessionListChanged skips agent-review analytics for a selfClose review but still closes the tab', () => {
+  const A = '/workspace/session-self-close.jsonl';
+  const baseSummary: SessionSummary = {
+    path: A,
+    name: 'Reviewer',
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 3,
+  };
+
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    sessions: {
+      ...createInitialArchState().sessions,
+      sessions: [baseSummary],
+      openTabPaths: [A],
+      activeSessionPath: A,
+    },
+  };
+  const getArchState = () => archState;
+  const dispatchedEvents: Event[] = [];
+  const dispatchArch = (event: Event) => {
+    dispatchedEvents.push(event);
+    archState = reducer(archState, event).state;
+  };
+
+  const context = {
+    globalState: { update: async () => undefined },
+    workspaceState: { update: async () => undefined },
+  } as any;
+  const backend = { request: async () => ({}) } as any;
+  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+
+  const recordAgentReviewCalls: Array<{ sessionPath: string; review: Record<string, unknown> }> = [];
+  const runObserver: RunObserver = {
+    ...NOOP_RUN_OBSERVER,
+    recordAgentReview: (sessionPath, review) => {
+      recordAgentReviewCalls.push({ sessionPath, review: { ...review } });
+    },
+  };
+
+  const deps = {
+    context,
+    getArchState,
+    dispatchArch,
+    runObserver,
+    state,
+    scheduleRender: () => undefined,
+    requireEventSessionPath: (_eventName: string, sessionPath: string | undefined) => sessionPath ?? null,
+  };
+
+  // Seed with A not done.
+  onSessionListChanged(
+    { sessions: [{ ...baseSummary, done: false }], activeSessionPath: A },
+    deps,
+  );
+  dispatchedEvents.length = 0;
+
+  // Flip to done as a selfClose marker. The tab must still close (CloseSession
+  // dispatched) but no agent-review analytics should be recorded.
+  onSessionListChanged(
+    { sessions: [{ ...baseSummary, done: true, selfClose: true }], activeSessionPath: A },
+    deps,
+  );
+
+  assert.equal(recordAgentReviewCalls.length, 0, 'selfClose must not record agent-review analytics');
+  const closeCommands = dispatchedEvents.filter(
+    (e) => e.kind === 'Command' && (e as any).cmd?.kind === 'CloseSession',
+  );
+  assert.equal(closeCommands.length, 1, 'selfClose must still dispatch a CloseSession to close the tab');
+});
+
 test('onSessionListChanged applies defaults for missing review fields on a done transition', () => {
   const A = '/workspace/session-done-defaults.jsonl';
   const baseSummary: SessionSummary = {

@@ -1,4 +1,12 @@
-import { LIVE_PIPELINE_LIMITS, type LivePipelineState, type LiveTurnPhase, type TurnSemanticEnvelope } from '../../../shared/live-pipeline-protocol.js';
+import {
+  LIVE_PIPELINE_LIMITS,
+  isToolPreview,
+  type LivePipelineState,
+  type LiveTurnPhase,
+  type ToolPreview,
+  type TurnSemanticEnvelope,
+} from '../../../shared/live-pipeline-protocol.js';
+import { applyJsonPatch, type JsonSafeValue } from '../../../shared/json-structural-patch.js';
 import { incrementLiveRevision, pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from './model.js';
 
 export type LiveTransitionResult =
@@ -75,7 +83,14 @@ export function applyLiveSemanticEnvelope(
     return queueOwnerPending(current, event);
   }
   if (event.seq <= owner.seq) return { classification: 'duplicate_or_late', state: current };
-  if (event.seq !== owner.seq + 1) return enterGap(current, owner, event);
+  const expectedBaseSeq = owner.seq;
+  if (event.kind === 'tool.progress') {
+    if (event.baseSeq !== expectedBaseSeq
+      || event.seq <= event.baseSeq
+      || event.seq - event.baseSeq !== event.progressRevision - event.baseProgressRevision) {
+      return enterGap(current, owner, event);
+    }
+  } else if (event.seq !== owner.seq + 1) return enterGap(current, owner, event);
 
   if (event.kind === 'observation.rejected') {
     const state = withTurn(current, event.sessionPath, {
@@ -216,9 +231,33 @@ export function applyLiveSemanticEnvelope(
     if (!tool || tool.turnId !== owner.turnId || tool.attemptId !== owner.attemptId) {
       return queueOwnerPending(current, event);
     }
+    if (tool.terminal) {
+      return { classification: 'invalid', state: current, reason: 'progress after terminal tool' };
+    }
+    if ((tool.progressRevision ?? 0) !== event.baseProgressRevision) {
+      return enterGap(current, owner, event);
+    }
+    let preview: ToolPreview;
+    if (event.update.kind === 'snapshot') {
+      preview = event.update.preview;
+      if (event.update.operations?.length) {
+        const patched = applyJsonPatch(preview as JsonSafeValue, event.update.operations);
+        if (!patched.ok || !isToolPreview(patched.value)) {
+          return { classification: 'invalid', state: current, reason: 'invalid progress snapshot patch' };
+        }
+        preview = patched.value;
+      }
+    } else {
+      if (!tool.preview) return enterGap(current, owner, event);
+      const patched = applyJsonPatch(tool.preview as JsonSafeValue, event.update.operations);
+      if (!patched.ok || !isToolPreview(patched.value)) {
+        return { classification: 'invalid', state: current, reason: 'invalid progress patch' };
+      }
+      preview = patched.value;
+    }
     const aggregatePreviewBytes = owner.toolExecutionIds.reduce((total, executionId) =>
       total + (executionId === event.executionId
-        ? jsonByteLength(event.preview)
+        ? jsonByteLength(preview)
         : jsonByteLength(current.toolsByExecutionId[executionId]?.preview)),
     0);
     if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
@@ -228,7 +267,13 @@ export function applyLiveSemanticEnvelope(
       ...current,
       toolsByExecutionId: {
         ...current.toolsByExecutionId,
-        [event.executionId]: { ...tool, seq: event.seq, preview: event.preview, lastProgressAt: event.occurredAt },
+        [event.executionId]: {
+          ...tool,
+          seq: event.seq,
+          preview,
+          progressRevision: event.progressRevision,
+          lastProgressAt: event.occurredAt,
+        },
       },
     }, event.sessionPath, { ...owner, seq: event.seq, lastSemanticProgressAt: event.occurredAt });
     return { classification: 'applied', state };

@@ -319,20 +319,22 @@ export class PieExtension implements vscode.Disposable {
     this.statusBar.show();
   }
 
-  /** Resolve the provider name for a session's in-flight request, mirroring
-   *  host/core/model-capability.ts: the session summary's `modelId` (falling
-   *  back to the global default model) → the available-models table's
-   *  `.provider`. Returns `undefined` when the model/provider can't be
-   *  resolved (fail-open). Shared by the FP-C2a model-start re-arm gate and
-   *  the FP-C3 send-timer queue-wait headroom. */
+  /** Resolve the provider name for a session's in-flight request from its
+   *  provider/model pair. A bare model-id fallback is retained only for legacy
+   *  summaries that predate provider persistence. Shared by the FP-C2a
+   *  model-start re-arm gate and FP-C3 queue-wait headroom. */
   private resolveSessionProvider(sessionPath: string): string | undefined {
     const archState = this.archState;
-    const modelId = archState.sessions.sessions.find((s) => s.path === sessionPath)?.modelId
-      ?? archState.settings.modelSettings?.defaultModel;
+    const session = archState.sessions.sessions.find((item) => item.path === sessionPath);
+    const modelId = session?.modelId ?? archState.settings.modelSettings?.defaultModel;
+    const provider = session?.provider ?? archState.settings.modelSettings?.defaultProvider;
     if (!modelId) return undefined;
     const directModels = archState.settings.availableModelsBySession[sessionPath] ?? [];
     const fallbackModels = Object.values(archState.settings.availableModelsBySession).flatMap((models) => models);
-    return [...directModels, ...fallbackModels].find((m) => m.id === modelId)?.provider;
+    const models = [...directModels, ...fallbackModels];
+    return provider
+      ? models.find((model) => model.id === modelId && model.provider === provider)?.provider
+      : models.find((model) => model.id === modelId)?.provider;
   }
 
   /** FP-C3: resolve the real per-provider `queueWaitSeconds` headroom for a
@@ -380,13 +382,14 @@ export class PieExtension implements vscode.Disposable {
   private pushOpenTabsRegistry(): void {
     const sessions = this.archState.sessions.sessions;
     const pinned = this.archState.sessions.pinnedTabPaths;
+    const running = this.archState.sessions.runningSessionPaths;
     const tabs = this.archState.sessions.openTabPaths
       .filter((p) => !isPendingTabPath(p))
       .map((p) => {
         const s = sessions.find((entry) => entry.path === p);
-        return s ? { ...s, pinned: pinned.includes(p) } : undefined;
+        return s ? { ...s, pinned: pinned.includes(p), isRunning: running.includes(p) } : undefined;
       })
-      .filter((s): s is SessionSummary & { pinned: boolean } => !!s);
+      .filter((s): s is SessionSummary & { pinned: boolean; isRunning: boolean } => !!s);
     void this.backend
       .request('openTabs.set', { tabs }, { timeoutMs: 5000 })
       .catch((err) =>

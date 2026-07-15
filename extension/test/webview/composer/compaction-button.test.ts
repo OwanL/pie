@@ -19,21 +19,27 @@ beforeEach(() => {
   };
 });
 
-test('compaction button invokes its action when enabled', () => {
+test('compaction button explains and invokes its action when available', () => {
   let calls = 0;
-  act(() => render(h(CompactionButton, { disabled: false, onCompact: () => { calls += 1; } }), container));
+  act(() => render(h(CompactionButton, { availability: 'available', onCompact: () => { calls += 1; } }), container));
   const button = container.querySelector('button') as HTMLButtonElement;
-  assert.equal(button.getAttribute('aria-label'), 'Compact conversation context');
+  assert.equal(button.getAttribute('aria-label'), 'Compact context — summarize older messages and keep recent work');
   act(() => button.click());
   assert.equal(calls, 1);
 });
 
-test('compaction button cannot be invoked while disabled', () => {
+test('compaction button distinguishes no-session and busy disabled reasons', () => {
   let calls = 0;
-  act(() => render(h(CompactionButton, { disabled: true, onCompact: () => { calls += 1; } }), container));
-  const button = container.querySelector('button') as HTMLButtonElement;
+  act(() => render(h(CompactionButton, { availability: 'no-session', onCompact: () => { calls += 1; } }), container));
+  let button = container.querySelector('button') as HTMLButtonElement;
   assert.equal(button.disabled, true);
-  assert.equal(button.getAttribute('aria-label'), 'Compaction is unavailable while the session is running');
+  assert.equal(button.getAttribute('aria-label'), 'Open a conversation to compact its context');
+  act(() => button.click());
+
+  act(() => render(h(CompactionButton, { availability: 'busy', onCompact: () => { calls += 1; } }), container));
+  button = container.querySelector('button') as HTMLButtonElement;
+  assert.equal(button.disabled, true);
+  assert.equal(button.getAttribute('aria-label'), 'Wait for the current run or compaction to finish');
   act(() => button.click());
   assert.equal(calls, 0);
 });

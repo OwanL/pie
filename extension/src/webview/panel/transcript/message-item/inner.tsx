@@ -6,6 +6,7 @@ import type { ComponentChildren, RefObject } from 'preact';
 import type { ChatMessage, ChatPrefs, ComposerInput } from '../../../../shared/protocol';
 import { cx } from '../../utils/cx';
 import { InlineEditor } from '../inline-editor';
+import { CompactionSummary } from '../compaction-summary';
 import type { PruningHeaderState } from '../pruning';
 import { PruningHeaderPanel } from '../pruning-header';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
@@ -160,6 +161,10 @@ export function MessageItemInner({
   onEditCancel,
   onCancelPrepass,
 }: MessageItemInnerProps) {
+  if (message.customType === 'compaction-summary') {
+    return <CompactionSummary summary={message.markdown} />;
+  }
+
   const showHeaderActions = pruningHeaderState || statusLabel;
   const headerActions = showHeaderActions ? (
     <MessageHeaderActions

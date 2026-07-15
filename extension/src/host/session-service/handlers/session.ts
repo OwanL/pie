@@ -59,6 +59,12 @@ export function onSessionListChanged(payload: SessionListChangedPayload, deps: H
     if (!summary || summary.done !== true) {
       continue;
     }
+    // A `closeSelf` marker is the reviewer session closing its own tab once
+    // its work is done — not an objective performance review. Skip scored
+    // agent-review analytics for it (the tab still closes below).
+    if (summary.selfClose === true) {
+      continue;
+    }
     deps.runObserver.recordAgentReview(sessionPath, {
       done: true,
       rating: summary.rating ?? 0,

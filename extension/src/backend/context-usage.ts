@@ -40,6 +40,13 @@ export function deriveContextUsageFromBranch(
 
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
+    // A compaction entry replaces the earlier conversation context. Usage on
+    // assistant messages before that boundary describes the pre-compaction
+    // prompt and must not keep the context indicator artificially full. The
+    // next assistant response will provide a fresh measured footprint.
+    if (entry.type === 'compaction') {
+      return undefined;
+    }
     if (entry.type !== 'message' || entry.message?.role !== 'assistant') {
       continue;
     }

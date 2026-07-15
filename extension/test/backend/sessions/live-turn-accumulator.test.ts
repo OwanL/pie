@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BackendLiveTurnAccumulator, LiveTurnCheckpointRegistry } from '../../../src/backend/live-turn-accumulator';
+import { normalizeToolProgress } from '../../../src/backend/tool-progress-normalizer';
 
 function accumulator() {
   return new BackendLiveTurnAccumulator({
-    protocolVersion: 4,
+    protocolVersion: 5,
     sessionPath: '/session.jsonl',
     requestId: 'request',
     turnId: 'turn',
@@ -27,11 +28,80 @@ test('backend accumulator reserves every candidate sequence including rejections
   const rejected = value.observe({
     kind: 'tool.progress', executionId: 'missing', preview: { kind: 'generic', summary: 'safe' },
   }, 120);
-  assert.deepEqual({ kind: rejected.kind, seq: rejected.seq }, { kind: 'observation.rejected', seq: 3 });
+  assert.deepEqual({ kind: rejected?.kind, seq: rejected?.seq }, { kind: 'observation.rejected', seq: 3 });
   assert.equal(value.observe({ kind: 'turn.reasoning', delta: 'plan' }, 130).seq, 4);
   assert.equal(value.checkpoint().checkpointSeq, 4);
   assert.equal(value.checkpoint().turn.modelId, 'provider/model');
   assert.equal(value.checkpoint().turn.thinkingLevel, 'high');
+});
+
+test('normal subagent normalization feeds a JSON-safe accumulator snapshot', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  const preview = normalizeToolProgress('subagent', {
+    details: { mode: 'single', results: [{ agent: 'worker', task: 'work', exitCode: -1, messages: [] }] },
+  });
+  const progress = value.observe({ kind: 'tool.progress', executionId: 'execution', preview }, 120);
+  assert.equal(progress?.kind, 'tool.progress');
+  assert.equal(progress?.kind === 'tool.progress' ? progress.update.kind : undefined, 'snapshot');
+});
+
+test('backend accumulator emits one full subagent preview then incremental patches and suppresses duplicates', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  const initialPreview = {
+    kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'x'.repeat(10_000), messages: [] }],
+  };
+  const initial = value.observe({ kind: 'tool.progress', executionId: 'execution', preview: initialPreview }, 120);
+  assert.equal(initial?.kind, 'tool.progress');
+  if (initial?.kind !== 'tool.progress') return;
+  assert.equal(initial.update.kind, 'snapshot');
+  assert.equal(initial.baseProgressRevision, 0);
+
+  assert.equal(value.observe({ kind: 'tool.progress', executionId: 'execution', preview: initialPreview }, 121), undefined);
+  assert.equal(value.checkpoint().checkpointSeq, initial.seq, 'duplicate SDK snapshots consume no sequence');
+
+  const nextPreview = {
+    ...initialPreview,
+    children: [{ ...initialPreview.children[0]!, streamingText: `${initialPreview.children[0]!.streamingText} world`, messages: [
+      { role: 'assistant', content: [{ type: 'text', text: 'nested transcript' }] },
+    ] }],
+  };
+  const patch = value.observe({ kind: 'tool.progress', executionId: 'execution', preview: nextPreview }, 130);
+  assert.equal(patch?.kind, 'tool.progress');
+  if (patch?.kind !== 'tool.progress') return;
+  assert.equal(patch.update.kind, 'patch');
+  assert.equal(patch.baseSeq, initial.seq);
+  assert.equal(patch.baseProgressRevision, 1);
+  assert.equal(patch.progressRevision, 2);
+  assert.ok(Buffer.byteLength(JSON.stringify(patch), 'utf8') < Buffer.byteLength(JSON.stringify(nextPreview), 'utf8'));
+  assert.deepEqual(value.checkpoint().tools[0]?.preview, nextPreview, 'checkpoint retains the fully assembled preview');
+});
+
+test('backend accumulator rejects progress after a durability-confirmed tool terminal', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'execution', parentExecutionId: null, rootExecutionId: 'execution',
+    toolCallId: 'tool', name: 'subagent', input: {}, startedAt: 110,
+  }, 110);
+  value.observe({
+    kind: 'tool.terminal', executionId: 'execution', status: 'completed', result: 'done', durableEntryId: 'entry',
+  }, 120);
+  const late = value.observe({
+    kind: 'tool.progress', executionId: 'execution', preview: { kind: 'generic', summary: 'late' },
+  }, 130);
+  assert.equal(late?.kind, 'observation.rejected');
+  assert.equal(value.checkpoint().tools[0]?.preview, undefined);
 });
 
 test('backend terminal checkpoint and independently delivered watermark share final sequence', () => {

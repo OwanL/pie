@@ -3,14 +3,21 @@
 
 import { Tooltip } from '../components/tooltip';
 
+export type CompactionAvailability = 'available' | 'no-session' | 'busy';
+
 interface Props {
-  disabled: boolean;
+  availability: CompactionAvailability;
   onCompact: () => void;
 }
 
 /** Manually summarize older conversation history to free context. */
-export function CompactionButton({ disabled, onCompact }: Props) {
-  const label = disabled ? 'Compaction is unavailable while the session is running' : 'Compact conversation context';
+export function CompactionButton({ availability, onCompact }: Props) {
+  const disabled = availability !== 'available';
+  const label = availability === 'no-session'
+    ? 'Open a conversation to compact its context'
+    : availability === 'busy'
+      ? 'Wait for the current run or compaction to finish'
+      : 'Compact context — summarize older messages and keep recent work';
   return (
     <Tooltip content={label} placement="top">
       <button

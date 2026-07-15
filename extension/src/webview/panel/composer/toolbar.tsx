@@ -152,7 +152,10 @@ export function ComposerToolbar({
           onSetPrefs={onSetPrefs}
         />
 
-        <CompactionButton disabled={!sessionPath || busy} onCompact={onCompact} />
+        <CompactionButton
+          availability={!sessionPath ? 'no-session' : busy ? 'busy' : 'available'}
+          onCompact={onCompact}
+        />
       </div>
 
       <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">

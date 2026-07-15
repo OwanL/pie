@@ -78,6 +78,11 @@ function normalizeReview(value: unknown): ReviewRecord | undefined {
   const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
     ? rawCount
     : undefined;
+  // selfClose marker (optional): a self-close review written by the `closeSelf`
+  // action. Validated as a boolean so a corrupt sidecar line never breaks the
+  // read path; dropped (undefined) when malformed.
+  const rawSelfClose = v.selfClose;
+  const selfClose = typeof rawSelfClose === 'boolean' ? rawSelfClose : undefined;
   return {
     sessionPath: v.sessionPath,
     done: v.done,
@@ -87,6 +92,7 @@ function normalizeReview(value: unknown): ReviewRecord | undefined {
     evaluatedAt: typeof v.evaluatedAt === 'string' ? v.evaluatedAt : new Date(0).toISOString(),
     ...(reviewerBuckets !== undefined ? { reviewerBuckets } : {}),
     ...(reviewerCount !== undefined ? { reviewerCount } : {}),
+    ...(selfClose !== undefined ? { selfClose } : {}),
   };
 }
 

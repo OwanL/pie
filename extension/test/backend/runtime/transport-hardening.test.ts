@@ -6,6 +6,7 @@ import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../../../src/shared
 import { boundToolProgress } from '../../../src/backend/session-event-handler';
 import { OrderedJsonlWriter } from '../../../src/backend/server-io';
 import { extractPreviewRequestId } from '../../../src/backend/server';
+import { applyJsonPatch, type JsonSafeValue } from '../../../src/shared/json-structural-patch';
 
 function collect(maxLineBytes: number) {
   const stream = new PassThrough();
@@ -205,6 +206,87 @@ test('ordered stdout writer never coalesces or supersedes sequenced semantic pro
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(written.map((line) => JSON.parse(line)).slice(1).map((entry) => entry.payload.seq), [2, 3, 4, 5]);
+});
+
+test('stalled stdout coalesces contiguous v5 subagent patches without duplicating recursive snapshots', async () => {
+  const written: string[] = [];
+  const callbacks: Array<() => void> = [];
+  const fatal: Error[] = [];
+  const stream = new Writable({
+    write(chunk, _encoding, callback) {
+      written.push(chunk.toString());
+      callbacks.push(callback);
+    },
+  });
+  const writer = new OrderedJsonlWriter(stream, {
+    maxQueuedBytes: 2 * 1024 * 1024,
+    onFatal: (error) => fatal.push(error),
+  });
+  writer.write({ id: 'blocked', ok: true });
+
+  const recursiveText = 'x'.repeat(512 * 1024);
+  const basePayload = {
+    protocolVersion: 5, sessionPath: '/s', requestId: 'request', turnId: 'turn',
+    attemptId: 'attempt', executionId: 'execution', kind: 'tool.progress', occurredAt: 1,
+  };
+  writer.write({
+    event: 'live.semantic',
+    payload: {
+      ...basePayload, seq: 2, baseSeq: 1, baseProgressRevision: 0, progressRevision: 1,
+      update: { kind: 'snapshot', preview: {
+        kind: 'subagent', mode: 'single', omittedChildren: 0,
+        children: [{ id: 'worker', phase: 'running', streamingText: recursiveText, messages: [{
+          role: 'assistant', content: [{ type: 'text', text: recursiveText }],
+        }] }],
+      } },
+    },
+  });
+  let naiveSnapshotBytes = 0;
+  for (let index = 0; index < 200; index += 1) {
+    const seq = index + 3;
+    naiveSnapshotBytes += Buffer.byteLength(recursiveText) * 2;
+    writer.write({
+      event: 'live.semantic',
+      payload: {
+        ...basePayload, occurredAt: seq, seq, baseSeq: seq - 1,
+        baseProgressRevision: index + 1, progressRevision: index + 2,
+        update: { kind: 'patch', operations: [{
+          op: 'appendString', path: ['children', 0, 'streamingText'], value: 'y'.repeat(128),
+        }] },
+      },
+    });
+    assert.ok(writer.getDebugState().queuedBytes < 2 * 1024 * 1024);
+    assert.equal(writer.getDebugState().queueDepth, 1);
+  }
+  writer.write({
+    event: 'live.semantic',
+    payload: {
+      ...basePayload, kind: 'tool.terminal', seq: 203, status: 'completed',
+      result: { kind: 'subagent', children: [] }, durableEntryId: 'entry',
+    },
+  });
+  assert.equal(fatal.length, 0);
+  assert.equal(writer.getDebugState().queueDepth, 2, 'coalesced progress remains ordered before terminal');
+  assert.ok(naiveSnapshotBytes >= 200 * 1024 * 1024, 'fixture represents the former duplicate-snapshot volume');
+
+  while (callbacks.length > 0) callbacks.shift()!();
+  await new Promise((resolve) => setImmediate(resolve));
+  const drained = written.map((line) => JSON.parse(line));
+  assert.equal(drained[1].payload.kind, 'tool.progress');
+  assert.equal(drained[1].payload.baseSeq, 1);
+  assert.equal(drained[1].payload.seq, 202);
+  const coalescedUpdate = drained[1].payload.update;
+  assert.equal(coalescedUpdate.kind, 'snapshot');
+  const reconstructed = applyJsonPatch(
+    coalescedUpdate.preview as JsonSafeValue,
+    coalescedUpdate.operations ?? [],
+  );
+  assert.equal(reconstructed.ok, true);
+  if (reconstructed.ok) {
+    const preview = reconstructed.value as { children: Array<{ streamingText: string }> };
+    assert.equal(preview.children[0]?.streamingText.length, recursiveText.length + 200 * 128);
+  }
+  assert.equal(drained[2].payload.kind, 'tool.terminal');
 });
 
 test('ordered stdout writer bounds remembered terminal tool keys', () => {
