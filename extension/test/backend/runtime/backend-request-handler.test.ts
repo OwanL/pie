@@ -442,6 +442,78 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
   }
 });
 
+test('message.send waits for semantic-timeout recovery instead of steering into the retired runtime', async () => {
+  let oldSteerCalls = 0;
+  let resolveReplacement: ((context: SessionContext) => void) | undefined;
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: true,
+      steer: async () => { oldSteerCalls += 1; },
+      abort: () => new Promise<void>(() => undefined),
+    },
+  });
+  harness.context.retired = true;
+  harness.context.recoveryPromise = new Promise<SessionContext>((resolve) => {
+    resolveReplacement = resolve;
+  });
+
+  let replacementPromptCalls = 0;
+  const replacementSession = {
+    ...harness.context.session,
+    isStreaming: false,
+    prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+      replacementPromptCalls += 1;
+      options?.preflightResult?.(true);
+    },
+  } as SessionContext['session'];
+  const replacement: SessionContext = {
+    ...harness.context,
+    session: replacementSession,
+    retired: false,
+    recoveryPromise: undefined,
+  };
+
+  const send = handleBackendRequest(harness.deps, {
+    id: 'send-after-semantic-timeout',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: 'continue safely', inputs: [] },
+  });
+  await Promise.resolve();
+  assert.equal(oldSteerCalls, 0);
+  assert.equal(replacementPromptCalls, 0, 'send must wait until replacement is authoritative');
+
+  resolveReplacement?.(replacement);
+  const result = await send as { requestId?: string; queued?: boolean };
+  assert.equal(typeof result.requestId, 'string');
+  assert.equal(result.queued, undefined);
+  assert.equal(oldSteerCalls, 0);
+  assert.equal(replacementPromptCalls, 1);
+});
+
+test('message.send rejects without steering when semantic-timeout replacement fails', async () => {
+  let oldSteerCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: true,
+      steer: async () => { oldSteerCalls += 1; },
+    },
+  });
+  harness.context.retired = true;
+  harness.context.recoveryPromise = Promise.reject(new Error('replacement construction failed'));
+
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'send-after-failed-semantic-recovery',
+      method: 'message.send',
+      params: { sessionPath: harness.context.sessionPath, text: 'do not queue this', inputs: [] },
+    }),
+    (error: unknown) => error instanceof BackendError
+      && error.code === 'SESSION_RUNTIME_RECOVERY_FAILED'
+      && /replacement construction failed/.test(error.message),
+  );
+  assert.equal(oldSteerCalls, 0);
+});
+
 test('message.interrupt defensively clears a stuck activeRequest when abort settles and streaming has stopped', async () => {
   // Reproduces the stuck-session bug: the SDK never fires `turn_end` (e.g. a
   // hung provider connection), so `activeRequest` would stay set forever and
@@ -590,6 +662,7 @@ test('compaction_start/compaction_end re-arm busy so a compaction call stays int
   // provide); cast across the narrower event-handler deps shape for the test.
   const eventDeps: BackendSessionEventHandlerDeps = {
     ...harness.deps,
+    recoverStuckSession() {},
     async emitSessionOpened(sessionPath) {
       harness.emitted.push({ event: 'session.opened', payload: { sessionPath } });
     },

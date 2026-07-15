@@ -110,6 +110,8 @@ export interface SessionContext {
   terminalLiveTurn?: { accumulator: BackendLiveTurnAccumulator; expiresAt: number };
   /** Replacement runtime created after provider abort teardown failed. */
   recoveryPromise?: Promise<SessionContext>;
+  /** This runtime was locally terminalized and must ignore subsequent SDK events. */
+  retired?: boolean;
 }
 
 export interface SessionPromptState {

@@ -402,8 +402,8 @@ export interface BackendSessionEventHandlerDeps {
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void>;
   emitSessionListChanged(): Promise<void>;
-  /** Force a retry-stuck session to a terminal idle state. */
-  recoverStuckSession?(context: SessionContext, reason: string): void;
+  /** Terminalize a stuck runtime locally and replace it before the session becomes reusable. */
+  recoverStuckSession(context: SessionContext, reason: string): void;
 }
 
 function emitLatestPruningResult(
@@ -486,27 +486,14 @@ function renewSemanticLease(
     emitSemanticCandidate(deps, context, {
       kind: 'turn.phase', phase: 'aborting', inactivityBudgetMs: 5_000,
     });
-    const messageId = current.lastAssistantMessageId ?? current.currentMessageId;
     const reason = leaseKind === 'tool'
       ? 'The running tool stopped producing progress.'
       : 'The provider stopped producing semantic response events.';
-    current.pendingDurableToolTerminals?.clear();
-    context.activeRequest = undefined;
-    context.session.clearQueue();
-    context.queuedLocalIds = [];
-    context.session.abortRetry?.();
-    void context.session.abort().catch(() => undefined);
     deps.emit('operational-error', {
       code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT', message: reason,
       sessionPath: context.sessionPath, requestId,
     });
-    deps.emit('message.aborted', {
-      requestId, sessionPath: context.sessionPath, messageId,
-      userInitiated: false, reason,
-    } satisfies MessageAbortedPayload);
-    deps.emitBusyChanged(context, false);
-    void deps.emitSessionOpened(context.sessionPath);
-    void deps.emitSessionListChanged();
+    deps.recoverStuckSession(context, reason);
   }, budgetMs);
   active.semanticLeaseTimer.unref?.();
 }

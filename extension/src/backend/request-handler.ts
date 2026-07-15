@@ -558,7 +558,22 @@ async function handleMessageSend(
 ): Promise<unknown> {
   const params = validateMessageSend(request.params);
   let context = await deps.ensureSessionContext(params.sessionPath);
-  if (context.recoveryPromise) context = await context.recoveryPromise;
+  if (context.recoveryPromise) {
+    try {
+      context = await context.recoveryPromise;
+    } catch (error) {
+      throw new BackendError(
+        'SESSION_RUNTIME_RECOVERY_FAILED',
+        `The session runtime could not be replaced: ${toErrorMessage(error)}`,
+      );
+    }
+  }
+  if (context.retired) {
+    throw new BackendError(
+      'SESSION_RUNTIME_RECOVERY_FAILED',
+      'The previous session runtime was retired before a replacement became available.',
+    );
+  }
   // Steering: if a turn is already running, inject this message into the
   // current turn via the SDK's `steer()` (delivered after in-flight tool calls
   // finish, before the next LLM call). Falls back to `followUp()` (queue for the

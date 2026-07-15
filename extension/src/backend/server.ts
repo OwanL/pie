@@ -888,6 +888,7 @@ export class BackendServer {
   }
 
   private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
+    if (context.retired) return;
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
       emitBusyChanged: (sessionContext, busy) => this.emitBusyChanged(sessionContext, busy),
@@ -901,21 +902,35 @@ export class BackendServer {
   }
 
   /**
-   * Provider/SDK abort hooks are best-effort, but host-visible state is always
-   * reconciled after a bounded grace. A dead retry must not leave the
-   * transcript and status indicators busy forever.
+   * Locally terminalize a stuck runtime immediately, then replace it without
+   * waiting for provider teardown. The old runtime is fenced before any async
+   * work so late SDK events cannot revive or terminalize the request twice.
    */
-  private async recoverStuckSession(context: SessionContext, reason: string): Promise<void> {
+  private recoverStuckSession(context: SessionContext, reason: string): void {
+    if (context.retired || context.recoveryPromise) return;
     const active = context.activeRequest;
     if (!active) {
-      this.emitBusyChanged(context, false);
       return;
     }
 
     const requestId = active.id;
     const messageId = active.lastAssistantMessageId ?? active.currentMessageId;
+    context.retired = true;
     context.willRetryWatchdogClear?.();
     context.willRetryWatchdogClear = undefined;
+    if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
+    if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
+    active.promptSafetyTimer = undefined;
+    active.semanticLeaseTimer = undefined;
+    active.pendingDurableToolTerminals?.clear();
+    active.aborted = true;
+    if (active.liveTurnAccumulator) {
+      context.terminalLiveTurn = {
+        accumulator: active.liveTurnAccumulator,
+        expiresAt: Date.now() + 10_000,
+      };
+    }
+    context.activeRequest = undefined;
     context.uiBridge?.cancelAll();
     context.session.clearQueue();
     context.queuedLocalIds = [];
@@ -924,21 +939,6 @@ export class BackendServer {
     context.session.abortBranchSummary?.();
     context.session.abortBash?.();
 
-    const abort = Promise.resolve(context.session.abort()).catch((error) => {
-      backendWarn('backend-session', 'retry-stuck abort failed', {
-        sessionPath: context.sessionPath,
-        requestId,
-        error: toErrorMessage(error),
-      });
-    });
-    await Promise.race([
-      abort,
-      new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-    ]);
-
-    // A normal agent_end may have won the race and already finalized it.
-    if (context.activeRequest?.id !== requestId) return;
-    context.activeRequest = undefined;
     this.emit('message.aborted', {
       requestId,
       sessionPath: context.sessionPath,
@@ -946,11 +946,57 @@ export class BackendServer {
       userInitiated: false,
       reason,
     } satisfies MessageAbortedPayload);
-    this.emitBusyChanged(context, false);
-    await Promise.allSettled([
-      this.emitSessionOpened(context.sessionPath),
-      this.emitSessionListChanged(),
-    ]);
+
+    let abortGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = Promise.resolve()
+      .then(() => context.session.abort())
+      .then(
+        () => 'settled' as const,
+        (error) => {
+          backendWarn('backend-session', 'stuck runtime abort failed', {
+            sessionPath: context.sessionPath,
+            requestId,
+            error: toErrorMessage(error),
+          });
+          return 'failed' as const;
+        },
+      );
+    const abortGrace = new Promise<'timeout'>((resolve) => {
+      abortGraceTimer = setTimeout(() => resolve('timeout'), 5_000);
+      abortGraceTimer.unref?.();
+    });
+    void Promise.race([abort, abortGrace]).then((outcome) => {
+      if (abortGraceTimer) clearTimeout(abortGraceTimer);
+      if (outcome === 'timeout') {
+        backendWarn('backend-session', 'stuck runtime abort did not settle within grace', {
+          sessionPath: context.sessionPath,
+          requestId,
+        });
+      }
+    });
+
+    const replacementPromise = Promise.resolve()
+      .then(() => this.createSessionContext(
+        this.sdk.SessionManager.open(context.sessionPath),
+        'resume',
+      ))
+      .then(async (replacement) => {
+        this.emitBusyChanged(replacement, false);
+        await Promise.allSettled([
+          this.emitSessionOpened(replacement.sessionPath),
+          this.emitSessionListChanged(),
+        ]);
+        return replacement;
+      });
+    context.recoveryPromise = replacementPromise;
+    void replacementPromise.catch((error) => {
+      this.emit('operational-error', {
+        code: 'SESSION_RUNTIME_RECOVERY_FAILED',
+        message: `Failed to replace the stuck session runtime: ${toErrorMessage(error)}`,
+        sessionPath: context.sessionPath,
+        requestId,
+      });
+    });
   }
 
   async dispose(): Promise<void> {

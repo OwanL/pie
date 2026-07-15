@@ -74,6 +74,7 @@ function createDeps(options: { captureLive?: boolean } = {}) {
     async emitSessionListChanged() {
       listChangedCount += 1;
     },
+    recoverStuckSession() {},
   };
 
   return { deps, emitted, busy, sessionOpened, getListChangedCount: () => listChangedCount, getContextUsageChangedCount: () => contextUsageChangedCount };
@@ -1099,18 +1100,26 @@ test('concurrent semantic tool starts carry one stable parallel group into live 
   assert.equal(accumulator.checkpoint().tools[1]?.parallelGroupId, starts[0]?.parallelGroupId);
 });
 
-test('pre-first-semantic inactivity terminalizes locally and raw transport cannot renew the lease', async () => {
+test('pre-first-semantic inactivity retires and replaces a runtime even when abort never settles', async () => {
   const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
   process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '5';
   try {
     const { deps, emitted, busy } = createDeps();
     let abortCalls = 0;
+    const recoveries: Array<{ context: SessionContext; reason: string }> = [];
+    deps.recoverStuckSession = (context, reason) => {
+      recoveries.push({ context, reason });
+    };
     const context = createContext({
       session: {
+        isStreaming: true,
         sessionManager: { getBranch: () => [] },
         clearQueue: () => undefined,
         abortRetry: () => undefined,
-        abort: async () => { abortCalls += 1; },
+        abort: () => {
+          abortCalls += 1;
+          return new Promise<void>(() => undefined);
+        },
       } as unknown as SessionContext['session'],
       activeRequest: {
         id: 'req-semantic-timeout', messageIndex: 0, aborted: false,
@@ -1122,11 +1131,12 @@ test('pre-first-semantic inactivity terminalizes locally and raw transport canno
     });
     handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(context.activeRequest, undefined);
-    assert.equal(abortCalls, 1);
-    assert.deepEqual(busy, [false]);
-    assert.equal(emitted.some((entry) => entry.event === 'operational-error'), true);
-    assert.equal(emitted.some((entry) => entry.event === 'message.aborted'), true);
+    assert.equal(recoveries.length, 1);
+    assert.equal(recoveries[0]?.context, context);
+    assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
+    assert.equal(abortCalls, 0, 'the shared recovery owner must own remote teardown');
+    assert.deepEqual(busy, [], 'the old runtime must not be advertised idle before replacement');
+    assert.equal(emitted.some((entry) => entry.event === 'message.aborted'), false, 'the shared recovery owner emits the terminal exactly once');
   } finally {
     if (previous === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
     else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previous;
