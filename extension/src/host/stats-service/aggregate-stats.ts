@@ -208,9 +208,11 @@ function canonicalModel(modelId: string | undefined, pricingMap: Map<string, Mod
 export function providerForModel(
   modelId: string | undefined,
   pricingMap: Map<string, ModelPricingRecord[]>,
+  preferredProvider?: string,
 ): string {
   if (!modelId) return 'unknown';
   const records = pricingMap.get(modelId);
+  if (preferredProvider) return preferredProvider;
   if (!records || records.length === 0) return 'unknown';
   const priced = records.find((r) => r.pricing !== undefined);
   return priced?.provider ?? records[0]!.provider;
@@ -220,10 +222,14 @@ export function providerForModel(
 export function pricingForModel(
   modelId: string | undefined,
   pricingMap: Map<string, ModelPricingRecord[]>,
+  preferredProvider?: string,
 ): ModelTokenPricing | null {
   if (!modelId) return null;
   const records = pricingMap.get(modelId);
   if (!records) return null;
+  if (preferredProvider) {
+    return records.find((record) => record.provider === preferredProvider)?.pricing ?? null;
+  }
   const priced = records.find((r) => r.pricing !== undefined);
   return priced?.pricing ?? null;
 }
@@ -263,16 +269,17 @@ function usageForModel(
   occurredAtMs: number,
   counts: TokenCounts,
   pricingMap: Map<string, ModelPricingRecord[]>,
+  preferredProvider?: string,
 ): AttributedUsage {
   // Unknown/stale model IDs are folded into one stable bucket. This keeps every
   // model/provider breakdown bounded by the current pricing catalog plus one,
   // rather than by the number of distinct IDs in historical snapshots.
   const attributedModel = canonicalModel(model === 'unknown' ? undefined : model, pricingMap);
-  const pricing = pricingForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap);
+  const pricing = pricingForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap, preferredProvider);
   return {
     ...counts,
     model: attributedModel,
-    provider: providerForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap),
+    provider: providerForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap, preferredProvider),
     occurredAtMs,
     cost: costFromTokens(
       counts.inputTokens,
@@ -301,7 +308,7 @@ function attributedRunUsage(
     outputTokens: run.outputTokens,
     cacheReadTokens: run.cacheReadTokens,
     cacheWriteTokens: run.cacheWriteTokens,
-  }, pricingMap)];
+  }, pricingMap, run.provider)];
   const auxiliary = run.auxiliaryLlmUsage ?? [];
   const seen = new Set<string>();
 
@@ -323,6 +330,7 @@ function attributedRunUsage(
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
+      sample.provider ?? run.provider,
     ));
   }
 
@@ -350,6 +358,7 @@ function attributedRunUsage(
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
+      sample.provider ?? run.provider,
     ));
     remaining = subtractUsage(remaining, counts);
   }
@@ -364,7 +373,7 @@ function attributedRunUsage(
         .filter((modelId): modelId is string => !!modelId && modelId !== run.modelId),
     );
     const fallbackModel = hintedModels.size === 1 ? [...hintedModels][0]! : runModel;
-    usage.push(usageForModel(fallbackModel, fallbackMs, remaining, pricingMap));
+    usage.push(usageForModel(fallbackModel, fallbackMs, remaining, pricingMap, run.provider));
   }
 
   return usage;
@@ -578,7 +587,7 @@ export function accumulateAggregateStats(
     // observation; forwarded subagent samples are already present here once.
     for (const sample of run.turnThroughputSamples) {
       if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
-      const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+      const sampleProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap, sample.provider ?? run.provider);
       const sampleAcc = providerAcc(sampleProvider);
       sampleAcc.throughputOutputTokens += sample.outputTokens;
       sampleAcc.throughputGenerationMs += sample.generationDurationMs;
@@ -657,7 +666,7 @@ export function accumulateAggregateStats(
       if (Number.isNaN(sMs)) continue;
       if (sample.status !== 'completed' || sample.generationDurationMs <= 0) continue;
       const date = localDateString(sMs);
-      const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap);
+      const sProvider = providerForModel(sample.modelId ?? run.modelId, pricingMap, sample.provider ?? run.provider);
       const sModel = canonicalModel(sample.modelId ?? run.modelId, pricingMap);
       const hourDate = new Date(sMs);
       hourDate.setMinutes(0, 0, 0);
@@ -695,7 +704,7 @@ export function accumulateAggregateStats(
         cost: canonicalCostValue(runCost),
         durationMs: run.busyDurationMs ?? 0,
         modelId: run.modelId ?? null,
-        provider: providerForModel(run.modelId, pricingMap),
+        provider: providerForModel(run.modelId, pricingMap, run.provider),
         outcome: run.outcome ?? null,
         startedAt: run.startedAt,
         endedAt: run.finalizedAt ?? run.updatedAt,

@@ -1,4 +1,5 @@
 import { LIVE_PIPELINE_LIMITS, type SubagentChildPreview, type ToolPreview } from '../shared/live-pipeline-protocol.js';
+import { estimateTextTokens } from '../shared/tokenize.js';
 
 const MAX_TAIL_CHARS = 8_192;
 const MAX_SUMMARY_CHARS = 1_024;
@@ -56,11 +57,9 @@ function normalizeSubagent(value: unknown): ToolPreview {
   const taskBudget = Math.max(256, Math.floor(4 * 1024 / Math.max(1, visibleChildren.length)));
   const children: SubagentChildPreview[] = [];
   for (let index = 0; index < visibleChildren.length; index += 1) {
-    const item = visibleChildren[index];
-    const child = asRecord(item);
+    const child = asRecord(visibleChildren[index]);
     if (!child) continue;
     const agent = boundedOptional(stringField(child, ['agent']), 256);
-    const task = boundedOptional(stringField(child, ['task']), taskBudget);
     const id = stringField(child, ['id', 'childId', 'sessionId']) ?? agent ?? `child-${index + 1}`;
     const phase = normalizeChildPhase(stringField(child, ['activityPhase', 'phase', 'status']), numberField(child, 'exitCode'));
     const streamingText = boundedTailOptional(stringField(child, ['streamingText']), textBudget);
@@ -73,27 +72,96 @@ function normalizeSubagent(value: unknown): ToolPreview {
       id: boundedHead(id, 128),
       phase,
       agent,
-      task,
+      task: boundedOptional(stringField(child, ['task']), taskBudget),
       summary,
       exitCode: numberField(child, 'exitCode'),
-      model: boundedOptional(stringField(child, ['model', 'selectedModel']), 256),
+      model: boundedOptional(stringField(child, ['model']), 256),
+      selectedModel: boundedOptional(stringField(child, ['selectedModel']), 256),
       provider: boundedOptional(stringField(child, ['provider']), 256),
+      thinkingLevel: boundedOptional(stringField(child, ['thinkingLevel']), 64),
       activityDetail: boundedOptional(stringField(child, ['activityDetail']), 256),
       activitySince: numberField(child, 'activitySince'),
+      startedAt: numberField(child, 'startedAt'),
+      completedAt: numberField(child, 'completedAt'),
       lastProgressAt: numberField(child, 'lastProgressAt'),
       inactivityBudgetMs: numberField(child, 'inactivityBudgetMs'),
       streaming: typeof child.streaming === 'boolean' ? child.streaming : undefined,
       streamingText,
       streamingReasoning,
+      cumulativeOutputTokens: estimateCumulativeSubagentTokens(child),
       runningTools: Array.isArray(child.runningTools)
         ? child.runningTools.filter((tool): tool is string => typeof tool === 'string').slice(0, 20).map((tool) => boundedHead(tool, 128))
         : undefined,
+      finalOutput: boundedTailOptional(stringField(child, ['finalOutput']), textBudget),
+      transcriptCompacted: typeof child.transcriptCompacted === 'boolean' ? child.transcriptCompacted : undefined,
+      contextWindow: numberField(child, 'contextWindow'),
+      usage: normalizeUsage(child.usage),
+      taskScores: normalizeNumberRecord(child.taskScores),
+      selectionPool: Array.isArray(child.selectionPool)
+        ? child.selectionPool.filter((model): model is string => typeof model === 'string').slice(0, 20).map((model) => boundedHead(model, 256))
+        : undefined,
+      selectionFitScores: Array.isArray(child.selectionFitScores)
+        ? child.selectionFitScores.filter((score): score is number => typeof score === 'number' && Number.isFinite(score)).slice(0, 20)
+        : undefined,
+      retryCount: numberField(child, 'retryCount'),
+      stopReason: boundedOptional(stringField(child, ['stopReason']), 256),
+      errorMessage: boundedTailOptional(stringField(child, ['errorMessage']), MAX_TAIL_CHARS),
+      stderr: boundedTailOptional(stringField(child, ['stderr']), MAX_TAIL_CHARS),
     });
   }
-  while (children.length > 1 && jsonBytes({ kind: 'subagent', mode, children, omittedChildren: rawChildren.length - children.length }) > LIVE_PIPELINE_LIMITS.previewBytes) {
-    children.pop();
-  }
   return { kind: 'subagent', mode, children, omittedChildren: Math.max(0, rawChildren.length - children.length) };
+}
+
+function normalizeNumberRecord(value: unknown): Record<string, number> | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  return Object.fromEntries(Object.entries(record).filter((entry): entry is [string, number] => (
+    typeof entry[1] === 'number' && Number.isFinite(entry[1])
+  )));
+}
+
+function normalizeUsage(value: unknown): SubagentChildPreview['usage'] {
+  const usage = asRecord(value);
+  if (!usage) return undefined;
+  return {
+    input: numberField(usage, 'input') ?? 0,
+    output: numberField(usage, 'output') ?? 0,
+    cacheRead: numberField(usage, 'cacheRead') ?? 0,
+    cacheWrite: numberField(usage, 'cacheWrite') ?? 0,
+    contextTokens: numberField(usage, 'contextTokens'),
+    cost: numberField(usage, 'cost'),
+    turns: numberField(usage, 'turns'),
+  };
+}
+
+/**
+ * Use provider-reported cumulative usage when available. Otherwise estimate
+ * from the current stream only. Walking the child transcript here would repeat
+ * recursive work for every high-frequency progress update and defeats the live
+ * transport's bounded-state contract.
+ */
+export function estimateCumulativeSubagentTokens(child: Record<string, unknown>): number {
+  const preserved = numberField(child, 'cumulativeOutputTokens');
+  if (preserved !== undefined && preserved >= 0) return preserved;
+
+  const usage = asRecord(child.usage);
+  const reportedOutput = numberField(usage, 'output');
+  const streamingText = typeof child.streamingText === 'string' ? child.streamingText : '';
+  const streamingReasoning = typeof child.streamingReasoning === 'string' ? child.streamingReasoning : '';
+  const streamedTokens = estimatePossiblyLongTextTokens(streamingText) + estimatePossiblyLongTextTokens(streamingReasoning);
+  return Math.max(0, reportedOutput ?? streamedTokens);
+}
+
+const TOKEN_SAMPLE_CHARS = 8_192;
+
+/** Bound tokenizer work for high-frequency progress deltas. For a long stream,
+ * sample its tail's token density and scale by total characters; this remains
+ * cumulative without re-tokenizing an ever-growing buffer on every delta. */
+function estimatePossiblyLongTextTokens(text: string): number {
+  if (text.length <= TOKEN_SAMPLE_CHARS) return estimateTextTokens(text);
+  const tail = text.slice(-TOKEN_SAMPLE_CHARS);
+  const tailTokens = estimateTextTokens(tail);
+  return Math.round(tailTokens * (text.length / tail.length));
 }
 
 function normalizeSubagentMode(value: unknown): 'single' | 'parallel' | 'chain' {
@@ -197,13 +265,8 @@ function stringField(record: Record<string, unknown> | undefined, keys: readonly
   return undefined;
 }
 
-function numberField(record: Record<string, unknown>, key: string): number | undefined {
-  return typeof record[key] === 'number' && Number.isFinite(record[key]) ? record[key] : undefined;
-}
-
-function jsonBytes(value: unknown): number {
-  try { return Buffer.byteLength(JSON.stringify(value), 'utf8'); }
-  catch { return Number.POSITIVE_INFINITY; }
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  return record && typeof record[key] === 'number' && Number.isFinite(record[key]) ? record[key] : undefined;
 }
 
 /** Defensive protocol assertion used by the accumulator before publication. */

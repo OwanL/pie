@@ -88,35 +88,42 @@ export function subagentActivity(result: SubagentSingleResult, now: number): Sub
     queued: 'Waiting for concurrency',
     preparing: 'Starting',
     waiting_provider: 'Waiting for provider',
-    streaming: 'Generating',
+    streaming: 'Waiting for output',
     running_tool: 'Running tool',
     retry_wait: 'Retrying provider',
   };
   const runningTools = result.runningTools?.filter(Boolean).join(', ');
-  const hasStreamingOutput = result.streaming === true || !!result.streamingText?.trim();
+  const hasStreamingText = !!result.streamingText?.trim();
+  const hasStreamingReasoning = !!result.streamingReasoning?.trim();
+  const isReceivingOutput = result.streaming === true || hasStreamingText || hasStreamingReasoning;
   // Concrete output/tool activity is more trustworthy than lifecycle metadata,
-  // which can briefly lag behind streamed child updates.
+  // which can briefly lag behind streamed child updates. Name the concrete
+  // stream rather than spending header space on the ambiguous "Generating".
   const label = runningTools
     ? 'Running tool'
-    : hasStreamingOutput
-      ? 'Generating'
-      : result.activityPhase
-        ? labels[result.activityPhase]
-        : 'Starting';
+    : hasStreamingText
+      ? 'Responding'
+      : hasStreamingReasoning
+        ? 'Reasoning'
+        : isReceivingOutput
+          ? 'Waiting for output'
+          : result.activityPhase
+            ? labels[result.activityPhase]
+            : 'Starting';
   if (!label) return undefined;
   const detail = runningTools
     ? runningTools
-    : hasStreamingOutput
+    : isReceivingOutput
       ? undefined
       : result.activityPhase === 'waiting_provider' && result.provider
         ? result.provider
         : result.activityDetail ?? (!result.activityPhase ? 'waiting for first status update' : undefined);
-  const elapsed = result.activitySince ? formatActivityDuration(now - result.activitySince) : undefined;
+  const phaseElapsed = result.activitySince ? formatActivityDuration(now - result.activitySince) : undefined;
   const budget = result.inactivityBudgetMs ? formatActivityDuration(result.inactivityBudgetMs) : undefined;
-  const diagnostic = [label, detail, elapsed && `${elapsed} in this state`, budget && `${budget} stall limit`]
+  const diagnostic = [label, detail, phaseElapsed && `${phaseElapsed} in this state`, budget && `${budget} stall limit`]
     .filter(Boolean)
     .join(' · ');
-  return { label, detail, elapsed, diagnostic };
+  return { label, detail, elapsed: phaseElapsed, diagnostic };
 }
 
 function isFailed(result: SubagentSingleResult): boolean {
@@ -192,9 +199,17 @@ function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
   );
 }
 
-/** Runtime telemetry uses otherwise-empty header space. Context pressure is
- * highest priority; output, last-turn throughput, and retries progressively
- * disappear at narrow widths via CSS. Full precision remains in the tooltip. */
+/** Runtime telemetry stays visible in the collapsed header at every panel
+ * width. Items wrap rather than silently disappearing; full precision also
+ * remains available in the tooltip. */
+function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
+  const startedAt = result.startedAt ?? result.activitySince;
+  if (!startedAt) return null;
+  const endedAt = result.completedAt ?? (isSubagentSingleResultRunning(result) ? now : result.lastProgressAt ?? now);
+  const elapsed = formatActivityDuration(Math.max(0, endedAt - startedAt));
+  return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span>;
+}
+
 function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
   const usage = result.usage;
   const contextTokens = usage?.contextTokens;
@@ -585,6 +600,9 @@ function SubagentSingleBlock({
             <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
           )}
           <PrimaryMeta result={singleResult} />
+          <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
+            <ElapsedTelemetry result={singleResult} now={activityNow} />
+          </span>
           <RuntimeTelemetry result={singleResult} />
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
@@ -596,7 +614,7 @@ function SubagentSingleBlock({
           role="status"
           aria-label={`${singleResult.agent} ${status === 'running' || status === 'idle' ? 'live' : status} output`}
         >
-          <TurnActivityTailBody tail={previewTail} />
+          <TurnActivityTailBody tail={previewTail} continuous />
         </div>
       )}
       {renderBody && (

@@ -37,7 +37,7 @@ export type Call =
   | { kind: 'log'; level: string; message: string }
   | { kind: 'showWarningModal'; message: string; confirmChoice: string }
   | { kind: 'bumpEpoch'; sessionPath: string }
-  | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string }
+  | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string; provider?: string }
   | { kind: 'handleSelectionFailure'; token: string; notice: string }
   | { kind: 'applySessionOpened'; payload: unknown };
 
@@ -151,8 +151,8 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     bumpSessionDataEpoch(sessionPath: string) {
       calls.push({ kind: 'bumpEpoch', sessionPath });
     },
-    onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel) {
-      calls.push({ kind: 'onModelConfigChanged', sessionPath, modelId, thinkingLevel });
+    onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel, provider?: string) {
+      calls.push({ kind: 'onModelConfigChanged', sessionPath, modelId, thinkingLevel, ...(provider ? { provider } : {}) });
     },
     suppressNextCompletionNotificationFor() {},
     async loadOlderTranscript() {},

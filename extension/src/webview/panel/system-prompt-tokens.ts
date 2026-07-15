@@ -10,7 +10,7 @@ export { estimateTextTokens };
 
 export function estimateSystemPromptTokens(prompts: readonly SystemPromptEntry[]): number {
   return prompts.reduce((total, prompt) => {
-    if (prompt.availability !== 'available') {
+    if (prompt.availability !== 'available' || prompt.disabled === true) {
       return total;
     }
 

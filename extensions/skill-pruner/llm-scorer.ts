@@ -225,6 +225,35 @@ function tryParseJson(candidate: string, knownSkills: Set<string>, knownTools: S
 	}
 }
 
+/** Remove trailing JSON commas without touching comma-like text inside strings. */
+function removeTrailingJsonCommas(candidate: string): string {
+	let result = "";
+	let inString = false;
+	let escaped = false;
+	for (let index = 0; index < candidate.length; index++) {
+		const char = candidate[index];
+		if (inString) {
+			result += char;
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			result += char;
+			continue;
+		}
+		if (char === ",") {
+			let next = index + 1;
+			while (next < candidate.length && /\s/.test(candidate[next])) next++;
+			if (candidate[next] === "]" || candidate[next] === "}") continue;
+		}
+		result += char;
+	}
+	return result;
+}
+
 /**
  * Parse the LLM response as a prune list. Any failure to read a valid
  * prune list resolves to "keep everything" (empty prune lists) — the safe,
@@ -241,6 +270,16 @@ export function parseLlmResponse(raw: string, knownSkills: Set<string>, knownToo
 	if (jsonMatch) {
 		const extracted = tryParseJson(jsonMatch[0], knownSkills, knownTools);
 		if (extracted) return extracted;
+
+		// A common small-model failure is otherwise-valid JSON with trailing
+		// commas. This repair is deliberately narrow: unlike scraping prose or
+		// rewriting quotes, removing commas immediately before `]` / `}` cannot
+		// invert the model's keep/prune intent.
+		const withoutTrailingCommas = removeTrailingJsonCommas(jsonMatch[0]);
+		if (withoutTrailingCommas !== jsonMatch[0]) {
+			const repaired = tryParseJson(withoutTrailingCommas, knownSkills, knownTools);
+			if (repaired) return repaired;
+		}
 	}
 
 	// Phase 3: unreadable response — keep everything rather than risk misparsing.
@@ -261,6 +300,7 @@ export async function runLlmPruning(
 	model: unknown,
 	options: Record<string, unknown>,
 	completeFn: CompleteSimpleFn,
+	invalidResponseToCorrect?: string,
 ): Promise<LlmPruningOutput> {
 	const systemPrompt = buildPruningSystemPrompt(input.config);
 	const userMessage = buildPruningUserMessage(input);
@@ -269,6 +309,15 @@ export async function runLlmPruning(
 		{ role: "system", content: systemPrompt },
 		{ role: "user", content: userMessage },
 	];
+	if (invalidResponseToCorrect !== undefined) {
+		context.push(
+			{ role: "assistant", content: invalidResponseToCorrect.slice(0, 2_000) },
+			{
+				role: "user",
+				content: 'That response was not valid JSON. Try again and return ONLY {"pruneSkills":[],"pruneTools":[]} with the appropriate names in the arrays.',
+			},
+		);
+	}
 
 	const start = Date.now();
 	const response = await completeFn(model, context, options);

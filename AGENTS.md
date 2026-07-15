@@ -18,6 +18,19 @@ npm run typecheck  # type-check only
 npm run package    # produce .vsix
 ```
 
+From the repo root, focused tests should use the path-aware wrapper rather than
+calling `npx tsx` directly:
+
+```bash
+npm run test:file -- extension/test/path/to/example.test.ts
+npm run test -- --fast --package extension --test-name-pattern="pattern"
+```
+
+On Windows the harness `bash` tool is Git Bash, not PowerShell. Use `/dev/null`
+for shell redirection, never `NUL`; a literal `NUL` file breaks Windows ripgrep
+traversal. Native Windows programs may print `%TEMP%` paths even when Bash also
+exposes the same directory as `/tmp`; tools should accept either spelling.
+
 ## Context-lean layers
 
 Three distinct mechanisms keep the model's context lean. Don't conflate them — they operate on different objects at different times.

@@ -31,6 +31,7 @@ export interface PanelMainProps {
   transcriptWindow: ViewState['transcriptWindow'];
   transcriptLoaded: ViewState['transcriptLoaded'];
   busy: ViewState['busy'];
+  liveTurnPhase: ViewState['liveTurnPhase'];
   prefs: ViewState['prefs'];
   pruningSettings: ViewState['pruningSettings'];
   systemPrompts: ViewState['systemPrompts'];
@@ -80,6 +81,7 @@ export const PanelMain = memo(function PanelMain({
   transcriptWindow,
   transcriptLoaded,
   busy,
+  liveTurnPhase,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -133,6 +135,7 @@ export const PanelMain = memo(function PanelMain({
           transcriptWindow={transcriptWindow}
           transcriptLoaded={transcriptLoaded}
           busy={busy}
+          liveTurnPhase={liveTurnPhase}
           prefs={prefs}
           pruningSettings={pruningSettings}
           systemPrompts={systemPrompts}

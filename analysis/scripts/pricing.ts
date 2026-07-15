@@ -6,8 +6,8 @@
  * module and is re-exported here. The package-local pieces that differ by
  * consumer policy remain here:
  *
- * - `loadModelPricingMap` — **first-provider-wins** single-value
- *   `Map<string, ModelTokenPricing>`, env-aware (delegates file IO to
+ * - `loadModelPricingMap` — provider/model keys plus legacy first-provider bare-id
+ *   keys in a `Map<string, ModelTokenPricing>`, env-aware (delegates file IO to
  *   `./load-models.ts`).
  * - `computeTokenCostUsd` / `estimateRunCostUsd` — analysis-only token-math
  *   (kept local, NOT in the shared core).
@@ -47,17 +47,18 @@ export interface TokenUsageForCost {
   cacheWriteTokens: number;
 }
 
-function addRecord(map: Map<string, ModelTokenPricing>, id: string, model: Record<string, unknown>): void {
-  if (!id) {
-    return;
-  }
-  if (map.has(id)) {
-    return; // first provider wins; later duplicates ignored
-  }
+function addRecord(
+  map: Map<string, ModelTokenPricing>,
+  provider: string,
+  id: string,
+  model: Record<string, unknown>,
+): void {
+  if (!id) return;
   const pricing = parseModelPricing(model.cost);
-  if (pricing) {
-    map.set(id, pricing);
-  }
+  if (!pricing) return;
+  map.set(`${provider}/${id}`, pricing);
+  // Retain the historical bare-id fallback for snapshots without provider.
+  if (!map.has(id)) map.set(id, pricing);
 }
 
 /**
@@ -74,7 +75,7 @@ export function loadModelPricingMap(modelsJsonPath?: string): Map<string, ModelT
     return map;
   }
 
-  for (const providerData of Object.values(providers)) {
+  for (const [providerName, providerData] of Object.entries(providers)) {
     if (!providerData || typeof providerData !== 'object') {
       continue;
     }
@@ -90,7 +91,7 @@ export function loadModelPricingMap(modelsJsonPath?: string): Map<string, ModelT
         if (typeof m.id !== 'string') {
           continue;
         }
-        addRecord(map, m.id, m);
+        addRecord(map, providerName, m.id, m);
       }
     }
 
@@ -100,7 +101,7 @@ export function loadModelPricingMap(modelsJsonPath?: string): Map<string, ModelT
         if (!model || typeof model !== 'object') {
           continue;
         }
-        addRecord(map, id, model as Record<string, unknown>);
+        addRecord(map, providerName, id, model as Record<string, unknown>);
       }
     }
   }
@@ -126,11 +127,12 @@ export function estimateRunCostUsd(
   modelId: string | null | undefined,
   usage: TokenUsageForCost,
   pricingMap: Map<string, ModelTokenPricing>,
+  provider?: string | null,
 ): number | null {
   if (!modelId) {
     return null;
   }
-  const pricing = pricingMap.get(modelId);
+  const pricing = provider ? pricingMap.get(`${provider}/${modelId}`) : pricingMap.get(modelId);
   if (!pricing) {
     return null;
   }

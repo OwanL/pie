@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pie.local/schemas/task.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "promptFile", "fixture", "policy", "limits", "checks", "metrics"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "id": {"type": "string"},
+    "version": {"type": "integer", "minimum": 1},
+    "promptFile": {"type": "string"},
+    "fixture": {
+      "type": "object",
+      "required": ["type", "path"],
+      "properties": {"type": {"const": "directory"}, "path": {"type": "string"}}
+    },
+    "policy": {
+      "type": "object",
+      "required": ["network", "subagents", "allowedTools", "allowedChangedPaths"],
+      "properties": {
+        "network": {"const": "deny"},
+        "subagents": {"const": "deny"},
+        "allowedTools": {"type": "array", "items": {"enum": ["read", "edit", "write", "bash", "grep", "find", "ls"]}},
+        "allowedChangedPaths": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "limits": {"type": "object", "required": ["timeoutMs", "checkTimeoutMs", "scorerTimeoutMs", "maxBashTimeoutSeconds"], "properties": {"timeoutMs": {"type": "integer", "minimum": 1000}, "checkTimeoutMs": {"type":"integer","minimum":1000,"maximum":60000}, "scorerTimeoutMs": {"type":"integer","minimum":1000,"maximum":30000}, "maxBashTimeoutSeconds": {"type":"integer","minimum":1,"maximum":300}, "inactivityTimeoutMs": {"type":"integer","minimum":30000,"maximum":600000}}},
+    "checks": {
+      "type": "object",
+      "required": ["public", "privateScorer"],
+      "properties": {
+        "privateScorer": {"type": "string"},
+        "public": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"type": "string"},
+              {"type": "object", "required": ["script"], "properties": {"script": {"type": "string"}}}
+            ]
+          }
+        }
+      }
+    },
+    "metrics": {"type": "object"}
+  }
+}

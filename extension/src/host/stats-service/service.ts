@@ -156,8 +156,9 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     modelId: string | undefined,
     thinkingLevel: ThinkingLevel | undefined,
+    provider?: string,
   ): void {
-    this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel);
+    this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {

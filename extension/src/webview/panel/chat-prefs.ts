@@ -8,6 +8,7 @@ export type BooleanPrefKey =
   | 'showPruningMessages'
   | 'subagentAlwaysParentModel'
   | 'subagentRouteAroundSaturatedProviders'
+  | 'subagentFallbackOnProviderFailure'
   | 'runtimeAuditLog'
   | 'hideStatusStrip'
   | 'hideTokenRate'

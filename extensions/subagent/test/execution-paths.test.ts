@@ -172,8 +172,17 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(state.disposeCalls, 1);
 });
 
-test("runSingleAgent publishes real lifecycle phases and streaming state", async () => {
-	const snapshots: Array<{ phase?: string; detail?: string; streaming?: boolean; reasoning?: string; tools: string[] }> = [];
+test("runSingleAgent publishes model details with the first lifecycle update", async () => {
+	const snapshots: Array<{
+		phase?: string;
+		detail?: string;
+		streaming?: boolean;
+		reasoning?: string;
+		model?: string;
+		selectedModel?: string;
+		thinkingLevel?: string;
+		tools: string[];
+	}> = [];
 	const { sdk } = createFakeSdk({
 		onPrompt: async (emit) => {
 			emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", thinking: "reasoning" } });
@@ -208,6 +217,9 @@ test("runSingleAgent publishes real lifecycle phases and streaming state", async
 				detail: current.activityDetail,
 				streaming: current.streaming,
 				reasoning: current.streamingReasoning,
+				model: current.model,
+				selectedModel: current.selectedModel,
+				thinkingLevel: current.thinkingLevel,
 				tools: [...(current.runningTools ?? [])],
 			});
 		},
@@ -224,6 +236,9 @@ test("runSingleAgent publishes real lifecycle phases and streaming state", async
 	);
 
 	assert.equal(snapshots[0]?.phase, "preparing");
+	assert.equal(snapshots[0]?.model, "model-a");
+	assert.equal(snapshots[0]?.selectedModel, "model-a");
+	assert.equal(snapshots[0]?.thinkingLevel, "low");
 	const queuedIndex = snapshots.findIndex((snapshot) => snapshot.phase === "queued" && snapshot.detail?.includes("concurrency"));
 	const providerIndex = snapshots.findIndex((snapshot, index) => index > queuedIndex && snapshot.phase === "waiting_provider");
 	const streamingIndex = snapshots.findIndex((snapshot, index) => index > providerIndex && snapshot.phase === "streaming" && snapshot.streaming === true);

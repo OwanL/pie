@@ -14,6 +14,7 @@ interface RawModelConfig {
 }
 
 interface RawProfileEntry {
+  provider?: string;
   id?: string;
   eligible?: unknown;
   precision?: number;
@@ -36,10 +37,19 @@ function loadYaml(filePath: string): RawProfileConfig {
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trimEnd();
-    const idMatch = line.match(/^\s+-\s+id:\s+(.+)$/);
-    if (idMatch) {
+    const providerMatch = line.match(/^\s+-\s+provider:\s+(.+)$/);
+    if (providerMatch) {
       if (current) profiles.push(current);
-      current = { id: idMatch[1].trim() };
+      current = { provider: providerMatch[1].trim() };
+      continue;
+    }
+    const idMatch = line.match(/^\s+(?:-\s+)?id:\s+(.+)$/);
+    if (idMatch) {
+      if (!current || current.id !== undefined) {
+        if (current) profiles.push(current);
+        current = {};
+      }
+      current.id = idMatch[1].trim();
       continue;
     }
     if (!current) continue;

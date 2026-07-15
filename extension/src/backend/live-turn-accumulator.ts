@@ -9,6 +9,7 @@ import {
   type TurnSemanticEnvelope,
 } from '../shared/live-pipeline-protocol.js';
 import type { ChatMessage } from '../shared/protocol/messages.js';
+import type { ThinkingLevel } from '../shared/protocol/models.js';
 import { normalizeToolProgress } from './tool-progress-normalizer.js';
 
 export interface BackendLiveTurnIdentity {
@@ -18,6 +19,8 @@ export interface BackendLiveTurnIdentity {
   turnId: string;
   attemptId: string;
   canonicalMessageId: string;
+  modelId?: string;
+  thinkingLevel?: ThinkingLevel;
   startedAt: number;
 }
 
@@ -33,8 +36,13 @@ export type BackendSemanticCandidate =
   | { kind: 'tool.terminal'; executionId: string; status: 'completed' | 'failed'; result: unknown; durationMs?: number; durableEntryId: string }
   | { kind: 'turn.terminal'; terminalKind: 'completed' | 'interrupted' | 'error'; userInitiated?: boolean; reason?: string; durableMessage: ChatMessage; durableEntryId: string };
 
-const MAX_LIVE_TOOL_INPUT_BYTES = 3 * 1024;
+const MAX_LIVE_TOOL_INPUT_BYTES = LIVE_PIPELINE_LIMITS.toolInputBytes;
 const MAX_LIVE_TOOL_INPUT_PREVIEW_BYTES = 2 * 1024;
+// Preserve at least the complete detail window that the former total-count cap
+// allowed, then compact only older durability-confirmed payloads.
+const RETAINED_SETTLED_TOOL_DETAILS = 64;
+const COMPACTED_LIVE_INPUT = { liveCompacted: true, detail: 'Durability-confirmed tool input omitted from repair checkpoints.' } as const;
+const COMPACTED_LIVE_RESULT = { kind: 'generic', summary: 'Durability-confirmed tool result omitted from repair checkpoints.', liveCompacted: true } as const;
 
 export class BackendLiveTurnAccumulator {
   private seq = 0;
@@ -42,6 +50,7 @@ export class BackendLiveTurnAccumulator {
   private readonly tools: Record<string, LiveToolRecord> = {};
   private terminal?: ChatMessage;
   private watermark?: LiveLifecycleWatermark;
+  private readonly settledExecutionIds: string[] = [];
   private textBytes = 0;
   private reasoningBytes = 0;
 
@@ -52,6 +61,8 @@ export class BackendLiveTurnAccumulator {
       requestId: identity.requestId,
       sessionPath: identity.sessionPath,
       canonicalMessageId: identity.canonicalMessageId,
+      modelId: identity.modelId,
+      thinkingLevel: identity.thinkingLevel,
       seq: 0,
       checkpointSeq: 0,
       phase: 'queued',
@@ -70,7 +81,14 @@ export class BackendLiveTurnAccumulator {
     let envelope: TurnSemanticEnvelope;
     switch (candidate.kind) {
       case 'turn.started':
-        envelope = { ...base, kind: 'turn.started', canonicalMessageId: this.identity.canonicalMessageId, startedAt: this.identity.startedAt };
+        envelope = {
+          ...base,
+          kind: 'turn.started',
+          canonicalMessageId: this.identity.canonicalMessageId,
+          modelId: this.identity.modelId,
+          thinkingLevel: this.identity.thinkingLevel,
+          startedAt: this.identity.startedAt,
+        };
         this.turn = { ...this.turn, seq, checkpointSeq: seq, phase: 'preparing', phaseSince: occurredAt, lastSemanticProgressAt: occurredAt };
         break;
       case 'turn.phase':
@@ -132,9 +150,6 @@ export class BackendLiveTurnAccumulator {
       }
       case 'tool.started': {
         if (this.tools[candidate.executionId]) return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
-        if (this.turn.toolExecutionIds.length >= LIVE_PIPELINE_LIMITS.checkpointTools) {
-          return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
-        }
         // Tool inputs can contain whole prompts, generated schemas, or cyclic
         // extension-owned values. Live state only needs enough immutable input
         // to render the running card; the durability-confirmed transcript owns
@@ -142,11 +157,7 @@ export class BackendLiveTurnAccumulator {
         // long subagent/tool turn cannot turn every later start into a rejected
         // observation and a checkpoint-repair storm.
         const input = normalizeLiveToolInput(candidate.input);
-        const aggregateInputBytes = Object.values(this.tools).reduce(
-          (total, tool) => total + jsonByteLength(tool.immutableInput),
-          jsonByteLength(input),
-        );
-        if (aggregateInputBytes > LIVE_PIPELINE_LIMITS.toolInputAggregateBytes) {
+        if (jsonByteLength(input) > LIVE_PIPELINE_LIMITS.toolInputBytes) {
           return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
         envelope = { ...base, ...candidate, input };
@@ -202,12 +213,7 @@ export class BackendLiveTurnAccumulator {
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
         if (!candidate.durableEntryId) return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         const boundedResult = normalizeToolProgress(tool.name, candidate.result);
-        const aggregateTerminalBytes = Object.values(this.tools).reduce((total, entry) =>
-          total + (entry.executionId === candidate.executionId
-            ? jsonByteLength(boundedResult)
-            : jsonByteLength(entry.terminal?.result)),
-        0);
-        if (aggregateTerminalBytes > LIVE_PIPELINE_LIMITS.toolTerminalAggregateBytes) {
+        if (jsonByteLength(boundedResult) > LIVE_PIPELINE_LIMITS.previewBytes) {
           return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
         envelope = { ...base, ...candidate, result: boundedResult };
@@ -222,15 +228,14 @@ export class BackendLiveTurnAccumulator {
             durableEntryId: candidate.durableEntryId,
           },
         };
+        if (!tool.terminal) this.settledExecutionIds.push(candidate.executionId);
         this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
+        this.compactSettledToolHistory();
         break;
       }
       case 'turn.terminal':
         if (!candidate.durableEntryId || candidate.durableMessage.durableEntryId !== candidate.durableEntryId) {
           return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
-        }
-        if (!isJsonWithin(candidate.durableMessage, LIVE_PIPELINE_LIMITS.checkpointBytes / 2)) {
-          return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
         envelope = { ...base, ...candidate };
         this.terminal = candidate.durableMessage;
@@ -288,6 +293,20 @@ export class BackendLiveTurnAccumulator {
     return this.watermark ? { ...this.watermark } : undefined;
   }
 
+  private compactSettledToolHistory(): void {
+    const compactIndex = this.settledExecutionIds.length - RETAINED_SETTLED_TOOL_DETAILS - 1;
+    if (compactIndex < 0) return;
+    const executionId = this.settledExecutionIds[compactIndex];
+    const tool = executionId ? this.tools[executionId] : undefined;
+    if (!tool?.terminal || isLiveCompactedValue(tool.terminal.result)) return;
+    this.tools[tool.executionId] = {
+      ...tool,
+      immutableInput: COMPACTED_LIVE_INPUT,
+      preview: undefined,
+      terminal: { ...tool.terminal, result: COMPACTED_LIVE_RESULT },
+    };
+  }
+
   private replaceWithRejected(seq: number, occurredAt: number, reason: RejectedObservationReason): TurnSemanticEnvelope {
     this.turn = { ...this.turn, seq, checkpointSeq: seq };
     return { ...this.base(seq, occurredAt), kind: 'observation.rejected', reason };
@@ -312,8 +331,8 @@ function jsonByteLength(value: unknown): number {
   catch { return Number.POSITIVE_INFINITY; }
 }
 
-function isJsonWithin(value: unknown, maxBytes: number): boolean {
-  return jsonByteLength(value) <= maxBytes;
+function isLiveCompactedValue(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && (value as { liveCompacted?: unknown }).liveCompacted === true;
 }
 
 function normalizeLiveToolInput(value: unknown): unknown {

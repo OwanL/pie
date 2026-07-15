@@ -89,7 +89,7 @@ export function MessageItemShell({
       data-streaming={isCurrentlyStreaming ? 'true' : undefined}
       onClick={handleMessageClick}
       title={status === 'queued'
-        ? 'Waiting for the current tool calls to finish; this message will be injected before the next model response.'
+        ? 'Queued for this turn — click to edit before delivery.'
         : isClickableUserMsg ? 'Click to edit' : undefined}
     >
       {children}
@@ -124,7 +124,7 @@ interface MessageItemInnerProps {
   footerActivityState: TurnActivityState | null;
   recovery: { kind: 'available'; userId: string } | { kind: 'unloaded' } | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
   onCancelPrepass?: () => void;
 }
@@ -201,7 +201,7 @@ export function MessageItemInner({
           initialText={message.markdown}
           initialInputs={initialInputs}
           capturedHeight={capturedHeight}
-          onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs)}
+          onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs, message.status === 'queued')}
           onCancel={onEditCancel}
         />
       ) : (

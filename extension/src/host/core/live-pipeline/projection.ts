@@ -16,8 +16,14 @@ export function projectTranscriptView(
   if (!turn) return { messages: [...durableMessages], activeTurn: null, liveTools: [] };
   const tools = toolsForTurn(state, turn);
   const activeTurn = projectLiveTurn(turn, tools, 'streaming');
+  const messagesBeforeActiveTurn: ChatMessage[] = [];
+  const queuedFollowUps: ChatMessage[] = [];
+  for (const message of durableMessages) {
+    if (message.role === 'user' && message.status === 'queued') queuedFollowUps.push(message);
+    else messagesBeforeActiveTurn.push(message);
+  }
   return {
-    messages: [...durableMessages, activeTurn],
+    messages: [...messagesBeforeActiveTurn, activeTurn, ...queuedFollowUps],
     activeTurn,
     liveTools: activeTurn.toolCalls ?? [],
   };
@@ -51,6 +57,8 @@ export function projectLiveTurn(
     id: turn.canonicalMessageId,
     role: 'assistant',
     createdAt: new Date(turn.startedAt).toISOString(),
+    modelId: turn.modelId,
+    thinkingLevel: turn.thinkingLevel,
     markdown,
     thinking: thinking || undefined,
     parts,

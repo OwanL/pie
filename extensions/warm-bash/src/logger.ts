@@ -11,8 +11,8 @@
  *   - `session_summary` — one per session at session_shutdown, carrying the
  *     session-cumulative routing counters (fast-path / warm / fallback) + config
  *     context. Per-session (warm-bash has no run-boundary signal; per-run
- *     attribution would need baseline+delta + a host-side RPC, deliberately out
- *     of scope — see docs/warm-bash-search-pruning-plan.md).
+ *     attribution would need baseline+delta + a host-side RPC and is deliberately
+ *     out of scope).
  *
  * The analytics pipeline reads this with `readWarmBashLog` (analysis/scripts/
  * source.ts) and joins rewrite events to runs via `hashToPrefix(sessionId, 16)`,

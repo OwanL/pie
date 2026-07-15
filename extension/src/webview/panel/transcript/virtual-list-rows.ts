@@ -102,9 +102,15 @@ function processSingleMessage(
     return;
   }
   if (message.role === 'user') {
-    acc.pendingPruning = null;
-    acc.lastAssistantRowIndexSinceUser = null;
-    acc.latestUserMessage = message;
+    // Queued follow-ups sit after the active assistant turn in projection, but
+    // they do not begin a new visible turn until delivery. Keep the active
+    // turn's pruning/assistant ownership intact while still rendering the
+    // queued bubble at the boundary.
+    if (message.status !== 'queued') {
+      acc.pendingPruning = null;
+      acc.lastAssistantRowIndexSinceUser = null;
+      acc.latestUserMessage = message;
+    }
   } else if (message.role === 'assistant') {
     pushAssistantRow(acc, message, index);
     return;
@@ -170,29 +176,42 @@ function maybeAddPlaceholderAssistant(
     toolCalls: [],
   };
 
-  if (pendingPruningHeaderState) {
-    rows.push({
-      kind: 'message',
-      key: `message:${placeholderAssistantId}`,
-      message: baseMessage,
-      pruningHeaderState: pendingPruningHeaderState,
-    });
-  } else {
-    rows.push({
-      kind: 'message',
-      key: `message:${placeholderAssistantId}`,
-      message: baseMessage,
-    });
-  }
+  const placeholder: TranscriptRow = pendingPruningHeaderState
+    ? {
+        kind: 'message',
+        key: `message:${placeholderAssistantId}`,
+        message: baseMessage,
+        pruningHeaderState: pendingPruningHeaderState,
+      }
+    : {
+        kind: 'message',
+        key: `message:${placeholderAssistantId}`,
+        message: baseMessage,
+      };
+  const firstQueuedIndex = rows.findIndex(
+    (row) => row.kind === 'message' && row.message.role === 'user' && row.message.status === 'queued',
+  );
+  if (firstQueuedIndex >= 0) rows.splice(firstQueuedIndex, 0, placeholder);
+  else rows.push(placeholder);
 }
 
 function attachActivityState(rows: TranscriptRow[], activityState: TurnActivityState): void {
-  const lastVisibleRow = rows[rows.length - 1];
-  if (lastVisibleRow?.kind === 'message' && lastVisibleRow.message.role === 'assistant') {
-    rows[rows.length - 1] = { ...lastVisibleRow, activityState };
-  } else {
-    rows.push({ kind: 'typingIndicator', key: 'typing-indicator', activityState });
+  // Queued follow-ups are displayed after the live turn. Attach activity to
+  // that turn's assistant row rather than manufacturing a second reply below
+  // the queue (which previously looked like a pruning-prepass response).
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row?.kind === 'message' && row.message.role === 'assistant') {
+      rows[index] = { ...row, activityState };
+      return;
+    }
   }
+  const firstQueuedIndex = rows.findIndex(
+    (row) => row.kind === 'message' && row.message.role === 'user' && row.message.status === 'queued',
+  );
+  const typing: TranscriptRow = { kind: 'typingIndicator', key: 'typing-indicator', activityState };
+  if (firstQueuedIndex >= 0) rows.splice(firstQueuedIndex, 0, typing);
+  else rows.push(typing);
 }
 
 export function buildTranscriptRows({

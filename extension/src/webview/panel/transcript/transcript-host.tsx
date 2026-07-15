@@ -43,6 +43,7 @@ function TranscriptSurface({
   transcriptLoaded,
   loadingStatus,
   busy,
+  liveTurnPhase,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -79,6 +80,7 @@ function TranscriptSurface({
         transcriptLoaded={transcriptLoaded}
         loadingStatus={loadingStatus}
         busy={busy}
+        liveTurnPhase={liveTurnPhase}
         prefs={prefs}
         pruningSettings={pruningSettings}
         systemPrompts={systemPrompts}
@@ -111,6 +113,7 @@ export interface TranscriptHostProps {
   transcriptLoaded: boolean;
   loadingStatus?: string;
   busy: boolean;
+  liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   systemPrompts: SystemPromptEntry[];
@@ -120,7 +123,7 @@ export interface TranscriptHostProps {
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -151,6 +154,7 @@ export function TranscriptHost({
   transcriptLoaded,
   loadingStatus,
   busy,
+  liveTurnPhase,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -210,23 +214,29 @@ export function TranscriptHost({
   useLayoutEffect(() => {
     const target = commitRegistry.target;
     if (!target) return;
+    // Leaf effects and the streamed-markdown buffer settle just after this
+    // parent layout effect. Reporting that expected intermediate frame made
+    // every streaming snapshot look like a warning even though the same
+    // revision committed moments later. Only report a block that survives a
+    // short, stable-target grace period; the cleanup cancels stale revisions.
     const reportBlocked = (reason: 'window_mismatch' | 'structure_mismatch' | 'leaf_missing' | 'leaf_mismatch') => {
       const blockedKey = `${target.viewGeneration}:${target.revision}:${reason}`;
-      if (lastBlockedRef.current === blockedKey) return;
-      lastBlockedRef.current = blockedKey;
-      postMessage({
-        type: 'transcriptCommitBlocked',
-        payload: { revision: target.revision, viewGeneration: target.viewGeneration, reason },
-      });
+      if (lastBlockedRef.current === blockedKey) return undefined;
+      const timer = window.setTimeout(() => {
+        lastBlockedRef.current = blockedKey;
+        postMessage({
+          type: 'transcriptCommitBlocked',
+          payload: { revision: target.revision, viewGeneration: target.viewGeneration, reason },
+        });
+      }, 250);
+      return () => window.clearTimeout(timer);
     };
     if (mountGeneration === 0 || !hostRef.current) {
-      reportBlocked('leaf_missing');
-      return;
+      return reportBlocked('leaf_missing');
     }
     if (target.state.activeSessionPath !== activeSessionPath
       || (activeSessionPath !== null && !target.state.openTabPaths.includes(activeSessionPath))) {
-      reportBlocked('structure_mismatch');
-      return;
+      return reportBlocked('structure_mismatch');
     }
 
     const mountedVirtualRowIndexes: number[] = [];
@@ -243,8 +253,7 @@ export function TranscriptHost({
       intentionallyHiddenMessageIds,
     });
     if (!decision.matches) {
-      reportBlocked(decision.reason ?? 'leaf_mismatch');
-      return;
+      return reportBlocked(decision.reason ?? 'leaf_mismatch');
     }
 
     const commitKey = `${target.viewGeneration}:${target.revision}:${mountGeneration}:${target.expectedTranscriptIdentity}:${decision.evidence}`;
@@ -312,6 +321,7 @@ export function TranscriptHost({
           transcriptLoaded={transcriptLoaded}
           loadingStatus={loadingStatus}
           busy={busy}
+          liveTurnPhase={liveTurnPhase}
           prefs={prefs}
           pruningSettings={pruningSettings}
           systemPrompts={systemPrompts}

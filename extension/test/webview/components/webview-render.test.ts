@@ -431,6 +431,10 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
             selectedModel: 'claude-opus-4.6',
             taskScores: { precision: 4, reasoning: 5 },
             thinkingLevel: 'high',
+            startedAt: 1_000,
+            completedAt: 66_000,
+            contextWindow: 200_000,
+            usage: { input: 1_200, output: 345, cacheRead: 50, cacheWrite: 0, contextTokens: 1_595, cost: 0.0123, turns: 2 },
           }],
         },
       },
@@ -446,6 +450,11 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.doesNotMatch(html, /gpt-5\.4/);  // actual execution model not shown when selectedModel present
   assert.match(html, /claude-opus-4\.6/);  // selectedModel is now visible in header
   assert.match(html, /subagent-model-label/);
+  assert.match(html, />1m 5s</);
+  assert.match(html, />ctx 1\.6k \/ 200k/);
+  assert.match(html, />in 1\.2k</);
+  assert.match(html, />out 345</);
+  assert.match(html, />\$0\.012</);
   assert.doesNotMatch(html, /subagent-model-tag/);
 });
 
@@ -846,7 +855,10 @@ test('subagent card shows preview rows only while collapsed', async () => {
     renderToolCall: () => null,
   }));
   assert.match(collapsedRunningHtml, /subagent-live-preview/);
-  assert.match(collapsedRunningHtml, /Running bash\.\.\./);
+  assert.match(collapsedRunningHtml, /turn-activity-tail-composite/);
+  assert.match(collapsedRunningHtml, /Keep working/);
+  assert.doesNotMatch(collapsedRunningHtml, /Running bash\.\.\./);
+  assert.doesNotMatch(collapsedRunningHtml, /Generating\.\.\./);
   assert.doesNotMatch(collapsedRunningHtml, /pending\.\.\./);
   assert.doesNotMatch(collapsedRunningHtml, /→ bash/);
   assert.doesNotMatch(collapsedRunningHtml, /subagent-messages/);

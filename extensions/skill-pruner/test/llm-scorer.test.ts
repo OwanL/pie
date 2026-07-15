@@ -249,6 +249,20 @@ test("parseLlmResponse extracts embedded JSON from surrounding prose", () => {
 	assert.equal(result.keptAllDueToParseFailure, undefined);
 });
 
+test("parseLlmResponse repairs trailing commas in an otherwise valid prune list", () => {
+	const knownSkills = new Set(["alpha"]);
+	const knownTools = new Set(["read"]);
+	const result = parseLlmResponse(
+		'{"reasoning":"keep literal comma, } intact","pruneSkills":["alpha",],"pruneTools":["read",],}',
+		knownSkills,
+		knownTools,
+	);
+	assert.deepEqual(result.pruneSkills, ["alpha"]);
+	assert.deepEqual(result.pruneTools, ["read"]);
+	assert.equal(result.reasoning, "keep literal comma, } intact");
+	assert.equal(result.keptAllDueToParseFailure, undefined);
+});
+
 test("parseLlmResponse keeps everything when prose mentions names (no scrape)", () => {
 	// Prose usually names items to KEEP, so we must not scrape known names out of
 	// it and treat them as prunes. Keep all instead.

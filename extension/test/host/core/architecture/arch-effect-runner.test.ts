@@ -68,6 +68,61 @@ test('EffectRunner routes InterruptRpc only through the target session queue', a
   assert.equal(events[0]?.ok, true);
 });
 
+test('EffectRunner serializes rapid system-prompt toggle snapshots per session', async () => {
+  const queueTails = new Map<string, Promise<void>>();
+  const queues: EffectRunnerDeps['queues'] = {
+    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> { return await task(); },
+    async enqueueSessionOperation<T>(sessionPath: string, task: () => Promise<T>): Promise<T> {
+      const previous = queueTails.get(sessionPath) ?? Promise.resolve();
+      const next = previous.then(task, task);
+      queueTails.set(sessionPath, next.then(() => undefined, () => undefined));
+      return await next;
+    },
+  };
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const applied: string[][] = [];
+  const { deps } = makeEffectRunnerDeps({
+    queues,
+    serviceOverrides: {
+      async setSystemPromptToggles(_sessionPath, disabledEntries) {
+        applied.push([...disabledEntries]);
+        if (applied.length === 1) await firstBlocked;
+      },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SetSystemPromptTogglesRpc', corrId: 'toggle-1', sessionPath: '/a', disabledEntries: ['harness'] });
+  runner.run({ kind: 'SetSystemPromptTogglesRpc', corrId: 'toggle-2', sessionPath: '/a', disabledEntries: ['harness', 'skills', 'runtime'] });
+  await settle();
+
+  assert.deepEqual(applied, [['harness']], 'newer complete set waits for the older request');
+  releaseFirst();
+  await settle();
+  assert.deepEqual(applied, [
+    ['harness'],
+    ['harness', 'skills', 'runtime'],
+  ], 'the final picker snapshot is applied last');
+});
+
+test('EffectRunner routes CompactRpc through the target session queue', async () => {
+  const { deps, calls, events } = makeEffectRunnerDeps();
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'CompactRpc', corrId: 'compact-1', sessionPath: '/a' });
+  await settle();
+
+  const relevantCalls = calls.filter(
+    (call) => !(call.kind === 'log' && call.level === 'info' && call.message === 'effect.dispatch'),
+  );
+  assert.deepEqual(relevantCalls[0], { kind: 'session', sessionPath: '/a' });
+  assert.deepEqual(relevantCalls[1], {
+    kind: 'request', method: 'message.compact', params: { sessionPath: '/a' },
+  });
+  assert.deepEqual(events, [{ kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/a', ok: true }]);
+});
+
 test('a slow session RPC cannot block creating another session', async () => {
   let releaseSend!: () => void;
   const slowSend = new Promise<void>((resolve) => { releaseSend = resolve; });
@@ -432,7 +487,7 @@ test('EffectRunner SetModelRpc writes settings.set, bumps the epoch, notifies th
   assert.deepEqual(req, { kind: 'request', method: 'settings.set', params: { sessionPath: '/s', defaultModel: 'image-model', defaultProvider: 'image-provider', defaultThinkingLevel: 'medium' } });
   // Effect-side concerns (host-local epoch + disk-persisting analytics).
   assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'bumpEpoch'), { kind: 'bumpEpoch', sessionPath: '/s' });
-  assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'onModelConfigChanged'), { kind: 'onModelConfigChanged', sessionPath: '/s', modelId: 'image-model', thinkingLevel: 'medium' });
+  assert.deepEqual(callsSansEffectDispatch.find((c) => c.kind === 'onModelConfigChanged'), { kind: 'onModelConfigChanged', sessionPath: '/s', modelId: 'image-model', thinkingLevel: 'medium', provider: 'image-provider' });
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'SetModelResult');
   assert.equal(events[0]?.corrId, 'sm1');

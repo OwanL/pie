@@ -18,7 +18,7 @@ import type {
 import type { SdkSessionEvent } from './sdk';
 import type { BackendSemanticCandidate } from './live-turn-accumulator';
 import type { TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
-import { normalizeToolProgress } from './tool-progress-normalizer';
+import { estimateCumulativeSubagentTokens, normalizeToolProgress } from './tool-progress-normalizer';
 import { mapAssistantMessage, mapCustomMessage, mapTranscript, type SessionEntryLike } from './transcript';
 import type { SessionContext } from './server-types';
 import { backendLog, type BackendLogLevel } from './log';
@@ -88,8 +88,10 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
         const streamingReasoning = typeof result.streamingReasoning === 'string'
           ? result.streamingReasoning.slice(-32 * 1024)
           : result.streamingReasoning;
+        const cumulativeOutputTokens = estimateCumulativeSubagentTokens(result);
         return {
           ...result,
+          cumulativeOutputTokens,
           messages: [{
             role: 'assistant',
             content: [{ type: 'text', text: 'Earlier live transcript omitted while progress exceeded the transport limit.' }],
@@ -136,6 +138,7 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
             streaming: result.streaming,
             streamingText: boundedText(result.streamingText, 8_192),
             streamingReasoning: boundedText(result.streamingReasoning, 8_192),
+            cumulativeOutputTokens: result.cumulativeOutputTokens,
             runningTools: Array.isArray(result.runningTools) ? result.runningTools.slice(0, 20) : undefined,
             messages: [{
               role: 'assistant',

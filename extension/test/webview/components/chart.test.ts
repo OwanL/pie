@@ -31,6 +31,8 @@ test('StackedAreaChart renders solid stacked paths for cumulative points', () =>
   );
   const paths = container.querySelectorAll('path');
   assert.equal(paths.length, 2, 'expected one continuous area path per provider');
+  assert.equal(new Set([...paths].map((path) => path.getAttribute('fill'))).size, 2,
+    'providers in the same chart must have distinguishable fills');
   assert.equal(container.querySelectorAll('rect').length, 0, 'cumulative areas should not have rect seams');
   // Axis labels present (first + last x).
   const axis = container.querySelector('.chart-axis');

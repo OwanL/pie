@@ -86,6 +86,9 @@ export interface SubagentSingleResult {
   activityPhase?: 'queued' | 'preparing' | 'waiting_provider' | 'streaming' | 'running_tool' | 'retry_wait' | 'completed' | 'failed' | 'cancelled' | 'orphaned_cleanup';
   activityDetail?: string;
   activitySince?: number;
+  /** Stable child lifecycle bounds for total elapsed-time display. */
+  startedAt?: number;
+  completedAt?: number;
   lastProgressAt?: number;
   inactivityBudgetMs?: number;
   /** The model chosen by scored selection. */
@@ -112,6 +115,10 @@ export interface SubagentSingleResult {
    *  host token-rate clock so it advances through stalls + reasoning streams but
    *  pauses during the subagent's tool calls / between turns / pre-first-token. */
   streaming?: boolean;
+  /** Cumulative estimated output tokens for this child and nested descendants.
+   * Kept independently from renderable transcript content so rate measurement
+   * remains cheap and monotonic during long recursive runs. */
+  cumulativeOutputTokens?: number;
   /** Per-turn throughput observations from this subagent session, forwarded to
    *  the parent run snapshot for historical tok/s attribution. */
   turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string }[];
@@ -355,17 +362,36 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         exitCode,
         messages,
         ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
+        ...(typeof candidate.selectedModel === 'string' ? { selectedModel: candidate.selectedModel } : {}),
         ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),
+        ...(typeof candidate.thinkingLevel === 'string' ? { thinkingLevel: candidate.thinkingLevel } : {}),
         ...(typeof candidate.activityDetail === 'string' ? { activityDetail: candidate.activityDetail } : {}),
         ...(typeof candidate.activitySince === 'number' ? { activitySince: candidate.activitySince } : {}),
+        ...(typeof candidate.startedAt === 'number' ? { startedAt: candidate.startedAt } : {}),
+        ...(typeof candidate.completedAt === 'number' ? { completedAt: candidate.completedAt } : {}),
         ...(typeof candidate.lastProgressAt === 'number' ? { lastProgressAt: candidate.lastProgressAt } : {}),
         ...(typeof candidate.inactivityBudgetMs === 'number' ? { inactivityBudgetMs: candidate.inactivityBudgetMs } : {}),
         ...(typeof candidate.streaming === 'boolean' ? { streaming: candidate.streaming } : {}),
         ...(streamingText ? { streamingText } : {}),
         ...(typeof candidate.streamingReasoning === 'string' ? { streamingReasoning: candidate.streamingReasoning } : {}),
+        ...(typeof candidate.cumulativeOutputTokens === 'number' && Number.isFinite(candidate.cumulativeOutputTokens)
+          ? { cumulativeOutputTokens: candidate.cumulativeOutputTokens }
+          : {}),
         ...(Array.isArray(candidate.runningTools)
           ? { runningTools: candidate.runningTools.filter((tool): tool is string => typeof tool === 'string') }
           : {}),
+        ...(Array.isArray(candidate.messages) ? { messages: candidate.messages as RawMessage[] } : {}),
+        ...(typeof candidate.finalOutput === 'string' ? { finalOutput: candidate.finalOutput } : {}),
+        ...(typeof candidate.transcriptCompacted === 'boolean' ? { transcriptCompacted: candidate.transcriptCompacted } : {}),
+        ...(typeof candidate.contextWindow === 'number' ? { contextWindow: candidate.contextWindow } : {}),
+        ...(isRecord(candidate.usage) ? { usage: candidate.usage as unknown as SubagentUsageSummary } : {}),
+        ...(isRecord(candidate.taskScores) ? { taskScores: candidate.taskScores as Record<string, number> } : {}),
+        ...(Array.isArray(candidate.selectionPool) ? { selectionPool: candidate.selectionPool.filter((model): model is string => typeof model === 'string') } : {}),
+        ...(Array.isArray(candidate.selectionFitScores) ? { selectionFitScores: candidate.selectionFitScores.filter((score): score is number => typeof score === 'number') } : {}),
+        ...(typeof candidate.retryCount === 'number' ? { retryCount: candidate.retryCount } : {}),
+        ...(typeof candidate.stopReason === 'string' ? { stopReason: candidate.stopReason } : {}),
+        ...(typeof candidate.errorMessage === 'string' ? { errorMessage: candidate.errorMessage } : {}),
+        ...(typeof candidate.stderr === 'string' ? { stderr: candidate.stderr } : {}),
         activityPhase: phase === 'cancelled'
           ? 'cancelled'
           : phase === 'failed' ? 'failed'

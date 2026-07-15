@@ -25,7 +25,13 @@ test('segmentColor maps known contributor categories to their fixed semantic col
   assert.equal(segmentColor('System prompt'), '#b079f3');
   assert.equal(segmentColor('Read file'), '#4cc2ff');
   assert.equal(segmentColor('Skill'), '#3fb950');
+  assert.equal(segmentColor('Skill: frontend-design'), '#3fb950');
   assert.equal(segmentColor('User message'), '#f0883e');
+  assert.equal(segmentColor('Assistant responses'), '#58a6ff');
+  assert.equal(segmentColor('Reasoning'), '#d2a8ff');
+  assert.equal(segmentColor('System messages'), '#f85149');
+  assert.equal(segmentColor('Tool: bash'), '#53b9bd');
+  assert.equal(segmentColor('Tool: edit'), '#53b9bd');
   assert.equal(segmentColor('Other'), '#e3b341');
 });
 

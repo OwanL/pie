@@ -30,6 +30,7 @@ test('pending new-session tab shows background preparation without disabling int
     activeRunSummary: null,
     isPinned: false,
     hasDeferredTriggers: false,
+    hasDeferredTimer: false,
     onContextMenu: () => undefined,
     onPointerDown: () => undefined,
     onClick: () => undefined,

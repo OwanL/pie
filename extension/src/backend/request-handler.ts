@@ -2,13 +2,14 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, type CustomMessagePayload, type ErrorPayload, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
+import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type ErrorPayload, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
 import {
   validateLoadTranscriptPage,
   validateMessageSend,
+  validateMessageReplaceQueue,
   validateRuntimePrefsSet,
   validateSessionCreate,
   validateSessionDuplicate,
@@ -231,6 +232,9 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentRouteAroundSaturatedProviders !== undefined) {
     process.env[SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV] = params.subagentRouteAroundSaturatedProviders ? '1' : '0';
+  }
+  if (params.subagentFallbackOnProviderFailure !== undefined) {
+    process.env[SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV] = params.subagentFallbackOnProviderFailure ? '1' : '0';
   }
   if (params.subagentMaxDepth !== undefined) {
     process.env['PIE_SUBAGENT_MAX_DEPTH'] = String(params.subagentMaxDepth);
@@ -600,6 +604,8 @@ async function handleMessageSend(
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
   const canonicalMessageId = `${requestId}:1`;
+  const modelId = context.session.model?.id;
+  const thinkingLevel = normalizeThinkingLevel(context.session.thinkingLevel);
   context.activeRequest = {
     id: requestId,
     messageIndex: 0,
@@ -610,10 +616,12 @@ async function handleMessageSend(
       turnId,
       attemptId,
       canonicalMessageId,
+      modelId,
+      thinkingLevel,
       startedAt: Date.now(),
     }),
-    modelId: context.session.model?.id,
-    thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
+    modelId,
+    thinkingLevel,
     // The first turn has no preceding tool call, so its latency window opens at
     // prompt-send. Subsequent turns overwrite this on `tool_execution_end`.
     turnBoundaryAt: Date.now(),
@@ -779,6 +787,22 @@ async function handleMessageSend(
   return { requestId };
 }
 
+async function handleMessageCompact(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionPath('message.compact', request.params);
+  const context = deps.getSessionContext(params.sessionPath);
+  if (!context) {
+    throw new BackendError('SESSION_NOT_FOUND', `Cannot compact an unopened session: ${params.sessionPath}`);
+  }
+  if (context.activeRequest || context.session.isStreaming || context.session.isCompacting) {
+    throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot compact while this session is running.');
+  }
+  await context.session.compact();
+  return { compacted: true };
+}
+
 async function handleMessageInterrupt(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -916,6 +940,61 @@ async function handleMessageInterrupt(
  *  `process.env.PIE_OPEN_TABS` (JSON) so the `session_review` tool (running in
  *  this backend process) can list currently-open sessions without host state
  *  access. Fire-and-forget from the host's tab-persistence site. */
+async function handleMessageReplaceQueue(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateMessageReplaceQueue(request.params);
+  const context = deps.getSessionContext(params.sessionPath);
+  if (!context) {
+    throw new BackendError('SESSION_NOT_FOUND', `Cannot edit the queue for an unopened session: ${params.sessionPath}`);
+  }
+  if (!context.activeRequest && !context.session.isStreaming) {
+    throw new BackendError('QUEUE_NOT_RUNNING', 'The queued message is already being delivered and can no longer be edited.');
+  }
+
+  const enqueueAll = async (messages: typeof params.messages): Promise<void> => {
+    // Register every correlation first, then invoke every SDK enqueue without
+    // yielding. Current SDK steer/followUp implementations mutate their queues
+    // synchronously before returning a resolved promise, so clear + complete
+    // replacement occurs in one JavaScript turn and cannot expose a transient
+    // empty/partial queue to the agent loop.
+    context.queuedLocalIds = messages.map((message) => message.localId);
+    const enqueues: Promise<void>[] = [];
+    for (const message of messages) {
+      const promptText = buildPromptText(message.text, message.inputs);
+      const images = lowerImageInputs(message.inputs);
+      const imagePayload = images.length > 0 ? images : undefined;
+      enqueues.push(context.session.steer
+        ? context.session.steer(promptText, imagePayload)
+        : context.session.followUp(promptText, imagePayload));
+    }
+    await Promise.all(enqueues);
+  };
+
+  context.session.clearQueue();
+  try {
+    await enqueueAll(params.messages);
+  } catch (replaceError) {
+    // Queue replacement is all-or-nothing from the host's perspective. Restore
+    // the original ordered queue before returning the edit failure.
+    context.session.clearQueue();
+    try {
+      await enqueueAll(params.fallbackMessages);
+    } catch (restoreError) {
+      context.session.clearQueue();
+      context.queuedLocalIds = [];
+      return {
+        updated: false,
+        queueCleared: true,
+        error: `Could not update or restore the queued messages: ${toErrorMessage(replaceError)}; restore failed: ${toErrorMessage(restoreError)}`,
+      };
+    }
+    throw replaceError;
+  }
+  return { updated: true, count: params.messages.length };
+}
+
 async function handleMessageClearQueue(
   _deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -1148,7 +1227,10 @@ async function handleLiveTurnCheckpoint(
   let encodedBytes: number;
   try { encodedBytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8'); }
   catch { return { status: 'oversize', checkpoint: null, watermark: accumulator.lifecycleWatermark() ?? null }; }
-  if (encodedBytes > LIVE_PIPELINE_LIMITS.checkpointBytes) {
+  const checkpointByteLimit = checkpoint.terminal
+    ? LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
+    : LIVE_PIPELINE_LIMITS.checkpointBytes;
+  if (encodedBytes > checkpointByteLimit) {
     return { status: 'oversize', checkpoint: null, watermark: accumulator.lifecycleWatermark() ?? null };
   }
   if (getBackendLivePipelineTraceHealth().enabled) {
@@ -1189,8 +1271,10 @@ const handlers: Record<string, RequestHandler> = {
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
   'session.truncateAfter': handleSessionTruncateAfter,
   'message.send': handleMessageSend,
+  'message.compact': handleMessageCompact,
   'message.interrupt': handleMessageInterrupt,
   'message.clearQueue': handleMessageClearQueue,
+  'message.replaceQueue': handleMessageReplaceQueue,
   'extension_ui.response': handleExtensionUiResponse,
   'openTabs.set': handleOpenTabsSet,
   'models.list': handleModelsList,

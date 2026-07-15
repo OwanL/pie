@@ -60,6 +60,13 @@ env var (set by the pie host on startup and on every change).
 - A model id may appear in more than one bucket.
 - "Always use parent model" (same settings section) skips bucket and capacity
   selection entirely and runs every subagent on the caller's active model.
+- **Fallback on provider failure** is enabled by default. After the provider/SDK
+  exhausts its own retries for a transient timeout, connection, rate-limit, or
+  server failure, the subagent retries the task on another model from the same
+  requested bucket (up to five fallback attempts). Auth/client/model errors do
+  not fail over. A turn is replayed only before visible output or tool execution,
+  preventing duplicate externally-visible work. Disable the setting to surface
+  the first provider failure directly.
 
 Model selection still reads `<pi-config>/model-profiles.yaml` (`.json`
 fallback) for thinking-level support lookups — the shared registry, also

@@ -207,6 +207,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           onTogglePin={handlers.handleTogglePinTab}
           onRunAction={handlers.handleTabRunAction}
           deferredSessionPaths={derived.deferredSessionPaths}
+          deferredTimerSessionPaths={derived.deferredTimerSessionPaths}
         />
       )}
 
@@ -227,6 +228,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         transcriptWindow={viewState.transcriptWindow}
         transcriptLoaded={viewState.transcriptLoaded}
         busy={transcriptBusy}
+        liveTurnPhase={viewState.liveTurnPhase}
         prefs={viewState.prefs}
         pruningSettings={viewState.pruningSettings}
         systemPrompts={viewState.systemPrompts}
@@ -247,7 +249,6 @@ export function AppBody({ adapter }: AppBodyProps) {
         postMessage={postMessage}
         busy={viewState.busy}
         retryStatus={viewState.retryStatus}
-        liveTurnPhase={viewState.liveTurnPhase}
         interrupting={interrupting}
         activeSession={viewState.activeSession}
         modelSettings={viewState.modelSettings}

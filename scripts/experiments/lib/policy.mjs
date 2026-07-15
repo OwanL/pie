@@ -1,0 +1,5 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
+const NETWORK=/(^|[;&|\s])(curl|wget|ssh|scp|nc|ncat|telnet|ftp|npm\s+(install|i)|pnpm\s+(install|add)|yarn\s+add|git\s+clone)(\s|$)/i;
+export function capBashTimeout(event,capSeconds=60){if(event.toolName!=="bash")return;event.input.timeout=Math.min(Number(event.input.timeout)||capSeconds,capSeconds);}
+export function findUnrelatedChanges(changedFiles,allowedChangedPaths){const allowed=new Set(allowedChangedPaths);return changedFiles.filter(path=>!allowed.has(path));}
+export function classifyToolCall(event,cwd){if(event.toolName==="bash"&&NETWORK.test(event.input?.command||""))return{type:"network_command",tool:event.toolName,reason:"Network-oriented command blocked by benchmark policy"};const candidate=event.input?.path;if(typeof candidate==="string"){const rel=relative(resolve(cwd),resolve(cwd,candidate));if(rel===".."||rel.startsWith(`..${sep}`)||isAbsolute(rel))return{type:"path_boundary",tool:event.toolName,reason:"Path outside task workspace blocked"};}return undefined;}

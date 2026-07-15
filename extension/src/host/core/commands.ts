@@ -73,9 +73,27 @@ export interface EditCommand extends CommandBase {
   timestamp: number;
 }
 
+/** Replace one message that is still waiting in the steering/follow-up queue.
+ * Unlike Edit, this does not truncate or interrupt the active turn. */
+export interface EditQueuedCommand extends CommandBase {
+  kind: 'EditQueued';
+  sessionPath: string;
+  messageId: string;
+  text: string;
+  inputs: ComposerInput[];
+  composedText: string;
+  userParts?: UserContentPart[];
+}
+
 /** Interrupt the in-flight assistant turn for a session. */
 export interface InterruptCommand extends CommandBase {
   kind: 'Interrupt';
+  sessionPath: string;
+}
+
+/** Manually summarize older conversation history to free context. */
+export interface CompactCommand extends CommandBase {
+  kind: 'Compact';
   sessionPath: string;
 }
 
@@ -285,7 +303,9 @@ export interface SetSystemPromptTogglesCommand extends CommandBase {
 export type Command =
   | SendCommand
   | EditCommand
+  | EditQueuedCommand
   | InterruptCommand
+  | CompactCommand
   | ClearQueueCommand
   | TruncateAfterCommand
   | OpenSessionCommand

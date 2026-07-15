@@ -35,6 +35,9 @@ test('SubagentSection renders the inline container, toggle, buckets, and nesting
   assert.match(html, /Always use parent model</);
   assert.match(html, /Route around busy providers</);
   assert.match(html, /If capacity is unavailable or every candidate is busy/);
+  assert.match(html, /Fallback on provider failure</);
+  assert.match(html, /another model in the same bucket/);
+  assert.match(html, /aria-checked="true"[\s\S]*?Fallback on provider failure/);
 
   // Default provider section explains why it has no toggles until buckets are configured.
   assert.match(html, /Default providers</);

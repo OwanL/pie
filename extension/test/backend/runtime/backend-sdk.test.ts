@@ -75,7 +75,7 @@ test('applySdkRetryHotPatch extends the current pi-ai retry.js array shape for t
 
     assert.equal(result, 'patched');
     // New array entries appended after the matched one.
-    assert.match(patched, /"stream ended before message_stop", "stream ended before a terminal response event", "upstream stream stalled", "upstream header phase stalled",/);
+    assert.match(patched, /"stream ended before message_stop", "stream ended before a terminal response event", "upstream stream stalled", "upstream header phase stalled", "upstream transport circuit open",/);
     // The comment line must be untouched (no trailing-comma needle injected there).
     assert.match(patched, /Comment mentioning "stream ended before message_stop" without/);
   });
@@ -92,7 +92,7 @@ test('applySdkRetryHotPatch extends the legacy inline agent-session.js classifie
     const patched = await fs.readFile(path.join(sdkDir, 'dist', 'core', 'agent-session.js'), 'utf8');
 
     assert.equal(result, 'patched');
-    assert.match(patched, /stream ended before message_stop\|stream ended before a terminal response event\|upstream stream stalled\|upstream header phase stalled/);
+    assert.match(patched, /stream ended before message_stop\|stream ended before a terminal response event\|upstream stream stalled\|upstream header phase stalled\|upstream transport circuit open/);
   });
 });
 
@@ -117,10 +117,23 @@ test('applySdkRetryHotPatch prefers the current pi-ai shape when both files exis
   });
 });
 
-test('applySdkRetryHotPatch is a no-op when upstream already supports terminal-event cuts', async () => {
+test('applySdkRetryHotPatch adds newly-required patterns to a previously patched SDK', async () => {
   await withSdkDir({
     'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
-      const R = ["stream ended before message_stop", "stream ended before a terminal response event", "timeout"];
+      const R = ["stream ended before message_stop", "stream ended before a terminal response event", "upstream stream stalled", "upstream header phase stalled", "timeout"];
+    `,
+  }, async (sdkDir) => {
+    const result = await applySdkRetryHotPatch(sdkDir);
+    const patched = await fs.readFile(path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js'), 'utf8');
+    assert.equal(result, 'patched');
+    assert.match(patched, /upstream transport circuit open/);
+  });
+});
+
+test('applySdkRetryHotPatch is a no-op when every required pattern is present', async () => {
+  await withSdkDir({
+    'node_modules/@earendil-works/pi-ai/dist/utils/retry.js': `
+      const R = ["stream ended before message_stop", "stream ended before a terminal response event", "upstream stream stalled", "upstream header phase stalled", "upstream transport circuit open", "timeout"];
     `,
   }, async (sdkDir) => {
     const result = await applySdkRetryHotPatch(sdkDir);

@@ -62,6 +62,24 @@ export interface EditRpcEffect extends EffectBase {
   userParts?: UserContentPart[];
 }
 
+export interface QueuedMessageRpcPayload {
+  localId: string;
+  text: string;
+  inputs: ComposerInput[];
+}
+
+export interface ReplaceQueueRpcEffect extends EffectBase {
+  kind: 'ReplaceQueueRpc';
+  sessionPath: string;
+  messageId: string;
+  text: string;
+  inputs: ComposerInput[];
+  composedText: string;
+  userParts?: UserContentPart[];
+  messages: QueuedMessageRpcPayload[];
+  fallbackMessages: QueuedMessageRpcPayload[];
+}
+
 export interface InterruptRpcEffect extends EffectBase {
   kind: 'InterruptRpc';
   sessionPath: string;
@@ -72,6 +90,11 @@ export interface RequestLiveTurnCheckpointEffect extends EffectBase {
   sessionPath: string;
   turnId: string;
   attemptId: string;
+}
+
+export interface CompactRpcEffect extends EffectBase {
+  kind: 'CompactRpc';
+  sessionPath: string;
 }
 
 export interface ClearQueueRpcEffect extends EffectBase {
@@ -277,8 +300,10 @@ export interface DuplicateSessionEffect extends EffectBase {
 export type Effect =
   | SendRpcEffect
   | EditRpcEffect
+  | ReplaceQueueRpcEffect
   | InterruptRpcEffect
   | RequestLiveTurnCheckpointEffect
+  | CompactRpcEffect
   | ClearQueueRpcEffect
   | TruncateRpcEffect
   | OpenSessionEffect

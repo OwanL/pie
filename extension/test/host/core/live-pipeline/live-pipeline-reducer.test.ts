@@ -25,13 +25,16 @@ test('sequenced live events project without mutating durable transcript and term
   state.transcript.bySession[base.sessionPath] = [];
 
   state = dispatch(state, {
-    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message',
+    modelId: 'provider/model', thinkingLevel: 'high', startedAt: 90,
   }).state;
   state = dispatch(state, { ...base, kind: 'turn.text', seq: 2, delta: 'live' }).state;
 
   assert.deepEqual(state.transcript.bySession[base.sessionPath], [], 'durable projection is not the live authority');
   const liveView = selectViewState(state);
   assert.equal(liveView.transcript.at(-1)?.markdown, 'live');
+  assert.equal(liveView.transcript.at(-1)?.modelId, 'provider/model');
+  assert.equal(liveView.transcript.at(-1)?.thinkingLevel, 'high');
   assert.equal(liveView.liveTurnPhase, 'streaming');
 
   const terminalMessage = {

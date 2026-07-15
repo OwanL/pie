@@ -15,6 +15,7 @@ import { backendTrace } from './diag';
  * for picker ordering, so this is intentionally minimal and tolerant.
  */
 interface RawSubagentProfile {
+  provider?: unknown;
   id?: unknown;
   precision?: unknown;
   creativity?: unknown;
@@ -34,6 +35,25 @@ const cache = new Map<string, CacheEntry>();
 
 function toNumber(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+function profileKey(provider: string | undefined, id: string): string {
+  // Preserve legacy bare-id map keys. Provider-qualified entries use a JSON
+  // tuple so neither provider nor model ids can collide with a delimiter.
+  return provider ? JSON.stringify([provider, id]) : id;
+}
+
+function parseProfileKey(key: string): { provider?: string; id: string } | undefined {
+  if (!key.startsWith('[')) return key.length > 0 ? { id: key } : undefined;
+  try {
+    const tuple = JSON.parse(key) as unknown;
+    if (Array.isArray(tuple) && tuple.length === 2 && tuple.every((part) => typeof part === 'string')) {
+      return { provider: tuple[0], id: tuple[1] };
+    }
+  } catch {
+    // Internal qualified keys are generated above; ignore malformed keys.
+  }
+  return undefined;
 }
 
 function parseProfilesFromObject(raw: unknown): Map<string, ModelSubagentInfo> {
@@ -56,7 +76,10 @@ function parseProfilesFromObject(raw: unknown): Map<string, ModelSubagentInfo> {
     if (typeof entry.disabled_reason === 'string' && entry.disabled_reason.length > 0) {
       info.disabledReason = entry.disabled_reason;
     }
-    out.set(entry.id, info);
+    const provider = typeof entry.provider === 'string' && entry.provider.length > 0
+      ? entry.provider
+      : undefined;
+    out.set(profileKey(provider, entry.id), info);
   }
   return out;
 }
@@ -80,7 +103,9 @@ function resolveProfilesPath(agentDir: string): { filePath: string; ext: string 
 }
 
 /**
- * Load subagent profiles for the picker, keyed by model id. Returns an empty map
+ * Load subagent profiles for the picker, keyed by provider + model id. Legacy
+ * profile files without `provider` remain supported as provider-agnostic fallbacks.
+ * Returns an empty map
  * when the shared `<agentDir>/model-profiles.{yaml,json}` is missing or unreadable so the
  * picker still renders (and the subagent extension falls back to inheriting the
  * caller's model). Cached by mtime of both the profiles file and models.json to
@@ -125,10 +150,14 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
     // Enrich with pricing data from models.json when available.
     const pricingRecords = loadModelPricing(pricingPath);
     if (pricingRecords.size > 0) {
-      for (const [modelId, info] of map) {
-        const records = pricingRecords.get(modelId);
+      for (const [key, info] of map) {
+        const identity = parseProfileKey(key);
+        if (!identity) continue;
+        const records = pricingRecords.get(identity.id);
         if (records && records.length > 0) {
-          const priced = records.find((r) => r.pricing !== undefined);
+          const priced = (identity.provider
+            ? records.find((record) => record.provider === identity.provider)
+            : records.find((record) => record.pricing !== undefined));
           if (priced?.pricing) {
             info.normalizedCost = estimateNormalizedCost(priced.pricing);
             info.pricing = { ...priced.pricing };
@@ -143,4 +172,14 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
     backendTrace('subagentProfiles', 'loadProfiles.failed', { level: 'debug', error: toErrorMessage(error), filePath });
     return new Map();
   }
+}
+
+/** Resolve an exact provider/model profile, falling back only for legacy
+ * provider-less profile files. */
+export function findSubagentProfile(
+  profiles: Map<string, ModelSubagentInfo>,
+  provider: string,
+  id: string,
+): ModelSubagentInfo | undefined {
+  return profiles.get(profileKey(provider, id)) ?? profiles.get(profileKey(undefined, id));
 }

@@ -45,14 +45,24 @@ test('typed live subagent preview rehydrates the running child reply', () => {
       omittedChildren: 0,
       children: [{
         id: 'worker', phase: 'running', agent: 'worker', task: 'inspect the queue',
-        exitCode: -1, streaming: true, streamingText: 'Live reply before interruption.',
+        exitCode: -1, model: 'provider/model', provider: 'provider', thinkingLevel: 'high',
+        startedAt: 1000, contextWindow: 200000,
+        usage: { input: 100, output: 20, cacheRead: 5, cacheWrite: 0, contextTokens: 125, cost: 0.01, turns: 1 },
+        messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'complete live reasoning' }, { type: 'toolCall', id: 'nested', name: 'subagent', arguments: {} }] }],
+        streaming: true, streamingText: 'Live reply before interruption.',
       }],
     },
   });
 
   assert.equal(out?.results[0]?.exitCode, -1);
+  assert.equal(out?.results[0]?.model, 'provider/model');
+  assert.equal(out?.results[0]?.thinkingLevel, 'high');
   assert.equal(out?.results[0]?.streamingText, 'Live reply before interruption.');
   assert.equal(out?.results[0]?.streaming, true);
+  assert.equal(out?.results[0]?.startedAt, 1000);
+  assert.equal(out?.results[0]?.usage?.input, 100);
+  assert.match(JSON.stringify(out?.results[0]?.messages), /complete live reasoning/);
+  assert.match(JSON.stringify(out?.results[0]?.messages), /nested/);
 });
 
 // --- getRenderableSubagentResult: raw result field parsing ---

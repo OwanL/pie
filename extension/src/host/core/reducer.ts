@@ -33,7 +33,7 @@ export { initialArchState };
 
 // Handler modules
 import { handleCommand } from './reducer/command-handlers.js';
-import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult } from './reducer/result-handlers.js';
+import { handleEffectResult, handleModelSwitchConfirmResult, handlePreflightFailed, handlePreflightSuperseded, handleClearQueueResult, handleReplaceQueueResult } from './reducer/result-handlers.js';
 import { handleStreamingEvent, handleQueuedDelivered, handleAssistantMessageErrorStamped } from './reducer/streaming-handlers.js';
 import {
   handleSessionClosed,
@@ -110,6 +110,7 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     // ─── Effect result events ─────────────────────────────────────────
 
     case 'InterruptResult':
+    case 'CompactResult':
     case 'SendResult':
     case 'EditResult':
     case 'FileDiffResult':
@@ -132,6 +133,10 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
 
     case 'ClearQueueResult': {
       return handleClearQueueResult(state, event);
+    }
+
+    case 'ReplaceQueueResult': {
+      return handleReplaceQueueResult(state, event);
     }
 
     case 'LiveTurnCheckpointResult': {

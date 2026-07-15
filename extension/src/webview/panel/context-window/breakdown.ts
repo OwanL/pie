@@ -199,16 +199,23 @@ interface ContributorItem {
 function buildContributors(
   systemPrompts: readonly SystemPromptEntry[],
   transcript: readonly ChatMessage[],
-): { items: ContributorItem[]; otherEstimated: number } {
+): ContributorItem[] {
   const items: ContributorItem[] = [];
-  let otherEstimated = 0;
   let readFileTokens = 0;
   let readFileCount = 0;
+  let assistantResponseTokens = 0;
+  let assistantResponseCount = 0;
+  let reasoningTokens = 0;
+  let reasoningCount = 0;
+  let systemMessageTokens = 0;
+  let systemMessageCount = 0;
+  const toolTokensByName = new Map<string, { tokens: number; count: number }>();
+  const skillTokensByName = new Map<string, { tokens: number; count: number }>();
   let index = 0;
 
   // System prompts — combine all available prompt cards into one entry.
   const systemPromptTokens = systemPrompts.reduce((total, prompt) => {
-    if (prompt.availability !== 'available') {
+    if (prompt.availability !== 'available' || prompt.disabled === true) {
       return total;
     }
 
@@ -228,9 +235,17 @@ function buildContributors(
         : undefined;
       items.push({ label: 'User message', note, tokens, originalIndex: index++ });
     } else if (message.role === 'assistant') {
-      // Assistant prose and reasoning go to "other".
-      otherEstimated += typeof message.markdown === 'string' ? estimateTextTokens(message.markdown) : 0;
-      otherEstimated += estimateTextTokens(message.thinking ?? '');
+      const responseTokens = typeof message.markdown === 'string' ? estimateTextTokens(message.markdown) : 0;
+      if (responseTokens > 0) {
+        assistantResponseTokens += responseTokens;
+        assistantResponseCount += 1;
+      }
+
+      const messageReasoningTokens = estimateTextTokens(message.thinking ?? '');
+      if (messageReasoningTokens > 0) {
+        reasoningTokens += messageReasoningTokens;
+        reasoningCount += 1;
+      }
 
       for (const toolCall of message.toolCalls ?? []) {
         const toolName = typeof toolCall.name === 'string' ? toolCall.name.toLowerCase().trim() : '';
@@ -239,7 +254,10 @@ function buildContributors(
           if (path) {
             const skillName = extractSkillName(path);
             if (skillName) {
-              items.push({ label: 'Skill', note: skillName, tokens: estimateToolCallTokens(toolCall), originalIndex: index++ });
+              const current = skillTokensByName.get(skillName) ?? { tokens: 0, count: 0 };
+              current.tokens += estimateToolCallTokens(toolCall);
+              current.count += 1;
+              skillTokensByName.set(skillName, current);
             } else {
               // Aggregate every read_file call into a single contributor row
               // (one total) instead of one row per file — a long session can
@@ -248,18 +266,51 @@ function buildContributors(
               readFileTokens += estimateToolCallTokens(toolCall);
               readFileCount += 1;
             }
-          } else {
-            otherEstimated += estimateToolCallTokens(toolCall);
+            continue;
           }
-        } else {
-          otherEstimated += estimateToolCallTokens(toolCall);
         }
+
+        // Keep non-file tools visible by name rather than hiding their often
+        // substantial inputs/results in the residual "Other" segment.
+        const displayName = toolName || 'unknown';
+        const current = toolTokensByName.get(displayName) ?? { tokens: 0, count: 0 };
+        current.tokens += estimateToolCallTokens(toolCall);
+        current.count += 1;
+        toolTokensByName.set(displayName, current);
       }
     } else {
-      otherEstimated += estimateTextTokens(message.markdown);
+      const tokens = estimateTextTokens(message.markdown);
+      if (tokens > 0) {
+        systemMessageTokens += tokens;
+        systemMessageCount += 1;
+      }
     }
   }
 
+  if (assistantResponseTokens > 0) {
+    items.push({
+      label: 'Assistant responses',
+      note: `${assistantResponseCount} response${assistantResponseCount === 1 ? '' : 's'}`,
+      tokens: assistantResponseTokens,
+      originalIndex: index++,
+    });
+  }
+  if (reasoningTokens > 0) {
+    items.push({
+      label: 'Reasoning',
+      note: `${reasoningCount} response${reasoningCount === 1 ? '' : 's'}`,
+      tokens: reasoningTokens,
+      originalIndex: index++,
+    });
+  }
+  if (systemMessageTokens > 0) {
+    items.push({
+      label: 'System messages',
+      note: `${systemMessageCount} message${systemMessageCount === 1 ? '' : 's'}`,
+      tokens: systemMessageTokens,
+      originalIndex: index++,
+    });
+  }
   if (readFileCount > 0) {
     items.push({
       label: 'Read file',
@@ -268,11 +319,27 @@ function buildContributors(
       originalIndex: index++,
     });
   }
+  for (const [skillName, aggregate] of skillTokensByName) {
+    items.push({
+      label: `Skill: ${skillName}`,
+      note: `${aggregate.count} load${aggregate.count === 1 ? '' : 's'}`,
+      tokens: aggregate.tokens,
+      originalIndex: index++,
+    });
+  }
+  for (const [toolName, aggregate] of toolTokensByName) {
+    items.push({
+      label: `Tool: ${toolName}`,
+      note: `${aggregate.count} call${aggregate.count === 1 ? '' : 's'}`,
+      tokens: aggregate.tokens,
+      originalIndex: index++,
+    });
+  }
 
   // Sort largest first, using insertion order as a stable tiebreaker.
   items.sort((a, b) => b.tokens - a.tokens || a.originalIndex - b.originalIndex);
 
-  return { items, otherEstimated };
+  return items;
 }
 
 function buildFooterEntries(summary: ContextWindowSummary): ContextWindowBreakdownEntry[] {
@@ -353,24 +420,25 @@ function buildFullEntries(
   otherKind: ContextWindowBreakdownKind,
   otherNote: string,
 ): ContextWindowBreakdownEntry[] {
-  return [
-    ...contributors.map((item, index) => ({
-      key: `contributor:${index}`,
-      label: item.label,
-      value: formatTokenValue(item.tokens, 'estimated'),
-      kind: 'estimated' as ContextWindowBreakdownKind,
-      tokens: item.tokens,
-      note: item.note,
-    })),
-    {
+  const entries: ContextWindowBreakdownEntry[] = contributors.map((item, index) => ({
+    key: `contributor:${index}`,
+    label: item.label,
+    value: formatTokenValue(item.tokens, 'estimated'),
+    kind: 'estimated',
+    tokens: item.tokens,
+    note: item.note,
+  }));
+  if (otherTokens > 0) {
+    entries.push({
       key: 'other',
       label: 'Other',
       value: formatTokenValue(otherTokens, otherKind),
       kind: otherKind,
       tokens: otherTokens,
       note: otherNote,
-    },
-  ];
+    });
+  }
+  return entries;
 }
 
 function buildFullNotes(
@@ -402,8 +470,8 @@ function computeRemainingKind(totalWindow: number, reportedUsedTokens: number | 
   return reportedUsedTokens !== null ? 'exact' : 'estimated';
 }
 
-function computeOtherTokens(reportedUsedTokens: number | null, explicitTokens: number, otherEstimated: number): number {
-  return reportedUsedTokens !== null ? Math.max(reportedUsedTokens - explicitTokens, 0) : otherEstimated;
+function computeOtherTokens(reportedUsedTokens: number | null, explicitTokens: number): number {
+  return reportedUsedTokens !== null ? Math.max(reportedUsedTokens - explicitTokens, 0) : 0;
 }
 
 function computeOtherKind(reportedUsedTokens: number | null): ContextWindowBreakdownKind {
@@ -412,8 +480,8 @@ function computeOtherKind(reportedUsedTokens: number | null): ContextWindowBreak
 
 function computeOtherNote(reportedUsedTokens: number | null): string {
   return reportedUsedTokens !== null
-    ? 'Unattributed: assistant responses, tool schemas, provider prompt, tokenizer drift.'
-    : 'Assistant responses, reasoning, and misc tool calls.';
+    ? 'Unattributed: tool schemas, provider prompt, hidden content, and tokenizer drift.'
+    : 'Content unavailable for explicit attribution.';
 }
 
 function buildFullBreakdown(options: BuildContextWindowBreakdownOptions): ContextWindowBreakdown {
@@ -421,9 +489,9 @@ function buildFullBreakdown(options: BuildContextWindowBreakdownOptions): Contex
   const reportedUsedTokens = contextUsage?.tokens ?? null;
   const totalWindow = contextUsage?.contextWindow ?? effectiveContextWindow;
 
-  const { items: contributors, otherEstimated } = buildContributors(systemPrompts, transcript);
+  const contributors = buildContributors(systemPrompts, transcript);
   const explicitTokens = contributors.reduce((sum, item) => sum + item.tokens, 0);
-  const estimatedUsedTokens = explicitTokens + otherEstimated;
+  const estimatedUsedTokens = explicitTokens;
 
   const usedTokens = reportedUsedTokens ?? estimatedUsedTokens;
   const usedKind = computeUsedKind(reportedUsedTokens);
@@ -435,7 +503,7 @@ function buildFullBreakdown(options: BuildContextWindowBreakdownOptions): Contex
     remainingKind = computeRemainingKind(totalWindow, reportedUsedTokens);
   }
 
-  const otherTokens = computeOtherTokens(reportedUsedTokens, explicitTokens, otherEstimated);
+  const otherTokens = computeOtherTokens(reportedUsedTokens, explicitTokens);
   const otherKind = computeOtherKind(reportedUsedTokens);
   const otherNote = computeOtherNote(reportedUsedTokens);
 

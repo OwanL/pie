@@ -85,6 +85,9 @@ export interface SessionContext {
    *  reopens via the sidecar store). Applied to both the display entries and
    *  the `_baseSystemPrompt` sent to the model. */
   systemPromptDisabledEntries?: string[];
+  /** Active tool set captured when the Tools prompt entry is switched off, so
+   * re-enabling it restores provider-visible schemas and executions. */
+  systemPromptToolsBeforeDisable?: string[];
   /** Bug 6 watchdog: armed on `agent_end willRetry:true`, re-armed on
    *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
    *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +
@@ -112,6 +115,9 @@ export interface SessionContext {
 export interface SessionPromptState {
   _baseSystemPrompt?: string;
   _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
+  /** SDK-internal synchronous rebuild used after active tools or extension
+   * resources change. Pie wraps it so picker exclusions survive rebuilds. */
+  _rebuildSystemPrompt?: (toolNames: string[]) => string;
   /** Unfiltered snapshot of the SDK's `_baseSystemPromptOptions`, captured
    *  before `applySystemPromptTogglesToBasePrompt` filters them for the model
    *  prompt. The display entry list (picker + transcript) is rebuilt from this

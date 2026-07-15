@@ -100,6 +100,23 @@ interface AccountPauseState {
 	strikeCount: number;
 }
 
+interface TransportCircuitState {
+	consecutiveFailures: number;
+	openUntil: number;
+	probeInFlight: boolean;
+}
+
+export interface ProviderGateResilienceOptions {
+	/** Consecutive header stalls required to open the shared provider circuit. */
+	transportFailureThreshold?: number;
+	/** Initial circuit cooldown. Failed half-open probes increase it exponentially. */
+	transportCircuitCooldownSeconds?: number;
+}
+
+const DEFAULT_TRANSPORT_FAILURE_THRESHOLD = 2;
+const DEFAULT_TRANSPORT_CIRCUIT_COOLDOWN_SECONDS = 30;
+const MAX_TRANSPORT_CIRCUIT_COOLDOWN_MS = 5 * 60_000;
+
 /** A concurrency slot with optional afterburn sticky-hold. */
 interface ConcurrencySlot {
 	index: number;
@@ -437,6 +454,18 @@ export class ProviderGateHeaderTimeoutError extends Error {
 	}
 }
 
+/** Raised locally while repeated header stalls have opened the provider-wide
+ * transport circuit. No upstream request is made. */
+export class ProviderGateTransportCircuitOpenError extends Error {
+	readonly isRetryable = true;
+	readonly httpStatus = 503;
+	constructor(provider: string, retryAtMs: number) {
+		const seconds = Math.max(1, Math.ceil((retryAtMs - Date.now()) / 1000));
+		super(`upstream transport circuit open for provider "${provider}" after repeated header stalls; retry probe available in ~${seconds}s.`);
+		this.name = 'ProviderGateTransportCircuitOpenError';
+	}
+}
+
 // ── Provider Gate (singleton) ─────────────────────────────────────────────────
 
 /**
@@ -459,11 +488,24 @@ export class ProviderGate {
 	private configs: ProviderConcurrencyConfig[] = [];
 	private idleTimeoutMs: number;
 	private defaultHeaderWaitMs: number;
+	private readonly transportCircuits = new Map<string, TransportCircuitState>();
+	private transportFailureThreshold: number;
+	private transportCircuitCooldownMs: number;
 	private uninstallCapacityBridge: (() => void) | null = null;
 
-	private constructor(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds: number) {
+	private constructor(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds: number,
+		resilience: ProviderGateResilienceOptions = {},
+	) {
 		this.configs = configs;
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
+		this.transportFailureThreshold = Math.max(1, Math.floor(
+			resilience.transportFailureThreshold ?? DEFAULT_TRANSPORT_FAILURE_THRESHOLD,
+		));
+		this.transportCircuitCooldownMs = Math.max(1,
+			(resilience.transportCircuitCooldownSeconds ?? DEFAULT_TRANSPORT_CIRCUIT_COOLDOWN_SECONDS) * 1000,
+		);
 		// Gate-wide default for the header-phase bound (replaces the proxy's
 		// raw-ASGI middleware header-phase bound). Individual providers may
 		// override via `headerWaitSeconds` in their concurrency config.
@@ -472,12 +514,16 @@ export class ProviderGate {
 	}
 
 	/** Install (or reconfigure) the provider gate. Wraps `globalThis.fetch`. */
-	static install(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds = 120): ProviderGate {
+	static install(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds = 120,
+		resilience: ProviderGateResilienceOptions = {},
+	): ProviderGate {
 		if (ProviderGate.instance) {
-			ProviderGate.instance.reconfigure(configs, idleTimeoutSeconds);
+			ProviderGate.instance.reconfigure(configs, idleTimeoutSeconds, resilience);
 			return ProviderGate.instance;
 		}
-		ProviderGate.instance = new ProviderGate(configs, idleTimeoutSeconds);
+		ProviderGate.instance = new ProviderGate(configs, idleTimeoutSeconds, resilience);
 		ProviderGate.instance.wrapFetch();
 		ProviderGate.instance.installCapacityBridge();
 		return ProviderGate.instance;
@@ -502,9 +548,19 @@ export class ProviderGate {
 	}
 
 	/** Reconfigure the pools without re-wrapping fetch (idempotent re-install). */
-	reconfigure(configs: ProviderConcurrencyConfig[], idleTimeoutSeconds: number): void {
+	reconfigure(
+		configs: ProviderConcurrencyConfig[],
+		idleTimeoutSeconds: number,
+		resilience?: ProviderGateResilienceOptions,
+	): void {
 		this.configs = configs;
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
+		if (resilience?.transportFailureThreshold !== undefined) {
+			this.transportFailureThreshold = Math.max(1, Math.floor(resilience.transportFailureThreshold));
+		}
+		if (resilience?.transportCircuitCooldownSeconds !== undefined) {
+			this.transportCircuitCooldownMs = Math.max(1, resilience.transportCircuitCooldownSeconds * 1000);
+		}
 		this.rebuildPools();
 	}
 
@@ -558,6 +614,64 @@ export class ProviderGate {
 		}
 	}
 
+	private getTransportCircuit(provider: string): TransportCircuitState {
+		let state = this.transportCircuits.get(provider);
+		if (!state) {
+			state = { consecutiveFailures: 0, openUntil: 0, probeInFlight: false };
+			this.transportCircuits.set(provider, state);
+		}
+		return state;
+	}
+
+	/** Claim the single half-open probe after cooldown, or reject locally while
+	 * the shared provider circuit remains open. */
+	private beginTransportAttempt(provider: string): boolean {
+		const state = this.getTransportCircuit(provider);
+		if (state.consecutiveFailures < this.transportFailureThreshold) return false;
+		const now = Date.now();
+		if (state.openUntil > now || state.probeInFlight) {
+			throw new ProviderGateTransportCircuitOpenError(provider, Math.max(state.openUntil, now + 1_000));
+		}
+		state.probeInFlight = true;
+		return true;
+	}
+
+	private cancelTransportAttempt(provider: string, wasProbe: boolean): void {
+		if (wasProbe) this.getTransportCircuit(provider).probeInFlight = false;
+	}
+
+	private failTransportProbe(provider: string, wasProbe: boolean): void {
+		// Once half-open, any transport-level failure means the provider has not
+		// recovered. Count it so repeated failed probes extend the cooldown.
+		if (wasProbe) this.recordTransportFailure(provider);
+	}
+
+	private recordTransportSuccess(provider: string): void {
+		const state = this.getTransportCircuit(provider);
+		state.consecutiveFailures = 0;
+		state.openUntil = 0;
+		state.probeInFlight = false;
+	}
+
+	private recordTransportFailure(provider: string): void {
+		const state = this.getTransportCircuit(provider);
+		state.consecutiveFailures += 1;
+		state.probeInFlight = false;
+		if (state.consecutiveFailures < this.transportFailureThreshold) return;
+		const exponent = Math.max(0, state.consecutiveFailures - this.transportFailureThreshold);
+		const cooldown = Math.min(
+			MAX_TRANSPORT_CIRCUIT_COOLDOWN_MS,
+			this.transportCircuitCooldownMs * (2 ** exponent),
+		);
+		state.openUntil = Date.now() + cooldown;
+	}
+
+	private transportCircuitBlocked(provider: string): boolean {
+		const state = this.transportCircuits.get(provider);
+		return !!state && state.consecutiveFailures >= this.transportFailureThreshold
+			&& (state.openUntil > Date.now() || state.probeInFlight);
+	}
+
 	private wrapFetch(): void {
 		if (this.originalFetch) return; // already wrapped
 		this.originalFetch = globalThis.fetch;
@@ -575,7 +689,8 @@ export class ProviderGate {
 		const snapshot: Record<string, { immediatelyClaimable: boolean }> = {};
 		for (const [provider, entry] of this.pools) {
 			snapshot[provider] = {
-				immediatelyClaimable: entry.pool.canClaimImmediatelyForUnrelatedSession(),
+				immediatelyClaimable: !this.transportCircuitBlocked(provider)
+					&& entry.pool.canClaimImmediatelyForUnrelatedSession(),
 			};
 		}
 		return snapshot;
@@ -646,16 +761,24 @@ export class ProviderGate {
 		const requestClass = this.extractRequestClass(init);
 		const signal = init?.signal ?? undefined;
 
-		// Circuit breaker: reject immediately if the provider is paused.
+		// Account suspension and repeated transport stalls are independent shared
+		// circuits. Both reject before consuming a concurrency slot.
 		if (pool.isPaused()) {
 			throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 		}
+		const wasTransportProbe = this.beginTransportAttempt(config.provider);
 
 		// Acquire a concurrency slot. Queue and header waits are separate phases.
 		if (sessionId && !pool.canClaimImmediately(sessionId)) {
 			publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'gate_queue' });
 		}
-		const slotIndex = await pool.acquire(sessionId, signal, requestClass);
+		let slotIndex: number;
+		try {
+			slotIndex = await pool.acquire(sessionId, signal, requestClass);
+		} catch (error) {
+			this.cancelTransportAttempt(config.provider, wasTransportProbe);
+			throw error;
+		}
 		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_wait' });
 
 		try {
@@ -664,6 +787,7 @@ export class ProviderGate {
 			// concurrency slot indefinitely. The idle-chunk watchdog (armed in
 			// wrapStream) only covers the BODY phase — headers must arrive first.
 			const response = await this.fetchWithHeaderTimeout(input, init, config.provider, headerWaitMs, signal);
+			this.recordTransportSuccess(config.provider);
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
 
 			// Account-pause detection: 429/403 with suspension body.
@@ -693,6 +817,16 @@ export class ProviderGate {
 			pool.release(slotIndex, sessionId, true);
 			return response;
 		} catch (error) {
+			if (error instanceof ProviderGateHeaderTimeoutError) {
+				this.recordTransportFailure(config.provider);
+			} else if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+				// User cancellation is not evidence that the provider is unhealthy.
+				this.cancelTransportAttempt(config.provider, wasTransportProbe);
+			} else {
+				// A non-header network failure during the sole half-open probe must
+				// re-open the circuit rather than allowing an immediate probe storm.
+				this.failTransportProbe(config.provider, wasTransportProbe);
+			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);
 			throw error;
@@ -948,15 +1082,17 @@ export class ProviderGate {
 	getMetrics(): ProviderGateMetrics[] {
 		const result: ProviderGateMetrics[] = [];
 		for (const [provider, entry] of this.pools) {
+			const transport = this.transportCircuits.get(provider);
+			const transportPaused = this.transportCircuitBlocked(provider);
 			result.push({
 				provider,
 				activeRequests: entry.pool.activeRequests,
 				queuedRequests: entry.pool.queuedRequests,
 				maxConcurrentRequests: entry.pool.maxConcurrent,
 				afterburnSeconds: Math.round(entry.pool.afterburnMs / 1000),
-				paused: entry.pool.isPaused(),
-				pausedUntilMs: entry.pool.pausedUntilMs(),
-				strikeCount: entry.pool.strikeCount(),
+				paused: entry.pool.isPaused() || transportPaused,
+				pausedUntilMs: Math.max(entry.pool.pausedUntilMs(), transportPaused ? (transport?.openUntil ?? 0) : 0),
+				strikeCount: entry.pool.strikeCount() + (transport?.consecutiveFailures ?? 0),
 			});
 		}
 		return result.sort((a, b) => a.provider.localeCompare(b.provider));

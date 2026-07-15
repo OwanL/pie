@@ -1,0 +1,1 @@
+{"name":"atlas-replay-slice","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","benchmark":"node scripts/replay-benchmark.mjs"}}

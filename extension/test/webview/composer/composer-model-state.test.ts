@@ -33,6 +33,36 @@ test('resolveComposerModelState prefers the active session model over the global
   assert.equal(state.supportsReasoning, true);
 });
 
+test('resolveComposerModelState uses provider identity when model ids collide', () => {
+  const state = resolveComposerModelState({
+    modelSettings: {
+      defaultModel: 'gpt-shared',
+      defaultProvider: 'openai-codex',
+      defaultThinkingLevel: 'high',
+    },
+    availableModels: [
+      {
+        id: 'gpt-shared',
+        name: 'Copilot GPT',
+        provider: 'github-copilot',
+        reasoning: false,
+        inputKinds: ['text'],
+      },
+      {
+        id: 'gpt-shared',
+        name: 'Codex GPT',
+        provider: 'openai-codex',
+        reasoning: true,
+        inputKinds: ['text', 'image'],
+      },
+    ],
+  });
+
+  assert.equal(state.selectedProvider, 'openai-codex');
+  assert.equal(state.selectedModelInfo?.name, 'Codex GPT');
+  assert.equal(state.supportsReasoning, true);
+});
+
 test('resolveComposerModelState falls back to the default model when the session has no explicit model', () => {
   const state = resolveComposerModelState({
     modelSettings: { defaultModel: 'claude-sonnet-4-5', defaultThinkingLevel: 'low' },

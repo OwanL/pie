@@ -1,4 +1,6 @@
 import type { ChatMessage, ToolCall } from './protocol/messages.js';
+import type { ThinkingLevel } from './protocol/models.js';
+import { isThinkingLevel } from './thinking-level.js';
 
 /** Transient live-pipeline protocol. Nothing in this file is a durable event log. */
 export const LIVE_PIPELINE_PROTOCOL_VERSION = 4;
@@ -7,12 +9,14 @@ export const LIVE_PIPELINE_LIMITS = {
   textPartBytes: 512 * 1024,
   reasoningPartBytes: 512 * 1024,
   toolDraftBytes: 64 * 1024,
-  previewBytes: 32 * 1024,
-  toolPreviewAggregateBytes: 192 * 1024,
-  toolInputAggregateBytes: 192 * 1024,
-  toolTerminalAggregateBytes: 512 * 1024,
+  toolInputBytes: 3 * 1024,
+  // Subagent previews carry the complete recursively renderable child transcript.
+  // Generic tool normalizers remain independently tail-bounded; this larger
+  // ceiling exists so transparency is not traded away for transport size.
+  previewBytes: 24 * 1024 * 1024,
+  toolPreviewAggregateBytes: 28 * 1024 * 1024,
   checkpointBytes: 2 * 1024 * 1024,
-  checkpointTools: 64,
+  terminalCheckpointBytes: 24 * 1024 * 1024,
   pendingOwnerEvents: 64,
   pendingOwnerBytes: 2 * 1024 * 1024,
   extensionUiRequests: 32,
@@ -54,15 +58,43 @@ export interface SubagentChildPreview {
   summary?: string;
   exitCode?: number;
   model?: string;
+  selectedModel?: string;
   provider?: string;
+  thinkingLevel?: string;
   activityDetail?: string;
   activitySince?: number;
+  startedAt?: number;
+  completedAt?: number;
   lastProgressAt?: number;
   inactivityBudgetMs?: number;
   streaming?: boolean;
   streamingText?: string;
   streamingReasoning?: string;
+  /** Cumulative estimated output tokens produced by this child and its nested
+   * descendants. Kept separately from render content so live-rate measurement
+   * stays monotonic without repeatedly tokenizing the complete transcript. */
+  cumulativeOutputTokens?: number;
   runningTools?: string[];
+  messages?: unknown[];
+  finalOutput?: string;
+  transcriptCompacted?: boolean;
+  contextWindow?: number;
+  usage?: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    contextTokens?: number;
+    cost?: number;
+    turns?: number;
+  };
+  taskScores?: Record<string, number>;
+  selectionPool?: string[];
+  selectionFitScores?: number[];
+  retryCount?: number;
+  stopReason?: string;
+  errorMessage?: string;
+  stderr?: string;
 }
 
 export type LiveAssistantPart =
@@ -94,6 +126,8 @@ export interface LiveTurnRecord {
   requestId: string;
   sessionPath: string;
   canonicalMessageId: string;
+  modelId?: string;
+  thinkingLevel?: ThinkingLevel;
   seq: number;
   checkpointSeq: number;
   phase: LiveTurnPhase;
@@ -167,6 +201,8 @@ export type TurnSemanticEnvelope =
   | (SemanticEnvelopeBase & {
       kind: 'turn.started';
       canonicalMessageId: string;
+      modelId?: string;
+      thinkingLevel?: ThinkingLevel;
       startedAt: number;
     })
   | (SemanticEnvelopeBase & { kind: 'turn.phase'; phase: Exclude<LiveTurnPhase, 'reconciling_gap'>; inactivityBudgetMs?: number })
@@ -252,7 +288,10 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
     || typeof value.occurredAt !== 'number' || !Number.isFinite(value.occurredAt)
     || typeof value.kind !== 'string') return false;
   switch (value.kind) {
-    case 'turn.started': return typeof value.canonicalMessageId === 'string' && isFiniteNumber(value.startedAt);
+    case 'turn.started': return typeof value.canonicalMessageId === 'string'
+      && (value.modelId === undefined || typeof value.modelId === 'string')
+      && (value.thinkingLevel === undefined || isThinkingLevel(value.thinkingLevel))
+      && isFiniteNumber(value.startedAt);
     case 'turn.phase': return isLiveTurnPhase(value.phase) && value.phase !== 'reconciling_gap' && optionalFiniteNumber(value.inactivityBudgetMs);
     case 'turn.text': case 'turn.reasoning': return typeof value.delta === 'string';
     case 'turn.toolDraft': return isRecord(value.draft) && typeof value.draft.toolCallId === 'string' && typeof value.draft.name === 'string' && typeof value.draft.argumentsJson === 'string';

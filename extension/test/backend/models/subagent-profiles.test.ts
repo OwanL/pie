@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { loadSubagentProfiles } from '../../../src/backend/subagent-profiles';
+import { findSubagentProfile, loadSubagentProfiles } from '../../../src/backend/subagent-profiles';
 
 function makeAgentDir(files: Record<string, string>): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-subagent-profiles-'));
@@ -30,6 +30,29 @@ test('loadSubagentProfiles parses YAML content and skips invalid profile entries
   assert.deepEqual(profiles.get('good'), { eligible: true, aggregate: 18 });
   assert.deepEqual(profiles.get('zeroed'), { eligible: false, aggregate: 3 });
   assert.equal(profiles.size, 2);
+});
+
+test('loadSubagentProfiles keeps same-id profiles isolated by provider', () => {
+  const agentDir = makeAgentDir({
+    'model-profiles.yaml': JSON.stringify({
+      profiles: [
+        { provider: 'github-copilot', id: 'gpt-shared', precision: 1, eligible: false, disabled_reason: 'not vetted' },
+        { provider: 'openai-codex', id: 'gpt-shared', precision: 5, creativity: 5, thoroughness: 5, reasoning: 5, eligible: true },
+      ],
+    }),
+  });
+
+  const profiles = loadSubagentProfiles(agentDir);
+  assert.deepEqual(findSubagentProfile(profiles, 'github-copilot', 'gpt-shared'), {
+    eligible: false,
+    aggregate: 1,
+    disabledReason: 'not vetted',
+  });
+  assert.deepEqual(findSubagentProfile(profiles, 'openai-codex', 'gpt-shared'), {
+    eligible: true,
+    aggregate: 20,
+  });
+  assert.equal(findSubagentProfile(profiles, 'other-provider', 'gpt-shared'), undefined);
 });
 
 test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when needed', () => {

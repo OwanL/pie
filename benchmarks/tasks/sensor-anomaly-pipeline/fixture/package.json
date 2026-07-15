@@ -1,0 +1,1 @@
+{"name":"borealis-edge-model","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","benchmark":"node scripts/model-benchmark.mjs"}}

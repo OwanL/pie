@@ -56,6 +56,48 @@ export interface MessageSendParams {
   localId?: string;
 }
 
+export interface QueuedMessageParams {
+  localId: string;
+  text: string;
+  inputs: ComposerInput[];
+}
+
+export interface MessageReplaceQueueParams {
+  sessionPath: string;
+  messages: QueuedMessageParams[];
+  fallbackMessages: QueuedMessageParams[];
+}
+
+export function validateMessageReplaceQueue(params: unknown): MessageReplaceQueueParams {
+  if (!isObj(params)) fail('message.replaceQueue', 'expected an object');
+  const { sessionPath } = validateSessionPath('message.replaceQueue', params);
+  const validateEntries = (field: 'messages' | 'fallbackMessages'): QueuedMessageParams[] => {
+    const raw = params[field];
+    if (!Array.isArray(raw) || raw.length === 0 || raw.length > 256) {
+      fail('message.replaceQueue', `${field} must contain between 1 and 256 queued messages`);
+    }
+    return raw.map((entry, index) => {
+      if (!isObj(entry) || typeof entry['localId'] !== 'string' || !entry['localId']) {
+        fail('message.replaceQueue', `${field}[${index}].localId must be a non-empty string`);
+      }
+      const validated = validateMessageSend({
+        sessionPath,
+        text: entry['text'],
+        inputs: entry['inputs'],
+        localId: entry['localId'],
+      });
+      return { localId: entry['localId'] as string, text: validated.text, inputs: validated.inputs };
+    });
+  };
+  const messages = validateEntries('messages');
+  const fallbackMessages = validateEntries('fallbackMessages');
+  if (messages.length !== fallbackMessages.length
+    || messages.some((message, index) => message.localId !== fallbackMessages[index]?.localId)) {
+    fail('message.replaceQueue', 'messages and fallbackMessages must contain the same localIds in the same order');
+  }
+  return { sessionPath, messages, fallbackMessages };
+}
+
 export interface SessionCreateParams {
   cwd?: string;
   selectionToken?: string;
@@ -538,6 +580,9 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const rawRouteAroundSaturated = (params as Record<string, unknown>)['subagentRouteAroundSaturatedProviders'];
   const subagentRouteAroundSaturatedProviders =
     rawRouteAroundSaturated === undefined ? undefined : typeof rawRouteAroundSaturated === 'boolean' ? rawRouteAroundSaturated : fail('runtimePrefs.set', 'subagentRouteAroundSaturatedProviders must be a boolean when provided');
+  const rawFallbackOnProviderFailure = (params as Record<string, unknown>)['subagentFallbackOnProviderFailure'];
+  const subagentFallbackOnProviderFailure =
+    rawFallbackOnProviderFailure === undefined ? undefined : typeof rawFallbackOnProviderFailure === 'boolean' ? rawFallbackOnProviderFailure : fail('runtimePrefs.set', 'subagentFallbackOnProviderFailure must be a boolean when provided');
   const subagentMaxDepth = validateOptionalInt('runtimePrefs.set', 'subagentMaxDepth', (params as Record<string, unknown>)['subagentMaxDepth'], 0, 8);
   const subagentMaxTreeSessions = validateOptionalInt('runtimePrefs.set', 'subagentMaxTreeSessions', (params as Record<string, unknown>)['subagentMaxTreeSessions'], 5, 200);
   const subagentBuckets = validateOptionalSubagentBuckets('runtimePrefs.set', (params as Record<string, unknown>)['subagentBuckets']);
@@ -553,7 +598,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashWarmupTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashWarmupTimeoutMs', (params as Record<string, unknown>)['bashWarmupTimeoutMs'], 0, 60000);
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
 }
 
 export interface OpenTabsSetParams {

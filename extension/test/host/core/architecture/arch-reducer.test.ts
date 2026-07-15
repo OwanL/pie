@@ -82,6 +82,29 @@ test('reducer: Interrupt command sets interruptInFlight and returns InterruptRpc
   });
 });
 
+test('reducer: Compact command returns a session-scoped CompactRpc effect', () => {
+  const result = reducer(initialArchState, {
+    kind: 'Command',
+    cmd: { kind: 'Compact', corrId: 'compact-1', sessionPath: '/session/a' },
+  });
+
+  assert.equal(result.state, initialArchState);
+  assert.deepEqual(result.effects, [{
+    kind: 'CompactRpc', corrId: 'compact-1', sessionPath: '/session/a',
+  }]);
+});
+
+test('reducer: CompactResult failure surfaces an operational notice', () => {
+  const result = reducer(initialArchState, {
+    kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/session/a', ok: false, error: 'provider failed',
+  });
+
+  assert.equal(result.state.settings.notice, 'Could not compact this conversation.');
+  assert.equal(result.state.settings.noticeKind, 'operational-error');
+  assert.equal(result.state.settings.noticeRaw, 'provider failed');
+  assert.deepEqual(result.effects, []);
+});
+
 test('reducer: Interrupt does not affect other sessions', () => {
   const stateWithB: ArchState = {
     ...initialArchState,

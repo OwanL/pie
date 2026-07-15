@@ -256,6 +256,24 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
         Prefer another enabled model/provider in the requested bucket when its ProviderGate has an immediate slot. If capacity is unavailable or every candidate is busy, keep normal selection and queue. “Always use parent model” takes precedence.
       </div>
 
+      <button
+        class={`toolbar-settings-item${prefs.subagentFallbackOnProviderFailure ? ' checked' : ''}`}
+        type="button"
+        role="checkbox"
+        aria-checked={prefs.subagentFallbackOnProviderFailure}
+        onClick={() => onSetPrefs(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure'))}
+      >
+        <span class="toolbar-settings-item-check" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={prefs.subagentFallbackOnProviderFailure ? '' : 'opacity:0'}>
+            <polyline points="2.5,6.5 5,9 10.5,3.5" />
+          </svg>
+        </span>
+        <span class="toolbar-settings-item-label">Fallback on provider failure</span>
+      </button>
+      <div class="toolbar-settings-item-hint">
+        Retry on another model in the same bucket when a provider fails after exhausting its own retries (for example a timeout, connection error, rate limit, or server error). Failover only happens before visible output or tool execution, so work is not replayed unsafely.
+      </div>
+
       <UiGroupLabel label="Default providers" />
       <div class="toolbar-settings-item-hint">
         Sets the initial selection in each chat's subagent provider selector. Per-chat changes override these defaults. Only providers assigned to a model bucket are listed.

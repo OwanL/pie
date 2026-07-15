@@ -107,6 +107,11 @@ export interface SingleResult {
 	activityDetail?: string;
 	/** Epoch milliseconds at which this phase began. */
 	activitySince?: number;
+	/** Wall-clock lifecycle bounds used for stable total elapsed time in the
+	 * collapsed parent header. Unlike activitySince, startedAt never resets when
+	 * the child changes phase. */
+	startedAt?: number;
+	completedAt?: number;
 	/** Monotonically increasing per-child progress sequence. Incremented only for
 	 * credible child activity, allowing parents to distinguish real work from
 	 * duplicate `onUpdate` snapshots without relying on wall-clock timestamps. */

@@ -10,7 +10,7 @@ import { cx } from '../utils/cx';
 import { Tooltip } from '../components/tooltip';
 import { StackedAreaChart } from '../components/stacked-area-chart';
 import { Sparkline } from '../components/sparkline';
-import { colorFor } from '../components/chart-colors';
+import { colorsFor } from '../components/chart-colors';
 import { Num } from './num';
 
 /**
@@ -297,11 +297,12 @@ function dateToMs(date: string): number {
 // ── Rich tooltip building blocks ────────────────────────────────────────────
 
 function Legend({ items }: { items: { key: string; value: string }[] }): JSX.Element {
+  const colors = colorsFor(items.map((item) => item.key));
   return (
     <div class="rich-tooltip-legend">
       {items.map((it) => (
         <span class="rich-tooltip-legend-item" key={it.key}>
-          <span class="rich-tooltip-swatch" style={`background:${colorFor(it.key)}`} />
+          <span class="rich-tooltip-swatch" style={`background:${colors.get(it.key)}`} />
           <span>{it.key}</span>
           <span class="rich-tooltip-legend-val">{it.value}</span>
         </span>
@@ -334,7 +335,8 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.todayCost)}</span>
       </div>
       <div class="rich-tooltip-sub">{sub.join('  ·  ')}</div>
-      <StackedAreaChart points={s.todayCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatTimeOfDay} />
+      <StackedAreaChart points={s.todayCostSeries} mode="cumulative" formatY={formatCostAdaptive} formatX={formatTimeOfDay}
+        colorKeys={s.todayCostByProvider.map((p) => p.provider)} />
       {s.todayCostByProvider.length > 0 && (
         <Legend items={s.todayCostByProvider.map((p) => ({ key: p.provider, value: formatCostAdaptive(p.cost) }))} />
       )}
@@ -357,7 +359,8 @@ function weekCostTooltipNode(s: AggregateStats): string | JSX.Element {
         <span class="rich-tooltip-head-value">{formatCostAdaptive(s.weekCost)}</span>
       </div>
       <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
-      <StackedAreaChart points={weekPoints} mode="rate" formatY={formatCostAdaptive} formatX={formatDateShort} />
+      <StackedAreaChart points={weekPoints} mode="rate" formatY={formatCostAdaptive} formatX={formatDateShort}
+        colorKeys={s.weekCostByProvider.map((p) => p.provider)} />
       {s.weekCostByProvider.length > 0 && (
         <Legend items={s.weekCostByProvider.map((p) => ({ key: p.provider, value: formatCostAdaptive(p.cost) }))} />
       )}
@@ -374,7 +377,8 @@ function tokensTooltipNode(s: AggregateStats): JSX.Element {
         <span class="rich-tooltip-head-value">↑{formatCompactTokens(s.todayOutputTokens)}</span>
       </div>
       <div class="rich-tooltip-sub">↓{formatCompactTokens(s.todayInputTokens)} in  ·  ↑{formatCompactTokens(s.todayOutputTokens)} out</div>
-      <StackedAreaChart points={s.todayTokenSeries} mode="cumulative" formatY={formatCompactTokens} formatX={formatTimeOfDay} />
+      <StackedAreaChart points={s.todayTokenSeries} mode="cumulative" formatY={formatCompactTokens} formatX={formatTimeOfDay}
+        colorKeys={s.todayCostByProvider.map((p) => p.provider)} />
       {s.todayCostByProvider.length > 0 && (
         <Legend items={s.todayCostByProvider.map((p) => ({ key: p.provider, value: formatCompactTokens(p.outputTokens) }))} />
       )}
@@ -398,7 +402,8 @@ function throughputTooltipNode(s: AggregateStats, source: 'live' | 'today' | 'al
         <span class="rich-tooltip-head-value">{formatRate(source === 'live' ? s.liveTokensPerSecond : (s.todayTokensPerSecond > 0 ? s.todayTokensPerSecond : s.tokensPerSecond))} tok/s</span>
       </div>
       <div class="rich-tooltip-sub">{lines.join('\n')}</div>
-      <StackedAreaChart points={s.todayThroughputSeries} mode="rate" formatY={(n) => formatRate(n)} formatX={formatTimeOfDay} unit="tok/s" />
+      <StackedAreaChart points={s.todayThroughputSeries} mode="rate" formatY={(n) => formatRate(n)} formatX={formatTimeOfDay} unit="tok/s"
+        colorKeys={s.todayTokensPerSecondByProvider.map((p) => p.provider)} />
       {s.todayTokensPerSecondByProvider.length > 0 && (
         <Legend items={s.todayTokensPerSecondByProvider.map((p) => ({ key: p.provider, value: `${formatRate(p.tokensPerSecond)} tok/s` }))} />
       )}

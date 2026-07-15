@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isIdle, subagentPreviewTail } from '../../../../src/webview/panel/transcript/activity-tail-preview';
+import { installDom } from '../../../_helpers/dom';
+installDom();
+
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
+import {
+  CONTINUOUS_PREVIEW_MAX_CHARS,
+  isIdle,
+  mergeContinuousPreviewSource,
+  subagentPreviewTail,
+  TurnActivityTailBody,
+} from '../../../../src/webview/panel/transcript/activity-tail-preview';
 import type { SubagentSingleResult } from '../../../../src/shared/subagent-result';
 
 function result(overrides: Partial<SubagentSingleResult> & { agent: string; task: string }): SubagentSingleResult {
@@ -14,6 +25,52 @@ function result(overrides: Partial<SubagentSingleResult> & { agent: string; task
     ...rest,
   } as SubagentSingleResult;
 }
+
+test('continuous subagent preview appends source changes without clearing prior rows', () => {
+  let stream = mergeContinuousPreviewSource({ accumulated: '', segment: '' }, 'Inspecting the event path');
+  stream = mergeContinuousPreviewSource(stream, 'Inspecting the event path now');
+  stream = mergeContinuousPreviewSource(stream, '12 tests passed');
+  stream = mergeContinuousPreviewSource(stream, '');
+  assert.equal(stream.accumulated, 'Inspecting the event path now\n12 tests passed');
+});
+
+test('continuous subagent preview handles a bounded source tail sliding forward', () => {
+  let stream = mergeContinuousPreviewSource({ accumulated: '', segment: '' }, 'abcdef');
+  stream = mergeContinuousPreviewSource(stream, 'defghi');
+  assert.equal(stream.accumulated, 'abcdefghi');
+});
+
+test('continuous subagent preview bounds its retained animation history', () => {
+  let stream = mergeContinuousPreviewSource({ accumulated: '', segment: '' }, 'a'.repeat(19_000));
+  for (let i = 0; i < 10; i += 1) {
+    stream = mergeContinuousPreviewSource(stream, `${stream.segment.slice(-10_000)}${String(i).repeat(10_000)}`);
+  }
+  assert.ok(stream.accumulated.length <= CONTINUOUS_PREVIEW_MAX_CHARS);
+});
+
+test('TurnActivityTailBody continuous mode retains rows across an empty transition', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const makeTail = (sourceText?: string) => ({
+    kind: 'subagent' as const,
+    label: 'task',
+    inputLine: 'trace issue',
+    lines: sourceText ? [sourceText] : [],
+    sourceText,
+    truncated: false,
+    cursor: false,
+    reservedRows: 3,
+  });
+  try {
+    act(() => render(h(TurnActivityTailBody, { tail: makeTail('reasoning so far'), continuous: true }), container));
+    assert.match(container.textContent ?? '', /reasoning so far/);
+    act(() => render(h(TurnActivityTailBody, { tail: makeTail(), continuous: true }), container));
+    assert.match(container.textContent ?? '', /reasoning so far/);
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
 
 test('subagentPreviewTail shows streaming text for a running child', () => {
   const tail = subagentPreviewTail(
@@ -49,19 +106,20 @@ test('subagentPreviewTail shows live reasoning instead of a generating placehold
   assert.doesNotMatch(tail.lines.join(' '), /Generating/);
 });
 
-test('subagentPreviewTail shows active generation before visible text arrives', () => {
+test('subagentPreviewTail does not waste output rows before visible content arrives', () => {
   const tail = subagentPreviewTail(
     result({ agent: 'worker', task: 'fix tests', exitCode: -1, streaming: true }),
     3,
     true,
   );
   assert.ok(tail);
-  assert.deepEqual(tail.lines, ['Generating...']);
-  assert.equal(tail.cursor, true);
-  assert.equal(tail.reservedRows, 4); // header row + 3 content rows
+  assert.deepEqual(tail.lines, []);
+  assert.equal(tail.inputLine, 'fix tests');
+  assert.equal(tail.cursor, false);
+  assert.equal(tail.reservedRows, 1);
 });
 
-test('subagentPreviewTail shows running tools instead of pending', () => {
+test('subagentPreviewTail leaves tool-only lifecycle detail in the card header', () => {
   const tail = subagentPreviewTail(
     result({
       agent: 'worker',
@@ -77,9 +135,9 @@ test('subagentPreviewTail shows running tools instead of pending', () => {
     true,
   );
   assert.ok(tail);
-  assert.deepEqual(tail.lines, ['Running bash, read...']);
+  assert.deepEqual(tail.lines, []);
   assert.equal(tail.sourceText, undefined);
-  assert.equal(tail.cursor, true);
+  assert.equal(tail.cursor, false);
   assert.doesNotMatch(tail.lines.join(' '), /gpt-5/);
 });
 
@@ -138,26 +196,28 @@ test('subagentPreviewTail shows a running tool call before output arrives', () =
   assert.equal(tail.cursor, true);
 });
 
-test('subagentPreviewTail reserves pending for a genuinely queued child', () => {
+test('subagentPreviewTail keeps only the task row for a genuinely queued child', () => {
   const tail = subagentPreviewTail(
     result({ agent: 'worker', task: 'fix tests', exitCode: -1, activityPhase: 'queued' }),
     2,
     true,
   );
   assert.ok(tail);
-  assert.deepEqual(tail.lines, ['pending...']);
+  assert.deepEqual(tail.lines, []);
   assert.equal(tail.cursor, false);
+  assert.equal(tail.reservedRows, 1);
 });
 
-test('subagentPreviewTail shows provider lifecycle activity', () => {
+test('subagentPreviewTail leaves provider lifecycle activity in the card header', () => {
   const tail = subagentPreviewTail(
     result({ agent: 'worker', task: 'fix tests', exitCode: -1, activityPhase: 'waiting_provider' }),
     2,
     true,
   );
   assert.ok(tail);
-  assert.deepEqual(tail.lines, ['Waiting for provider...']);
-  assert.equal(tail.cursor, true);
+  assert.deepEqual(tail.lines, []);
+  assert.equal(tail.cursor, false);
+  assert.equal(tail.reservedRows, 1);
 });
 
 test('subagentPreviewTail keeps the task header for completed children', () => {

@@ -100,6 +100,113 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
   assert.equal(invalidPhase.classification, 'malformed');
 });
 
+test('terminal repair checkpoints may use one-shot transport headroom beyond the active checkpoint budget', () => {
+  const state = apply(createEmptyLivePipelineState(), start()).state;
+  const owner = state.turnsBySession[base.sessionPath]!;
+  const terminal = {
+    id: 'terminal', role: 'assistant' as const, createdAt: 'now',
+    markdown: 'x'.repeat(3 * 1024 * 1024), status: 'completed' as const, durableEntryId: 'terminal-entry',
+  };
+  const checkpoint: LiveTurnCheckpoint = {
+    protocolVersion: 4,
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    attemptId: base.attemptId,
+    checkpointSeq: 1,
+    phase: owner.phase,
+    turn: { ...owner, checkpointSeq: 1 },
+    tools: [],
+    pendingExtensionUiRequestIds: [],
+    terminal,
+  };
+
+  assert.ok(Buffer.byteLength(JSON.stringify(checkpoint), 'utf8') > 2 * 1024 * 1024);
+  assert.equal(applyLiveTurnCheckpoint(state, checkpoint).classification, 'applied');
+});
+
+test('checkpoint repair preserves richer settled-tool details already received by the host', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-1',
+    parentExecutionId: null, rootExecutionId: 'execution-1', toolCallId: 'tool-1',
+    name: 'read', input: { path: '/full/path' }, startedAt: 1_100,
+  }).state;
+  state = apply(state, {
+    ...base, kind: 'tool.terminal', seq: 3, executionId: 'execution-1', status: 'completed',
+    result: { kind: 'text', tail: 'full visible result', omittedChars: 0 }, durableEntryId: 'entry-1',
+  }).state;
+  const owner = state.turnsBySession[base.sessionPath]!;
+  const existingTool = state.toolsByExecutionId['execution-1']!;
+  const repaired = applyLiveTurnCheckpoint(state, {
+    protocolVersion: 4,
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    attemptId: base.attemptId,
+    checkpointSeq: 3,
+    phase: owner.phase,
+    turn: { ...owner, checkpointSeq: 3 },
+    tools: [{
+      ...existingTool,
+      immutableInput: { liveCompacted: true },
+      terminal: {
+        ...existingTool.terminal!,
+        result: { kind: 'generic', summary: 'compacted', liveCompacted: true },
+      },
+    }],
+    pendingExtensionUiRequestIds: [],
+  });
+
+  assert.equal(repaired.classification, 'applied');
+  assert.deepEqual(repaired.state.toolsByExecutionId['execution-1']?.immutableInput, { path: '/full/path' });
+  assert.deepEqual(repaired.state.toolsByExecutionId['execution-1']?.terminal?.result, {
+    kind: 'text', tail: 'full visible result', omittedChars: 0,
+  });
+});
+
+test('projection places queued follow-ups after the active turn at their delivery boundary', () => {
+  const state = apply(createEmptyLivePipelineState(), start()).state;
+  const view = projectTranscriptView([
+    {
+      id: 'user-1', role: 'user', createdAt: new Date(800).toISOString(),
+      markdown: 'initial prompt', status: 'completed',
+    },
+    {
+      id: 'follow-up-1', role: 'user', createdAt: new Date(1_000).toISOString(),
+      markdown: 'first follow-up', status: 'queued',
+    },
+    {
+      id: 'system-1', role: 'system', createdAt: new Date(1_050).toISOString(),
+      markdown: 'durable event', status: 'completed',
+    },
+    {
+      id: 'follow-up-2', role: 'user', createdAt: new Date(1_100).toISOString(),
+      markdown: 'second follow-up', status: 'queued',
+    },
+  ], state, base.sessionPath);
+
+  assert.deepEqual(view.messages.map((message) => message.id), [
+    'user-1', 'system-1', 'message-1', 'follow-up-1', 'follow-up-2',
+  ]);
+  assert.equal(view.activeTurn?.id, 'message-1');
+});
+
+test('projection preserves durable ordering when there is no active turn', () => {
+  const durable = [
+    {
+      id: 'follow-up-1', role: 'user' as const, createdAt: new Date(1_000).toISOString(),
+      markdown: 'queued follow-up', status: 'queued' as const,
+    },
+    {
+      id: 'assistant-1', role: 'assistant' as const, createdAt: new Date(1_100).toISOString(),
+      markdown: 'completed response', status: 'completed' as const,
+    },
+  ];
+
+  const view = projectTranscriptView(durable, createEmptyLivePipelineState(), base.sessionPath);
+  assert.deepEqual(view.messages.map((message) => message.id), ['follow-up-1', 'assistant-1']);
+  assert.equal(view.activeTurn, null);
+});
+
 test('projected live tool progress advances commit identity without hashing preview payloads', () => {
   let state = apply(createEmptyLivePipelineState(), start()).state;
   state = apply(state, {

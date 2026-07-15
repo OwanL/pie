@@ -9,7 +9,7 @@ import type {
 import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs';
 import type { SdkModule } from './sdk';
 import type { SessionContext } from './server-types';
-import { loadSubagentProfiles } from './subagent-profiles';
+import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
 import { backendTrace } from './diag';
@@ -175,7 +175,7 @@ export function listAvailableModels(context?: SessionContext, agentDir?: string)
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,
       };
-      const profile = profiles.get(model.id);
+      const profile = findSubagentProfile(profiles, model.provider, model.id);
       if (profile) info.subagent = profile;
       return info;
     });

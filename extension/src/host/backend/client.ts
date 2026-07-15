@@ -89,6 +89,7 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'app.ping': 10_000,
   'diagnostics.livePipeline.setEnabled': 5_000,
   'message.send': 10_000,
+  'message.compact': 300_000,
   'message.interrupt': 15_000,
   'message.clearQueue': 10_000,
   'extension_ui.response': 10_000,

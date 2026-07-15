@@ -108,6 +108,7 @@ test('background (non-active) session is measured continuously: switching back d
 
   const bgRate = service.getRate('/a');
   assert.equal(bgRate.state, 'generating');
+  assert.equal(bgRate.liveOutputTokens, 200, 'current unreported output is exposed for live analytics');
   const rate = Number.parseFloat(bgRate.label.replace(/[^\d.]/g, ''));
   assert.ok(rate >= 90 && rate <= 110, `expected ~100 tok/s for background session, got ${rate}`);
 
@@ -218,6 +219,30 @@ test('onActiveRateChanged fires only when the active session display changes', (
   service.tick(BASE_NOW + 2000);     // paused -> generating: change
   service.tick(BASE_NOW + 3000);     // generating, rate may fluctuate -> change(s)
   assert.ok(changeCount >= 2, `expected at least 2 active-rate change notifications, got ${changeCount}`);
+});
+
+test('onRatesTick fires for aggregate-relevant changes but not unchanged idle/tool ticks', () => {
+  const arch = makeArchState({
+    openTabs: ['/a'],
+    running: ['/a'],
+    active: '/a',
+    transcripts: { '/a': [streamingMessage('a1', 0)] },
+    runSummaries: { '/a': runSummary('r1') },
+  });
+  let aggregateTicks = 0;
+  const service = new TokenRateService({
+    getArchState: () => arch,
+    onActiveRateChanged: () => {},
+    onRatesTick: () => { aggregateTicks += 1; },
+  });
+
+  service.tick(BASE_NOW);
+  assert.equal(aggregateTicks, 1);
+  service.tick(BASE_NOW + 200);
+  assert.equal(aggregateTicks, 1, 'unchanged paused state does not rebuild aggregate charts');
+  arch.transcript.bySession['/a'] = [streamingMessage('a1', 400)];
+  service.tick(BASE_NOW + 400);
+  assert.equal(aggregateTicks, 2, 'new live output requests a fast aggregate refresh');
 });
 
 test('a closed session is dropped from the measured set', () => {

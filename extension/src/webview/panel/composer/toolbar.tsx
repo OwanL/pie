@@ -15,6 +15,7 @@ import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
 import { ComposerSettingsMenu } from './settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
+import { CompactionButton } from './compaction-button';
 
 interface ComposerToolbarStatus {
   text: string;
@@ -24,6 +25,7 @@ interface ComposerToolbarStatus {
 
 interface ComposerToolbarProps {
   sessionPath: string | null;
+  busy: boolean;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pruningCatalog: PruningCatalog;
@@ -38,6 +40,7 @@ interface ComposerToolbarProps {
   availableModels: ModelInfo[];
   systemPrompts: SystemPromptEntry[];
   selectedModel: string;
+  selectedProvider?: string;
   selectedLevel: ThinkingLevel;
   supportsReasoning: boolean;
   contextIndicator: { label: string | null; ariaLabel: string; severity: string | null } | null;
@@ -46,10 +49,12 @@ interface ComposerToolbarProps {
   tokenRateIndicator: TokenRateIndicatorState;
   runStatus: ComposerToolbarStatus | null;
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
+  onCompact: () => void;
 }
 
 export function ComposerToolbar({
   sessionPath,
+  busy,
   prefs,
   pruningSettings,
   pruningCatalog,
@@ -64,6 +69,7 @@ export function ComposerToolbar({
   availableModels,
   systemPrompts,
   selectedModel,
+  selectedProvider,
   selectedLevel,
   supportsReasoning,
   contextIndicator,
@@ -72,15 +78,23 @@ export function ComposerToolbar({
   tokenRateIndicator,
   runStatus,
   onModelChange,
+  onCompact,
 }: ComposerToolbarProps) {
   const filteredModels = useMemo(
     () => availableModels.filter(
-      (m) => prefs.providerToggles[m.provider] !== false || m.id === selectedModel,
+      (m) => prefs.providerToggles[m.provider] !== false
+        || (m.id === selectedModel && (!selectedProvider || m.provider === selectedProvider)),
     ),
-    [availableModels, prefs.providerToggles, selectedModel],
+    [availableModels, prefs.providerToggles, selectedModel, selectedProvider],
   );
-  const modelEntries = useMemo(() => orderModelsForPicker(filteredModels), [filteredModels]);
-  const selectedModelEntry = modelEntries.find((entry) => entry.model.id === selectedModel) ?? null;
+  const modelEntries = useMemo(
+    () => orderModelsForPicker(filteredModels, { useSubagentEligibility: false }),
+    [filteredModels],
+  );
+  const selectedModelEntry = modelEntries.find(
+    (entry) => entry.model.id === selectedModel
+      && (!selectedProvider || entry.model.provider === selectedProvider),
+  ) ?? null;
   const fallbackModelLabel = modelEntries[0]?.selectedLabel ?? '';
   const selectedModelLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
   return (
@@ -91,7 +105,7 @@ export function ComposerToolbar({
         {filteredModels.length > 0 ? (
           <ModelPicker
             label={selectedModelLabel}
-            value={selectedModel}
+            value={selectedProvider ? `${selectedProvider}/${selectedModel}` : selectedModel}
             ariaLabel="Model"
             title="Select model"
             entries={modelEntries}
@@ -137,6 +151,8 @@ export function ComposerToolbar({
           availableModels={availableModels}
           onSetPrefs={onSetPrefs}
         />
+
+        <CompactionButton disabled={!sessionPath || busy} onCompact={onCompact} />
       </div>
 
       <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">

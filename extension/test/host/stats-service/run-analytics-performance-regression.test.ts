@@ -493,6 +493,97 @@ test('AggregateStatsService includes live open-run tokens and counts without re-
   });
 });
 
+test('AggregateStatsService refreshLive updates estimated streaming tokens and charts without slow polling', async () => {
+  await withTempDir(async (storageDir) => {
+    const now = new Date();
+    let liveOutputTokens = 100;
+    let persistedQueries = 0;
+    let backendPolls = 0;
+    const openRun = {
+      ...validSnapshot('live-estimate', now.toISOString()),
+      sessionPath: '/live',
+      status: 'open',
+      finalizedAt: undefined,
+      outputTokens: 1_000,
+    } as RunSnapshot;
+    const service = new AggregateStatsService({
+      getArchState: () => ({
+        sessions: { runningSessionPaths: ['/live'], openTabPaths: ['/live'] },
+      }) as never,
+      statsService: {
+        getStorageDir: () => storageDir,
+        queryPersistedRunAnalytics: async () => {
+          persistedQueries += 1;
+          return { completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] };
+        },
+        getOpenRuns: () => [openRun],
+        getPendingCompletedRuns: () => [],
+      } as never,
+      tokenRateService: {
+        getRates: () => ({
+          '/live': { state: 'generating', rate: 20, liveOutputTokens },
+        }),
+      } as never,
+      getAgentDir: () => null,
+      fetchWarmBashStats: async () => { backendPolls += 1; return EMPTY_WARM_BASH_STATS; },
+      fetchProviderGateStats: async () => { backendPolls += 1; return EMPTY_PROVIDER_GATE_STATS; },
+      onChanged: () => undefined,
+    });
+
+    await (service as unknown as { recompute(): Promise<void> }).recompute();
+    assert.equal(service.getAggregateStats().todayOutputTokens, 1_100);
+    const pollsAfterInitialCompute = backendPolls;
+
+    liveOutputTokens = 250;
+    service.refreshLive();
+    const refreshed = service.getAggregateStats();
+    assert.equal(refreshed.todayOutputTokens, 1_250);
+    assert.equal(refreshed.totalOutputTokens, 1_250);
+    const finalPoint = refreshed.todayTokenSeries.at(-1);
+    assert.equal(finalPoint?.byProvider.reduce((sum, segment) => sum + segment.value, 0), 1_250,
+      'the cumulative token graph advances with the live estimate');
+    assert.equal(persistedQueries, 1, 'fast refresh never reads completed history');
+    assert.equal(backendPolls, pollsAfterInitialCompute, 'fast refresh never polls backend metrics');
+  });
+});
+
+test('AggregateStatsService refreshLive retains a just-persisted run until the completed layer refreshes', async () => {
+  await withTempDir(async (storageDir) => {
+    const now = new Date().toISOString();
+    let pendingRuns = [{
+      ...validSnapshot('pending-to-persisted', now),
+      finalizedAt: now,
+      outputTokens: 900,
+    } as RunSnapshot];
+    const service = new AggregateStatsService({
+      getArchState: () => ({ sessions: { runningSessionPaths: [], openTabPaths: [] } }) as never,
+      statsService: {
+        getStorageDir: () => storageDir,
+        queryPersistedRunAnalytics: async () => ({
+          completedRuns: [], openRuns: [], outcomes: [], agentReviews: [],
+        }),
+        getOpenRuns: () => [],
+        getPendingCompletedRuns: () => pendingRuns,
+      } as never,
+      tokenRateService: { getRates: () => ({}) } as never,
+      getAgentDir: () => null,
+      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+      mtimeFn: (_path, cb) => cb(null, { mtimeMs: 100 }),
+    });
+
+    await (service as unknown as { recompute(): Promise<void> }).recompute();
+    assert.equal(service.getAggregateStats().totalOutputTokens, 900);
+    pendingRuns = [];
+    (service as unknown as { inFlight: boolean }).inFlight = true;
+    service.refreshLive();
+    (service as unknown as { inFlight: boolean }).inFlight = false;
+    assert.equal(service.getAggregateStats().totalOutputTokens, 900,
+      'fast refresh must not publish a transient aggregate dip');
+  });
+});
+
 test('AggregateStatsService cache keys on snapshots only — checkpoint churn does not reread completed history', async () => {
   await withTempDir(async (storageDir) => {
     let persistedQueries = 0;
@@ -1134,6 +1225,74 @@ test('retains the newest records in chronological order', async () => {
     assert.equal(lines.length, 2);
     assert.equal(JSON.parse(lines[0]!).runId, 'r4');
     assert.equal(JSON.parse(lines[1]!).runId, 'r5');
+  });
+});
+
+test('history retention scans each under-limit file once and tracks later appends incrementally', async () => {
+  await withTempDir(async (root) => {
+    let historyReads = 0;
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: root,
+      workspaceId: 'retention-read-fast-path',
+      now: () => new Date(),
+      serializeSessions: () => ({}),
+      maxRunHistoryEntries: 100,
+      maxRunHistoryBytes: 100_000,
+      autoExportIntervalMs: 60_000,
+      readFile: (async (filePath: Parameters<typeof fs.readFile>[0], encoding: BufferEncoding) => {
+        historyReads += 1;
+        return fs.readFile(filePath, encoding);
+      }) as typeof fs.readFile,
+    });
+    await storage.start();
+
+    await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
+    assert.equal(historyReads, 3, 'the first pass establishes metadata for all history files');
+    await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
+    assert.equal(historyReads, 3, 'unchanged under-limit files are not read again');
+
+    const t = new Date().toISOString();
+    storage.schedulePersist(validSnapshot('tracked-append', t), outcome('tracked-append', t));
+    await storage.flush();
+    assert.equal(historyReads, 3, 'known valid appends update retention metadata without rescanning files');
+    await storage.dispose();
+  });
+});
+
+test('a partially written failed append invalidates retention metadata before the next prune', async () => {
+  await withTempDir(async (root) => {
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: root,
+      workspaceId: 'partial-append-retention',
+      now: () => new Date(),
+      serializeSessions: () => ({}),
+      maxRunHistoryEntries: 1,
+      maxRunHistoryBytes: 100_000,
+      autoExportIntervalMs: 60_000,
+      appendFile: (async (file: Parameters<typeof fs.appendFile>[0], data: string | Uint8Array) => {
+        await fs.appendFile(file, data);
+        throw new Error('append acknowledgement lost');
+      }) as typeof fs.appendFile,
+    });
+    await storage.start();
+    await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
+
+    const t = new Date().toISOString();
+    const chunk = `${JSON.stringify(outcome('partial-1', t))}\n${JSON.stringify(outcome('partial-2', t))}\n`;
+    await assert.rejects(
+      (storage as unknown as {
+        appendHistoryChunk(fileName: string, chunk: string, entryCount: number): Promise<void>;
+      }).appendHistoryChunk('outcome-history.jsonl', chunk, 2),
+      /append acknowledgement lost/,
+    );
+    await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
+
+    const retained = (await fs.readFile(path.join(storage.getStorageDir(), 'outcome-history.jsonl'), 'utf8'))
+      .trim()
+      .split('\n');
+    assert.equal(retained.length, 1);
+    assert.equal(JSON.parse(retained[0]!).runId, 'partial-2');
+    await storage.dispose();
   });
 });
 

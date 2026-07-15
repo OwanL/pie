@@ -38,6 +38,7 @@ function useTranscriptRows({
   systemPrompts,
   transcriptWindow,
   busy,
+  liveTurnPhase,
   pruningResult,
   prefs,
   pruningSettings,
@@ -48,6 +49,7 @@ function useTranscriptRows({
   systemPrompts: SystemPromptEntry[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
   pruningResult: PruningResult | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
@@ -61,7 +63,8 @@ function useTranscriptRows({
     pruningSettings,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-  }), [busy, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel]);
+    liveTurnPhase,
+  }), [busy, transcript, prefs, pruningSettings, pendingAssistantModelId, pendingAssistantThinkingLevel, liveTurnPhase]);
 
   const rows = useMemo(() => buildTranscriptRows({
     transcript,
@@ -192,7 +195,7 @@ interface VirtualRowProps {
   isLoadingOlder: boolean;
   isLoadingNewer: boolean;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
@@ -285,6 +288,7 @@ export function TranscriptVirtualList({
   transcript,
   transcriptWindow,
   busy,
+  liveTurnPhase,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -308,6 +312,7 @@ export function TranscriptVirtualList({
     systemPrompts,
     transcriptWindow,
     busy,
+    liveTurnPhase,
     pruningResult,
     prefs,
     pruningSettings,

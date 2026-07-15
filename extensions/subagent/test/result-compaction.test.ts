@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compactSingleResult, MAX_SUBAGENT_OUTPUT_CHARS } from "../src/result-compaction.js";
+import { compactSingleResult } from "../src/result-compaction.js";
 import type { SingleResult } from "../types.js";
 
 function result(messages: any[], over: Partial<SingleResult> = {}): SingleResult {
@@ -16,51 +16,50 @@ function result(messages: any[], over: Partial<SingleResult> = {}): SingleResult
 	};
 }
 
-test("compactSingleResult stores final prose once and preserves modifying tool calls", () => {
+test("terminalization preserves complete reasoning, tool inputs/results, and final prose", () => {
 	const original = result([
 		{
 			role: "assistant",
 			content: [
-				{ type: "thinking", thinking: "private reasoning".repeat(1_000) },
-				{ type: "text", text: "intermediate ".repeat(1_000) },
+				{ type: "thinking", thinking: "private reasoning" },
+				{ type: "text", text: "intermediate" },
 				{ type: "toolCall", id: "edit-1", name: "edit", arguments: { path: "/repo/a.ts", oldText: "a", newText: "b" } },
 			],
 		},
-		{ role: "toolResult", toolCallId: "edit-1", toolName: "edit", content: [{ type: "text", text: "ok" }] },
+		{ role: "toolResult", toolCallId: "edit-1", toolName: "edit", content: [{ type: "text", text: "complete tool output" }] },
 		{ role: "assistant", content: [{ type: "text", text: "final answer" }] },
 	]);
 
-	const compacted = compactSingleResult(original);
-	assert.equal(compacted.finalOutput, "final answer");
-	assert.equal(compacted.transcriptCompacted, true);
-	assert.equal(JSON.stringify(compacted.messages).includes("private reasoning"), false);
-	assert.equal(JSON.stringify(compacted.messages).includes("final answer"), false, "final prose is not duplicated in messages");
-	const encoded = JSON.stringify(compacted.messages);
-	assert.match(encoded, /\"name\":\"edit\"/);
-	assert.match(encoded, /\/repo\/a\.ts/);
-	assert.equal(encoded.includes("oldText"), false);
-	assert.deepEqual(compacted.fileChanges, [{
-		path: "/repo/a.ts", kind: "modified", description: "edited", additions: 1, deletions: 1,
-	}]);
-	assert.equal(original.messages[2].content[0].text, "final answer", "live result is not mutated");
+	const terminal = compactSingleResult(original);
+	const encoded = JSON.stringify(terminal.messages);
+	assert.equal(terminal.finalOutput, "final answer");
+	assert.equal(terminal.transcriptCompacted, false);
+	assert.match(encoded, /private reasoning/);
+	assert.match(encoded, /intermediate/);
+	assert.match(encoded, /oldText/);
+	assert.match(encoded, /complete tool output/);
+	assert.match(encoded, /final answer/);
 });
 
-test("compactSingleResult bounds final output and terminalizes live-only state", () => {
-	const compacted = compactSingleResult(result([], {
+test("terminalization clears only live-only fields and does not cap output", () => {
+	const longOutput = "x".repeat(100_000);
+	const terminal = compactSingleResult(result([], {
 		streaming: true,
-		streamingText: "x".repeat(MAX_SUBAGENT_OUTPUT_CHARS + 100),
+		streamingText: longOutput,
 		streamingReasoning: "reasoning",
 		runningTools: ["bash"],
+		finalOutput: longOutput,
 	}));
-	assert.ok((compacted.finalOutput?.length ?? 0) < MAX_SUBAGENT_OUTPUT_CHARS + 100);
-	assert.match(compacted.finalOutput ?? "", /chars omitted/);
-	assert.equal(compacted.streaming, false);
-	assert.equal(compacted.streamingText, undefined);
-	assert.equal(compacted.streamingReasoning, undefined);
+	assert.equal(terminal.finalOutput, longOutput);
+	assert.equal(terminal.streaming, false);
+	assert.equal(terminal.streamingText, undefined);
+	assert.equal(terminal.streamingReasoning, undefined);
+	assert.deepEqual(terminal.runningTools, []);
+	assert.equal(typeof terminal.completedAt, "number");
 });
 
-test("compactSingleResult recursively compacts nested subagent details", () => {
-	const child = result([{ role: "assistant", content: [{ type: "text", text: "nested final" }] }]);
+test("terminalization recursively preserves nested subagent details", () => {
+	const child = result([{ role: "assistant", content: [{ type: "thinking", thinking: "nested reasoning" }, { type: "text", text: "nested final" }] }]);
 	const parent = result([
 		{
 			role: "toolResult",
@@ -72,9 +71,10 @@ test("compactSingleResult recursively compacts nested subagent details", () => {
 		{ role: "assistant", content: [{ type: "text", text: "parent final" }] },
 	]);
 
-	const compacted = compactSingleResult(parent) as any;
-	const nested = compacted.messages[0].details.results[0];
+	const terminal = compactSingleResult(parent) as any;
+	const nested = terminal.messages[0].details.results[0];
 	assert.equal(nested.finalOutput, "nested final");
-	assert.equal(nested.transcriptCompacted, true);
-	assert.equal(JSON.stringify(nested.messages).includes("nested final"), false);
+	assert.equal(nested.transcriptCompacted, false);
+	assert.match(JSON.stringify(nested.messages), /nested reasoning/);
+	assert.match(JSON.stringify(nested.messages), /nested final/);
 });

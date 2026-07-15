@@ -159,6 +159,59 @@ test('QueuedDelivered: a correlated out-of-order delivery promotes only its exac
   assert.deepEqual(duplicate.state, out.state, 'a duplicate correlated delivery must not fall back to FIFO');
 });
 
+// ─── EditQueued: replace the backend queue without interrupt/truncate ────────
+
+test('EditQueued preserves queue order and updates only after ReplaceQueueResult succeeds', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  out = reducer(out.state, sendResult('c1', true, true));
+  out = reducer(out.state, sendCmd('c2', SESSION, 'second'));
+  out = reducer(out.state, sendResult('c2', true, true));
+  out = reducer(out.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'EditQueued', corrId: 'eq', sessionPath: SESSION, messageId: 'local:c1',
+      text: 'edited first', inputs: [], composedText: 'edited first', userParts: [{ kind: 'text', text: 'edited first' }],
+    },
+  });
+
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.markdown, 'first', 'waits for backend acknowledgement');
+  const effect = out.effects.find((entry) => entry.kind === 'ReplaceQueueRpc');
+  assert.ok(effect && effect.kind === 'ReplaceQueueRpc');
+  assert.deepEqual(effect.messages.map((message) => [message.localId, message.text]), [
+    ['local:c1', 'edited first'], ['local:c2', 'second'],
+  ]);
+  assert.deepEqual(effect.fallbackMessages.map((message) => message.text), ['first', 'second']);
+  assert.deepEqual(out.state.sessions.runningSessionPaths, [SESSION], 'does not interrupt the current turn');
+
+  out = reducer(out.state, {
+    kind: 'ReplaceQueueResult', corrId: 'eq', sessionPath: SESSION, messageId: 'local:c1', ok: true,
+    text: 'edited first', inputs: [], composedText: 'edited first', userParts: [{ kind: 'text', text: 'edited first' }],
+  });
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.markdown, 'edited first');
+  assert.equal(out.state.pending.promoted['c1']?.text, 'edited first');
+});
+
+test('ReplaceQueueResult updates an already-delivered row and catastrophic restore failure clears stale queue state', () => {
+  let out = reducer(busyState(), sendCmd('c1', SESSION, 'first'));
+  out = reducer(out.state, sendResult('c1', true, true));
+  out = reducer(out.state, queuedDelivered('edited first', 'local:c1'));
+  out = reducer(out.state, {
+    kind: 'ReplaceQueueResult', corrId: 'eq', sessionPath: SESSION, messageId: 'local:c1', ok: true,
+    text: 'edited first', inputs: [], composedText: 'edited first', userParts: [{ kind: 'text', text: 'edited first' }],
+  });
+  assert.equal(out.state.transcript.bySession[SESSION]?.[0]?.markdown, 'edited first');
+
+  out = reducer(out.state, sendCmd('c2', SESSION, 'second'));
+  out = reducer(out.state, sendResult('c2', true, true));
+  out = reducer(out.state, {
+    kind: 'ReplaceQueueResult', corrId: 'eq2', sessionPath: SESSION, messageId: 'local:c2', ok: false,
+    text: 'edited second', inputs: [], composedText: 'edited second', error: 'QUEUE_REPLACE_FAILED: restore failed',
+  });
+  assert.equal(out.state.transcript.bySession[SESSION]?.some((message) => message.status === 'queued'), false);
+  assert.equal(out.state.pending.promoted['c2'], undefined);
+  assert.match(out.state.settings.notice ?? '', /were cleared/);
+});
+
 // ─── ClearQueue command: remove queued messages + ClearQueueRpc ──────────────
 
 test('ClearQueue command: removes queued transcript messages, drops pending snapshots, emits ClearQueueRpc', () => {

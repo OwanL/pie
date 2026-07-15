@@ -224,8 +224,8 @@ export class SessionService implements vscode.Disposable {
    *  the ArchState model-switch transitions; the EffectRunner calls this on
    *  `SetModelRpc` success to record the (disk-persisting) model-config
    *  change in run analytics. */
-  onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel): void {
-    this.runObserver.onModelConfigChanged(sessionPath, modelId, thinkingLevel);
+  onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel, provider?: string): void {
+    this.runObserver.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
   async hydrateModelState(sessionPath: string): Promise<void> {

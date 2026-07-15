@@ -33,13 +33,12 @@ import { toErrorMessage } from './util/error-message';
  *
  * ## Refresh model
  *
- * A {@link RECOMPUTE_MS} interval refreshes the rollup. Completed runs and
- * their accumulation are cached by snapshot/pricing signatures; current runs
- * come directly from the in-memory tracker and are accumulated each tick. Thus
- * active sessions stay live without a persistence flush or historical walk.
- *
- * The live `tokensPerSecond` aggregate (sum of running sessions' rates) is read
- * from `TokenRateService.getRates()` each tick — cheap and always current.
+ * A {@link RECOMPUTE_MS} interval refreshes history and backend metrics.
+ * Completed runs are cached by snapshot/pricing signatures. Independently,
+ * TokenRateService signals aggregate-relevant changes every 200 ms; that path
+ * rebuilds only the small in-memory open-run layer and reuses completed history.
+ * Live throughput, counts, token totals, and charts therefore move during all
+ * active streams without polling disk/backend services at the fast cadence.
  *
  * Side-effectful (wall-clock + `setInterval` + disk reads) by design — it lives
  * outside the pure reducer, mirroring `TokenRateService`.
@@ -98,11 +97,14 @@ export class AggregateStatsService {
   private pricingCache: PricingCache | null = null;
   private lastDataSignature: DataSignature | null = null;
   private completedRunsCache: RunSnapshot[] = [];
+  private completedRunIds = new Set<string>();
   private completedAccumulator: AggregateStatsAccumulator | null = null;
   private completedAccumulatorKey: string | null = null;
   private completedLayer: PreparedAggregateStatsLayer | null = null;
   private completedLayerKey: string | null = null;
   private openAccumulator: AggregateStatsAccumulator | null = null;
+  private liveRunIds = new Set<string>();
+  private liveRevision = 0;
   private lastFinalizedDate: string | null = null;
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
@@ -134,6 +136,66 @@ export class AggregateStatsService {
     return this.cached;
   }
 
+  /**
+   * Refresh mutable open-run analytics from the token-rate service's 200 ms
+   * tick. This path is synchronous and bounded by the number of open runs: it
+   * never stats/reads history and never polls backend metrics.
+   */
+  refreshLive(): void {
+    this.liveRevision += 1;
+    if (this.completedLayer === null || this.lastFinalizedDate === null) return;
+
+    const archState = this.deps.getArchState();
+    const runningSessionPaths = archState.sessions.runningSessionPaths;
+    const openTabCount = archState.sessions.openTabPaths.length;
+    const ratesBySession = this.deps.tokenRateService.getRates();
+    const nowMs = (this.deps.now?.() ?? new Date()).getTime();
+    const currentDate = localDateString(nowMs);
+    if (currentDate !== this.lastFinalizedDate) {
+      void this.tick();
+      return;
+    }
+
+    const pricing = this.pricingCache?.map;
+    if (!pricing) return;
+    const openRuns = this.deps.statsService.getOpenRuns();
+    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
+    const nextLiveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
+    // A run that just moved pending → persisted is not in the cached completed
+    // layer until the slow mtime refresh lands. Keep the last good aggregate
+    // instead of briefly dropping the whole run from every total/chart.
+    for (const runId of this.liveRunIds) {
+      if (!nextLiveRunIds.has(runId) && !this.completedRunIds.has(runId)) {
+        void this.tick();
+        return;
+      }
+    }
+    const nextOpenAccumulator = this.buildOpenAccumulator(
+      pricing,
+      ratesBySession,
+      openRuns,
+      pendingCompletedRuns,
+    );
+    this.deps.onAccumulatorBuilt?.('open', openRuns.length + pendingCompletedRuns.length);
+    this.openAccumulator = nextOpenAccumulator;
+    this.liveRunIds = nextLiveRunIds;
+
+    const next = finalizeAggregateStatsLayers(
+      this.completedLayer,
+      nextOpenAccumulator,
+      nowMs,
+      runningSessionPaths,
+      ratesBySession,
+      openTabCount,
+    );
+    next.warmBash = this.cached.warmBash;
+    next.providerGate = this.cached.providerGate;
+    if (!aggregateStatsEqual(this.cached, next)) {
+      this.cached = next;
+      this.deps.onChanged();
+    }
+  }
+
   private async tick(): Promise<void> {
     if (this.inFlight) return;
     this.inFlight = true;
@@ -153,6 +215,7 @@ export class AggregateStatsService {
   }
 
   private async recompute(): Promise<void> {
+    const liveRevisionAtStart = this.liveRevision;
     const archState = this.deps.getArchState();
     const runningSessionPaths = archState.sessions.runningSessionPaths;
     const openTabCount = archState.sessions.openTabPaths.length;
@@ -173,10 +236,10 @@ export class AggregateStatsService {
     if (!completedDataUnchanged) {
       const { completedRuns } = await this.deps.statsService.queryPersistedRunAnalytics();
       this.completedRunsCache = completedRuns;
+      this.completedRunIds = new Set(completedRuns.map((run) => run.runId));
       this.lastDataSignature = dataSignature;
     }
 
-    const completedRunIds = new Set(this.completedRunsCache.map((run) => run.runId));
     const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
 
     const pricing = this.loadPricingCached();
@@ -201,22 +264,20 @@ export class AggregateStatsService {
 
     // Live accumulation is intentionally rebuilt every tick from only the
     // small mutable set plus authoritative finalized snapshots awaiting append.
-    // Historical runs are not walked when an open run changes.
-    const effectiveOpenById = new Map<string, RunSnapshot>();
-    for (const run of openRuns) {
-      if (!completedRunIds.has(run.runId) && !pendingRunIds.has(run.runId)) {
-        effectiveOpenById.set(run.runId, run);
-      }
-    }
-    // Pending finalized snapshots are authoritative until their append lands,
-    // including when a stale snapshot with the same runId is already persisted.
-    for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
-    const effectiveOpenRuns = [...effectiveOpenById.values()];
-    const nextOpenAccumulator = accumulateAggregateStats(effectiveOpenRuns, pricing.map);
-    this.deps.onAccumulatorBuilt?.('open', effectiveOpenRuns.length);
+    // Historical runs are not walked when an open run changes. While a turn is
+    // streaming, add its tokenizer estimate; provider-reported usage replaces
+    // the estimate as soon as the turn/tool completes.
+    const nextOpenAccumulator = this.buildOpenAccumulator(
+      pricing.map,
+      ratesBySession,
+      openRuns,
+      pendingCompletedRuns,
+    );
+    this.deps.onAccumulatorBuilt?.('open', openRuns.length + pendingCompletedRuns.length);
     const openChanged = this.openAccumulator === null
       || !deepEqualValue(this.openAccumulator, nextOpenAccumulator);
     this.openAccumulator = nextOpenAccumulator;
+    this.liveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
 
     let warmBash = this.cached.warmBash;
     try {
@@ -272,10 +333,38 @@ export class AggregateStatsService {
       };
     }
 
+    // A token-rate tick may have refreshed live inputs while this slow path was
+    // awaiting disk/backend metrics. Never overwrite that newer projection
+    // with the stale rates/open-run snapshot captured above.
+    if (this.liveRevision !== liveRevisionAtStart) {
+      this.refreshLive();
+      return;
+    }
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
       this.deps.onChanged();
     }
+  }
+
+  private buildOpenAccumulator(
+    pricing: Map<string, ModelPricingRecord[]>,
+    ratesBySession: Record<string, TokenRateIndicatorState>,
+    openRuns: RunSnapshot[],
+    pendingCompletedRuns: RunSnapshot[],
+  ): AggregateStatsAccumulator {
+    const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
+    const effectiveOpenById = new Map<string, RunSnapshot>();
+    for (const run of openRuns) {
+      if (this.completedRunIds.has(run.runId) || pendingRunIds.has(run.runId)) continue;
+      const liveOutputTokens = ratesBySession[run.sessionPath]?.liveOutputTokens ?? 0;
+      effectiveOpenById.set(run.runId, liveOutputTokens > 0
+        ? { ...run, outputTokens: run.outputTokens + liveOutputTokens }
+        : run);
+    }
+    // Pending finalized snapshots are authoritative until their append lands,
+    // including when a stale snapshot with the same runId is already persisted.
+    for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
+    return accumulateAggregateStats([...effectiveOpenById.values()], pricing);
   }
 
   /** Mtime of the completed-run JSONL. The checkpoint (`open-runs.gen`) is
@@ -424,6 +513,10 @@ function deepEqualValue(a: unknown, b: unknown): boolean {
       || !deepEqualValue(aRecord[key], bRecord[key])) return false;
   }
   return true;
+}
+
+function liveRunIdSet(openRuns: RunSnapshot[], pendingCompletedRuns: RunSnapshot[]): Set<string> {
+  return new Set([...openRuns, ...pendingCompletedRuns].map((run) => run.runId));
 }
 
 function localDateString(ms: number): string {

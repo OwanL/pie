@@ -1,7 +1,7 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, mergeToolResultPruningSettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeToolResultPruningSettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
@@ -44,6 +44,13 @@ export function handleInterrupt(state: ArchState, cmd: Extract<Command, { kind: 
   return {
     state: nextState,
     effects: [{ kind: 'InterruptRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
+  };
+}
+
+export function handleCompact(state: ArchState, cmd: Extract<Command, { kind: 'Compact' }>): ReducerResult {
+  return {
+    state,
+    effects: [{ kind: 'CompactRpc', corrId: cmd.corrId, sessionPath: cmd.sessionPath }],
   };
 }
 
@@ -257,6 +264,58 @@ export function handleSend(state: ArchState, cmd: Extract<Command, { kind: 'Send
         priorPruningMode: cmd.priorPruningMode,
       },
     ],
+  };
+}
+
+export function handleEditQueued(state: ArchState, cmd: Extract<Command, { kind: 'EditQueued' }>): ReducerResult {
+  const queuedMessages = (state.transcript.bySession[cmd.sessionPath] ?? []).filter(
+    (message) => message.role === 'user' && message.status === 'queued',
+  );
+  if (!queuedMessages.some((message) => message.id === cmd.messageId)) {
+    return { state, effects: [] };
+  }
+
+  const pendingFor = (localId: string) => Object.values(state.pending.ops).find(
+    (op) => op.queued && op.sessionPath === cmd.sessionPath && op.localId === localId,
+  ) ?? Object.values(state.pending.promoted).find(
+    (op) => op.queued && op.sessionPath === cmd.sessionPath && op.localId === localId,
+  );
+
+  const fallbackMessages = queuedMessages.map((message) => {
+    const pending = pendingFor(message.id);
+    return pending?.text !== undefined
+      ? { localId: message.id, text: pending.text, inputs: pending.inputs ?? [] }
+      : null;
+  });
+  if (fallbackMessages.some((message) => message === null)) {
+    return {
+      state,
+      effects: [{
+        kind: 'Log', corrId: cmd.corrId, level: 'error',
+        message: `Cannot edit queued message ${cmd.messageId}: queue metadata is incomplete`,
+      }],
+    };
+  }
+
+  const original = fallbackMessages as Array<{ localId: string; text: string; inputs: ComposerInput[] }>;
+  const messages = original.map((message) => message.localId === cmd.messageId
+    ? { localId: message.localId, text: cmd.text, inputs: cmd.inputs }
+    : message);
+
+  return {
+    state,
+    effects: [{
+      kind: 'ReplaceQueueRpc',
+      corrId: cmd.corrId,
+      sessionPath: cmd.sessionPath,
+      messageId: cmd.messageId,
+      text: cmd.text,
+      inputs: cmd.inputs,
+      composedText: cmd.composedText,
+      userParts: cmd.userParts,
+      messages,
+      fallbackMessages: original,
+    }],
   };
 }
 

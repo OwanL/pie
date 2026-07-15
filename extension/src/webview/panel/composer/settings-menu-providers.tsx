@@ -132,7 +132,7 @@ function ProviderConcurrencyControls({
             aria-label={`Header wait timeout for ${provider}`}
           />
           <div class="toolbar-settings-item-hint">
-            Max seconds to wait for upstream response headers. 0 = gate default (120s).
+            Max seconds to wait for upstream response headers. 0 = provider default.
           </div>
         </div>
 

@@ -51,6 +51,8 @@ export function applyLiveSemanticEnvelope(
       requestId: event.requestId,
       sessionPath: event.sessionPath,
       canonicalMessageId: event.canonicalMessageId,
+      modelId: event.modelId,
+      thinkingLevel: event.thinkingLevel,
       seq: event.seq,
       checkpointSeq: 0,
       phase: 'preparing' as const,
@@ -168,14 +170,8 @@ export function applyLiveSemanticEnvelope(
   }
 
   if (event.kind === 'tool.started') {
-    if (owner.toolExecutionIds.length >= LIVE_PIPELINE_LIMITS.checkpointTools) {
-      return { classification: 'invalid', state: current, reason: 'tool capacity exceeded' };
-    }
-    const aggregateInputBytes = owner.toolExecutionIds.reduce((total, executionId) =>
-      total + jsonByteLength(current.toolsByExecutionId[executionId]?.immutableInput),
-    jsonByteLength(event.input));
-    if (aggregateInputBytes > LIVE_PIPELINE_LIMITS.toolInputAggregateBytes) {
-      return { classification: 'invalid', state: current, reason: 'aggregate tool input capacity exceeded' };
+    if (jsonByteLength(event.input) > LIVE_PIPELINE_LIMITS.toolInputBytes) {
+      return { classification: 'invalid', state: current, reason: 'tool input exceeds live byte limit' };
     }
     if (current.toolsByExecutionId[event.executionId]) {
       return { classification: 'invalid', state: current, reason: 'execution id already exists' };
@@ -244,13 +240,8 @@ export function applyLiveSemanticEnvelope(
       return queueOwnerPending(current, event);
     }
     if (!event.durableEntryId) return { classification: 'invalid', state: current, reason: 'terminal tool lacks durable evidence' };
-    const aggregateTerminalBytes = owner.toolExecutionIds.reduce((total, executionId) =>
-      total + (executionId === event.executionId
-        ? jsonByteLength(event.result)
-        : jsonByteLength(current.toolsByExecutionId[executionId]?.terminal?.result)),
-    0);
-    if (aggregateTerminalBytes > LIVE_PIPELINE_LIMITS.toolTerminalAggregateBytes) {
-      return { classification: 'invalid', state: current, reason: 'aggregate terminal result capacity exceeded' };
+    if (jsonByteLength(event.result) > LIVE_PIPELINE_LIMITS.previewBytes) {
+      return { classification: 'invalid', state: current, reason: 'terminal tool result exceeds live byte limit' };
     }
     const state = withTurn({
       ...current,

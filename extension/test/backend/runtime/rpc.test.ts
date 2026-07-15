@@ -166,6 +166,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
       },
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,
@@ -183,7 +184,7 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 });
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
-  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
 });
 
 test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
@@ -196,6 +197,7 @@ test('validateRuntimePrefsSet accepts a subagentBuckets patch', () => {
       extensionToggles: {},
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,
@@ -220,6 +222,7 @@ test('validateRuntimePrefsSet allows partial subagentBuckets and drops missing k
       extensionToggles: {},
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,
@@ -260,6 +263,7 @@ test('validateRuntimePrefsSet accepts a subagentNestedAllowedBuckets patch', () 
       extensionToggles: {},
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,
@@ -284,6 +288,7 @@ test('validateRuntimePrefsSet allows partial subagentNestedAllowedBuckets and de
       extensionToggles: {},
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,
@@ -322,6 +327,7 @@ test('validateRuntimePrefsSet accepts a subagentDropTools string array', () => {
       extensionToggles: {},
       subagentAlwaysParentModel: undefined,
       subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
       subagentMaxDepth: undefined,
       subagentMaxTreeSessions: undefined,
       subagentMaxInflight: undefined,

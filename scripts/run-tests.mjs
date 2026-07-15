@@ -10,12 +10,12 @@ import {
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
+import { resolveLocalTsx } from './run-test-files.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const reporterSpecifier = pathToFileURL(path.join(__dirname, 'test-reporter.mjs')).href;
-const npxCommand = 'npx';
 
 const PACKAGE_CONFIGS = [
   {
@@ -93,6 +93,13 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 90, branches: 77 },
   },
   {
+    id: 'copilot-model-discovery',
+    cwd: repoRoot,
+    testGlobs: ['extensions/copilot-model-discovery/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/copilot-model-discovery/src/**/*.ts'],
+    thresholds: { lines: 90, branches: 80 },
+  },
+  {
     id: 'web-access-compat',
     cwd: repoRoot,
     testGlobs: ['extensions/web-access-compat/test/**/*.test.ts'],
@@ -156,13 +163,16 @@ for (const config of PACKAGE_CONFIGS) {
 }
 
 function printHelp() {
-  console.log(`Usage: npm run test -- [--package <id>] [--fast] [--list]\n\n` +
+  console.log(`Usage: npm run test -- [--package <id>] [--fast] [--test-name-pattern <regex>] [-- <node:test args>]\n\n` +
     `Runs package tests in isolation with concise output and package-level coverage gates.\n\n` +
     `Options:\n` +
-    `  --package <id>   Run only the selected package. Repeatable.\n` +
-    `  --fast           Developer loop: parallel test files, skip coverage collection/gates.\n` +
-    `  --list           Print available package ids.\n` +
-    `  --help           Show this help.\n`);
+    `  --package <id>            Run only the selected package. Repeatable.\n` +
+    `  --fast                    Developer loop: parallel test files, skip coverage collection/gates.\n` +
+    `  --test-name-pattern <re>  Forward a name filter to node:test.\n` +
+    `  --list                    Print available package ids.\n` +
+    `  --help                    Show this help.\n` +
+    `  -- <args>                 Forward remaining arguments to node:test.\n\n` +
+    `For specific files, prefer: npm run test:file -- <repo-relative-test-file>...\n`);
 }
 
 function printPackageList() {
@@ -173,14 +183,24 @@ function printPackageList() {
   }
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const selected = [];
+  const testArgs = [];
   let listOnly = false;
   let helpOnly = false;
   let fast = false;
+  let forwarding = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (forwarding) {
+      testArgs.push(arg);
+      continue;
+    }
+    if (arg === '--') {
+      forwarding = true;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       helpOnly = true;
       continue;
@@ -206,10 +226,23 @@ function parseArgs(argv) {
       selected.push(arg.slice('--package='.length));
       continue;
     }
-    throw new Error(`Unknown argument: ${arg}`);
+    if (arg === '--test-name-pattern') {
+      const value = argv[index + 1];
+      if (!value) {
+        throw new Error('--test-name-pattern requires a value');
+      }
+      testArgs.push(arg, value);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--test-name-pattern=')) {
+      testArgs.push(arg);
+      continue;
+    }
+    throw new Error(`Unknown argument: ${arg}. Use -- before additional node:test arguments.`);
   }
 
-  return { selected, listOnly, helpOnly, fast };
+  return { selected, listOnly, helpOnly, fast, testArgs };
 }
 
 function resolveSelectedPackages(selectedIds) {
@@ -321,7 +354,7 @@ function summarizeCoverageFailures(config, coverage) {
   return failures;
 }
 
-function buildTestArgs(config, fast = false) {
+export function buildTestArgs(config, fast = false, testArgs = []) {
   // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
   // resolution / path aliases. Only the subagent package sets this today: its
   // schema test needs the `paths` aliases in extensions/subagent/tsconfig.json
@@ -329,7 +362,6 @@ function buildTestArgs(config, fast = false) {
   // precede the positional test globs.
   const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
   return [
-    'tsx',
     ...tsxConfigArgs,
     '--test',
     // Full verification is serialized for deterministic shared-env fixtures.
@@ -339,6 +371,7 @@ function buildTestArgs(config, fast = false) {
     ...(fast ? [] : ['--experimental-test-coverage']),
     `--test-reporter=${reporterSpecifier}`,
     ...(fast ? [] : config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`)),
+    ...testArgs,
     ...config.testGlobs,
   ];
 }
@@ -377,22 +410,9 @@ function indent(text, prefix = '  ') {
     .join('\n');
 }
 
-function resolveCommandInvocation(command, args) {
-  if (process.platform === 'win32' && (command === 'npm' || command === 'npx')) {
-    const comSpec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe';
-    return {
-      command: comSpec,
-      args: ['/d', '/s', '/c', [command, ...args].join(' ')],
-    };
-  }
-
-  return { command, args };
-}
-
 function runChildProcess(command, args, cwd, signal) {
   return new Promise((resolve, reject) => {
-    const invocation = resolveCommandInvocation(command, args);
-    const child = spawn(invocation.command, invocation.args, withProcessTreeIsolation({
+    const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
       env: { ...process.env, FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -439,9 +459,17 @@ function runChildProcess(command, args, cwd, signal) {
   });
 }
 
-async function runPackage(config, fast = false, signal) {
-  const args = buildTestArgs(config, fast);
-  const rawResult = await runChildProcess(npxCommand, args, config.cwd, signal);
+async function runPackage(config, fast = false, testArgs = [], signal) {
+  const args = buildTestArgs(config, fast, testArgs);
+  // Invoke the package-local tsx CLI directly rather than routing through npx
+  // and a platform shell. This preserves regexes/spaces in forwarded node:test
+  // arguments and avoids command-resolution differences between cwd/shells.
+  const rawResult = await runChildProcess(
+    process.execPath,
+    [resolveLocalTsx(config.cwd), ...args],
+    config.cwd,
+    signal,
+  );
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
   const coverage = report?.coverage ?? null;
@@ -562,7 +590,7 @@ async function main() {
   const processAbort = abortOnProcessSignals();
   let results;
   try {
-    results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast, processAbort.signal)));
+    results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast, parsedArgs.testArgs, processAbort.signal)));
   } finally {
     processAbort.dispose();
   }
@@ -587,4 +615,9 @@ async function main() {
   process.exitCode = 1;
 }
 
-await main();
+// Keep pure argument/command construction importable by focused script tests.
+const invokedDirectly = process.argv[1]
+  && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+if (invokedDirectly) {
+  await main();
+}

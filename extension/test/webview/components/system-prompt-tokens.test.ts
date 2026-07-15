@@ -23,6 +23,7 @@ test('estimateSystemPromptTokens counts only available prompt text', () => {
   const tokenCount = estimateSystemPromptTokens([
     makePrompt({ text: 'abcd' }),
     makePrompt({ source: 'harness', text: 'abcde' }),
+    makePrompt({ disabled: true, text: 'x'.repeat(400) }),
     makePrompt({ source: 'provider', availability: 'unknown', text: 'x'.repeat(400) }),
     makePrompt({ availability: 'hidden', text: 'x'.repeat(400) }),
     makePrompt({ availability: 'missing', text: 'x'.repeat(400) }),

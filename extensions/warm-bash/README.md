@@ -63,7 +63,6 @@ all extension instances adopt the replacement lazily on their next call.
 Codex and the Anthropic API keep the shell alive to *preserve state* (cwd, env,
 background jobs). This extension preserves pi's existing **no-state** model (fresh
 spawn per call) and only hides the spawn latency — so it gets the speedup without
-introducing state-leakage bugs. See `docs/AGENT-HARNESS-IMPROVEMENTS.md` for the
-broader harness-speed discussion and `scripts/analyze-bash.mjs` for the command-mix
+introducing state-leakage bugs. See `scripts/analyze-bash.mjs` for the command-mix
 analysis that motivated this (84.6% of bash calls need a shell; the fast path covers
 the no-metacharacter share, the warm pool covers the rest).

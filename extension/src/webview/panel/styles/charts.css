@@ -86,16 +86,30 @@
 }
 
 .ctx-legend {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
   margin-top: 2px;
 }
 
 .ctx-legend-item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto auto;
   align-items: baseline;
   gap: 4px;
+  width: 100%;
 }
 
 .ctx-legend-label {
+  min-width: 0;
+  overflow: hidden;
   color: color-mix(in srgb, var(--panel-foreground) 80%, var(--panel-muted));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-legend-note {
+  color: var(--panel-muted);
 }
 
 .ctx-legend-kind {
@@ -145,6 +159,22 @@
 .chart-wrap svg {
   display: block;
   overflow: visible;
+}
+
+/* Preserve categorical fills in high-contrast mode and outline each stacked
+   band with a system colour so adjacent areas remain separable. */
+@media (forced-colors: active) {
+  .chart-wrap path[fill],
+  .chart-wrap rect[fill] {
+    forced-color-adjust: none;
+    stroke: CanvasText;
+    stroke-width: 0.75px;
+  }
+
+  .rich-tooltip-swatch {
+    forced-color-adjust: none;
+    border: 1px solid CanvasText;
+  }
 }
 
 .chart-empty {

@@ -157,6 +157,7 @@ export class PieExtension implements vscode.Disposable {
     this.tokenRateService = new TokenRateService({
       getArchState: () => this.archState,
       onActiveRateChanged: () => this.sidebarProvider.scheduleState(),
+      onRatesTick: () => this.aggregateStatsService.refreshLive(),
     });
 
     this.aggregateStatsService = new AggregateStatsService({

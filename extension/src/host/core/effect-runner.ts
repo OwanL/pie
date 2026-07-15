@@ -32,8 +32,10 @@ import type {
   Effect,
   SendRpcEffect,
   EditRpcEffect,
+  ReplaceQueueRpcEffect,
   InterruptRpcEffect,
   RequestLiveTurnCheckpointEffect,
+  CompactRpcEffect,
   ClearQueueRpcEffect,
   TruncateRpcEffect,
   ExtensionUiResponseRpcEffect,
@@ -114,7 +116,7 @@ export interface SessionServiceLike {
   bumpSessionDataEpoch(sessionPath: string): void;
   /** Notify the run-analytics observer that a session's model config changed
    *  (disk-persisting side effect, not ArchState). Effect-side concern. */
-  onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel): void;
+  onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel, provider?: string): void;
   suppressNextCompletionNotificationFor(sessionPath: string): void;
   loadOlderTranscript(sessionPath: string): Promise<void>;
   loadNewerTranscript(sessionPath: string): Promise<void>;
@@ -320,8 +322,10 @@ export class EffectRunner {
       //    rpcResultFor path. ──
       SendRpc: (e) => this.runRpc(e),
       EditRpc: (e) => this.runRpc(e),
+      ReplaceQueueRpc: (e) => this.runReplaceQueueRpc(e),
       InterruptRpc: (e) => this.runRpc(e),
       RequestLiveTurnCheckpoint: (e) => this.handleRequestLiveTurnCheckpoint(e),
+      CompactRpc: (e) => this.runRpc(e),
       ClearQueueRpc: (e) => this.runRpc(e),
       TruncateRpc: (e) => this.runRpc(e),
       ExtensionUiResponseRpc: (e) => this.runRpc(e),
@@ -574,7 +578,12 @@ export class EffectRunner {
         }
         await backend.request('settings.set', setParams);
         service.bumpSessionDataEpoch(effect.sessionPath);
-        service.onModelConfigChanged(effect.sessionPath, effect.modelSettings.defaultModel, effect.modelSettings.defaultThinkingLevel);
+        service.onModelConfigChanged(
+          effect.sessionPath,
+          effect.modelSettings.defaultModel,
+          effect.modelSettings.defaultThinkingLevel,
+          effect.modelSettings.defaultProvider,
+        );
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: true });
       } catch (err) {
         dispatch({ kind: 'SetModelResult', corrId: effect.corrId, sessionPath: effect.sessionPath, ok: false, error: toErrorMessage(err) });
@@ -596,20 +605,19 @@ export class EffectRunner {
     this.prefsQueue = operation.then(() => undefined, () => undefined);
   }
 
-  /** `SetSystemPromptTogglesRpc` — IIFE (not queued),
-   *  `service.setSystemPromptToggles(...)`. Fire-and-forget: the backend
-   *  re-emits `session.opened` (routed through `SessionOpened`) to update
-   *  `systemPromptsBySession` with fresh `disabled` flags, so no `*Result`
-   *  event is dispatched. Errors are logged via the audit log only — the
-   *  webview's toggle state stays as-is until a successful re-emit. */
+  /** `SetSystemPromptTogglesRpc` — serialized through the target session
+   *  queue. The picker emits a complete disabled set after every click; FIFO
+   *  ordering ensures an older partial set cannot finish after the final set,
+   *  and a subsequent SendRpc cannot overtake the prompt update. The backend
+   *  re-emits `session.opened`, so no `*Result` event is needed. */
   private handleSetSystemPromptTogglesRpc(effect: SetSystemPromptTogglesRpcEffect): void {
-    void (async () => {
+    void this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
       try {
         await this.deps.service.setSystemPromptToggles(effect.sessionPath, effect.disabledEntries);
       } catch (err) {
         this.deps.log.log('warn', 'setSystemPromptToggles failed', { scope: 'system-prompt-toggles', error: toErrorMessage(err), sessionPath: effect.sessionPath });
       }
-    })();
+    });
   }
 
   /** `Log` — synchronous `log.log(level, message, data)`. No try/catch, no
@@ -954,7 +962,7 @@ export class EffectRunner {
    * holding that queue while a slow prepass/checkpoint is pending only creates
    * cross-session head-of-line blocking.
    */
-  private runRpc(effect: SendRpcEffect | EditRpcEffect | InterruptRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect): void {
+  private runRpc(effect: SendRpcEffect | EditRpcEffect | InterruptRpcEffect | CompactRpcEffect | ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect): void {
     if (effect.kind === 'EditRpc') {
       this.runEditRpc(effect);
       return;
@@ -1049,6 +1057,31 @@ export class EffectRunner {
             error: toErrorMessage(err),
           });
         }
+    });
+  }
+
+  private runReplaceQueueRpc(effect: ReplaceQueueRpcEffect): void {
+    const { queues, backend, dispatch } = this.deps;
+    void queues.enqueueSessionOperation(effect.sessionPath, async () => {
+      try {
+        const response = await backend.request<{ updated: boolean; queueCleared?: boolean; error?: string }>('message.replaceQueue', {
+          sessionPath: effect.sessionPath,
+          messages: effect.messages,
+          fallbackMessages: effect.fallbackMessages,
+        });
+        dispatch({
+          kind: 'ReplaceQueueResult', corrId: effect.corrId, sessionPath: effect.sessionPath,
+          messageId: effect.messageId, ok: response.updated, text: effect.text, inputs: effect.inputs,
+          composedText: effect.composedText, userParts: effect.userParts,
+          ...(response.queueCleared ? { error: `QUEUE_REPLACE_FAILED: ${response.error ?? 'queue cleared'}` } : {}),
+        });
+      } catch (err) {
+        dispatch({
+          kind: 'ReplaceQueueResult', corrId: effect.corrId, sessionPath: effect.sessionPath,
+          messageId: effect.messageId, ok: false, text: effect.text, inputs: effect.inputs,
+          composedText: effect.composedText, userParts: effect.userParts, error: toErrorMessage(err),
+        });
+      }
     });
   }
 
@@ -1208,12 +1241,14 @@ export class EffectRunner {
  *  Send/Edit have been short-circuited to their dedicated handlers. Kept
  *  exhaustive over this 3-kind set so the helper switches below stay
  *  exhaustive with no `never`-unreachable arms. */
-type RpcEffect = InterruptRpcEffect | ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
+type RpcEffect = InterruptRpcEffect | CompactRpcEffect | ClearQueueRpcEffect | TruncateRpcEffect | ExtensionUiResponseRpcEffect;
 
 function rpcMethodFor(effect: RpcEffect): string {
   switch (effect.kind) {
     case 'InterruptRpc':
       return 'message.interrupt';
+    case 'CompactRpc':
+      return 'message.compact';
     case 'ClearQueueRpc':
       return 'message.clearQueue';
     case 'TruncateRpc':
@@ -1226,6 +1261,8 @@ function rpcMethodFor(effect: RpcEffect): string {
 function rpcParamsFor(effect: RpcEffect): unknown {
   switch (effect.kind) {
     case 'InterruptRpc':
+      return { sessionPath: effect.sessionPath };
+    case 'CompactRpc':
       return { sessionPath: effect.sessionPath };
     case 'ClearQueueRpc':
       return { sessionPath: effect.sessionPath };
@@ -1248,6 +1285,8 @@ function rpcResultFor(
   switch (effect.kind) {
     case 'InterruptRpc':
       return { kind: 'InterruptResult', ...base };
+    case 'CompactRpc':
+      return { kind: 'CompactResult', ...base };
     case 'ClearQueueRpc':
       return { kind: 'ClearQueueResult', ...base };
     case 'TruncateRpc':

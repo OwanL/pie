@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "inference-batch-scheduler",
+  "version": 4,
+  "promptFile": "prompt.md",
+  "fixture": {
+    "type": "directory",
+    "path": "fixture"
+  },
+  "policy": {
+    "network": "deny",
+    "subagents": "deny",
+    "allowedTools": [
+      "read",
+      "edit",
+      "write",
+      "bash",
+      "grep",
+      "find",
+      "ls"
+    ],
+    "allowedChangedPaths": [
+      "src/scheduler.mjs"
+    ]
+  },
+  "limits": {
+    "timeoutMs": 900000,
+    "checkTimeoutMs": 30000,
+    "scorerTimeoutMs": 10000,
+    "maxBashTimeoutSeconds": 60,
+    "inactivityTimeoutMs": 300000
+  },
+  "checks": {
+    "public": [
+      "npm test",
+      "npm run benchmark -- --json"
+    ],
+    "privateScorer": "../../scorers/private/inference-batch-scheduler.mjs"
+  },
+  "metrics": {
+    "primary": "normalizedQuality",
+    "secondary": [
+      "deadlineUtility",
+      "computeEfficiency",
+      "invalidBatches",
+      "outputTokens"
+    ]
+  }
+}

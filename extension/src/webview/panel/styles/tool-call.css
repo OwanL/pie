@@ -168,8 +168,9 @@
   display: flex;
   min-width: 0;
   flex: 1 1 auto;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 5px 7px;
 }
 
 .subagent-header-summary {
@@ -271,6 +272,15 @@
   font-size: 11px;
 }
 
+/* Before concrete child output arrives, the compact preview contains only its
+   useful task row. Do not reserve the normal output-row budget for an empty
+   "Generating…" placeholder; lifecycle remains visible in the card header. */
+.subagent-live-preview .turn-activity-tail-content:empty {
+  display: none;
+  height: 0;
+  min-height: 0;
+}
+
 .subagent-agent-name {
   min-width: 0;
   flex: 0 0 auto;
@@ -287,17 +297,17 @@
   flex: 0 0 auto;
 }
 
-/* Dense runtime telemetry consumes the remaining header width without pushing
-   the status or model off-screen. Context pressure is retained longest; lower
-   priority metrics are hidden progressively on narrow panels. */
+/* Dense runtime telemetry wraps without pushing status/model off-screen.
+   Operational metrics remain visible rather than disappearing at narrow widths. */
 .subagent-runtime-telemetry {
   display: inline-flex;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 5px;
-  overflow: hidden;
+  overflow: visible;
   color: var(--panel-muted);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10px;
@@ -322,30 +332,10 @@
   color: var(--panel-warning);
 }
 
-@media (max-width: 850px) {
-  .subagent-telemetry-cost,
-  .subagent-telemetry-cache,
-  .subagent-telemetry-turns {
-    display: none;
-  }
-}
-
+/* Header telemetry is intentionally never hidden at narrow widths. It wraps
+   instead: token/cost/context data is operational information, not decoration. */
 @media (max-width: 700px) {
-  .subagent-telemetry-rate,
-  .subagent-telemetry-input {
-    display: none;
-  }
-
-  .subagent-activity-detail {
-    max-width: 100px;
-  }
-}
-
-@media (max-width: 520px) {
-  .subagent-runtime-telemetry,
-  :where(.subagent-scores) {
-    display: none;
-  }
+  .subagent-activity-detail { max-width: 100px; }
 }
 
 /* ── Subagent score bar ──────────────────────────────────────────────────── */

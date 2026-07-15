@@ -59,10 +59,19 @@ function stripProviderPrefix(name: string): string {
  * The returned entries carry display affordances (warning prefix, tooltip) so the
  * toolbar can render without re-deriving rating logic.
  */
-export function orderModelsForPicker(models: ModelInfo[]): ModelPickerEntry[] {
+export interface ModelPickerOrderOptions {
+  /** Apply subagent eligibility warnings/demotion. Disable this for the parent
+   * chat picker: subagent eligibility is not a recommendation about chat use. */
+  useSubagentEligibility?: boolean;
+}
+
+export function orderModelsForPicker(
+  models: ModelInfo[],
+  { useSubagentEligibility = true }: ModelPickerOrderOptions = {},
+): ModelPickerEntry[] {
   const decorated = models.map((model, index) => {
     const sub = model.subagent;
-    const ineligible = sub?.eligible === false;
+    const ineligible = useSubagentEligibility && sub?.eligible === false;
     const aggregate = sub?.aggregate;
     const cost = sub?.normalizedCost;
     return {

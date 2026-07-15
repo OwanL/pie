@@ -26,7 +26,6 @@ import type {
   WebviewToHostMessage,
 } from '../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
-import type { LiveTurnPhase } from '../../shared/live-pipeline-protocol';
 import { describeComposerInputSummary } from './composer/inputs';
 import { ComposerAttachments } from './composer/attachments';
 import { ComposerToolbar } from './composer/toolbar';
@@ -53,7 +52,6 @@ interface ComposerProps {
    *  (Cancel reuses `onInterrupt` — `session.abort()` aborts the retry sleep
    *  via `abortRetry()`, emitting `auto_retry_end` "Retry cancelled"). */
   retryStatus: RetryStatus | null;
-  liveTurnPhase: LiveTurnPhase | null;
   sessionPath: string | null;
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
@@ -111,7 +109,6 @@ function ComposerView({
   busy,
   interrupting,
   retryStatus,
-  liveTurnPhase,
   sessionPath,
   draftText,
   draftRestore,
@@ -154,6 +151,7 @@ function ComposerView({
 
   const {
     selectedModel,
+    selectedProvider,
     selectedLevel,
     supportsReasoning,
     supportsImageInputs,
@@ -256,6 +254,11 @@ function ComposerView({
       postMessage({ type: 'clearQueue', sessionPath });
     }
   }, [sessionPath, postMessage]);
+  const onCompact = useCallback(() => {
+    if (sessionPath && !busy) {
+      postMessage({ type: 'compact', sessionPath });
+    }
+  }, [sessionPath, busy, postMessage]);
 
   const canSend = (text.trim().length > 0 || pendingComposerInputs.length > 0) && !submitting.current;
   const attachmentSummary = useMemo(
@@ -270,6 +273,7 @@ function ComposerView({
       <div class="composer-rail flex flex-col gap-1.5">
       <ComposerToolbar
         sessionPath={sessionPath}
+        busy={busy}
         prefs={prefs}
         pruningSettings={pruningSettings}
         pruningCatalog={pruningCatalog}
@@ -284,6 +288,7 @@ function ComposerView({
         availableExtensions={availableExtensions}
         availableModels={availableModels}
         selectedModel={selectedModel}
+        selectedProvider={selectedProvider}
         selectedLevel={selectedLevel}
         supportsReasoning={supportsReasoning}
         contextIndicator={contextIndicatorProp}
@@ -292,6 +297,7 @@ function ComposerView({
         tokenRateIndicator={tokenRateIndicator}
         runStatus={runControls.status}
         onModelChange={onModelChange}
+        onCompact={onCompact}
       />
 
       <div
@@ -306,14 +312,6 @@ function ComposerView({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {!retryStatus && busy && liveTurnPhase && liveTurnPhase !== 'streaming' && (
-          <div class="composer-provider-phase flex items-center gap-2" role="status" aria-live="polite">
-            <span class="composer-retry-label flex items-center gap-1.5">
-              <span class="composer-retry-spinner" aria-hidden="true" />
-              {describeLiveTurnPhase(liveTurnPhase)}
-            </span>
-          </div>
-        )}
         {retryStatus && (
           <div class="composer-retry-row flex items-center gap-2" role="status" aria-live="polite">
             <span class="composer-retry-label flex items-center gap-1.5">
@@ -377,20 +375,6 @@ function ComposerView({
       </div>
     </div>
   );
-}
-
-function describeLiveTurnPhase(phase: LiveTurnPhase): string {
-  switch (phase) {
-    case 'queued': return 'Queued for provider capacity…';
-    case 'preparing': return 'Preparing the next provider request…';
-    case 'waiting_provider': return 'Waiting for the provider…';
-    case 'running_tool': return 'Running a tool…';
-    case 'waiting_input': return 'Waiting for input…';
-    case 'retry_wait': return 'Waiting to retry the provider…';
-    case 'aborting': return 'Stopping provider work…';
-    case 'reconciling_gap': return 'Recovering live response state…';
-    case 'streaming': return 'Receiving provider response…';
-  }
 }
 
 export const Composer = memo(ComposerView);

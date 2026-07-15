@@ -84,8 +84,10 @@ Thumbs.db
 .DS_Store
 desktop.ini
 ehthumbs.db
-# Windows null device (created when redirecting to uninitialized variable in batch/PowerShell)
+# Windows null-device artifacts. Git's ignore matching is case-insensitive on
+# Windows, but ripgrep's traversal is not reliably so; list both spellings.
 nul
+NUL
 
 # Editor / IDE artifacts
 *.swp

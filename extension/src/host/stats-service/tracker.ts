@@ -458,6 +458,7 @@ export class SessionRunTracker {
         sourceId: `${toolCall.id}:${index}`,
         occurredAt,
         modelId: result.model ?? result.selectedModel,
+        ...(result.provider ? { provider: result.provider } : {}),
         inputTokens,
         outputTokens,
         cacheReadTokens,
@@ -497,6 +498,7 @@ export class SessionRunTracker {
           concurrentBusySessions: this.busySessionPaths.size,
           status: status as TurnThroughputStatus,
           modelId: modelId ?? undefined,
+          ...(result.provider ? { provider: result.provider } : {}),
           turnLatencyMs: null,
           overheadMs: null,
           providerLatencyMs: null,
@@ -660,6 +662,7 @@ export class SessionRunTracker {
     sessionPath: string,
     modelId: string | undefined,
     thinkingLevel: ThinkingLevel | undefined,
+    provider?: string,
   ): void {
     const run = this.runState.sessions.get(sessionPath)?.currentRun;
     if (!run) {
@@ -667,7 +670,7 @@ export class SessionRunTracker {
     }
 
     const changedKinds: TreatmentChangeKind[] = [];
-    if ((run.modelId ?? null) !== (modelId ?? null)) {
+    if ((run.modelId ?? null) !== (modelId ?? null) || (run.provider ?? null) !== (provider ?? null)) {
       changedKinds.push('model');
     }
     if ((run.thinkingLevel ?? null) !== (thinkingLevel ?? null)) {
@@ -687,6 +690,7 @@ export class SessionRunTracker {
     // transient undefined never clobbers a known model. For genuinely mixed
     // runs the latest model is recorded (mixedModelConfig flags the mix).
     if (modelId) run.modelId = modelId;
+    if (provider) run.provider = provider;
     if (thinkingLevel) run.thinkingLevel = thinkingLevel;
     this.runState.markTreatmentChanges(run, changedKinds);
     run.updatedAt = this.runState.isoNow();

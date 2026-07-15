@@ -23,9 +23,12 @@ test('subagent provider defaults are empty and malformed stored values are norma
   }).subagentProviderDefaults, { anthropic: false });
 });
 
-test('DEFAULT_CHAT_PREFS keeps saturated-provider routing opt-in', () => {
+test('DEFAULT_CHAT_PREFS keeps busy-provider routing off and provider-failure fallback on', () => {
   assert.equal(DEFAULT_CHAT_PREFS.subagentRouteAroundSaturatedProviders, false);
   assert.equal(resolveChatPrefs(null).subagentRouteAroundSaturatedProviders, false);
+  assert.equal(DEFAULT_CHAT_PREFS.subagentFallbackOnProviderFailure, true);
+  assert.equal(resolveChatPrefs(null).subagentFallbackOnProviderFailure, true);
+  assert.equal(resolveChatPrefs({ subagentFallbackOnProviderFailure: false }).subagentFallbackOnProviderFailure, false);
 });
 
 test('DEFAULT_CHAT_PREFS seeds empty subagent buckets', () => {

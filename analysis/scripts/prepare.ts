@@ -68,6 +68,7 @@ function addKnownCosts(left: number, right: number): number {
 function estimateSubagentCostUsd(
   run: RunSnapshot,
   parentModelId: string | null,
+  parentProvider: string | null,
   canonicalUsage: TokenUsageForCost,
   pricingMap: ReturnType<typeof loadModelPricingMap>,
 ): number | null {
@@ -102,7 +103,12 @@ function estimateSubagentCostUsd(
       continue;
     }
 
-    const sampleCost = estimateRunCostUsd(normalizeNullableText(sample.modelId), attributed, pricingMap);
+    const sampleCost = estimateRunCostUsd(
+      normalizeNullableText(sample.modelId),
+      attributed,
+      pricingMap,
+      normalizeNullableText(sample.provider) ?? parentProvider,
+    );
     if (sampleCost === null) {
       return null;
     }
@@ -110,7 +116,7 @@ function estimateSubagentCostUsd(
   }
 
   if (hasPositiveTokenUsage(remaining)) {
-    const remainderCost = estimateRunCostUsd(parentModelId, remaining, pricingMap);
+    const remainderCost = estimateRunCostUsd(parentModelId, remaining, pricingMap, parentProvider);
     if (remainderCost === null) {
       return null;
     }
@@ -234,7 +240,7 @@ function prepareRun(
   const startedDay = toStartedDay(run.startedAt);
   const normalizedModelId = normalizeNullableText(run.modelId);
   const modelFamily = resolveModelFamily(normalizedModelId, familyMap);
-  const provider = resolveModelProvider(normalizedModelId, familyMap);
+  const provider = normalizeNullableText(run.provider) ?? resolveModelProvider(normalizedModelId, familyMap);
 
   const dims = ['precision', 'creativity', 'reasoning', 'thoroughness'] as const;
   function meanForDim(dim: typeof dims[number]): number | null {
@@ -263,9 +269,9 @@ function prepareRun(
   };
   const parentUsageReported = (run.tokenReportedTurnCount ?? 0) > 0 || hasPositiveTokenUsage(parentUsage);
   const parentEstimatedCostUsd = parentUsageReported
-    ? estimateRunCostUsd(normalizedModelId, parentUsage, pricingMap)
+    ? estimateRunCostUsd(normalizedModelId, parentUsage, pricingMap, provider)
     : null;
-  const subagentEstimatedCostUsd = estimateSubagentCostUsd(run, normalizedModelId, {
+  const subagentEstimatedCostUsd = estimateSubagentCostUsd(run, normalizedModelId, provider, {
     inputTokens: subagentInputTokens,
     outputTokens: subagentOutputTokens,
     cacheReadTokens: subagentCacheReadTokens,

@@ -61,6 +61,7 @@ export function useComposerIndicators({
 }) {
   const {
     selectedModel,
+    selectedProvider,
     selectedLevel,
     selectedModelInfo,
     supportsReasoning,
@@ -69,7 +70,7 @@ export function useComposerIndicators({
     activeThinkingLevel,
     modelSettings,
     availableModels,
-  }), [activeModelId, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultThinkingLevel, availableModels]);
+  }), [activeModelId, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultProvider, modelSettings?.defaultThinkingLevel, availableModels]);
 
   const pricingByModelId = useMemo(() => {
     const map = new Map<string, TokenPricing>();
@@ -192,6 +193,7 @@ export function useComposerIndicators({
 
   return {
     selectedModel,
+    selectedProvider,
     selectedLevel,
     selectedModelInfo,
     supportsReasoning,

@@ -32,6 +32,10 @@ import {
 	readRouteAroundSaturatedProviders,
 } from "./src/provider-capacity.js";
 import {
+	classifyProviderFailure,
+	markProviderReplayUnsafe,
+} from "./src/provider-failure.js";
+import {
 	ParentExtensionUIBridgeProxy,
 	type ParentBridge,
 } from "./src/parent-extension-ui-bridge-proxy.js";
@@ -277,6 +281,9 @@ function createInitialResult(
 	step: number | undefined,
 	actualModelId: string | undefined,
 	provider: string | undefined,
+	contextWindow: number | undefined,
+	selectedModel: string | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
 	modelResolutionDiagnostic: string | undefined,
 ): SingleResult {
 	const now = Date.now();
@@ -290,9 +297,13 @@ function createInitialResult(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: actualModelId,
 		provider,
+		contextWindow,
+		selectedModel,
+		thinkingLevel,
 		activityPhase: "preparing",
 		activityDetail: "loading subagent resources",
 		activitySince: now,
+		startedAt: now,
 		progressGeneration: 0,
 		lastProgressAt: now,
 		step,
@@ -321,6 +332,9 @@ function setActivity(
 	result.activityPhase = phase;
 	result.activityDetail = detail;
 	result.activitySince = Date.now();
+	if (phase === "completed" || phase === "failed" || phase === "cancelled") {
+		result.completedAt = result.activitySince;
+	}
 	markProgress(result);
 	return true;
 }
@@ -331,16 +345,43 @@ function createUpdateEmitter(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	streamingTextRef: { value: string },
-): () => void {
-	return () => {
+): (immediate?: boolean) => void {
+	let lastEmittedAt = 0;
+	let emittedFirstStreamingUpdate = false;
+	let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+	const emitNow = () => {
+		pendingTimer = undefined;
 		if (!onUpdate) return;
-		// Prefer the final output from completed messages; fall back to in-flight streaming text.
+		lastEmittedAt = Date.now();
 		const finalOutput = getFinalOutput(result.messages);
 		const text = finalOutput || streamingTextRef.value || "(running...)";
 		onUpdate({
 			content: [{ type: "text", text }],
 			details: makeDetails([result]),
 		});
+	};
+	return (immediate = true) => {
+		if (!onUpdate) return;
+		if (immediate) {
+			if (pendingTimer) clearTimeout(pendingTimer);
+			emitNow();
+			return;
+		}
+		// Full recursive transcripts are retained. Coalesce provider/nested-tool
+		// token bursts to 20fps so repeated serialization does not become the
+		// bottleneck; the trailing callback reads the latest mutable accumulator,
+		// therefore no transcript content is omitted.
+		if (!emittedFirstStreamingUpdate) {
+			emittedFirstStreamingUpdate = true;
+			emitNow();
+			return;
+		}
+		const remaining = 50 - (Date.now() - lastEmittedAt);
+		if (remaining <= 0 && !pendingTimer) emitNow();
+		else if (!pendingTimer) {
+			pendingTimer = setTimeout(emitNow, Math.max(1, remaining));
+			pendingTimer.unref?.();
+		}
 	};
 }
 
@@ -422,7 +463,7 @@ function applyToolExecutionUpdate(
 	result: SingleResult,
 	toolCallId: string,
 	partialResult: unknown,
-	emitUpdate: () => void,
+	emitUpdate: (immediate?: boolean) => void,
 	toolProgress: Map<string, string>,
 ): boolean {
 	if (partialResult === undefined) return false;
@@ -445,7 +486,7 @@ function applyToolExecutionUpdate(
 			if (progressed && !setActivity(result, "running_tool", (result.runningTools ?? []).join(", ") || "nested tool progress")) {
 				markProgress(result);
 			}
-			emitUpdate();
+			emitUpdate(false);
 			return true;
 		}
 	}
@@ -474,6 +515,7 @@ function subscribeToSession(
 			return;
 		}
 		if (event.type === "tool_execution_start" && event.toolName) {
+			markProviderReplayUnsafe(result, "tool_side_effect");
 			result.streaming = false;
 			result.runningTools = [...(result.runningTools ?? []), event.toolName];
 			setActivity(result, "running_tool", result.runningTools.join(", "));
@@ -526,7 +568,7 @@ function subscribeToSession(
 function handleMessageUpdate(
 	event: SubagentSessionEvent,
 	result: SingleResult,
-	emitUpdate: () => void,
+	emitUpdate: (immediate?: boolean) => void,
 	streamingTextRef: { value: string },
 	streamingReasoningRef: { value: string },
 	stageRef: { value: string },
@@ -540,6 +582,7 @@ function handleMessageUpdate(
 	const isThinkingDelta = streamEvent?.type === "thinking_delta" && (!!streamEvent.delta || !!streamEvent.thinking);
 	const isToolCallGeneration = streamEvent?.type === "toolcall_start" || streamEvent?.type === "toolcall_delta";
 	if (isTextDelta || isThinkingDelta || isToolCallGeneration) {
+		if (isTextDelta || isThinkingDelta) markProviderReplayUnsafe(result, "partial_output");
 		// Any streamed provider content advances the visible lifecycle. Only text
 		// and reasoning deltas drive the token-rate clock; tool-call argument
 		// generation is active work but does not expose countable output tokens.
@@ -560,7 +603,7 @@ function handleMessageUpdate(
 			streamingReasoningRef.value += streamEvent.delta ?? streamEvent.thinking ?? "";
 			result.streamingReasoning = streamingReasoningRef.value;
 		}
-		emitUpdate();
+		emitUpdate(false);
 	}
 }
 
@@ -783,6 +826,7 @@ function applyTimeoutFailure(result: SingleResult, timeoutMs: number, stage?: st
 	result.stopReason = "timeout";
 	const suffix = stage ? ` (while ${stage})` : "";
 	result.errorMessage = `Subagent timed out after ${timeoutMs / 1000}s waiting for model response${suffix}.`;
+	classifyProviderFailure(result);
 	clearLiveState(result);
 	setActivity(result, "failed", result.errorMessage);
 }
@@ -800,6 +844,7 @@ function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: s
 		result.exitCode = 1;
 		if (!result.errorMessage) result.errorMessage = "Subagent was aborted";
 	}
+	if (result.exitCode !== 0) classifyProviderFailure(result);
 	// Enrich whatever message we have (the SDK's raw "Request was aborted" or
 	// similar) with the run stage and cause, mirroring applyTimeoutFailure /
 	// applyThrownError — otherwise an abort surfaces as a bare, contextless
@@ -825,6 +870,7 @@ function applyThrownError(result: SingleResult, err: unknown, stage?: string, pa
 	const suffix = stage && !message.includes(`(while ${stage})`) ? ` (while ${stage})` : "";
 	result.errorMessage = (result.errorMessage || message) + suffix;
 	result.stderr = result.stderr || message;
+	classifyProviderFailure(result, err);
 	clearLiveState(result);
 	setActivity(result, interrupted ? "cancelled" : "failed", result.errorMessage);
 }
@@ -1001,6 +1047,9 @@ export async function runSingleAgent(
 		step,
 		actualModelId,
 		resolvedModel?.provider,
+		resolvedModel?.contextWindow,
+		bucketSelection?.modelId,
+		thinkingLevel,
 		modelResolutionDiagnostic,
 	);
 	const streamingTextRef = { value: "" };

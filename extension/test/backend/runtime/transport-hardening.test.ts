@@ -124,6 +124,7 @@ test('oversized subagent progress preserves a renderable activity skeleton', () 
   assert.equal(bounded.details.mode, 'single');
   assert.equal(bounded.details.results[0].activityPhase, 'streaming');
   assert.equal(bounded.details.results[0].streamingText, 'still working');
+  assert.ok(bounded.details.results[0].cumulativeOutputTokens > 0);
   assert.match(bounded.details.results[0].messages[0].content[0].text, /transcript omitted/i);
 });
 

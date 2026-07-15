@@ -58,7 +58,10 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
 export function BufferedTextPart({ messageId, index, text, streaming, onContextMenu }: BufferedTextPartProps) {
   const visibleText = useBufferedText(text, streaming);
   const initialText = streaming ? visibleText : text;
-  const [rendered, setRendered] = useState(() => ({ html: renderMarkdown(initialText), text: initialText }));
+  const [rendered, setRendered] = useState(() => ({
+    html: renderMarkdown(initialText, !streaming),
+    text: initialText,
+  }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   const visibleTextRef = useRef(visibleText);
@@ -117,7 +120,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
     const now = Date.now();
     if (now - lastParseAtRef.current >= MARKDOWN_PARSE_THROTTLE_MS) {
       lastParseAtRef.current = now;
-      applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
+      applyHtml(renderMarkdown(visibleTextRef.current, false), visibleTextRef.current);
       return;
     }
 
@@ -128,7 +131,7 @@ export function BufferedTextPart({ messageId, index, text, streaming, onContextM
       timerRef.current = window.setTimeout(() => {
         timerRef.current = null;
         lastParseAtRef.current = Date.now();
-        applyHtml(renderMarkdown(visibleTextRef.current), visibleTextRef.current);
+        applyHtml(renderMarkdown(visibleTextRef.current, false), visibleTextRef.current);
       }, MARKDOWN_PARSE_THROTTLE_MS);
     }
   }, [visibleText, streaming]);

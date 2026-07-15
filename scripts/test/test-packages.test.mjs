@@ -11,15 +11,15 @@ import {
   mapFilesToPackages,
 } from '../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers the 13 run-tests.mjs package ids', () => {
+test('PACKAGE_DIRECTIVES covers the 14 run-tests.mjs package ids', () => {
   const expected = [
     'extension', 'analysis',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
-    'warm-bash', 'web-access-compat', 'tool-result-pruner',
+    'warm-bash', 'copilot-model-discovery', 'web-access-compat', 'tool-result-pruner',
     'session-reviewer', 'session-changes', 'deferred-triggers',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  assert.equal(PACKAGE_DIRECTIVES.length, 13);
+  assert.equal(PACKAGE_DIRECTIVES.length, 14);
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {
@@ -30,6 +30,7 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('extensions/subagent/test/schema.test.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/subagent/schema.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
+  assert.equal(classifyFileToPackage('extensions/copilot-model-discovery/test/copilot-models.test.ts'), 'copilot-model-discovery');
   assert.equal(classifyFileToPackage('extensions/session-changes/test/render.test.ts'), 'session-changes');
 });
 

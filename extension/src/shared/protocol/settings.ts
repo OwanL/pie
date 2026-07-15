@@ -162,6 +162,9 @@ export interface ChatPrefs {
   /** When true, bucket selection softly routes around enabled providers whose
    *  live ProviderGate has no immediately claimable slot. Default false. */
   subagentRouteAroundSaturatedProviders: boolean;
+  /** When true, a replay-safe transient provider failure retries on another
+   *  model from the requested bucket. Default true. */
+  subagentFallbackOnProviderFailure: boolean;
   /** When true, host-side `auditLog` events are emitted to the extension host
    *  console (exthost.log) even in production/installed mode. Off by default;
    *  dev mode (`extensionMode === 1`) always emits regardless of this flag.
@@ -337,6 +340,9 @@ export const SUBAGENT_PROVIDER_TOGGLES_ENV = 'PIE_SUBAGENT_PROVIDER_TOGGLES_BY_S
 /** Opt-in live-capacity routing for subagent model/provider selection. */
 export const SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV = 'PIE_SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS';
 
+/** Provider-failure model fallback for subagents (enabled by default). */
+export const SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV = 'PIE_SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE';
+
 /** Environment key used to expose pie extension toggles to in-process pi extensions. */
 export const EXTENSION_TOGGLES_ENV = 'PIE_EXTENSION_TOGGLES_JSON';
 
@@ -378,6 +384,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   showPruningMessages: true,
   subagentAlwaysParentModel: false,
   subagentRouteAroundSaturatedProviders: false,
+  subagentFallbackOnProviderFailure: true,
   runtimeAuditLog: false,
   subagentMaxDepth: 3,
   subagentMaxTreeSessions: 10,
@@ -661,6 +668,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   extensionToggles: Record<string, boolean>;
   subagentAlwaysParentModel?: boolean;
   subagentRouteAroundSaturatedProviders?: boolean;
+  subagentFallbackOnProviderFailure?: boolean;
   subagentMaxDepth?: number;
   subagentMaxTreeSessions?: number;
   subagentMaxInflight?: number;
@@ -682,6 +690,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
     extensionToggles: prefs.extensionToggles,
     subagentAlwaysParentModel: prefs.subagentAlwaysParentModel,
     subagentRouteAroundSaturatedProviders: prefs.subagentRouteAroundSaturatedProviders,
+    subagentFallbackOnProviderFailure: prefs.subagentFallbackOnProviderFailure,
     subagentMaxDepth: prefs.subagentMaxDepth,
     subagentMaxTreeSessions: prefs.subagentMaxTreeSessions,
     subagentMaxInflight: prefs.subagentMaxInflight,

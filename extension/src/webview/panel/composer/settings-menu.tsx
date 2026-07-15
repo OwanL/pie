@@ -311,6 +311,14 @@ function buildSettingsSearchIndex(
       checked: !!prefs.subagentRouteAroundSaturatedProviders,
       apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentRouteAroundSaturatedProviders')),
     });
+    entries.push({
+      type: 'toggle',
+      id: 'subagent:fallback-provider-failure',
+      label: 'Fallback on provider failure',
+      haystack: 'subagent fallback failover provider failure timeout connection retries exhausted'.toLowerCase(),
+      checked: !!prefs.subagentFallbackOnProviderFailure,
+      apply: () => onSetPrefs(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure')),
+    });
     for (const def of NESTED_LABELS) {
       const enabled = prefs.subagentNestedAllowedBuckets[def.key] ?? true;
       entries.push({

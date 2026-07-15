@@ -12,7 +12,8 @@ export type TurnActivityPhase =
   | 'runningTool'
   | 'preparing'
   | 'pruning'
-  | 'startingModel';
+  | 'startingModel'
+  | 'providerStatus';
 
 export interface TurnActivityStripProps {
   label: string;
@@ -43,7 +44,8 @@ export function activityPhaseHasRunningDot(phase: TurnActivityPhase): boolean {
     || phase === 'thinking'
     || phase === 'draftingTool'
     || phase === 'runningTool'
-    || phase === 'startingModel';
+    || phase === 'startingModel'
+    || phase === 'providerStatus';
 }
 
 function defaultAriaLabel(label: string, detail?: string): string {

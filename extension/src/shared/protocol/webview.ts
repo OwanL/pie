@@ -301,8 +301,9 @@ type WebviewToHostMessagePayload =
        * host-confirmed message. */
       localId?: string;
     }
-  | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; inputs?: ComposerInput[]; localId?: string }
+  | { type: 'editMessage'; sessionPath: string; messageId: string; text: string; inputs?: ComposerInput[]; localId?: string; queued?: boolean }
   | { type: 'interrupt'; sessionPath: string }
+  | { type: 'compact'; sessionPath: string }
   | { type: 'clearQueue'; sessionPath: string }
   | { type: 'newSession' }
   | { type: 'openSession'; sessionPath: string }

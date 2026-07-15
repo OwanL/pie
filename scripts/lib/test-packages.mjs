@@ -24,6 +24,7 @@ export const PACKAGE_DIRECTIVES = [
   { id: 'subagent', dir: 'extensions/subagent' },
   { id: 'ask-user', dir: 'extensions/ask-user' },
   { id: 'warm-bash', dir: 'extensions/warm-bash' },
+  { id: 'copilot-model-discovery', dir: 'extensions/copilot-model-discovery' },
   { id: 'web-access-compat', dir: 'extensions/web-access-compat' },
   { id: 'tool-result-pruner', dir: 'extensions/tool-result-pruner' },
   { id: 'session-reviewer', dir: 'extensions/session-reviewer' },

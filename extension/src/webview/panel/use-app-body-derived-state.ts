@@ -80,20 +80,34 @@ export function useAppBodyDerivedState(
     unregisterInlineRequest,
   ]);
 
-  // Stable signature of the active deferred-trigger set so the derived
-  // `deferredSessionPaths` array + `activeSessionHasDeferredTriggers` boolean
-  // keep stable references across snapshots whose `deferredTriggers` content is
-  // unchanged (the host re-serialises the array on every post, which would
-  // otherwise defeat the SessionTabs / SessionTab memo barriers). Keyed on a
-  // compact id+session string so a note/registeredAt change (e.g. a re-arm)
-  // doesn't churn the set unless membership changes.
+  // Stable signatures of the active deferred-trigger set so the derived
+  // session-path arrays and active-session boolean keep stable references
+  // across snapshots whose `deferredTriggers` content is unchanged (the host
+  // re-serialises the array on every post, which would otherwise defeat the
+  // SessionTabs / SessionTab memo barriers).
   const deferredSig = useMemo(
     () => deferredTriggers.map((t) => `${t.sessionPath}:${t.id}`).sort().join('|'),
+    [deferredTriggers],
+  );
+  const deferredTimerSig = useMemo(
+    () => deferredTriggers
+      .filter((t) => t.triggers.some((trigger) => trigger.kind === 'timer'))
+      .map((t) => `${t.sessionPath}:${t.id}`)
+      .sort()
+      .join('|'),
     [deferredTriggers],
   );
   const deferredSessionPaths = useMemo(
     () => Array.from(new Set(deferredTriggers.map((t) => t.sessionPath))),
     [deferredSig],
+  );
+  const deferredTimerSessionPaths = useMemo(
+    () => Array.from(new Set(
+      deferredTriggers
+        .filter((t) => t.triggers.some((trigger) => trigger.kind === 'timer'))
+        .map((t) => t.sessionPath),
+    )),
+    [deferredTimerSig],
   );
   const activeSessionHasDeferredTriggers = useMemo(
     () => deferredTriggers.some((t) => t.sessionPath === activeSessionPath),
@@ -121,6 +135,7 @@ export function useAppBodyDerivedState(
     loadingStatus,
     deferredTriggers,
     deferredSessionPaths,
+    deferredTimerSessionPaths,
     activeSessionHasDeferredTriggers,
   };
 }

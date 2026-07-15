@@ -50,6 +50,26 @@ test('orderModelsForPicker decorates ineligible options with a warning prefix an
   assert.match(good!.title, /rating 16\/20/);
 });
 
+test('orderModelsForPicker does not treat subagent ineligibility as a parent-chat recommendation', () => {
+  const ordered = orderModelsForPicker([
+    model('shared', {
+      provider: 'github-copilot',
+      name: 'Copilot Model',
+      subagent: { eligible: false, aggregate: 0, disabledReason: 'not vetted', normalizedCost: 20 },
+    }),
+    model('shared', {
+      provider: 'openai-codex',
+      name: 'Codex Model',
+      subagent: { eligible: true, aggregate: 20, normalizedCost: 10 },
+    }),
+  ], { useSubagentEligibility: false });
+
+  assert.deepEqual(ordered.map((entry) => entry.model.provider), ['github-copilot', 'openai-codex']);
+  assert.ok(ordered.every((entry) => !entry.ineligible));
+  assert.ok(ordered.every((entry) => !entry.label.startsWith('⚠')));
+  assert.ok(ordered.every((entry) => !entry.title.includes('Disabled for subagent use')));
+});
+
 test('orderModelsForPicker strips provider text only from the compact selected label', () => {
   const [entry] = orderModelsForPicker([
     model('deepseek', { name: 'Ollama Cloud: Deepseek V4 pro', subagent: { eligible: true, aggregate: 12 } }),

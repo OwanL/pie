@@ -171,6 +171,17 @@ test('estimateRunCostUsd computes the known cost for a priced model', () => {
   approx(estimateRunCostUsd('m1', usage, map)!, 33);
 });
 
+test('estimateRunCostUsd does not borrow same-id pricing from another provider', () => {
+  const githubPricing = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 };
+  const map = new Map([
+    ['gpt-5.6-sol', githubPricing],
+    ['github-copilot/gpt-5.6-sol', githubPricing],
+  ]);
+  const usage: TokenUsageForCost = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  assert.equal(estimateRunCostUsd('gpt-5.6-sol', usage, map, 'openai-codex'), null);
+  assert.equal(estimateRunCostUsd('gpt-5.6-sol', usage, map, 'github-copilot'), 5);
+});
+
 // ---------------------------------------------------------------------------
 // resolveModelsJsonPath
 // ---------------------------------------------------------------------------
@@ -204,7 +215,7 @@ test('loadModelPricingMap accumulates models from providers.models arrays', () =
   });
   withTempModelsJson(json, (filePath) => {
     const map = loadModelPricingMap(filePath);
-    assert.equal(map.size, 2);
+    assert.equal(map.size, 4);
     assert.deepEqual(map.get('opus'), { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 });
     assert.deepEqual(map.get('haiku'), { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 });
   });
@@ -223,13 +234,13 @@ test('loadModelPricingMap also accumulates provider.modelOverrides entries', () 
   });
   withTempModelsJson(json, (filePath) => {
     const map = loadModelPricingMap(filePath);
-    assert.equal(map.size, 2);
+    assert.equal(map.size, 4);
     assert.deepEqual(map.get('opus-discount'), { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 });
   });
 });
 
-test('loadModelPricingMap keeps the first entry for a duplicate id (first provider wins; later duplicates ignored)', () => {
-  // 'dupe' appears in two providers; the first provider's pricing is retained.
+test('loadModelPricingMap keeps provider-specific entries plus a legacy bare-id fallback', () => {
+  // 'dupe' appears in two providers; provider/model keys retain both prices.
   const json = JSON.stringify({
     providers: {
       anthropic: { models: [{ id: 'dupe', cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } }] },
@@ -238,8 +249,10 @@ test('loadModelPricingMap keeps the first entry for a duplicate id (first provid
   });
   withTempModelsJson(json, (filePath) => {
     const map = loadModelPricingMap(filePath);
-    assert.equal(map.size, 1);
+    assert.equal(map.size, 3);
     assert.deepEqual(map.get('dupe'), { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+    assert.deepEqual(map.get('anthropic/dupe'), { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+    assert.deepEqual(map.get('openai/dupe'), { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
   });
 });
 
@@ -258,7 +271,7 @@ test('loadModelPricingMap skips models without a valid cost block or string id',
   });
   withTempModelsJson(json, (filePath) => {
     const map = loadModelPricingMap(filePath);
-    assert.equal(map.size, 1);
+    assert.equal(map.size, 2);
     assert.ok(map.has('priced'));
     assert.ok(!map.has('no-cost'));
     assert.ok(!map.has('bad-cost'));

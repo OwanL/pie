@@ -238,6 +238,36 @@ test('subagent delta is non-negative and accumulates into cumTokens while the ma
   assert.equal(acc.subagentTokens.get('sub1#0'), t100);
 });
 
+test('typed subagent previews use the cumulative token counter instead of bounded text tails', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const previewCall = (tokens: number): ToolCall => ({
+    id: 'sub1',
+    name: 'subagent',
+    input: {},
+    status: 'running',
+    result: {
+      kind: 'subagent',
+      mode: 'single',
+      omittedChildren: 0,
+      children: [{
+        id: 'child-1', agent: 'worker', task: 't', phase: 'running',
+        streaming: true,
+        // A bounded tail can remain unchanged while the full stream grows.
+        streamingText: 'same bounded tail',
+        cumulativeOutputTokens: tokens,
+      }],
+    },
+  });
+
+  tickTokenRate(acc, [{ ...m, toolCalls: [previewCall(100)] }], BASE_NOW + 1000);
+  const state = tickTokenRate(acc, [{ ...m, toolCalls: [previewCall(250)] }], BASE_NOW + 2000);
+  assert.equal(acc.cumTokens, 250);
+  assert.equal(state.state, 'generating');
+  const rate = Number.parseFloat(state.label.replace(/[^\d.]/g, ''));
+  assert.ok(rate >= 145 && rate <= 155, `expected ~150 tok/s from cumulative preview counter, got ${rate}`);
+});
+
 test('subagent delta is clamped to zero when output shrinks between ticks (never negative)', () => {
   const acc = createAccumulator(BASE_NOW);
   const m = streamingMessage();

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { handleBackendRequest } from '../../../src/backend/request-handler';
-import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV } from '../../../src/shared/protocol';
+import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
 import { validateRuntimePrefsSet } from '../../../src/backend/rpc';
 import { ProviderGate } from '../../../src/backend/provider-gate';
 
@@ -47,7 +47,7 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
@@ -90,7 +90,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 
@@ -116,6 +116,31 @@ test('runtimePrefs.set validates and mirrors subagent capacity routing', async (
   assert.throws(
     () => validateRuntimePrefsSet({ subagentRouteAroundSaturatedProviders: 'yes' }),
     /subagentRouteAroundSaturatedProviders must be a boolean/,
+  );
+});
+
+test('runtimePrefs.set validates and mirrors provider-failure fallback', async (t) => {
+  const previous = process.env[SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV];
+    else process.env[SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV] = previous;
+  });
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-provider-fallback',
+    method: 'runtimePrefs.set',
+    params: {
+      providerToggles: {},
+      extensionToggles: {},
+      subagentFallbackOnProviderFailure: false,
+    },
+  }) as { subagentFallbackOnProviderFailure?: boolean };
+
+  assert.equal(result.subagentFallbackOnProviderFailure, false);
+  assert.equal(process.env[SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV], '0');
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentFallbackOnProviderFailure: 'yes' }),
+    /subagentFallbackOnProviderFailure must be a boolean/,
   );
 });
 

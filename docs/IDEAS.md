@@ -18,3 +18,11 @@ Tools:
 Diff tool
 codebase_search semantic
 ask user
+
+## Unprioritized engineering follow-ups
+
+- Make subagent fan-out guidance adaptive to measured provider load. Publish a provider-busy signal from existing capacity/token-rate telemetry and inject the sequential-work directive only when warranted.
+- Add a browser-level transcript reconciliation fixture covering edit rejection, pruning failure, first-stream commit, backend crashes, edits during another turn, attachment rollback, and webview reload during an optimistic edit.
+- Preserve long-range analytics without unbounded active files: rotate JSONL into immutable segments, ingest idempotently into DuckDB, materialize aggregates, expose metric provenance/data-quality counters, and version metric definitions separately from storage schema.
+- Persist provider-attempt, queued-message dwell, subagent phase-time, and recovery telemetry needed to explain reliability and performance.
+- Refactor the largest state-machine and analytics hotspots by ownership boundary, especially duplicated analytics coercion and rollup formulas.

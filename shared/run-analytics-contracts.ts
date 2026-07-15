@@ -190,6 +190,8 @@ export interface TurnThroughputSample {
   status: TurnThroughputStatus;
   /** The model this turn ran on. Used for per-sample provider attribution; absent ⇒ fall back to the run's model. */
   modelId?: string;
+  /** Provider paired with modelId when known. */
+  provider?: string;
   /**
    * Total turn latency: previous tool end (or prompt send) → first reply
    * token, in ms. Null when not measurable for this turn.
@@ -244,6 +246,8 @@ export interface AuxiliaryLlmUsageSample {
   occurredAt: string;
   /** Actual model used when reported; consumers fall back to the run model. */
   modelId?: string;
+  /** Actual provider used when reported; consumers fall back to the run provider. */
+  provider?: string;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -372,6 +376,8 @@ export interface RunSnapshot {
   finalizationReason?: RunFinalizationReason;
   outcome?: RunOutcome;
   modelId?: string;
+  /** Provider selected alongside modelId; required to disambiguate shared model IDs. */
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
   mixedModelConfig: boolean;
   mixedTreatmentConfig: boolean;

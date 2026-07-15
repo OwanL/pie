@@ -24,6 +24,7 @@ export const TYPECHECK_PROJECTS = [
   { id: 'skill-pruner', config: 'extensions/skill-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'web-access-compat', config: 'extensions/web-access-compat/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'warm-bash', config: 'extensions/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+  { id: 'copilot-model-discovery', config: 'extensions/copilot-model-discovery/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'tool-result-pruner', config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'session-reviewer', config: 'extensions/session-reviewer/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'session-changes', config: 'extensions/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },

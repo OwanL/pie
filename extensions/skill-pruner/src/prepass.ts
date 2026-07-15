@@ -303,6 +303,45 @@ export function hasUsablePrepassResponse(result: Awaited<ReturnType<typeof runLl
 	return result.rawResponse.trim().length > 0;
 }
 
+/**
+ * Retry a non-empty but unreadable scorer response once at the same thinking
+ * level. The invalid response is included as assistant context followed by a
+ * terse correction, which gives small local models a better chance than simply
+ * replaying the identical request. Empty responses remain the responsibility
+ * of the transport / thinking-level retry paths below.
+ */
+async function runLlmPruningWithParseRecovery(
+	input: LlmPruningInput,
+	model: unknown,
+	options: Record<string, unknown>,
+	completeFn: CompleteSimpleFn,
+	timeoutMs: number,
+): Promise<Awaited<ReturnType<typeof runLlmPruning>>> {
+	const initial = await runLlmPruning(input, model, options, completeFn);
+	if (!initial.keptAllDueToParseFailure || initial.rawResponse.trim().length === 0) {
+		return initial;
+	}
+
+	console.warn("[skill-pruner] invalid JSON response; retrying once with a correction prompt");
+	const recovered = await runLlmPruning(
+		input,
+		model,
+		{ ...options, signal: AbortSignal.timeout(timeoutMs) },
+		completeFn,
+		initial.rawResponse,
+	);
+	return {
+		...recovered,
+		latencyMs: initial.latencyMs + recovered.latencyMs,
+		usage: initial.usage || recovered.usage ? {
+			input: (initial.usage?.input ?? 0) + (recovered.usage?.input ?? 0),
+			output: (initial.usage?.output ?? 0) + (recovered.usage?.output ?? 0),
+			cacheRead: (initial.usage?.cacheRead ?? 0) + (recovered.usage?.cacheRead ?? 0),
+			cacheWrite: (initial.usage?.cacheWrite ?? 0) + (recovered.usage?.cacheWrite ?? 0),
+		} : undefined,
+	};
+}
+
 export function formatEmptyPrepassError(result: Awaited<ReturnType<typeof runLlmPruning>>): string {
 	const diagnostics: string[] = [];
 	if (result.stopReason) {
@@ -451,16 +490,17 @@ export async function runPruningPrepass(
 
 	for (let index = 0; index < attempts.length; index++) {
 		const thinkingLevel = attempts[index];
+		const timeoutMs = prepassTimeoutMs(thinkingLevel, index, timeoutOverrides);
 		try {
-			const result = await runLlmPruning(llmInput, model, {
+			const result = await runLlmPruningWithParseRecovery(llmInput, model, {
 				reasoning: thinkingLevel,
 				// Disable pi-ai retries so only the classified manual loop below
 				// controls retry count and backoff (avoids nested amplification).
 				maxRetries: 0,
 				...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-				signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
+				signal: AbortSignal.timeout(timeoutMs),
 				...auth,
-			}, completeFn);
+			}, completeFn, timeoutMs);
 
 			latestResult = {
 				prunedSkills: result.prunedSkills,
@@ -491,13 +531,13 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] transport error (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms: ${result.errorMessage}`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruning(llmInput, model, {
+						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
 							reasoning: thinkingLevel,
 							maxRetries: 0,
 							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
+							signal: AbortSignal.timeout(timeoutMs),
 							...auth,
-						}, completeFn);
+						}, completeFn, timeoutMs);
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,
@@ -556,13 +596,13 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] ${errorMessage} (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruning(llmInput, model, {
+						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
 							reasoning: thinkingLevel,
 							maxRetries: 0,
 							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-							signal: AbortSignal.timeout(prepassTimeoutMs(thinkingLevel, index, timeoutOverrides)),
+							signal: AbortSignal.timeout(timeoutMs),
 							...auth,
-						}, completeFn);
+						}, completeFn, timeoutMs);
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,

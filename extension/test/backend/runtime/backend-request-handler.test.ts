@@ -49,6 +49,7 @@ function createHarness(overrides: {
     prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
       options?.preflightResult?.(true);
     },
+    compact: async () => undefined,
     abort: async () => undefined,
     followUp: async (_text: string, _images?: unknown) => undefined,
     steer: async (_text: string, _images?: unknown) => undefined,
@@ -360,6 +361,25 @@ test('message.send pre-commit safety timer is cleared at the first message_start
   assert.equal(abortCalled, false, 'session.abort() must not be called after the commit-point clear');
   const failed = longRunHarness.emitted.find((e) => e.event === 'preflight.failed');
   assert.equal(failed, undefined, 'no preflight.failed must fire after the commit point');
+});
+
+test('message.compact compacts an idle session and rejects a running session', async () => {
+  let compactCalls = 0;
+  const idleHarness = createHarness({
+    sessionOverrides: { compact: async () => { compactCalls += 1; } },
+  });
+  assert.deepEqual(await handleBackendRequest(idleHarness.deps, {
+    id: 'compact-idle', method: 'message.compact', params: { sessionPath: idleHarness.context.sessionPath },
+  }), { compacted: true });
+  assert.equal(compactCalls, 1);
+
+  const runningHarness = createHarness({
+    sessionOverrides: { isStreaming: true, compact: async () => { compactCalls += 1; } },
+  });
+  await assert.rejects(() => handleBackendRequest(runningHarness.deps, {
+    id: 'compact-running', method: 'message.compact', params: { sessionPath: runningHarness.context.sessionPath },
+  }), /Cannot compact while this session is running/);
+  assert.equal(compactCalls, 1);
 });
 
 test('message.interrupt validates running state and reports abort failures', async () => {
@@ -858,6 +878,88 @@ test('message.send removes a pre-registered localId when SDK queueing rejects', 
     id: 'failed-steer', method: 'message.send',
     params: { sessionPath: harness.context.sessionPath, text: 'queued', inputs: [], localId: 'local-failed' },
   }), /queue failed/);
+  assert.deepEqual(harness.context.queuedLocalIds, []);
+});
+
+test('message.replaceQueue clears and requeues edited messages in order with stable local ids', async () => {
+  const steerCalls: string[] = [];
+  let clearCalls = 0;
+  let correlationsAtFirstEnqueue: string[] = [];
+  const harness = createHarness({
+    context: { queuedLocalIds: ['local-1', 'local-2'] },
+    sessionOverrides: {
+      isStreaming: true,
+      clearQueue: () => { clearCalls += 1; return { steering: [], followUp: [] }; },
+      steer: async (text: string) => {
+        if (steerCalls.length === 0) correlationsAtFirstEnqueue = [...(harness.context.queuedLocalIds ?? [])];
+        steerCalls.push(text);
+      },
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'replace-queue', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [
+        { localId: 'local-1', text: 'edited', inputs: [] },
+        { localId: 'local-2', text: 'second', inputs: [] },
+      ],
+      fallbackMessages: [
+        { localId: 'local-1', text: 'first', inputs: [] },
+        { localId: 'local-2', text: 'second', inputs: [] },
+      ],
+    },
+  });
+  assert.deepEqual(result, { updated: true, count: 2 });
+  assert.equal(clearCalls, 1);
+  assert.deepEqual(steerCalls, ['edited', 'second']);
+  assert.deepEqual(correlationsAtFirstEnqueue, ['local-1', 'local-2']);
+  assert.deepEqual(harness.context.queuedLocalIds, ['local-1', 'local-2']);
+});
+
+test('message.replaceQueue restores the original queue when replacement fails', async () => {
+  const steerCalls: string[] = [];
+  let clearCalls = 0;
+  let failEdited = true;
+  const harness = createHarness({
+    context: { queuedLocalIds: ['local-1'] },
+    sessionOverrides: {
+      isStreaming: true,
+      clearQueue: () => { clearCalls += 1; return { steering: [], followUp: [] }; },
+      steer: async (text: string) => {
+        steerCalls.push(text);
+        if (text === 'edited' && failEdited) { failEdited = false; throw new Error('replace failed'); }
+      },
+    },
+  });
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'replace-queue-fail', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [{ localId: 'local-1', text: 'edited', inputs: [] }],
+      fallbackMessages: [{ localId: 'local-1', text: 'first', inputs: [] }],
+    },
+  }), /replace failed/);
+  assert.equal(clearCalls, 2);
+  assert.deepEqual(steerCalls, ['edited', 'first']);
+  assert.deepEqual(harness.context.queuedLocalIds, ['local-1']);
+});
+
+test('message.replaceQueue clears correlations when replacement and fallback both fail', async () => {
+  const harness = createHarness({
+    context: { queuedLocalIds: ['local-1'] },
+    sessionOverrides: {
+      isStreaming: true,
+      steer: async () => { throw new Error('always fails'); },
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'replace-queue-double-fail', method: 'message.replaceQueue', params: {
+      sessionPath: harness.context.sessionPath,
+      messages: [{ localId: 'local-1', text: 'edited', inputs: [] }],
+      fallbackMessages: [{ localId: 'local-1', text: 'first', inputs: [] }],
+    },
+  }) as { updated: boolean; queueCleared?: boolean };
+  assert.equal(result.updated, false);
+  assert.equal(result.queueCleared, true);
   assert.deepEqual(harness.context.queuedLocalIds, []);
 });
 

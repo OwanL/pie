@@ -38,6 +38,8 @@ export interface SelectionContext {
 	alwaysParentModel: boolean;
 	/** Opt-in soft routing around providers without an immediately claimable slot. */
 	routeAroundSaturatedProviders?: boolean;
+	/** Retry a replay-safe transient provider failure on another model in the same bucket. */
+	fallbackOnProviderFailure?: boolean;
 	/** Enabled/configured registry models used to map duplicate ids to providers. */
 	registryModels?: ModelProviderRef[];
 	/** Per-tier allowlist restricting which buckets *nested* subagents (depth ≥ 1)

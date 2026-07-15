@@ -17,7 +17,7 @@ test('custom Copilot provider keeps required IDE auth headers at provider bounda
       compat?: unknown;
       headers?: Record<string, string>;
       modelOverrides?: Record<string, unknown>;
-      models?: unknown[];
+      models?: Array<{ id?: string }>;
     }>;
   };
 
@@ -26,7 +26,7 @@ test('custom Copilot provider keeps required IDE auth headers at provider bounda
 
   assert.equal(provider.api, undefined, 'github-copilot must preserve per-model generated API routing');
   assert.equal(provider.compat, undefined, 'github-copilot must preserve per-model generated compat settings');
-  assert.ok(provider.modelOverrides?.['gpt-5.5'], 'gpt-5.5 must remain a built-in model override');
+  assert.ok(provider.models?.some((model) => model.id === 'gpt-5.6-sol'), 'account-visible Copilot models must be full catalog entries');
 
   const headers = provider.headers;
   assert.ok(headers, 'github-copilot provider must define provider-level headers');

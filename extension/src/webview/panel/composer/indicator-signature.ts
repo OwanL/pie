@@ -14,21 +14,18 @@ import { isRecord } from '../../../shared/type-guards';
  * whenever the result could change, so the memos skip the walk in the common
  * "only the streaming message grew" case.
  *
- * Correctness contract — why a length + last-message fingerprint suffices:
+ * Correctness contract — why a length + last-non-queued-message fingerprint suffices:
  * The guarded walks read only
- *   - `message.usage` / `message.modelId`  — set once at `MessageFinished`
- *     (the message is the last assistant message at that moment) and immutable
- *     afterwards;
+ *   - `message.usage` / `message.modelId` — set once at `MessageFinished` on
+ *     the active assistant message and immutable afterwards;
  *   - `message.toolCalls` / `message.parts` tool calls — results land
- *     atomically on the streaming (last) message, and are immutable once
- *     completed;
- *   - `message.markdown` / `message.thinking` — only the streaming message's
- *     grow.
+ *     atomically on that active message and are immutable once completed;
+ *   - `message.markdown` / `message.thinking` — only the active streaming
+ *     message grows.
  * None of these mutate a non-streaming message after it completes, and the
- * only "content transition" during a turn happens on the last message (the one
- * streaming). Appends/removes change `transcript.length`. So
- * `length + last-message volatile fields` captures every transition the walks
- * care about, without paying O(transcript) to detect it.
+ * only content transition during a turn happens on the active message. Queued
+ * follow-ups may project after it, so the signatures skip those trailing rows.
+ * Appends/removes still change `transcript.length`.
  *
  * This deliberately does NOT stabilize the whole transcript (the decision
  * documented in `view-state-stabilize.ts`): the signatures are O(1)/O(small),
@@ -37,14 +34,16 @@ import { isRecord } from '../../../shared/type-guards';
  */
 
 /**
- * O(1). Guards {@link buildSessionTokenUsage} and {@link buildCompletedCostSummary},
- * which sum per-message usage. Usage lands only at `MessageFinished` and is
- * immutable afterwards, so `length + last-message id/status/usage-total`
- * captures every transition: appends/removes (length) and a turn finishing
- * (status flips + `usage` appears).
+ * O(trailing queued follow-ups). Guards {@link buildSessionTokenUsage} and
+ * {@link buildCompletedCostSummary}, which sum per-message usage. Usage lands
+ * only at `MessageFinished` and is immutable afterwards, so
+ * `length + last-non-queued-message id/status/usage-total` captures every
+ * transition: appends/removes (length) and a turn finishing (status flips +
+ * `usage` appears). Queued follow-ups project after the active assistant turn,
+ * so they are skipped to keep that turn in the fingerprint.
  */
 export function transcriptUsageSignature(transcript: readonly ChatMessage[]): string {
-  const last = transcript[transcript.length - 1];
+  const last = lastNonQueuedMessage(transcript);
   return `${transcript.length}|${last?.id ?? ''}|${last?.status ?? ''}|${last?.usage?.totalTokens ?? ''}`;
 }
 
@@ -96,12 +95,13 @@ export function systemPromptsSignature(systemPrompts: readonly SystemPromptEntry
 }
 
 /**
- * O(last message's tool calls). Guards {@link extractSubagentDirectCost}, which
- * sums `cost` from completed subagent tool calls across the transcript.
- * Completed subagent results are immutable once landed; the only NEW completed
- * calls during a turn arrive on the streaming (last) message, so
- * `length + last-message tool-call id/status/name/result-presence` captures
- * every transition without walking the whole transcript. Mirrors
+ * O(trailing queued follow-ups + active message tool calls). Guards
+ * {@link extractSubagentDirectCost}, which sums `cost` from completed subagent
+ * tool calls across the transcript. Completed subagent results are immutable
+ * once landed; the only NEW completed calls during a turn arrive on the
+ * streaming message, so `length + last-non-queued-message tool-call
+ * id/status/name/result-presence` captures every transition without walking the
+ * whole transcript. Mirrors
  * `toolCallsFromMessage` (prefers `toolCalls` when non-empty, else the `parts`
  * tool-call entries) so the fingerprint tracks exactly the calls the walk sees.
  */
@@ -127,8 +127,16 @@ function subagentResultCostFingerprint(rawResult: unknown, depth = 0): string {
   }).join(';');
 }
 
+function lastNonQueuedMessage(transcript: readonly ChatMessage[]): ChatMessage | undefined {
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const message = transcript[index];
+    if (message?.status !== 'queued') return message;
+  }
+  return undefined;
+}
+
 export function subagentCostSignature(transcript: readonly ChatMessage[]): string {
-  const last = transcript[transcript.length - 1];
+  const last = lastNonQueuedMessage(transcript);
   if (!last) return `${transcript.length}|`;
   const tcs = last.toolCalls ?? [];
   const partTcs = last.parts

@@ -254,6 +254,21 @@ test('deriveTurnActivityState returns null when not busy', () => {
   assert.equal(state, null);
 });
 
+test('deriveTurnActivityState surfaces provider waits in the animated transcript status row', () => {
+  const state = deriveTurnActivityState({
+    busy: true,
+    liveTurnPhase: 'waiting_provider',
+    transcript: [makeMessage('user-1', 'user')],
+    prefs: DEFAULT_CHAT_PREFS,
+    pruningSettings: DEFAULT_PRUNING_SETTINGS,
+  });
+  assert.ok(state);
+  assert.equal(state!.phase, 'providerStatus');
+  assert.equal(state!.label, 'waiting for the provider');
+  assert.equal(state!.tone, 'processing');
+  assert.equal(state!.ariaLabel, 'Agent is waiting for the provider');
+});
+
 test('deriveTurnActivityState returns structured streaming state', () => {
   const state = deriveTurnActivityState({
     busy: true,

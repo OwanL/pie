@@ -26,6 +26,12 @@ test('validateWebviewToHostMessage rejects unknown message types', () => {
   if (!result.ok) assert.match(result.reason, /unknown/);
 });
 
+test('validateWebviewToHostMessage validates compact payloads', () => {
+  assert.equal(validateWebviewToHostMessage({ type: 'compact', sessionPath: '/a' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'compact' }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'compact', sessionPath: 42 }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates send payloads', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'send', sessionPath: '/a', text: 'hi' }).ok, true);
   assert.equal(validateWebviewToHostMessage({ type: 'send', text: 'hi' }).ok, false);
@@ -97,6 +103,14 @@ test('validateWebviewToHostMessage validates editMessage payloads', () => {
     validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited', inputs: 'bad' }).ok,
     false,
     'editMessage with non-array inputs should fail',
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited', queued: true }).ok,
+    true,
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1', text: 'edited', queued: 'yes' }).ok,
+    false,
   );
   assert.equal(validateWebviewToHostMessage({ type: 'editMessage', messageId: 'm1', text: 'edited' }).ok, false);
   assert.equal(validateWebviewToHostMessage({ type: 'editMessage', sessionPath: '/a', messageId: 'm1' }).ok, false);

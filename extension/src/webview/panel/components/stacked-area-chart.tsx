@@ -5,7 +5,7 @@ import { useMemo, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 
 import type { AggregateSeriesPoint } from '../../../shared/protocol';
-import { colorFor } from './chart-colors';
+import { colorsFor } from './chart-colors';
 
 /**
  * Reusable SVG stacked-area/bar chart for status-strip tooltip graphs.
@@ -38,6 +38,9 @@ export interface StackedAreaChartProps {
   formatX: (ms: number) => string;
   /** Optional unit label shown beside the max. */
   unit?: string;
+  /** Full legend key set. Supplying it keeps collision-resolved chart fills and
+   * legend swatches identical even when a zero-valued key has no SVG mark. */
+  colorKeys?: string[];
   height?: number;
   width?: number;
 }
@@ -53,6 +56,7 @@ export function StackedAreaChart({
   formatY,
   formatX,
   unit,
+  colorKeys,
   height = 84,
   width = 312,
 }: StackedAreaChartProps): JSX.Element {
@@ -77,8 +81,15 @@ export function StackedAreaChart({
       for (const seg of p.byProvider) s += seg.value;
       if (s > yMax) yMax = s;
     }
-    return { providers, minMs, maxMs, span, yMax: yMax > 0 ? yMax : 1 };
-  }, [points]);
+    return {
+      providers,
+      colors: colorsFor(colorKeys ?? providers),
+      minMs,
+      maxMs,
+      span,
+      yMax: yMax > 0 ? yMax : 1,
+    };
+  }, [points, colorKeys]);
 
   if (points.length === 0 || model.yMax <= 0) {
     return <div class="chart-empty">No data yet</div>;
@@ -128,7 +139,7 @@ export function StackedAreaChart({
         if (i > 0) d += ` V ${yFor(pointSegs[i - 1]!.segs[providerIdx]!.y0)}`;
       }
       d += ' Z';
-      marks.push(<path key={provider} d={d} fill={colorFor(provider)} opacity="0.92" />);
+      marks.push(<path key={provider} d={d} fill={model.colors.get(provider)} opacity="0.92" />);
     }
   } else {
     for (let i = 0; i < pointSegs.length; i += 1) {
@@ -144,7 +155,7 @@ export function StackedAreaChart({
             y={yFor(seg.y1)}
             width={bw}
             height={yFor(seg.y0) - yFor(seg.y1)}
-            fill={colorFor(seg.provider)}
+            fill={model.colors.get(seg.provider)}
             opacity={dim ? 0.4 : 0.92}
           />,
         );

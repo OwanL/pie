@@ -95,24 +95,46 @@ export function loadSource(root = repoRoot()) {
   return source;
 }
 
+function identityKey(provider, id) {
+  return JSON.stringify([provider, id]);
+}
+
+function profileRefKey(ref, providersById) {
+  if (typeof ref === 'object' && ref !== null) return identityKey(ref.provider, ref.id);
+  const providers = providersById.get(ref) ?? [];
+  if (providers.length > 1) {
+    throw new Error(`profileOrder model id '${ref}' is ambiguous; use { provider, id }`);
+  }
+  return providers.length === 1 ? identityKey(providers[0], ref) : undefined;
+}
+
 /** Hand-written cross-field checks the JSON Schema can't easily express. */
 function validateExtra(source) {
-  const allIds = new Set();
-  for (const [pname, provider] of Object.entries(source.providers)) {
-    for (const m of provider.models) {
-      if (allIds.has(m.id)) throw new Error(`duplicate model id across providers: ${m.id}`);
-      allIds.add(m.id);
+  const allModels = new Set();
+  const providersById = new Map();
+  for (const [providerName, provider] of Object.entries(source.providers)) {
+    for (const model of provider.models) {
+      const key = identityKey(providerName, model.id);
+      if (allModels.has(key)) throw new Error(`duplicate model identity: ${providerName}/${model.id}`);
+      allModels.add(key);
+      const providers = providersById.get(model.id) ?? [];
+      providers.push(providerName);
+      providersById.set(model.id, providers);
     }
   }
 
-  const po = source.profileOrder;
-  const poSet = new Set(po);
-  if (poSet.size !== po.length) throw new Error('profileOrder has duplicate entries');
-  for (const id of allIds) {
-    if (!poSet.has(id)) throw new Error(`model '${id}' missing from profileOrder`);
+  const profileKeys = source.profileOrder.map((ref) => profileRefKey(ref, providersById));
+  if (profileKeys.some((key) => key === undefined)) {
+    const index = profileKeys.findIndex((key) => key === undefined);
+    throw new Error(`profileOrder references unknown model '${JSON.stringify(source.profileOrder[index])}'`);
   }
-  for (const id of po) {
-    if (!allIds.has(id)) throw new Error(`profileOrder references unknown model id '${id}'`);
+  const profileSet = new Set(profileKeys);
+  if (profileSet.size !== profileKeys.length) throw new Error('profileOrder has duplicate model identities');
+  for (const key of allModels) {
+    if (!profileSet.has(key)) {
+      const [provider, id] = JSON.parse(key);
+      throw new Error(`model '${provider}/${id}' missing from profileOrder`);
+    }
   }
 }
 
@@ -143,6 +165,7 @@ function toModelsJsonModel(m, includeId) {
         output: m.pricing.output,
         cacheRead: m.pricing.cacheRead,
         cacheWrite: m.pricing.cacheWrite,
+        ...(m.pricing.tiers !== undefined ? { tiers: m.pricing.tiers } : {}),
       };
     } else if (m[k] !== undefined) {
       obj[k] = m[k];
@@ -178,29 +201,38 @@ export function generateModelsJson(source) {
   return { providers };
 }
 
-/** Build a flat id → model map across all providers. */
+/** Build full-identity and bare-id indexes for profile-order resolution. */
 function buildModelIndex(source) {
-  const idx = new Map();
-  for (const provider of Object.values(source.providers)) {
-    for (const m of provider.models) idx.set(m.id, m);
+  const byIdentity = new Map();
+  const providersById = new Map();
+  for (const [provider, config] of Object.entries(source.providers)) {
+    for (const model of config.models) {
+      byIdentity.set(identityKey(provider, model.id), { provider, model });
+      const providers = providersById.get(model.id) ?? [];
+      providers.push(provider);
+      providersById.set(model.id, providers);
+    }
   }
-  return idx;
+  return { byIdentity, providersById };
 }
 
 /** Generate model-profiles.yaml text (with banner). */
 export function generateModelProfilesYaml(source) {
   const YAML = getYaml();
-  const idx = buildModelIndex(source);
+  const { byIdentity, providersById } = buildModelIndex(source);
   const profiles = [];
-  for (const id of source.profileOrder) {
-    const m = idx.get(id);
-    if (!m) throw new Error(`profileOrder references unknown model id '${id}'`);
+  for (const ref of source.profileOrder) {
+    const key = profileRefKey(ref, providersById);
+    const entry = key ? byIdentity.get(key) : undefined;
+    if (!entry) throw new Error(`profileOrder references unknown model '${JSON.stringify(ref)}'`);
+    const { provider, model } = entry;
     profiles.push({
-      id: m.id,
-      eligible: m.eligible,
-      thinking: m.thinking,
-      disabled_reason: m.disabledReason,
-      cost: m.costRank,
+      provider,
+      id: model.id,
+      eligible: model.eligible,
+      thinking: model.thinking,
+      disabled_reason: model.disabledReason,
+      cost: model.costRank,
     });
   }
   const body = YAML.stringify({ profiles }, { sortMapEntries: false, indent: 2 });

@@ -107,6 +107,8 @@ export interface SdkSession {
   sessionManager: SdkSessionManager;
   subscribe: (listener: (event: SdkSessionEvent) => void) => () => void;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
+  /** Manually summarize older history to free context. */
+  compact: (customInstructions?: string) => Promise<unknown>;
   abort: () => Promise<void>;
   /** Queue a follow-up message to run as a fresh turn after the current turn
    *  completes. Used by `message.send` when a turn is already running (steering)
@@ -145,6 +147,10 @@ export interface SdkSession {
   setThinkingLevel?: (level: string) => void;
   getContextUsage?: () => { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
   getAllTools?: () => SdkToolInfo[];
+  /** Names of tools currently exposed to the provider. */
+  getActiveToolNames?: () => string[];
+  /** Replace the provider-visible tool set; synchronously rebuilds the prompt. */
+  setActiveToolsByName?: (toolNames: string[]) => void;
 }
 
 export interface SdkContextFile {
@@ -298,18 +304,16 @@ function assertAllowedSdkPath(sdkPath: string): void {
 //    parser does not recognise as a terminal event) — and what an upstream
 //    truncation produces. Without this pattern, a stalled/truncated stream is
 //    a silent interruption (never retried) instead of a retried turn.
-//  - `upstream stream stalled` / `upstream header phase stalled`: the
-//    ProviderGate's own terminal error texts, should they ever surface in an
-//    errorMessage. Belt-and-suspenders — the 504 header-phase path already
-//    matches `504`.
+//  - `upstream stream stalled` / `upstream header phase stalled` /
+//    `upstream transport circuit open`: the ProviderGate's own terminal error
+//    texts, should they ever surface in an errorMessage. Belt-and-suspenders —
+//    the synthetic 503/504 paths are also retryable by status.
 const RETRY_HOT_PATCH_INSERTS = [
   'stream ended before a terminal response event',
   'upstream stream stalled',
   'upstream header phase stalled',
+  'upstream transport circuit open',
 ] as const;
-// Idempotency marker: the primary insert. If present, the file is already patched.
-const RETRY_HOT_PATCH_MARKER = RETRY_HOT_PATCH_INSERTS[0];
-
 type RetryHotPatchShape = 'array' | 'inline';
 interface RetryHotPatchCandidate {
   /** Path segments relative to the SDK root. */
@@ -360,11 +364,15 @@ export type SdkRetryHotPatchResult =
  *    (new array entries after the matched one).
  *  - `inline`: `stream ended before message_stop|pat1|pat2|...` (new regex
  *    alternatives after the matched alternative). */
-function buildRetryHotPatchReplacement(needle: string, shape: RetryHotPatchShape): string {
+function buildRetryHotPatchReplacement(
+  needle: string,
+  shape: RetryHotPatchShape,
+  inserts: readonly string[],
+): string {
   if (shape === 'array') {
-    return `${needle} ${RETRY_HOT_PATCH_INSERTS.map((p) => `"${p}"`).join(', ')},`;
+    return `${needle} ${inserts.map((p) => `"${p}"`).join(', ')},`;
   }
-  return `${needle}|${RETRY_HOT_PATCH_INSERTS.join('|')}`;
+  return `${needle}|${inserts.join('|')}`;
 }
 
 export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHotPatchResult> {
@@ -382,14 +390,16 @@ export async function applySdkRetryHotPatch(sdkPath: string): Promise<SdkRetryHo
     }
     foundAnyFile = true;
 
-    // Idempotent: the primary insert is already present in this file.
-    if (source.includes(RETRY_HOT_PATCH_MARKER)) return 'already-present';
-
+    const missingInserts = RETRY_HOT_PATCH_INSERTS.filter((pattern) => !source.includes(pattern));
+    if (missingInserts.length === 0) return 'already-present';
     if (!source.includes(candidate.needle)) continue; // wrong shape — try next candidate
 
     await fs.writeFile(
       filePath,
-      source.replace(candidate.needle, buildRetryHotPatchReplacement(candidate.needle, candidate.shape)),
+      source.replace(
+        candidate.needle,
+        buildRetryHotPatchReplacement(candidate.needle, candidate.shape, missingInserts),
+      ),
       'utf8',
     );
     return 'patched';

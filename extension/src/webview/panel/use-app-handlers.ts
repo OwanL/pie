@@ -208,11 +208,11 @@ export function useAppHandlers(
     postMessage({ type: 'setModel', sessionPath, defaultModel: model, defaultProvider: provider, defaultThinkingLevel: thinkingLevel });
   }, [postMessage, activeSessionPathRef]);
 
-  const handleEditSend = useCallback((messageId: string, text: string, inputs?: ComposerInput[]) => {
+  const handleEditSend = useCallback((messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
     const localId = createLocalMessageId('edit');
-    postMessage({ type: 'editMessage', sessionPath, messageId, text, inputs, localId });
+    postMessage({ type: 'editMessage', sessionPath, messageId, text, inputs, localId, queued });
   }, [postMessage, activeSessionPathRef]);
 
   const handleOpenFileDiff = useCallback((filePath: string) => {

@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatPrefs, PruningSettings, ToolCall } from '../../../shared/protocol';
+import type { LiveTurnPhase } from '../../../shared/live-pipeline-protocol';
 import { assistantPartsFromMessage, toolCallsFromMessageParts } from '../../../shared/chat-message-parts';
 import { normalizeToolCallName } from '../../../shared/tool-call-analysis';
 import { estimateTextTokens } from '../../../shared/tokenize';
@@ -29,7 +30,7 @@ export type AgentActivityLabel = typeof AGENT_ACTIVITY_LABELS[keyof typeof AGENT
  */
 export interface TurnActivityState {
   /** Primary in-flight phase identifier. */
-  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'draftingTool' | 'runningTool' | 'streaming';
+  phase: 'preparing' | 'pruning' | 'startingModel' | 'thinking' | 'draftingTool' | 'runningTool' | 'streaming' | 'providerStatus';
   /** Human-readable label for this phase */
   label: string;
   /** Additional detail text (e.g., specific tool name, tool count) */
@@ -60,6 +61,26 @@ interface PendingActivityOptions {
   pruningSettings: Pick<PruningSettings, 'mode'>;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ChatMessage['thinkingLevel'];
+  liveTurnPhase?: LiveTurnPhase | null;
+}
+
+function livePhaseActivityState(phase: LiveTurnPhase | null | undefined): TurnActivityState | null {
+  const labels: Partial<Record<LiveTurnPhase, string>> = {
+    queued: 'queued for provider capacity',
+    preparing: 'preparing the next provider request',
+    waiting_provider: 'waiting for the provider',
+    waiting_input: 'waiting for input',
+    retry_wait: 'waiting to retry the provider',
+    aborting: 'stopping provider work',
+    reconciling_gap: 'recovering live response state',
+  };
+  const label = phase ? labels[phase] : undefined;
+  return label ? {
+    phase: 'providerStatus',
+    label,
+    tone: 'processing',
+    ariaLabel: `Agent is ${label}`,
+  } : null;
 }
 
 function isSkillPrunerActive(
@@ -71,7 +92,11 @@ function isSkillPrunerActive(
 
 function latestUserIndex(transcript: readonly ChatMessage[]): number {
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
-    if (transcript[index]?.role === 'user') {
+    const message = transcript[index];
+    // Queued follow-ups are projected after the live assistant turn. They are
+    // not the owner of the activity currently on screen and must not make that
+    // active tool/reply look like a fresh pruning prepass.
+    if (message?.role === 'user' && message.status !== 'queued') {
       return index;
     }
   }
@@ -112,10 +137,17 @@ export function deriveTurnActivityState({
   pruningSettings,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  liveTurnPhase,
 }: PendingActivityOptions): TurnActivityState | null {
   if (!busy) {
     return null;
   }
+
+  // Provider lifecycle status used to render inside the composer. Surface it in
+  // the transcript's subtle animated activity row instead. Streaming and
+  // running-tool phases retain their richer transcript-derived status/tails.
+  const livePhaseState = livePhaseActivityState(liveTurnPhase);
+  if (livePhaseState) return livePhaseState;
 
   const userIndex = latestUserIndex(transcript);
   if (userIndex === -1) {

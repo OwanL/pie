@@ -162,7 +162,7 @@ test('running subagent placeholders stay visibly active before the first progres
   });
 });
 
-test('running subagent output is shown as generating before lifecycle status arrives', () => {
+test('running subagent output identifies the concrete response stream before lifecycle status arrives', () => {
   const result = {
     agent: 'reviewer',
     task: 'Inspect regression',
@@ -174,10 +174,10 @@ test('running subagent output is shown as generating before lifecycle status arr
   };
   assert.equal(singleResultStatus(result, 'running', false), 'running');
   assert.deepEqual(subagentActivity(result, 1_000), {
-    label: 'Generating',
+    label: 'Responding',
     detail: undefined,
     elapsed: undefined,
-    diagnostic: 'Generating',
+    diagnostic: 'Responding',
   });
 });
 
@@ -632,6 +632,53 @@ test('subagentSingleResultToChatMessages renders streaming assistant output for 
       { role: 'assistant', markdown: 'Still working...', status: 'streaming' },
     ],
   );
+});
+
+test('subagentSingleResultToChatMessages appends live reasoning and reply after committed child history', () => {
+  const messages = subagentSingleResultToChatMessages({
+    agent: 'scout',
+    task: 'Trace the UI state',
+    exitCode: -1,
+    messages: [{ role: 'assistant', content: 'I will inspect the renderer.' }],
+    streamingReasoning: 'Reading the transcript projection now.',
+    streamingText: 'The live fields are not appended',
+  } as any, 'subagent');
+
+  assert.equal(messages.length, 3);
+  assert.equal(messages[1]?.markdown, 'I will inspect the renderer.');
+  assert.deepEqual(
+    {
+      role: messages[2]?.role,
+      markdown: messages[2]?.markdown,
+      thinking: messages[2]?.thinking,
+      status: messages[2]?.status,
+      parts: messages[2]?.parts,
+    },
+    {
+      role: 'assistant',
+      markdown: 'The live fields are not appended',
+      thinking: 'Reading the transcript projection now.',
+      status: 'streaming',
+      parts: [
+        { kind: 'reasoning', text: 'Reading the transcript projection now.' },
+        { kind: 'text', text: 'The live fields are not appended' },
+      ],
+    },
+  );
+});
+
+test('subagentSingleResultToChatMessages renders reasoning before reply text exists', () => {
+  const messages = subagentSingleResultToChatMessages({
+    agent: 'scout',
+    task: 'Trace the UI state',
+    exitCode: -1,
+    messages: [],
+    streamingReasoning: 'Inspecting event flow',
+  } as any, 'subagent');
+
+  assert.equal(messages.at(-1)?.thinking, 'Inspecting event flow');
+  assert.equal(messages.at(-1)?.markdown, '');
+  assert.equal(messages.at(-1)?.status, 'streaming');
 });
 
 test('subagentSingleResultToChatMessages renders a completed no-output fallback when no task or nested transcript exists', () => {

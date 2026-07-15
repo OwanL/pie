@@ -71,12 +71,12 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		attachSelectionMetadata(result, resolved);
 
 		if (args.signal.aborted) break;
-		const failure = isModelFailure(result, resolved.modelOverride, !!args.selectionCtx.bucketAssignments);
+		const failure = args.selectionCtx.fallbackOnProviderFailure !== false
+			&& resolved.selection?.fallback !== true
+			&& isModelFailure(result, resolved.modelOverride, !!args.selectionCtx.bucketAssignments);
 		if (!failure || attempt >= MAX_MODEL_RETRIES) break;
 
 		args.excludeModels.add(resolved.modelOverride!);
-		lastFailedModel = resolved.modelOverride;
-		retryCount++;
 		const next = await resolveModel(
 			args.agent,
 			args.selectionCtx,
@@ -86,7 +86,12 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			args.excludeModels,
 			args.childDepth,
 		);
-		if (!next.modelOverride || args.excludeModels.has(next.modelOverride)) break;
+		// An exhausted bucket normally falls back to the parent's active model.
+		// Provider failover is stricter: it may only dispatch another configured
+		// model from this same bucket, never escape to an out-of-bucket parent.
+		if (!next.modelOverride || next.selection?.fallback === true || args.excludeModels.has(next.modelOverride)) break;
+		lastFailedModel = resolved.modelOverride;
+		retryCount++;
 	}
 
 	if (!result) throw new Error("Subagent did not produce a result.");

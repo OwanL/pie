@@ -53,7 +53,7 @@ export interface RunObserver {
   onBackendError(sessionPath: string | undefined, code: string): void;
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void;
   onBusyChanged(sessionPath: string, busy: boolean): void;
-  onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined): void;
+  onModelConfigChanged(sessionPath: string, modelId: string | undefined, thinkingLevel: ThinkingLevel | undefined, provider?: string): void;
   onUnsupportedInputAttempt(sessionPath: string): void;
   onSessionClosed(sessionPath: string): void;
   replaceSessionPath(oldPath: string, newPath: string): void;

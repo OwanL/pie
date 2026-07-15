@@ -46,6 +46,6 @@ When updating:
 
 ### New docs in docs/
 
-If a decision doesn't fit into an existing doc, create a new file in `docs/`. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`). Existing examples: `STATE_CONTRACT.md`, `ARCHITECTURE.md`, `AGENT-HARNESS-IMPROVEMENTS.md`.
+If a decision doesn't fit into an existing doc, create a new file in `docs/`. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`). Existing examples: `STATE_CONTRACT.md` and `ARCHITECTURE.md`.
 
 Follow the existing naming convention — either UPPER-CASE-With-Dashes.md or lower-case-with-dashes.md, matching the prevailing style in the directory.

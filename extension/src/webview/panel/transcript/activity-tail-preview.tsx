@@ -48,6 +48,63 @@ export const TAIL_RENDER_MAX_CHARS = 20000;
 
 interface TurnActivityTailBodyProps {
   tail: TurnActivityTail;
+  /** Keep prior output rows when a compact preview changes source (reasoning →
+   * tool output → reply), so the rows behave like one continuous console. */
+  continuous?: boolean;
+}
+
+interface ContinuousPreviewSource {
+  accumulated: string;
+  segment: string;
+}
+
+/** Retain enough history for many screenfuls while bounding a long-lived card's
+ * animation cache. The renderer itself still lays out only the newest 20k. */
+export const CONTINUOUS_PREVIEW_MAX_CHARS = TAIL_RENDER_MAX_CHARS * 4;
+
+function longestSuffixPrefix(left: string, right: string): number {
+  if (!left || !right) return 0;
+  const prefix = new Array<number>(right.length).fill(0);
+  for (let i = 1, matched = 0; i < right.length; i += 1) {
+    while (matched > 0 && right[i] !== right[matched]) matched = prefix[matched - 1];
+    if (right[i] === right[matched]) matched += 1;
+    prefix[i] = matched;
+  }
+
+  let matched = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    while (matched > 0 && left[i] !== right[matched]) matched = prefix[matched - 1];
+    if (left[i] === right[matched]) matched += 1;
+    if (matched === right.length && i < left.length - 1) matched = prefix[matched - 1];
+  }
+  return matched;
+}
+
+/** Merge source snapshots into one append-only visual stream. Empty snapshots
+ * preserve the previous rows, while overlapping snapshots (including a bounded
+ * tail sliding forward) append only genuinely new text. */
+export function mergeContinuousPreviewSource(
+  previous: ContinuousPreviewSource,
+  nextSegment: string,
+): ContinuousPreviewSource {
+  if (!nextSegment) return previous;
+  const boundedSegment = nextSegment.slice(-TAIL_RENDER_MAX_CHARS);
+  if (!previous.segment) {
+    return { accumulated: boundedSegment.slice(-CONTINUOUS_PREVIEW_MAX_CHARS), segment: boundedSegment };
+  }
+  if (boundedSegment === previous.segment) return previous;
+
+  const overlap = boundedSegment.startsWith(previous.segment)
+    ? previous.segment.length
+    : longestSuffixPrefix(previous.segment, boundedSegment);
+  const addition = boundedSegment.slice(overlap);
+  if (!addition) return { accumulated: previous.accumulated, segment: boundedSegment };
+  const separator = overlap === 0 && previous.accumulated && !/\s$/.test(previous.accumulated) ? '\n' : '';
+  const accumulated = `${previous.accumulated}${separator}${addition}`;
+  return {
+    accumulated: accumulated.slice(-CONTINUOUS_PREVIEW_MAX_CHARS),
+    segment: boundedSegment,
+  };
 }
 
 /**
@@ -94,13 +151,9 @@ interface TurnActivityTailBodyProps {
  * re-acquire. The animation is detected off the wrapped line count exceeding its
  * historical peak, so height wobble never false-fires a scroll.
  */
-export function TurnActivityTailBody({ tail }: TurnActivityTailBodyProps) {
+export function TurnActivityTailBody({ tail, continuous = false }: TurnActivityTailBodyProps) {
   const { kind, label, inputLine, lines, cursor, sourceText } = tail;
   const hasComposite = Boolean(label);
-  const hasContent = lines.length > 0;
-  // The caret sits on the composite row while no output has arrived, otherwise
-  // at the end of the flowing body text.
-  const caretOnComposite = Boolean(cursor) && !hasContent;
   // Smoothly stream the live tail in instead of snapping a full chunk every
   // snapshot. Reasoning / reply / tool tails carry the raw, monotonically
   // growing `sourceText`; we buffer that source and reveal the *full* tail (not
@@ -114,11 +167,22 @@ export function TurnActivityTailBody({ tail }: TurnActivityTailBodyProps) {
   // streamed text stays crisp and readable.
   const streaming = Boolean(cursor);
   const rawJoined = lines.filter((l) => l.length > 0).join(' ');
-  const source = sourceText ?? rawJoined;
+  const currentSource = sourceText ?? rawJoined;
+  const continuousSourceRef = useRef<ContinuousPreviewSource>({ accumulated: '', segment: '' });
+  if (continuous) {
+    continuousSourceRef.current = mergeContinuousPreviewSource(continuousSourceRef.current, currentSource);
+  } else {
+    continuousSourceRef.current = { accumulated: currentSource, segment: currentSource };
+  }
+  const source = continuous ? continuousSourceRef.current.accumulated : currentSource;
+  const hasContent = source.length > 0;
+  // The caret sits on the composite row while no output has arrived, otherwise
+  // at the end of the flowing body text.
+  const caretOnComposite = Boolean(cursor) && !hasContent;
   const revealed = useBufferedText(source, streaming, TAIL_RATE);
   // Render the full revealed tail (capped only as a safety bound) so the wrapped
   // line count is monotonic; the row-scroll hook depends on that growth.
-  const joined = sourceText
+  const joined = sourceText || continuous
     ? collapseSpaces(revealed.length > TAIL_RENDER_MAX_CHARS ? revealed.slice(revealed.length - TAIL_RENDER_MAX_CHARS) : revealed)
     : revealed;
   const { pushY, animating, overflows, refs } = useTailConsoleScroll(
@@ -518,34 +582,20 @@ export function subagentPreviewTail(
     };
   }
 
-  // 3. Lifecycle fallback — only when no actual content exists.
-  if (!running && !taskInputLine) return undefined;
-
-  const runningTools = result.runningTools?.filter(Boolean).join(', ');
-  const activityLabels: Record<string, string> = {
-    queued: 'pending...',
-    preparing: 'Starting...',
-    waiting_provider: 'Waiting for provider...',
-    streaming: 'Generating...',
-    running_tool: runningTools ? `Running ${runningTools}...` : 'Running tool...',
-    retry_wait: 'Retrying provider...',
-  };
-  const activityLine = (runningTools
-    ? `Running ${runningTools}...`
-    : result.activityPhase
-      ? activityLabels[result.activityPhase]
-      : result.streaming
-        ? 'Generating...'
-        : undefined) ?? 'Starting...';
-  const lines = running ? [activityLine] : [];
+  // 3. No concrete live content yet. The header already carries lifecycle,
+  // elapsed time, provider waits, and running-tool names, so repeating
+  // "Generating…"/"Starting…" in a fixed-height preview wastes transcript
+  // space. Keep only the useful one-line task; actual reasoning, reply text, or
+  // nested tool detail will replace it as soon as it arrives.
+  if (!taskInputLine) return undefined;
   return {
     kind: 'subagent',
-    label: taskInputLine ? 'task' : undefined,
+    label: 'task',
     inputLine: taskInputLine,
-    lines,
+    lines: [],
     truncated: false,
-    cursor: running && !isIdle(result),
-    reservedRows: lineBudget + (taskInputLine ? 1 : 0),
+    cursor: false,
+    reservedRows: 1,
     sourceText: undefined,
   };
 }

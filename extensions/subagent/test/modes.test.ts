@@ -211,13 +211,13 @@ test("isModelFailure allows only transient, side-effect-safe failures", () => {
 	assert.equal(isModelFailure({ ...base, retryable: true, replaySafety: "tool_side_effect" }, "model-a", true), false);
 });
 
-test("unclassified provider error does not retry because failure metadata is no longer attached", async () => {
+test("transient provider timeout retries on another model in the same bucket", async () => {
 	let attempts = 0;
 	setMockBehavior({
 		onPrompt: async (emit: any) => {
 			attempts++;
 			if (attempts === 1) {
-				const error = Object.assign(new Error("provider timed out"), { code: "ETIMEDOUT" });
+				const error = Object.assign(new Error("provider timed out after retries exhausted"), { code: "ETIMEDOUT" });
 				throw error;
 			}
 			emit(messageEnd("recovered", "completed"));
@@ -236,16 +236,73 @@ test("unclassified provider error does not retry because failure metadata is no 
 			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
 		},
 	};
+	const originalRandom = Math.random;
+	Math.random = () => 0;
+	try {
+		const response: any = await execSingle(
+			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
+			() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
+			"t-retry", undefined,
+		);
+		assert.equal(response.isError, undefined);
+		assert.equal(response.content[0].text, "recovered");
+		assert.equal(attempts, 2);
+		assert.equal(response.details.results[0].retryCount, 1);
+		assert.equal(response.details.results[0].failedModel, "model-a");
+		assert.equal(response.details.results[0].selectedModel, "model-b");
+	} finally {
+		Math.random = originalRandom;
+	}
+});
+
+test("exhausted bucket does not fall back outside the bucket or report an unstarted retry", async () => {
+	let attempts = 0;
+	setMockBehavior({ onPrompt: async () => {
+		attempts++;
+		throw Object.assign(new Error("connection reset after retries exhausted"), { code: "ECONNRESET" });
+	} });
+	const models = [
+		{ id: "parent-model", provider: "parent-provider" },
+		{ id: "bucket-model", provider: "bucket-provider" },
+	];
+	const ctx = {
+		...makeCtx(),
+		model: models[0],
+		modelRegistry: {
+			getAvailable: () => models,
+			getAll: () => models,
+			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+		},
+	};
 	const response: any = await execSingle(
 		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
-		"t-retry", undefined,
+		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["bucket-model"], frontier: [] } }),
+		"t-exhausted", undefined,
 	);
 	assert.equal(response.isError, true);
-	assert.equal(attempts, 1, "runner no longer attaches retryable/replaySafety metadata, so failover is not triggered");
+	assert.equal(attempts, 1);
+	assert.equal(response.details.results[0].selectedModel, "bucket-model");
 	assert.equal(response.details.results[0].retryCount, undefined);
 	assert.equal(response.details.results[0].failedModel, undefined);
+});
+
+test("provider fallback toggle off surfaces the first transient failure", async () => {
+	let attempts = 0;
+	setMockBehavior({ onPrompt: async () => {
+		attempts++;
+		throw Object.assign(new Error("provider timed out"), { code: "ETIMEDOUT" });
+	} });
+	const response: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" }, makeCtx(), makeAgents(),
+		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
+		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: false, bucketAssignments: { small: [], medium: ["active-model", "other-model"], frontier: [] } }),
+		"t-no-retry", undefined,
+	);
+	assert.equal(response.isError, true);
+	assert.equal(attempts, 1);
+	assert.equal(response.details.results[0].retryCount, undefined);
 });
 
 test("executeSingleMode: parent abort is terminal and never starts a fallback model attempt", async () => {

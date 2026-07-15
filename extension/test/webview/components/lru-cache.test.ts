@@ -77,6 +77,41 @@ test('LruCache maxSize is exposed', () => {
   assert.equal(cache.maxSize, 5);
 });
 
+test('LruCache evicts multiple old entries to remain within a weight budget', () => {
+  const cache = new LruCache<string, string>(10, {
+    maxWeight: 6,
+    weight: (_key, value) => value.length,
+  });
+  cache.set('a', '12');
+  cache.set('b', '345');
+  cache.set('c', '678');
+  assert.equal(cache.has('a'), false);
+  assert.equal(cache.has('b'), true);
+  assert.equal(cache.has('c'), true);
+  assert.equal(cache.totalWeight, 6);
+});
+
+test('LruCache does not retain an entry larger than its total weight budget', () => {
+  const cache = new LruCache<string, string>(10, {
+    maxWeight: 3,
+    weight: (_key, value) => value.length,
+  });
+  cache.set('small', '12');
+  cache.set('huge', '1234');
+  assert.equal(cache.has('small'), true, 'an oversized insertion does not evict useful cached entries');
+  assert.equal(cache.has('huge'), false);
+  assert.equal(cache.totalWeight, 2);
+  cache.clear();
+  assert.equal(cache.totalWeight, 0);
+});
+
+test('LruCache rejects invalid weight configuration and entry weights', () => {
+  assert.throws(() => new LruCache<string, string>(2, { maxWeight: 0, weight: () => 1 }), RangeError);
+  assert.throws(() => new LruCache<string, string>(2, { maxWeight: 2 }), TypeError);
+  const cache = new LruCache<string, string>(2, { maxWeight: 2, weight: () => Number.NaN });
+  assert.throws(() => cache.set('a', '1'), RangeError);
+});
+
 test('LruCache rejects a non-positive or non-finite maxSize', () => {
   assert.throws(() => new LruCache<string, string>(0), RangeError);
   assert.throws(() => new LruCache<string, string>(-1), RangeError);

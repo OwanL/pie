@@ -11,7 +11,14 @@
 
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { ProviderGate, ProviderGateSaturatedError, ProviderGateAbortError, ProviderGateHeaderTimeoutError, type ProviderConcurrencyConfig } from '../../../src/backend/provider-gate.js';
+import {
+	ProviderGate,
+	ProviderGateSaturatedError,
+	ProviderGateAbortError,
+	ProviderGateHeaderTimeoutError,
+	ProviderGateTransportCircuitOpenError,
+	type ProviderConcurrencyConfig,
+} from '../../../src/backend/provider-gate.js';
 import { readProviderCapacitySnapshot } from '../../../../shared/provider-capacity-bridge.js';
 import { observeProviderTransport } from '../../../src/backend/provider-progress-bus.js';
 
@@ -455,6 +462,169 @@ describe('ProviderGate — header-phase timeout', () => {
 		assert.equal(res.status, 200);
 	});
 
+	test('repeated header stalls open a shared circuit and stop hitting the upstream', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.02,
+			queueWaitSeconds: 0,
+		};
+		let callCount = 0;
+		globalThis.fetch = async (_input, init) => {
+			callCount++;
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+			});
+		};
+		const gate = ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 0.05,
+		});
+
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s3')), ProviderGateTransportCircuitOpenError);
+
+		assert.equal(callCount, 2, 'an open circuit must reject locally without another upstream call');
+		const [metrics] = gate.getMetrics();
+		assert.equal(metrics.paused, true);
+		assert.equal(metrics.strikeCount, 2);
+	});
+
+	test('one half-open probe closes the transport circuit after recovery', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.01,
+			queueWaitSeconds: 0,
+		};
+		let healthy = false;
+		let callCount = 0;
+		globalThis.fetch = async (_input, init) => {
+			callCount++;
+			if (healthy) return makeStreamingResponse([new TextEncoder().encode('data: recovered\n\n')]);
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+			});
+		};
+		const gate = ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 0.02,
+		});
+
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		healthy = true;
+
+		const probe = await fetch(TEST_BASE + '/chat', makeInit('probe'));
+		assert.equal(await probe.text(), 'data: recovered\n\n');
+		assert.equal(gate.getMetrics()[0].paused, false);
+		assert.equal(gate.getMetrics()[0].strikeCount, 0);
+
+		const followUp = await fetch(TEST_BASE + '/chat', makeInit('follow-up'));
+		assert.equal(followUp.status, 200);
+		assert.equal(callCount, 4, 'two failed calls, one probe, and one normal follow-up should reach upstream');
+	});
+
+	test('only one half-open probe reaches upstream at a time', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.01,
+			queueWaitSeconds: 0,
+		};
+		let healthy = false;
+		let releaseProbe: ((response: Response) => void) | undefined;
+		let callCount = 0;
+		globalThis.fetch = async (_input, init) => {
+			callCount++;
+			if (healthy) return new Promise<Response>((resolve) => { releaseProbe = resolve; });
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+			});
+		};
+		ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 0.02,
+		});
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		healthy = true;
+
+		const probe = fetch(TEST_BASE + '/chat', makeInit('probe'));
+		await new Promise((resolve) => setImmediate(resolve));
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('blocked-sibling')),
+			ProviderGateTransportCircuitOpenError,
+		);
+		assert.equal(callCount, 3, 'the blocked sibling must not reach upstream');
+		releaseProbe?.(makeStreamingResponse([new TextEncoder().encode('data: ok\n\n')]));
+		assert.equal((await probe).status, 200);
+	});
+
+	test('non-header failure during a half-open probe re-opens the circuit', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.01,
+			queueWaitSeconds: 0,
+		};
+		let probeFailsDifferently = false;
+		let callCount = 0;
+		globalThis.fetch = async (_input, init) => {
+			callCount++;
+			if (probeFailsDifferently) throw new TypeError('connection reset during probe');
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+			});
+		};
+		ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 0.02,
+		});
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		probeFailsDifferently = true;
+
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('probe')), TypeError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('blocked')), ProviderGateTransportCircuitOpenError);
+		assert.equal(callCount, 3, 'failed half-open probe should restore local short-circuiting');
+	});
+
+	test('transport circuit survives live concurrency reconfiguration', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.01,
+			queueWaitSeconds: 0,
+		};
+		let callCount = 0;
+		globalThis.fetch = async (_input, init) => {
+			callCount++;
+			return new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+			});
+		};
+		const gate = ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 1,
+		});
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 4 } });
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s3')), ProviderGateTransportCircuitOpenError);
+		assert.equal(callCount, 2, 'settings changes must not reset an outage circuit');
+	});
+
 	test('headers arriving within the bound pass through normally', async () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
@@ -638,6 +808,27 @@ describe('ProviderGate — live capacity bridge', () => {
 
 		releaseHeaders();
 		await request;
+		assert.equal(readProviderCapacitySnapshot()?.['test-provider']?.immediatelyClaimable, false);
+	});
+
+	test('reports a transport-circuit-open provider as unavailable even with free slots', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			headerWaitSeconds: 0.01,
+			queueWaitSeconds: 0,
+		};
+		globalThis.fetch = async (_input, init) => new Promise((_resolve, reject) => {
+			const signal = init?.signal;
+			if (signal?.aborted) reject(signal.reason);
+			else signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+		});
+		ProviderGate.install([config], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 1,
+		});
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), ProviderGateHeaderTimeoutError);
+
 		assert.equal(readProviderCapacitySnapshot()?.['test-provider']?.immediatelyClaimable, false);
 	});
 

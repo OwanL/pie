@@ -11,6 +11,7 @@ import type {
   ToolCall,
   TranscriptWindow,
 } from '../../../shared/protocol';
+import type { LiveTurnPhase } from '../../../shared/live-pipeline-protocol';
 import type { TranscriptContextMenuType } from '../chat-prefs';
 
 export type TranscriptContextMenuHandler = (
@@ -35,6 +36,7 @@ export interface TranscriptCommonProps {
   transcriptLoaded: boolean;
   loadingStatus?: string;
   busy: boolean;
+  liveTurnPhase?: LiveTurnPhase | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   systemPrompts: SystemPromptEntry[];
@@ -44,7 +46,7 @@ export interface TranscriptCommonProps {
   workingDirectory: string | null;
   editingId: string | null;
   onEditRequest: (messageId: string) => void;
-  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;

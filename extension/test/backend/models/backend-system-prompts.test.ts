@@ -12,8 +12,11 @@ import {
   applySystemPromptTogglesToOptions,
   buildProviderSystemPrompt,
   buildSessionSystemPrompts,
+  buildToggledSystemPrompt,
   captureOriginalSystemPromptOptions,
   contextFileEntryId,
+  installSystemPromptToggleRebuildGuard,
+  installSystemPromptToolToggleGuard,
   isSupersetSystemPromptOptions,
   markDisabledEntries,
   stripDisabledSectionsFromPrompt,
@@ -347,6 +350,143 @@ test('stripDisabledSectionsFromPrompt strips the custom prompt prefix when custo
   assert.ok(!stripped.startsWith('You are a custom'));
   // Runtime (not disabled) survives.
   assert.ok(stripped.includes('Current date:'));
+});
+
+test('disabling the harness alone preserves the independently enabled tools block', () => {
+  const toolsBlock =
+    'Available tools:\n- read: read files\n\n' +
+    'In addition to the tools above, you may have access to other custom tools depending on the project.\n\n';
+  const harnessPrefix = `Harness core\n\n${toolsBlock}Guidelines`;
+  const stripped = stripDisabledSectionsFromPrompt(
+    `${harnessPrefix}\nCurrent date: 2026-01-01\nCurrent working directory: /repo`,
+    new Set([HARNESS_ENTRY_ID]),
+    undefined,
+    harnessPrefix,
+  );
+
+  assert.ok(!stripped.includes('Harness core'));
+  assert.ok(!stripped.includes('Guidelines'));
+  assert.match(stripped, /Available tools:/);
+  assert.match(stripped, /Current date:/);
+});
+
+test('disabling only the project-context prelude unwraps enabled context files', () => {
+  const full =
+    'Harness\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n' +
+    '<project_instructions path="/repo/AGENTS.md">\nrules\n</project_instructions>\n\n' +
+    '</project_context>\n\nCurrent date: 2026-01-01\nCurrent working directory: /repo';
+  const stripped = stripDisabledSectionsFromPrompt(
+    full,
+    new Set([PROJECT_CONTEXT_ENTRY_ID]),
+    undefined,
+    undefined,
+  );
+
+  assert.ok(!stripped.includes('<project_context>'));
+  assert.ok(!stripped.includes('</project_context>'));
+  assert.ok(!stripped.includes('Project-specific instructions and guidelines:'));
+  assert.match(stripped, /<project_instructions path="\/repo\/AGENTS\.md">/);
+  assert.match(stripped, /Current date:/);
+});
+
+test('runtime can be removed after another toggle moves it to the start', () => {
+  const runtime = 'Current date: 2026-01-01\nCurrent working directory: /repo';
+  assert.equal(
+    stripDisabledSectionsFromPrompt(runtime, new Set([RUNTIME_ENTRY_ID]), undefined, undefined),
+    '',
+  );
+});
+
+function buildTestSdkPrompt(options: SdkBuildSystemPromptOptions): string {
+  const toolsBlock =
+    'Available tools:\n- read: read files\n\n' +
+    'In addition to the tools above, you may have access to other custom tools depending on the project.\n\n';
+  let prompt = `Harness core\n\n${toolsBlock}Guidelines`;
+  if (options.appendSystemPrompt) prompt += `\n\n${options.appendSystemPrompt}`;
+  if ((options.contextFiles?.length ?? 0) > 0) {
+    prompt += '\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n';
+    for (const file of options.contextFiles ?? []) {
+      prompt += `<project_instructions path="${file.path}">\n${file.content}\n</project_instructions>\n\n`;
+    }
+    prompt += '</project_context>\n';
+  }
+  if ((options.skills?.length ?? 0) > 0) prompt += '\n<skills>loaded</skills>';
+  prompt += '\nCurrent date: 2026-01-01\nCurrent working directory: /repo';
+  return prompt;
+}
+
+test('buildToggledSystemPrompt permits a truly empty prompt when every entry is disabled', () => {
+  const source = fullOptions();
+  source.selectedTools = ['read'];
+  source.toolSnippets = { read: 'read files' };
+  const disabled = [
+    HARNESS_ENTRY_ID,
+    TOOLS_ENTRY_ID,
+    APPEND_ENTRY_ID,
+    PROJECT_CONTEXT_ENTRY_ID,
+    ...source.contextFiles!.map((file) => contextFileEntryId(file.path)),
+    SKILLS_ENTRY_ID,
+    RUNTIME_ENTRY_ID,
+  ];
+
+  const toggled = buildToggledSystemPrompt(source, disabled, buildTestSdkPrompt);
+  assert.equal(toggled.prompt, '');
+  assert.equal(toggled.options.appendSystemPrompt, undefined);
+  assert.deepEqual(toggled.options.contextFiles, []);
+  assert.deepEqual(toggled.options.skills, []);
+});
+
+test('Tools toggle guard prevents extensions from re-exposing provider schemas', () => {
+  let disabled: string[] = [TOOLS_ENTRY_ID];
+  const applied: string[][] = [];
+  const session = {
+    setActiveToolsByName(names: string[]) { applied.push(names); },
+  };
+
+  installSystemPromptToolToggleGuard(session, () => disabled);
+  session.setActiveToolsByName(['read', 'bash']);
+  assert.deepEqual(applied, [[]]);
+
+  disabled = [];
+  session.setActiveToolsByName(['read', 'bash']);
+  assert.deepEqual(applied, [[], ['read', 'bash']]);
+});
+
+test('Skills row remains toggleable while all tools are manually disabled', () => {
+  const prompts = buildSessionSystemPrompts({
+    harnessPrompt: 'Harness\nCurrent date: 2026-01-01\nCurrent working directory: /repo',
+    promptOptions: { cwd: '/repo', selectedTools: [], skills: [makeSkill('frontend-design')] },
+    formatSkillsForPrompt: (skills) => skills.map((skill) => skill.name).join('\n'),
+    disabledEntries: [TOOLS_ENTRY_ID],
+  });
+  assert.ok(prompts.some((prompt) => prompt.id === SKILLS_ENTRY_ID));
+});
+
+test('system-prompt exclusions survive synchronous SDK prompt rebuilds', () => {
+  let disabled: string[] = [SKILLS_ENTRY_ID, contextFileEntryId('/repo/AGENTS.md')];
+  const state: {
+    _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
+    _originalSystemPromptOptions?: SdkBuildSystemPromptOptions;
+    _rebuildSystemPrompt?: (toolNames: string[]) => string;
+  } = {
+    _rebuildSystemPrompt(toolNames) {
+      const options = fullOptions();
+      options.selectedTools = toolNames;
+      this._baseSystemPromptOptions = options;
+      return buildTestSdkPrompt(options);
+    },
+  };
+
+  installSystemPromptToggleRebuildGuard(state, () => disabled, buildTestSdkPrompt);
+  const filtered = state._rebuildSystemPrompt!(['read']);
+  assert.doesNotMatch(filtered, /<skills>/);
+  assert.doesNotMatch(filtered, /AGENTS\.md/);
+  assert.match(filtered, /other\.md/);
+
+  disabled = [];
+  const restored = state._rebuildSystemPrompt!(['read']);
+  assert.match(restored, /<skills>/);
+  assert.match(restored, /AGENTS\.md/);
 });
 
 test('markDisabledEntries sets disabled only on matching ids', () => {

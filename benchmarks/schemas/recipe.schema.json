@@ -1,0 +1,5 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://pie.local/schemas/recipe.schema.json","type":"object","additionalProperties":false,
+  "required":["schemaVersion","id","baseCommit","type","hypothesisDimension","changedPaths","apply","contentHash","validation"],
+  "properties":{"schemaVersion":{"const":1},"id":{"type":"string"},"baseCommit":{"type":"string","pattern":"^[0-9a-f]{40}$"},"type":{"enum":["extension-overlay","source-patch","prompt-override","skill-override","settings-overlay","composite"]},"hypothesisDimension":{"type":"string"},"changedPaths":{"type":"array","items":{"type":"string"}},"apply":{"type":"object"},"contentHash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"validation":{"type":"array","items":{"type":"string"}}}
+}

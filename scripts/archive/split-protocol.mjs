@@ -3,7 +3,6 @@
  * Target refactor (protocol.ts split into shared/protocol/*) is DONE;
  * re-running OVERWRITES protocol.ts with a 1-line barrel (no backup, not
  * idempotent) and silently drops any missed export. Kept for history only.
- * See docs/internal/code-review/09_analysis_docs_config.md (S10 C1).
  */
 import fs from 'node:fs';
 import path from 'node:path';

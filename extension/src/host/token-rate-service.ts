@@ -45,12 +45,17 @@ export interface TokenRateServiceDeps {
   /** Called when the active session's displayed rate state changed, so the
    * host can post a fresh snapshot to the webview. */
   onActiveRateChanged: () => void;
+  /** Called after every measurement tick. Aggregate analytics use this cheap
+   * 200 ms signal to refresh live fields without polling history or backend
+   * metrics at the same cadence. */
+  onRatesTick?: () => void;
 }
 
 export class TokenRateService {
   private accumulators = new Map<string, Accumulator>();
   private runIdsBySession = new Map<string, string | null>();
   private statesBySession = new Map<string, TokenRateIndicatorState>();
+  private lastAggregateSignature = '';
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly deps: TokenRateServiceDeps) {}
@@ -178,6 +183,21 @@ export class TokenRateService {
 
     if (activeChanged) {
       this.deps.onActiveRateChanged();
+    }
+
+    // Aggregate analytics only need a fast refresh when a perceptible live
+    // input changed. Avoid rebuilding chart series five times per second while
+    // idle or while a running session is stalled at an unchanged tool state.
+    const aggregateSignature = [
+      `tabs=${[...openTabs].sort().join(',')}`,
+      ...[...new Set(running)].sort().map((path) => {
+        const measured = this.statesBySession.get(path);
+        return `${path}:${measured?.state ?? ''}:${measured?.rate ?? ''}:${measured?.liveOutputTokens ?? ''}`;
+      }),
+    ].join('|');
+    if (aggregateSignature !== this.lastAggregateSignature) {
+      this.lastAggregateSignature = aggregateSignature;
+      this.deps.onRatesTick?.();
     }
   }
 }

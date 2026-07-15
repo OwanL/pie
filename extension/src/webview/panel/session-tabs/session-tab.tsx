@@ -29,6 +29,8 @@ export interface SessionTabProps {
    *  close × and mark-done badge with an explanatory tooltip (the trigger must
    *  be cancelled first, from the status strip). */
   hasDeferredTriggers: boolean;
+  /** True when a pending deferred trigger includes a timer. */
+  hasDeferredTimer: boolean;
   onContextMenu: (event: MouseEvent, tabPath: string) => void;
   onPointerDown: (event: PointerEvent, sourceIndex: number, sourcePath: string) => void;
   onClick: (tabPath: string) => void;
@@ -53,6 +55,7 @@ export const SessionTab = memo(function SessionTab({
   activeRunSummary,
   isPinned,
   hasDeferredTriggers,
+  hasDeferredTimer,
   onContextMenu,
   onPointerDown,
   onClick,
@@ -66,7 +69,7 @@ export const SessionTab = memo(function SessionTab({
   const isRunning = runningPathSet.has(tabPath);
   const isPreparing = isPendingTabPath(tabPath);
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
-  const isUnreadFinished = unreadFinishedPathSet.has(tabPath);
+  const isUnreadFinished = unreadFinishedPathSet.has(tabPath) && !hasDeferredTimer;
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
   const review = session
     ? { done: session.done, rating: session.rating, completion: session.completion, reason: session.reviewReason }
@@ -89,9 +92,11 @@ export const SessionTab = memo(function SessionTab({
     ? `${label} (waiting for your answer)`
     : isPreparing
       ? `${label} (preparing in background — you can type or send now)`
-      : isUnreadFinished
-        ? `${label} (finished, unread)`
-        : label;
+      : hasDeferredTimer
+        ? `${label} (waiting for deferred timer)`
+        : isUnreadFinished
+          ? `${label} (finished, unread)`
+          : label;
 
   // A pending deferred trigger blocks closing the tab and marking it done —
   // the trigger must be cancelled first (from the status strip) so it is not
@@ -103,6 +108,7 @@ export const SessionTab = memo(function SessionTab({
   if (isActive) classBits.push('active');
   if (isAttention) classBits.push('attention');
   if (isUnreadFinished) classBits.push('unread-finished');
+  if (hasDeferredTimer) classBits.push('deferred-timer');
   if (isPinned) classBits.push('pinned');
   if (isRunning) classBits.push('running');
 
@@ -137,9 +143,11 @@ export const SessionTab = memo(function SessionTab({
           <>
             {isRunning || isPreparing
               ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
-              : isUnreadFinished
-                ? <span class="session-tab-finished" aria-hidden="true" />
-                : null}
+              : hasDeferredTimer
+                ? <span class="session-tab-deferred-timer" aria-hidden="true">⌛</span>
+                : isUnreadFinished
+                  ? <span class="session-tab-finished" aria-hidden="true" />
+                  : null}
             <span class="session-tab-label">{label}</span>
             {hasReview ? (
               <span

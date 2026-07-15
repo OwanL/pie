@@ -83,12 +83,12 @@ export function applySystemPromptTogglesToOptions(
   return filtered;
 }
 
-const RUNTIME_TRAILER_RE = /\nCurrent date: [^\n]+\nCurrent working directory: [^\n]+$/;
+const RUNTIME_TRAILER_RE = /(?:^|\n)Current date: [^\n]+\nCurrent working directory: [^\n]+$/;
 const TOOLS_BLOCK_RE =
   /Available tools:\n[\s\S]*?\nIn addition to the tools above, you may have access to other custom tools depending on the project\.\n\n/;
 const PROJECT_CONTEXT_OPEN_RE =
   /\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n/;
-const PROJECT_CONTEXT_CLOSE_RE = /\n<\/project_context>\n$/;
+const PROJECT_CONTEXT_CLOSE_RE = /\n<\/project_context>\n/;
 
 /** Strip non-option-driven disabled sections (harness/custom, tools,
  *  project-context prelude, runtime) from a prompt built by `buildSystemPrompt`.
@@ -104,12 +104,16 @@ export function stripDisabledSectionsFromPrompt(
 ): string {
   let out = prompt;
 
-  // Harness core or custom prompt: remove the leading prefix entirely.
+  // Harness core or custom prompt: remove the leading prefix. The Tools row
+  // is independent, so preserve its block when only the harness row is off.
   if (disabled.has(HARNESS_ENTRY_ID) || disabled.has(CUSTOM_ENTRY_ID)) {
     if (customPrompt && out.startsWith(customPrompt)) {
       out = out.slice(customPrompt.length).replace(/^\n+/, '');
     } else if (harnessPrefix && out.startsWith(harnessPrefix)) {
-      out = out.slice(harnessPrefix.length).replace(/^\n+/, '');
+      const toolsBlock = disabled.has(TOOLS_ENTRY_ID)
+        ? ''
+        : harnessPrefix.match(TOOLS_BLOCK_RE)?.[0] ?? '';
+      out = toolsBlock + out.slice(harnessPrefix.length).replace(/^\n+/, '');
     }
   }
 
@@ -178,6 +182,95 @@ export function isSupersetSystemPromptOptions(
 interface PromptStateLike {
   _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
   _originalSystemPromptOptions?: SdkBuildSystemPromptOptions;
+}
+
+interface RebuildablePromptState extends PromptStateLike {
+  _rebuildSystemPrompt?: (toolNames: string[]) => string;
+}
+
+interface ToolToggleSession {
+  setActiveToolsByName?: (toolNames: string[]) => void;
+}
+
+export interface ToggledSystemPrompt {
+  prompt: string;
+  options: SdkBuildSystemPromptOptions;
+}
+
+/** Rebuild a prompt from an unfiltered SDK option snapshot and apply the
+ * persisted picker exclusions. An empty string is a valid result: it is how
+ * the picker represents a genuinely prompt-less/raw model call. */
+export function buildToggledSystemPrompt(
+  source: SdkBuildSystemPromptOptions,
+  disabledEntries: readonly string[],
+  buildSystemPrompt: (options: SdkBuildSystemPromptOptions) => string,
+): ToggledSystemPrompt {
+  const disabled = disabledPromptEntryIds(new Set(disabledEntries));
+  const options = applySystemPromptTogglesToOptions(source, disabled);
+  const built = normalizePromptText(buildSystemPrompt(options)) ?? '';
+  if (disabled.size === 0) {
+    return { prompt: built, options };
+  }
+
+  const harnessPrefix = normalizePromptText(buildSystemPrompt({
+    cwd: source.cwd,
+    selectedTools: source.selectedTools,
+    toolSnippets: source.toolSnippets,
+    promptGuidelines: source.promptGuidelines,
+  }))?.replace(RUNTIME_TRAILER_RE, '');
+  return {
+    prompt: stripDisabledSectionsFromPrompt(
+      built,
+      disabled,
+      source.customPrompt,
+      harnessPrefix,
+    ),
+    options,
+  };
+}
+
+/** Keep picker exclusions authoritative when the SDK rebuilds its base prompt
+ * after tools or extension-contributed resources change. The SDK rebuild is
+ * synchronous, so the guard must filter synchronously too; a fire-and-forget
+ * reapply would race `before_agent_start` and expose the unfiltered prompt. */
+export function installSystemPromptToggleRebuildGuard(
+  promptState: RebuildablePromptState,
+  getDisabledEntries: () => readonly string[],
+  buildSystemPrompt: (options: SdkBuildSystemPromptOptions) => string,
+): void {
+  const rebuild = promptState._rebuildSystemPrompt;
+  if (typeof rebuild !== 'function') return;
+
+  promptState._rebuildSystemPrompt = function guardedRebuild(toolNames: string[]): string {
+    const sdkPrompt = rebuild.call(this, toolNames);
+    captureOriginalSystemPromptOptions(promptState);
+    const source = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
+    if (!source) return sdkPrompt;
+
+    try {
+      const toggled = buildToggledSystemPrompt(source, getDisabledEntries(), buildSystemPrompt);
+      promptState._baseSystemPromptOptions = toggled.options;
+      return toggled.prompt;
+    } catch {
+      return sdkPrompt;
+    }
+  };
+}
+
+/** Make the Tools picker row authoritative over provider tool schemas as well
+ * as prompt prose. Extensions may call `setActiveToolsByName` during preflight;
+ * while Tools is disabled those calls must remain unable to re-expose tools. */
+export function installSystemPromptToolToggleGuard(
+  session: ToolToggleSession,
+  getDisabledEntries: () => readonly string[],
+): void {
+  const setActiveTools = session.setActiveToolsByName;
+  if (typeof setActiveTools !== 'function') return;
+
+  session.setActiveToolsByName = function guardedSetActiveTools(toolNames: string[]): void {
+    const toolsDisabled = getDisabledEntries().includes(TOOLS_ENTRY_ID);
+    setActiveTools.call(this, toolsDisabled ? [] : toolNames);
+  };
 }
 
 /** Maintain `_originalSystemPromptOptions`: an unfiltered snapshot of the
@@ -345,7 +438,10 @@ export function buildSessionSystemPrompts(options: {
   const entries: SystemPromptEntry[] = [buildProviderSystemPrompt(options.activeProvider)];
 
   const customPrompt = normalizePromptText(promptOptions?.customPrompt);
-  const { mainText: harnessMainText, runtimeText: harnessRuntimeText } = splitRuntimeContext(harnessPrompt);
+  const { mainText: harnessMainTextWithTools, runtimeText: harnessRuntimeText } = splitRuntimeContext(harnessPrompt);
+  // Tools have their own independently-toggleable row; do not duplicate that
+  // block in the harness card or its token estimate.
+  const harnessMainText = harnessMainTextWithTools?.replace(TOOLS_BLOCK_RE, '').trim();
 
   if (customPrompt) {
     entries.push({
@@ -445,7 +541,13 @@ export function buildSessionSystemPrompts(options: {
     });
   }
 
-  const shouldIncludeSkills = !promptOptions?.selectedTools || promptOptions.selectedTools.includes('read');
+  // Keep the Skills row available while the Tools row is manually disabled.
+  // Pi normally omits skills when `read` is inactive, but the picker must not
+  // lose the independent Skills toggle merely because all schemas are hidden.
+  const toolsDisabled = options.disabledEntries?.includes(TOOLS_ENTRY_ID) ?? false;
+  const shouldIncludeSkills = toolsDisabled
+    || !promptOptions?.selectedTools
+    || promptOptions.selectedTools.includes('read');
   const skills = (promptOptions?.skills ?? []).filter(
     (s): s is SdkSkill => !!s && typeof s.name === 'string',
   );

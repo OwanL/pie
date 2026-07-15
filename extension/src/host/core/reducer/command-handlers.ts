@@ -11,7 +11,9 @@ import {
   handleInterrupt,
   handleSend,
   handleEdit,
+  handleEditQueued,
   handleTruncateAfter,
+  handleCompact,
   handleClearQueue,
   handleSetOutcomeDialog,
   handleDismissNotice,
@@ -68,6 +70,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleInterrupt(state, cmd);
     }
 
+    case 'Compact': {
+      return handleCompact(state, cmd);
+    }
+
     case 'ClearQueue': {
       return handleClearQueue(state, cmd);
     }
@@ -78,6 +84,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'Edit': {
       return handleEdit(state, cmd);
+    }
+
+    case 'EditQueued': {
+      return handleEditQueued(state, cmd);
     }
 
     case 'TruncateAfter': {

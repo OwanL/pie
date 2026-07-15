@@ -229,6 +229,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'showPruningMessages',
     'subagentAlwaysParentModel',
     'subagentRouteAroundSaturatedProviders',
+    'subagentFallbackOnProviderFailure',
     'runtimeAuditLog',
     'bashFastPath',
     'hideStatusStrip',
@@ -427,10 +428,15 @@ export function validateWebviewToHostMessage(
       if (!isString(value.messageId)) return fail('editMessage: missing `messageId`');
       if (!isString(value.text)) return fail('editMessage: missing `text`');
       if (value.inputs !== undefined && !Array.isArray(value.inputs)) return fail('editMessage: `inputs` must be an array when provided');
+      if (value.queued !== undefined && typeof value.queued !== 'boolean') return fail('editMessage: `queued` must be a boolean when provided');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'interrupt':
       if (!isString(value.sessionPath)) return fail('interrupt: missing `sessionPath`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'compact':
+      if (!isString(value.sessionPath)) return fail('compact: missing `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'cancelDeferredTrigger':

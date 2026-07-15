@@ -89,6 +89,48 @@ test('generate() is a pure function: same source + settings => same output', asy
   assert.deepStrictEqual(a, b, 'generate() is not deterministic');
 });
 
+test('long-context pricing tiers flow from models.yaml pricing to models.json cost', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot) as {
+    providers: Record<string, { models: Array<{ id: string; pricing: { tiers?: unknown } }> }>;
+  };
+  const generated = mod.generate(source, parseCommitted('settings.json')).modelsJson as {
+    providers: Record<string, { models?: Array<{ id: string; cost: { tiers?: unknown } }> }>;
+  };
+  const sourceModel = source.providers['github-copilot'].models.find((model) => model.id === 'gpt-5.6-terra');
+  const generatedModel = generated.providers['github-copilot'].models?.find((model) => model.id === 'gpt-5.6-terra');
+  assert.ok(sourceModel?.pricing.tiers, 'fixture model should have endpoint-provided pricing tiers');
+  assert.deepEqual(generatedModel?.cost.tiers, sourceModel.pricing.tiers);
+});
+
+test('provider-qualified profileOrder entries support duplicate model ids across providers', async () => {
+  const mod = await loadSyncModule();
+  const source = structuredClone(mod.loadSource(repoRoot)) as {
+    profileOrder: Array<string | { provider: string; id: string }>;
+    providers: Record<string, { models: Array<Record<string, unknown>> }>;
+  };
+  const id = 'gpt-5.6-sol';
+  const original = source.providers['github-copilot'].models.find((model) => model.id === id);
+  assert.ok(original);
+  source.providers['openai-codex'].models.push({ ...original, name: 'Codex GPT-5.6 Sol' });
+  const profileIndex = source.profileOrder.indexOf(id);
+  assert.ok(profileIndex >= 0);
+  source.profileOrder.splice(
+    profileIndex,
+    1,
+    { provider: 'github-copilot', id },
+    { provider: 'openai-codex', id },
+  );
+
+  const generated = YAML.parse(mod.generate(source, parseCommitted('settings.json')).modelProfilesYaml) as {
+    profiles: Array<{ provider: string; id: string }>;
+  };
+  assert.deepEqual(
+    generated.profiles.filter((profile) => profile.id === id).map((profile) => profile.provider),
+    ['github-copilot', 'openai-codex'],
+  );
+});
+
 test('settings.json merge preserves user-selected chat and pruning models while overwriting retry', async () => {
   const mod = await loadSyncModule();
   const source = mod.loadSource(repoRoot);

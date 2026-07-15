@@ -618,6 +618,48 @@ test("runPruningPrepass: 500 then recovery on retry -> returns parsed pruned ski
 	assert.equal(result.error, null);
 });
 
+test("runPruningPrepass: malformed JSON is retried once with a correction prompt", async () => {
+	const cfg = config();
+	let calls = 0;
+	const completeFn = async (_model: unknown, context: Array<{ role: string; content: string }>) => {
+		calls++;
+		if (calls === 1) return { text: "I would keep alpha and read" };
+		assert.deepEqual(context.slice(-2).map((message) => message.role), ["assistant", "user"]);
+		assert.match(context.at(-1)?.content ?? "", /not valid JSON/i);
+		return { text: '{"pruneSkills":["beta"],"pruneTools":[]}', stopReason: "stop" };
+	};
+	const result = await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub() },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.equal(calls, 2);
+	assert.deepEqual(result.prunedSkills, ["beta"]);
+	assert.equal(result.keptAllDueToParseFailure, undefined);
+	assert.equal(result.error, null);
+});
+
+test("runPruningPrepass: persistent malformed JSON retries once then fails open", async () => {
+	const cfg = config();
+	let calls = 0;
+	const completeFn = async () => {
+		calls++;
+		return { text: "still not json" };
+	};
+	const result = await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub() },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.equal(calls, 2, "parse recovery must be bounded to one retry");
+	assert.deepEqual(result.prunedSkills, []);
+	assert.deepEqual(result.prunedTools, []);
+	assert.equal(result.keptAllDueToParseFailure, true);
+	assert.equal(result.error, null);
+});
+
 test("runPruningPrepass: persistent 500 -> terminal error surfaced (not swallowed)", async () => {
 	const cfg = config();
 	let calls = 0;

@@ -381,6 +381,51 @@ test('buildTranscriptRows suppresses standalone typingIndicator when assistant i
   assert.equal(rows[1]?.kind === 'message' && rows[1].activityState ? rows[1].activityState.phase : null, 'streaming');
 });
 
+test('queued follow-ups do not steal active tool activity or create a reply below the queue', () => {
+  const user = makeMessage('user-1', 'user');
+  const assistant = makeMessage('assistant-1', 'assistant');
+  assistant.toolCalls = [{ id: 'tool-1', name: 'bash', input: {}, status: 'running', startedAt: 1 }];
+  const queued = makeMessage('queued-1', 'user');
+  queued.status = 'queued';
+  const transcript = [user, assistant, queued];
+  const activityState = deriveTurnActivityState({
+    busy: true,
+    transcript,
+    prefs: { extensionToggles: {}, activityTailLines: 2 },
+    pruningSettings: { mode: 'auto' },
+  });
+  assert.equal(activityState?.phase, 'runningTool');
+
+  const rows = buildTranscriptRows({
+    transcript, systemPromptCount: 0, hasOlder: false, hasNewer: false, busy: true, activityState,
+  });
+  assert.deepEqual(rows.map((row) => row.kind === 'message' ? row.message.id : row.kind), [
+    'user-1', 'assistant-1', 'queued-1',
+  ]);
+  const assistantRow = rows[1];
+  assert.ok(assistantRow?.kind === 'message');
+  assert.equal(assistantRow.activityState?.phase, 'runningTool');
+});
+
+test('pending assistant placeholder stays before queued follow-ups', () => {
+  const user = makeMessage('user-1', 'user');
+  const queued = makeMessage('queued-1', 'user');
+  queued.status = 'queued';
+  const transcript = [user, queued];
+  const activityState = deriveTurnActivityState({
+    busy: true,
+    transcript,
+    prefs: { extensionToggles: {}, activityTailLines: 2 },
+    pruningSettings: { mode: 'auto' },
+  });
+  const rows = buildTranscriptRows({
+    transcript, systemPromptCount: 0, hasOlder: false, hasNewer: false, busy: true, activityState,
+  });
+  assert.deepEqual(rows.map((row) => row.kind === 'message' ? row.message.id : row.kind), [
+    'user-1', 'assistant-placeholder:user-1', 'queued-1',
+  ]);
+});
+
 test('buildTranscriptRows shows standalone typingIndicator when busy with empty transcript', () => {
   const activityState = deriveTurnActivityState({
     busy: true,

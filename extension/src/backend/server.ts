@@ -54,12 +54,13 @@ import {
   type SessionPromptState,
 } from './server-types';
 import {
-  applySystemPromptTogglesToOptions,
   buildSessionSystemPrompts,
+  buildToggledSystemPrompt,
   captureOriginalSystemPromptOptions,
-  disabledPromptEntryIds,
+  installSystemPromptToggleRebuildGuard,
+  installSystemPromptToolToggleGuard,
   normalizePromptText,
-  stripDisabledSectionsFromPrompt,
+  TOOLS_ENTRY_ID,
 } from './system-prompts';
 import {
   buildDisplayTranscriptCache,
@@ -397,12 +398,38 @@ export class BackendServer {
         this.handleSessionEvent(context, event);
       });
 
-      // Apply persisted per-session system-prompt toggles (survives reopen) to
-      // the base prompt the SDK built during runtime creation. Safe to skip
-      // when there are none or when the prompt state isn't exposed yet.
+      // Load persisted picker state before installing guards: both prompt
+      // rebuilds and extension-driven tool changes consult this live set.
       const persistedDisabled = readSystemPromptTogglesForSession(sessionPath);
+      context.systemPromptDisabledEntries = persistedDisabled;
+
+      // The SDK rebuilds its base prompt whenever active tools or extension
+      // resources change. Guard that synchronous rebuild so it cannot silently
+      // restore entries the picker disabled.
+      const promptState = this.getSessionPromptState(context);
+      if (typeof promptState._rebuildSystemPrompt === 'function') {
+        const { buildSystemPrompt } = await this.getSystemPromptModule();
+        installSystemPromptToggleRebuildGuard(
+          promptState,
+          () => context.systemPromptDisabledEntries ?? [],
+          buildSystemPrompt,
+        );
+      }
+      installSystemPromptToolToggleGuard(
+        session,
+        () => context.systemPromptDisabledEntries ?? [],
+      );
+
+      // Disabling Tools controls both prompt prose and the provider's separate
+      // tool-schema field. Capture the initial active set so a later re-enable
+      // can restore it, including after reopening a persisted disabled session.
+      if (persistedDisabled.includes(TOOLS_ENTRY_ID)) {
+        context.systemPromptToolsBeforeDisable = session.getActiveToolNames?.()
+          ?? session.getAllTools?.().map((tool) => tool.name)
+          ?? [];
+        session.setActiveToolsByName?.([]);
+      }
       if (persistedDisabled.length > 0) {
-        context.systemPromptDisabledEntries = persistedDisabled;
         await this.applySystemPromptTogglesToBasePrompt(context, persistedDisabled);
       }
 
@@ -631,29 +658,6 @@ export class BackendServer {
     }
   }
 
-  /** Compute the harness-template prefix of the full base prompt — the exact
-   *  string `buildSystemPrompt({ cwd, selectedTools, toolSnippets,
-   *  promptGuidelines })` produces (no custom/append/context/skills). Used to
-   *  strip the harness section from the built prompt when the user toggles it
-   *  off. Returns undefined when the prompt state isn't exposed yet. */
-  private async computeHarnessPrefix(context: SessionContext): Promise<string | undefined> {
-    const promptState = this.getSessionPromptState(context);
-    const options = promptState._baseSystemPromptOptions;
-    if (!options) return undefined;
-    try {
-      const { buildSystemPrompt } = await this.getSystemPromptModule();
-      return normalizePromptText(buildSystemPrompt({
-        cwd: options.cwd,
-        selectedTools: options.selectedTools,
-        toolSnippets: options.toolSnippets,
-        promptGuidelines: options.promptGuidelines,
-      }));
-    } catch (error) {
-      backendTrace('systemPrompt', 'harnessPrefixCompute.failed', { level: 'debug', error: toErrorMessage(error) });
-      return undefined;
-    }
-  }
-
   /** Rewrite the SDK session's cached `_baseSystemPrompt` (and the structured
    *  `_baseSystemPromptOptions`) so the next turn sends a prompt with the
    *  disabled entries removed. The SDK reads `_baseSystemPrompt` each turn
@@ -681,44 +685,22 @@ export class BackendServer {
     const source = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
     if (!source) return;
 
-    const disabled = disabledPromptEntryIds(new Set(disabledEntries));
-    if (disabled.size === 0) {
-      // Nothing disabled — restore the unfiltered base prompt from the
-      // snapshot, and restore the live options too so downstream extensions
-      // (e.g. the skill-pruner `before_agent_start` hook) see the full
-      // skill/context sets again. Rebuilding from the snapshot (not the
-      // previously-filtered live options) is what makes re-enable a true
-      // inverse of disable.
-      try {
-        const { buildSystemPrompt } = await this.getSystemPromptModule();
-        const restored = normalizePromptText(buildSystemPrompt(source));
-        if (restored) promptState._baseSystemPrompt = restored;
-      } catch (error) {
-        // leave the existing base prompt untouched
-        backendTrace('systemPrompt', 'harnessRestore.failed', { level: 'debug', error: toErrorMessage(error) });
-      }
-      promptState._baseSystemPromptOptions = source;
-      return;
-    }
-
-    const filteredOptions = applySystemPromptTogglesToOptions(source, disabled);
-    let base: string | undefined;
     try {
       const { buildSystemPrompt } = await this.getSystemPromptModule();
-      base = normalizePromptText(buildSystemPrompt(filteredOptions));
+      const toggled = buildToggledSystemPrompt(source, disabledEntries, buildSystemPrompt);
+      // Empty is intentional and valid when every entry is disabled. Do not
+      // use a truthiness check here or the prior full prompt survives.
+      promptState._baseSystemPrompt = toggled.prompt;
+      // Keep the structured options in sync so downstream extensions (e.g. the
+      // skill-pruner `before_agent_start` hook) see the filtered skill/context
+      // sets instead of re-adding stripped sections from the original options.
+      promptState._baseSystemPromptOptions = toggled.options;
     } catch (error) {
+      // Leave the existing base prompt untouched if the SDK builder is not
+      // available; sending the previous known prompt is safer than a partial
+      // regex-only rewrite.
       backendTrace('systemPrompt', 'harnessRebuild.failed', { level: 'debug', error: toErrorMessage(error) });
-      base = promptState._baseSystemPrompt;
     }
-    if (base) {
-      const harnessPrefix = await this.computeHarnessPrefix(context);
-      base = stripDisabledSectionsFromPrompt(base, disabled, source.customPrompt, harnessPrefix);
-    }
-    if (base) promptState._baseSystemPrompt = base;
-    // Keep the structured options in sync so downstream extensions (e.g. the
-    // skill-pruner `before_agent_start` hook) see the filtered skill/context
-    // sets instead of re-adding stripped sections from the original options.
-    promptState._baseSystemPromptOptions = filteredOptions;
   }
 
   /** Apply a new disabled-entry set for a session: update the SessionContext,
@@ -732,7 +714,29 @@ export class BackendServer {
     const context = this.sessionContexts.get(sessionPath);
     if (!context) return;
     const next = [...new Set(disabledEntries)];
+    const toolsWereDisabled = context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) ?? false;
+    const toolsWillBeDisabled = next.includes(TOOLS_ENTRY_ID);
+
+    if (!toolsWereDisabled && toolsWillBeDisabled) {
+      context.systemPromptToolsBeforeDisable = context.session.getActiveToolNames?.()
+        ?? context.session.getAllTools?.().map((tool) => tool.name)
+        ?? [];
+    }
+
+    // Update the live set before invoking setActiveToolsByName: the installed
+    // guard consults it synchronously and prevents extensions from re-exposing
+    // schemas while Tools is off.
     context.systemPromptDisabledEntries = next;
+    if (!toolsWereDisabled && toolsWillBeDisabled) {
+      context.session.setActiveToolsByName?.([]);
+    } else if (toolsWereDisabled && !toolsWillBeDisabled) {
+      const restore = context.systemPromptToolsBeforeDisable
+        ?? context.session.getAllTools?.().map((tool) => tool.name)
+        ?? [];
+      context.session.setActiveToolsByName?.(restore);
+      context.systemPromptToolsBeforeDisable = undefined;
+    }
+
     writeSystemPromptTogglesForSession(sessionPath, next);
     await this.applySystemPromptTogglesToBasePrompt(context, next);
   }

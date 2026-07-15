@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pie.local/schemas/experiment.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "status", "baseCommit", "hypothesis", "recipe", "suite", "models", "samples", "execution", "budgets", "completedTrialIds"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$"},
+    "status": {"enum": ["draft","materialized","baseline-ready","candidate-ready","smoke-running","full-running","analyzing","complete","blocked","cancelled"]},
+    "baseCommit": {"type":"string","pattern":"^[0-9a-f]{40}$"}, "hypothesis":{"type":"string","minLength":10}, "recipe":{"type":"string"}, "suite":{"type":"string"},
+    "models":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["provider","id","thinking"],"properties":{"provider":{"const":"umans"},"id":{"enum":["umans-glm-5.2","umans-kimi-k2.7"]},"thinking":{"enum":["off","minimal","low","medium","high","xhigh"]}}}},
+    "samples":{"type":"integer","minimum":1}, "execution":{"type":"object"}, "budgets":{"type":"object"}, "completedTrialIds":{"type":"array","items":{"type":"string"}},
+    "immutableInputs":{"type":"object","additionalProperties":false,"required":["benchmarksHash","runnerHash","createdAt"],"properties":{"benchmarksHash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"runnerHash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"createdAt":{"type":"string"}}},"createdAt":{"type":"string"},"updatedAt":{"type":"string"},"fixtureHashes":{"type":"object","additionalProperties":{"type":"string"}},"taskHashes":{"type":"object","additionalProperties":{"type":"string"}},"scorerHashes":{"type":"object","additionalProperties":{"type":"string"}}
+  }
+}

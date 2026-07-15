@@ -71,6 +71,13 @@ export interface TokenRateIndicatorState {
    * the webview display ignores it (it renders {@link label}).
    */
   rate?: number;
+  /**
+   * Estimated output tokens in the currently-unreported main turn and running
+   * subagents. This is transient: provider-reported usage replaces it when the
+   * turn/tool completes. Aggregate analytics use it to keep live token totals
+   * and charts moving while output streams.
+   */
+  liveOutputTokens?: number;
 }
 
 export const IDLE_STATE: TokenRateIndicatorState = {
@@ -195,6 +202,14 @@ function latestReportedTurnRate(transcript: ChatMessage[]): number | null {
 }
 
 function estimatedSubagentOutputTokens(result: SubagentSingleResult): number {
+  if (
+    typeof result.cumulativeOutputTokens === 'number'
+    && Number.isFinite(result.cumulativeOutputTokens)
+    && result.cumulativeOutputTokens >= 0
+  ) {
+    return result.cumulativeOutputTokens;
+  }
+
   let tokens = 0;
   if (Array.isArray(result.messages)) {
     for (const msg of result.messages) {
@@ -291,6 +306,22 @@ function findNestedRunningSubagents(
     }
   }
   return running;
+}
+
+function subagentsForTokenCounting(running: RunningSubagent[]): RunningSubagent[] {
+  const descendantInclusiveKeys: string[] = [];
+  return running.filter(({ key, result }) => {
+    if (descendantInclusiveKeys.some((ancestor) => key.startsWith(`${ancestor}>`))) {
+      return false;
+    }
+    if (typeof result.cumulativeOutputTokens === 'number') {
+      // v4 preview counters already include nested descendants. Do not add the
+      // same nested results again when their legacy message tree is also
+      // present during a transition between representations.
+      descendantInclusiveKeys.push(key);
+    }
+    return true;
+  });
 }
 
 function computeSubagentDelta(
@@ -485,7 +516,12 @@ export function tickTokenRate(
   }
 
   const runningSubagents = findRunningSubagents(transcript);
-  const subagentDelta = computeSubagentDelta(acc, runningSubagents);
+  const countedSubagents = subagentsForTokenCounting(runningSubagents);
+  const subagentDelta = computeSubagentDelta(acc, countedSubagents);
+  const liveOutputTokens = currentTokens + countedSubagents.reduce(
+    (sum, { result }) => sum + estimatedSubagentOutputTokens(result),
+    0,
+  );
 
   const totalDelta = mainDelta + subagentDelta;
   if (totalDelta > 0) {
@@ -539,7 +575,8 @@ export function tickTokenRate(
   const reportedTurnRate = !generating && streaming === null && runningSubagents.length === 0
     ? latestReportedTurnRate(transcript)
     : null;
-  return buildState(acc, generating, streaming, toolBlocked, latencyStats, reportedTurnRate);
+  const state = buildState(acc, generating, streaming, toolBlocked, latencyStats, reportedTurnRate);
+  return liveOutputTokens > 0 ? { ...state, liveOutputTokens } : state;
 }
 
 /** Create a fresh accumulator (for tests / explicit reset). */

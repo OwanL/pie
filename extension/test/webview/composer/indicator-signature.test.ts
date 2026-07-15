@@ -60,6 +60,18 @@ test('transcriptUsageSignature changes when the last message finishes (usage lan
   assert.notEqual(transcriptUsageSignature(finished), before);
 });
 
+test('transcriptUsageSignature tracks the active assistant before queued follow-ups', () => {
+  const base = [
+    msg({ id: 's', status: 'streaming' }),
+    msg({ id: 'q', role: 'user', status: 'queued', markdown: 'follow-up' }),
+  ];
+  const before = transcriptUsageSignature(base);
+  const finished = structuredClone(base);
+  finished[0].status = 'completed';
+  finished[0].usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2 };
+  assert.notEqual(transcriptUsageSignature(finished), before);
+});
+
 test('transcriptUsageSignature changes when the last message id changes (same length, different tail)', () => {
   // Guards against a stale summary when the loaded window is replaced with a
   // same-length but different-tail window (e.g. truncate-then-load).
@@ -141,6 +153,22 @@ test('subagentCostSignature changes when the last message tool call completes (r
   completed[0].toolCalls![0].status = 'completed';
   completed[0].toolCalls![0].result = { content: [], details: { mode: 'single', results: [] } };
   assert.notEqual(subagentCostSignature(completed), sig);
+});
+
+test('subagentCostSignature tracks the active assistant before queued follow-ups', () => {
+  const base = [
+    msg({
+      id: 's',
+      status: 'streaming',
+      toolCalls: [{ id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1 }],
+    }),
+    msg({ id: 'q', role: 'user', status: 'queued', markdown: 'follow-up' }),
+  ];
+  const before = subagentCostSignature(base);
+  const completed = structuredClone(base);
+  completed[0].toolCalls![0].status = 'completed';
+  completed[0].toolCalls![0].result = { content: [], details: { mode: 'single', results: [] } };
+  assert.notEqual(subagentCostSignature(completed), before);
 });
 
 test('subagentCostSignature uses the parts tool-call path when toolCalls is absent', () => {

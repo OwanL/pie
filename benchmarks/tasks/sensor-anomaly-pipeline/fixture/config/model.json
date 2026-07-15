@@ -1,0 +1,1 @@
+{"featureOrder":["temperatureDelta","vibrationRms","pressureDelta","currentSkew"],"maxTrainMs":500,"metric":"balancedAccuracy"}

@@ -73,6 +73,19 @@ export interface EditResultEvent {
   error?: string;
 }
 
+export interface ReplaceQueueResultEvent {
+  kind: 'ReplaceQueueResult';
+  corrId: string;
+  sessionPath: string;
+  messageId: string;
+  ok: boolean;
+  text: string;
+  inputs: ComposerInput[];
+  composedText: string;
+  userParts?: UserContentPart[];
+  error?: string;
+}
+
 export interface InterruptResultEvent {
   kind: 'InterruptResult';
   corrId: string;
@@ -83,6 +96,14 @@ export interface InterruptResultEvent {
 
 export interface TruncateResultEvent {
   kind: 'TruncateResult';
+  corrId: string;
+  sessionPath: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface CompactResultEvent {
+  kind: 'CompactResult';
   corrId: string;
   sessionPath: string;
   ok: boolean;
@@ -282,8 +303,10 @@ export type EffectResultEvent =
   | LiveTurnCheckpointResultEvent
   | SendResultEvent
   | EditResultEvent
+  | ReplaceQueueResultEvent
   | InterruptResultEvent
   | TruncateResultEvent
+  | CompactResultEvent
   | ClearQueueResultEvent
   | OpenSessionResultEvent
   | CreateSessionResultEvent

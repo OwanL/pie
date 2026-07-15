@@ -110,6 +110,8 @@ export class MessageRouter {
 
       case 'interrupt':
         return this.onInterrupt(msg as Extract<WebviewToHostMessage, { type: 'interrupt' }>);
+      case 'compact':
+        return this.onCompact(msg as Extract<WebviewToHostMessage, { type: 'compact' }>);
       case 'clearQueue':
         return this.onClearQueue(msg as Extract<WebviewToHostMessage, { type: 'clearQueue' }>);
 
@@ -275,6 +277,13 @@ export class MessageRouter {
     this.sidebarProvider.postState();
   }
 
+  private onCompact(msg: Extract<WebviewToHostMessage, { type: 'compact' }>): void {
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'Compact', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath },
+    });
+  }
+
   private async onSend(msg: Extract<WebviewToHostMessage, { type: 'send' }>, opts?: { priorPruningMode?: PruningMode }): Promise<void> {
     const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
     const text = typeof msg.text === 'string' ? msg.text : '';
@@ -355,12 +364,29 @@ export class MessageRouter {
 
     const composedText = buildPromptText(text, inputs);
     const userParts = buildOptimisticUserParts(text, inputs);
+    const corrId = crypto.randomUUID();
+    const target = this.getArchState().transcript.bySession[sessionPath]?.find((message) => message.id === messageId);
+
+    if (msg.queued || (target?.role === 'user' && target.status === 'queued')) {
+      if (target?.role !== 'user' || target.status !== 'queued') {
+        this.dispatchEvent({
+          kind: 'Command',
+          cmd: { kind: 'SetEditingMessage', corrId, sessionPath, messageId: null },
+        });
+        this.dispatchEvent({ kind: 'NoticeShown', notice: 'That queued message was already delivered and can no longer be edited in place.' });
+        return;
+      }
+      this.dispatchEvent({
+        kind: 'Command',
+        cmd: { kind: 'EditQueued', corrId, sessionPath, messageId, text, inputs, composedText, userParts },
+      });
+      return;
+    }
 
     const webviewLocalId = msg.localId;
     const localId = webviewLocalId ?? `local:edit:${crypto.randomUUID()}`;
 
     // Dispatch through CQRS spine.
-    const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'Edit', corrId, sessionPath, messageId, text, inputs, composedText, userParts, localId, timestamp: Date.now() },

@@ -1,0 +1,10 @@
+{
+  "name": "copilot-model-discovery",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

@@ -49,6 +49,8 @@ interface RunAnalyticsStorageOptions {
   autoExportIntervalMs?: number;
   /** Test seam for verifying append batching. */
   appendFile?: typeof fs.appendFile;
+  /** Test seam for verifying history-retention read fast paths. */
+  readFile?: typeof fs.readFile;
   /** Base delay for automatic export retry after a failure. */
   autoExportRetryBaseMs?: number;
   /** Maximum delay for automatic export retry backoff. */
@@ -74,6 +76,8 @@ export class RunAnalyticsStorage {
   private readonly stat: typeof fs.stat;
   private readonly autoExportIntervalMs: number;
   private readonly appendFile: typeof fs.appendFile;
+  private readonly readFile: typeof fs.readFile;
+  private readonly historyMetadata = new Map<string, { bytes: number; validEntries: number }>();
   private readonly autoExportRetryBaseMs: number;
   private readonly autoExportRetryMaxMs: number;
   private readonly autoExportSetTimeout: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
@@ -142,6 +146,7 @@ export class RunAnalyticsStorage {
     this.stat = options.stat ?? fs.stat;
     this.autoExportIntervalMs = options.autoExportIntervalMs ?? 30_000;
     this.appendFile = options.appendFile ?? fs.appendFile;
+    this.readFile = options.readFile ?? fs.readFile;
     this.autoExportRetryBaseMs = options.autoExportRetryBaseMs ?? 1000;
     this.autoExportRetryMaxMs = options.autoExportRetryMaxMs ?? 60_000;
     this.autoExportSetTimeout = options.autoExportSetTimeout ?? setTimeout;
@@ -323,34 +328,25 @@ export class RunAnalyticsStorage {
     // the whole batch pending for retry, avoiding partial-batch duplicates.
     const snapshots = [...this.pendingSnapshots.values()];
     if (snapshots.length > 0) {
-      await this.appendFile(
-        path.join(this.storageDir, 'run-snapshots.jsonl'),
-        snapshots.map((snapshot) => serializeJsonLine({
-          schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-          kind: 'run_snapshot',
-          recordedAt: this.isoNow(),
-          run: snapshot,
-        } satisfies RunSnapshotLogEntry)).join(''),
-        'utf8',
-      );
+      const chunk = snapshots.map((snapshot) => serializeJsonLine({
+        schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+        kind: 'run_snapshot',
+        recordedAt: this.isoNow(),
+        run: snapshot,
+      } satisfies RunSnapshotLogEntry)).join('');
+      await this.appendHistoryChunk('run-snapshots.jsonl', chunk, snapshots.length);
       this.deleteAppendedEntries(this.pendingSnapshots, snapshots);
     }
     const outcomes = [...this.pendingOutcomes.values()];
     if (outcomes.length > 0) {
-      await this.appendFile(
-        path.join(this.storageDir, 'outcome-history.jsonl'),
-        outcomes.map((outcome) => serializeJsonLine(outcome)).join(''),
-        'utf8',
-      );
+      const chunk = outcomes.map((outcome) => serializeJsonLine(outcome)).join('');
+      await this.appendHistoryChunk('outcome-history.jsonl', chunk, outcomes.length);
       this.deleteAppendedEntries(this.pendingOutcomes, outcomes);
     }
     const reviews = [...this.pendingAgentReviews.values()];
     if (reviews.length > 0) {
-      await this.appendFile(
-        path.join(this.storageDir, 'agent-reviews.jsonl'),
-        reviews.map((review) => serializeJsonLine(review)).join(''),
-        'utf8',
-      );
+      const chunk = reviews.map((review) => serializeJsonLine(review)).join('');
+      await this.appendHistoryChunk('agent-reviews.jsonl', chunk, reviews.length);
       this.deleteAppendedEntries(this.pendingAgentReviews, reviews);
     }
     if (needsCheckpoint) {
@@ -361,6 +357,23 @@ export class RunAnalyticsStorage {
       await this.pruneHistoryIfNeeded();
     } finally {
       this.markAutoExportDirty();
+    }
+  }
+
+  private async appendHistoryChunk(fileName: string, chunk: string, entryCount: number): Promise<void> {
+    try {
+      await this.appendFile(path.join(this.storageDir, fileName), chunk, 'utf8');
+    } catch (error) {
+      // An append can partially reach disk before rejecting. Its final size and
+      // record count are therefore unknown; force the next retention pass to
+      // rescan rather than trusting stale under-limit metadata.
+      this.historyMetadata.delete(fileName);
+      throw error;
+    }
+    const metadata = this.historyMetadata.get(fileName);
+    if (metadata) {
+      metadata.bytes += Buffer.byteLength(chunk, 'utf8');
+      metadata.validEntries += entryCount;
     }
   }
 
@@ -738,11 +751,19 @@ export class RunAnalyticsStorage {
 
   private async pruneJsonlFile(fileName: string): Promise<void> {
     const filePath = path.join(this.storageDir, fileName);
+    const entryLimit = this.maxRunHistoryEntries > 0 ? this.maxRunHistoryEntries : Infinity;
+    const byteLimit = this.maxRunHistoryBytes > 0 ? this.maxRunHistoryBytes : Infinity;
+    const metadata = this.historyMetadata.get(fileName);
+    if (metadata && metadata.validEntries <= entryLimit && metadata.bytes <= byteLimit) {
+      return;
+    }
+
     let raw: string;
     try {
-      raw = await fs.readFile(filePath, 'utf8');
+      raw = await this.readFile(filePath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.historyMetadata.set(fileName, { bytes: 0, validEntries: 0 });
         return;
       }
       throw error;
@@ -750,6 +771,7 @@ export class RunAnalyticsStorage {
 
     const allLines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
     if (allLines.length === 0) {
+      this.historyMetadata.set(fileName, { bytes: Buffer.byteLength(raw, 'utf8'), validEntries: 0 });
       return;
     }
 
@@ -761,10 +783,9 @@ export class RunAnalyticsStorage {
     const lineBytes = lines.map((line) => Buffer.byteLength(line, 'utf8') + terminatorBytes);
     const totalLines = lines.length;
     const totalBytes = lineBytes.reduce((sum, bytes) => sum + bytes, 0);
-    const entryLimit = this.maxRunHistoryEntries > 0 ? this.maxRunHistoryEntries : Infinity;
-    const byteLimit = this.maxRunHistoryBytes > 0 ? this.maxRunHistoryBytes : Infinity;
 
     if (allLines.length === lines.length && totalLines <= entryLimit && totalBytes <= byteLimit) {
+      this.historyMetadata.set(fileName, { bytes: Buffer.byteLength(raw, 'utf8'), validEntries: totalLines });
       return;
     }
 
@@ -789,11 +810,17 @@ export class RunAnalyticsStorage {
     }
 
     if (start === 0 && allLines.length === lines.length) {
+      this.historyMetadata.set(fileName, { bytes: Buffer.byteLength(raw, 'utf8'), validEntries: totalLines });
       return;
     }
 
     const kept = lines.slice(start);
-    await this.atomicWriteText(filePath, kept.length > 0 ? `${kept.join(lineTerminator)}${lineTerminator}` : '');
+    const rewritten = kept.length > 0 ? `${kept.join(lineTerminator)}${lineTerminator}` : '';
+    await this.atomicWriteText(filePath, rewritten);
+    this.historyMetadata.set(fileName, {
+      bytes: Buffer.byteLength(rewritten, 'utf8'),
+      validEntries: kept.length,
+    });
   }
 
   private isValidHistoryRecord(fileName: string, line: string): boolean {

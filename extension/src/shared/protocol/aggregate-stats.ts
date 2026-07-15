@@ -5,9 +5,10 @@
  *
  * The webview never computes these itself (STATE_CONTRACT § Webview-Local State):
  * the strip is a pure projection of host-owned data. The host recomputes on a
- * slow timer (and on run-analytics persistence), so the cached object reference
- * is stable between recomputes — mirroring `tokenRateBySession`'s reference-
- * stability contract (the host spreads the cached ref into each ViewState).
+ * slow historical timer plus a cheap event-driven live path. The live path is
+ * bounded by open runs and reuses the completed-history layer, so streaming
+ * totals/charts update without polling disk or backend metrics at 5 Hz. Equal
+ * results retain the cached reference, mirroring `tokenRateBySession`.
  *
  * ## Focus: recent + current
  *
@@ -18,13 +19,12 @@
  *
  * ## Provider attribution
  *
- * `RunSnapshot` carries model ids but never the serving provider. Parent-turn
- * usage uses the run model; skill-pruning and subagent usage use their recorded
- * actual model when available, then fall back to the run model. A model id can
- * appear under multiple providers in `models.json`, so each usage slice is
- * attributed to the **first priced provider** for that model id — the SAME
- * record the webview's per-session cost display uses (`pricingForModel`).
- * Unknown or unpriced models attribute to provider `'unknown'` (cost 0).
+ * `RunSnapshot` carries the serving provider alongside the model id. Parent-turn
+ * usage uses that pair; skill-pruning and subagent usage use their recorded
+ * actual pair when available, then fall back to the run pair. This prevents a
+ * shared model id (for example GPT-5.6 on OpenAI Codex and GitHub Copilot) from
+ * being relabeled or priced as the wrong provider. Legacy snapshots without a
+ * provider retain the historical first-priced-provider fallback.
  */
 
 import type { RunOutcome } from './settings.js';

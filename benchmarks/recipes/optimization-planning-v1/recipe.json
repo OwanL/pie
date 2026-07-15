@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "optimization-planning-v1",
+  "baseCommit": "6f8d7f6a4deb4802c255d1ba42a16ec2c70b4029",
+  "type": "prompt-override",
+  "hypothesisDimension": "measure-plan-iterate",
+  "changedPaths": [
+    "benchmarks/recipes/optimization-planning-v1/prompt.md"
+  ],
+  "apply": {
+    "appendSystemPromptFile": "prompt.md"
+  },
+  "contentHash": "e0bd92b699b367fd2c2595006c88c52c2f0a5d1909bbd82c3b85116cdd75500e",
+  "validation": [
+    "npm run experiment:test"
+  ]
+}

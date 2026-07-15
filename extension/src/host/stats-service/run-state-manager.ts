@@ -139,6 +139,7 @@ export class SessionRunStateManager {
       startedAt: nowIso,
       updatedAt: nowIso,
       modelId: currentConfig.modelId,
+      provider: currentConfig.provider,
       thinkingLevel: currentConfig.thinkingLevel,
       mixedModelConfig: false,
       mixedTreatmentConfig: false,
@@ -302,6 +303,7 @@ export class SessionRunStateManager {
 
   private getCurrentModelConfig(sessionPath: string): {
     modelId: string | undefined;
+    provider: string | undefined;
     thinkingLevel: ThinkingLevel | undefined;
   } {
     const archState = this.getArchState();
@@ -309,6 +311,7 @@ export class SessionRunStateManager {
     const modelSettings: ModelSettings | null = archState.settings.modelSettings;
     return {
       modelId: session?.modelId ?? modelSettings?.defaultModel,
+      provider: modelSettings?.defaultProvider,
       thinkingLevel: session?.thinkingLevel ?? modelSettings?.defaultThinkingLevel,
     };
   }

@@ -6,6 +6,7 @@ import {
   type LiveTurnCheckpoint,
   type LiveTurnPhase,
 } from '../../../shared/live-pipeline-protocol.js';
+import { isThinkingLevel } from '../../../shared/thinking-level.js';
 import { incrementLiveRevision, pendingOwnerKey } from './model.js';
 
 export type CheckpointApplyResult =
@@ -25,8 +26,10 @@ export function applyLiveTurnCheckpoint(
   } catch {
     return { classification: 'malformed', state: current };
   }
-  if (encodedBytes > LIVE_PIPELINE_LIMITS.checkpointBytes
-    || checkpoint.tools.length > LIVE_PIPELINE_LIMITS.checkpointTools) {
+  const checkpointByteLimit = checkpoint.terminal
+    ? LIVE_PIPELINE_LIMITS.terminalCheckpointBytes
+    : LIVE_PIPELINE_LIMITS.checkpointBytes;
+  if (encodedBytes > checkpointByteLimit) {
     return { classification: 'oversize', state: current };
   }
   if (checkpoint.protocolVersion !== LIVE_PIPELINE_PROTOCOL_VERSION
@@ -59,7 +62,26 @@ export function applyLiveTurnCheckpoint(
     if (tool.turnId !== checkpoint.turnId || tool.attemptId !== checkpoint.attemptId) {
       return { classification: 'malformed', state: current };
     }
-    tools[tool.executionId] = tool;
+    const existingTool = current.toolsByExecutionId[tool.executionId];
+    const sameExistingTool = existingTool?.turnId === tool.turnId && existingTool.attemptId === tool.attemptId
+      ? existingTool
+      : undefined;
+    const immutableInput = isLiveCompactedValue(tool.immutableInput)
+      && sameExistingTool
+      && !isLiveCompactedValue(sameExistingTool.immutableInput)
+      ? sameExistingTool.immutableInput
+      : tool.immutableInput;
+    const preserveExistingTerminal = tool.terminal
+      && isLiveCompactedValue(tool.terminal.result)
+      && sameExistingTool?.terminal?.durableEntryId === tool.terminal.durableEntryId
+      && !isLiveCompactedValue(sameExistingTool.terminal.result);
+    tools[tool.executionId] = {
+      ...tool,
+      immutableInput,
+      terminal: preserveExistingTerminal
+        ? { ...tool.terminal!, result: sameExistingTool!.terminal!.result }
+        : tool.terminal,
+    };
   }
 
   const key = pendingOwnerKey(checkpoint.turnId, checkpoint.attemptId);
@@ -111,6 +133,8 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     || typeof value.turn.attemptId !== 'string'
     || typeof value.turn.requestId !== 'string'
     || typeof value.turn.canonicalMessageId !== 'string'
+    || (value.turn.modelId !== undefined && typeof value.turn.modelId !== 'string')
+    || (value.turn.thinkingLevel !== undefined && !isThinkingLevel(value.turn.thinkingLevel))
     || !Number.isSafeInteger(value.turn.seq)
     || !Number.isSafeInteger(value.turn.checkpointSeq)
     || value.turn.checkpointSeq !== value.checkpointSeq
@@ -200,27 +224,29 @@ function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'o
     || reasoningBytes > LIVE_PIPELINE_LIMITS.reasoningPartBytes) return 'oversize';
 
   const executionIds = new Set<string>();
-  let inputBytes = 0;
   let previewBytes = 0;
-  let terminalBytes = 0;
   for (const tool of checkpoint.tools) {
     if (executionIds.has(tool.executionId)
       || tool.turnId !== checkpoint.turnId
       || tool.attemptId !== checkpoint.attemptId
       || !checkpoint.turn.toolExecutionIds.includes(tool.executionId)) return 'malformed';
     executionIds.add(tool.executionId);
-    inputBytes += jsonByteLength(tool.immutableInput);
+    const inputBytes = jsonByteLength(tool.immutableInput);
+    const terminalBytes = jsonByteLength(tool.terminal?.result);
     previewBytes += jsonByteLength(tool.preview);
-    terminalBytes += jsonByteLength(tool.terminal?.result);
-    if (tool.preview && jsonByteLength(tool.preview) > LIVE_PIPELINE_LIMITS.previewBytes) return 'oversize';
+    if (inputBytes > LIVE_PIPELINE_LIMITS.toolInputBytes
+      || (tool.preview && jsonByteLength(tool.preview) > LIVE_PIPELINE_LIMITS.previewBytes)
+      || terminalBytes > LIVE_PIPELINE_LIMITS.previewBytes) return 'oversize';
     if (tool.terminal && !tool.terminal.durableEntryId) return 'malformed';
   }
   if (checkpoint.turn.toolExecutionIds.length !== executionIds.size
-    || inputBytes > LIVE_PIPELINE_LIMITS.toolInputAggregateBytes
-    || previewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes
-    || terminalBytes > LIVE_PIPELINE_LIMITS.toolTerminalAggregateBytes) return 'oversize';
+    || previewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) return 'oversize';
   if (checkpoint.terminal && !checkpoint.terminal.durableEntryId) return 'malformed';
   return 'valid';
+}
+
+function isLiveCompactedValue(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && (value as { liveCompacted?: unknown }).liveCompacted === true;
 }
 
 function jsonByteLength(value: unknown): number {

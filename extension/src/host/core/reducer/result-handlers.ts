@@ -47,6 +47,64 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
   return { state: nextState, effects };
 }
 
+export function handleReplaceQueueResult(state: ArchState, event: Extract<Event, { kind: 'ReplaceQueueResult' }>): ReducerResult {
+  if (!event.ok) {
+    const mapped = mapSendOrEditError(event.error, 'edit');
+    return {
+      state: produce(state, (draft) => {
+        if (event.error?.includes('QUEUE_REPLACE_FAILED')) {
+          const list = draft.transcript.bySession[event.sessionPath];
+          if (list) {
+            draft.transcript.bySession[event.sessionPath] = list.filter(
+              (message) => !(message.role === 'user' && message.status === 'queued'),
+            );
+          }
+          for (const [corrId, op] of Object.entries(draft.pending.ops)) {
+            if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.ops[corrId];
+          }
+          for (const [corrId, op] of Object.entries(draft.pending.promoted)) {
+            if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.promoted[corrId];
+          }
+          draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+          draft.settings.notice = 'The queued messages could not be restored and were cleared. Re-send them if they are still needed.';
+          draft.settings.noticeKind = 'operational-error';
+          draft.settings.noticeRaw = event.error;
+        } else if (mapped) {
+          draft.settings.notice = mapped.message;
+          draft.settings.noticeKind = mapped.kind;
+          draft.settings.noticeRaw = event.error ?? null;
+        }
+      }),
+      effects: [{
+        kind: 'Log', corrId: event.corrId, level: 'error',
+        message: `Queued message edit failed for session ${event.sessionPath}`,
+        data: { error: event.error },
+      }],
+    };
+  }
+
+  return {
+    state: produce(state, (draft) => {
+      const message = draft.transcript.bySession[event.sessionPath]?.find((entry) => entry.id === event.messageId);
+      if (message?.role === 'user') {
+        // The backend response lane drains before queued-delivery events, but
+        // accept an already-promoted row defensively so an edit racing delivery
+        // cannot leave stale visible text.
+        message.markdown = event.composedText;
+        message.userParts = event.userParts;
+      }
+      const pending = Object.values(draft.pending.ops).find((op) => op.localId === event.messageId)
+        ?? Object.values(draft.pending.promoted).find((op) => op.localId === event.messageId);
+      if (pending?.queued) {
+        pending.text = event.text;
+        pending.inputs = event.inputs;
+      }
+      draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+    }),
+    effects: [],
+  };
+}
+
 export function handleClearQueueResult(state: ArchState, event: Extract<Event, { kind: 'ClearQueueResult' }>): ReducerResult {
   // The transcript 'queued' messages + pending snapshots were already removed
   // optimistically in `handleClearQueue`. On success there is nothing more to
@@ -88,6 +146,7 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
       draft.pending.promoted[event.corrId] = {
         ...pending,
         ...(event.requestId ? { requestId: event.requestId } : {}),
+        ...(event.queued ? { queued: true } : {}),
       };
       if (event.queued) {
         // Steering (FollowUp) ack: the message is queued, not running yet —
@@ -457,10 +516,23 @@ export function handleSetPrefsResult(state: ArchState, event: Extract<Event, { k
   };
 }
 
-export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
+export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
   switch (event.kind) {
     case 'InterruptResult':
       return handleInterruptResult(state, event);
+    case 'CompactResult':
+      return event.ok ? { state, effects: [] } : {
+        state: {
+          ...state,
+          settings: {
+            ...state.settings,
+            notice: 'Could not compact this conversation.',
+            noticeKind: 'operational-error',
+            noticeRaw: event.error ?? 'message.compact failed',
+          },
+        },
+        effects: [],
+      };
     case 'SendResult':
       return handleSendResult(state, event);
     case 'EditResult':

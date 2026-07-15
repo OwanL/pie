@@ -36,6 +36,8 @@ interface SessionTabsProps {
    *  their close × and mark-done badge greyed out with an explanatory tooltip
    *  (the trigger must be cancelled first, from the status strip). */
   deferredSessionPaths: string[];
+  /** Session paths whose pending deferred trigger includes a timer. */
+  deferredTimerSessionPaths: string[];
 }
 
 function hasPendingRequest(
@@ -68,6 +70,7 @@ export function SessionTabs({
   onTogglePin,
   onRunAction,
   deferredSessionPaths,
+  deferredTimerSessionPaths,
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
 
@@ -158,6 +161,10 @@ export function SessionTabs({
   const unreadFinishedPathSet = useMemo(() => new Set(unreadFinishedSessionPaths), [unreadFinishedSessionPaths]);
   const pinnedPathSet = useMemo(() => new Set(pinnedTabPaths), [pinnedTabPaths]);
   const deferredPathSet = useMemo(() => new Set(deferredSessionPaths), [deferredSessionPaths]);
+  const deferredTimerPathSet = useMemo(
+    () => new Set(deferredTimerSessionPaths),
+    [deferredTimerSessionPaths],
+  );
 
   // Re-resolve the dragged index from the source path each render so a tab
   // closing or being inserted elsewhere mid-drag doesn't float the wrong tab.
@@ -322,6 +329,7 @@ export function SessionTabs({
             activeRunSummary={tabPath === effectiveActivePath ? activeRunSummary : null}
             isPinned={pinnedPathSet.has(tabPath)}
             hasDeferredTriggers={deferredPathSet.has(tabPath)}
+            hasDeferredTimer={deferredTimerPathSet.has(tabPath)}
             onContextMenu={onContextMenu}
             onPointerDown={onPointerDown}
             onClick={onClick}

@@ -258,8 +258,7 @@ No models remain at `unknown` confidence as of 2026-06-19:
 3. **OpenRouter model pricing API** (Ollama Cloud source): https://openrouter.ai/api/v1/models
 4. **Umans** (code by Umans; subscription + per-token service keys): https://umans.ai
 5. **Ollama Cloud documentation**: https://ollama.com/ (pricing measured by GPU time)
-6. Internal historical: `docs/internal/copilot-model-pricing.md` (last updated 2026-05-16)
-7. Internal historical: `docs/internal/ollama-pro-cloud-models-ranked.md` (compute estimate methodology; superseded for live pricing by OpenRouter)
+6. Internal historical: `docs/internal/ollama-pro-cloud-models-ranked.md` (compute estimate methodology; superseded for live pricing by OpenRouter)
 
 ---
 
@@ -267,7 +266,7 @@ No models remain at `unknown` confidence as of 2026-06-19:
 
 | Date | Change |
 |---|---|
-| 2026-06-01 | Initial evidence ledger created. Copilot pricing sourced from official docs (via internal copilot-model-pricing.md). Ollama Cloud pricing from compute estimates (via ollama-pro-cloud-models-ranked.md). |
+| 2026-06-01 | Initial evidence ledger created. Copilot pricing sourced from official docs. Ollama Cloud pricing from compute estimates in `ollama-pro-cloud-models-ranked.md`. |
 | 2026-06-15 | Synced Ollama Cloud model list: added glm-5, kimi-k2.7-code, minimax-m2.1, minimax-m2.5; removed 21 models no longer on cloud page |
 | 2026-06-17 | Added `glm-5.2:cloud` with compute-estimate pricing (active params estimated 40B pending official spec) |
 | 2026-06-19 | **Ollama Cloud refresh to live API pricing.** Replaced stale compute-estimate cost blocks for all 22 compute-estimate Ollama Cloud models with live per-token rates from the OpenRouter model API (`/api/v1/models`), including cache-read where OpenRouter exposes it, and added the previously-missing `glm-5.2:cloud` price (`z-ai/glm-5.2`). Supersedes the 2026-06-04 Portkey snapshot (several Portkey values were stale or mis-mapped, e.g. `kimi-k2.7-code` had matched base `kimi-k2`, `minimax-m3` was 2× the live rate). Added the Umans section: twinned umans entries mirror their Ollama Cloud twin's OpenRouter rate as an opportunity-cost `cost` block (consistent with all other models); proprietary `umans-coder`/`flash`/`qwen3.6-35b-a3b` remain $0 (no public API twin). Cache captured via the shared `openai-completions` path. Newly-listed `umans-qwen3.6-35b-a3b` model + profile added. Copilot models unchanged (already official GitHub token pricing). |

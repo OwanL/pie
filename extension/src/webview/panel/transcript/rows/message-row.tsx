@@ -41,7 +41,7 @@ function renderMessage({
       message={row.message}
       isStreaming={isStreaming}
       prefs={prefs}
-      readonly={busy}
+      readonly={busy && row.message.status !== 'queued'}
       workingDirectory={workingDirectory}
       editingId={editingId}
       onEditRequest={onEditRequest}

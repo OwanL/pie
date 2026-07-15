@@ -50,6 +50,7 @@ import {
 	readRouteAroundSaturatedProviders,
 } from "./provider-capacity.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
+import { readFallbackOnProviderFailure } from "./provider-failure.js";
 // Model-selection primitives live in ./selection.ts and remain re-exported
 // here for compatibility with existing focused tests and integrations.
 import {
@@ -467,6 +468,7 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 		bucketAssignments,
 		alwaysParentModel: readAlwaysParentModel(),
 		routeAroundSaturatedProviders: readRouteAroundSaturatedProviders(),
+		fallbackOnProviderFailure: readFallbackOnProviderFailure(),
 		registryModels: availableModels,
 		nestedAllowedBuckets: readNestedAllowedBuckets(),
 	};

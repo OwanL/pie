@@ -61,9 +61,11 @@ marked.use({
  * tab-switch re-render), which is the dominant cost behind the UI's perceived
  * lag despite "just rendering text".
  *
- * Entry-count bound (rather than byte bound) keeps bookkeeping cheap; typical
- * markdown fragments are a few KB. The bound is sized for multi-session tab
- * switching: each host session switch swaps the visible transcript, and
+ * Both entry count and estimated retained UTF-16 bytes are bounded. The byte
+ * bound prevents a handful of unusually large tool results or growing stream
+ * prefixes from retaining far more heap than the typical few-KB fragments.
+ * The entry bound is sized for multi-session tab switching: each host session
+ * switch swaps the visible transcript, and
  * without a resident cache every visible message of the newly-active session
  * re-parses (marked + per-code-block hljs.highlight + DOMPurify)
  * synchronously on the first frame — a blocking burst that holds the
@@ -72,19 +74,28 @@ marked.use({
  * back-and-forth; 512 keeps recent sessions resident so switching back to a
  * previously-viewed session renders from cache with no parse burst (memory
  * stays bounded at ~few MB for typical fragments). LRU refresh on hit keeps
- * the frequently-rendered visible fragments resident even as streaming
- * intermediate snapshots churn through the cache.
+ * frequently-rendered completed fragments resident. Streaming prefixes bypass
+ * the cache entirely because each prefix is normally rendered only once.
  */
 const MARKDOWN_CACHE_MAX = 512;
-const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX);
+const MARKDOWN_CACHE_MAX_WEIGHT = 8 * 1024 * 1024;
+const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX, {
+  maxWeight: MARKDOWN_CACHE_MAX_WEIGHT,
+  // JavaScript strings are normally retained as UTF-16; this deliberately
+  // conservative estimate counts both the source key and sanitized HTML value.
+  weight: (text, html) => 2 * (text.length + html.length),
+});
 
-/** Cache capacity, exported so tests can drive the eviction boundary exactly. */
+/** Cache bounds, exported so tests can drive the eviction boundary exactly. */
 export const MARKDOWN_CACHE_MAX_ENTRIES = MARKDOWN_CACHE_MAX;
+export const MARKDOWN_CACHE_MAX_BYTES = MARKDOWN_CACHE_MAX_WEIGHT;
 
-export function renderMarkdown(text: string): string {
-  const cached = markdownCache.get(text);
-  if (cached !== undefined) {
-    return cached;
+export function renderMarkdown(text: string, cache = true): string {
+  if (cache) {
+    const cached = markdownCache.get(text);
+    if (cached !== undefined) {
+      return cached;
+    }
   }
 
   const raw = marked.parse(text) as string;
@@ -93,7 +104,7 @@ export function renderMarkdown(text: string): string {
     .replace(/<table>/g, '<div class="md-table-wrap"><table>')
     .replace(/<\/table>/g, '</table></div>');
   const html = DOMPurify.sanitize(withTableWrappers, { RETURN_DOM: false });
-  markdownCache.set(text, html);
+  if (cache) markdownCache.set(text, html);
   return html;
 }
 

@@ -33,7 +33,7 @@ test.before(async () => {
   ({ TranscriptHost } = await import('../../../../src/webview/panel/transcript/transcript-host'));
 });
 
-test('app commit without a mounted transcript leaf emits a classified transcript block', () => {
+test('app commit reports only a transcript block that survives the render grace period', async () => {
   const messages: any[] = [];
   const root = document.getElementById('root')!;
   const target = {
@@ -52,8 +52,8 @@ test('app commit without a mounted transcript leaf emits a classified transcript
     },
   };
   const hostProps = {
-    openTabPaths: ['/actual'],
-    activeSessionPath: '/actual',
+    openTabPaths: ['/expected'],
+    activeSessionPath: '/expected',
     transcript: [],
     transcriptWindow: target.state.transcriptWindow,
     transcriptLoaded: true,
@@ -78,11 +78,31 @@ test('app commit without a mounted transcript leaf emits a classified transcript
     postMessage: (message: any) => messages.push(message),
     children: h(TranscriptHost, hostProps as never),
   }), root);
-  render(null, root);
 
   assert.ok(messages.some((message) => message.type === 'appCommitted' && message.payload.revision === 7));
+  assert.equal(messages.some((message) => message.type === 'transcriptCommitBlocked'), false);
+  await new Promise((resolve) => setTimeout(resolve, 275));
+  assert.equal(
+    messages.some((message) => message.type === 'transcriptCommitBlocked'),
+    false,
+    'the transient first layout must settle without a warning',
+  );
+
+  render(h(TranscriptCommitProvider, {
+    target,
+    appSurface: 'transcript',
+    postMessage: (message: any) => messages.push(message),
+    children: h(TranscriptHost, {
+      ...hostProps,
+      openTabPaths: ['/actual'],
+      activeSessionPath: '/actual',
+    } as never),
+  }), root);
+  await new Promise((resolve) => setTimeout(resolve, 275));
+  render(null, root);
+
   assert.deepEqual(
     messages.filter((message) => message.type === 'transcriptCommitBlocked').map((message) => message.payload.reason),
-    ['leaf_missing'],
+    ['structure_mismatch'],
   );
 });

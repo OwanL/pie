@@ -321,7 +321,7 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   harness.tracker.onMessageEdited(harness.sessionPath);
   harness.tracker.onTruncatedAfter(harness.sessionPath);
   harness.tracker.onModelConfigChanged(harness.sessionPath, 'claude-test', 'medium');
-  harness.tracker.onModelConfigChanged(harness.sessionPath, 'model-b', 'high');
+  harness.tracker.onModelConfigChanged(harness.sessionPath, 'model-b', 'high', 'openai-codex');
 
   const currentRun = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
   assert.equal(currentRun?.runId, runId);
@@ -332,6 +332,7 @@ test('tracker no-op guards and metadata updates behave correctly across inactive
   assert.equal(currentRun?.messageEditCount, 1);
   assert.equal(currentRun?.truncatedAfterCount, 1);
   assert.equal(currentRun?.mixedModelConfig, true);
+  assert.equal(currentRun?.provider, 'openai-codex');
   assert.deepEqual(currentRun?.treatmentChangeKinds, ['model', 'thinking']);
 });
 

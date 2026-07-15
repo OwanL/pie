@@ -3,7 +3,6 @@
  * Target refactor (isObjectRecord rename) is DONE; re-running brace-counts
  * WITHOUT ignoring braces in strings/regex/templates/comments → silent
  * source corruption on edge cases. Kept for history only.
- * See docs/internal/code-review/09_analysis_docs_config.md (S10 C2).
  */
 import fs from 'node:fs';
 

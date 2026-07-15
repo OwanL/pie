@@ -28,6 +28,7 @@ const prefs: ChatPrefs = {
   showPruningMessages: true,
   subagentAlwaysParentModel: false,
   subagentRouteAroundSaturatedProviders: false,
+  subagentFallbackOnProviderFailure: true,
   runtimeAuditLog: false,
   subagentMaxDepth: 3,
   subagentMaxTreeSessions: 10,
@@ -119,6 +120,9 @@ test('toggle helpers return partial pref patches without mutating source prefs',
   assert.deepEqual(toggleChatPref(prefs, 'subagentRouteAroundSaturatedProviders'), {
     subagentRouteAroundSaturatedProviders: true,
   });
+  assert.deepEqual(toggleChatPref(prefs, 'subagentFallbackOnProviderFailure'), {
+    subagentFallbackOnProviderFailure: false,
+  });
   assert.deepEqual(toggleChatPrefForContext(prefs, 'toolCalls'), { autoExpandToolCalls: false });
   assert.deepEqual(toggleChatPrefForContext(prefs, 'subagentCalls'), { autoExpandSubagentCalls: true });
   assert.deepEqual(prefs, {
@@ -129,6 +133,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     showPruningMessages: true,
     subagentAlwaysParentModel: false,
     subagentRouteAroundSaturatedProviders: false,
+    subagentFallbackOnProviderFailure: true,
     runtimeAuditLog: false,
     subagentMaxDepth: 3,
     subagentMaxTreeSessions: 10,

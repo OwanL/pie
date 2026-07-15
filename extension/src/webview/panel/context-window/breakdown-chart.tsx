@@ -11,8 +11,8 @@ import { cx } from '../utils/cx';
 /**
  * Rich (JSX) tooltip for the context-window indicator. Renders a horizontal
  * stacked bar of the full context window: the used portion is split into its
- * contributor segments (system prompt, read files, skills, user messages,
- * other) and the remainder is shown as a muted tail. A legend below the bar
+ * contributor segments (system prompt, messages, assistant responses,
+ * reasoning, tools, skills, and residual content) and the remainder is shown as a muted tail. A legend below the bar
  * lists every segment with its colour swatch, label, and compact token count.
  *
  * Replaces the former plain-text `title` tooltip. Rendered into the
@@ -28,6 +28,10 @@ const SEGMENT_COLORS: Record<string, string> = {
   'Read file': '#4cc2ff', // azure
   'Skill': '#3fb950', // green
   'User message': '#f0883e', // orange
+  'Assistant responses': '#58a6ff', // blue
+  'Reasoning': '#d2a8ff', // lilac
+  'System messages': '#f85149', // red
+  'Tool calls': '#53b9bd', // teal
   'Other': '#e3b341', // yellow
 };
 
@@ -45,6 +49,8 @@ const FALLBACK_PALETTE = [
 export function segmentColor(label: string): string {
   const fixed = SEGMENT_COLORS[label];
   if (fixed) return fixed;
+  if (label.startsWith('Tool: ')) return SEGMENT_COLORS['Tool calls']!;
+  if (label.startsWith('Skill: ')) return SEGMENT_COLORS.Skill!;
   let h = 0;
   for (let i = 0; i < label.length; i += 1) {
     h = (h * 31 + label.charCodeAt(i)) | 0;
@@ -69,6 +75,8 @@ interface Segment {
   color: string;
   /** Muted tail segment (remaining context), styled differently from contributors. */
   muted?: boolean;
+  /** Compact contributor detail shown beside the label (counts/previews). */
+  note?: string;
   /** Attribution kind suffix for the legend (estimated/derived/unknown). */
   kindSuffix?: string;
   /** Hover text for the segment's native `title`. */
@@ -158,8 +166,9 @@ function ContextWindowBreakdownChartBase({
         label,
         tokens,
         color: e.key === 'other' ? SEGMENT_COLORS['Other']! : segmentColor(label),
+        note: e.note,
         kindSuffix: kindSuffixFor(e),
-        title: `${label}: ${formatCompactTokens(tokens)} tokens (${pct.toFixed(1)}%)`,
+        title: `${label}: ${formatCompactTokens(tokens)} tokens (${pct.toFixed(1)}%)${e.note ? ` — ${e.note}` : ''}`,
       } satisfies Segment;
     });
 
@@ -285,8 +294,9 @@ function ContextLegend({
               class={cx('rich-tooltip-swatch', s.muted && 'ctx-legend-swatch--muted')}
               style={`background:${s.color}`}
             />
-            <span class="ctx-legend-label">
+            <span class="ctx-legend-label" title={s.note}>
               {s.label}
+              {s.note && <span class="ctx-legend-note">{` · ${s.note}`}</span>}
               {s.kindSuffix && <span class="ctx-legend-kind">{` ${s.kindSuffix}`}</span>}
             </span>
             <span class="rich-tooltip-legend-val">{formatCompactTokens(s.tokens)}</span>

@@ -247,23 +247,33 @@ export function subagentSingleResultToChatMessages(result: SubagentSingleResult,
   const hasExplicitUserTask = chatMessages.some((message) => message.role === 'user');
   const taskMessage = hasExplicitUserTask ? undefined : subagentTaskMessage(result, idPrefix);
 
-  if (chatMessages.length > 0) {
-    return taskMessage ? [taskMessage, ...chatMessages] : chatMessages;
-  }
-
+  // `messages` contains committed child turns only. The current provider turn
+  // lives in the separate streaming fields, so it must be appended even when
+  // earlier assistant/tool messages already exist. Returning early here used
+  // to make an expanded card freeze on its first committed sentence while the
+  // collapsed preview continued to show new output.
   if (isSubagentSingleResultRunning(result)) {
-    const msgs = taskMessage ? [taskMessage] : [];
-    const streamText = result.streamingText?.trim();
-    if (streamText) {
-      msgs.push({
+    const streamText = nonEmptyText(result.streamingText);
+    const streamReasoning = nonEmptyText(result.streamingReasoning);
+    if (streamText || streamReasoning) {
+      const parts: ChatMessagePart[] = [];
+      if (streamReasoning) appendAssistantTextPart(parts, 'reasoning', streamReasoning);
+      if (streamText) appendAssistantTextPart(parts, 'text', streamText);
+      chatMessages.push({
         id: `${idPrefix}-streaming`,
         role: 'assistant',
         createdAt: '',
-        markdown: streamText,
+        markdown: streamText ?? '',
+        thinking: streamReasoning,
+        parts,
         status: 'streaming',
       });
     }
-    return msgs;
+    return taskMessage ? [taskMessage, ...chatMessages] : chatMessages;
+  }
+
+  if (chatMessages.length > 0) {
+    return taskMessage ? [taskMessage, ...chatMessages] : chatMessages;
   }
 
   return [

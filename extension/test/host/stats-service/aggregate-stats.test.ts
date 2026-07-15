@@ -450,6 +450,12 @@ test('providerForModel / pricingForModel: first priced provider wins', () => {
   ]);
   assert.equal(providerForModel('m', pricingMap), 'openai');
   assert.equal(pricingForModel('m', pricingMap)!.output, 6);
+  assert.equal(providerForModel('m', pricingMap, 'anthropic'), 'anthropic');
+  assert.equal(pricingForModel('m', pricingMap, 'anthropic')!.output, 15);
+  // Runtime provider identity is authoritative; never relabel an unpriced
+  // openai-codex run as a same-id GitHub Copilot model.
+  assert.equal(providerForModel('m', pricingMap, 'openai-codex'), 'openai-codex');
+  assert.equal(pricingForModel('m', pricingMap, 'openai-codex'), null);
   assert.equal(providerForModel(undefined, pricingMap), 'unknown');
   assert.equal(pricingForModel('nope', pricingMap), null);
 });

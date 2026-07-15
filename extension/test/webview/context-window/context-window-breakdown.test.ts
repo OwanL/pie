@@ -34,9 +34,9 @@ function makeMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
 test('buildContextWindowBreakdown sorts top contributors first, uses derived Other when exact usage is known', () => {
   const breakdown = buildContextWindowBreakdown({
     contextUsage: {
-      tokens: 20,
+      tokens: 100,
       contextWindow: 100,
-      percent: 20,
+      percent: 100,
     },
     effectiveContextWindow: 100,
     systemPrompts: [
@@ -44,6 +44,7 @@ test('buildContextWindowBreakdown sorts top contributors first, uses derived Oth
       makePrompt({ source: 'harness', text: 'abcd' }),
       makePrompt({ source: 'user', title: 'System append', text: 'abcde' }),
       makePrompt({ source: 'user', title: 'Repo prompt', text: 'abcdefgh' }),
+      makePrompt({ source: 'user', title: 'Disabled prompt', disabled: true, text: 'x'.repeat(400) }),
     ],
     transcript: [
       makeMessage({ role: 'user', markdown: 'abcd' }),
@@ -71,22 +72,26 @@ test('buildContextWindowBreakdown sorts top contributors first, uses derived Oth
   assert.equal(byLabel.get('System prompt')?.kind, 'estimated');
   assert.equal(byLabel.get('User message')?.kind, 'estimated');
   assert.ok(byLabel.get('User message')?.note?.includes('abcd'));
+  assert.equal(byLabel.get('Assistant responses')?.note, '1 response');
+  assert.equal(byLabel.get('Reasoning')?.note, '1 response');
+  assert.equal(byLabel.get('System messages')?.note, '1 message');
+  assert.equal(byLabel.get('Tool: run')?.note, '1 call');
   assert.equal(byLabel.get('Other')?.kind, 'derived');
 
   assert.deepEqual(breakdown.summary, {
-    usedTokens: 20,
+    usedTokens: 100,
     usedKind: 'exact',
-    remainingTokens: 80,
+    remainingTokens: 0,
     remainingKind: 'exact',
     totalWindow: 100,
   });
 
   assert.equal(footer.get('window.total')?.value, '100');
-  assert.equal(footer.get('window.used')?.value, '20');
-  assert.equal(footer.get('window.remaining')?.value, '80');
+  assert.equal(footer.get('window.used')?.value, '100');
+  assert.equal(footer.get('window.remaining')?.value, '0');
 
-  assert.match(breakdown.title, /Used: 20/m);
-  assert.match(breakdown.title, /Remaining: 80/m);
+  assert.match(breakdown.title, /Used: 100/m);
+  assert.match(breakdown.title, /Remaining: 0/m);
   assert.match(breakdown.title, /System prompt: 4 estimated/m);
 });
 
@@ -116,6 +121,13 @@ test('buildContextWindowBreakdown aggregates read_file tool calls into one total
             status: 'completed',
           },
           {
+            id: 'tool-2b',
+            name: 'read_file',
+            input: { filePath: '/home/user/skills/frontend-design/SKILL.md' },
+            result: 'abcd',
+            status: 'completed',
+          },
+          {
             id: 'tool-3',
             name: 'bash',
             input: { command: 'ls' },
@@ -135,13 +147,37 @@ test('buildContextWindowBreakdown aggregates read_file tool calls into one total
   const readFileEntry = readFileEntries[0]!;
   assert.equal(readFileEntry.note, '1 file');
 
-  const skillEntry = breakdown.entries.find((entry) => (entry.label ?? entry.key) === 'Skill');
+  const skillEntry = breakdown.entries.find((entry) => (entry.label ?? entry.key) === 'Skill: frontend-design');
   assert.ok(skillEntry);
-  assert.equal(skillEntry.note, 'frontend-design');
+  assert.equal(skillEntry.note, '2 loads');
+
+  const bashEntry = breakdown.entries.find((entry) => (entry.label ?? entry.key) === 'Tool: bash');
+  assert.ok(bashEntry);
+  assert.equal(bashEntry.note, '1 call');
 
   const otherEntry = breakdown.entries.find((entry) => entry.key === 'other');
-  assert.ok(otherEntry);
-  assert.equal(otherEntry.kind, 'estimated');
+  assert.equal(otherEntry, undefined, 'a zero-value residual should not create a generic Other row');
+});
+
+test('buildContextWindowBreakdown aggregates repeated non-file tools by normalized name', () => {
+  const breakdown = buildContextWindowBreakdown({
+    contextUsage: null,
+    effectiveContextWindow: 1000,
+    systemPrompts: [],
+    transcript: [makeMessage({
+      role: 'assistant',
+      toolCalls: [
+        { id: 'bash-1', name: 'Bash', input: { command: 'pwd' }, result: '/repo', status: 'completed' },
+        { id: 'bash-2', name: ' bash ', input: { command: 'ls' }, result: 'src', status: 'completed' },
+      ],
+    })],
+    isPartial: false,
+  });
+
+  const toolEntries = breakdown.entries.filter((entry) => entry.label === 'Tool: bash');
+  assert.equal(toolEntries.length, 1);
+  assert.equal(toolEntries[0]?.note, '2 calls');
+  assert.ok((toolEntries[0]?.tokens ?? 0) > 0);
 });
 
 test('buildContextWindowBreakdown estimates footer values without a PI usage snapshot', () => {

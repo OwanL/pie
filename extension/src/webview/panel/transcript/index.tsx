@@ -39,6 +39,7 @@ export function TranscriptView({
   transcriptLoaded,
   loadingStatus,
   busy,
+  liveTurnPhase,
   prefs,
   pruningSettings,
   systemPrompts,
@@ -71,7 +72,7 @@ export function TranscriptView({
 
   return (
     <TranscriptVirtualList
-      {...{ sessionKey, transcript, transcriptWindow, transcriptLoaded, loadingStatus, busy, prefs, pruningSettings, systemPrompts, pruningResult, pendingAssistantModelId, pendingAssistantThinkingLevel, workingDirectory, editingId, onEditRequest, onEditConfirm, onEditCancel, onOpenFile, onContextMenu, onLoadOlder, onLoadNewer, onJumpToLatest, onCancelPrepass }}
+      {...{ sessionKey, transcript, transcriptWindow, transcriptLoaded, loadingStatus, busy, liveTurnPhase, prefs, pruningSettings, systemPrompts, pruningResult, pendingAssistantModelId, pendingAssistantThinkingLevel, workingDirectory, editingId, onEditRequest, onEditConfirm, onEditCancel, onOpenFile, onContextMenu, onLoadOlder, onLoadNewer, onJumpToLatest, onCancelPrepass }}
     />
   );
 }

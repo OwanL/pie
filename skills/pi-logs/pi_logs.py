@@ -10,16 +10,16 @@ Three kinds of pi logs:
 Unity-style grouping collapses repeated lines into one entry with a count, turning
 thousands of log lines into a small set of unique signals — ideal for agent review.
 
-Usage:
-    uv run pi_logs.py summary
-    uv run pi_logs.py debug    [--section lines|messages] [--top N] [--filter REGEX] [--no-ansi] [--normalize smart]
-    uv run pi_logs.py session  [PATH] [--summary] [--role R] [--type T] [--tool NAME] [--errors]
-                               [--grouped] [--last N] [--context] [--cwd DIR]
-    uv run pi_logs.py group FILE [--top N] [--min N] [--normalize REGEX] [--no-ansi] [--context]
-    uv run pi_logs.py temp     [--list | --read PATH | --grouped PATH]
+Usage (invoke this script by absolute path from any cwd):
+    python <absolute-path>/pi_logs.py summary
+    python <absolute-path>/pi_logs.py debug    [--section lines|messages] [--top N] [--filter REGEX] [--no-ansi] [--normalize smart]
+    python <absolute-path>/pi_logs.py session  [PATH] [--summary] [--role R] [--type T] [--tool NAME] [--errors]
+                                             [--grouped] [--last N] [--context] [--cwd DIR]
+    python <absolute-path>/pi_logs.py group FILE [--filter REGEX] [--top N] [--min N] [--normalize REGEX] [--no-ansi] [--context]
+    python <absolute-path>/pi_logs.py temp     [--list | --read PATH | --grouped PATH]
 
 Run with no args -> `summary`. Any subcommand accepts --help.
-Stdlib only — no install step. Fallback: `python3 pi_logs.py ...`.
+Stdlib only — no install step. Use `python3` where `python` is unavailable.
 """
 
 from __future__ import annotations
@@ -163,6 +163,48 @@ def iso_local(mtime: float) -> str:
 
 def eprint(*args, **kwargs) -> None:
     print(*args, file=sys.stderr, **kwargs)
+
+
+def compile_filter(pattern: str | None):
+    """Compile an optional user regex with a concise CLI error."""
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        eprint(f"error: invalid --filter regex: {exc}")
+        return False
+
+
+def command_hint(args: str) -> str:
+    """Return a cwd-independent command using this running interpreter/script."""
+    return f'"{Path(sys.executable).resolve()}" "{Path(__file__).resolve()}" {args}'
+
+
+def resolve_input_path(raw: str) -> Path:
+    """Resolve user-supplied log paths across the mixed Git-Bash/Windows setup.
+
+    Windows Python cannot open Git Bash's `/tmp/...` spelling, so map that
+    prefix to the native temp directory. Bare names also search the tool temp
+    directory and pie's persistent temp log directory.
+    """
+    path = Path(raw).expanduser()
+    if path.is_file():
+        return path
+
+    normalized = raw.replace("\\", "/")
+    if os.name == "nt" and (normalized == "/tmp" or normalized.startswith("/tmp/")):
+        suffix = normalized.removeprefix("/tmp").lstrip("/")
+        candidate = TMP_DIR / Path(*suffix.split("/")) if suffix else TMP_DIR
+        if candidate.is_file():
+            return candidate
+
+    if Path(raw).name == raw:
+        for base in (TMP_DIR, TMP_DIR / "pie-logs"):
+            candidate = base / raw
+            if candidate.is_file():
+                return candidate
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -518,10 +560,10 @@ def cmd_summary(args) -> int:
 
     print()
     print("Next:")
-    print("  uv run pi_logs.py debug              # grouped overview of the debug log")
-    print("  uv run pi_logs.py session            # most recent session, structured summary")
-    print("  uv run pi_logs.py temp --list        # list tool-output temp logs")
-    print("  uv run pi_logs.py group <file>       # Unity-group any file")
+    print(f"  {command_hint('debug')}              # grouped overview of the debug log")
+    print(f"  {command_hint('session')}            # most recent session, structured summary")
+    print(f"  {command_hint('temp --list')}        # list tool-output temp logs")
+    print(f"  {command_hint('group <file>')}       # Unity-group any file")
     return 0
 
 
@@ -542,7 +584,9 @@ def cmd_debug(args) -> int:
     print()
 
     section = args.section
-    filt = re.compile(args.filter) if args.filter else None
+    filt = compile_filter(args.filter)
+    if filt is False:
+        return 2
 
     if section in ("lines", "all"):
         lines = [raw for (_idx, _vw, raw) in dl.rendered]
@@ -790,7 +834,7 @@ def _session_summary(sess: Session, entries: list[dict]) -> None:
 
 
 def cmd_group(args) -> int:
-    path = Path(args.file)
+    path = resolve_input_path(args.file)
     if not path.is_file():
         eprint(f"not a file: {path}")
         return 1
@@ -801,6 +845,11 @@ def cmd_group(args) -> int:
         return 1
 
     lines = text.splitlines()
+    filt = compile_filter(args.filter)
+    if filt is False:
+        return 2
+    if filt is not None:
+        lines = [line for line in lines if filt.search(line)]
     groups = group_lines(lines, strip_ansi_flag=not args.no_ansi, normalize=args.normalize)
 
     total = len(lines)
@@ -836,8 +885,8 @@ def cmd_temp(args) -> int:
         st = p.stat()
         print(f"{fmt_age(st.st_mtime):<10} {human_size(st.st_size):<10} {p.name}")
     print()
-    print("read one:    uv run pi_logs.py temp --read <name-or-path>")
-    print("group one:   uv run pi_logs.py temp --grouped <name-or-path>")
+    print(f"read one:    {command_hint('temp --read <name-or-path>')}")
+    print(f"group one:   {command_hint('temp --grouped <name-or-path>')}")
     return 0
 
 
@@ -933,6 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("file", help="File to group.")
     sp.add_argument("--top", type=int, default=50, help="Top N groups (default 50).")
     sp.add_argument("--min", type=int, default=1, help="Minimum count (default 1).")
+    sp.add_argument("--filter", help="Regex; only matching lines are grouped.")
     sp.add_argument("--normalize", help="Group key regex ('smart' = timestamps/ids/numbers).")
     sp.add_argument("--no-ansi", action="store_true", help="Do not strip ANSI.")
     sp.add_argument("--context", action="store_true", help="Show first/last line index per group.")
