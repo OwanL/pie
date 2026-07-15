@@ -8,7 +8,7 @@ import {
   type LiveTurnPhase,
 } from '../../../shared/live-pipeline-protocol.js';
 import { isThinkingLevel } from '../../../shared/thinking-level.js';
-import { incrementLiveRevision, pendingOwnerKey } from './model.js';
+import { incrementLiveRevision, pendingOwnerKey, terminalAttemptKey } from './model.js';
 
 export type CheckpointApplyResult =
   | { classification: 'applied'; state: LivePipelineState }
@@ -44,6 +44,14 @@ export function applyLiveTurnCheckpoint(
   }
   const bounds = validateCheckpointPayload(checkpoint);
   if (bounds !== 'valid') return { classification: bounds, state: current };
+
+  // Terminalization is authoritative. A checkpoint RPC may have captured its
+  // active snapshot before the terminal envelope was reduced, then settle
+  // afterward. Never let that delayed response revive an attempt whose
+  // tombstone already prevents further semantic events from advancing it.
+  if (current.terminalAttempts[terminalAttemptKey(checkpoint.turnId, checkpoint.attemptId)]) {
+    return { classification: 'stale', state: current };
+  }
 
   const existing = current.turnsBySession[checkpoint.sessionPath];
   if (existing) {

@@ -122,6 +122,7 @@ export function handleLiveTurnCheckpointResult(
       },
     };
     next = appendDurableTerminal(next, event.sessionPath, terminal);
+    next = clearPendingExtensionUiRequests(next, event.sessionPath);
   } else if (event.status === 'terminal_grace') {
     return interruptOne(next, event.sessionPath, event.occurredAt);
   } else {
@@ -262,10 +263,29 @@ function interruptOne(state: ArchState, sessionPath: string, occurredAt: number)
   let next = { ...state, livePipeline: {
     ...cleared,
     terminalAttempts: { ...cleared.terminalAttempts, ...transformed.state.terminalAttempts },
+    revisionBySession: {
+      ...cleared.revisionBySession,
+      [sessionPath]: transformed.state.revisionBySession[sessionPath]
+        ?? (cleared.revisionBySession[sessionPath] ?? 0) + 1,
+    },
   } };
   const interrupted = transformed.interruptedBySession[sessionPath];
   if (interrupted) next = appendDurableTerminal(next, sessionPath, interrupted);
+  next = clearPendingExtensionUiRequests(next, sessionPath);
   return { state: next, effects: [] };
+}
+
+/** A dead attempt cannot retain an actionable extension-UI prompt. */
+function clearPendingExtensionUiRequests(state: ArchState, sessionPath: string): ArchState {
+  if (!state.settings.pendingExtensionUIRequestsBySession[sessionPath]) return state;
+  const pendingExtensionUIRequestsBySession = {
+    ...state.settings.pendingExtensionUIRequestsBySession,
+  };
+  delete pendingExtensionUIRequestsBySession[sessionPath];
+  return {
+    ...state,
+    settings: { ...state.settings, pendingExtensionUIRequestsBySession },
+  };
 }
 
 /** Remove every live-pipeline structure owned by one terminalized attempt. */

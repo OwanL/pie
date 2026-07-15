@@ -18,6 +18,24 @@ function dispatch(state: ReturnType<typeof createInitialArchState>, envelope: Tu
   return reducer(state, { kind: 'TurnSemanticEventReceived', envelope });
 }
 
+function withPendingUiRequest(state: ReturnType<typeof createInitialArchState>) {
+  return {
+    ...state,
+    settings: {
+      ...state.settings,
+      pendingExtensionUIRequestsBySession: {
+        ...state.settings.pendingExtensionUIRequestsBySession,
+        [base.sessionPath]: {
+          'ui-request': {
+            id: 'ui-request', sessionPath: base.sessionPath, extensionId: 'test',
+            method: 'input' as const, title: 'Input',
+          },
+        },
+      },
+    },
+  };
+}
+
 test('sequenced live events project without mutating durable transcript and terminalize atomically', () => {
   let state = createInitialArchState();
   state.sessions.activeSessionPath = base.sessionPath;
@@ -51,6 +69,46 @@ test('sequenced live events project without mutating durable transcript and term
   assert.equal(selectViewState(committed.state).liveTurnPhase, null);
 });
 
+test('a delayed checkpoint cannot revive an attempt after its terminal tombstone', () => {
+  let state = createInitialArchState();
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  const active = state.livePipeline.turnsBySession[base.sessionPath]!;
+  const delayedCheckpoint = {
+    protocolVersion: 5 as const,
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    attemptId: base.attemptId,
+    checkpointSeq: 1,
+    phase: active.phase,
+    turn: { ...active, checkpointSeq: 1 },
+    tools: [],
+    pendingExtensionUiRequestIds: [],
+  };
+  const terminal = {
+    id: 'durable', role: 'assistant' as const, createdAt: new Date(110).toISOString(),
+    markdown: 'done', status: 'completed' as const, durableEntryId: 'entry',
+  };
+  state = dispatch(state, {
+    ...base, kind: 'turn.terminal', seq: 2, terminalKind: 'completed',
+    durableMessage: terminal, durableEntryId: 'entry',
+  }).state;
+  const transcript = state.transcript.bySession[base.sessionPath];
+  assert.equal(state.livePipeline.turnsBySession[base.sessionPath], undefined);
+  assert.ok(state.livePipeline.terminalAttempts['turn\u0000attempt']);
+
+  const late = reducer(state, {
+    kind: 'LiveTurnCheckpointResult', corrId: 'late-checkpoint', sessionPath: base.sessionPath,
+    turnId: base.turnId, attemptId: base.attemptId, ok: true, occurredAt: 120,
+    status: 'active', watermark: null, checkpoint: delayedCheckpoint,
+  });
+
+  assert.equal(late.state, state, 'a tombstoned checkpoint is ignored without changing state');
+  assert.equal(late.state.livePipeline.turnsBySession[base.sessionPath], undefined);
+  assert.equal(late.state.transcript.bySession[base.sessionPath], transcript);
+});
+
 test('sequence gaps request a checkpoint and a terminal checkpoint repairs missed terminal delivery', () => {
   let state = createInitialArchState();
   state = dispatch(state, {
@@ -65,7 +123,8 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
     id: 'durable', role: 'assistant' as const, createdAt: new Date(150).toISOString(), markdown: 'authoritative',
     status: 'completed' as const, durableEntryId: 'entry',
   };
-  const repaired = reducer(gap.state, {
+  const stateWithPrompt = withPendingUiRequest(gap.state);
+  const repaired = reducer(stateWithPrompt, {
     kind: 'LiveTurnCheckpointResult',
     corrId: 'checkpoint',
     sessionPath: base.sessionPath,
@@ -90,6 +149,7 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
   });
   assert.deepEqual(repaired.state.transcript.bySession[base.sessionPath], [terminal]);
   assert.equal(repaired.state.livePipeline.turnsBySession[base.sessionPath], undefined);
+  assert.equal(repaired.state.settings.pendingExtensionUIRequestsBySession[base.sessionPath], undefined);
   const lateStart = dispatch(repaired.state, {
     ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'revived', startedAt: 170,
   });
@@ -136,6 +196,8 @@ test('exhausted checkpoint repair clears the owned attempt and its pending gap s
   assert.equal(state.livePipeline.turnsBySession[base.sessionPath]?.pendingExtensionUiRequestIds[0], 'ui-request');
   assert.ok(state.livePipeline.toolsByExecutionId.execution);
   assert.ok(state.pending.currentTurnBySession[base.sessionPath]);
+  state = withPendingUiRequest(state);
+  const revisionBeforeFailures = state.livePipeline.revisionBySession[base.sessionPath] ?? 0;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     state = reducer(state, {
@@ -149,6 +211,12 @@ test('exhausted checkpoint repair clears the owned attempt and its pending gap s
   assert.equal(state.livePipeline.toolsByExecutionId.execution, undefined);
   assert.equal(state.livePipeline.pendingOwnerEvents[pendingKey], undefined);
   assert.equal(state.pending.currentTurnBySession[base.sessionPath], undefined);
+  assert.equal(state.settings.pendingExtensionUIRequestsBySession[base.sessionPath], undefined);
+  assert.equal(
+    state.livePipeline.revisionBySession[base.sessionPath],
+    revisionBeforeFailures + 1,
+    'terminal cleanup advances the live revision exactly once',
+  );
   assert.equal(state.livePipeline.terminalAttempts[pendingKey]?.terminalKind, 'interrupted');
   assert.equal(state.transcript.bySession[base.sessionPath]?.at(-1)?.status, 'interrupted');
 });
