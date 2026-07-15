@@ -32,7 +32,7 @@
     "bootstrap": "node ./scripts/bootstrap.mjs",
     "doctor": "node ./scripts/doctor.mjs",
     "extension:build": "npm --prefix extension run build --",
-    "extension:build:after-typecheck": "npm --prefix extension run build -- --skip-typecheck",
+    "extension:build:after-typecheck": "npm --prefix extension run build -- --skip-typecheck --no-sync",
     "extension:test": "node ./scripts/run-tests.mjs --package extension",
     "extension:typecheck": "node ./scripts/run-typechecks.mjs --project extension",
     "extensions:test": "node ./scripts/run-tests.mjs --package ask-user --package copilot-model-discovery --package cwd-skills --package safeguard --package skill-pruner --package subagent --package web-access-compat --package warm-bash --package tool-result-pruner --package session-reviewer --package session-changes --package deferred-triggers",
