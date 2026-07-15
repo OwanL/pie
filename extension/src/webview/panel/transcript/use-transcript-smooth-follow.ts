@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useState } from 'preact/hooks';
 
 import type { ChatMessage } from '../../../shared/protocol';
 import {
@@ -47,7 +47,22 @@ export function useRefreshFollowTarget(
   transcript: readonly ChatMessage[],
   sessionKey: string | null,
   cachedTargetRef: { current: number },
-) {
+): number {
+  // totalSize/transcript changes already render the owner and are passed on as
+  // wake dependencies. Only a container ResizeObserver notification needs its
+  // own revision to wake a quiescent follow effect without another reactive
+  // signal. Keeping the common streaming path out of state avoids a second
+  // render for every target refresh.
+  const [resizeRevision, setResizeRevision] = useState(0);
+  const refresh = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return false;
+    const target = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (target === cachedTargetRef.current) return false;
+    cachedTargetRef.current = target;
+    return true;
+  }, [scrollRef, cachedTargetRef]);
+
   // Keyed on BOTH totalSize and transcript identity. totalSize catches every
   // height-relevant mutation (row ResizeObserver -> measureElement), but it
   // lags the real bottom by up to a frame: the virtualizer batches
@@ -61,38 +76,38 @@ export function useRefreshFollowTarget(
   // follow-relevant case); totalSize fires a frame later and also catches
   // non-snapshot growth (collapsible expand/collapse, late image/table loads).
   useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    cachedTargetRef.current = Math.max(0, el.scrollHeight - el.clientHeight);
-  }, [scrollRef, totalSize, transcript, sessionKey, cachedTargetRef]);
+    refresh();
+  }, [refresh, totalSize, transcript, sessionKey]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    const refresh = () => {
-      cachedTargetRef.current = Math.max(0, el.scrollHeight - el.clientHeight);
-    };
-    const ro = new ResizeObserver(refresh);
+    const ro = new ResizeObserver(() => {
+      if (refresh()) setResizeRevision((revision) => revision + 1);
+    });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [scrollRef, cachedTargetRef]);
+  }, [scrollRef, refresh]);
+
+  return resizeRevision;
 }
 
 /**
- * rAF loop that eases the transcript toward its bottom whenever auto-follow is
- * active, replacing the previous hard `scrollTop = scrollHeight` snaps that
- * produced visible jumps as streaming content grew. Each frame advances
+ * Event-woken rAF easing that moves the transcript toward its bottom whenever
+ * auto-follow is active, replacing the previous hard
+ * `scrollTop = scrollHeight` snaps that produced visible jumps as streaming
+ * content grew. Each frame advances
  * scrollTop a bounded step toward the target (see `advanceSmoothScrollTop`),
  * so following feels continuous instead of snapping. CSS `scroll-behavior` is
  * forced to instant while auto-following so each frame is deterministic, then
  * the inline override is cleared when the loop stops.
  *
- * The loop is GATED on follow state: it self-cancels whenever the user is not
- * following the bottom (or newer messages are not loaded). In particular, an
- * active agent must not leave a no-op rAF running at ~60fps while the user is
- * reading earlier content. The `autoFollow` dependency restarts the loop as
- * soon as the user returns to the bottom; `hasNewer` does the same when the
- * latest page finishes loading.
+ * The loop is GATED on follow state and distance: it self-cancels whenever the
+ * user is not following the bottom (or newer messages are not loaded), and
+ * sleeps once it reaches the cached target. In particular, an active agent
+ * must not leave a no-op rAF running at ~60fps while the user reads earlier
+ * content or while the transcript is already pinned. Reactive follow/content
+ * signals and the container ResizeObserver restart it when work appears.
  * `scrollToBottom` / `jumpToLatest` keep doing their own synchronous snaps and
  * do not depend on this loop.
  *
@@ -118,6 +133,10 @@ export function useSmoothAutoFollow(
   isInitialPositioning: boolean,
   busy: boolean,
   cachedTargetRef: { current: number },
+  targetRevision: number,
+  totalSize: number,
+  transcript: readonly ChatMessage[],
+  sessionKey: string | null,
 ) {
   useEffect(() => {
     const el = scrollRef.current;
@@ -134,7 +153,6 @@ export function useSmoothAutoFollow(
         raf = 0;
         return;
       }
-      raf = requestAnimationFrame(tick);
       if (el.style.scrollBehavior !== 'auto') el.style.scrollBehavior = 'auto';
       const target = cachedTargetRef.current;
       // During the post-session-switch positioning window, snap to the bottom
@@ -152,6 +170,11 @@ export function useSmoothAutoFollow(
           lastScrollTopRef.current = target;
         }
         setIsAtBottom(true);
+        // Positioning owns a short settling window while the virtualizer is
+        // still measuring and may synchronously snap to scrollHeight. Keep
+        // correcting during that bounded window; normal settled follow below
+        // is event-driven and does not retain a frame callback.
+        raf = requestAnimationFrame(tick);
         return;
       }
       const current = el.scrollTop;
@@ -161,6 +184,10 @@ export function useSmoothAutoFollow(
           el.scrollTop = target;
           lastScrollTopRef.current = target;
         }
+        // Settled follow is event-driven: transcript/measurement dependencies
+        // restart this effect, while container resizes bump targetRevision. Do
+        // not burn a no-op rAF every frame at an unchanged bottom.
+        raf = 0;
         return;
       }
       const next = advanceSmoothScrollTop(current, target);
@@ -173,11 +200,12 @@ export function useSmoothAutoFollow(
       // unlike scrollHeight/clientHeight); scrollToBottom uses the same pattern.
       lastScrollTopRef.current = el.scrollTop;
       setIsAtBottom(true);
+      raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
       el.style.scrollBehavior = '';
     };
-  }, [scrollRef, hasNewer, autoFollowRef, autoFollow, lastScrollTopRef, setIsAtBottom, isInitialPositioningRef, isInitialPositioning, busy, cachedTargetRef]);
+  }, [scrollRef, hasNewer, autoFollowRef, autoFollow, lastScrollTopRef, setIsAtBottom, isInitialPositioningRef, isInitialPositioning, busy, cachedTargetRef, targetRevision, totalSize, transcript, sessionKey]);
 }

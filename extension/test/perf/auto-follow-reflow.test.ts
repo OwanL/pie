@@ -22,8 +22,8 @@
  *   (1) auto-follow tracks growth (correctness) — a `totalSize` change re-reads
  *       `scrollHeight` exactly once and advances `scrollTop` toward the new
  *       bottom, for ANY growth source (totalSize is source-agnostic);
- *   (2) stable-content frames read `scrollHeight` ZERO times (the loop reuses
- *       the cached target — no per-frame reflow);
+ *   (2) settled stable content leaves ZERO rAF callbacks queued and reads
+ *       `scrollHeight` zero times (no idle main-thread churn or reflow);
  *   (3) every `totalSize` change re-pins IMMEDIATELY — there is no timed
  *       fallback cadence anymore (no `Date.now` dependency), so a late image /
  *       table load is caught the same frame its row re-measures, not 250ms
@@ -66,6 +66,8 @@ let rafMap = new Map<number, () => void>();
 let rafCounter = 0;
 let origRaf: unknown;
 let origCaf: unknown;
+let origResizeObserver: typeof ResizeObserver;
+let resizeCallbacks = new Set<() => void>();
 
 function installFakeRaf(): void {
   origRaf = globalThis.requestAnimationFrame;
@@ -85,6 +87,31 @@ function installFakeRaf(): void {
 function restoreRaf(): void {
   globalThis.requestAnimationFrame = origRaf as typeof globalThis.requestAnimationFrame;
   globalThis.cancelAnimationFrame = origCaf as typeof globalThis.cancelAnimationFrame;
+}
+
+function installFakeResizeObserver(): void {
+  origResizeObserver = globalThis.ResizeObserver;
+  resizeCallbacks = new Set();
+  globalThis.ResizeObserver = class FakeResizeObserver {
+    private readonly notify: () => void;
+
+    constructor(callback: ResizeObserverCallback) {
+      this.notify = () => callback([], this as unknown as ResizeObserver);
+      resizeCallbacks.add(this.notify);
+    }
+
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void { resizeCallbacks.delete(this.notify); }
+  } as unknown as typeof ResizeObserver;
+}
+
+function restoreResizeObserver(): void {
+  globalThis.ResizeObserver = origResizeObserver;
+}
+
+function notifyResizeObservers(): void {
+  for (const callback of Array.from(resizeCallbacks)) callback();
 }
 
 /** Run `n` animation frames. Each frame executes every rAF callback queued at
@@ -154,6 +181,7 @@ let tick = 0;
 
 beforeEach(() => {
   installFakeRaf();
+  installFakeResizeObserver();
   container = document.createElement('div');
   document.body.appendChild(container);
   capture.r = null;
@@ -163,6 +191,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => { render(null, container); });
   container.remove();
+  restoreResizeObserver();
   restoreRaf();
 });
 
@@ -172,8 +201,10 @@ function rerender(busy: boolean, flush: number): void {
   tick += 1;
   act(() => {
     render(h(Probe, { totalSize: tick, busy }), container);
-    if (flush > 0) flushFrames(flush);
   });
+  // Target refresh may update the wake revision in a layout effect; let that
+  // commit restart the follow effect before advancing the fake scheduler.
+  if (flush > 0) act(() => flushFrames(flush));
 }
 
 function mountProbe(busy: boolean): void {
@@ -193,6 +224,10 @@ function mountProbe(busy: boolean): void {
  *  re-run under the spy, seeding the real bottom before the ease. */
 function settle(): void {
   rerender(true, 12);
+  // The positioning-state update flushes effects at the end of the render
+  // act, after rerender's frame batch. Drain the follow effect it restarts so
+  // the harness observes the genuinely settled scheduler state.
+  act(() => flushFrames(12));
   scrollHeightReads = 0;
 }
 
@@ -202,6 +237,7 @@ test('auto-follow tracks totalSize growth and reads scrollHeight only once per c
   assert.equal(capture.r!.autoFollowRef.current, true, 'auto-follow must be engaged after settle');
   assert.equal(scrollHeightReads, 0, 'sanity: reads reset after settle');
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
+  assert.equal(rafMap.size, 0, 'settled follow must leave no animation frame queued');
 
   const scrollTopBefore = scrollTopValue;
 
@@ -224,17 +260,19 @@ test('auto-follow tracks totalSize growth and reads scrollHeight only once per c
   assert.equal(scrollTopValue, bottom(), 'scrollTop should have eased to the cached bottom (auto-follow tracks growth)');
 });
 
-test('idle-but-busy frames with stable content force no scrollHeight read', () => {
+test('settled idle follow leaves the rAF queue empty even while busy', () => {
   mountProbe(true);
   settle();
   assert.equal(capture.r!.autoFollowRef.current, true, 'auto-follow engaged');
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
   const readsBefore = scrollHeightReads;
+  assert.equal(rafMap.size, 0, 'no follow frame remains queued once the target is reached');
 
-  // busy + auto-follow + stable content → the loop runs but must NOT read
-  // scrollHeight (cached target is still valid).
+  // busy + auto-follow + stable content is fully quiescent. Flushing the fake
+  // scheduler cannot manufacture work because no callback remains queued.
   act(() => flushFrames(10));
-  assert.equal(scrollHeightReads, readsBefore, 'idle frames (busy, auto-follow, stable content) must not read scrollHeight');
+  assert.equal(scrollHeightReads, readsBefore, 'quiescent follow must not read scrollHeight');
+  assert.equal(rafMap.size, 0, 'quiescent follow must keep the scheduler empty');
 });
 
 test('every totalSize change re-pins immediately — no timed fallback cadence', () => {
@@ -269,6 +307,7 @@ test('a fresh transcript snapshot re-reads the bottom at commit time — no meas
   settle();
   assert.equal(capture.r!.autoFollowRef.current, true, 'auto-follow engaged');
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
+  assert.equal(rafMap.size, 0, 'sanity: follow is quiescent before the transcript signal');
 
   // Growth arrives as a new transcript array reference with totalSize HELD
   // stable, so only the transcript-keyed refresh can fire (isolating it from
@@ -279,8 +318,30 @@ test('a fresh transcript snapshot re-reads the bottom at commit time — no meas
   const freshTranscript: readonly never[] = [];
   act(() => {
     render(h(Probe, { totalSize: tick, busy: true, transcript: freshTranscript }), container);
-    flushFrames(1);
   });
+  act(() => flushFrames(1));
   assert.ok(scrollHeightReads > readsBefore, 'a fresh transcript identity must re-read scrollHeight at commit time');
   assert.ok(scrollTopValue > scrollTopBefore, 'scrollTop should advance toward the grown bottom the same frame');
+});
+
+test('container resize wakes quiescent follow and settles back to an empty rAF queue', () => {
+  mountProbe(true);
+  settle();
+  assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
+  assert.equal(rafMap.size, 0, 'sanity: follow is quiescent before resize');
+
+  // A viewport resize changes the true bottom without changing transcript or
+  // virtualizer totalSize. The container observer must refresh the target and
+  // explicitly wake the otherwise-empty follow scheduler.
+  scrollHeightValue += 120;
+  const readsBefore = scrollHeightReads;
+  const scrollTopBefore = scrollTopValue;
+  act(() => notifyResizeObservers());
+  assert.equal(scrollHeightReads, readsBefore + 1, 'resize should refresh the cached bottom once');
+  assert.ok(rafMap.size > 0, 'resize should wake the settled follow effect');
+
+  act(() => flushFrames(40));
+  assert.ok(scrollTopValue > scrollTopBefore, 'resize-triggered follow should advance toward the new bottom');
+  assert.equal(scrollTopValue, bottom(), 'resize-triggered follow should settle at the new bottom');
+  assert.equal(rafMap.size, 0, 'follow should quiesce again after handling resize');
 });

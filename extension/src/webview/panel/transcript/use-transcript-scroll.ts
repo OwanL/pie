@@ -173,7 +173,7 @@ export function useTranscriptScroll({
     setAutoFollow,
   );
 
-  useRefreshFollowTarget(scrollRef, totalSize, transcript, sessionKey, cachedTargetRef);
+  const followTargetRevision = useRefreshFollowTarget(scrollRef, totalSize, transcript, sessionKey, cachedTargetRef);
 
   useSmoothAutoFollow(
     scrollRef,
@@ -186,6 +186,10 @@ export function useTranscriptScroll({
     isInitialPositioning,
     busy,
     cachedTargetRef,
+    followTargetRevision,
+    totalSize,
+    transcript,
+    sessionKey,
   );
 
   return {
