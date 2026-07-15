@@ -640,12 +640,6 @@ export class ProviderGate {
 		if (wasProbe) this.getTransportCircuit(provider).probeInFlight = false;
 	}
 
-	private failTransportProbe(provider: string, wasProbe: boolean): void {
-		// Once half-open, any transport-level failure means the provider has not
-		// recovered. Count it so repeated failed probes extend the cooldown.
-		if (wasProbe) this.recordTransportFailure(provider);
-	}
-
 	private recordTransportSuccess(provider: string): void {
 		const state = this.getTransportCircuit(provider);
 		state.consecutiveFailures = 0;
@@ -766,7 +760,7 @@ export class ProviderGate {
 		if (pool.isPaused()) {
 			throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 		}
-		const wasTransportProbe = this.beginTransportAttempt(config.provider);
+		let wasTransportProbe = this.beginTransportAttempt(config.provider);
 
 		// Acquire a concurrency slot. Queue and header waits are separate phases.
 		if (sessionId && !pool.canClaimImmediately(sessionId)) {
@@ -779,15 +773,42 @@ export class ProviderGate {
 			this.cancelTransportAttempt(config.provider, wasTransportProbe);
 			throw error;
 		}
+
+		// Availability may have changed while this request was queued. Recheck
+		// both shared circuits after acquiring the slot and immediately before
+		// dispatching upstream. Without this fence, waiters admitted while the
+		// provider was healthy would drain into an outage or account-pause window.
+		try {
+			if (pool.isPaused()) {
+				throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
+			}
+			if (!wasTransportProbe) {
+				wasTransportProbe = this.beginTransportAttempt(config.provider);
+			}
+		} catch (error) {
+			this.cancelTransportAttempt(config.provider, wasTransportProbe);
+			pool.release(slotIndex, sessionId, false);
+			throw error;
+		}
 		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_wait' });
 
+		let receivedHeaders = false;
 		try {
 			// Header-phase bound: race the upstream fetch against a timeout so
 			// a stalled upstream (TCP open but no HTTP response) cannot hold a
 			// concurrency slot indefinitely. The idle-chunk watchdog (armed in
 			// wrapStream) only covers the BODY phase — headers must arrive first.
 			const response = await this.fetchWithHeaderTimeout(input, init, config.provider, headerWaitMs, signal);
-			this.recordTransportSuccess(config.provider);
+			receivedHeaders = true;
+			// A server-side 5xx is transport-retryable and cannot prove that a
+			// half-open provider recovered. Count it as a shared failure, while
+			// returning the original response unchanged so the SDK retains control
+			// of retry/replay policy.
+			if (response.status >= 500 && response.status <= 599) {
+				this.recordTransportFailure(config.provider);
+			} else {
+				this.recordTransportSuccess(config.provider);
+			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
 
 			// Account-pause detection: 429/403 with suspension body.
@@ -822,10 +843,11 @@ export class ProviderGate {
 			} else if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
 				// User cancellation is not evidence that the provider is unhealthy.
 				this.cancelTransportAttempt(config.provider, wasTransportProbe);
-			} else {
-				// A non-header network failure during the sole half-open probe must
-				// re-open the circuit rather than allowing an immediate probe storm.
-				this.failTransportProbe(config.provider, wasTransportProbe);
+			} else if (!receivedHeaders) {
+				// Fetch-level failures such as DNS/connect/reset errors are provider
+				// transport evidence even while the circuit is closed. Counting only
+				// half-open probe failures would let an ordinary outage retry forever.
+				this.recordTransportFailure(config.provider);
 			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);

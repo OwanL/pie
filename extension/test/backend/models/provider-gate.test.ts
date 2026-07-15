@@ -16,6 +16,7 @@ import {
 	ProviderGateSaturatedError,
 	ProviderGateAbortError,
 	ProviderGateHeaderTimeoutError,
+	ProviderGatePauseError,
 	ProviderGateTransportCircuitOpenError,
 	type ProviderConcurrencyConfig,
 } from '../../../src/backend/provider-gate.js';
@@ -654,6 +655,102 @@ describe('ProviderGate — header-phase timeout', () => {
 		assert.equal(callCount, 2, 'settings changes must not reset an outage circuit');
 	});
 
+	test('ordinary pre-header connection failures open the shared circuit', async () => {
+		let callCount = 0;
+		globalThis.fetch = async () => {
+			callCount++;
+			throw new TypeError('fetch failed: connection reset');
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			queueWaitSeconds: 0,
+		}], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 1,
+		});
+
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), TypeError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), TypeError);
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('blocked')),
+			ProviderGateTransportCircuitOpenError,
+		);
+
+		assert.equal(callCount, 2, 'the open circuit must stop a third connection attempt');
+		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+		assert.equal(gate.getMetrics()[0].strikeCount, 2);
+	});
+
+	test('queued request revalidates a circuit opened while it waited', async () => {
+		let rejectFirst!: (error: unknown) => void;
+		let markEntered!: () => void;
+		const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+		let callCount = 0;
+		globalThis.fetch = async () => {
+			callCount++;
+			markEntered();
+			return new Promise<Response>((_resolve, reject) => { rejectFirst = reject; });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			queueWaitSeconds: 0,
+		}], 0, {
+			transportFailureThreshold: 1,
+			transportCircuitCooldownSeconds: 1,
+		});
+
+		const first = fetch(TEST_BASE + '/chat', makeInit('first'));
+		await entered;
+		const queued = fetch(TEST_BASE + '/chat', makeInit('queued'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+
+		rejectFirst(new TypeError('connection reset'));
+		await assert.rejects(first, TypeError);
+		await assert.rejects(queued, ProviderGateTransportCircuitOpenError);
+
+		assert.equal(callCount, 1, 'the stale queued request must not reach upstream');
+		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+		assert.equal(gate.getMetrics()[0].queuedRequests, 0);
+	});
+
+	test('half-open probe returning 503 re-opens the circuit without replay', async (t) => {
+		let now = 1_000_000;
+		t.mock.method(Date, 'now', () => now);
+		let return503 = false;
+		let callCount = 0;
+		globalThis.fetch = async () => {
+			callCount++;
+			if (!return503) throw new TypeError('connection refused');
+			return new Response('service unavailable', { status: 503 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			queueWaitSeconds: 0,
+		}], 0, {
+			transportFailureThreshold: 2,
+			transportCircuitCooldownSeconds: 1,
+		});
+
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), TypeError);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s2')), TypeError);
+		now += 1_001;
+		return503 = true;
+
+		const probe = await fetch(TEST_BASE + '/chat', makeInit('probe'));
+		assert.equal(probe.status, 503, 'the gate must preserve the upstream response');
+		assert.equal(await probe.text(), 'service unavailable');
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('blocked')),
+			ProviderGateTransportCircuitOpenError,
+		);
+
+		assert.equal(callCount, 3, 'the gate observes failures but never replays requests');
+		assert.equal(gate.getMetrics()[0].paused, true);
+		assert.equal(gate.getMetrics()[0].strikeCount, 3);
+	});
+
 	test('headers arriving within the bound pass through normally', async () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
@@ -686,7 +783,7 @@ describe('ProviderGate — header-phase timeout', () => {
 				}
 			});
 		};
-		ProviderGate.install([config], 0);
+		const gate = ProviderGate.install([config], 0);
 
 		const ac = new AbortController();
 		const p = fetch(TEST_BASE + '/chat', makeInit('s1', ac.signal));
@@ -696,6 +793,52 @@ describe('ProviderGate — header-phase timeout', () => {
 		await assert.rejects(p, (err: unknown) => {
 			return !(err instanceof ProviderGateHeaderTimeoutError);
 		});
+		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+		assert.equal(gate.getMetrics()[0].strikeCount, 0, 'caller cancellation is not a provider failure');
+	});
+});
+
+describe('ProviderGate — queued circuit revalidation', () => {
+	test('queued request revalidates an account pause before upstream dispatch', async () => {
+		const suspensionBody = JSON.stringify({
+			error: {
+				message: 'account_suspended: reactivates automatically at 2099-01-01T00:00 UTC',
+				type: 'upstream_account_paused',
+			},
+		});
+		let releaseFirst!: () => void;
+		let markEntered!: () => void;
+		const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+		const held = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let callCount = 0;
+		globalThis.fetch = async () => {
+			callCount++;
+			markEntered();
+			await held;
+			return new Response(suspensionBody, {
+				status: 429,
+				headers: { 'content-type': 'application/json' },
+			});
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			queueWaitSeconds: 0,
+		}], 0);
+
+		const first = fetch(TEST_BASE + '/chat', makeInit('first'));
+		await entered;
+		const queued = fetch(TEST_BASE + '/chat', makeInit('queued'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+
+		releaseFirst();
+		assert.equal((await first).status, 429);
+		await assert.rejects(queued, ProviderGatePauseError);
+
+		assert.equal(callCount, 1, 'a waiter queued before the pause must not reach upstream');
+		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+		assert.equal(gate.getMetrics()[0].queuedRequests, 0);
 	});
 });
 
