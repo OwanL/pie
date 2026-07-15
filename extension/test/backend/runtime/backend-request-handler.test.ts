@@ -442,6 +442,46 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
   }
 });
 
+test('message.interrupt preserves semantic recovery that starts while abort is pending', async () => {
+  const previous = process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
+  process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = '5';
+  try {
+    let abortStarted: (() => void) | undefined;
+    const abortDidStart = new Promise<void>((resolve) => { abortStarted = resolve; });
+    const harness = createHarness({
+      sessionOverrides: {
+        isStreaming: true,
+        abort: () => {
+          abortStarted?.();
+          return new Promise<void>(() => undefined);
+        },
+      },
+      context: { activeRequest: { id: 'req-racing-recovery', messageIndex: 1, aborted: false } },
+    });
+    const interrupt = handleBackendRequest(harness.deps, {
+      id: 'interrupt-racing-recovery',
+      method: 'message.interrupt',
+      params: { sessionPath: harness.context.sessionPath },
+    });
+    await abortDidStart;
+
+    const existingRecovery = new Promise<SessionContext>(() => undefined);
+    harness.context.retired = true;
+    harness.context.recoveryPromise = existingRecovery;
+
+    assert.deepEqual(await interrupt, {
+      interrupted: false,
+      alreadyStopped: true,
+      recoveryPending: true,
+    });
+    assert.equal(harness.context.recoveryPromise, existingRecovery);
+    assert.equal(harness.createCalls.length, 0, 'the interrupt watchdog must not steal recovery ownership');
+  } finally {
+    if (previous === undefined) delete process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
+    else process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = previous;
+  }
+});
+
 test('message.send waits for semantic-timeout recovery instead of steering into the retired runtime', async () => {
   let oldSteerCalls = 0;
   let resolveReplacement: ((context: SessionContext) => void) | undefined;

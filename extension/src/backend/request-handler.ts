@@ -902,6 +902,13 @@ async function handleMessageInterrupt(
   const outcome = await Promise.race([abort, timeout]);
   if (watchdogTimer) clearTimeout(watchdogTimer);
 
+  // Another watchdog may have retired this runtime while abort() was pending.
+  // Recovery ownership is single-writer: never replace the replacement that
+  // semantic recovery has already started for this context.
+  if (context.retired || context.recoveryPromise) {
+    return { interrupted: false, alreadyStopped: true, recoveryPending: true };
+  }
+
   if (outcome === 'timeout') {
     const message = `Provider teardown did not settle within ${watchdogMs}ms. Pie interrupted the turn locally and is replacing the session runtime.`;
     const active = context.activeRequest;
