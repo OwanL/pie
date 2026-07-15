@@ -861,22 +861,31 @@ export class ProviderGate {
 			}
 		}
 		const timer = setTimeout(() => controller.abort(new ProviderGateHeaderTimeoutError(provider, headerWaitMs)), headerWaitMs);
+		let onMergedAbort: (() => void) | undefined;
+		const abortSettlement = new Promise<never>((_resolve, reject) => {
+			onMergedAbort = () => reject(controller.signal.reason ?? new ProviderGateAbortError());
+			if (controller.signal.aborted) {
+				onMergedAbort();
+			} else {
+				controller.signal.addEventListener('abort', onMergedAbort, { once: true });
+			}
+		});
 
 		const mergedInit: RequestInit = { ...init, signal: controller.signal };
 		try {
-			return await this.originalFetch!(input, mergedInit);
-		} catch (error) {
-			// If the abort was triggered by OUR header timeout, surface the
-			// retryable error (the SDK retry hot-patch matches its message).
-			if (controller.signal.aborted) {
-				const reason = controller.signal.reason;
-				if (reason instanceof ProviderGateHeaderTimeoutError) {
-					throw reason;
+			const upstream = Promise.resolve(this.originalFetch!(input, mergedInit)).then((response) => {
+				if (controller.signal.aborted) {
+					// The local deadline already won. A non-cooperative upstream may
+					// still return later; discard its body without reviving the request.
+					void response.body?.cancel().catch(() => undefined);
+					throw controller.signal.reason ?? new ProviderGateAbortError();
 				}
-			}
-			throw error;
+				return response;
+			});
+			return await Promise.race([upstream, abortSettlement]);
 		} finally {
 			clearTimeout(timer);
+			if (onMergedAbort) controller.signal.removeEventListener('abort', onMergedAbort);
 			if (signal) signal.removeEventListener('abort', onCallerAbort);
 		}
 	}

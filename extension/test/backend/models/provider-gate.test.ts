@@ -430,6 +430,35 @@ describe('ProviderGate — stream liveness', () => {
 });
 
 describe('ProviderGate — header-phase timeout', () => {
+	test('header deadline settles locally and releases the slot when upstream ignores abort', async () => {
+		const config: ProviderConcurrencyConfig = {
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			headerWaitSeconds: 0.02,
+			queueWaitSeconds: 0,
+		};
+
+		globalThis.fetch = async () => new Promise<Response>(() => {});
+		const gate = ProviderGate.install([config], 0);
+
+		const request = fetch(TEST_BASE + '/chat', makeInit('stuck-upstream'));
+		const outcome = await Promise.race([
+			request.then(
+				() => 'resolved' as const,
+				(error: unknown) => error,
+			),
+			new Promise<'test-timeout'>((resolve) => setTimeout(() => resolve('test-timeout'), 250)),
+		]);
+
+		assert.notEqual(outcome, 'test-timeout', 'the local header deadline must not await upstream abort settlement');
+		assert.ok(outcome instanceof ProviderGateHeaderTimeoutError);
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0, 'the timed-out request must release its slot');
+
+		globalThis.fetch = async () => makeStreamingResponse([new TextEncoder().encode('data: recovered\n\n')]);
+		const response = await fetch(TEST_BASE + '/chat', makeInit('next-request'));
+		assert.equal(await response.text(), 'data: recovered\n\n');
+	});
+
 	test('stalled headers abort with ProviderGateHeaderTimeoutError and release the slot', async () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
