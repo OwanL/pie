@@ -6,15 +6,23 @@ cd "$repo_root"
 
 model_inputs=$(git diff --cached --name-only --diff-filter=ACMR -- models.yaml models.schema.json)
 if [ -n "$model_inputs" ]; then
+  generated_files="models.json model-profiles.yaml settings.json analysis/model-pricing-history.json"
+
   if ! git diff --quiet -- models.yaml models.schema.json; then
     echo "pre-commit: models.yaml/models.schema.json has unstaged changes." >&2
     echo "Stage or discard them before committing so generated config matches the staged source." >&2
     exit 1
   fi
 
+  if ! git diff --quiet -- $generated_files; then
+    echo "pre-commit: generated model files or settings.json have unstaged changes." >&2
+    echo "Stage or discard them before committing; the hook will not silently include unrelated preferences or generated output." >&2
+    exit 1
+  fi
+
   echo "pre-commit: synchronizing generated model configuration..."
   npm run sync-models
-  git add -- models.json model-profiles.yaml settings.json
+  git add -- $generated_files
 fi
 
 echo "pre-commit: running checks for changed files..."

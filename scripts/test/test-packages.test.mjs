@@ -11,15 +11,15 @@ import {
   mapFilesToPackages,
 } from '../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers the 14 run-tests.mjs package ids', () => {
+test('PACKAGE_DIRECTIVES covers the 15 run-tests.mjs package ids', () => {
   const expected = [
-    'extension', 'analysis',
+    'extension', 'analysis', 'scripts',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-compat', 'tool-result-pruner',
     'session-reviewer', 'session-changes', 'deferred-triggers',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  assert.equal(PACKAGE_DIRECTIVES.length, 14);
+  assert.equal(PACKAGE_DIRECTIVES.length, 15);
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {
@@ -27,6 +27,7 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('extension/src/backend/sdk.ts'), 'extension');
   assert.equal(classifyFileToPackage('analysis/test/pricing.test.ts'), 'analysis');
   assert.equal(classifyFileToPackage('analysis/scripts/build-db.ts'), 'analysis');
+  assert.equal(classifyFileToPackage('scripts/test/run-tests.test.mjs'), 'scripts');
   assert.equal(classifyFileToPackage('extensions/subagent/test/schema.test.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/subagent/schema.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
@@ -63,12 +64,13 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
     'package-lock.json',
     '.nvmrc',
     '.node-version',
+    '.githooks/pre-commit',
+    '.githooks/pre-push',
   ]) {
     assert.equal(isGlobalTestInfra(p), true, `${p} should be global`);
   }
   // prefixes
   assert.equal(isGlobalTestInfra('scripts/lib/sdk-version.mjs'), true);
-  assert.equal(isGlobalTestInfra('scripts/test/run-test-files.test.mjs'), true);
   assert.equal(isGlobalTestInfra('shared/pricing-core.ts'), true);
   assert.equal(isGlobalTestInfra('shared/subagent-context.ts'), true);
 });
@@ -79,6 +81,7 @@ test('isGlobalTestInfra is false for per-package and unrelated paths', () => {
   assert.equal(isGlobalTestInfra('extension/tsconfig.json'), false);
   assert.equal(isGlobalTestInfra('extensions/subagent/tsconfig.json'), false);
   assert.equal(isGlobalTestInfra('analysis/package-lock.json'), false);
+  assert.equal(isGlobalTestInfra('scripts/test/run-test-files.test.mjs'), false);
   // unrelated
   assert.equal(isGlobalTestInfra('README.md'), false);
   assert.equal(isGlobalTestInfra('docs/x.md'), false);
@@ -92,9 +95,10 @@ test('mapFilesToPackages maps package files and de-duplicates ids', () => {
     'extension/src/backend/sdk.ts',     // same package, different file
     'extensions/subagent/test/schema.test.ts',
     'analysis/test/pricing.test.ts',
+    'scripts/test/pre-push-safety.test.mjs',
   ]);
   assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['analysis', 'extension', 'subagent']);
+  assert.deepEqual(plan.packageIds, ['analysis', 'extension', 'scripts', 'subagent']);
 });
 
 test('mapFilesToPackages selects ALL when any global infra file changes', () => {

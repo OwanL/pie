@@ -18,6 +18,7 @@
 export const PACKAGE_DIRECTIVES = [
   { id: 'extension', dir: 'extension' },
   { id: 'analysis', dir: 'analysis' },
+  { id: 'scripts', dir: 'scripts/test' },
   { id: 'cwd-skills', dir: 'extensions/cwd-skills' },
   { id: 'safeguard', dir: 'extensions/safeguard' },
   { id: 'skill-pruner', dir: 'extensions/skill-pruner' },
@@ -41,8 +42,8 @@ export const ALL_PACKAGE_IDS = PACKAGE_DIRECTIVES.map((entry) => entry.id);
  *
  * Categories:
  *  - test tooling: the runner, the custom reporter, the sibling DX scripts, the
- *    shared script helpers (scripts/lib/), and the tests for those scripts
- *    (scripts/test/).
+ *    and shared script helpers (scripts/lib/). Script tests have their own
+ *    package so changing one does not rerun every product package.
  *  - root toolchain config: root package.json / lockfile (provide tsx used by the
  *    extensions/* packages + @types/node) and the node version pins.
  *  - cross-cutting shared source: shared/ is imported at runtime by extension,
@@ -57,11 +58,12 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'package-lock.json',
   '.nvmrc',
   '.node-version',
+  '.githooks/pre-commit',
+  '.githooks/pre-push',
 ]);
 
 const GLOBAL_INFRA_PREFIXES = [
   'scripts/lib/',
-  'scripts/test/',
   'shared/',
 ];
 

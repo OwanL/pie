@@ -15,7 +15,7 @@
     "test:fast": "node ./scripts/run-tests.mjs --fast",
     "test:file": "node ./scripts/run-test-files.mjs",
     "test:changed": "node ./scripts/run-changed-tests.mjs",
-    "test:scripts": "node --test scripts/test/*.test.mjs",
+    "test:scripts": "node ./scripts/run-tests.mjs --fast --package scripts",
     "shared:typecheck": "node ./scripts/run-typechecks.mjs --project shared",
     "typecheck": "node ./scripts/run-typechecks.mjs",
     "check": "npm run sync-models -- --check && npm run typecheck && npm --prefix extension run lint -- && npm run test:changed",

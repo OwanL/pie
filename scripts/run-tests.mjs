@@ -40,6 +40,15 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 95, branches: 78 },
   },
   {
+    id: 'scripts',
+    cwd: repoRoot,
+    testGlobs: ['scripts/test/*.test.mjs'],
+    // These tests exercise the test/typecheck runners and Git hooks themselves.
+    // Keep their established no-coverage behavior: collecting coverage while
+    // testing the coverage runner is both recursive in scope and misleading.
+    coverage: false,
+  },
+  {
     id: 'cwd-skills',
     cwd: repoRoot,
     testGlobs: ['extensions/cwd-skills/test/**/*.test.ts'],
@@ -340,6 +349,9 @@ function formatFailureDetails(failure) {
 }
 
 function summarizeCoverageFailures(config, coverage) {
+  if (config.coverage === false) {
+    return [];
+  }
   if (!coverage) {
     return ['coverage report missing'];
   }
@@ -361,6 +373,7 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
   // to resolve the pi SDK's nested typebox/pi-ai to a single instance. Must
   // precede the positional test globs.
   const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
+  const collectCoverage = !fast && config.coverage !== false;
   return [
     ...tsxConfigArgs,
     '--test',
@@ -368,9 +381,9 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     // Fast mode lets node:test parallelize independent test files, which is
     // substantially quicker for the 2k+ extension suite.
     ...(fast ? [] : ['--test-concurrency=1']),
-    ...(fast ? [] : ['--experimental-test-coverage']),
+    ...(collectCoverage ? ['--experimental-test-coverage'] : []),
     `--test-reporter=${reporterSpecifier}`,
-    ...(fast ? [] : config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`)),
+    ...(collectCoverage ? config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`) : []),
     ...testArgs,
     ...config.testGlobs,
   ];

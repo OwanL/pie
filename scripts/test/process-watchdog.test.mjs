@@ -147,6 +147,10 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
     stdio: 'ignore',
     windowsHide: true,
   }));
+  // Subscribe immediately: under full-suite load the 500 ms watchdog can fire
+  // before the pid-file polling below completes, and EventEmitter does not
+  // replay an already-emitted close event to a late listener.
+  const rootClosed = new Promise((resolve) => root.once('close', resolve));
   const watchdog = watchChildProcess(root, { timeoutMs: 500, label: 'integration tree' });
 
   try {
@@ -165,7 +169,7 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
     let closeTimer;
     try {
       await Promise.race([
-        new Promise((resolve) => root.once('close', resolve)),
+        rootClosed,
         new Promise((_, reject) => {
           closeTimer = setTimeout(() => reject(new Error('root tree did not close')), 5000);
         }),

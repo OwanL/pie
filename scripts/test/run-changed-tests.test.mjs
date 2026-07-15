@@ -47,9 +47,10 @@ test('planRuns maps package files to ids and de-duplicates', () => {
     'extension/test/a.test.ts',
     'extension/src/backend/sdk.ts',
     'extensions/subagent/test/schema.test.ts',
+    'scripts/test/pre-push-safety.test.mjs',
   ]);
   assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['extension', 'subagent']);
+  assert.deepEqual(plan.packageIds, ['extension', 'scripts', 'subagent']);
 });
 
 test('planRuns selects ALL when global infra changes', () => {
@@ -62,6 +63,7 @@ test('planRuns selects ALL when global infra changes', () => {
   assert.equal(planRuns(['shared/pricing-core.ts']).selectAll, true);
   assert.equal(planRuns(['package-lock.json']).selectAll, true);
   assert.equal(planRuns(['scripts/lib/sdk-version.mjs']).selectAll, true);
+  assert.equal(planRuns(['.githooks/pre-commit']).selectAll, true);
 });
 
 test('planRuns ignores unrelated files', () => {

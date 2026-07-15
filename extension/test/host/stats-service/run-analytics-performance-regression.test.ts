@@ -312,7 +312,7 @@ test('Phase 3: start marks a stale auto-export dirty and refreshes it', async ()
     await waitFor(async () => {
       const stat = await fs.stat(autoExportPath);
       return stat.mtimeMs > exportOldMtime;
-    }, 500);
+    }, 3_000);
 
     const refreshed = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { completedRuns: unknown[] };
     assert.equal(refreshed.completedRuns.length, 1);

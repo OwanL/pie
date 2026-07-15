@@ -7,8 +7,9 @@
 //  - A file under extension/, analysis/, or extensions/<id>/ selects that one
 //    package id (forwarded to run-tests.mjs as `--package <id>`).
 //  - A global test-infrastructure / config file (the runner scripts, scripts/lib,
-//    scripts/test, root package.json / lockfile, node version pins, shared/)
+//    root package.json / lockfile, node version pins, shared/, or Git hooks)
 //    selects ALL packages — see lib/test-packages.mjs isGlobalTestInfra.
+//  - A file under scripts/test/ selects only the scripts package.
 //  - Anything else (docs/, README, settings.json, models.yaml, …) selects no
 //    package; the script exits 0 with a short note.
 //

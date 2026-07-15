@@ -31,3 +31,14 @@ test('buildTestArgs places forwarded node:test arguments before test globs', () 
   assert.equal(args.includes('tsx'), false, 'the caller invokes the local tsx CLI directly');
   assert.ok(args.indexOf('--test-name-pattern=answer with spaces') < args.indexOf('./test/**/*.test.ts'));
 });
+
+test('buildTestArgs can run infrastructure tests without coverage collection', () => {
+  const args = buildTestArgs({
+    testGlobs: ['scripts/test/*.test.mjs'],
+    coverage: false,
+  }, false);
+
+  assert.equal(args.includes('--experimental-test-coverage'), false);
+  assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
+  assert.ok(args.includes('--test-concurrency=1'));
+});

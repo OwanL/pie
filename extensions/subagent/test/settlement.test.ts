@@ -211,17 +211,17 @@ test("execute(): a dispatch that never reports progress is force-settled after P
 });
 
 test("execute(): periodic credible progress renews the inactivity deadline", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "80";
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "500";
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
-			// Total runtime exceeds 80ms, but every idle gap is well below it. A
+			// Total runtime exceeds 500ms, but every idle gap is well below it. A
 			// fixed wall-clock deadline would force-settle this productive run.
 			for (const delta of ["still ", "working ", "normally "]) {
-				await sleep(30);
+				await sleep(160);
 				emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
 			}
-			await sleep(30);
+			await sleep(160);
 			emit({
 				type: "message_end",
 				message: {
