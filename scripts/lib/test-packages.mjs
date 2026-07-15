@@ -122,6 +122,11 @@ export function mapFilesToPackages(files) {
     const id = classifyFileToPackage(file);
     if (id) {
       ids.add(id);
+    } else if (file.startsWith('scripts/') && file.endsWith('.mjs')) {
+      // Root maintenance scripts (typecheck/model sync/install/doctor/etc.)
+      // are exercised by the scripts package. The four cross-package test
+      // runners and scripts/lib were already promoted to selectAll above.
+      ids.add('scripts');
     }
   }
   return {

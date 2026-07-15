@@ -101,6 +101,16 @@ test('mapFilesToPackages maps package files and de-duplicates ids', () => {
   assert.deepEqual(plan.packageIds, ['analysis', 'extension', 'scripts', 'subagent']);
 });
 
+test('mapFilesToPackages covers root maintenance scripts', () => {
+  const plan = mapFilesToPackages([
+    'scripts/run-typechecks.mjs',
+    'scripts/sync-models.mjs',
+    'scripts/install-dependencies.mjs',
+  ]);
+  assert.equal(plan.selectAll, false);
+  assert.deepEqual(plan.packageIds, ['scripts']);
+});
+
 test('mapFilesToPackages selects ALL when any global infra file changes', () => {
   const plan = mapFilesToPackages([
     'extension/test/a.test.ts',

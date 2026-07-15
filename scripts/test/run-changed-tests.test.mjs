@@ -53,6 +53,13 @@ test('planRuns maps package files to ids and de-duplicates', () => {
   assert.deepEqual(plan.packageIds, ['extension', 'scripts', 'subagent']);
 });
 
+test('planRuns selects scripts tests for root maintenance scripts', () => {
+  assert.deepEqual(planRuns(['scripts/run-typechecks.mjs', 'scripts/sync-models.mjs']), {
+    selectAll: false,
+    packageIds: ['scripts'],
+  });
+});
+
 test('planRuns selects ALL when global infra changes', () => {
   const plan = planRuns([
     'extension/test/a.test.ts',
