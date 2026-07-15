@@ -508,6 +508,37 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
   assert.match(result.ariaLabel, /live context cost is pending the provider cache split/);
 });
 
+test('buildSessionCostIndicator does not present unpriced live usage as zero cost', () => {
+  const transcript = [{
+    id: 'unpriced-live',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: 'streaming answer text',
+    status: 'streaming' as const,
+  }];
+  const liveEstimate = buildLiveSessionCostEstimate(
+    transcript,
+    { tokens: 25_000, contextWindow: 100_000, percent: 25 },
+    true,
+  );
+  const result = buildSessionCostIndicator(
+    makeSummary(),
+    undefined,
+    'Unpriced model',
+    buildCompletedCostSummary(makeSummary(), transcript, undefined, undefined),
+    extractSubagentDirectCost(transcript as never),
+    undefined,
+    undefined,
+    liveEstimate,
+  );
+
+  assert.ok(result);
+  assert.equal(result.label, '—*');
+  assert.match(result.ariaLabel, /cost unavailable.*pricing is unavailable/i);
+  assert.match(result.tooltip, /Total: unavailable \(live model pricing unavailable\)/);
+  assert.doesNotMatch(result.tooltip, /Known (?:estimated )?(?:subtotal|session cost) \$0/);
+});
+
 test('buildSessionCostIndicator does not price unclassified live context as uncached input', () => {
   const transcript = [
     {

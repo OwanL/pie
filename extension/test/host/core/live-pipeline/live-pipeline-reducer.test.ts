@@ -59,6 +59,7 @@ test('sequenced live events project without mutating durable transcript and term
     id: 'durable-assistant', role: 'assistant' as const, createdAt: new Date(120).toISOString(),
     markdown: 'live done', status: 'completed' as const, durableEntryId: 'entry-assistant',
   };
+  state = withPendingUiRequest(state);
   const committed = dispatch(state, {
     ...base, kind: 'turn.terminal', seq: 3, terminalKind: 'completed',
     durableMessage: terminalMessage, durableEntryId: 'entry-assistant',
@@ -66,6 +67,11 @@ test('sequenced live events project without mutating durable transcript and term
 
   assert.equal(committed.state.livePipeline.turnsBySession[base.sessionPath], undefined);
   assert.deepEqual(committed.state.transcript.bySession[base.sessionPath], [terminalMessage]);
+  assert.equal(
+    committed.state.settings.pendingExtensionUIRequestsBySession[base.sessionPath],
+    undefined,
+    'a committed terminal cannot leave an actionable extension UI request behind',
+  );
   assert.equal(selectViewState(committed.state).liveTurnPhase, null);
 });
 

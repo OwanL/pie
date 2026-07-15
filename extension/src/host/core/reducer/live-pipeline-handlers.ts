@@ -49,6 +49,7 @@ export function handleTurnSemanticEvent(
 
   if (transition.classification === 'committed') {
     nextState = appendDurableTerminal(nextState, envelope.sessionPath, transition.terminal);
+    nextState = clearPendingExtensionUiRequests(nextState, envelope.sessionPath);
   }
   return { state: nextState, effects };
 }
@@ -178,6 +179,7 @@ function replayPendingAfterCheckpoint(
       : { ...state, livePipeline: transition.state };
     if (transition.classification === 'committed') {
       state = appendDurableTerminal(state, envelope.sessionPath, transition.terminal);
+      state = clearPendingExtensionUiRequests(state, envelope.sessionPath);
       break;
     }
     if (transition.classification !== 'applied' && transition.classification !== 'duplicate_or_late') {

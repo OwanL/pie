@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { h, render } from 'preact';
+import { useLayoutEffect } from 'preact/hooks';
+import type { ChatMessage, ToolCall } from '../../../../src/shared/protocol/messages';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'http://localhost' });
 for (const [key, value] of Object.entries({
@@ -27,10 +29,76 @@ Object.defineProperty(globalThis, 'cancelAnimationFrame', {
 
 let TranscriptCommitProvider: typeof import('../../../../src/webview/panel/transcript/commit-registry').TranscriptCommitProvider;
 let TranscriptHost: typeof import('../../../../src/webview/panel/transcript/transcript-host').TranscriptHost;
+let commitRegistryModule: typeof import('../../../../src/webview/panel/transcript/commit-registry');
 
 test.before(async () => {
-  ({ TranscriptCommitProvider } = await import('../../../../src/webview/panel/transcript/commit-registry'));
+  commitRegistryModule = await import('../../../../src/webview/panel/transcript/commit-registry');
+  ({ TranscriptCommitProvider } = commitRegistryModule);
   ({ TranscriptHost } = await import('../../../../src/webview/panel/transcript/transcript-host'));
+});
+
+function ToolCommitLeaf({ tool }: { tool: ToolCall }) {
+  commitRegistryModule.useCommittedToolLeaf(tool);
+  return null;
+}
+
+function CommitRegistryProbe({ message, observe }: { message: ChatMessage; observe: (size: number) => void }) {
+  commitRegistryModule.useCommittedMessageLeaf(message);
+  const registry = commitRegistryModule.useTranscriptCommitRegistry();
+  useLayoutEffect(() => observe(registry.leaves.size), [registry.version, registry.leaves, observe]);
+  return h(commitRegistryModule.MessageCommitContext.Provider, {
+    value: { messageId: message.id, toolStateRevision: message.toolStateRevision ?? 0 },
+    children: message.toolCalls?.map((tool) => h(ToolCommitLeaf, { key: tool.id, tool })),
+  });
+}
+
+test('mounted commit provider retains every accepted leaf above the former 512-leaf boundary', async () => {
+  const root = document.getElementById('root')!;
+  const tools: ToolCall[] = Array.from({ length: 600 }, (_, index) => ({
+    id: `tool-${index}`,
+    name: 'read',
+    input: { index },
+    status: 'running',
+    executionId: `execution-${index}`,
+    seq: index + 1,
+    phase: 'running',
+  }));
+  const message: ChatMessage = {
+    id: 'large-live-owner',
+    role: 'assistant',
+    createdAt: new Date(0).toISOString(),
+    markdown: '',
+    status: 'streaming',
+    toolCalls: tools,
+    parts: tools.map((tool) => ({ kind: 'toolCall' as const, toolCall: tool })),
+    toolStateRevision: 600,
+  };
+  const window = {
+    loadedStart: 0, loadedEnd: 1, totalCount: 1,
+    hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false,
+  };
+  const target = {
+    revision: 9,
+    viewGeneration: 4,
+    expectedTranscriptIdentity: 'large-live-owner',
+    acceptedAt: 1,
+    state: {
+      transcript: [message], transcriptWindow: window,
+      activeSessionPath: '/large', openTabPaths: ['/large'],
+    },
+  };
+  const observedSizes: number[] = [];
+
+  render(h(TranscriptCommitProvider, {
+    target,
+    appSurface: 'transcript',
+    postMessage() {},
+    children: h(CommitRegistryProbe, { message, observe: (size) => observedSizes.push(size) }),
+  }), root);
+  await new Promise((resolve) => setImmediate(resolve));
+  render(null, root);
+
+  assert.equal(Math.max(...observedSizes), 601, 'message plus all 600 live tool leaves must remain registered');
 });
 
 test('app commit reports only a transcript block that survives the render grace period', async () => {

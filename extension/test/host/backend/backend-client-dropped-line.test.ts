@@ -210,6 +210,27 @@ test('BackendClient redacts credentials from dropped-line and stderr diagnostics
   }
 });
 
+test('BackendClient redacts a stderr credential across every chunk split', async () => {
+  const { client, proc } = await startClient();
+  try {
+    const credentialLine = 'authorization=stderr-supersecret';
+    for (let split = 1; split < credentialLine.length; split += 1) {
+      proc.stderr.emit('data', Buffer.from(credentialLine.slice(0, split)));
+      proc.stderr.emit('data', Buffer.from(`${credentialLine.slice(split)}\n`));
+    }
+    const reqPromise = client.request('message.send', { sessionPath: '/s', text: 'hi' });
+    proc.stdout.emit('data', Buffer.from('{"id":"req-1","result":}\n'));
+
+    await assert.rejects(reqPromise, (error: Error) => {
+      assert.match(error.message, /\[redacted\]/);
+      assert.doesNotMatch(error.message, /stderr-supersecret|supersecret/);
+      return true;
+    });
+  } finally {
+    client.dispose();
+  }
+});
+
 test('BackendClient does not reject an unrelated pending request when a dropped line has no recoverable id', async () => {
   // A dropped line with no req-NN must NOT reject a pending request — it is
   // logged and dropped, and the pending request stays pending. Dispose rejects

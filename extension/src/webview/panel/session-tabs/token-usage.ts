@@ -588,6 +588,7 @@ export function buildSessionCostIndicator(
   const prepass = buildPruningPrepassSummary(pruningDetails, pricing, pricingForModel);
   const liveCost = pricing && liveEstimate ? costFromUsage(liveEstimate, pricing) : 0;
   const hasUnclassifiedLiveContext = (liveEstimate?.unclassifiedContextTokens ?? 0) > 0;
+  const hasUnpricedLiveUsage = !pricing && !!liveEstimate && liveEstimate.totalTokens > 0;
   const mainCost = completed.totalCost;
   const totalCost = mainCost + liveCost + subagents.totalCost + prepass.cost;
 
@@ -654,14 +655,27 @@ export function buildSessionCostIndicator(
     tooltipLines.push('', ...modelCostLines);
   }
 
-  tooltipLines.push(hasUnclassifiedLiveContext
-    ? `Known subtotal: ${formatCostDetail(totalCost)} (live context cost excluded)`
-    : `Total: ${formatCostDetail(totalCost)}`);
+  if (hasUnpricedLiveUsage) {
+    tooltipLines.push(totalCost > 0
+      ? `Known subtotal: ${formatCostDetail(totalCost)} (live turn cost excluded; no pricing)`
+      : 'Total: unavailable (live model pricing unavailable)');
+  } else {
+    tooltipLines.push(hasUnclassifiedLiveContext
+      ? `Known subtotal: ${formatCostDetail(totalCost)} (live context cost excluded)`
+      : `Total: ${formatCostDetail(totalCost)}`);
+  }
 
-  const label = hasUnclassifiedLiveContext ? `${formatCostUsd(totalCost)}*` : formatCostUsd(totalCost);
-  const ariaLabel = hasUnclassifiedLiveContext
-    ? `Known estimated session cost ${formatCostUsd(totalCost)}; live context cost is pending the provider cache split.`
-    : `Estimated session cost ${formatCostUsd(totalCost)}.`;
+  const hasIncompleteLiveCost = hasUnclassifiedLiveContext || hasUnpricedLiveUsage;
+  const label = hasUnpricedLiveUsage && totalCost <= 0
+    ? '—*'
+    : hasIncompleteLiveCost ? `${formatCostUsd(totalCost)}*` : formatCostUsd(totalCost);
+  const ariaLabel = hasUnpricedLiveUsage
+    ? totalCost > 0
+      ? `Known estimated session cost ${formatCostUsd(totalCost)}; live turn cost is unavailable because model pricing is unavailable.`
+      : 'Estimated session cost unavailable because live model pricing is unavailable.'
+    : hasUnclassifiedLiveContext
+      ? `Known estimated session cost ${formatCostUsd(totalCost)}; live context cost is pending the provider cache split.`
+      : `Estimated session cost ${formatCostUsd(totalCost)}.`;
 
   return {
     label,

@@ -41,6 +41,9 @@ export interface BackendClientOptions {
 
 /** Maximum number of bytes of stderr we keep in memory (ring buffer). */
 const STDERR_BUFFER_LIMIT = 64 * 1024;
+// Retain enough raw prefix context that a ring-buffer trim cannot normally
+// sever a credential label from its value before boundary-time redaction.
+const STDERR_REDACTION_OVERLAP_BYTES = 1024;
 
 function utf8Tail(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf8');
@@ -232,9 +235,9 @@ export class BackendClient implements vscode.Disposable {
       appendPieLog(intentional ? 'info' : 'error', 'backend', intentional ? 'backend process stopped' : 'backend process exited', {        code,
         generation,
         current,
-        stderrTail: current ? this.stderrBuffer.trim().slice(-4000) || null : null,
+        stderrTail: current ? this.stderrDiagnosticTail(4000) || null : null,
       });
-      if (!intentional && current) this.exits.fire({ code, stderr: this.stderrBuffer.trim() });
+      if (!intentional && current) this.exits.fire({ code, stderr: this.stderrDiagnosticTail() });
     });
 
     proc.on('error', (error) => {
@@ -291,7 +294,7 @@ export class BackendClient implements vscode.Disposable {
         finishReject(
           new Error(
             `Backend failed to start${code === null ? '' : ` (code ${code})`}${
-              this.stderrBuffer.trim() ? `: ${this.stderrBuffer.trim()}` : ''
+              this.stderrDiagnosticTail() ? `: ${this.stderrDiagnosticTail()}` : ''
             }`,
           ),
         );
@@ -513,7 +516,7 @@ export class BackendClient implements vscode.Disposable {
     const rawSnippet = line.length > 200 ? `${line.slice(0, 200)}…` : line;
     const snippet = redactSensitiveText(rawSnippet);
     const reason = redactSensitiveText(parseError ? toErrorMessage(parseError) : 'unrecognized response envelope');
-    const stderrTail = this.stderrBuffer.trim();
+    const stderrTail = this.stderrDiagnosticTail();
     const stderrPart = stderrTail ? ` (stderr tail: ${stderrTail.slice(-200)})` : '';
     return new Error(
       `Backend sent an unparseable response for ${reqId}: ${reason} :: ${snippet}${stderrPart}`,
@@ -521,12 +524,25 @@ export class BackendClient implements vscode.Disposable {
   }
 
   private appendStderr(chunk: string): void {
-    this.stderrBuffer = utf8Tail(redactSensitiveText(this.stderrBuffer + chunk), STDERR_BUFFER_LIMIT);
+    // Keep raw bounded bytes until a complete diagnostic boundary exists.
+    // Redacting each chunk is unsafe: `authorization=sec` + `ret` would turn
+    // into `[redacted]ret`, leaking the credential suffix.
+    this.stderrBuffer = utf8Tail(
+      this.stderrBuffer + chunk,
+      STDERR_BUFFER_LIMIT + STDERR_REDACTION_OVERLAP_BYTES,
+    );
 
     // A newline-free stderr stream must not grow without bound. Keep the
     // diagnostic tail, matching stderrBuffer's byte-bounded behavior.
-    this.stderrLineBuffer = utf8Tail(redactSensitiveText(this.stderrLineBuffer + chunk), STDERR_BUFFER_LIMIT);
+    this.stderrLineBuffer = utf8Tail(
+      this.stderrLineBuffer + chunk,
+      STDERR_BUFFER_LIMIT + STDERR_REDACTION_OVERLAP_BYTES,
+    );
     this.flushStderrLines(false);
+  }
+
+  private stderrDiagnosticTail(maxBytes = STDERR_BUFFER_LIMIT): string {
+    return utf8Tail(redactSensitiveText(this.stderrBuffer), maxBytes).trim();
   }
 
   private flushStderrLines(flushPartial: boolean): void {
@@ -546,7 +562,7 @@ export class BackendClient implements vscode.Disposable {
   }
 
   private logStderrLine(line: string): void {
-    const trimmed = line.trim();
+    const trimmed = redactSensitiveText(line).trim();
     if (!trimmed) {
       return;
     }
