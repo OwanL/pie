@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Semaphore } from "../src/concurrency-limit.js";
+import { inflightSemaphore, Semaphore } from "../src/concurrency-limit.js";
 import { runSingleAgent } from "../runner.js";
 import type { AgentConfig } from "../agents.js";
 
@@ -83,6 +83,7 @@ function createHangingReloadSdk() {
 
 /** A fast, fully-controllable SDK for the "no poison leak" follow-up call. */
 function createFastSdk(events: any[] = []) {
+	const state = { createSessionCalls: 0 };
 	const listeners: Array<(e: any) => void> = [];
 	const session = {
 		agent: { state: { model: { id: "session-model" } } },
@@ -94,11 +95,55 @@ function createFastSdk(events: any[] = []) {
 	};
 	return {
 		sdk: {
-			createSession: async () => ({ session }),
+			createSession: async () => {
+				state.createSessionCalls++;
+				return { session };
+			},
 			createResourceLoader: () => ({ reload: async () => {} }),
 			createSessionManager: () => ({}),
 			getAgentDir: () => ".",
 		},
+		state,
+	};
+}
+
+/** A session that is created successfully but throws at one post-create setup site. */
+function createThrowingPostCreateSdk(failureSite: "setUIContext" | "subscribe") {
+	const state = {
+		createSessionCalls: 0,
+		setUIContextCalls: 0,
+		subscribeCalls: 0,
+		promptCalls: 0,
+		disposeCalls: 0,
+	};
+	const session = {
+		agent: { state: { model: { id: "session-model" } } },
+		extensionRunner: {
+			setUIContext: () => {
+				state.setUIContextCalls++;
+				if (failureSite === "setUIContext") throw new Error("setUIContext setup exploded");
+			},
+		},
+		subscribe: () => {
+			state.subscribeCalls++;
+			if (failureSite === "subscribe") throw new Error("subscribe setup exploded");
+			return () => {};
+		},
+		prompt: async () => { state.promptCalls++; },
+		abort: async () => {},
+		dispose: () => { state.disposeCalls++; },
+	};
+	return {
+		sdk: {
+			createSession: async () => {
+				state.createSessionCalls++;
+				return { session };
+			},
+			createResourceLoader: () => ({ reload: async () => {} }),
+			createSessionManager: () => ({}),
+			getAgentDir: () => ".",
+		},
+		state,
 	};
 }
 
@@ -108,6 +153,28 @@ function within<T>(ms: number, p: Promise<T>): Promise<T> {
 		p,
 		new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`did not settle within ${ms}ms`)), ms)),
 	]);
+}
+
+/** Prove a capacity-one root permit was released by admitting a fresh child. */
+async function assertRootPermitReleased(): Promise<void> {
+	const fast = createFastSdk([{
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			usage: { input: 1, output: 1, cost: { total: 0 } },
+		},
+	}]);
+	const result = await within(1500, runSingleAgent(
+		process.cwd(), [makeAgent()], "worker", "do work",
+		undefined, undefined, undefined, undefined, makeDetails(),
+		makeModelRegistry(), undefined,
+		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined, undefined, undefined, undefined, undefined,
+		{ sdk: fast.sdk as any, timeoutMs: 0 },
+	));
+	assert.equal(result.exitCode, 0);
+	assert.equal(fast.state.createSessionCalls, 1, "the released permit admits the follow-up child");
 }
 
 // ---- env save/restore for the inflight cap ----------------------------------
@@ -197,6 +264,85 @@ test("runSingleAgent: aborting DURING resource reload (never resolves) returns p
 	assert.equal(result.exitCode, 1);
 	assert.match(result.errorMessage ?? "", /abort|preparing|loading/i);
 	assert.equal(state.reloadEntered, 1);
+});
+
+test("runSingleAgent: an already-aborted root child never waits for a saturated process permit", async () => {
+	process.env[INFLIGHT_ENV] = "1";
+	const releaseHeldPermit = await inflightSemaphore.acquire();
+	try {
+		const controller = new AbortController();
+		controller.abort();
+		const fast = createFastSdk();
+		const result = await within(250, runSingleAgent(
+			process.cwd(), [makeAgent()], "worker", "do work",
+			undefined, undefined, controller.signal, undefined, makeDetails(),
+			makeModelRegistry(), undefined,
+			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+			undefined, undefined, undefined, undefined, undefined,
+			{ sdk: fast.sdk as any, timeoutMs: 0 },
+		));
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.stopReason, "aborted");
+		assert.match(result.errorMessage ?? "", /waiting for subagent concurrency slot/i);
+		assert.equal(fast.state.createSessionCalls, 0, "no session is created without a process permit");
+	} finally {
+		releaseHeldPermit();
+	}
+});
+
+test("runSingleAgent: subscribe setup exceptions dispose exactly once and release the root permit", async () => {
+	process.env[INFLIGHT_ENV] = "1";
+	const failing = createThrowingPostCreateSdk("subscribe");
+	await assert.rejects(
+		runSingleAgent(
+			process.cwd(), [makeAgent()], "worker", "do work",
+			undefined, undefined, undefined, undefined, makeDetails(),
+			makeModelRegistry(), undefined,
+			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+			undefined, undefined, undefined, undefined, undefined,
+			{ sdk: failing.sdk as any, timeoutMs: 0 },
+		),
+		/subscribe setup exploded/,
+	);
+	assert.equal(failing.state.createSessionCalls, 1);
+	assert.equal(failing.state.setUIContextCalls, 0);
+	assert.equal(failing.state.subscribeCalls, 1);
+	assert.equal(failing.state.promptCalls, 0);
+	assert.equal(failing.state.disposeCalls, 1, "the created session is disposed exactly once");
+
+	// Capacity is one. If the failing run leaked its root permit, this ordinary
+	// follow-up could never begin session creation.
+	await assertRootPermitReleased();
+});
+
+test("runSingleAgent: setUIContext setup exceptions dispose exactly once and release the root permit", async () => {
+	process.env[INFLIGHT_ENV] = "1";
+	const failing = createThrowingPostCreateSdk("setUIContext");
+	const parentBridge = {
+		select: async () => undefined,
+		confirm: async () => true,
+		input: async () => undefined,
+		notify: () => {},
+		cancelAll: () => {},
+	};
+	await assert.rejects(
+		runSingleAgent(
+			process.cwd(), [makeAgent()], "worker", "do work",
+			undefined, undefined, undefined, undefined, makeDetails(),
+			makeModelRegistry(), undefined,
+			{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+			undefined, "tool-ui-setup-failure", parentBridge, undefined, undefined,
+			{ sdk: failing.sdk as any, timeoutMs: 0 },
+		),
+		/setUIContext setup exploded/,
+	);
+	assert.equal(failing.state.createSessionCalls, 1);
+	assert.equal(failing.state.setUIContextCalls, 1);
+	assert.equal(failing.state.subscribeCalls, 0, "subscription never starts after UI setup fails");
+	assert.equal(failing.state.promptCalls, 0);
+	assert.equal(failing.state.disposeCalls, 1, "the created session is disposed exactly once");
+
+	await assertRootPermitReleased();
 });
 
 test("runSingleAgent: a createSession hang does NOT poison the process-wide semaphore — a follow-up call still acquires (no leaked permit)", async () => {

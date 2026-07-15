@@ -1115,9 +1115,12 @@ export async function runSingleAgent(
 	// Future parent aborts interrupt each phase. A root holds its process permit
 	// through prompt teardown; descendants borrow the same async-local scope.
 	//
-	// Already-aborted-at-entry is exceptional: setup still runs to settle pending
-	// UI, but no future abort edge exists to wake a dead SDK/proxy. Bound those
-	// phases with a short timeout instead of the normal parent-signal race.
+	// Already-aborted-at-entry is exceptional: resource setup still runs to
+	// settle pending UI, but the child must never queue for a process permit.
+	// Passing the already-aborted signal to acquire() makes that boundary reject
+	// immediately without claiming or waiting for a slot. Other setup phases are
+	// bounded by a short timeout because no future abort edge exists to wake a
+	// dead SDK/proxy.
 	const parentAlreadyAborted = signal?.aborted === true;
 	const ALREADY_ABORTED_TIMEOUT_MS = 10_000;
 	// Snapshot exit-signal listeners BEFORE `resourceLoader.reload()`. The
@@ -1140,7 +1143,7 @@ export async function runSingleAgent(
 		if (!runtimeContext.processPermitScope) {
 			setActivity(currentResult, "queued", "waiting for subagent concurrency slot");
 			emitUpdate();
-			ownedProcessPermit = await inflightSemaphore.acquire(parentAlreadyAborted ? undefined : signal);
+			ownedProcessPermit = await inflightSemaphore.acquire(signal);
 			runtimeContext.processPermitScope = { release: ownedProcessPermit };
 		}
 		setActivity(currentResult, "preparing", "creating subagent session");
@@ -1194,27 +1197,34 @@ export async function runSingleAgent(
 		return currentResult;
 	}
 
-	// Capture the model the session actually selected (in case our hint was overridden).
-	if (session.agent?.state?.model) {
-		currentResult.model = session.agent.state.model.id;
-	}
-
-	// Inject the parent UI bridge proxy so subagent ask_user calls appear in the parent UI.
+	// From the moment createSession succeeds, every exit path owns the session
+	// and (for a root child) the process permit. Keep all post-create setup inside
+	// one lifetime guard: setUIContext(), subscribe(), lifecycle updates, or any
+	// future setup step may throw before the prompt's narrower try/finally is
+	// reached. The no-op unsubscribe preserves exact-once session disposal even
+	// when subscription itself throws before returning its cleanup handle.
+	let unsubscribe: () => void = () => {};
+	let sessionCleanedUp = false;
+	const cleanupOwnedSession = (): void => {
+		if (sessionCleanedUp) return;
+		sessionCleanedUp = true;
+		teardownSession(unsubscribe, session);
+		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
+		// during this session (see `snapshotSignalListeners` above). Runs after
+		// `teardownSession` so the session's own disposal has settled; the
+		// reclaimed closures are pure no-arg pool-disposers that are no-ops on
+		// a live host anyway. No-op for the mock SDK / a fixed upstream.
+		reclaimOrphanedSignalListeners(signalListenersBefore);
+		if (ownedProcessPermit) {
+			ownedProcessPermit();
+			if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
+			ownedProcessPermit = undefined;
+		}
+	};
+	// Variables used by the prompt phase are created before setup so setup
+	// failures can propagate after cleanup without widening the prompt catch.
 	let proxy: ParentExtensionUIBridgeProxy | undefined;
-	if (parentUiBridge && _toolCallId) {
-		proxy = new ParentExtensionUIBridgeProxy(parentUiBridge, _toolCallId);
-		session.extensionRunner.setUIContext(proxy);
-	}
-
-	// Track the current run stage for abort/timeout diagnostics (D). The first
-	// streamed text_delta flips this to "streaming" (see handleMessageUpdate);
-	// "waiting for model response" covers prefill (the common abort window, and
-	// the one that produced the bare "Request was aborted" symptom).
 	const stageRef = { value: "preparing" };
-
-	// 5. Subscribe to session events.
-	const unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, streamingReasoningRef, stageRef);
-
 	// Wrap the prompt in the shared subagent context (A) so extensions whose
 	// before_agent_start hooks fire during session.prompt() — notably the
 	// skill-pruner prepass — can detect they are inside a scoped subagent
@@ -1223,11 +1233,29 @@ export async function runSingleAgent(
 	const subagentDepth = readRuntimeContext().depth;
 	const runPrompt = (): Promise<void> =>
 		subagentContext.run({ depth: subagentDepth }, () => session.prompt(`Task: ${task}`));
+	try {
+		// Capture the model the session actually selected (in case our hint was overridden).
+		if (session.agent?.state?.model) {
+			currentResult.model = session.agent.state.model.id;
+		}
 
-	// The session exists and the next potentially long window is provider
-	// prefill. Publish that distinction before prompt() starts.
-	setActivity(currentResult, "waiting_provider", currentResult.provider ? `waiting for ${currentResult.provider}` : "waiting for model response");
-	emitUpdate();
+		// Inject the parent UI bridge proxy so subagent ask_user calls appear in the parent UI.
+		if (parentUiBridge && _toolCallId) {
+			proxy = new ParentExtensionUIBridgeProxy(parentUiBridge, _toolCallId);
+			session.extensionRunner.setUIContext(proxy);
+		}
+
+		// 5. Subscribe to session events.
+		unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, streamingReasoningRef, stageRef);
+
+		// The session exists and the next potentially long window is provider
+		// prefill. Publish that distinction before prompt() starts.
+		setActivity(currentResult, "waiting_provider", currentResult.provider ? `waiting for ${currentResult.provider}` : "waiting for model response");
+		emitUpdate();
+	} catch (error) {
+		cleanupOwnedSession();
+		throw error;
+	}
 
 	// 6. Run the prompt with timeout / parent-signal handling, then shape the final result.
 	try {
@@ -1362,17 +1390,6 @@ export async function runSingleAgent(
 		applyThrownError(currentResult, err, stageRef.value, signal?.aborted === true);
 		return currentResult;
 	} finally {
-		teardownSession(unsubscribe, session);
-		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
-		// during this session (see `snapshotSignalListeners` above). Runs after
-		// `teardownSession` so the session's own disposal has settled; the
-		// reclaimed closures are pure no-arg pool-disposers that are no-ops on
-		// a live host anyway. No-op for the mock SDK / a fixed upstream.
-		reclaimOrphanedSignalListeners(signalListenersBefore);
-		if (ownedProcessPermit) {
-			ownedProcessPermit();
-			if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
-			ownedProcessPermit = undefined;
-		}
+		cleanupOwnedSession();
 	}
 }

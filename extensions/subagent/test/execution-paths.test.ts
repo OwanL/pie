@@ -291,13 +291,13 @@ test("runSingleAgent aborts promptly when the parent signal is already aborted",
 	assert.equal(result.streaming, false);
 	assert.match(result.errorMessage ?? "", /aborted/i);
 	assert.equal(state.createResourceLoaderArgs.length, 1, "resources load under the short already-aborted timeout");
-	assert.equal(state.createSessionArgs.length, 1, "session is created under the short already-aborted timeout");
-	assert.equal(state.promptCalls, 1, "prompt is invoked but aborts immediately");
-	assert.equal(state.abortCalls, 1, "session is aborted after the already-aborted prompt");
-	assert.equal(state.setUIContextCalls, 1);
-	assert.equal(state.unsubscribeCalls, 1);
-	assert.equal(state.disposeCalls, 1);
-	assert.equal(calls.cancelAll, 1, "parent-bridged UI is cancelled at the abort boundary");
+	assert.equal(state.createSessionArgs.length, 0, "an already-aborted root child stops at the permit boundary");
+	assert.equal(state.promptCalls, 0);
+	assert.equal(state.abortCalls, 0, "no session exists to abort");
+	assert.equal(state.setUIContextCalls, 0);
+	assert.equal(state.unsubscribeCalls, 0);
+	assert.equal(state.disposeCalls, 0);
+	assert.equal(calls.cancelAll, 0, "no child UI bridge was created");
 });
 
 test("runSingleAgent aborts the child prompt when the parent aborts after session creation", async () => {
