@@ -485,6 +485,39 @@ test('Part B (busy, idle transcript): all indicator walks are independent of del
   );
 });
 
+test('Part B: equal-shaped session switches cannot reuse prior transcript indicators', () => {
+  let latest: ReturnType<typeof useComposerIndicators> | undefined;
+  function Probe({ inputs }: { inputs: IndicatorsInputs }) {
+    latest = useComposerIndicators(inputs);
+    return null;
+  }
+  const first = [
+    ...buildTranscriptWithSubagentCall(),
+    makeUserMessage('u-tail', 'same tail'),
+    makeAssistantMessage('a-tail', 'same tail answer'),
+  ];
+  const second = structuredClone(first);
+  const result = second[1]?.toolCalls?.[0]?.result as { details?: unknown } | undefined;
+  const details = result?.details as {
+    results?: Array<{ usage?: { cost?: number } }>;
+  } | undefined;
+  assert.ok(details?.results?.[0]?.usage);
+  details.results[0].usage.cost = 0.25;
+
+  act(() => {
+    render(h(Probe, { inputs: stableInputs({ sessionPath: '/session/first', transcript: first }) }), container);
+  });
+  const firstCost = latest?.sessionCostIndicator;
+  act(() => {
+    render(h(Probe, { inputs: stableInputs({ sessionPath: '/session/second', transcript: second }) }), container);
+  });
+  const secondCost = latest?.sessionCostIndicator;
+
+  assert.ok(firstCost);
+  assert.ok(secondCost);
+  assert.notEqual(secondCost.tooltip, firstCost.tooltip, 'the second session must expose its own historical subagent cost');
+});
+
 test('Part B: recompute count is independent of transcript length for stable results', () => {
   // The same idle-busy scenario at two transcript lengths (4 vs 40 messages)
   // must recompute each indicator the same number of times (~1). Before the

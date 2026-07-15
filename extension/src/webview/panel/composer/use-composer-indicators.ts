@@ -136,21 +136,21 @@ export function useComposerIndicators({
     // appends/removes and a read_file/skill tool call completing on the
     // streaming message even when contextUsage.tokens is reported, so the
     // breakdown's contributor rows don't go stale.
-    [contextUsage?.tokens, contextUsage?.contextWindow, effectiveContextWindow, sysPromptsSig, breakdownStreamSig, subagentSig, transcriptWindow.isPartial],
+    [sessionPath, contextUsage?.tokens, contextUsage?.contextWindow, effectiveContextWindow, sysPromptsSig, breakdownStreamSig, subagentSig, transcriptWindow.isPartial],
   );
   const contextIndicator = useMemo(() => (
     contextBreakdown
       ? buildContextWindowIndicatorState(contextBreakdown.summary)
       : null
   ), [contextBreakdown]);
-  const sessionTokenUsage = useMemo(() => buildSessionTokenUsage(transcript), [usageSig]);
+  const sessionTokenUsage = useMemo(() => buildSessionTokenUsage(transcript), [sessionPath, usageSig]);
   const sessionTokenIndicator = useMemo(
     () => buildSessionTokenIndicator(sessionTokenUsage),
     [sessionTokenUsage],
   );
   const liveCostEstimate = useMemo(
     () => buildLiveSessionCostEstimate(transcript, contextUsage, busy),
-    [busy, contextUsage?.tokens, liveStreamSig],
+    [sessionPath, busy, contextUsage?.tokens, liveStreamSig],
   );
 
   // Stable pricing resolver so the completed-cost memo doesn't see a fresh
@@ -172,7 +172,7 @@ export function useComposerIndicators({
   );
   const subagentCostSummary = useMemo(
     () => extractSubagentCostSummary(transcript),
-    [subagentSig],
+    [sessionPath, subagentSig],
   );
   const sessionCostIndicator = useMemo(
     () => buildSessionCostIndicator(
