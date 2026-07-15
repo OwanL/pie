@@ -185,6 +185,55 @@ test('historical terminal tools do not exhaust live commit evidence', () => {
   });
 });
 
+test('a valid live owner can commit more than 512 tool leaves', () => {
+  const toolCount = 600;
+  const toolStateRevision = toolCount;
+  const tools = Array.from({ length: toolCount }, (_, index) => ({
+    id: `live-tool-${index}`,
+    name: 'read',
+    input: {},
+    status: 'running' as const,
+  }));
+  const liveOwner: ChatMessage = {
+    id: 'large-live-owner',
+    role: 'assistant',
+    createdAt: '',
+    markdown: '',
+    status: 'streaming',
+    parts: tools.map((toolCall) => ({ kind: 'toolCall' as const, toolCall })),
+    toolStateRevision,
+  };
+  const largeTarget: TranscriptCommitTarget = {
+    ...target,
+    state: { ...target.state, transcript: [liveOwner] },
+  };
+  const evidence = new Map<string, CommitLeaf>([
+    ['message:large-live-owner', {
+      kind: 'message', messageId: 'large-live-owner', role: 'assistant', status: 'streaming',
+    }],
+    ...tools.map((toolCall) => [
+      `tool:large-live-owner:${toolCall.id}`,
+      {
+        kind: 'tool' as const,
+        messageId: 'large-live-owner',
+        toolCallId: toolCall.id,
+        status: 'running' as const,
+        executionId: toolCall.id,
+        attempt: 0,
+        seq: toolStateRevision,
+        phase: 'running',
+        revision: toolStateRevision,
+      },
+    ] as const),
+  ]);
+
+  assert.equal(evidence.size, toolCount + 1);
+  assert.deepEqual(decideTranscriptCommit(largeTarget, evidence, model([liveOwner])), {
+    matches: true,
+    evidence: 'displayed',
+  });
+});
+
 test('collapsed reasoning acknowledges its visible summary, never the hidden source', () => {
   const source = 'A deliberately long reasoning source that has more than eighty visible characters and must not be acknowledged while collapsed.';
   const reasoningMessage: ChatMessage = {

@@ -11,7 +11,6 @@ import { reasoningSummary } from '../markdown';
 import { recordRenderSurface } from '../render-error';
 
 const MAX_COMMIT_ROWS = 256;
-const MAX_COMMIT_LEAVES = 512;
 
 export interface TranscriptCommitTarget {
   revision: number;
@@ -90,7 +89,6 @@ export function TranscriptCommitProvider({ target, postMessage, appSurface, chil
       registry.values.delete(key);
     } else {
       if (sameLeaf(previous, leaf)) return;
-      if (!previous && registry.values.size >= MAX_COMMIT_LEAVES) return;
       registry.values.set(key, leaf);
     }
     setRegistryVersion((version) => version + 1);
