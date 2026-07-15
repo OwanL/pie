@@ -73,6 +73,14 @@ test('classifyTestFile classifies analysis files (cwd=analysis/)', () => {
   assert.match(fwd(d.tsxBin), /analysis\/node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
+test('classifyTestFile keeps script tests repo-rooted like the scripts package gate', () => {
+  const d = classifyTestFile(repoRoot, 'scripts/test/run-test-files.test.mjs');
+  assert.equal(d.id, 'scripts');
+  assert.equal(fwd(d.cwd), fwd(repoRoot));
+  assert.equal(d.relativeFilePath, 'scripts/test/run-test-files.test.mjs');
+  assert.match(fwd(d.tsxBin), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
+});
+
 test('classifyTestFile classifies extensions/* files (cwd=repoRoot) and sets the subagent --tsconfig', () => {
   const d = classifyTestFile(repoRoot, 'extensions/subagent/test/agents.test.ts');
   assert.equal(d.id, 'subagent');
@@ -109,6 +117,21 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
   const ext = groups.find((g) => g.id === 'extension');
   assert.equal(ext.tsxConfig, undefined);
   assert.deepEqual(ext.files, ['test/webview/components/app-smoke.test.ts']);
+});
+
+test('groupFilesByPackage retains repo-relative script paths for execution', () => {
+  const groups = groupFilesByPackage(repoRoot, ['scripts/test/run-test-files.test.mjs']);
+  assert.deepEqual(groups, [{
+    id: 'scripts',
+    cwd: repoRoot,
+    tsxConfig: undefined,
+    tsxBin: resolveLocalTsx(repoRoot),
+    files: ['scripts/test/run-test-files.test.mjs'],
+  }]);
+  assert.deepEqual(buildTsxArgs(groups[0]), [
+    '--test',
+    'scripts/test/run-test-files.test.mjs',
+  ]);
 });
 
 test('groupFilesByPackage de-duplicates repeated files', () => {

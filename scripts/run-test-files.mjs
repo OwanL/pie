@@ -8,6 +8,7 @@
 // Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS:
 //  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
 //  - analysis/        -> cwd analysis/,         tsx = analysis/node_modules/tsx
+//  - scripts/test/    -> cwd repoRoot,           tsx = node_modules/tsx (root)
 //  - extensions/<id>/ -> cwd repoRoot,          tsx = node_modules/tsx (root)
 //
 // Only the `subagent` package needs a `--tsconfig` (its schema test resolves pi
@@ -95,20 +96,23 @@ export function normalizeRepoRelative(repoRoot, input) {
  * @param {string} repoRoot
  * @param {string} input - absolute or repo-relative test file path
  * @returns {{ id: string, cwd: string, tsxConfig?: string, tsxBin: string, repoRel: string, abs: string, relativeFilePath: string }}
- * @throws if the file is not under extension/, analysis/, or extensions/<id>/
+ * @throws if the file is not under extension/, analysis/, scripts/test/, or extensions/<id>/
  */
 export function classifyTestFile(repoRoot, input) {
   const { repoRel, abs } = normalizeRepoRelative(repoRoot, input);
   const directive = PACKAGE_DIRECTIVES.find(({ dir }) => repoRel === dir || repoRel.startsWith(`${dir}/`));
   if (!directive) {
     throw new Error(
-      `Cannot classify test file "${repoRel}": not under extension/, analysis/, or extensions/<id>/.`,
+      `Cannot classify test file "${repoRel}": not under extension/, analysis/, scripts/test/, or extensions/<id>/.`,
     );
   }
   const { id, dir } = directive;
-  // extensions/* run with cwd=repoRoot (their testGlobs are repo-relative);
-  // extension/ and analysis/ run with cwd=<dir> (their testGlobs are ./test/**).
-  const cwd = dir.startsWith('extensions/') ? repoRoot : path.join(repoRoot, dir);
+  // extensions/* and scripts run with cwd=repoRoot (their testGlobs are
+  // repo-relative); extension/ and analysis/ run with cwd=<dir> (their
+  // testGlobs are ./test/**).
+  const cwd = dir.startsWith('extensions/') || id === 'scripts'
+    ? repoRoot
+    : path.join(repoRoot, dir);
   const tsxConfig = TSX_CONFIG_BY_PACKAGE[id];
   const tsxBin = resolveLocalTsx(cwd);
   const relativeFilePath = path.relative(cwd, abs).replace(/\\/g, '/');
@@ -206,7 +210,7 @@ function printHelp() {
     `Usage: node scripts/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
       `(fast mode: parallel files, no coverage). Classifies each path into\n` +
-      `extension/, analysis/, or extensions/<id>/ and uses that package's local\n` +
+      `extension/, analysis/, scripts/test/, or extensions/<id>/ and uses that package's local\n` +
       `tsx; the subagent package additionally passes --tsconfig.\n\n` +
       `Options:\n` +
       `  --help, -h   Show this help.\n` +
