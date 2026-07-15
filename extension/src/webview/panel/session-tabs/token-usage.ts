@@ -135,6 +135,12 @@ interface CostUsage {
 
 export interface LiveSessionCostEstimate extends CostUsage {
   source: 'live-context';
+  /**
+   * Canonical context footprint reported while the turn is running. The live
+   * signal does not classify these tokens as uncached input, cache read, or
+   * cache write, so they must not be assigned any of those rates yet.
+   */
+  unclassifiedContextTokens: number;
 }
 
 export interface SessionCostIndicatorState {
@@ -272,7 +278,7 @@ export function buildLiveSessionCostEstimate(
 ): LiveSessionCostEstimate | null {
   if (!busy) return null;
 
-  const inputTokens = typeof contextUsage?.tokens === 'number' && Number.isFinite(contextUsage.tokens)
+  const unclassifiedContextTokens = typeof contextUsage?.tokens === 'number' && Number.isFinite(contextUsage.tokens)
     ? Math.max(0, Math.trunc(contextUsage.tokens))
     : 0;
 
@@ -283,16 +289,20 @@ export function buildLiveSessionCostEstimate(
     outputTokens += estimateTextTokens(message.thinking ?? '');
   }
 
-  const totalTokens = inputTokens + outputTokens;
+  const totalTokens = unclassifiedContextTokens + outputTokens;
   if (totalTokens <= 0) return null;
 
   return {
     source: 'live-context',
-    inputTokens,
+    // The canonical context signal has no provider billing-channel split. In
+    // particular, treating it as uncached input can overstate live spend by
+    // orders of magnitude when cache-read pricing is much lower.
+    inputTokens: 0,
     outputTokens,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens,
+    unclassifiedContextTokens,
   };
 }
 
@@ -577,6 +587,7 @@ export function buildSessionCostIndicator(
     : subagentCostOrSummary;
   const prepass = buildPruningPrepassSummary(pruningDetails, pricing, pricingForModel);
   const liveCost = pricing && liveEstimate ? costFromUsage(liveEstimate, pricing) : 0;
+  const hasUnclassifiedLiveContext = (liveEstimate?.unclassifiedContextTokens ?? 0) > 0;
   const mainCost = completed.totalCost;
   const totalCost = mainCost + liveCost + subagents.totalCost + prepass.cost;
 
@@ -618,9 +629,11 @@ export function buildSessionCostIndicator(
     const liveCosts = pricing ? costBreakdownFromUsage(liveEstimate, pricing) : null;
     tooltipLines.push(
       '',
-      `Live turn estimate: ${pricing ? formatCostDetail(liveCost) : 'unavailable (no pricing)'}`, 
-      `  Input:  ${liveCosts ? formatCostDetail(liveCosts.input) : 'unpriced'} (${formatCostTokens(liveEstimate.inputTokens)})`,
-      `  Output: ${liveCosts ? formatCostDetail(liveCosts.output) : 'unpriced'} (${formatCostTokens(liveEstimate.outputTokens)})`,
+      `Live turn ${hasUnclassifiedLiveContext ? 'partial ' : ''}estimate: ${pricing ? formatCostDetail(liveCost) : 'unavailable (no pricing)'}`,
+      ...(hasUnclassifiedLiveContext
+        ? [`  Context footprint: cost pending provider cache split (${formatCostTokens(liveEstimate.unclassifiedContextTokens)})`]
+        : []),
+      `  Output estimate: ${liveCosts ? formatCostDetail(liveCosts.output) : 'unpriced'} (${formatCostTokens(liveEstimate.outputTokens)})`,
     );
   }
 
@@ -641,11 +654,18 @@ export function buildSessionCostIndicator(
     tooltipLines.push('', ...modelCostLines);
   }
 
-  tooltipLines.push(`Total: ${formatCostDetail(totalCost)}`);
+  tooltipLines.push(hasUnclassifiedLiveContext
+    ? `Known subtotal: ${formatCostDetail(totalCost)} (live context cost excluded)`
+    : `Total: ${formatCostDetail(totalCost)}`);
+
+  const label = hasUnclassifiedLiveContext ? `${formatCostUsd(totalCost)}*` : formatCostUsd(totalCost);
+  const ariaLabel = hasUnclassifiedLiveContext
+    ? `Known estimated session cost ${formatCostUsd(totalCost)}; live context cost is pending the provider cache split.`
+    : `Estimated session cost ${formatCostUsd(totalCost)}.`;
 
   return {
-    label: formatCostUsd(totalCost),
-    ariaLabel: `Estimated session cost ${formatCostUsd(totalCost)}.`,
+    label,
+    ariaLabel,
     tooltip: tooltipLines.join('\n'),
   };
 }

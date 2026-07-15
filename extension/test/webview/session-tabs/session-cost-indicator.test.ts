@@ -273,6 +273,7 @@ test('buildSessionCostIndicator merges the live estimate into the selected model
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
     totalTokens: 50_000,
+    unclassifiedContextTokens: 0,
   };
 
   const result = buildSessionCostIndicator(
@@ -500,9 +501,53 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
 
   assert.ok(liveEstimate);
   assert.ok(result);
-  assert.equal(result.label, '<$0.01');
-  assert.match(result.tooltip, /Live turn estimate/);
+  assert.equal(result.label, '<$0.01*');
+  assert.match(result.tooltip, /Live turn partial estimate/);
   assert.match(result.tooltip, /126,500 tokens/);
+  assert.match(result.tooltip, /cost pending provider cache split/);
+  assert.match(result.ariaLabel, /live context cost is pending the provider cache split/);
+});
+
+test('buildSessionCostIndicator does not price unclassified live context as uncached input', () => {
+  const transcript = [
+    {
+      id: 'a1',
+      role: 'assistant' as const,
+      createdAt: '',
+      markdown: '',
+      status: 'streaming' as const,
+    },
+  ];
+  const liveEstimate = buildLiveSessionCostEstimate(
+    transcript,
+    { tokens: 1_000_000, contextWindow: 2_000_000, percent: 50 },
+    true,
+  );
+  // Deliberately distinct rates make an accidental channel assignment
+  // observable: the canonical context footprint has no cache split, so it is
+  // neither $30 of uncached input nor $0.03 of cache reads (nor a cache write).
+  const pricing = { input: 30, output: 7, cacheRead: 0.03, cacheWrite: 37.5 };
+  const result = buildSessionCostIndicator(
+    makeSummary(),
+    pricing,
+    'Distinct-rate model',
+    buildCompletedCostSummary(makeSummary(), transcript, pricing, undefined),
+    extractSubagentDirectCost(transcript as never),
+    undefined,
+    undefined,
+    liveEstimate,
+  );
+
+  assert.ok(liveEstimate);
+  assert.equal(liveEstimate.inputTokens, 0);
+  assert.equal(liveEstimate.cacheReadTokens, 0);
+  assert.equal(liveEstimate.cacheWriteTokens, 0);
+  assert.equal(liveEstimate.unclassifiedContextTokens, 1_000_000);
+  assert.ok(result);
+  assert.equal(result.label, '$0.00*');
+  assert.match(result.tooltip, /Context footprint: cost pending provider cache split \(1,000,000 tokens\)/);
+  assert.match(result.tooltip, /Known subtotal: \$0\.0000 \(live context cost excluded\)/);
+  assert.doesNotMatch(result.tooltip, /\$30\.0000|\$0\.0300|\$37\.5000/);
 });
 
 test('buildSessionCostIndicator does not crash when a tool call has an undefined name (parts path)', () => {
