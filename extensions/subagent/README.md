@@ -1,11 +1,16 @@
 # subagent
 
-Delegate tasks to specialized agents running as isolated in-process `AgentSession`s.
+Delegate tasks to specialized agents running as transcript-isolated, in-process `AgentSession`s.
 
 Each subagent invocation creates a fresh `AgentSession` via the pi SDK (`createAgentSession`).
 The session shares the parent's auth, model registry, and OAuth tokens but gets its own
-context window, system prompt, and tool allowlist. This is what unlocks newer GitHub Copilot
-models that were broken under the previous CLI-subprocess approach.
+context window, system prompt, tool allowlist, and in-memory session manager. This is
+transcript/context isolation, not a security or process boundary: children intentionally
+share the parent process, working directory, filesystem access, extension runtime, and
+external credentials. An abort-ignoring SDK/provider/tool therefore cannot be forcibly
+killed or prevented from producing late external side effects by this extension alone.
+This architecture unlocks newer GitHub Copilot models that were broken under the previous
+CLI-subprocess approach.
 
 ## Invocation and orchestration
 
@@ -198,8 +203,7 @@ only host-side tool override.
 ## Timeouts
 
 Subagents have **no short wall-clock deadline by default**. Productive work may
-continue indefinitely while it reports credible progress. Phase-specific
-provider/tool leases bound stalled phases, and an outer settlement inactivity
+continue indefinitely while it reports credible progress. An outer settlement inactivity
 net force-settles a completely silent dispatch after 12 minutes by default.
 Only credible child progress renews that outer deadline: lifecycle/retry/terminal
 transitions, model/reasoning/tool-call streaming, and tool start/update/end
@@ -207,6 +211,13 @@ transitions, model/reasoning/tool-call streaming, and tool start/update/end
 Repeated identical `onUpdate` snapshots do not renew it.
 `PIE_SUBAGENT_SETTLEMENT_MS` can override the inactivity budget or disable it
 with `0`. Parent cancellation remains immediate.
+
+Phase-specific queue/header/first-token/tool leases, retry backoff and
+`Retry-After`, and an orphan-cleanup registry are planned but are **not current
+runtime controls**. The executable containment today is the outer renewable
+settlement net plus the optional whole-prompt ceiling below. Local settlement
+can release UI/permit ownership even when an in-process upstream operation
+ignores abort, but it cannot quarantine that operation's external side effects.
 
 Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
 optional absolute containment ceiling. Unset, empty, zero, negative, and

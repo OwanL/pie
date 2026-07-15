@@ -21,6 +21,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Reference / informational
 
+- [audits/2026-07-15-stability-correctness-audit.md](audits/2026-07-15-stability-correctness-audit.md) — whole-repository stability/correctness audit, verified fixes, provider/transcript matrices, measurements, and prioritized residual risks.
 - [OMP-COMPARISON-2026-07.md](OMP-COMPARISON-2026-07.md) — evidence-backed comparison with Oh My Pi at a pinned commit, including capability gaps, features pie should keep distinct, and a measured P0–P2 adoption roadmap. Research/roadmap only; not an active implementation plan.
 - [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) and `AGENTS.md` for authoritative usage. Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.

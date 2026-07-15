@@ -1129,8 +1129,9 @@ export class ProviderGate {
 	 *  can still read it — or `null` if this is NOT a suspension (transient
 	 *  rate-limit, auth error, etc.) and should NOT arm the breaker.
 	 *
-	 *  The body is consumed via `response.clone()` + `text()` so the original
-	 *  response body remains readable by the SDK. */
+	 *  A bounded explicit reader consumes a clone, leaving the original body
+	 *  untouched. Suspension responses are reconstructed from the inspected
+	 *  text so the SDK receives the same readable payload. */
 	private async extractAccountPause(
 		response: Response,
 		_provider: string,
