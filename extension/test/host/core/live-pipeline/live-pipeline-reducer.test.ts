@@ -115,6 +115,44 @@ test('failed checkpoint for an ownerless event terminalizes the attempt and clea
   assert.equal(lateStart.state.livePipeline.turnsBySession[base.sessionPath], undefined);
 });
 
+test('exhausted checkpoint repair clears the owned attempt and its pending gap state', () => {
+  let state = createInitialArchState();
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution', parentExecutionId: null,
+    rootExecutionId: 'execution', toolCallId: 'tool', name: 'bash', input: { command: 'echo hi' }, startedAt: 95,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.extensionUi', seq: 3, uiRequestId: 'ui-request', action: 'opened',
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.text', seq: 5, occurredAt: 120, delta: 'after missing seq 4',
+  }).state;
+
+  const pendingKey = 'turn\u0000attempt';
+  assert.equal(state.livePipeline.pendingOwnerEvents[pendingKey]?.length, 1);
+  assert.equal(state.livePipeline.turnsBySession[base.sessionPath]?.pendingExtensionUiRequestIds[0], 'ui-request');
+  assert.ok(state.livePipeline.toolsByExecutionId.execution);
+  assert.ok(state.pending.currentTurnBySession[base.sessionPath]);
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    state = reducer(state, {
+      kind: 'LiveTurnCheckpointResult', corrId: `repair-${attempt}`, sessionPath: base.sessionPath,
+      turnId: base.turnId, attemptId: base.attemptId, ok: false, occurredAt: 130 + attempt,
+      status: 'active', error: 'unavailable',
+    }).state;
+  }
+
+  assert.equal(state.livePipeline.turnsBySession[base.sessionPath], undefined);
+  assert.equal(state.livePipeline.toolsByExecutionId.execution, undefined);
+  assert.equal(state.livePipeline.pendingOwnerEvents[pendingKey], undefined);
+  assert.equal(state.pending.currentTurnBySession[base.sessionPath], undefined);
+  assert.equal(state.livePipeline.terminalAttempts[pendingKey]?.terminalKind, 'interrupted');
+  assert.equal(state.transcript.bySession[base.sessionPath]?.at(-1)?.status, 'interrupted');
+});
+
 test('checkpoint repair replays a coalesced v5 progress range from the checkpoint base', () => {
   let state = createInitialArchState();
   state = dispatch(state, {

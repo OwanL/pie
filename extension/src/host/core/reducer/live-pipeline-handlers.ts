@@ -2,7 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import type { ChatMessage } from '../../../shared/protocol/messages.js';
-import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js';
+import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
 import type { ReducerResult } from './helpers.js';
@@ -250,21 +250,44 @@ function interruptOne(state: ArchState, sessionPath: string, occurredAt: number)
       ...state.livePipeline,
       turnsBySession: { [sessionPath]: turn },
       toolsByExecutionId: Object.fromEntries(
-        Object.entries(state.livePipeline.toolsByExecutionId).filter(([, tool]) => tool.turnId === turn.turnId),
+        Object.entries(state.livePipeline.toolsByExecutionId).filter(([, tool]) =>
+          tool.turnId === turn.turnId && tool.attemptId === turn.attemptId,
+        ),
       ),
     },
     occurredAt,
     occurredAt + TERMINAL_TOMBSTONE_GRACE_MS,
   );
+  const cleared = clearLiveAttempt(state.livePipeline, sessionPath, turn.turnId, turn.attemptId);
   let next = { ...state, livePipeline: {
-    ...state.livePipeline,
-    turnsBySession: Object.fromEntries(Object.entries(state.livePipeline.turnsBySession).filter(([path]) => path !== sessionPath)),
-    toolsByExecutionId: Object.fromEntries(Object.entries(state.livePipeline.toolsByExecutionId).filter(([, tool]) => tool.turnId !== turn.turnId)),
-    terminalAttempts: { ...state.livePipeline.terminalAttempts, ...transformed.state.terminalAttempts },
+    ...cleared,
+    terminalAttempts: { ...cleared.terminalAttempts, ...transformed.state.terminalAttempts },
   } };
   const interrupted = transformed.interruptedBySession[sessionPath];
   if (interrupted) next = appendDurableTerminal(next, sessionPath, interrupted);
   return { state: next, effects: [] };
+}
+
+/** Remove every live-pipeline structure owned by one terminalized attempt. */
+function clearLiveAttempt(
+  livePipeline: LivePipelineState,
+  sessionPath: string,
+  turnId: string,
+  attemptId: string,
+): LivePipelineState {
+  const turnsBySession = { ...livePipeline.turnsBySession };
+  const owner = turnsBySession[sessionPath];
+  if (owner?.turnId === turnId && owner.attemptId === attemptId) delete turnsBySession[sessionPath];
+
+  const toolsByExecutionId = Object.fromEntries(
+    Object.entries(livePipeline.toolsByExecutionId).filter(([, tool]) =>
+      tool.turnId !== turnId || tool.attemptId !== attemptId,
+    ),
+  );
+  const pendingOwnerEvents = { ...livePipeline.pendingOwnerEvents };
+  delete pendingOwnerEvents[pendingOwnerKey(turnId, attemptId)];
+
+  return { ...livePipeline, turnsBySession, toolsByExecutionId, pendingOwnerEvents };
 }
 
 function markCheckpointFailure(

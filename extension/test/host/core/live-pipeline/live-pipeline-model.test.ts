@@ -101,6 +101,55 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
   assert.equal(invalidPhase.classification, 'malformed');
 });
 
+test('checkpoint older than the applied semantic sequence is stale and cannot regress live state', () => {
+  const started = apply(createEmptyLivePipelineState(), start()).state;
+  const initialOwner = started.turnsBySession[base.sessionPath]!;
+  const baseCheckpoint: LiveTurnCheckpoint = {
+    protocolVersion: 5,
+    sessionPath: base.sessionPath,
+    turnId: base.turnId,
+    attemptId: base.attemptId,
+    checkpointSeq: 2,
+    phase: 'streaming',
+    turn: {
+      ...initialOwner,
+      seq: 2,
+      checkpointSeq: 2,
+      phase: 'streaming',
+      parts: [{ kind: 'text', text: 'two' }],
+    },
+    tools: [],
+    pendingExtensionUiRequestIds: [],
+  };
+  const repaired = applyLiveTurnCheckpoint(started, baseCheckpoint);
+  assert.equal(repaired.classification, 'applied');
+
+  let advanced = repaired.state;
+  advanced = apply(advanced, { ...base, kind: 'turn.text', seq: 3, delta: ' three' }).state;
+  advanced = apply(advanced, { ...base, kind: 'turn.text', seq: 4, delta: ' four' }).state;
+  advanced = apply(advanced, { ...base, kind: 'turn.text', seq: 5, delta: ' five' }).state;
+  assert.equal(advanced.turnsBySession[base.sessionPath]?.checkpointSeq, 2);
+  assert.equal(advanced.turnsBySession[base.sessionPath]?.seq, 5);
+
+  const staleCheckpoint: LiveTurnCheckpoint = {
+    ...baseCheckpoint,
+    checkpointSeq: 4,
+    turn: {
+      ...baseCheckpoint.turn,
+      seq: 4,
+      checkpointSeq: 4,
+      parts: [{ kind: 'text', text: 'stale through four' }],
+    },
+  };
+  const stale = applyLiveTurnCheckpoint(advanced, staleCheckpoint);
+  assert.equal(stale.classification, 'stale');
+  assert.equal(stale.state, advanced, 'a stale repair must preserve the current state identity');
+  assert.equal(stale.state.turnsBySession[base.sessionPath]?.seq, 5);
+  assert.deepEqual(stale.state.turnsBySession[base.sessionPath]?.parts, [{
+    kind: 'text', text: 'two three four five',
+  }]);
+});
+
 test('terminal repair checkpoints may use one-shot transport headroom for large durable messages', () => {
   const state = apply(createEmptyLivePipelineState(), start()).state;
   const owner = state.turnsBySession[base.sessionPath]!;

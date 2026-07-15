@@ -50,7 +50,12 @@ export function applyLiveTurnCheckpoint(
     if (existing.turnId !== checkpoint.turnId || existing.attemptId !== checkpoint.attemptId) {
       return { classification: 'mismatch', state: current };
     }
-    if (checkpoint.checkpointSeq < existing.checkpointSeq) {
+    // A repair may race semantic events that advanced the owner after the
+    // checkpoint was captured. Comparing only with the last checkpoint base
+    // would accept that older snapshot and regress already-applied text/tools.
+    // Equality remains valid: observation.rejected deliberately consumes a
+    // sequence and is repaired by a checkpoint at that same sequence.
+    if (checkpoint.checkpointSeq < existing.seq) {
       return { classification: 'stale', state: current };
     }
   }
