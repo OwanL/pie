@@ -289,6 +289,23 @@ export interface PreparedRunRow {
   totalEstimatedCostUsd: number | null;
   /** Number of history-compaction (`/compact`) LLM calls in this run (0 when untracked). */
   compactionCount: number;
+  /** Aggregate skill-pruning prepass input tokens (0 when none). */
+  skillPruningPrepassInputTokens: number;
+  /** Aggregate skill-pruning prepass output tokens (0 when none). */
+  skillPruningPrepassOutputTokens: number;
+  /** Aggregate skill-pruning prepass cache-read tokens (0 when none). */
+  skillPruningPrepassCacheReadTokens: number;
+  /** Aggregate skill-pruning prepass cache-write tokens (0 when none). */
+  skillPruningPrepassCacheWriteTokens: number;
+  /** Full last-turn usage scalar fields, nullable when absent. */
+  lastTurnInputTokens: number | null;
+  lastTurnOutputTokens: number | null;
+  lastTurnCacheReadTokens: number | null;
+  lastTurnCacheWriteTokens: number | null;
+  lastTurnTotalTokens: number | null;
+  lastTurnReasoningTokens: number | null;
+  /** Treatment-change kinds recorded during this run. */
+  treatmentChangeKinds: TreatmentChangeKind[];
   /** Number of auto-retry attempts in this run (0 when untracked). */
   autoRetryCount: number;
   verificationTotalCount: number;
@@ -308,7 +325,8 @@ export interface PreparedRunRow {
   tokenEfficiency: number | null;
   contextUtilization: number | null;
   cacheHitRatio: number | null;
-  firstAttemptSuccess: boolean;
+  /** True only for scored runs that succeeded on the first attempt without interruption, edits, or truncation; null for unscored/no-outcome runs. */
+  firstAttemptSuccess: boolean | null;
   /** File-churn signal: fraction of EDIT ops that revisited an already-edited file in this run
    *   (0 = every edit touched a fresh file, no churn; →1 = kept re-editing the same files). Null
    *   when the run had no edits or lacked per-file attribution (legacy runs). Derived from
@@ -339,7 +357,9 @@ export interface PreparedToolUsageRow {
   resultIssueCount: number;
   /** Cumulative execution duration (ms) for this tool across the run (0 when unreported). */
   totalDurationMs: number;
-  /** Mean execution duration (ms) per call (= totalDurationMs / callCount); null when callCount is 0. */
+  /** Number of timed calls for this tool in this run (0 when unreported). */
+  timedCallCount: number;
+  /** Mean execution duration (ms) per timed call (= totalDurationMs / timedCallCount); null when no timed calls exist. */
   meanDurationMs: number | null;
   startedAt: string;
   startedDay: string;
@@ -430,6 +450,8 @@ export interface PreparedTurnThroughputRow {
   startedDay: string;
   /** Provider-specific model used for this turn. */
   modelId: string | null;
+  /** Provider paired with this turn's modelId when known. */
+  provider: string | null;
   /** Canonical provider-agnostic family for this turn's model. */
   modelFamily: string | null;
   thinkingLevel: ThinkingLevel | null;
@@ -450,6 +472,26 @@ export interface PreparedTurnThroughputRow {
   cacheWriteTokens: number;
   /** Context-window token count at the end of this turn (null when unreported). */
   contextTokens: number | null;
+}
+
+/** Prepared non-success result issue row for DuckDB + site-data. */
+export interface PreparedToolResultIssueRow {
+  runId: string;
+  toolName: string;
+  resultIssueKind: ToolResultIssueKind;
+  count: number;
+  exitCode: number | null;
+  errorExcerpt: string | null;
+  verificationKinds: VerificationCommandKind[];
+  startedAt: string;
+  startedDay: string;
+  modelId: string | null;
+  thinkingLevel: ThinkingLevel | null;
+  experimentAssignment: string | null;
+  mixedTreatmentConfig: boolean;
+  scored: boolean;
+  satisfaction: number | null;
+  resolution: RunOutcomeResolution | null;
 }
 
 /** Raw pruning decision as read from data/pruning.jsonl. */
@@ -664,6 +706,7 @@ export interface PreparedAnalyticsData {
   runs: PreparedRunRow[];
   toolUsage: PreparedToolUsageRow[];
   toolFailures: PreparedToolFailureRow[];
+  toolResultIssues: PreparedToolResultIssueRow[];
   verificationUsage: PreparedVerificationUsageRow[];
   backendErrors: PreparedBackendErrorRow[];
   fileExtensions: PreparedFileExtensionRow[];

@@ -5,7 +5,7 @@ import type { PreparedRunRow } from '../../scripts/contracts.ts';
 function firstAttemptByModel(runs: PreparedRunRow[]) {
   const map = new Map<string, { success: number; total: number }>();
   for (const run of runs) {
-    if (run.status === 'open') {
+    if (run.status === 'open' || run.firstAttemptSuccess === null) {
       continue;
     }
     const model = modelFamilyKey(run);
@@ -31,8 +31,9 @@ export const interruptionCharts: ChartEntry[] = [
       const interrupted = completed.filter((r) => r.interruptedCount > 0).length;
       const edited = completed.filter((r) => r.messageEditCount > 0).length;
       const truncated = completed.filter((r) => r.truncatedAfterCount > 0).length;
-      const firstAttempt = completed.filter((r) => r.firstAttemptSuccess).length;
-      const firstRate = completed.length > 0 ? firstAttempt / completed.length : 0;
+      const firstAttemptEligible = completed.filter((r) => r.firstAttemptSuccess !== null);
+      const firstAttempt = firstAttemptEligible.filter((r) => r.firstAttemptSuccess).length;
+      const firstRate = firstAttemptEligible.length > 0 ? firstAttempt / firstAttemptEligible.length : 0;
       const rows = [
         { signal: 'Interrupted', count: interrupted, detail: `${interrupted} runs` },
         { signal: 'Message edits', count: edited, detail: `${edited} runs` },

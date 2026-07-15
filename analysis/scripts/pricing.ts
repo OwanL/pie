@@ -22,7 +22,7 @@
  * relative to this module). Override with the `PIE_MODELS_JSON` env var or the
  * explicit `modelsJsonPath` argument (used by tests).
  */
-import { loadModelsJsonProviders } from './load-models.ts';
+import { loadHistoricalModelRecords, loadModelsJsonProviders } from './load-models.ts';
 
 import { parseModelPricing } from '../../shared/pricing-core.js';
 import type { ModelTokenPricing } from '../../shared/pricing-core.js';
@@ -68,14 +68,11 @@ function addRecord(
  * that cost derivation degrades gracefully to `null` rather than breaking the
  * analytics pipeline.
  */
-export function loadModelPricingMap(modelsJsonPath?: string): Map<string, ModelTokenPricing> {
+export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: string): Map<string, ModelTokenPricing> {
   const map = new Map<string, ModelTokenPricing>();
   const providers = loadModelsJsonProviders(modelsJsonPath);
-  if (!providers) {
-    return map;
-  }
 
-  for (const [providerName, providerData] of Object.entries(providers)) {
+  for (const [providerName, providerData] of Object.entries(providers ?? {})) {
     if (!providerData || typeof providerData !== 'object') {
       continue;
     }
@@ -104,6 +101,19 @@ export function loadModelPricingMap(modelsJsonPath?: string): Map<string, ModelT
         addRecord(map, providerName, id, model as Record<string, unknown>);
       }
     }
+  }
+
+  // Explicit models.json test fixtures remain isolated unless they also pass
+  // an explicit history path. Active entries win every collision.
+  const historical = modelsJsonPath === undefined || historyPath !== undefined
+    ? loadHistoricalModelRecords(historyPath)
+    : [];
+  for (const model of historical) {
+    const pricing = parseModelPricing(model.cost);
+    if (!pricing) continue;
+    const providerKey = `${model.provider}/${model.id}`;
+    if (!map.has(providerKey)) map.set(providerKey, pricing);
+    if (!map.has(model.id)) map.set(model.id, pricing);
   }
 
   return map;

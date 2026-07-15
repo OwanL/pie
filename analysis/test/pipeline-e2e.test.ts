@@ -67,6 +67,7 @@ function createMinimalRunSnapshot(overrides: Partial<RunSnapshot> = {}): RunSnap
       totalDurationMs: 0,
       timedCallCount: 0,
       durationMsByName: {},
+      timedCallCountsByName: {},
       countsByName: {},
       failureCountsByName: {},
       failureCountsByKind: {} as Record<ToolFailureKind, number>,

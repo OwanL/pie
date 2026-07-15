@@ -6,6 +6,7 @@ import test, { after } from 'node:test';
 
 import { buildDuckDbDatabase, runNamedDuckDbQuery, runDuckDbQuery } from '../scripts/duckdb.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
+import type { PreparedToolResultIssueRow } from '../scripts/contracts.ts';
 import { loadFixture } from './helpers.ts';
 
 // Building the DuckDB database from the fixture dominates test time (~450ms).
@@ -301,6 +302,158 @@ test('turn_throughput table maps every scalar PreparedTurnThroughputRow field (n
   assert.equal(Number(tokenCols[0]['cache_read_tokens']), 0, 'fixture samples lack per-turn cache-read tokens → 0');
   assert.equal(Number(tokenCols[0]['cache_write_tokens']), 0, 'fixture samples lack per-turn cache-write tokens → 0');
   assert.equal(tokenCols[0]['context_tokens'], null, 'fixture samples lack per-turn context tokens → NULL');
+});
+
+test('tool_result_issues table maps prepared rows and preserves sample detail', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-tool-result-issues-'));
+  try {
+    const base = prepared.runs.find((run) => run.status !== 'open')!;
+    const run: typeof base = {
+      ...base,
+      runId: 'issue-run',
+      taskGroupId: 'issue-task',
+    };
+    const issues: PreparedToolResultIssueRow[] = [
+      {
+        runId: 'issue-run',
+        toolName: 'bash',
+        resultIssueKind: 'verification_failure',
+        count: 2,
+        exitCode: 1,
+        errorExcerpt: 'tests failed',
+        verificationKinds: ['test'],
+        startedAt: run.startedAt,
+        startedDay: run.startedDay,
+        modelId: run.modelId,
+        thinkingLevel: run.thinkingLevel,
+        experimentAssignment: run.experimentAssignment,
+        mixedTreatmentConfig: run.mixedTreatmentConfig,
+        scored: run.scored,
+        satisfaction: run.satisfaction,
+        resolution: run.resolution,
+      },
+      {
+        runId: 'issue-run',
+        toolName: 'bash',
+        resultIssueKind: 'probe_no_match',
+        count: 1,
+        exitCode: null,
+        errorExcerpt: null,
+        verificationKinds: [],
+        startedAt: run.startedAt,
+        startedDay: run.startedDay,
+        modelId: run.modelId,
+        thinkingLevel: run.thinkingLevel,
+        experimentAssignment: run.experimentAssignment,
+        mixedTreatmentConfig: run.mixedTreatmentConfig,
+        scored: run.scored,
+        satisfaction: run.satisfaction,
+        resolution: run.resolution,
+      },
+    ];
+    const dbPath = path.join(dir, 'usage.duckdb');
+    await buildDuckDbDatabase({
+      dbPath,
+      exportsDir: path.join(dir, 'exports'),
+      prepared: { ...prepared, runs: [run], toolResultIssues: issues },
+    });
+    const rows = await runDuckDbQuery(
+      dbPath,
+      "SELECT * FROM tool_result_issues WHERE run_id = 'issue-run' ORDER BY result_issue_kind",
+    );
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]?.['result_issue_kind'], 'probe_no_match');
+    assert.equal(rows[1]?.['result_issue_kind'], 'verification_failure');
+    assert.equal(rows[1]?.['count'], 2);
+    assert.equal(rows[1]?.['exit_code'], '1');
+    assert.equal(rows[1]?.['error_excerpt'], 'tests failed');
+    assert.deepEqual(rows[1]?.['verification_kinds'], ['test']);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('runs table exposes new captured fields: treatmentChangeKinds, lastTurnUsage, and skill-pruning prepass tokens', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-runs-extra-'));
+  try {
+    const base = prepared.runs.find((run) => run.status !== 'open')!;
+    const run: typeof base = {
+      ...base,
+      runId: 'extra-run',
+      taskGroupId: 'extra-task',
+      treatmentChangeKinds: ['model', 'thinking'] as any,
+      lastTurnInputTokens: 10,
+      lastTurnOutputTokens: 20,
+      lastTurnCacheReadTokens: 5,
+      lastTurnCacheWriteTokens: 2,
+      lastTurnTotalTokens: 37,
+      lastTurnReasoningTokens: 15,
+      skillPruningPrepassInputTokens: 100,
+      skillPruningPrepassOutputTokens: 20,
+      skillPruningPrepassCacheReadTokens: 5,
+      skillPruningPrepassCacheWriteTokens: 3,
+    };
+    const dbPath = path.join(dir, 'usage.duckdb');
+    await buildDuckDbDatabase({
+      dbPath,
+      exportsDir: path.join(dir, 'exports'),
+      prepared: { ...prepared, runs: [run] },
+    });
+    const rows = await runDuckDbQuery(
+      dbPath,
+      "SELECT treatment_change_kinds, last_turn_reasoning_tokens, skill_pruning_prepass_input_tokens FROM runs WHERE run_id = 'extra-run'",
+    );
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]?.['treatment_change_kinds'], ['model', 'thinking']);
+    assert.equal(rows[0]?.['last_turn_reasoning_tokens'], '15');
+    assert.equal(rows[0]?.['skill_pruning_prepass_input_tokens'], '100');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('turn_throughput table exposes per-turn provider and tool_usage exposes timed_call_count', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-throughput-provider-'));
+  try {
+    const base = prepared.runs.find((run) => run.status !== 'open')!;
+    const run: typeof base = { ...base, runId: 'throughput-run', taskGroupId: 'throughput-task' };
+    const throughput = [
+      {
+        ...prepared.turnThroughput[0],
+        runId: 'throughput-run',
+        provider: 'openai',
+      },
+    ];
+    const toolUsage = [
+      {
+        ...prepared.toolUsage[0],
+        runId: 'throughput-run',
+        toolName: 'bash',
+        timedCallCount: 3,
+        totalDurationMs: 3000,
+        meanDurationMs: 1000,
+      },
+    ];
+    const dbPath = path.join(dir, 'usage.duckdb');
+    await buildDuckDbDatabase({
+      dbPath,
+      exportsDir: path.join(dir, 'exports'),
+      prepared: { ...prepared, runs: [run], turnThroughput: throughput, toolUsage },
+    });
+    const tpRows = await runDuckDbQuery(
+      dbPath,
+      "SELECT provider FROM turn_throughput WHERE run_id = 'throughput-run'",
+    );
+    assert.equal(tpRows[0]?.['provider'], 'openai');
+    const toolRows = await runDuckDbQuery(
+      dbPath,
+      "SELECT timed_call_count, mean_duration_ms FROM tool_usage WHERE run_id = 'throughput-run' AND tool_name = 'bash'",
+    );
+    assert.equal(toolRows[0]?.['timed_call_count'], 3);
+    assert.equal(toolRows[0]?.['mean_duration_ms'], 1000);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('core_runs exposes model attribution, outcome source, mixed config, and parent/subagent/total cost', async () => {

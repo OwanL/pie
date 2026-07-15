@@ -25,12 +25,14 @@ interface SyncModule {
     modelsJson: unknown;
     modelProfilesYaml: string;
     settingsJson: unknown;
+    pricingHistoryJson: unknown;
   };
   loadSource: (root?: string) => unknown;
   loadAndGenerate: (root?: string) => {
     modelsJson: unknown;
     modelProfilesYaml: string;
     settingsJson: unknown;
+    pricingHistoryJson: unknown;
   };
 }
 
@@ -68,6 +70,13 @@ test('generated model-profiles.yaml matches the committed file', async () => {
   const committed = parseCommitted('model-profiles.yaml');
   const generated = YAML.parse(out.modelProfilesYaml);
   assert.deepStrictEqual(generated, committed, 'model-profiles.yaml drift');
+});
+
+test('generated historical pricing matches the committed analysis artifact', async () => {
+  const mod = await loadSyncModule();
+  const out = await mod.loadAndGenerate(repoRoot);
+  const committed = parseCommitted('analysis/model-pricing-history.json');
+  assert.deepStrictEqual(out.pricingHistoryJson, committed, 'historical pricing drift');
 });
 
 test('generated settings.json matches the committed settings.json (merge preserves non-model fields)', async () => {

@@ -171,6 +171,36 @@ test('estimateRunCostUsd computes the known cost for a priced model', () => {
   approx(estimateRunCostUsd('m1', usage, map)!, 33);
 });
 
+test('default pricing includes retired models without restoring them to the active catalog', () => {
+  const map = loadModelPricingMap();
+  assert.deepEqual(map.get('github-copilot/gpt-5.4'), {
+    input: 2.5,
+    output: 15,
+    cacheRead: 0.25,
+    cacheWrite: 0,
+  });
+  assert.deepEqual(map.get('gpt-5.4'), map.get('github-copilot/gpt-5.4'));
+});
+
+test('active pricing takes precedence over an explicit historical collision', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-pricing-history-test-'));
+  const modelsPath = path.join(dir, 'models.json');
+  const historyPath = path.join(dir, 'history.json');
+  try {
+    fs.writeFileSync(modelsPath, JSON.stringify({
+      providers: { active: { models: [{ id: 'shared', cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 } }] } },
+    }));
+    fs.writeFileSync(historyPath, JSON.stringify({
+      models: [{ provider: 'active', id: 'shared', name: 'retired', cost: { input: 99, output: 99, cacheRead: 99, cacheWrite: 99 } }],
+    }));
+    const map = loadModelPricingMap(modelsPath, historyPath);
+    assert.deepEqual(map.get('active/shared'), { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+    assert.deepEqual(map.get('shared'), { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('estimateRunCostUsd does not borrow same-id pricing from another provider', () => {
   const githubPricing = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 };
   const map = new Map([

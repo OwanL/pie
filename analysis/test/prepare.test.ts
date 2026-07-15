@@ -49,14 +49,180 @@ test('prepareSourceAnalytics preserves run timing totals and failure-only tool r
     failureCount: unknownUsage.failureCount,
     resultIssueCount: unknownUsage.resultIssueCount,
     totalDurationMs: unknownUsage.totalDurationMs,
+    timedCallCount: unknownUsage.timedCallCount,
     meanDurationMs: unknownUsage.meanDurationMs,
   }, {
     callCount: 0,
     failureCount: 3,
     resultIssueCount: 1,
     totalDurationMs: 12_000,
+    timedCallCount: 0,
     meanDurationMs: null,
   });
+});
+
+test('prepareSourceAnalytics computes per-tool mean duration from per-tool timed call counts', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.toolUsage.totalCount = 4;
+  run.toolUsage.timedCallCount = 3;
+  run.toolUsage.totalDurationMs = 3000;
+  run.toolUsage.countsByName = { bash: 4 };
+  run.toolUsage.durationMsByName = { bash: 3000 };
+  run.toolUsage.timedCallCountsByName = { bash: 3 };
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const bashUsage = prepared.toolUsage.find((row) => row.runId === run.runId && row.toolName === 'bash');
+  assert.equal(bashUsage?.callCount, 4);
+  assert.equal(bashUsage?.timedCallCount, 3);
+  assert.equal(bashUsage?.totalDurationMs, 3000);
+  assert.equal(bashUsage?.meanDurationMs, 1000);
+});
+
+test('prepareSourceAnalytics preserves treatment-change kinds and last-turn usage scalars', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.treatmentChangeKinds = ['model', 'thinking'];
+  run.lastTurnUsage = {
+    inputTokens: 100,
+    outputTokens: 200,
+    cacheReadTokens: 50,
+    cacheWriteTokens: 10,
+    totalTokens: 360,
+    reasoningTokens: 80,
+  };
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const row = prepared.runs.find((r) => r.runId === run.runId)!;
+  assert.deepEqual(row.treatmentChangeKinds, ['model', 'thinking']);
+  assert.equal(row.lastTurnInputTokens, 100);
+  assert.equal(row.lastTurnOutputTokens, 200);
+  assert.equal(row.lastTurnCacheReadTokens, 50);
+  assert.equal(row.lastTurnCacheWriteTokens, 10);
+  assert.equal(row.lastTurnTotalTokens, 360);
+  assert.equal(row.lastTurnReasoningTokens, 80);
+});
+
+test('prepareSourceAnalytics aggregates skill-pruning prepass tokens without double-counting parent usage', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.auxiliaryLlmUsage = [
+    {
+      kind: 'skill_pruning_prepass',
+      sourceId: 'prune-1',
+      occurredAt: run.startedAt,
+      modelId: 'openai/pruner',
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 3,
+    },
+    {
+      kind: 'skill_pruning_prepass',
+      sourceId: 'prune-2',
+      occurredAt: run.startedAt,
+      modelId: 'openai/pruner',
+      inputTokens: 50,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    },
+  ];
+  // Parent usage stays unchanged.
+  run.inputTokens = 1000;
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const row = prepared.runs.find((r) => r.runId === run.runId)!;
+  assert.equal(row.skillPruningPrepassInputTokens, 150);
+  assert.equal(row.skillPruningPrepassOutputTokens, 30);
+  assert.equal(row.skillPruningPrepassCacheReadTokens, 5);
+  assert.equal(row.skillPruningPrepassCacheWriteTokens, 3);
+  assert.equal(row.inputTokens, 1000);
+});
+
+test('prepareSourceAnalytics firstAttemptSuccess is null only for unscored/no-outcome runs', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run001 = fixture.completedRuns.find((r: any) => r.runId === 'run-001')!;
+  const run003 = fixture.completedRuns.find((r: any) => r.runId === 'run-003')!;
+  const run004 = fixture.completedRuns.find((r: any) => r.runId === 'run-004')!;
+  run001.interruptedCount = 0;
+  run001.messageEditCount = 0;
+  run001.truncatedAfterCount = 0;
+  run001.outcome = { resolution: 'resolved', satisfaction: 5 };
+  run003.interruptedCount = 1;
+  run003.outcome = { resolution: 'resolved', satisfaction: 5 };
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const byId = new Map(prepared.runs.map((r) => [r.runId, r]));
+  assert.equal(byId.get('run-001')?.firstAttemptSuccess, true);
+  assert.equal(byId.get('run-003')?.firstAttemptSuccess, false);
+  assert.equal(byId.get('run-004')?.firstAttemptSuccess, null);
+});
+
+test('prepareSourceAnalytics preserves per-turn provider in throughput rows', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.provider = 'openai';
+  run.turnThroughputSamples = [
+    { endedAt: '2026-05-10T14:08:00.000Z', outputTokens: 100, generationDurationMs: 1000, concurrentBusySessions: 1, status: 'completed' },
+    { endedAt: '2026-05-10T14:09:00.000Z', outputTokens: 200, generationDurationMs: 2000, concurrentBusySessions: 1, status: 'completed', provider: 'anthropic' },
+  ];
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const rows = prepared.turnThroughput.filter((row) => row.runId === run.runId);
+  assert.equal(rows[0]?.provider, 'openai');
+  assert.equal(rows[1]?.provider, 'anthropic');
+});
+
+test('prepareSourceAnalytics exposes tool result issue rows separate from execution failures', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.toolUsage.resultIssueCountsByNameAndKind = {
+    bash: { verification_failure: 2, probe_no_match: 1 },
+  };
+  run.toolUsage.resultIssueCountsByName = { bash: 3 };
+  run.toolUsage.resultIssueCount = 3;
+  run.toolUsage.resultIssueSamples = [{
+    toolName: 'bash',
+    resultIssueKind: 'verification_failure',
+    exitCode: 1,
+    errorExcerpt: 'tests failed',
+    verificationKinds: ['test'],
+    occurredAt: run.startedAt,
+  }];
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const rows = prepared.toolResultIssues.filter((row) => row.runId === run.runId);
+  assert.equal(rows.length, 2);
+  const verificationRow = rows.find((row) => row.resultIssueKind === 'verification_failure')!;
+  assert.equal(verificationRow.toolName, 'bash');
+  assert.equal(verificationRow.count, 2);
+  assert.equal(verificationRow.exitCode, 1);
+  assert.equal(verificationRow.errorExcerpt, 'tests failed');
+  assert.deepEqual(verificationRow.verificationKinds, ['test']);
+});
+
+test('prepareSourceAnalytics derives tool result issue rows from legacy samples when counts are missing', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.toolUsage.resultIssueCountsByNameAndKind = {};
+  run.toolUsage.resultIssueCountsByName = {};
+  run.toolUsage.resultIssueCount = 0;
+  run.toolUsage.resultIssueSamples = [{
+    toolName: 'read',
+    resultIssueKind: 'probe_no_match',
+    exitCode: null,
+    errorExcerpt: '',
+    verificationKinds: [],
+    occurredAt: run.startedAt,
+  }];
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const rows = prepared.toolResultIssues.filter((row) => row.runId === run.runId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.toolName, 'read');
+  assert.equal(rows[0]?.resultIssueKind, 'probe_no_match');
+  assert.equal(rows[0]?.count, 1);
 });
 
 test('prepareSourceAnalytics exposes tool failure reason rows', async () => {
@@ -193,10 +359,10 @@ test('prepareSourceAnalytics computes derived efficiency metrics', async () => {
   assert.ok(Math.abs(r3.contextUtilization! - 16800 / 200000) < 0.001);
   assert.equal(r3.firstAttemptSuccess, true);
 
-  // run-004: lmt=0 → tokenEfficiency=null; no outcome → firstAttemptSuccess=false
+  // run-004: lmt=0 → tokenEfficiency=null; no outcome → firstAttemptSuccess=null
   const r4 = byId.get('run-004')!;
   assert.equal(r4.tokenEfficiency, null);
-  assert.equal(r4.firstAttemptSuccess, false);
+  assert.equal(r4.firstAttemptSuccess, null);
 
   // run-005: cacheRead=0, input=24500 → cacheHitRatio=0; interrupted=1 → firstAttemptSuccess=false
   const r5 = byId.get('run-005')!;

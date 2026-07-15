@@ -17,7 +17,7 @@
  * Mirrors the structure of `pricing.ts` (both delegate `models.json` loading to
  * `./load-models.ts`) so the two lookups stay in lockstep.
  */
-import { loadModelsJsonProviders } from './load-models.ts';
+import { loadHistoricalModelRecords, loadModelsJsonProviders } from './load-models.ts';
 
 export interface ModelFamilyEntry {
   /** Canonical, provider-agnostic family id (e.g. 'glm-5.2'). Falls back to the model id when no `family` is declared. */
@@ -43,14 +43,11 @@ function entryFor(id: string, model: Record<string, unknown> | null | undefined,
  * resolution degrades gracefully to "every model is its own family" rather than breaking the
  * analytics pipeline.
  */
-export function loadModelFamilyMap(modelsJsonPath?: string): Map<string, ModelFamilyEntry> {
+export function loadModelFamilyMap(modelsJsonPath?: string, historyPath?: string): Map<string, ModelFamilyEntry> {
   const map = new Map<string, ModelFamilyEntry>();
   const providers = loadModelsJsonProviders(modelsJsonPath);
-  if (!providers) {
-    return map;
-  }
 
-  for (const [providerName, providerData] of Object.entries(providers)) {
+  for (const [providerName, providerData] of Object.entries(providers ?? {})) {
     if (!providerData || typeof providerData !== 'object') {
       continue;
     }
@@ -81,6 +78,18 @@ export function loadModelFamilyMap(modelsJsonPath?: string): Map<string, ModelFa
           map.set(id, entry);
         }
       }
+    }
+  }
+
+  const historical = modelsJsonPath === undefined || historyPath !== undefined
+    ? loadHistoricalModelRecords(historyPath)
+    : [];
+  for (const model of historical) {
+    if (!map.has(model.id)) {
+      map.set(model.id, {
+        family: typeof model.family === 'string' && model.family.trim() ? model.family.trim() : model.id,
+        provider: model.provider,
+      });
     }
   }
 

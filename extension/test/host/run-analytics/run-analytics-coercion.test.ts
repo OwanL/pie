@@ -179,6 +179,7 @@ test('rollup coercers normalize invalid nested records and preserve valid values
   assert.equal(toolUsage.totalDurationMs, 1234);
   assert.equal(toolUsage.timedCallCount, 2);
   assert.deepEqual(toolUsage.durationMsByName, { bash: 900 });
+  assert.deepEqual(toolUsage.timedCallCountsByName, {});
   assert.equal(toolUsage.subagentScoredTaskCount, 1);
   assert.equal(toolUsage.subagentTaskScores.precision.sum, 3);
   assert.equal(toolUsage.subagentTaskScores.creativity.sum, 0);
@@ -328,6 +329,31 @@ test('coerceFunctionalSettings defaults tool-result-pruning fields to null when 
   });
 });
 
+test('coerceRunSnapshot preserves per-turn provider on throughput samples', () => {
+  const snapshot = makeRunSnapshot();
+  snapshot.turnThroughputSamples = [
+    {
+      endedAt: '2026-01-01T00:00:00.000Z',
+      outputTokens: 10,
+      generationDurationMs: 500,
+      concurrentBusySessions: 1,
+      status: 'completed',
+      provider: 'openai',
+    } as unknown as TurnThroughputSample,
+    {
+      endedAt: '2026-01-01T00:00:01.000Z',
+      outputTokens: 4,
+      generationDurationMs: 200,
+      concurrentBusySessions: 1,
+      status: 'completed',
+    } as unknown as TurnThroughputSample,
+  ];
+
+  const coerced = coerceRunSnapshot(snapshot);
+  assert.equal(coerced?.turnThroughputSamples[0]?.provider, 'openai');
+  assert.equal(coerced?.turnThroughputSamples[1]?.provider, undefined);
+});
+
 test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defaulting missing/malformed ones to null', () => {
   const snapshot = makeRunSnapshot();
   snapshot.turnThroughputSamples = [
@@ -414,6 +440,17 @@ test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compa
   ];
   const coerced = coerceRunSnapshot(snapshot);
   assert.deepEqual(coerced?.auxiliaryLlmUsage, [snapshot.auxiliaryLlmUsage[0]]);
+});
+
+test('coerceToolUsageRollup preserves per-tool timed call counts', () => {
+  const toolUsage = coerceToolUsageRollup({
+    totalCount: 3,
+    totalDurationMs: 1200,
+    timedCallCount: 2,
+    durationMsByName: { bash: 500, read: 700 },
+    timedCallCountsByName: { bash: 1, read: 1, edit: 0, invalid: 'x' },
+  } as unknown as Parameters<typeof coerceToolUsageRollup>[0]);
+  assert.deepEqual(toolUsage.timedCallCountsByName, { bash: 1, read: 1, edit: 0 });
 });
 
 test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollups', () => {

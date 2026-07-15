@@ -15,6 +15,11 @@ import {
 import { readOptionalText } from '../shared/checkpoint-io';
 import { parseJsonOrThrow } from '../../shared/error-message';
 import { readCheckpointSlots } from './checkpoint';
+import {
+  inferGlobalLogRoot,
+  readGlobalSideChannels,
+  type GlobalSideChannels,
+} from './side-channel';
 
 export interface RunAnalyticsQueryResult {
   completedRuns: RunSnapshot[];
@@ -27,7 +32,7 @@ export interface RunAnalyticsQueryResult {
   agentReviews: AgentReviewEntry[];
 }
 
-export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult {
+export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult, GlobalSideChannels {
   schemaVersion: number;
   exportedAt: string;
   workspaceKey: string;
@@ -140,11 +145,14 @@ export async function exportRunAnalyticsStore(
   now: () => Date = () => new Date(),
 ): Promise<RunAnalyticsExportPayload> {
   const result = await queryRunAnalyticsStore(storageDir);
+  const logRoot = inferGlobalLogRoot(storageDir);
+  const sideChannels = await readGlobalSideChannels(logRoot);
   const payload: RunAnalyticsExportPayload = {
     schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
     exportedAt: now().toISOString(),
     workspaceKey: path.basename(storageDir),
     ...result,
+    ...sideChannels,
   };
 
   await fs.mkdir(path.dirname(targetPath), { recursive: true });

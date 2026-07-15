@@ -265,6 +265,7 @@ export class SessionRunTracker {
         concurrentBusySessions: this.busySessionPaths.size,
         status,
         modelId: run.modelId ?? undefined,
+        provider: run.provider ?? undefined,
         turnLatencyMs: finiteOrNull(latency?.turnLatencyMs),
         overheadMs: finiteOrNull(latency?.overheadMs),
         providerLatencyMs: finiteOrNull(latency?.providerLatencyMs),
@@ -348,6 +349,8 @@ export class SessionRunTracker {
       run.toolUsage.timedCallCount += 1;
       run.toolUsage.durationMsByName[normalizedName] =
         (run.toolUsage.durationMsByName[normalizedName] ?? 0) + durationMs;
+      run.toolUsage.timedCallCountsByName[normalizedName] =
+        (run.toolUsage.timedCallCountsByName[normalizedName] ?? 0) + 1;
     }
   }
 

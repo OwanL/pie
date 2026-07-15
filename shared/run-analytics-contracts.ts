@@ -286,6 +286,10 @@ export interface ToolUsageRollup {
   timedCallCount: number;
   /** Cumulative execution time (ms) per normalized tool name. */
   durationMsByName: Record<string, number>;
+  /** Per-tool count of calls that reported an execution duration. Backward-compatible:
+   *  absent/legacy rolls up to the aggregate `timedCallCount` only, so per-tool
+   *  mean duration can be left null rather than divided by the total call count. */
+  timedCallCountsByName: Record<string, number>;
   subagentCallCount: number;
   subagentTaskCount: number;
   subagentAgentNames: string[];

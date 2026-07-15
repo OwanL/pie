@@ -77,6 +77,43 @@ test('model quality uses stable-treatment user outcomes and discloses supplement
   assert.match(bundle.modelQuality.notes.join(' '), /stable-model, stable-treatment user outcomes/i);
 });
 
+test('firstAttemptSuccess rate excludes null/unscored runs from denominators', async () => {
+  const prepared = deepClone(prepareSourceAnalytics(await loadFixture()));
+  // Null out every completed run's firstAttemptSuccess except two runs that share
+  // the same model-quality group (same model family + thinking + experiment).
+  for (const run of prepared.runs) {
+    if (run.status !== 'open') {
+      run.firstAttemptSuccess = null;
+    }
+  }
+  const run001 = prepared.runs.find((r) => r.runId === 'run-001')!;
+  const run002 = prepared.runs.find((r) => r.runId === 'run-002')!;
+  run001.firstAttemptSuccess = true;
+  run001.satisfaction = 5;
+  run001.resolution = 'resolved';
+  run002.firstAttemptSuccess = false;
+  run002.satisfaction = 3;
+  run002.resolution = 'partially_resolved';
+  run002.mixedModelConfig = false;
+  run002.mixedTreatmentConfig = false;
+  run002.outcomeSource = 'user';
+  run002.modelFamily = run001.modelFamily;
+  run002.modelId = run001.modelId;
+  run002.thinkingLevel = run001.thinkingLevel;
+  run002.experimentAssignment = run001.experimentAssignment;
+
+  const bundle = buildSiteDataBundle(prepared);
+  // run-001 true, run-002 false; all other completed runs have null firstAttemptSuccess.
+  assert.equal(bundle.overview.firstAttemptSuccessRate, 0.5);
+
+  const modelQualityRow = bundle.modelQuality.rows.find(
+    (row) => row.modelId === run001.modelFamily && row.thinkingLevel === run001.thinkingLevel,
+  );
+  assert.ok(modelQualityRow);
+  assert.equal(modelQualityRow.runCount, 2);
+  assert.equal(modelQualityRow.firstAttemptSuccessRate, 0.5);
+});
+
 test('site data generation handles no-scored and open-only edge cases', async () => {
   const fixture = deepClone(await loadFixture());
   fixture.completedRuns.forEach((run) => {
@@ -414,6 +451,7 @@ test('token-throughput artifact retains errored/tokenless turns and validates pe
     startedDay: '2026-05-10',
     modelId: 'gpt-4.1',
     modelFamily: 'gpt-4.1',
+    provider: null,
     thinkingLevel: 'medium',
     experimentAssignment: null,
     outputTokens: 0,

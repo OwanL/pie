@@ -14,6 +14,7 @@ import {
   type PreparedWarmBashSummaryRow,
   type PreparedRunRow,
   type PreparedToolFailureRow,
+  type PreparedToolResultIssueRow,
   type PreparedToolUsageRow,
   type PreparedTurnThroughputRow,
   type PreparedVerificationUsageRow,
@@ -24,6 +25,7 @@ import {
   type WarmBashSessionSummarySourceEvent,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
+  type ToolResultIssueKind,
   type VerificationCommandKind,
 } from './contracts.ts';
 import { existingHashPrefix, hashToPrefix } from './hash.ts';
@@ -33,6 +35,23 @@ import { normalizeSessionPath } from './transcript-source.ts';
 
 function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+function aggregateSkillPruningPrepassTokens(run: RunSnapshot): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+} {
+  const result = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  for (const sample of run.auxiliaryLlmUsage ?? []) {
+    if (sample.kind !== 'skill_pruning_prepass') continue;
+    result.inputTokens += normalizeTokenCount(sample.inputTokens);
+    result.outputTokens += normalizeTokenCount(sample.outputTokens);
+    result.cacheReadTokens += normalizeTokenCount(sample.cacheReadTokens);
+    result.cacheWriteTokens += normalizeTokenCount(sample.cacheWriteTokens);
+  }
+  return result;
 }
 
 function normalizeNullableText(value: string | null | undefined): string | null {
@@ -281,6 +300,8 @@ function prepareRun(
     ? addKnownCosts(parentEstimatedCostUsd, subagentEstimatedCostUsd)
     : null;
 
+  const prepassTokens = aggregateSkillPruningPrepassTokens(run);
+
   const scored = run.scored || outcome !== null;
   return {
     runId: run.runId,
@@ -302,6 +323,7 @@ function prepareRun(
     thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
     mixedModelConfig: run.mixedModelConfig,
     mixedTreatmentConfig: run.mixedTreatmentConfig,
+    treatmentChangeKinds: [...run.treatmentChangeKinds],
     experimentAssignment: normalizeNullableText(run.experimentAssignment),
     promptFamily: normalizeNullableText(run.analyticsFactors?.promptFamily),
     promptHashPrefix: existingHashPrefix(run.analyticsFactors?.promptHash),
@@ -374,6 +396,16 @@ function prepareRun(
     totalEstimatedCostUsd,
     compactionCount: run.compactionCount ?? 0,
     autoRetryCount: run.autoRetryCount ?? 0,
+    skillPruningPrepassInputTokens: prepassTokens.inputTokens,
+    skillPruningPrepassOutputTokens: prepassTokens.outputTokens,
+    skillPruningPrepassCacheReadTokens: prepassTokens.cacheReadTokens,
+    skillPruningPrepassCacheWriteTokens: prepassTokens.cacheWriteTokens,
+    lastTurnInputTokens: run.lastTurnUsage?.inputTokens ?? null,
+    lastTurnOutputTokens: run.lastTurnUsage?.outputTokens ?? null,
+    lastTurnCacheReadTokens: run.lastTurnUsage?.cacheReadTokens ?? null,
+    lastTurnCacheWriteTokens: run.lastTurnUsage?.cacheWriteTokens ?? null,
+    lastTurnTotalTokens: run.lastTurnUsage?.totalTokens ?? null,
+    lastTurnReasoningTokens: run.lastTurnUsage?.reasoningTokens ?? null,
     verificationTotalCount,
     verificationFailureCount,
     verificationState: normalizeVerificationState(verificationTotalCount, verificationFailureCount),
@@ -406,7 +438,9 @@ function prepareRun(
     cacheHitRatio: ((run.cacheReadTokens ?? 0) + (run.inputTokens ?? 0)) > 0
       ? round3((run.cacheReadTokens ?? 0) / ((run.cacheReadTokens ?? 0) + (run.inputTokens ?? 0)))
       : null,
-    firstAttemptSuccess: run.interruptedCount === 0 && run.messageEditCount === 0 && run.truncatedAfterCount === 0 && (outcome?.resolution === 'resolved'),
+    firstAttemptSuccess: outcome
+      ? run.interruptedCount === 0 && run.messageEditCount === 0 && run.truncatedAfterCount === 0 && outcome.resolution === 'resolved'
+      : null,
     editRevisitRate: (() => {
       // File churn: fraction of attributed EDIT ops that revisited an already-edited file.
       // 0 = every edit touched a fresh file (no churn); →1 = kept re-editing the same files.
@@ -467,7 +501,8 @@ function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): Prepare
       const resultIssueCount = run.toolUsage.resultIssueCountsByName[toolName]
         ?? (verificationProjectFailureCount + probeFailureCount);
       const totalDurationMs = run.toolUsage.durationMsByName[toolName] ?? 0;
-      const meanDurationMs = callCount > 0 ? round3(totalDurationMs / callCount) : null;
+      const timedCallCount = run.toolUsage.timedCallCountsByName[toolName] ?? 0;
+      const meanDurationMs = timedCallCount > 0 ? round3(totalDurationMs / timedCallCount) : null;
       return {
         runId: run.runId,
         toolName,
@@ -478,6 +513,7 @@ function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): Prepare
         probeFailureCount,
         resultIssueCount,
         totalDurationMs,
+        timedCallCount,
         meanDurationMs,
         startedAt: run.startedAt,
         startedDay,
@@ -567,6 +603,63 @@ function prepareToolFailures(run: RunSnapshot, outcome: RunOutcome | null): Prep
     }
     const unclassifiedTotal = run.toolUsage.failureCount - classifiedTotal;
     pushFailureRow('(unattributed)', 'unknown', unclassifiedTotal);
+  }
+
+  return rows;
+}
+
+function prepareToolResultIssues(run: RunSnapshot, outcome: RunOutcome | null): PreparedToolResultIssueRow[] {
+  const startedDay = toStartedDay(run.startedAt);
+  const rows: PreparedToolResultIssueRow[] = [];
+  const emittedKeys = new Set<string>();
+  const sampleByKey = new Map<string, (typeof run.toolUsage.resultIssueSamples)[number]>(
+    run.toolUsage.resultIssueSamples.map((sample) => [`${sample.toolName}\u0000${sample.resultIssueKind}`, sample]),
+  );
+
+  const pushRow = (toolName: string, resultIssueKind: ToolResultIssueKind, count: number): void => {
+    const key = `${toolName}\u0000${resultIssueKind}`;
+    if (emittedKeys.has(key)) return;
+    emittedKeys.add(key);
+    const sample = sampleByKey.get(key);
+    rows.push({
+      runId: run.runId,
+      toolName,
+      resultIssueKind,
+      count,
+      exitCode: sample?.exitCode ?? null,
+      errorExcerpt: sample?.errorExcerpt || null,
+      verificationKinds: sample?.verificationKinds ?? [],
+      startedAt: run.startedAt,
+      startedDay,
+      modelId: normalizeNullableText(run.modelId),
+      thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
+      experimentAssignment: normalizeNullableText(run.experimentAssignment),
+      mixedTreatmentConfig: run.mixedTreatmentConfig,
+      scored: run.scored || outcome !== null,
+      satisfaction: outcome?.satisfaction ?? null,
+      resolution: outcome?.resolution ?? null,
+    });
+  };
+
+  const kinds: ToolResultIssueKind[] = ['verification_failure', 'probe_no_match'];
+  for (const toolName of Object.keys(run.toolUsage.resultIssueCountsByNameAndKind)) {
+    const countsByKind = run.toolUsage.resultIssueCountsByNameAndKind[toolName];
+    if (!countsByKind) continue;
+    for (const kind of kinds) {
+      const count = countsByKind[kind] ?? 0;
+      if (count <= 0) continue;
+      pushRow(toolName, kind, count);
+    }
+  }
+
+  // Backward compatibility: legacy snapshots may carry result-issue samples
+  // without a per-tool per-kind breakdown. Emit a count-1 row for each unique
+  // sample tool+kind so the detail is not lost.
+  for (const sample of run.toolUsage.resultIssueSamples) {
+    const key = `${sample.toolName}\u0000${sample.resultIssueKind}`;
+    if (!emittedKeys.has(key)) {
+      pushRow(sample.toolName, sample.resultIssueKind, 1);
+    }
   }
 
   return rows;
@@ -888,6 +981,7 @@ function prepareTurnThroughput(
 
   return run.turnThroughputSamples.map((sample) => {
     const modelId = normalizeNullableText(sample.modelId) ?? runModelId;
+    const provider = normalizeNullableText(sample.provider) ?? run.provider ?? null;
     const modelFamily = resolveModelFamily(modelId, familyMap);
     const tokensPerSecond =
       sample.status === 'completed'
@@ -900,6 +994,7 @@ function prepareTurnThroughput(
       endedAt: sample.endedAt,
       startedDay: toStartedDay(sample.endedAt),
       modelId,
+      provider,
       modelFamily,
       thinkingLevel,
       experimentAssignment,
@@ -967,6 +1062,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const historicalSessions = [...historicalByPath.values()];
   const toolUsage: PreparedToolUsageRow[] = [];
   const toolFailures: PreparedToolFailureRow[] = [];
+  const toolResultIssues: PreparedToolResultIssueRow[] = [];
   const verificationUsage: PreparedVerificationUsageRow[] = [];
   const backendErrors: PreparedBackendErrorRow[] = [];
   const fileExtensions: PreparedFileExtensionRow[] = [];
@@ -976,6 +1072,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     const outcome = getRunOutcome(run, outcomesByRunId);
     toolUsage.push(...prepareToolUsage(run, outcome));
     toolFailures.push(...prepareToolFailures(run, outcome));
+    toolResultIssues.push(...prepareToolResultIssues(run, outcome));
     verificationUsage.push(...prepareVerificationUsage(run, outcome));
     backendErrors.push(...prepareBackendErrors(run, outcome));
     fileExtensions.push(...prepareFileExtensions(run, outcome));
@@ -996,6 +1093,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     runs,
     toolUsage,
     toolFailures,
+    toolResultIssues,
     verificationUsage,
     backendErrors,
     fileExtensions,

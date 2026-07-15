@@ -328,3 +328,137 @@ test('agent reviews are surfaced in query and export payloads', async () => {
     await stats.shutdown();
   });
 });
+
+test('exportRunAnalyticsStore embeds parsed global side-channel logs', async () => {
+  await withTempDir(async (tempDir) => {
+    let archState: ArchState = createInitialArchState();
+    const sessionPath = '/workspace/session-side-channels.jsonl';
+    let idCounter = 0;
+
+    archState = produce(archState, draft => {
+      draft.sessions.sessions.push({
+        path: sessionPath,
+        name: 'Side Channel Session',
+        cwd: '/workspace',
+        modifiedAt: new Date().toISOString(),
+        messageCount: 0,
+        modelId: 'claude',
+      });
+      draft.settings.modelSettings = {
+        defaultModel: 'claude',
+        defaultThinkingLevel: 'medium',
+      };
+    });
+
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      legacyUsageDataRootPath: tempDir,
+      workspaceId: 'workspace-side-channels',
+      getArchState: () => archState,
+      dispatchArchEvent: (event) => { const result = reducer(archState, event); archState = result.state; },
+      createId: () => `id-${++idCounter}`,
+    });
+
+    await stats.start();
+    stats.prepareForSend(sessionPath, []);
+    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
+    await stats.flush();
+
+    // Global side-channel logs live at <configRoot>/data/*.jsonl, two levels
+    // above the hashed workspace store. The exported payload should embed them.
+    await fs.mkdir(path.join(tempDir, 'data'), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, 'data', 'pruning.jsonl'),
+      [
+        JSON.stringify({
+          timestamp: '2026-01-01T00:00:00.000Z',
+          sessionId: 'sess-prune-1',
+          mode: 'auto',
+          included: ['skill-a'],
+          excluded: ['skill-b'],
+          skillBlockTokens: 100,
+          originalBlockTokens: 200,
+          toolIncluded: ['tool-a'],
+          toolExcluded: ['tool-b'],
+          toolBlockTokens: 50,
+          originalToolBlockTokens: 80,
+        }),
+        JSON.stringify({ event: 'skill_miss', sessionId: 'sess-prune-1', timestamp: '2026-01-01T00:00:01.000Z', skillName: 'skill-b' }),
+        'this is not valid json and should be ignored',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(tempDir, 'data', 'tool-result-pruning.jsonl'),
+      JSON.stringify({
+        event: 'tool_result_pruned',
+        sessionId: 'sess-prune-1',
+        toolName: 'bash',
+        rules: ['strip-ansi'],
+        beforeTokens: 500,
+        afterTokens: 100,
+        tokensSaved: 400,
+        timestamp: '2026-01-01T00:00:02.000Z',
+      }) + '\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(tempDir, 'data', 'warm-bash.jsonl'),
+      [
+        JSON.stringify({
+          event: 'auto_prune_rewrite',
+          sessionId: 'sess-warm-1',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          before: 'grep x',
+          after: 'grep --exclude-dir=node_modules x',
+        }),
+        JSON.stringify({
+          event: 'session_summary',
+          sessionId: 'sess-warm-1',
+          timestamp: '2026-01-01T00:00:04.000Z',
+          fastPath: 1,
+          warm: 2,
+          fallback: 0,
+          poolSize: 4,
+          warmupFailures: 0,
+          autoPruneEnabled: true,
+          fastPathEnabled: true,
+          gnuGrep: true,
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const storageDir = await getRunStorageDir(tempDir);
+    const targetPath = path.join(tempDir, 'analytics-export-side-channels.json');
+    const payload = await exportRunAnalyticsStore(storageDir, targetPath, () => new Date('2026-01-01T00:00:05.000Z'));
+    const written = JSON.parse(await fs.readFile(targetPath, 'utf8')) as {
+      pruningDecisions: Array<{ sessionId: string; query: string }>;
+      pruningEvents: Array<{ event: string; sessionId: string }>;
+      toolResultPruningEvents: Array<{ toolName: string }>;
+      warmBashRewrites: Array<{ sessionId: string }>;
+      warmBashSummaries: Array<{ warm: number }>;
+    };
+
+    assert.equal(payload.pruningDecisions.length, 1);
+    assert.equal(payload.pruningDecisions[0]?.sessionId, 'sess-prune-1');
+    assert.equal(payload.pruningDecisions[0]?.query, '', 'portable export must redact user-authored pruning queries');
+    assert.equal(payload.pruningEvents.length, 1);
+    assert.equal(payload.pruningEvents[0]?.event, 'skill_miss');
+    assert.equal(payload.toolResultPruningEvents.length, 1);
+    assert.equal(payload.toolResultPruningEvents[0]?.toolName, 'bash');
+    // Raw rewrite commands may contain paths or secrets, so portable exports
+    // retain only content-free warm-bash summaries.
+    assert.equal(payload.warmBashRewrites.length, 0);
+    assert.equal(payload.warmBashSummaries.length, 1);
+    assert.equal(payload.warmBashSummaries[0]?.warm, 2);
+
+    assert.equal(written.pruningDecisions.length, 1);
+    assert.equal(written.pruningEvents.length, 1);
+    assert.equal(written.toolResultPruningEvents.length, 1);
+    assert.equal(written.warmBashRewrites.length, 0);
+    assert.equal(written.warmBashSummaries.length, 1);
+
+    await stats.shutdown();
+  });
+});

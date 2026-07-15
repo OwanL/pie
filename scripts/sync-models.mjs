@@ -136,6 +136,24 @@ function validateExtra(source) {
       throw new Error(`model '${provider}/${id}' missing from profileOrder`);
     }
   }
+
+  // Historical/retired catalog: identities must be unique within the catalog,
+  // and none may duplicate an active provider/id (a model still in `providers`
+  // is not retired). Active pricing always wins; historical entries only fill
+  // missing identities, so an active collision would be dead/misleading data.
+  if (Array.isArray(source.historicalModels)) {
+    const seenHistorical = new Set();
+    for (const m of source.historicalModels) {
+      const key = identityKey(m.provider, m.id);
+      if (seenHistorical.has(key)) {
+        throw new Error(`duplicate historical model identity: ${m.provider}/${m.id}`);
+      }
+      seenHistorical.add(key);
+      if (allModels.has(key)) {
+        throw new Error(`historical model '${m.provider}/${m.id}' is still active — remove it from historicalModels`);
+      }
+    }
+  }
 }
 
 // --- generation -------------------------------------------------------------
@@ -199,6 +217,34 @@ export function generateModelsJson(source) {
     providers[pname] = out;
   }
   return { providers };
+}
+
+/**
+ * Generate the historical/retired model pricing catalog consumed by analysis
+ * (`analysis/model-pricing-history.json`). Each entry mirrors the models.json
+ * model shape (`cost` block) plus its `provider` so the analysis pricing/family
+ * loaders can merge retired identities as a fallback behind active pricing.
+ * Retired models are deliberately excluded from `models.json`, `profileOrder`,
+ * and the picker — this file is read-only pricing/attribution metadata.
+ */
+export function generatePricingHistoryJson(source) {
+  const entries = (source.historicalModels ?? []).map((m) => {
+    const entry = {
+      provider: m.provider,
+      id: m.id,
+      name: m.name,
+      cost: {
+        input: m.pricing.input,
+        output: m.pricing.output,
+        cacheRead: m.pricing.cacheRead,
+        cacheWrite: m.pricing.cacheWrite,
+        ...(m.pricing.tiers !== undefined ? { tiers: m.pricing.tiers } : {}),
+      },
+    };
+    if (m.family !== undefined) entry.family = m.family;
+    return entry;
+  });
+  return { models: entries };
 }
 
 /** Build full-identity and bare-id indexes for profile-order resolution. */
@@ -273,6 +319,7 @@ export function generate(source, existingSettings) {
     modelsJson: generateModelsJson(source),
     modelProfilesYaml: generateModelProfilesYaml(source),
     settingsJson: generateSettings(source, existingSettings),
+    pricingHistoryJson: generatePricingHistoryJson(source),
   };
 }
 
@@ -289,6 +336,7 @@ const DERIVED_PATHS = {
   modelsJson: 'models.json',
   modelProfilesYaml: 'model-profiles.yaml',
   settingsJson: 'settings.json',
+  pricingHistoryJson: 'analysis/model-pricing-history.json',
 };
 
 /** Parse a derived file (JSON or YAML) into a JS value for semantic compare. */
@@ -338,7 +386,7 @@ export function check(root = repoRoot()) {
   for (const [key, rel] of Object.entries(DERIVED_PATHS)) {
     const committed = parseDerived(rel, readFileSync(path.join(root, rel), 'utf8'));
     const generated =
-      key === 'modelsJson' || key === 'settingsJson' ? out[key] : getYaml().parse(out[key]);
+      key === 'modelProfilesYaml' ? getYaml().parse(out[key]) : out[key];
     let changed = false;
     let diffLines = [];
     try {
@@ -391,6 +439,7 @@ export function sync(root = repoRoot()) {
     { key: 'modelsJson', rel: DERIVED_PATHS.modelsJson, serialize: (v) => JSON.stringify(v, null, 2) + '\n' },
     { key: 'modelProfilesYaml', rel: DERIVED_PATHS.modelProfilesYaml, serialize: (v) => v },
     { key: 'settingsJson', rel: DERIVED_PATHS.settingsJson, serialize: (v) => JSON.stringify(v, null, 2) + '\n' },
+    { key: 'pricingHistoryJson', rel: DERIVED_PATHS.pricingHistoryJson, serialize: (v) => JSON.stringify(v, null, 2) + '\n' },
   ];
   for (const w of writes) {
     const content = w.serialize(out[w.key]);

@@ -18,6 +18,15 @@ import { parseJsonOrThrow } from '../../shared/error-message.js';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MODELS_JSON_PATH = path.resolve(SCRIPT_DIR, '../../models.json');
+const DEFAULT_MODEL_PRICING_HISTORY_PATH = path.resolve(SCRIPT_DIR, '../model-pricing-history.json');
+
+export interface HistoricalModelRecord {
+  provider: string;
+  id: string;
+  name: string;
+  family?: string;
+  cost: unknown;
+}
 
 /** Resolve the models.json path: explicit arg > env var > repo-root default. */
 export function resolveModelsJsonPath(modelsJsonPath?: string): string {
@@ -39,6 +48,27 @@ export function resolveModelsJsonPath(modelsJsonPath?: string): string {
  * empty map) rather than breaking the analytics pipeline. Callers then iterate `providers`
  * themselves — the per-record mapping differs between pricing and model-family resolution.
  */
+export function loadHistoricalModelRecords(historyPath?: string): HistoricalModelRecord[] {
+  const resolvedPath = historyPath ?? DEFAULT_MODEL_PRICING_HISTORY_PATH;
+  let parsed: unknown;
+  try {
+    parsed = parseJsonOrThrow<unknown>(fs.readFileSync(resolvedPath, 'utf8'), resolvedPath);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  const models = (parsed as Record<string, unknown>).models;
+  if (!Array.isArray(models)) return [];
+  return models.filter((entry): entry is HistoricalModelRecord => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const record = entry as Record<string, unknown>;
+    return typeof record.provider === 'string'
+      && typeof record.id === 'string'
+      && typeof record.name === 'string'
+      && 'cost' in record;
+  });
+}
+
 export function loadModelsJsonProviders(modelsJsonPath?: string): Record<string, unknown> | null {
   const resolvedPath = resolveModelsJsonPath(modelsJsonPath);
 

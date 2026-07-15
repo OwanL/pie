@@ -384,6 +384,24 @@ test('throughput samples default latency fields to null when unmeasured', () => 
   assert.equal(sample?.providerLatencyMs, null);
 });
 
+test('turn throughput samples preserve per-turn provider attribution', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  harness.tracker.onModelConfigChanged(harness.sessionPath, 'claude-test', 'medium', 'openai');
+  harness.tracker.onAssistantTurnStarted(harness.sessionPath, 'turn-prov');
+  harness.tracker.onAssistantTurnEnded(
+    harness.sessionPath,
+    'turn-prov',
+    500,
+    { inputTokens: 5, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 55 },
+    'completed',
+  );
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.provider, 'openai');
+  assert.equal(run?.turnThroughputSamples[0]?.provider, 'openai');
+});
+
 test('a turn with measurable latency still records a sample even with negligible generation', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);
@@ -449,6 +467,7 @@ test('duplicate tool.started and tool.finished events do not double-count', () =
   assert.equal(run?.toolUsage.countsByName['bash'], 1, 'duplicate tool.started must not double-count per-name count');
   assert.equal(run?.toolUsage.timedCallCount, 1, 'duplicate tool.finished must not double-count timedCallCount');
   assert.equal(run?.toolUsage.totalDurationMs, 100, 'duplicate tool.finished must not double-count duration');
+  assert.equal(run?.toolUsage.timedCallCountsByName['bash'], 1, 'per-tool timed call count is recorded');
 });
 
 test('assistant turn usage with NaN or negative values does not corrupt counters', () => {

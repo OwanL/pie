@@ -9,6 +9,7 @@ import type {
   PreparedFileExtensionRow,
   PreparedPruningEventRow,
   PreparedPruningSignalRow,
+  PreparedToolResultIssueRow,
   PreparedToolResultPruningRow,
   PreparedWarmBashRewriteRow,
   PreparedWarmBashSummaryRow,
@@ -129,7 +130,7 @@ interface DuckDbRunRow {
   token_efficiency: number | null;
   context_utilization: number | null;
   cache_hit_ratio: number | null;
-  first_attempt_success: boolean;
+  first_attempt_success: boolean | null;
   estimated_cost_usd: number | null;
   // ── Fields below were added after the initial DuckDB export layer and must be
   //    kept in sync with `PreparedRunRow` (contracts.ts) + `toDuckDbRunRow` +
@@ -148,6 +149,17 @@ interface DuckDbRunRow {
   files_reviewed_count: number;
   read_revisit_rate: number | null;
   initial_user_message_chars: number | null;
+  skill_pruning_prepass_input_tokens: number;
+  skill_pruning_prepass_output_tokens: number;
+  skill_pruning_prepass_cache_read_tokens: number;
+  skill_pruning_prepass_cache_write_tokens: number;
+  last_turn_input_tokens: number | null;
+  last_turn_output_tokens: number | null;
+  last_turn_cache_read_tokens: number | null;
+  last_turn_cache_write_tokens: number | null;
+  last_turn_total_tokens: number | null;
+  last_turn_reasoning_tokens: number | null;
+  treatment_change_kinds: string[];
 }
 
 interface DuckDbToolUsageRow {
@@ -160,6 +172,7 @@ interface DuckDbToolUsageRow {
   probe_failure_count: number;
   result_issue_count: number;
   total_duration_ms: number;
+  timed_call_count: number;
   mean_duration_ms: number | null;
   started_at: string;
   started_day: string;
@@ -176,6 +189,25 @@ interface DuckDbToolFailureRow {
   run_id: string;
   tool_name: string;
   failure_kind: string;
+  count: number;
+  exit_code: number | null;
+  error_excerpt: string | null;
+  verification_kinds: string[];
+  started_at: string;
+  started_day: string;
+  model_id: string | null;
+  thinking_level: string | null;
+  experiment_assignment: string | null;
+  mixed_treatment_config: boolean;
+  scored: boolean;
+  satisfaction: number | null;
+  resolution: string | null;
+}
+
+interface DuckDbToolResultIssueRow {
+  run_id: string;
+  tool_name: string;
+  result_issue_kind: string;
   count: number;
   exit_code: number | null;
   error_excerpt: string | null;
@@ -349,15 +381,16 @@ interface DuckDbTurnThroughputRow {
   turn_latency_ms: number | null;
   overhead_ms: number | null;
   provider_latency_ms: number | null;
-  // ── Per-turn token/context fields added after the initial throughput export
-  //    layer. Kept in sync with `PreparedTurnThroughputRow` (contracts.ts) +
-  //    `toDuckDbTurnThroughputRow` + `turnThroughputTableSchema()`. Appended
+  // ── Per-turn token/context/provider fields added after the initial throughput
+  //    export layer. Kept in sync with `PreparedTurnThroughputRow` (contracts.ts)
+  //    + `toDuckDbTurnThroughputRow` + `turnThroughputTableSchema()`. Appended
   //    here (and in the mapper/schema) so the positional `INSERT ... SELECT *
   //    FROM read_json_auto` column order is preserved — see `populateTableFromJson`.
   input_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
   context_tokens: number | null;
+  provider: string | null;
 }
 
 function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
@@ -467,6 +500,17 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     files_reviewed_count: row.filesReviewedCount,
     read_revisit_rate: row.readRevisitRate,
     initial_user_message_chars: row.initialUserMessageChars,
+    skill_pruning_prepass_input_tokens: row.skillPruningPrepassInputTokens,
+    skill_pruning_prepass_output_tokens: row.skillPruningPrepassOutputTokens,
+    skill_pruning_prepass_cache_read_tokens: row.skillPruningPrepassCacheReadTokens,
+    skill_pruning_prepass_cache_write_tokens: row.skillPruningPrepassCacheWriteTokens,
+    last_turn_input_tokens: row.lastTurnInputTokens,
+    last_turn_output_tokens: row.lastTurnOutputTokens,
+    last_turn_cache_read_tokens: row.lastTurnCacheReadTokens,
+    last_turn_cache_write_tokens: row.lastTurnCacheWriteTokens,
+    last_turn_total_tokens: row.lastTurnTotalTokens,
+    last_turn_reasoning_tokens: row.lastTurnReasoningTokens,
+    treatment_change_kinds: row.treatmentChangeKinds,
   };
 }
 
@@ -481,6 +525,7 @@ function toDuckDbToolUsageRow(row: PreparedToolUsageRow): DuckDbToolUsageRow {
     probe_failure_count: row.probeFailureCount,
     result_issue_count: row.resultIssueCount,
     total_duration_ms: row.totalDurationMs,
+    timed_call_count: row.timedCallCount,
     mean_duration_ms: row.meanDurationMs,
     started_at: row.startedAt,
     started_day: row.startedDay,
@@ -499,6 +544,27 @@ function toDuckDbToolFailureRow(row: PreparedToolFailureRow): DuckDbToolFailureR
     run_id: row.runId,
     tool_name: row.toolName,
     failure_kind: row.failureKind,
+    count: row.count,
+    exit_code: row.exitCode,
+    error_excerpt: row.errorExcerpt,
+    verification_kinds: row.verificationKinds,
+    started_at: row.startedAt,
+    started_day: row.startedDay,
+    model_id: row.modelId,
+    thinking_level: row.thinkingLevel,
+    experiment_assignment: row.experimentAssignment,
+    mixed_treatment_config: row.mixedTreatmentConfig,
+    scored: row.scored,
+    satisfaction: row.satisfaction,
+    resolution: row.resolution,
+  };
+}
+
+function toDuckDbToolResultIssueRow(row: PreparedToolResultIssueRow): DuckDbToolResultIssueRow {
+  return {
+    run_id: row.runId,
+    tool_name: row.toolName,
+    result_issue_kind: row.resultIssueKind,
     count: row.count,
     exit_code: row.exitCode,
     error_excerpt: row.errorExcerpt,
@@ -696,14 +762,16 @@ function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnTh
     cache_read_tokens: row.cacheReadTokens,
     cache_write_tokens: row.cacheWriteTokens,
     context_tokens: row.contextTokens,
+    provider: row.provider,
   };
 }
 
 export async function writeDuckDbStagingExports(exportsDir: string, prepared: PreparedAnalyticsData): Promise<{
   runsPath: string;
   toolUsagePath: string;
-  verificationUsagePath: string;
   toolFailuresPath: string;
+  toolResultIssuesPath: string;
+  verificationUsagePath: string;
   backendErrorsPath: string;
   fileExtensionsPath: string;
   pruningEventsPath: string;
@@ -718,6 +786,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const runsPath = path.join(exportsDir, 'runs.json');
   const toolUsagePath = path.join(exportsDir, 'tool-usage.json');
   const toolFailuresPath = path.join(exportsDir, 'tool-failures.json');
+  const toolResultIssuesPath = path.join(exportsDir, 'tool-result-issues.json');
   const verificationUsagePath = path.join(exportsDir, 'verification-usage.json');
   const backendErrorsPath = path.join(exportsDir, 'backend-errors.json');
   const fileExtensionsPath = path.join(exportsDir, 'file-extensions.json');
@@ -733,6 +802,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(runsPath, prepared.runs.map(toDuckDbRunRow)),
     writeJsonFile(toolUsagePath, prepared.toolUsage.map(toDuckDbToolUsageRow)),
     writeJsonFile(toolFailuresPath, prepared.toolFailures.map(toDuckDbToolFailureRow)),
+    writeJsonFile(toolResultIssuesPath, prepared.toolResultIssues.map(toDuckDbToolResultIssueRow)),
     writeJsonFile(verificationUsagePath, prepared.verificationUsage.map(toDuckDbVerificationUsageRow)),
     writeJsonFile(backendErrorsPath, prepared.backendErrors.map(toDuckDbBackendErrorRow)),
     writeJsonFile(fileExtensionsPath, prepared.fileExtensions.map(toDuckDbFileExtensionRow)),
@@ -745,7 +815,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(turnThroughputPath, prepared.turnThroughput.map(toDuckDbTurnThroughputRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -875,7 +945,18 @@ CREATE TABLE runs (
   edit_revisit_rate DOUBLE,
   files_reviewed_count INTEGER,
   read_revisit_rate DOUBLE,
-  initial_user_message_chars INTEGER
+  initial_user_message_chars INTEGER,
+  skill_pruning_prepass_input_tokens BIGINT,
+  skill_pruning_prepass_output_tokens BIGINT,
+  skill_pruning_prepass_cache_read_tokens BIGINT,
+  skill_pruning_prepass_cache_write_tokens BIGINT,
+  last_turn_input_tokens BIGINT,
+  last_turn_output_tokens BIGINT,
+  last_turn_cache_read_tokens BIGINT,
+  last_turn_cache_write_tokens BIGINT,
+  last_turn_total_tokens BIGINT,
+  last_turn_reasoning_tokens BIGINT,
+  treatment_change_kinds VARCHAR[]
 );
 `.trim();
 }
@@ -892,6 +973,7 @@ CREATE TABLE tool_usage (
   probe_failure_count INTEGER,
   result_issue_count INTEGER,
   total_duration_ms DOUBLE,
+  timed_call_count INTEGER,
   mean_duration_ms DOUBLE,
   started_at TIMESTAMP,
   started_day DATE,
@@ -912,6 +994,29 @@ CREATE TABLE tool_failures (
   run_id VARCHAR,
   tool_name VARCHAR,
   failure_kind VARCHAR,
+  count INTEGER,
+  exit_code BIGINT,
+  error_excerpt VARCHAR,
+  verification_kinds VARCHAR[],
+  started_at TIMESTAMP,
+  started_day DATE,
+  model_id VARCHAR,
+  thinking_level VARCHAR,
+  experiment_assignment VARCHAR,
+  mixed_treatment_config BOOLEAN,
+  scored BOOLEAN,
+  satisfaction DOUBLE,
+  resolution VARCHAR
+);
+`.trim();
+}
+
+function toolResultIssuesTableSchema(): string {
+  return `
+CREATE TABLE tool_result_issues (
+  run_id VARCHAR,
+  tool_name VARCHAR,
+  result_issue_kind VARCHAR,
   count INTEGER,
   exit_code BIGINT,
   error_excerpt VARCHAR,
@@ -1128,7 +1233,8 @@ CREATE TABLE turn_throughput (
   input_tokens BIGINT,
   cache_read_tokens BIGINT,
   cache_write_tokens BIGINT,
-  context_tokens BIGINT
+  context_tokens BIGINT,
+  provider VARCHAR
 );
 `.trim();
 }
@@ -1220,6 +1326,7 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'runs', runsTableSchema(), stagingPaths.runsPath);
     await populateTableFromJson(connection, 'tool_usage', toolUsageTableSchema(), stagingPaths.toolUsagePath);
     await populateTableFromJson(connection, 'tool_failures', toolFailuresTableSchema(), stagingPaths.toolFailuresPath);
+    await populateTableFromJson(connection, 'tool_result_issues', toolResultIssuesTableSchema(), stagingPaths.toolResultIssuesPath);
     await populateTableFromJson(connection, 'verification_usage', verificationUsageTableSchema(), stagingPaths.verificationUsagePath);
     await populateTableFromJson(connection, 'backend_errors', backendErrorsTableSchema(), stagingPaths.backendErrorsPath);
     await populateTableFromJson(connection, 'file_extensions', fileExtensionsTableSchema(), stagingPaths.fileExtensionsPath);

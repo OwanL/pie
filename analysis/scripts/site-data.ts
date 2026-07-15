@@ -196,9 +196,12 @@ function createOverview(prepared: PreparedAnalyticsData): OverviewData {
     medianTokenEfficiency: percentile(completedRuns.map((r) => r.tokenEfficiency).filter((v): v is number => v !== null), 50, 1),
     averageContextUtilization: average(completedRuns.map((r) => r.contextUtilization).filter((v): v is number => v !== null), 3),
     averageCacheHitRatio: average(completedRuns.map((r) => r.cacheHitRatio).filter((v): v is number => v !== null), 3),
-    firstAttemptSuccessRate: completedRuns.length === 0
-      ? null
-      : round(completedRuns.filter((r) => r.firstAttemptSuccess).length / completedRuns.length, 3),
+    firstAttemptSuccessRate: (() => {
+      const eligible = completedRuns.filter((r) => r.firstAttemptSuccess !== null);
+      return eligible.length === 0
+        ? null
+        : round(eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length, 3);
+    })(),
     totalEstimatedCostUsd: costValues.length === 0 ? null : round(costValues.reduce((sum, v) => sum + v, 0), 4),
     medianEstimatedCostUsd: percentile(costValues, 50, 4),
     latestRunTimestamp,
@@ -265,9 +268,12 @@ function createModelQuality(prepared: PreparedAnalyticsData): ModelQualityData {
       medianTokenEfficiency: percentile(runs.map((r) => r.tokenEfficiency).filter((v): v is number => v !== null), 50, 1),
       averageContextUtilization: average(runs.map((r) => r.contextUtilization).filter((v): v is number => v !== null), 3),
       averageCacheHitRatio: average(runs.map((r) => r.cacheHitRatio).filter((v): v is number => v !== null), 3),
-      firstAttemptSuccessRate: runs.length === 0
-        ? null
-        : round(runs.filter((r) => r.firstAttemptSuccess).length / runs.length, 3),
+      firstAttemptSuccessRate: (() => {
+        const eligible = runs.filter((r) => r.firstAttemptSuccess !== null);
+        return eligible.length === 0
+          ? null
+          : round(eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length, 3);
+      })(),
       resolutionCounts,
     };
   });
@@ -630,7 +636,10 @@ function buildToolResultPruningOutcomes(prepared: PreparedAnalyticsData): ToolRe
         scoredRunCount: scored.length,
         meanSatisfaction: meanOver(scored, (r) => r.satisfaction ?? 0),
         resolvedRate: scored.length > 0 ? resolvedCount / scored.length : null,
-        firstAttemptSuccessRate: rateOver(list, (r) => r.firstAttemptSuccess),
+        firstAttemptSuccessRate: (() => {
+          const eligible = list.filter((r) => r.firstAttemptSuccess !== null);
+          return eligible.length === 0 ? null : eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length;
+        })(),
         meanToolFailureCount: meanOver(list, (r) => r.toolFailureCount),
         meanEditCount: meanOver(list, (r) => r.fileEditCount),
         meanAssistantTurnCount: meanOver(list, (r) => r.assistantTurnCount),

@@ -66,6 +66,10 @@
     "providers": {
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/provider" }
+    },
+    "historicalModels": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/historicalModel" }
     }
   },
   "definitions": {
@@ -166,6 +170,18 @@
           ]
         },
         "costRank": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "historicalModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "id", "name", "pricing"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "family": { "type": "string" },
+        "pricing": { "$ref": "#/definitions/pricing" }
       }
     }
   }

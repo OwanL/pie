@@ -116,6 +116,7 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       concurrentBusySessions: toNonNegativeInteger(entry.concurrentBusySessions),
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
+      provider: typeof entry.provider === 'string' ? entry.provider : undefined,
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),
       overheadMs: toNullableNonNegativeInteger(entry.overheadMs),
       providerLatencyMs: toNullableNonNegativeInteger(entry.providerLatencyMs),

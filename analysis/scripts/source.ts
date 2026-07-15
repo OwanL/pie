@@ -216,6 +216,7 @@ function createEmptyToolUsageRollup(): ToolUsageRollup {
     totalDurationMs: 0,
     timedCallCount: 0,
     durationMsByName: {},
+    timedCallCountsByName: {},
     subagentCallCount: 0,
     subagentTaskCount: 0,
     subagentAgentNames: [],
@@ -543,6 +544,7 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     totalDurationMs: toNonNegativeInteger(value.totalDurationMs),
     timedCallCount: toNonNegativeInteger(value.timedCallCount),
     durationMsByName: coerceCountRecord(value.durationMsByName),
+    timedCallCountsByName: coerceCountRecord(value.timedCallCountsByName),
     subagentCallCount: toNonNegativeInteger(value.subagentCallCount),
     subagentTaskCount: toNonNegativeInteger(value.subagentTaskCount),
     subagentAgentNames: coerceStringArray(value.subagentAgentNames),
@@ -724,6 +726,7 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       concurrentBusySessions: toNonNegativeInteger(entry.concurrentBusySessions),
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
+      provider: typeof entry.provider === 'string' ? entry.provider : undefined,
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),
       overheadMs: toNullableNonNegativeInteger(entry.overheadMs),
       providerLatencyMs: toNullableNonNegativeInteger(entry.providerLatencyMs),
@@ -812,12 +815,26 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   if (!isRecord(value)) {
     return null;
   }
+  const inputTokens = toNonNegativeInteger(value.inputTokens);
+  const outputTokens = toNonNegativeInteger(value.outputTokens);
+  const cacheReadTokens = toNonNegativeInteger(value.cacheReadTokens);
+  const cacheWriteTokens = toNonNegativeInteger(value.cacheWriteTokens);
+  const reportedTotal = toNonNegativeInteger(value.totalTokens);
+  const totalTokens = reportedTotal > 0
+    ? reportedTotal
+    : inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  if (totalTokens === 0) {
+    return null;
+  }
+  const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
+  const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, outputTokens) : undefined;
   return {
-    inputTokens: toNonNegativeInteger(value.inputTokens),
-    outputTokens: toNonNegativeInteger(value.outputTokens),
-    cacheReadTokens: toNonNegativeInteger(value.cacheReadTokens),
-    cacheWriteTokens: toNonNegativeInteger(value.cacheWriteTokens),
-    totalTokens: toNonNegativeInteger(value.totalTokens),
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens,
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   };
 }
 
@@ -967,6 +984,70 @@ function coerceOutcomeArray(value: unknown): OutcomeHistoryLogEntry[] {
   });
 }
 
+function coerceWarmBashRewrites(value: unknown): WarmBashRewriteSourceEvent[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const events: WarmBashRewriteSourceEvent[] = [];
+  for (const entry of value) {
+    if (
+      isRecord(entry)
+      && entry.event === 'auto_prune_rewrite'
+      && typeof entry.sessionId === 'string'
+      && typeof entry.timestamp === 'string'
+      && typeof entry.before === 'string'
+      && typeof entry.after === 'string'
+    ) {
+      events.push({
+        event: 'auto_prune_rewrite',
+        sessionId: entry.sessionId,
+        timestamp: entry.timestamp,
+        before: entry.before,
+        after: entry.after,
+      });
+    }
+  }
+  return events.length > 0 ? events : undefined;
+}
+
+function coerceWarmBashSummaries(value: unknown): WarmBashSessionSummarySourceEvent[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const events: WarmBashSessionSummarySourceEvent[] = [];
+  for (const entry of value) {
+    if (
+      isRecord(entry)
+      && entry.event === 'session_summary'
+      && typeof entry.sessionId === 'string'
+      && typeof entry.timestamp === 'string'
+      && typeof entry.fastPath === 'number'
+      && typeof entry.warm === 'number'
+      && typeof entry.fallback === 'number'
+      && typeof entry.poolSize === 'number'
+      && typeof entry.warmupFailures === 'number'
+      && typeof entry.autoPruneEnabled === 'boolean'
+      && typeof entry.fastPathEnabled === 'boolean'
+      && typeof entry.gnuGrep === 'boolean'
+    ) {
+      events.push({
+        event: 'session_summary',
+        sessionId: entry.sessionId,
+        timestamp: entry.timestamp,
+        fastPath: Math.trunc(entry.fastPath),
+        warm: Math.trunc(entry.warm),
+        fallback: Math.trunc(entry.fallback),
+        poolSize: Math.trunc(entry.poolSize),
+        warmupFailures: Math.trunc(entry.warmupFailures),
+        autoPruneEnabled: entry.autoPruneEnabled,
+        fastPathEnabled: entry.fastPathEnabled,
+        gnuGrep: entry.gnuGrep,
+      });
+    }
+  }
+  return events.length > 0 ? events : undefined;
+}
+
 export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPayload {
   if (!isRecord(value)) {
     throw new Error('Source analytics payload must be a JSON object.');
@@ -994,6 +1075,8 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
     agentReviews: coerceAgentReviews(value.agentReviews),
     historicalSessions: coerceHistoricalSessionSummaries(value.historicalSessions),
+    warmBashRewrites: coerceWarmBashRewrites(value.warmBashRewrites),
+    warmBashSummaries: coerceWarmBashSummaries(value.warmBashSummaries),
   };
 }
 
@@ -1250,6 +1333,23 @@ export function readWarmBashLog(configRoot: string): { rewrites: WarmBashRewrite
   return { rewrites, summaries };
 }
 
+/**
+ * Derive the global log root (`<configRoot>/data`) from a run store path.
+ * Workspace stores live at `<configRoot>/data/outcomes/<hash>`, so walking up
+ * two levels yields the config root. Returns `undefined` when the path does
+ * not follow that convention, letting callers fall back to the configured root.
+ */
+function inferGlobalLogRoot(dataPath: string): string | undefined {
+  const normalized = path.normalize(dataPath);
+  const parent = path.dirname(normalized);            // outcomes
+  const grandparent = path.dirname(parent);          // data
+  const configRoot = path.dirname(grandparent);       // repository / global config root
+  if (path.basename(parent) === 'outcomes' && path.basename(grandparent) === 'data') {
+    return configRoot;
+  }
+  return undefined;
+}
+
 /** Attach the global side-channel logs (pruning.jsonl, tool-result-pruning.jsonl,
  *  warm-bash.jsonl — all read once from <configRoot>/data/) to a source payload. */
 function attachGlobalSideChannelLogs(source: SourceAnalyticsPayload, configRoot: string): void {
@@ -1436,14 +1536,19 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   const configRoot = CONFIG_ROOT;
   if (selection.exportPath) {
     const source = await readSourceAnalyticsPayload(selection.exportPath);
-    attachGlobalSideChannelLogs(source, configRoot);
+    // Portable exports embed their own side-channel data. Do not overwrite it
+    // with the analyzing machine's local logs, and do not attach local historical
+    // session summaries (those cannot be safely reconstructed from a portable
+    // export because they depend on raw transcript content from the source
+    // machine).
     return { source, sourceKind: 'export', sourcePath: selection.exportPath };
   }
 
   if (selection.storageDir) {
     const source = await querySourceAnalyticsPayloadFromStorageDir(selection.storageDir);
+    const logRoot = inferGlobalLogRoot(selection.storageDir) ?? configRoot;
     await attachLocalHistoricalSessions(source, selection);
-    attachGlobalSideChannelLogs(source, configRoot);
+    attachGlobalSideChannelLogs(source, logRoot);
     return { source, sourceKind: 'storage-dir', sourcePath: selection.storageDir };
   }
 
@@ -1454,8 +1559,9 @@ export async function loadSourceAnalytics(selection: SourceSelection = {}): Prom
   const outcomesRoot = selection.outcomesRoot ?? DEFAULT_OUTCOMES_ROOT;
   const { source, storeCount } = await queryAllRunAnalyticsStores(outcomesRoot);
   if (storeCount > 0) {
+    const logRoot = inferGlobalLogRoot(outcomesRoot) ?? configRoot;
     await attachLocalHistoricalSessions(source, selection);
-    attachGlobalSideChannelLogs(source, configRoot);
+    attachGlobalSideChannelLogs(source, logRoot);
     return { source, sourceKind: 'all-stores', sourcePath: outcomesRoot };
   }
 

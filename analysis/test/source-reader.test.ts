@@ -526,3 +526,177 @@ test('coerceSourceAnalyticsPayload returns normalized payloads for valid inputs'
   assert.deepEqual(coerced.completedRuns[0]?.fileExtensions.readCountsByExtension, {});
   assert.deepEqual(coerced.completedRuns[1]?.fileExtensions.readCountsByExtension, {});
 });
+
+test('loadSourceAnalytics preserves embedded side channels for portable exports', async () => {
+  await withTempDir(async (configRoot) => {
+    const fixture = await loadFixture();
+    const exportPath = path.join(configRoot, 'portable-export.json');
+    const embedded: SourceAnalyticsPayload = {
+      ...fixture,
+      workspaceKey: 'portable',
+      pruningDecisions: [
+        {
+          timestamp: '2026-01-01T00:00:00.000Z',
+          sessionId: 'embedded',
+          sessionPath: 'embedded',
+          mode: 'auto',
+          query: 'q',
+          llmModel: 'm',
+          llmThinkingLevel: 'low',
+          llmLatencyMs: 0,
+          included: ['skill-a'],
+          excluded: [],
+          skillBlockTokens: 0,
+          originalBlockTokens: 0,
+        },
+      ],
+      pruningEvents: [
+        { event: 'skill_miss', sessionId: 'embedded', timestamp: '2026-01-01T00:00:01.000Z' },
+      ],
+      toolResultPruningEvents: [
+        {
+          event: 'tool_result_pruned',
+          sessionId: 'embedded',
+          toolName: 'bash',
+          rules: ['strip'],
+          beforeTokens: 10,
+          afterTokens: 5,
+          tokensSaved: 5,
+          timestamp: '2026-01-01T00:00:02.000Z',
+        },
+      ],
+      warmBashRewrites: [
+        {
+          event: 'auto_prune_rewrite',
+          sessionId: 'embedded',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          before: 'b',
+          after: 'a',
+        },
+      ],
+      warmBashSummaries: [
+        {
+          event: 'session_summary',
+          sessionId: 'embedded',
+          timestamp: '2026-01-01T00:00:04.000Z',
+          fastPath: 0,
+          warm: 1,
+          fallback: 0,
+          poolSize: 2,
+          warmupFailures: 0,
+          autoPruneEnabled: true,
+          fastPathEnabled: true,
+          gnuGrep: true,
+        },
+      ],
+    };
+    await fs.writeFile(exportPath, JSON.stringify(embedded), 'utf8');
+
+    // Plant local side-channel logs that must be ignored for a portable export.
+    await fs.mkdir(path.join(configRoot, 'data'), { recursive: true });
+    await fs.writeFile(
+      path.join(configRoot, 'data', 'pruning.jsonl'),
+      JSON.stringify({ event: 'skill_read', sessionId: 'local', timestamp: '2026-01-02T00:00:00.000Z' }) + '\n',
+      'utf8',
+    );
+
+    const loaded = await loadSourceAnalytics({ exportPath });
+    assert.equal(loaded.sourceKind, 'export');
+    assert.equal(loaded.source.pruningDecisions.length, 1);
+    assert.equal(loaded.source.pruningDecisions[0]?.sessionId, 'embedded');
+    assert.equal(loaded.source.pruningEvents.length, 1);
+    assert.equal(loaded.source.pruningEvents[0]?.sessionId, 'embedded');
+    assert.equal(loaded.source.toolResultPruningEvents.length, 1);
+    assert.equal(loaded.source.toolResultPruningEvents[0]?.sessionId, 'embedded');
+    assert.equal(loaded.source.warmBashRewrites?.length, 1);
+    assert.equal(loaded.source.warmBashRewrites?.[0]?.sessionId, 'embedded');
+    assert.equal(loaded.source.warmBashSummaries?.length, 1);
+    assert.equal(loaded.source.warmBashSummaries?.[0]?.sessionId, 'embedded');
+    // Historical sessions are not embedded and cannot be safely reconstructed,
+    // so they must not be silently replaced by the analyzer's local transcripts.
+    assert.deepEqual(loaded.source.historicalSessions, []);
+  });
+});
+
+test('coerceRunSnapshot preserves lastTurnUsage reasoning tokens and clamps them to output tokens', async () => {
+  const fixture = await loadFixture();
+  const run = deepClone(fixture.completedRuns[0]) as any;
+  run.lastTurnUsage = {
+    inputTokens: 10,
+    outputTokens: 20,
+    cacheReadTokens: 5,
+    cacheWriteTokens: 2,
+    totalTokens: 37,
+    reasoningTokens: 15,
+  };
+  const coerced = coerceRunSnapshot(run);
+  assert.equal(coerced?.lastTurnUsage?.reasoningTokens, 15);
+
+  const excessive = deepClone(run);
+  excessive.lastTurnUsage.reasoningTokens = 25;
+  assert.equal(coerceRunSnapshot(excessive)?.lastTurnUsage?.reasoningTokens, 20);
+});
+
+test('coerceRunSnapshot preserves per-turn throughput provider attribution', async () => {
+  const fixture = await loadFixture();
+  const run = deepClone(fixture.completedRuns[0]) as any;
+  run.turnThroughputSamples = [
+    {
+      endedAt: '2026-05-10T15:00:00.000Z',
+      outputTokens: 10,
+      generationDurationMs: 500,
+      concurrentBusySessions: 1,
+      status: 'completed',
+      provider: 'openai',
+    },
+  ];
+  const coerced = coerceRunSnapshot(run);
+  assert.equal(coerced?.turnThroughputSamples[0]?.provider, 'openai');
+});
+
+test('coerceRunSnapshot coerces per-tool timed call counts compatibly', async () => {
+  const fixture = await loadFixture();
+  const run = deepClone(fixture.completedRuns[0]) as any;
+  run.toolUsage.timedCallCountsByName = { bash: 2.9, read: -1, invalid: 'x' };
+  const coerced = coerceRunSnapshot(run);
+  assert.deepEqual(coerced?.toolUsage.timedCallCountsByName, { bash: 2 });
+});
+
+test('loadSourceAnalytics attaches local side-channel logs for storage-dir sources', async () => {
+  await withTempDir(async (configRoot) => {
+    const fixture = await loadFixture();
+    const store = path.join(configRoot, 'data', 'outcomes', 'store-hash');
+    await fs.mkdir(store, { recursive: true });
+
+    const run = fixture.completedRuns[0]!;
+    await fs.writeFile(
+      path.join(store, 'run-snapshots.jsonl'),
+      JSON.stringify({
+        schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+        kind: 'run_snapshot',
+        recordedAt: run.updatedAt,
+        run,
+      }) + '\n',
+      'utf8',
+    );
+    await fs.writeFile(path.join(store, 'outcome-history.jsonl'), '', 'utf8');
+    await fs.writeFile(
+      path.join(store, 'open-runs.a.json'),
+      JSON.stringify({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, seq: 1, sessions: {} }),
+      'utf8',
+    );
+    await fs.writeFile(path.join(store, 'open-runs.gen'), 'a', 'utf8');
+
+    await fs.mkdir(path.join(configRoot, 'data'), { recursive: true });
+    await fs.writeFile(
+      path.join(configRoot, 'data', 'pruning.jsonl'),
+      JSON.stringify({ event: 'skill_read', sessionId: 'local', timestamp: '2026-01-02T00:00:00.000Z' }) + '\n',
+      'utf8',
+    );
+
+    const loaded = await loadSourceAnalytics({ storageDir: store });
+    assert.equal(loaded.sourceKind, 'storage-dir');
+    assert.equal(loaded.source.pruningEvents.length, 1);
+    assert.equal(loaded.source.pruningEvents[0]?.sessionId, 'local');
+  });
+});
