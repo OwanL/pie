@@ -2261,10 +2261,9 @@ test('reducer: handleError strips internal req-NN ids from the notice (Brief H c
   assert.ok(result.state.settings.notice, 'an error notice is set');
   assert.ok(!result.state.settings.notice!.includes('req-99'), 'no internal req-NN id reaches the user');
   assert.match(result.state.settings.notice!, /load transcript/, 'the plain-language problem is still named');
-  // The verbatim error (with req-NN) is retained as noticeRaw so the webview
-  // can reveal it via a 'show more' affordance, without leaking into the
-  // short summary.
-  assert.equal(result.state.settings.noticeRaw, error, 'noticeRaw carries the unredacted error');
+  // The full error (with req-NN) is retained host-side as noticeRaw. Projection
+  // applies credential redaction before the webview's 'show more' boundary.
+  assert.equal(result.state.settings.noticeRaw, error, 'noticeRaw carries the full host-side error');
   assert.ok(result.state.settings.noticeRaw!.includes('req-99'), 'the raw detail keeps the req-NN id');
 });
 

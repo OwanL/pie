@@ -91,9 +91,9 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
       settings: {
         ...state.settings,
         // Brief H: strip any internal req-NN before surfacing (transcript-paging
-        // RPC timeouts carry req-NN). The raw, unredacted error is retained as
-        // `noticeRaw` so the webview can reveal it via 'show more', and is still
-        // logged host-side.
+        // RPC timeouts carry req-NN). The full host-side error is retained as
+        // `noticeRaw`; projection redacts credentials before the webview can
+        // reveal it via 'show more'.
         notice: stripReqIds(event.error),
         // Brief H: classify the generic backend error so the webview renders a
         // fitting recovery action (`operational-error` → show-logs) instead of

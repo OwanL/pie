@@ -137,12 +137,11 @@ export interface SettingsState {
    *  render recovery action buttons. Invariant: non-null only when `notice`
    *  is an H-category error. */
   noticeKind: NoticeKind | null;
-  /** Raw, unredacted full error string behind the current `notice` summary,
-   *  or null. Surfaced via `ViewState.noticeRaw` so the webview can render a
-   *  "show more" affordance with the verbatim backend error (including any
-   *  internal `req-NN` correlation ids) for debugging. Cleared alongside
-   *  `notice`/`noticeKind` whenever a notice is dismissed or replaced by a
-   *  non-error notice (plain `NoticeShown` notices carry no raw detail). */
+  /** Full host-side error string behind the current `notice` summary, or null.
+   *  Projection redacts credentials before exposing `ViewState.noticeRaw` but
+   *  retains useful context such as internal `req-NN` correlation ids. Cleared
+   *  alongside `notice`/`noticeKind` whenever a notice is dismissed or
+   *  replaced by a non-error notice. */
   noticeRaw: string | null;
   /** Chat display preferences. */
   prefs: ChatPrefs;

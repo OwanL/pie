@@ -229,9 +229,8 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
     if (mapped) {
       draft.settings.notice = mapped.message;
       draft.settings.noticeKind = mapped.kind;
-      // Surface the verbatim error (including any req-NN ids) as the raw
-      // detail behind the short summary, so the webview can reveal it via
-      // a 'show more' affordance. null when there is no upstream error.
+      // Retain the full host-side error (including req-NN ids) behind the short
+      // summary. Projection redacts credentials before the webview boundary.
       draft.settings.noticeRaw = event.error ?? null;
     }
     // Restore composer inputs from the send-time snapshot so a retry can

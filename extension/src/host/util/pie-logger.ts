@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type * as vscode from 'vscode';
 
+import { redactSensitiveText } from '../../shared/sensitive-redaction';
 import { toErrorMessage } from './error-message';
 
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
@@ -152,10 +153,10 @@ function stringifyLogData(data: unknown): string {
     return '';
   }
   if (typeof data === 'string') {
-    return data;
+    return redactSensitiveText(data);
   }
   if (data instanceof Error) {
-    return data.stack || data.message;
+    return redactSensitiveText(data.stack || data.message);
   }
   try {
     return JSON.stringify(redactSensitive(data));
@@ -176,6 +177,7 @@ const SENSITIVE_KEY_PATTERN = /(api[_-]?key|authorization|auth[_-]?token|access[
  *  callers can opt into explicit redaction before passing data to `appendPieLog`
  *  (e.g. for pre-formatted payloads). Applied automatically in {@link stringifyLogData}. */
 export function redactSensitive(data: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (typeof data === 'string') return redactSensitiveText(data);
   if (data === null || typeof data !== 'object') return data;
   if (seen.has(data as object)) return '[circular]';
   seen.add(data as object);
@@ -247,10 +249,11 @@ export function pieLog(
   data?: Record<string, unknown>,
 ): void {
   const ts = new Date().toISOString();
+  const safeMessage = redactSensitiveText(message);
   const suffix = stringifyLogData(data);
   const fullLine = suffix
-    ? `[${ts}] [${level}] [${scope}] ${message} ${suffix}`
-    : `[${ts}] [${level}] [${scope}] ${message}`;
+    ? `[${ts}] [${level}] [${scope}] ${safeMessage} ${suffix}`
+    : `[${ts}] [${level}] [${scope}] ${safeMessage}`;
 
   // The Output channel is a `LogOutputChannel` — it prepends its own
   // `[timestamp] [level]` prefix and colorizes by severity, so we hand it the
@@ -258,8 +261,8 @@ export function pieLog(
   // channel's own logLevel (native dropdown), independent of `minLevel` —
   // see `emitToChannel`. Backend stderr lines are passed through raw.
   const channelLine = scope === 'backend-stderr'
-    ? message
-    : (suffix ? `[${scope}] ${message} ${suffix}` : `[${scope}] ${message}`);
+    ? safeMessage
+    : (suffix ? `[${scope}] ${safeMessage} ${suffix}` : `[${scope}] ${safeMessage}`);
   emitToChannel(level, scope, channelLine);
 
   // Persistent file + dev console are gated by the global `pie.logLevel`
@@ -270,7 +273,7 @@ export function pieLog(
   }
 
   appendToPersistentLog(fullLine);
-  appendToConsole(level, scope, message, data === undefined ? undefined : (redactSensitive(data) as Record<string, unknown>));
+  appendToConsole(level, scope, safeMessage, data === undefined ? undefined : (redactSensitive(data) as Record<string, unknown>));
 }
 
 export function pieDebug(scope: string, message: string, data?: Record<string, unknown>): void {
@@ -279,13 +282,6 @@ export function pieDebug(scope: string, message: string, data?: Record<string, u
 
 export function pieWarn(scope: string, message: string, data?: Record<string, unknown>): void {
   pieLog('warn', scope, message, data);
-}
-
-function redactSensitiveText(value: string): string {
-  return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
-    .replace(/([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|secret)=)[^&\s]+/gi, '$1[redacted]')
-    .replace(/\b(api[_-]?key|authorization|password|passwd|secret|access[_-]?token|refresh[_-]?token)\b\s*[:=]\s*([^\s,;]+)/gi, '$1=[redacted]');
 }
 
 function errorDiagnostic(error: unknown): Record<string, unknown> {

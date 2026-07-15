@@ -3,8 +3,8 @@ import type { Event } from '../core/events.js';
 export type InterruptedSessionActivity = 'waiting for user input' | 'running a tool' | 'generating';
 
 /** Pure backend-exit notice/cleanup policy. Paths are deduplicated because a
- * session must be counted and terminalized exactly once. Raw stderr is kept in
- * noticeRaw, never in the short user-facing notice. */
+ * session must be counted and terminalized exactly once. Full stderr is kept
+ * host-side in noticeRaw; projection redacts credentials before the webview. */
 export function backendExitEvents(
   runningSessionPaths: readonly string[],
   code: number | null,

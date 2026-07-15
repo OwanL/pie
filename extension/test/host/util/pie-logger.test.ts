@@ -296,14 +296,18 @@ test('redactSensitive prunes circular references', () => {
   assert.equal(out.self, '[circular]');
 });
 
-test('appendPieLog redacts sensitive data before writing (M2 integration)', () => {
+test('appendPieLog redacts sensitive keys, messages, and nested string values before writing', () => {
   resetState();
   clearLogFiles();
   initPieLogger({ devMode: false });
   setLogLevel('debug');
-  appendPieLog('warn', 'test-redact', 'msg with secret', { apiKey: 'sk-leak', safe: 'ok' });
+  appendPieLog('warn', 'test-redact', 'authorization=message-secret', {
+    apiKey: 'key-secret',
+    safe: 'Bearer nested-secret',
+  });
   const written = fs.readFileSync(PIE_LOG_PATH, 'utf8');
-  assert.ok(!written.includes('sk-leak'), 'sensitive value must not reach the log file');
+  assert.ok(!written.includes('message-secret'), 'message credentials must not reach the log file');
+  assert.ok(!written.includes('key-secret'), 'sensitive keyed values must not reach the log file');
+  assert.ok(!written.includes('nested-secret'), 'credentials inside safe string fields must be redacted');
   assert.ok(written.includes('[redacted]'), 'sensitive key is redacted');
-  assert.ok(written.includes('ok'), 'safe value is preserved');
 });

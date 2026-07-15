@@ -6,6 +6,7 @@ import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '
 import { getDeferredTriggersDir } from '../../shared/deferred-triggers-paths';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
+import { redactSensitiveText } from '../../shared/sensitive-redaction';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
@@ -509,8 +510,9 @@ export class BackendClient implements vscode.Disposable {
     line: string,
     parseError: Error | undefined,
   ): Error {
-    const snippet = line.length > 200 ? `${line.slice(0, 200)}…` : line;
-    const reason = parseError ? toErrorMessage(parseError) : 'unrecognized response envelope';
+    const rawSnippet = line.length > 200 ? `${line.slice(0, 200)}…` : line;
+    const snippet = redactSensitiveText(rawSnippet);
+    const reason = redactSensitiveText(parseError ? toErrorMessage(parseError) : 'unrecognized response envelope');
     const stderrTail = this.stderrBuffer.trim();
     const stderrPart = stderrTail ? ` (stderr tail: ${stderrTail.slice(-200)})` : '';
     return new Error(
@@ -519,11 +521,11 @@ export class BackendClient implements vscode.Disposable {
   }
 
   private appendStderr(chunk: string): void {
-    this.stderrBuffer = utf8Tail(this.stderrBuffer + chunk, STDERR_BUFFER_LIMIT);
+    this.stderrBuffer = utf8Tail(redactSensitiveText(this.stderrBuffer + chunk), STDERR_BUFFER_LIMIT);
 
     // A newline-free stderr stream must not grow without bound. Keep the
     // diagnostic tail, matching stderrBuffer's byte-bounded behavior.
-    this.stderrLineBuffer = utf8Tail(this.stderrLineBuffer + chunk, STDERR_BUFFER_LIMIT);
+    this.stderrLineBuffer = utf8Tail(redactSensitiveText(this.stderrLineBuffer + chunk), STDERR_BUFFER_LIMIT);
     this.flushStderrLines(false);
   }
 

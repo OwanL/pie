@@ -19,7 +19,7 @@ export interface NoticeBannerProps {
    *  Restart backend) alongside the message. `null`/`undefined` for plain
    *  info/warning notices — no action buttons. */
   kind?: NoticeKind | null;
-  /** Raw, unredacted full error string behind the short `notice` summary, or
+  /** Credential-redacted full error string behind the short `notice` summary, or
    *  null. When present, the banner renders a "Show raw error" toggle that
    *  reveals this verbatim (including internal req-NN ids) for debugging.
    *  Absent for plain info/warning notices. */

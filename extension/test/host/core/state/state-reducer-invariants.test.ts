@@ -394,6 +394,19 @@ test('selectViewState: workspaceCwd propagates when set', () => {
   assert.equal(vs.workspaceCwd, '/project');
 });
 
+test('selectViewState redacts credentials from noticeRaw at the webview boundary', () => {
+  const state = produce(initialArchState, draft => {
+    draft.settings.notice = 'Backend failed.';
+    draft.settings.noticeKind = 'operational-error';
+    draft.settings.noticeRaw = 'req-42 failed with apiKey=projection-secret';
+  });
+
+  const view = selectViewState(state);
+
+  assert.equal(state.settings.noticeRaw, 'req-42 failed with apiKey=projection-secret');
+  assert.equal(view.noticeRaw, 'req-42 failed with apiKey=[redacted]');
+});
+
 test('selectViewState: busy is false when no active session even if sessions are running', () => {
   const state = produce(initialArchState, draft => {
     draft.sessions.runningSessionPaths = ['/s'];

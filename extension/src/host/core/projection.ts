@@ -30,6 +30,7 @@ import type {
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../shared/protocol';
 import { EMPTY_AGGREGATE_STATS } from '../../shared/protocol';
 import { pruningTotals } from '../../shared/pruning.js';
+import { redactSensitiveText } from '../../shared/sensitive-redaction.js';
 import { projectTranscriptView } from './live-pipeline/projection.js';
 import type {
   ArchState,
@@ -425,7 +426,7 @@ function projectViewState(state: ArchState): ViewState {
     liveTurnPhase: activePath ? state.livePipeline.turnsBySession[activePath]?.phase ?? null : null,
     notice: settings.notice,
     noticeKind: settings.noticeKind,
-    noticeRaw: settings.noticeRaw,
+    noticeRaw: settings.noticeRaw === null ? null : redactSensitiveText(settings.noticeRaw),
     backendReady: settings.backendReady,
     workspaceCwd: sessions.workspaceCwd,
     systemPrompts: activeSystemPrompts,

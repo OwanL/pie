@@ -24,7 +24,7 @@
 - Intentional stops do not produce public unexpected-exit events, but an intentional stop during startup still rejects that child’s readiness promise. Process generations prevent an old exit from clearing a replacement. Backend restart is manual; there is no automatic restart.
 - Provider header waits are bounded per provider. Two consecutive header stalls open a shared transport circuit, so sibling sessions fail locally instead of consuming every provider slot and timeout budget. After an exponentially backed-off cooldown, exactly one half-open probe may reach the provider; response headers close the circuit, while a failed probe reopens it. User cancellation never counts as provider failure. The circuit survives live concurrency-setting changes and is exposed through provider capacity/metrics.
 - Affected session paths are deduplicated. Crash cleanup materializes each host-owned live turn as interrupted, preserves only durability-confirmed terminal tools, interrupts queued user messages, and clears pending extension-UI, retry, wait, interrupt, checkpoint, and queued transient state even when no transcript is loaded.
-- The short exit notice contains the interrupted-session count and reliable activity classification; raw stderr is exposed only as `noticeRaw` with `noticeKind: backend-exit`.
+- The short exit notice contains the interrupted-session count and reliable activity classification; credential-redacted stderr is exposed only as `noticeRaw` with `noticeKind: backend-exit`.
 
 ## Session Cleanup
 
@@ -171,8 +171,8 @@ All other state (editing, outcome dialogs, draft content, session selection, mod
 
 ## Notice Surfacing
 
-- The host owns a single global notice triple in `settings`: `notice` (short, user-facing summary, `string | null`), `noticeKind` (Brief H failure category for recovery buttons, `NoticeKind | null`), and `noticeRaw` (the verbatim, unredacted backend error string, `string | null`).
-- The short `notice` summary **never** contains internal `req-NN` correlation ids (Brief H criterion 1). `noticeRaw` **does** retain them verbatim so the webview can reveal the full error via a "show raw" affordance for debugging.
+- The host owns a single global notice triple in `settings`: `notice` (short, user-facing summary, `string | null`), `noticeKind` (Brief H failure category for recovery buttons, `NoticeKind | null`), and `noticeRaw` (the full host-side backend error string, `string | null`).
+- The short `notice` summary **never** contains internal `req-NN` correlation ids (Brief H criterion 1). Projection retains those ids in `noticeRaw` but redacts credentials before the webview boundary, so "show raw" remains useful without exposing secrets.
 - Invariant: `noticeRaw` is non-null only when `notice` is an error notice (set at the send/edit/prepass error sites, `handleError`, and `revertSetModel`). Plain `NoticeShown` notices (info/warnings, including `notice: null` clears) always set `noticeRaw = null` so a stale "show raw" can't outlive its notice.
 - `dismissNotice` clears all three together. A non-error `NoticeShown` clears `noticeKind` and `noticeRaw` together (a plain info banner carries no recovery actions and no raw detail).
-- The projection surfaces all three as `ViewState.notice`, `ViewState.noticeKind`, and `ViewState.noticeRaw`. The webview's `NoticeBanner` renders the short summary, recovery action buttons (from `kind`), and — when `noticeRaw` differs from `notice` — a "Show raw" toggle that reveals the verbatim error in a scrollable monospaced block.
+- The projection surfaces all three as `ViewState.notice`, `ViewState.noticeKind`, and credential-redacted `ViewState.noticeRaw`. The webview's `NoticeBanner` renders the short summary, recovery action buttons (from `kind`), and — when `noticeRaw` differs from `notice` — a "Show raw" toggle that reveals the sanitized diagnostic in a scrollable monospaced block.
