@@ -268,6 +268,33 @@ test('cancelAll: with no pending requests is a safe no-op', () => {
   assert.doesNotThrow(() => bridge.cancelAll());
 });
 
+test('cancelAll: keeps the bridge reusable for a later turn', async () => {
+  const { bridge, captured } = makeBridge();
+  const cancelled = bridge.confirm('old', 'turn');
+  bridge.cancelAll();
+  assert.equal(await cancelled, false);
+
+  const next = bridge.confirm('new', 'turn');
+  assert.equal(captured.length, 2);
+  resolveLast(bridge, captured, { confirmed: true });
+  assert.equal(await next, true);
+});
+
+test('dispose: cancels pending dialogs and fences every later request', async () => {
+  const { bridge, captured } = makeBridge();
+  const pending = bridge.confirm('old', 'turn');
+
+  bridge.dispose();
+  bridge.dispose();
+
+  assert.equal(await pending, false);
+  assert.equal(await bridge.confirm('late', 'confirm'), false);
+  assert.equal(await bridge.select('late', ['select']), undefined);
+  assert.equal(await bridge.input('late'), undefined);
+  bridge.notify('late notice', 'warning');
+  assert.equal(captured.length, 1, 'a disposed runtime must not emit zombie UI requests');
+});
+
 // ─── notify ──────────────────────────────────────────────────────────────────
 
 test('notify: emits a fire-and-forget request without awaiting', () => {

@@ -428,6 +428,9 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
       sessionOverrides: { isStreaming: true, abort: () => new Promise(() => undefined) },
       context: { activeRequest: { id: 'req-stuck-abort', messageIndex: 1, lastAssistantMessageId: 'm1', aborted: false } },
     });
+    const uiRequests: unknown[] = [];
+    const bridge = new ExtensionUIBridge(harness.context.sessionPath, (_event, payload) => uiRequests.push(payload));
+    harness.context.uiBridge = bridge;
     const result = await handleBackendRequest(harness.deps, {
       id: 'interrupt-stuck', method: 'message.interrupt', params: { sessionPath: harness.context.sessionPath },
     }) as { interrupted: boolean; settled: boolean; teardownTimedOut: boolean };
@@ -436,6 +439,9 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
     assert.deepEqual(harness.busyEvents, [false]);
     assert.equal(harness.createCalls.length, 1);
     assert.equal(harness.emitted.some((entry) => entry.event === 'message.aborted'), true);
+    assert.equal(await bridge.confirm('late', 'runtime request'), false);
+    bridge.notify('late runtime notice');
+    assert.deepEqual(uiRequests, [], 'the retired runtime bridge must stay fenced after replacement starts');
   } finally {
     if (previous === undefined) delete process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
     else process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = previous;

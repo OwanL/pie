@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
+import { ExtensionUIBridge } from '../../../src/backend/extension-ui-bridge';
 import { BackendError } from '../../../src/backend/server-io';
 import type { SessionContext } from '../../../src/backend/server-types';
 
@@ -10,6 +11,8 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
   const calls: string[] = [];
   const events: Array<{ event: string; payload: any }> = [];
   let abortCalls = 0;
+  const uiRequests: unknown[] = [];
+  const uiBridge = new ExtensionUIBridge('/s', (_event, payload) => uiRequests.push(payload));
   const context = {
     sessionPath: '/s',
     busySeq: 0,
@@ -32,6 +35,7 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
         return new Promise<void>(() => undefined);
       },
     },
+    uiBridge,
   } as unknown as SessionContext;
   const replacement = {
     sessionPath: '/s',
@@ -69,6 +73,9 @@ test('stuck recovery terminalizes once and replaces a runtime without awaiting a
   assert.equal(context.activeRequest, undefined);
   assert.equal(events.filter((event) => event.event === 'message.aborted').length, 1);
   assert.equal(events.some((event) => event.event === 'busy.changed'), false);
+  assert.equal(await uiBridge.confirm('late', 'runtime request'), false);
+  uiBridge.notify('late runtime notice');
+  assert.deepEqual(uiRequests, [], 'semantic retirement must fence late extension UI requests');
 
   // A late terminal event from the retired SDK session is fenced and cannot
   // produce a second terminal or advertise the zombie runtime as idle.
@@ -140,7 +147,7 @@ test('createSessionContext preserves an unexpired terminal checkpoint across rep
     busySeq: 7,
     terminalLiveTurn,
     willRetryWatchdogClear: () => { throw new Error('watchdog cleanup failed'); },
-    uiBridge: { cancelAll: () => { throw new Error('UI cleanup failed'); } },
+    uiBridge: { dispose: () => { throw new Error('UI cleanup failed'); } },
     unsubscribe: () => { throw new Error('unsubscribe failed'); },
     runtime: { dispose: () => { throw new Error('runtime disposal failed'); } },
   } as unknown as SessionContext;
@@ -154,6 +161,50 @@ test('createSessionContext preserves an unexpired terminal checkpoint across rep
   assert.equal(await server.createSessionContext({}, 'resume'), replacement);
   assert.equal(replacement.busySeq, 7);
   assert.equal(replacement.terminalLiveTurn, terminalLiveTurn);
+});
+
+test('createSessionContext permanently fences the bridge owned by the replaced runtime', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const uiRequests: unknown[] = [];
+  const uiBridge = new ExtensionUIBridge('/s', (_event, payload) => uiRequests.push(payload));
+  const pending = uiBridge.confirm('pending', 'request');
+  const old = {
+    sessionPath: '/s',
+    busySeq: 0,
+    uiBridge,
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => undefined },
+  } as unknown as SessionContext;
+  const replacement = { sessionPath: '/s', busySeq: 0 } as unknown as SessionContext;
+  server.sessionContexts.set('/s', old);
+  server.buildSessionContext = async () => replacement;
+
+  assert.equal(await server.createSessionContext({}, 'resume'), replacement);
+  assert.equal(await pending, false);
+  assert.equal(await uiBridge.confirm('late', 'request'), false);
+  uiBridge.notify('late notice');
+  assert.equal(uiRequests.length, 1);
+});
+
+test('backend shutdown permanently fences every runtime bridge', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const uiRequests: unknown[] = [];
+  const uiBridge = new ExtensionUIBridge('/s', (_event, payload) => uiRequests.push(payload));
+  const pending = uiBridge.input('pending');
+  const context = {
+    sessionPath: '/s',
+    uiBridge,
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => undefined },
+  } as unknown as SessionContext;
+  server.sessionContexts.set('/s', context);
+
+  await server.dispose();
+
+  assert.equal(await pending, undefined);
+  assert.equal(await uiBridge.select('late', ['request']), undefined);
+  uiBridge.notify('late notice');
+  assert.equal(uiRequests.length, 1);
 });
 
 test('throwing best-effort cleanup cannot strand a retired runtime without replacement', async () => {

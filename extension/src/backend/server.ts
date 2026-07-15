@@ -348,7 +348,7 @@ export class BackendServer {
         }
       };
       cleanup('watchdog cleanup', () => existing.willRetryWatchdogClear?.());
-      cleanup('UI cancellation', () => existing.uiBridge?.cancelAll());
+      cleanup('UI disposal', () => existing.uiBridge?.dispose());
       cleanup('unsubscribe', () => existing.unsubscribe());
       // A provider teardown can wedge the old runtime. The replacement becomes
       // authoritative immediately; old disposal is bounded best-effort and
@@ -987,7 +987,7 @@ export class BackendServer {
       };
     }
     context.activeRequest = undefined;
-    bestEffort('UI cancellation', () => context.uiBridge?.cancelAll());
+    bestEffort('UI disposal', () => context.uiBridge?.dispose());
     bestEffort('queue cleanup', () => { context.session.clearQueue(); });
     context.queuedLocalIds = [];
     bestEffort('retry abort', () => context.session.abortRetry?.());
@@ -1066,7 +1066,7 @@ export class BackendServer {
 
     for (const context of contexts) {
       context.willRetryWatchdogClear?.();
-      context.uiBridge?.cancelAll();
+      context.uiBridge?.dispose();
       context.unsubscribe();
       await context.runtime.dispose();
     }

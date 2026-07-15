@@ -27,6 +27,7 @@ export class ExtensionUIBridge {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly emit: ExtensionUIBridgeEmitter;
   private readonly sessionPath: string;
+  private closed = false;
 
   constructor(sessionPath: string, emit: ExtensionUIBridgeEmitter) {
     this.sessionPath = sessionPath;
@@ -58,6 +59,7 @@ export class ExtensionUIBridge {
   }
 
   notify(message: string, type?: 'info' | 'warning' | 'error', subagentCallId?: string): void {
+    if (this.closed) return;
     const id = crypto.randomUUID();
     this.emit('extension_ui.request', { id, method: 'notify', message, notifyType: type, sessionPath: this.sessionPath, subagentCallId });
   }
@@ -100,11 +102,26 @@ export class ExtensionUIBridge {
     this.pending.clear();
   }
 
+  /**
+   * Permanently retire this bridge. Unlike {@link cancelAll}, disposal fences
+   * every future SDK UI request from the runtime that owned it. This matters
+   * when a runtime is replaced locally while its provider teardown is still
+   * pending: late extension code must not surface zombie dialogs or notices.
+   */
+  dispose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.cancelAll();
+  }
+
   private emitAndAwait(
     id: string,
     payload: ExtensionUIRequestPayload,
     opts?: DialogOptions,
   ): Promise<ExtensionUIResponsePayload> {
+    if (this.closed) {
+      return Promise.resolve({ id, cancelled: true });
+    }
     return new Promise<ExtensionUIResponsePayload>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const onAbort = () => finish({ id, cancelled: true });
