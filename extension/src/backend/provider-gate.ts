@@ -154,6 +154,8 @@ class ProviderPool {
 	private waiters: QueuedWaiter[] = [];
 	private holdWakeTimer: ReturnType<typeof setTimeout> | null = null;
 	private circuitBreaker: AccountPauseState = { pausedUntil: 0, strikeCount: 0 };
+	private circuitGeneration = 0;
+	private disposed = false;
 	/** Monotonic enqueue counter — preserves FIFO within a priority band. */
 	private waiterSeq = 0;
 
@@ -261,6 +263,10 @@ class ProviderPool {
 		return this.circuitBreaker.strikeCount;
 	}
 
+	pauseGeneration(): number {
+		return this.circuitGeneration;
+	}
+
 	/** Record an account-pause event.
 	 *
 	 *  `pauseUntilMs` — if the upstream body carried an explicit reactivation
@@ -271,6 +277,7 @@ class ProviderPool {
 	 *  count backoff if that is also absent). */
 	recordPause(pauseUntilMs?: number, retryAfterSeconds?: number): void {
 		const now = Date.now();
+		this.circuitGeneration += 1;
 
 		// Explicit reactivation timestamp from the body wins over the header.
 		if (pauseUntilMs && pauseUntilMs > now) {
@@ -291,10 +298,24 @@ class ProviderPool {
 	}
 
 	/** Clear the circuit breaker after a successful request. */
-	clearPause(): void {
-		if (this.circuitBreaker.strikeCount > 0) {
+	clearPause(admissionGeneration: number): void {
+		if (admissionGeneration === this.circuitGeneration && this.circuitBreaker.strikeCount > 0) {
 			this.circuitBreaker = { pausedUntil: 0, strikeCount: 0 };
 		}
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		if (this.holdWakeTimer) {
+			clearTimeout(this.holdWakeTimer);
+			this.holdWakeTimer = null;
+		}
+		for (const waiter of [...this.waiters]) {
+			if (waiter.abortFn) waiter.abortFn();
+			else waiter.reject(new ProviderGateAbortError('disposing provider gate'));
+		}
+		this.waiters = [];
 	}
 
 	private now(): number {
@@ -317,6 +338,7 @@ class ProviderPool {
 	 * request is never preempted.
 	 */
 	async acquire(sessionId: string | null, signal?: AbortSignal, requestClass: ProviderGateRequestClass = 'default'): Promise<number> {
+		if (this.disposed) throw new ProviderGateAbortError('disposing provider gate');
 		if (signal?.aborted) throw new ProviderGateAbortError();
 
 		const now = this.now();
@@ -455,6 +477,7 @@ class ProviderPool {
 
 	/** Transfer as many newly available permits as the configured cap allows. */
 	private wakeEligibleWaiters(): void {
+		if (this.disposed) return;
 		if (this.holdWakeTimer) {
 			clearTimeout(this.holdWakeTimer);
 			this.holdWakeTimer = null;
@@ -500,6 +523,7 @@ class ProviderPool {
 	/** A held slot has no release event when its sticky window expires, so arm
 	 * one pool-level wakeup for the earliest expiry whenever waiters exist. */
 	private scheduleHoldWakeup(): void {
+		if (this.disposed) return;
 		if (this.holdWakeTimer) {
 			clearTimeout(this.holdWakeTimer);
 			this.holdWakeTimer = null;
@@ -518,6 +542,7 @@ class ProviderPool {
 			this.holdWakeTimer = null;
 			this.wakeEligibleWaiters();
 		}, Math.max(0, earliest - now));
+		this.holdWakeTimer.unref?.();
 	}
 
 	/** Force-release all slots held by a session (e.g. on abort). */
@@ -658,6 +683,7 @@ export class ProviderGate {
 	/** Remove the fetch wrapper (for tests / disposal). */
 	static uninstall(): void {
 		if (ProviderGate.instance) {
+			for (const entry of ProviderGate.instance.pools.values()) entry.pool.dispose();
 			ProviderGate.instance.uninstallCapacityBridge?.();
 			ProviderGate.instance.uninstallCapacityBridge = null;
 			if (ProviderGate.instance.originalFetch) {
@@ -734,6 +760,9 @@ export class ProviderGate {
 				? cfg.headerWaitSeconds! * 1000
 				: this.defaultHeaderWaitMs;
 			this.pools.set(cfg.provider, { pool, baseUrl: cfg.baseUrl, headerWaitMs });
+		}
+		for (const [provider, entry] of oldPools) {
+			if (!this.pools.has(provider)) entry.pool.dispose();
 		}
 	}
 
@@ -928,6 +957,7 @@ export class ProviderGate {
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
+		const pauseGenerationAtAdmission = pool.pauseGeneration();
 		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_wait' });
 
 		let receivedHeaders = false;
@@ -950,7 +980,7 @@ export class ProviderGate {
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
 
 			// Account-pause detection: 429/403 with suspension body.
-			const pauseInfo = await this.extractAccountPause(response, config.provider);
+			const pauseInfo = await this.extractAccountPause(response, config.provider, signal);
 			if (pauseInfo) {
 				pool.recordPause(pauseInfo.pauseUntilMs, pauseInfo.retryAfterSeconds);
 				pool.release(slotIndex, sessionId, false);
@@ -964,7 +994,7 @@ export class ProviderGate {
 			}
 
 			// Success.
-			pool.clearPause();
+			pool.clearPause(pauseGenerationAtAdmission);
 
 			// If the response has a body, wrap it to release the slot on
 			// stream completion (and arm the idle watchdog if configured).
@@ -1087,6 +1117,7 @@ export class ProviderGate {
 	private async extractAccountPause(
 		response: Response,
 		_provider: string,
+		signal: AbortSignal | undefined,
 	): Promise<{ retryAfterSeconds: number | undefined; pauseUntilMs: number | undefined; reconstructed: Response } | null> {
 		// Only inspect 429/403 — other statuses are never suspensions.
 		if (response.status !== 429 && response.status !== 403) return null;
@@ -1094,11 +1125,40 @@ export class ProviderGate {
 		// Clone so the SDK can still consume the original body.
 		const cloneForInspection = response.clone();
 		let bodyText: string;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let removeAbort = () => {};
 		try {
-			bodyText = await cloneForInspection.text();
+			const timeoutMs = this.idleTimeoutMs > 0 ? this.idleTimeoutMs : this.defaultHeaderWaitMs;
+			const timeout = new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), timeoutMs);
+				timer.unref?.();
+			});
+			const aborted = new Promise<never>((_resolve, reject) => {
+				if (!signal) return;
+				const onAbort = () => reject(new ProviderGateAbortError('inspecting provider response body'));
+				if (signal.aborted) onAbort();
+				else {
+					signal.addEventListener('abort', onAbort, { once: true });
+					removeAbort = () => signal.removeEventListener('abort', onAbort);
+				}
+			});
+			const inspected = await Promise.race([
+				cloneForInspection.text().then((text) => ({ text })),
+				timeout,
+				aborted,
+			]);
+			if (inspected === null) {
+				void cloneForInspection.body?.cancel().catch(() => {});
+				return null;
+			}
+			bodyText = inspected.text;
 		} catch {
+			if (signal?.aborted) throw new ProviderGateAbortError('inspecting provider response body');
 			// Can't read body — don't arm the breaker (defensive).
 			return null;
+		} finally {
+			if (timer) clearTimeout(timer);
+			removeAbort();
 		}
 
 		const lower = bodyText.toLowerCase();

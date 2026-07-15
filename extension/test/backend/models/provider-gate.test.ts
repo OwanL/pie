@@ -258,6 +258,23 @@ describe('ProviderGate — concurrency limiting', () => {
 });
 
 describe('ProviderGate — afterburn sticky slots', () => {
+	test('uninstall rejects waiters blocked behind an afterburn hold', async () => {
+		globalThis.fetch = async () => new Response(null, { status: 200 });
+		ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			afterburnSeconds: 60,
+			queueWaitSeconds: 0,
+		}], 0);
+
+		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
+		const blocked = fetch(TEST_BASE + '/chat', makeInit('session-B'));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		ProviderGate.uninstall();
+		await assert.rejects(blocked, ProviderGateAbortError);
+	});
+
 	test('same session reuses its slot immediately (no queue)', async () => {
 		const config: ProviderConcurrencyConfig = {
 			...BASE_CONFIG,
@@ -1076,6 +1093,55 @@ describe('ProviderGate — queued circuit revalidation', () => {
 });
 
 describe('ProviderGate — account-pause circuit breaker', () => {
+	test('a stale success cannot clear a pause armed by a newer concurrent response', async () => {
+		const suspensionBody = JSON.stringify({
+			error: { message: 'account_suspended: reactivates automatically at 2099-01-01T00:00 UTC' },
+		});
+		let releaseSuccess!: () => void;
+		const successHeld = new Promise<void>((resolve) => { releaseSuccess = resolve; });
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls += 1;
+			if (calls === 1) {
+				await successHeld;
+				return new Response(null, { status: 200 });
+			}
+			return new Response(suspensionBody, {
+				status: 429,
+				headers: { 'content-type': 'application/json' },
+			});
+		};
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 2 }], 0);
+
+		const staleSuccess = fetch(TEST_BASE + '/chat', makeInit('success'));
+		const pauseResponse = await fetch(TEST_BASE + '/chat', makeInit('pause'));
+		assert.equal(pauseResponse.status, 429);
+		assert.equal(gate.getMetrics()[0].paused, true);
+
+		releaseSuccess();
+		assert.equal((await staleSuccess).status, 200);
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('blocked')), ProviderGatePauseError);
+		assert.equal(calls, 2, 'the stale success must not reopen the paused provider');
+	});
+
+	test('caller abort releases a slot while a 429 inspection body is stalled', async () => {
+		globalThis.fetch = async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull() { return new Promise(() => {}); },
+			});
+			return new Response(body, { status: 429, headers: { 'content-type': 'application/json' } });
+		};
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+		const abort = new AbortController();
+		const pending = fetch(TEST_BASE + '/chat', makeInit('stalled', abort.signal));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].activeRequests, 1);
+
+		abort.abort();
+		await assert.rejects(pending, ProviderGateAbortError);
+		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+	});
+
 	test('live reconfiguration cannot bypass an armed account pause', async () => {
 		const suspensionBody = JSON.stringify({
 			error: { message: 'account_suspended: reactivates automatically at 2099-01-01T00:00 UTC' },
