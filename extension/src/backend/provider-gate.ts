@@ -103,7 +103,10 @@ interface AccountPauseState {
 interface TransportCircuitState {
 	consecutiveFailures: number;
 	openUntil: number;
-	probeInFlight: boolean;
+	/** Monotonic probe ownership. A token is cleared only by the attempt that
+	 * claimed it, so a stale queued attempt cannot release a newer probe. */
+	nextProbeToken: number;
+	activeProbeToken: number | null;
 }
 
 export interface ProviderGateResilienceOptions {
@@ -138,26 +141,77 @@ interface QueuedWaiter {
 	priority: number;
 	/** Monotonic enqueue order — preserves FIFO within a priority band. */
 	seq: number;
+	/** Session affinity is needed to transfer an afterburn-held slot without
+	 * disturbing queue priority for waiters that cannot claim it. */
+	sessionId: string | null;
 }
 
 class ProviderPool {
 	slots: ConcurrencySlot[];
-	readonly afterburnMs: number;
-	readonly queueWaitMs: number;
+	private configuredMaxConcurrent: number;
+	private configuredAfterburnMs: number;
+	private configuredQueueWaitMs: number;
 	private waiters: QueuedWaiter[] = [];
+	private holdWakeTimer: ReturnType<typeof setTimeout> | null = null;
 	private circuitBreaker: AccountPauseState = { pausedUntil: 0, strikeCount: 0 };
 	/** Monotonic enqueue counter — preserves FIFO within a priority band. */
 	private waiterSeq = 0;
 
-	constructor(readonly provider: string, readonly maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number) {
-		this.slots = Array.from({ length: Math.max(1, maxConcurrent) }, (_, i) => ({
+	constructor(readonly provider: string, maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number) {
+		this.configuredMaxConcurrent = Math.max(1, Math.floor(maxConcurrent));
+		this.configuredAfterburnMs = Math.max(0, afterburnSeconds) * 1000;
+		this.configuredQueueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+		this.slots = Array.from({ length: this.configuredMaxConcurrent }, (_, i) => ({
 			index: i,
 			inFlight: false,
 			holder: null,
 			holdUntil: 0,
 		}));
-		this.afterburnMs = Math.max(0, afterburnSeconds) * 1000;
-		this.queueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+	}
+
+	get maxConcurrent(): number {
+		return this.configuredMaxConcurrent;
+	}
+
+	get afterburnMs(): number {
+		return this.configuredAfterburnMs;
+	}
+
+	get queueWaitMs(): number {
+		return this.configuredQueueWaitMs;
+	}
+
+	/** Update live bounds without replacing the pool. Keeping this object is
+	 * what preserves in-flight permits, queued waiters, sticky holds, and the
+	 * account-pause breaker across settings changes. Shrinking is conservative:
+	 * existing requests finish on their original slot, while new admissions wait
+	 * until active work is below the new cap. */
+	reconfigure(maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number): void {
+		const nextMax = Math.max(1, Math.floor(maxConcurrent));
+		const nextAfterburnMs = Math.max(0, afterburnSeconds) * 1000;
+		const now = this.now();
+
+		while (this.slots.length < nextMax) {
+			const index = this.slots.length;
+			this.slots.push({ index, inFlight: false, holder: null, holdUntil: 0 });
+		}
+
+		// A shorter/disabled afterburn setting may release existing idle holds,
+		// but never extends a hold merely because preferences were reapplied.
+		for (const slot of this.slots) {
+			if (slot.inFlight) continue;
+			if (slot.index >= nextMax || nextAfterburnMs === 0) {
+				slot.holder = null;
+				slot.holdUntil = 0;
+			} else if (nextAfterburnMs < this.configuredAfterburnMs && slot.holder !== null) {
+				slot.holdUntil = Math.min(slot.holdUntil, now + nextAfterburnMs);
+			}
+		}
+
+		this.configuredMaxConcurrent = nextMax;
+		this.configuredAfterburnMs = nextAfterburnMs;
+		this.configuredQueueWaitMs = Math.max(0, queueWaitSeconds) * 1000;
+		this.wakeEligibleWaiters();
 	}
 
 	get activeRequests(): number {
@@ -177,8 +231,9 @@ class ProviderPool {
 	 *  priority over a new unrelated session. */
 	canClaimImmediatelyForUnrelatedSession(): boolean {
 		if (this.isPaused() || this.waiters.length > 0) return false;
+		if (this.activeRequests >= this.maxConcurrent) return false;
 		const now = this.now();
-		return this.slots.some((slot) =>
+		return this.slots.some((slot) => slot.index < this.maxConcurrent &&
 			!slot.inFlight && (slot.holder === null || slot.holdUntil <= now),
 		);
 	}
@@ -186,11 +241,12 @@ class ProviderPool {
 	/** Exact pre-acquire classification for one session (includes afterburn). */
 	canClaimImmediately(sessionId: string | null): boolean {
 		if (this.isPaused() || this.waiters.length > 0) return false;
+		if (this.activeRequests >= this.maxConcurrent) return false;
 		const now = this.now();
-		if (sessionId && this.afterburnMs > 0 && this.slots.some((slot) =>
+		if (sessionId && this.afterburnMs > 0 && this.slots.some((slot) => slot.index < this.maxConcurrent &&
 			!slot.inFlight && slot.holder === sessionId && slot.holdUntil > now,
 		)) return true;
-		return this.slots.some((slot) =>
+		return this.slots.some((slot) => slot.index < this.maxConcurrent &&
 			!slot.inFlight && (slot.holder === null || slot.holdUntil <= now),
 		);
 	}
@@ -268,6 +324,7 @@ class ProviderPool {
 		// Fast path: reuse a held slot for this session (afterburn).
 		if (sessionId && this.afterburnMs > 0) {
 			for (const s of this.slots) {
+				if (s.index >= this.maxConcurrent || this.activeRequests >= this.maxConcurrent) break;
 				if (!s.inFlight && s.holder === sessionId && s.holdUntil > now) {
 					s.inFlight = true;
 					s.holdUntil = 0;
@@ -286,8 +343,15 @@ class ProviderPool {
 	}
 
 	private tryClaimFreeSlot(sessionId: string | null, now: number): number | null {
+		if (this.activeRequests >= this.maxConcurrent) return null;
 		for (const s of this.slots) {
+			if (s.index >= this.maxConcurrent) break;
 			if (s.inFlight) continue;
+			if (sessionId && s.holder === sessionId && s.holdUntil > now) {
+				s.inFlight = true;
+				s.holdUntil = 0;
+				return s.index;
+			}
 			if (s.holder !== null && s.holdUntil > now) continue; // held by another session
 			// Free or expired hold.
 			s.holder = null;
@@ -301,7 +365,14 @@ class ProviderPool {
 
 	private async queueForSlot(sessionId: string | null, signal: AbortSignal | undefined, deadline: number, requestClass: ProviderGateRequestClass): Promise<number> {
 		return new Promise<number>((resolve, reject) => {
-			const waiter: QueuedWaiter = { resolve: () => {}, reject, signal, priority: REQUEST_CLASS_PRIORITY[requestClass], seq: this.waiterSeq++ };
+			const waiter: QueuedWaiter = {
+				resolve: () => {},
+				reject,
+				signal,
+				priority: REQUEST_CLASS_PRIORITY[requestClass],
+				seq: this.waiterSeq++,
+				sessionId,
+			};
 			this.waiters.push(waiter);
 
 			let settled = false;
@@ -312,6 +383,7 @@ class ProviderPool {
 				if (idx >= 0) this.waiters.splice(idx, 1);
 				signal?.removeEventListener('abort', onAbort);
 				if (timer) { clearTimeout(timer); timer = null; }
+				this.scheduleHoldWakeup();
 			};
 
 			const onAbort = () => {
@@ -356,6 +428,7 @@ class ProviderPool {
 					reject(new ProviderGateSaturatedError(this.provider, this.queueWaitMs));
 				}, remaining);
 			}
+			this.scheduleHoldWakeup();
 		});
 	}
 
@@ -364,7 +437,7 @@ class ProviderPool {
 		const s = this.slots[slotIndex];
 		if (!s || !s.inFlight) return;
 		s.inFlight = false;
-		if (success && sessionId && this.afterburnMs > 0) {
+		if (slotIndex < this.maxConcurrent && success && sessionId && this.afterburnMs > 0) {
 			s.holder = sessionId;
 			s.holdUntil = this.now() + this.afterburnMs;
 		} else {
@@ -377,24 +450,74 @@ class ProviderPool {
 		// earliest-enqueued waiter (lowest `seq`) wins — stable FIFO. This
 		// unblocks skill-pruner prepass calls ahead of main-session calls
 		// so a saturated pruner provider does not stall its own session.
-		const next = this.popNextWaiter();
-		if (next) next.resolve();
+		this.wakeEligibleWaiters();
 	}
 
-	/** Remove and return the highest-priority queued waiter (lowest priority
-	 *  number, then lowest enqueue seq). Returns undefined when the queue is
-	 *  empty. */
-	private popNextWaiter(): QueuedWaiter | undefined {
-		if (this.waiters.length === 0) return undefined;
-		let bestIdx = 0;
-		for (let i = 1; i < this.waiters.length; i++) {
+	/** Transfer as many newly available permits as the configured cap allows. */
+	private wakeEligibleWaiters(): void {
+		if (this.holdWakeTimer) {
+			clearTimeout(this.holdWakeTimer);
+			this.holdWakeTimer = null;
+		}
+		while (this.activeRequests < this.maxConcurrent && this.waiters.length > 0) {
+			const next = this.popNextEligibleWaiter(this.now());
+			if (!next) break;
+			next.resolve();
+		}
+		this.scheduleHoldWakeup();
+	}
+
+	/** Remove the highest-priority waiter that can claim a slot now. Ineligible
+	 * waiters retain their original queue position while an afterburn hold is
+	 * active, avoiding reorder-on-requeue races. */
+	private popNextEligibleWaiter(now: number): QueuedWaiter | undefined {
+		let bestIdx = -1;
+		for (let i = 0; i < this.waiters.length; i++) {
 			const w = this.waiters[i];
+			if (!this.hasClaimableSlotForSession(w.sessionId, now)) continue;
+			if (bestIdx < 0) {
+				bestIdx = i;
+				continue;
+			}
 			const best = this.waiters[bestIdx];
 			if (w.priority < best.priority || (w.priority === best.priority && w.seq < best.seq)) {
 				bestIdx = i;
 			}
 		}
+		if (bestIdx < 0) return undefined;
 		return this.waiters.splice(bestIdx, 1)[0];
+	}
+
+	private hasClaimableSlotForSession(sessionId: string | null, now: number): boolean {
+		if (this.activeRequests >= this.maxConcurrent) return false;
+		return this.slots.some((slot) => {
+			if (slot.index >= this.maxConcurrent || slot.inFlight) return false;
+			if (sessionId && slot.holder === sessionId && slot.holdUntil > now) return true;
+			return slot.holder === null || slot.holdUntil <= now;
+		});
+	}
+
+	/** A held slot has no release event when its sticky window expires, so arm
+	 * one pool-level wakeup for the earliest expiry whenever waiters exist. */
+	private scheduleHoldWakeup(): void {
+		if (this.holdWakeTimer) {
+			clearTimeout(this.holdWakeTimer);
+			this.holdWakeTimer = null;
+		}
+		if (this.waiters.length === 0 || this.activeRequests >= this.maxConcurrent) return;
+		const now = this.now();
+		let earliest = Number.POSITIVE_INFINITY;
+		for (const slot of this.slots) {
+			if (slot.index >= this.maxConcurrent) break;
+			if (!slot.inFlight && slot.holder !== null && slot.holdUntil > now) {
+				earliest = Math.min(earliest, slot.holdUntil);
+			}
+		}
+		if (!Number.isFinite(earliest)) return;
+		this.holdWakeTimer = setTimeout(() => {
+			this.holdWakeTimer = null;
+			this.wakeEligibleWaiters();
+		}, Math.max(0, earliest - now));
 	}
 
 	/** Force-release all slots held by a session (e.g. on abort). */
@@ -406,9 +529,7 @@ class ProviderPool {
 				s.holdUntil = 0;
 			}
 		}
-		// Wake all waiters — they'll re-evaluate.
-		const waiters = this.waiters.splice(0);
-		for (const w of waiters) w.resolve();
+		this.wakeEligibleWaiters();
 	}
 }
 
@@ -596,17 +717,19 @@ export class ProviderGate {
 		this.pools = new Map();
 		for (const cfg of this.configs) {
 			const existing = oldPools.get(cfg.provider);
-			if (existing) {
-				// Keep the pool — just update config bounds.
-				// The pool's maxConcurrent is set at construction; if it changed,
-				// we need a new pool. For simplicity, always rebuild.
-			}
-			const pool = new ProviderPool(
+			const pool = existing?.pool ?? new ProviderPool(
 				cfg.provider,
 				cfg.maxConcurrentRequests,
 				cfg.afterburnSeconds ?? 0,
 				cfg.queueWaitSeconds ?? 30,
 			);
+			if (existing) {
+				pool.reconfigure(
+					cfg.maxConcurrentRequests,
+					cfg.afterburnSeconds ?? 0,
+					cfg.queueWaitSeconds ?? 30,
+				);
+			}
 			const headerWaitMs = (cfg.headerWaitSeconds ?? 0) > 0
 				? cfg.headerWaitSeconds! * 1000
 				: this.defaultHeaderWaitMs;
@@ -617,7 +740,12 @@ export class ProviderGate {
 	private getTransportCircuit(provider: string): TransportCircuitState {
 		let state = this.transportCircuits.get(provider);
 		if (!state) {
-			state = { consecutiveFailures: 0, openUntil: 0, probeInFlight: false };
+			state = {
+				consecutiveFailures: 0,
+				openUntil: 0,
+				nextProbeToken: 0,
+				activeProbeToken: null,
+			};
 			this.transportCircuits.set(provider, state);
 		}
 		return state;
@@ -625,32 +753,42 @@ export class ProviderGate {
 
 	/** Claim the single half-open probe after cooldown, or reject locally while
 	 * the shared provider circuit remains open. */
-	private beginTransportAttempt(provider: string): boolean {
+	private beginTransportAttempt(provider: string): number | null {
 		const state = this.getTransportCircuit(provider);
-		if (state.consecutiveFailures < this.transportFailureThreshold) return false;
+		if (state.consecutiveFailures < this.transportFailureThreshold) return null;
 		const now = Date.now();
-		if (state.openUntil > now || state.probeInFlight) {
+		if (state.openUntil > now || state.activeProbeToken !== null) {
 			throw new ProviderGateTransportCircuitOpenError(provider, Math.max(state.openUntil, now + 1_000));
 		}
-		state.probeInFlight = true;
-		return true;
+		const token = ++state.nextProbeToken;
+		state.activeProbeToken = token;
+		return token;
 	}
 
-	private cancelTransportAttempt(provider: string, wasProbe: boolean): void {
-		if (wasProbe) this.getTransportCircuit(provider).probeInFlight = false;
-	}
-
-	private recordTransportSuccess(provider: string): void {
+	private cancelTransportAttempt(provider: string, probeToken: number | null): void {
+		if (probeToken === null) return;
 		const state = this.getTransportCircuit(provider);
+		if (state.activeProbeToken === probeToken) state.activeProbeToken = null;
+	}
+
+	private recordTransportSuccess(provider: string, probeToken: number | null): void {
+		const state = this.getTransportCircuit(provider);
+		// A request admitted before a newer half-open probe is not authoritative
+		// for that probe. Its late result must not close or release the new probe.
+		if (state.activeProbeToken !== null && state.activeProbeToken !== probeToken) return;
 		state.consecutiveFailures = 0;
 		state.openUntil = 0;
-		state.probeInFlight = false;
+		if (probeToken !== null && state.activeProbeToken === probeToken) {
+			state.activeProbeToken = null;
+		}
 	}
 
-	private recordTransportFailure(provider: string): void {
+	private recordTransportFailure(provider: string, probeToken: number | null): void {
 		const state = this.getTransportCircuit(provider);
 		state.consecutiveFailures += 1;
-		state.probeInFlight = false;
+		if (probeToken !== null && state.activeProbeToken === probeToken) {
+			state.activeProbeToken = null;
+		}
 		if (state.consecutiveFailures < this.transportFailureThreshold) return;
 		const exponent = Math.max(0, state.consecutiveFailures - this.transportFailureThreshold);
 		const cooldown = Math.min(
@@ -663,7 +801,7 @@ export class ProviderGate {
 	private transportCircuitBlocked(provider: string): boolean {
 		const state = this.transportCircuits.get(provider);
 		return !!state && state.consecutiveFailures >= this.transportFailureThreshold
-			&& (state.openUntil > Date.now() || state.probeInFlight);
+			&& (state.openUntil > Date.now() || state.activeProbeToken !== null);
 	}
 
 	private wrapFetch(): void {
@@ -760,7 +898,7 @@ export class ProviderGate {
 		if (pool.isPaused()) {
 			throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 		}
-		let wasTransportProbe = this.beginTransportAttempt(config.provider);
+		let transportProbeToken = this.beginTransportAttempt(config.provider);
 
 		// Acquire a concurrency slot. Queue and header waits are separate phases.
 		if (sessionId && !pool.canClaimImmediately(sessionId)) {
@@ -770,7 +908,7 @@ export class ProviderGate {
 		try {
 			slotIndex = await pool.acquire(sessionId, signal, requestClass);
 		} catch (error) {
-			this.cancelTransportAttempt(config.provider, wasTransportProbe);
+			this.cancelTransportAttempt(config.provider, transportProbeToken);
 			throw error;
 		}
 
@@ -782,11 +920,11 @@ export class ProviderGate {
 			if (pool.isPaused()) {
 				throw new ProviderGatePauseError(config.provider, pool.pausedUntilMs());
 			}
-			if (!wasTransportProbe) {
-				wasTransportProbe = this.beginTransportAttempt(config.provider);
+			if (transportProbeToken === null) {
+				transportProbeToken = this.beginTransportAttempt(config.provider);
 			}
 		} catch (error) {
-			this.cancelTransportAttempt(config.provider, wasTransportProbe);
+			this.cancelTransportAttempt(config.provider, transportProbeToken);
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
@@ -805,9 +943,9 @@ export class ProviderGate {
 			// returning the original response unchanged so the SDK retains control
 			// of retry/replay policy.
 			if (response.status >= 500 && response.status <= 599) {
-				this.recordTransportFailure(config.provider);
+				this.recordTransportFailure(config.provider, transportProbeToken);
 			} else {
-				this.recordTransportSuccess(config.provider);
+				this.recordTransportSuccess(config.provider, transportProbeToken);
 			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
 
@@ -831,7 +969,7 @@ export class ProviderGate {
 			// If the response has a body, wrap it to release the slot on
 			// stream completion (and arm the idle watchdog if configured).
 			if (response.body) {
-				return this.wrapStream(response, config.provider, pool, slotIndex, sessionId);
+				return this.wrapStream(response, config.provider, pool, slotIndex, sessionId, signal);
 			}
 
 			// No body — release immediately.
@@ -839,15 +977,15 @@ export class ProviderGate {
 			return response;
 		} catch (error) {
 			if (error instanceof ProviderGateHeaderTimeoutError) {
-				this.recordTransportFailure(config.provider);
+				this.recordTransportFailure(config.provider, transportProbeToken);
 			} else if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
 				// User cancellation is not evidence that the provider is unhealthy.
-				this.cancelTransportAttempt(config.provider, wasTransportProbe);
+				this.cancelTransportAttempt(config.provider, transportProbeToken);
 			} else if (!receivedHeaders) {
 				// Fetch-level failures such as DNS/connect/reset errors are provider
 				// transport evidence even while the circuit is closed. Counting only
 				// half-open probe failures would let an ordinary outage retry forever.
-				this.recordTransportFailure(config.provider);
+				this.recordTransportFailure(config.provider, transportProbeToken);
 			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);
@@ -1028,22 +1166,50 @@ export class ProviderGate {
 	 * This replaces both `wrap_stream_with_liveness` (idle watchdog) and the
 	 * proxy's implicit slot release on stream completion.
 	 */
-	private wrapStream(response: Response, provider: string, pool: ProviderPool, slotIndex: number, sessionId: string | null): Response {
+	private wrapStream(
+		response: Response,
+		provider: string,
+		pool: ProviderPool,
+		slotIndex: number,
+		sessionId: string | null,
+		signal: AbortSignal | undefined,
+	): Response {
 		const originalBody = response.body!;
 		const idleTimeoutMs = this.idleTimeoutMs;
 		const reader = originalBody.getReader();
 		let released = false;
+		let removeCallerAbort = () => {};
 
-		const releaseSlot = () => {
+		const releaseSlot = (success: boolean) => {
 			if (released) return;
 			released = true;
-			pool.release(slotIndex, sessionId, true);
+			removeCallerAbort();
+			pool.release(slotIndex, sessionId, success);
 		};
 
 		const stream = new ReadableStream<Uint8Array>({
 			async start(controller) {
 				let timer: ReturnType<typeof setTimeout> | null = null;
 				let settled = false;
+
+				const clearTimer = () => {
+					if (timer) { clearTimeout(timer); timer = null; }
+				};
+
+				const onCallerAbort = () => {
+					if (settled) return;
+					settled = true;
+					clearTimer();
+					const reason = signal?.reason ?? new ProviderGateAbortError('reading provider response body');
+					reader.cancel(reason).catch(() => {});
+					try { controller.error(reason); } catch { /* already closed */ }
+					releaseSlot(false);
+				};
+				if (signal) {
+					signal.addEventListener('abort', onCallerAbort, { once: true });
+					removeCallerAbort = () => signal.removeEventListener('abort', onCallerAbort);
+					if (signal.aborted) onCallerAbort();
+				}
 
 				const armTimer = () => {
 					if (idleTimeoutMs <= 0) return;
@@ -1058,25 +1224,25 @@ export class ProviderGate {
 								new Error(`upstream stream stalled: no chunk for ${idleTimeoutMs / 1000}s (provider=${provider})`),
 							);
 						} catch { /* already closed */ }
-						releaseSlot();
+						releaseSlot(false);
 					}, idleTimeoutMs);
 				};
 
-				const clearTimer = () => {
-					if (timer) { clearTimeout(timer); timer = null; }
-				};
-
-				armTimer();
+				if (!settled) armTimer();
 				try {
 					while (true) {
 						const { done, value } = await reader.read();
+						// Caller cancellation may settle this wrapper while an upstream
+						// reader ignores abort briefly. Its eventual read completion is
+						// stale and must not publish a successful terminal observation.
+						if (settled) return;
 						clearTimer();
 						if (settled) return;
 						if (done) {
 							if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_terminal' });
 							controller.close();
 							settled = true;
-							releaseSlot();
+							releaseSlot(true);
 							return;
 						}
 						if (value) {
@@ -1091,14 +1257,14 @@ export class ProviderGate {
 					if (!settled) {
 						settled = true;
 						try { controller.error(err); } catch { /* already closed */ }
-						releaseSlot();
+						releaseSlot(false);
 					}
 				}
 			},
 
 			cancel(reason) {
 				reader.cancel(reason).catch(() => {});
-				releaseSlot();
+				releaseSlot(false);
 			},
 		});
 

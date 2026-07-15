@@ -311,6 +311,26 @@ describe('ProviderGate — afterburn sticky slots', () => {
 			(err: unknown) => err instanceof ProviderGateSaturatedError,
 		);
 	});
+
+	test('an expired sticky hold wakes the next queued session', async () => {
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			return new Response(null, { status: 200 });
+		};
+		ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			afterburnSeconds: 0.02,
+			queueWaitSeconds: 0.2,
+		}], 0);
+
+		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
+		const response = await fetch(TEST_BASE + '/chat', makeInit('session-B'));
+
+		assert.equal(response.status, 200);
+		assert.equal(calls, 2, 'hold expiry should transfer the permit before the queue deadline');
+	});
 });
 
 describe('ProviderGate — request-class queue priority', () => {
@@ -404,6 +424,32 @@ describe('ProviderGate — request-class queue priority', () => {
 });
 
 describe('ProviderGate — stream liveness', () => {
+	test('caller cancellation releases a body-phase slot immediately', async () => {
+		let mode: 'stall' | 'success' = 'stall';
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			return mode === 'stall' ? makeStallingResponse() : new Response(null, { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			queueWaitSeconds: 0,
+		}], 0);
+		const abort = new AbortController();
+		const response = await fetch(TEST_BASE + '/chat', makeInit('streaming', abort.signal));
+		const bodyRead = response.text();
+		assert.equal(gate.getMetrics()[0].activeRequests, 1);
+
+		abort.abort();
+		assert.equal(gate.getMetrics()[0].activeRequests, 0, 'abort dispatch should release synchronously');
+		await assert.rejects(bodyRead, (error: unknown) => error instanceof Error && error.name === 'AbortError');
+
+		mode = 'success';
+		assert.equal((await fetch(TEST_BASE + '/chat', makeInit('next'))).status, 200);
+		assert.equal(calls, 2);
+	});
+
 	test('stalled stream is terminated after idle timeout', async () => {
 		globalThis.fetch = async () => makeStallingResponse();
 		ProviderGate.install([BASE_CONFIG], 0.1); // 100ms idle timeout
@@ -594,6 +640,62 @@ describe('ProviderGate — header-phase timeout', () => {
 		);
 		assert.equal(callCount, 3, 'the blocked sibling must not reach upstream');
 		releaseProbe?.(makeStreamingResponse([new TextEncoder().encode('data: ok\n\n')]));
+		assert.equal((await probe).status, 200);
+	});
+
+	test('a late ordinary failure cannot relinquish a newer half-open probe', async (t) => {
+		let now = 1_000_000;
+		t.mock.method(Date, 'now', () => now);
+		let rejectOld!: (error: unknown) => void;
+		let resolveProbe!: (response: Response) => void;
+		let markOldEntered!: () => void;
+		let markProbeEntered!: () => void;
+		const oldEntered = new Promise<void>((resolve) => { markOldEntered = resolve; });
+		const probeEntered = new Promise<void>((resolve) => { markProbeEntered = resolve; });
+		let calls = 0;
+		globalThis.fetch = async (_input, init) => {
+			calls++;
+			const sessionId = new Headers(init?.headers).get('x-session-affinity');
+			if (sessionId === 'old') {
+				markOldEntered();
+				return new Promise<Response>((_resolve, reject) => { rejectOld = reject; });
+			}
+			if (sessionId === 'trip') throw new TypeError('connection refused');
+			if (sessionId === 'probe') {
+				markProbeEntered();
+				return new Promise<Response>((resolve) => { resolveProbe = resolve; });
+			}
+			throw new Error(`unexpected upstream request for ${sessionId}`);
+		};
+		ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 2,
+			headerWaitSeconds: 10,
+			queueWaitSeconds: 0,
+		}], 0, {
+			transportFailureThreshold: 1,
+			transportCircuitCooldownSeconds: 1,
+		});
+
+		const old = fetch(TEST_BASE + '/chat', makeInit('old'));
+		await oldEntered;
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('trip')), TypeError);
+		now += 1_001;
+		const probe = fetch(TEST_BASE + '/chat', makeInit('probe'));
+		await probeEntered;
+
+		// This pre-circuit request settles after the probe was claimed. It is
+		// transport evidence, but does not own (and therefore cannot clear) it.
+		rejectOld(new TypeError('old connection reset'));
+		await assert.rejects(old, TypeError);
+		now += 2_001;
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('blocked-sibling')),
+			ProviderGateTransportCircuitOpenError,
+		);
+		assert.equal(calls, 3, 'the active probe remains the sole upstream attempt');
+
+		resolveProbe(new Response(null, { status: 200 }));
 		assert.equal((await probe).status, 200);
 	});
 
@@ -798,6 +900,137 @@ describe('ProviderGate — header-phase timeout', () => {
 	});
 });
 
+describe('ProviderGate — live reconfiguration', () => {
+	test('keeps the active permit and queued waiters under the original cap', async () => {
+		let releaseFirst!: () => void;
+		let markEntered!: () => void;
+		const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+		const held = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let calls = 0;
+		let upstreamActive = 0;
+		let maxUpstreamActive = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			upstreamActive++;
+			maxUpstreamActive = Math.max(maxUpstreamActive, upstreamActive);
+			if (calls === 1) {
+				markEntered();
+				await held;
+			}
+			upstreamActive--;
+			return new Response(null, { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			queueWaitSeconds: 0,
+		}], 0);
+
+		const first = fetch(TEST_BASE + '/chat', makeInit('first'));
+		await entered;
+		const second = fetch(TEST_BASE + '/chat', makeInit('second'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+
+		gate.applyUserOverrides({ 'test-provider': { headerWaitSeconds: 30 } });
+		const third = fetch(TEST_BASE + '/chat', makeInit('third'));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.equal(calls, 1, 'reconfiguration must not create a second pool authority');
+		assert.equal(gate.getMetrics()[0].activeRequests, 1);
+		assert.equal(gate.getMetrics()[0].queuedRequests, 2);
+		releaseFirst();
+		await Promise.all([first, second, third]);
+		assert.equal(maxUpstreamActive, 1);
+	});
+
+	test('shrinking the cap drains existing work before admitting a waiter', async () => {
+		const releases: Array<() => void> = [];
+		let calls = 0;
+		globalThis.fetch = async () => {
+			const call = calls++;
+			if (call < 2) await new Promise<void>((resolve) => { releases[call] = resolve; });
+			return new Response(null, { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 2,
+			queueWaitSeconds: 0,
+		}], 0);
+
+		const first = fetch(TEST_BASE + '/chat', makeInit('first'));
+		const second = fetch(TEST_BASE + '/chat', makeInit('second'));
+		while (releases.length < 2) await new Promise((resolve) => setImmediate(resolve));
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 1 } });
+		const third = fetch(TEST_BASE + '/chat', makeInit('third'));
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 1);
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+		releases[0]();
+		await first;
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(calls, 2, 'one remaining active request still occupies the shrunken cap');
+
+		releases[1]();
+		await Promise.all([second, third]);
+		assert.equal(calls, 3);
+	});
+
+	test('growing the cap immediately transfers a new permit to a queued waiter', async () => {
+		let releaseFirst!: () => void;
+		const held = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			if (calls === 1) await held;
+			return new Response(null, { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			queueWaitSeconds: 0,
+		}], 0);
+
+		const first = fetch(TEST_BASE + '/chat', makeInit('first'));
+		while (calls < 1) await new Promise((resolve) => setImmediate(resolve));
+		const second = fetch(TEST_BASE + '/chat', makeInit('second'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 2 } });
+		await second;
+		assert.equal(calls, 2, 'the newly configured permit should wake the existing queue');
+		releaseFirst();
+		await first;
+	});
+
+	test('preserves an afterburn hold across unrelated settings changes', async () => {
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			return new Response(null, { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 1,
+			afterburnSeconds: 10,
+			queueWaitSeconds: 0,
+		}], 0);
+		await fetch(TEST_BASE + '/chat', makeInit('holder'));
+
+		gate.applyUserOverrides({ 'test-provider': { headerWaitSeconds: 30 } });
+		const abort = new AbortController();
+		const blocked = fetch(TEST_BASE + '/chat', makeInit('other', abort.signal));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0].queuedRequests, 1);
+		assert.equal(calls, 1, 'the sticky reservation must remain authoritative');
+
+		abort.abort();
+		await assert.rejects(blocked, ProviderGateAbortError);
+	});
+});
+
 describe('ProviderGate — queued circuit revalidation', () => {
 	test('queued request revalidates an account pause before upstream dispatch', async () => {
 		const suspensionBody = JSON.stringify({
@@ -843,6 +1076,32 @@ describe('ProviderGate — queued circuit revalidation', () => {
 });
 
 describe('ProviderGate — account-pause circuit breaker', () => {
+	test('live reconfiguration cannot bypass an armed account pause', async () => {
+		const suspensionBody = JSON.stringify({
+			error: { message: 'account_suspended: reactivates automatically at 2099-01-01T00:00 UTC' },
+		});
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls++;
+			return new Response(suspensionBody, {
+				status: 429,
+				headers: { 'content-type': 'application/json' },
+			});
+		};
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+		assert.equal((await fetch(TEST_BASE + '/chat', makeInit('first'))).status, 429);
+
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 3 } });
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('second')),
+			ProviderGatePauseError,
+		);
+
+		assert.equal(calls, 1, 'settings changes must retain the existing breaker state');
+		assert.equal(gate.getMetrics()[0].paused, true);
+		assert.equal(gate.getMetrics()[0].strikeCount, 1);
+	});
+
 	test('suspension body arms the circuit breaker', async () => {
 		const reactivation = new Date(Date.now() + 3600_000).toISOString().replace(/.\d+Z$/, ' UTC').replace('T', ' ');
 		const suspensionBody = JSON.stringify({
