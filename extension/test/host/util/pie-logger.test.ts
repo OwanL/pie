@@ -100,16 +100,30 @@ test('log level filtering blocks low-priority messages', () => {
   resetState();
   clearLogFiles();
   setLogLevel('warn');
+  const filteredMarker = 'filtered-info-message-should-not-appear';
 
   const originalInfo = console.info;
   console.info = () => { /* swallow */ };
   try {
-    appendPieLog('info', 'filtered-scope', 'should not appear');
+    appendPieLog('info', 'filtered-scope', filteredMarker);
   } finally {
     console.info = originalInfo;
   }
 
-  assert.ok(!fs.existsSync(PIE_LOG_PATH), 'info message should not be written when minLevel is warn');
+  // Other extension test files share the process-wide log destination and run
+  // concurrently, so the file itself may legitimately exist. Assert the
+  // filtered record is absent instead of claiming exclusive ownership of it.
+  let logContent = '';
+  try {
+    logContent = fs.readFileSync(PIE_LOG_PATH, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  assert.doesNotMatch(
+    logContent,
+    new RegExp(filteredMarker),
+    'info message should not be written when minLevel is warn',
+  );
 });
 
 test('auditLog is gated by devMode and runtimeAuditLogEnabled', () => {
