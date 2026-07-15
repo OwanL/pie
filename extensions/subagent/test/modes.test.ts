@@ -417,24 +417,20 @@ function createStampCaptureBridge() {
 	} as any;
 }
 
-async function capturedSubagentCallIds(bridge: ReturnType<typeof createStampCaptureBridge>): Promise<string[]> {
-	const proxies: any[] = (globalThis as any).__MOCK_PROXIES__ || [];
-	const ids: string[] = [];
-	for (const p of proxies) {
-		// proxy.select delegates to bridge.select, recording opts.subagentCallId.
-		await p.select("q", ["a"]);
-		ids.push(bridge.calls.select[bridge.calls.select.length - 1].opts.subagentCallId);
-	}
-	return ids;
-}
-
 test("executeSingleMode stamps the bare tool-call id (single result -> bare id)", async () => {
-	setMockBehavior(successBehavior("ok"));
 	const bridge = createStampCaptureBridge();
+	setMockBehavior({ onPrompt: async (emit: any) => {
+		const proxy = (globalThis as any).__MOCK_PROXIES__.at(-1);
+		await proxy.select("q", ["a"]);
+		emit(messageEnd("ok", "completed"));
+	} });
 	await execSingle(
 		{ agent: "worker", task: "s" }, makeCtx(), makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(), selCtx(), "callD", bridge,
 	);
-	const ids = await capturedSubagentCallIds(bridge);
-	assert.deepEqual(ids, ["callD"]);
+	assert.equal(bridge.calls.select[0].opts.subagentCallId, "callD");
+
+	const capturedProxy = (globalThis as any).__MOCK_PROXIES__[0];
+	assert.equal(await capturedProxy.select("late", ["x"]), undefined);
+	assert.equal(bridge.calls.select.length, 1, "a terminal session's captured proxy stays fenced");
 });

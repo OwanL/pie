@@ -275,6 +275,21 @@ describe("ParentExtensionUIBridgeProxy", () => {
       assert.equal(scoped.calls.cancelAll.length, 0);
     });
   });
+
+  it("permanently fences dialog forwarding after disposal", async () => {
+    proxy.dispose();
+    assert.equal(await proxy.select("late", ["x"]), undefined);
+    assert.equal(await proxy.confirm("late", "late"), false);
+    assert.equal(await proxy.input("late"), undefined);
+    proxy.notify("late");
+    proxy.cancelAll();
+
+    assert.equal(mock.calls.select.length, 0);
+    assert.equal(mock.calls.confirm.length, 0);
+    assert.equal(mock.calls.input.length, 0);
+    assert.equal(mock.calls.notify.length, 0);
+    assert.equal(mock.calls.cancelAll.length, 1, "dispose settles owned dialogs exactly once");
+  });
 });
 
 // ── Nested proxy chain (depth ≥ 2) — T3 ───────────────────────────────────

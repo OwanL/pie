@@ -29,6 +29,7 @@ export interface ParentBridge {
 export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
   private readonly parentBridge: ParentBridge;
   private readonly subagentCallId: string;
+  private disposed = false;
 
   constructor(parentBridge: ParentBridge, subagentCallId: string) {
     this.parentBridge = parentBridge;
@@ -58,18 +59,22 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
   // ── Dialog methods (delegated to parent bridge) ──────────────────────────
 
   async select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined> {
+    if (this.disposed) return undefined;
     return this.parentBridge.select(title, options, this.forwardOpts(opts));
   }
 
   async confirm(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean> {
+    if (this.disposed) return false;
     return this.parentBridge.confirm(title, message, this.forwardOpts(opts));
   }
 
   async input(title: string, placeholder?: string, opts?: ExtensionUIDialogOptions): Promise<string | undefined> {
+    if (this.disposed) return undefined;
     return this.parentBridge.input(title, placeholder, this.forwardOpts(opts));
   }
 
   notify(message: string, type?: "info" | "warning" | "error"): void {
+    if (this.disposed) return;
     this.parentBridge.notify(message, type, this.subagentCallId);
   }
 
@@ -77,10 +82,24 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
    * bridge, so delegating to cancelAll() would incorrectly dismiss every
    * sibling when one child times out. Nested proxies forward the innermost id. */
   cancelAll(): void {
+    if (this.disposed) return;
     this.cancelSubagent(this.subagentCallId);
   }
 
   cancelSubagent(subagentCallId: string): void {
+    if (this.disposed) return;
+    this.cancelOwnedDialogs(subagentCallId);
+  }
+
+  /** Permanently fence this attempt's captured UI context, then settle any
+   * outstanding dialog retained by the parent bridge. */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.cancelOwnedDialogs(this.subagentCallId);
+  }
+
+  private cancelOwnedDialogs(subagentCallId: string): void {
     if (this.parentBridge.cancelSubagent) {
       this.parentBridge.cancelSubagent(subagentCallId);
     } else {

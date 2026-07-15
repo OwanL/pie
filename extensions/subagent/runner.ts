@@ -1249,7 +1249,7 @@ export async function runSingleAgent(
 		if (!proxy || proxyCancelled) return;
 		proxyCancelled = true;
 		try {
-			proxy.cancelAll();
+			proxy.dispose();
 		} catch {
 			/* a broken parent bridge must not prevent owned-session teardown */
 		}
