@@ -340,18 +340,21 @@ function setActivity(
 }
 
 /** Build the update emitter that publishes partial state to the parent UI. */
+type UpdateEmitter = ((immediate?: boolean) => void) & { close: () => void };
+
 function createUpdateEmitter(
 	result: SingleResult,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	streamingTextRef: { value: string },
-): (immediate?: boolean) => void {
+): UpdateEmitter {
 	let lastEmittedAt = 0;
 	let emittedFirstStreamingUpdate = false;
 	let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+	let closed = false;
 	const emitNow = () => {
 		pendingTimer = undefined;
-		if (!onUpdate) return;
+		if (closed || !onUpdate) return;
 		lastEmittedAt = Date.now();
 		const finalOutput = getFinalOutput(result.messages);
 		const text = finalOutput || streamingTextRef.value || "(running...)";
@@ -360,8 +363,8 @@ function createUpdateEmitter(
 			details: makeDetails([result]),
 		});
 	};
-	return (immediate = true) => {
-		if (!onUpdate) return;
+	const emit = ((immediate = true) => {
+		if (closed || !onUpdate) return;
 		if (immediate) {
 			if (pendingTimer) clearTimeout(pendingTimer);
 			emitNow();
@@ -382,7 +385,16 @@ function createUpdateEmitter(
 			pendingTimer = setTimeout(emitNow, Math.max(1, remaining));
 			pendingTimer.unref?.();
 		}
+	}) as UpdateEmitter;
+	emit.close = () => {
+		if (closed) return;
+		closed = true;
+		if (pendingTimer) {
+			clearTimeout(pendingTimer);
+			pendingTimer = undefined;
+		}
 	};
+	return emit;
 }
 
 /** Record a completed assistant message's usage and metadata into the result. */
@@ -501,6 +513,7 @@ function subscribeToSession(
 	streamingTextRef: { value: string },
 	streamingReasoningRef: { value: string },
 	stageRef: { value: string },
+	eventFence: { accepting: boolean },
 ): () => void {
 	const toolProgress = new Map<string, string>();
 	// The SDK can report a tool update before the assistant's toolCall message
@@ -509,7 +522,12 @@ function subscribeToSession(
 	// Completion is authoritative: providers may emit a late update after end,
 	// which must never resurrect a completed toolCall in the transcript.
 	const endedToolCallIds = new Set<string>();
-	return session.subscribe((event) => {
+	const unsubscribe = session.subscribe((event) => {
+		// Some SDK/provider adapters return an unsubscribe handle that is a no-op,
+		// while already-queued callbacks can also arrive after teardown. The local
+		// ownership fence is authoritative: a completed attempt must never mutate
+		// its result or publish UI state after a retry has taken ownership.
+		if (!eventFence.accepting) return;
 		if (event.type === "message_update") {
 			handleMessageUpdate(event, result, emitUpdate, streamingTextRef, streamingReasoningRef, stageRef);
 			return;
@@ -562,6 +580,13 @@ function subscribeToSession(
 			}
 		}
 	});
+	return () => {
+		if (!eventFence.accepting) return;
+		eventFence.accepting = false;
+		pendingToolUpdates.clear();
+		toolProgress.clear();
+		unsubscribe();
+	};
 }
 
 /** Handle streaming text_delta / thinking_delta events from the assistant. */
@@ -876,9 +901,18 @@ function applyThrownError(result: SingleResult, err: unknown, stage?: string, pa
 }
 
 /** Tear down a session, swallowing disposal errors. */
-function teardownSession(unsubscribe: () => void, session: { dispose: () => void }): void {
+function teardownSession(
+	unsubscribe: () => void,
+	session: { dispose: () => void },
+	beforeDispose?: () => void,
+): void {
 	try {
 		unsubscribe();
+	} catch {
+		/* ignore */
+	}
+	try {
+		beforeDispose?.();
 	} catch {
 		/* ignore */
 	}
@@ -1185,6 +1219,7 @@ export async function runSingleAgent(
 			content: [{ type: "text", text: `⚠ ${agentName}: ${currentResult.errorMessage}` }],
 			details: makeDetails([currentResult]),
 		});
+		emitUpdate.close();
 		// Reclaim any orphaned exit-signal listeners the loader leaked before
 		// the pre-spawn phase failed (reload may have run partially). See the
 		// snapshot above and `reclaimOrphanedSignalListeners`.
@@ -1203,12 +1238,31 @@ export async function runSingleAgent(
 	// future setup step may throw before the prompt's narrower try/finally is
 	// reached. The no-op unsubscribe preserves exact-once session disposal even
 	// when subscription itself throws before returning its cleanup handle.
-	let unsubscribe: () => void = () => {};
+	const sessionEventFence = { accepting: true };
+	let unsubscribe: () => void = () => {
+		sessionEventFence.accepting = false;
+	};
 	let sessionCleanedUp = false;
+	let proxy: ParentExtensionUIBridgeProxy | undefined;
+	let proxyCancelled = false;
+	const cancelProxy = (): void => {
+		if (!proxy || proxyCancelled) return;
+		proxyCancelled = true;
+		try {
+			proxy.cancelAll();
+		} catch {
+			/* a broken parent bridge must not prevent owned-session teardown */
+		}
+	};
 	const cleanupOwnedSession = (): void => {
 		if (sessionCleanedUp) return;
 		sessionCleanedUp = true;
-		teardownSession(unsubscribe, session);
+		// Stop attempt-owned publication before teardown or a fallback attempt can
+		// begin. This clears any trailing throttled update from the old attempt.
+		emitUpdate.close();
+		// Fence the SDK callback before cancelling UI or disposing the session;
+		// either operation may synchronously flush provider/extension callbacks.
+		teardownSession(unsubscribe, session, cancelProxy);
 		// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
 		// during this session (see `snapshotSignalListeners` above). Runs after
 		// `teardownSession` so the session's own disposal has settled; the
@@ -1223,7 +1277,6 @@ export async function runSingleAgent(
 	};
 	// Variables used by the prompt phase are created before setup so setup
 	// failures can propagate after cleanup without widening the prompt catch.
-	let proxy: ParentExtensionUIBridgeProxy | undefined;
 	const stageRef = { value: "preparing" };
 	// Wrap the prompt in the shared subagent context (A) so extensions whose
 	// before_agent_start hooks fire during session.prompt() — notably the
@@ -1246,7 +1299,15 @@ export async function runSingleAgent(
 		}
 
 		// 5. Subscribe to session events.
-		unsubscribe = subscribeToSession(session, currentResult, emitUpdate, streamingTextRef, streamingReasoningRef, stageRef);
+		unsubscribe = subscribeToSession(
+			session,
+			currentResult,
+			emitUpdate,
+			streamingTextRef,
+			streamingReasoningRef,
+			stageRef,
+			sessionEventFence,
+		);
 
 		// The session exists and the next potentially long window is provider
 		// prefill. Publish that distinction before prompt() starts.
@@ -1266,7 +1327,7 @@ export async function runSingleAgent(
 			// proxy that ignores session.abort() can't dangle the worker.
 			void session.abort();
 			// Settle any in-flight parent-bridge ask_user prompt so it can't hang.
-			proxy?.cancelAll();
+			cancelProxy();
 			await raceTimeout("prompt (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, runPrompt());
 			currentResult.stopReason = "aborted";
 			applyStopReason(currentResult, true, stageRef.value);
@@ -1339,7 +1400,7 @@ export async function runSingleAgent(
 					});
 				});
 			// Settle any in-flight parent-bridge ask_user prompt so it can't hang.
-			proxy?.cancelAll();
+			cancelProxy();
 		});
 
 		stageRef.value = "waiting for model response";

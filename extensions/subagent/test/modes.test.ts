@@ -256,6 +256,63 @@ test("transient provider timeout retries on another model in the same bucket", a
 	}
 });
 
+test("a retry attempt cannot receive a stale trailing update from the failed attempt", async () => {
+	let attempts = 0;
+	setMockBehavior({
+		onPrompt: async (emit: any) => {
+			attempts++;
+			if (attempts === 1) {
+				// Tool-call argument generation is credible provider activity but not
+				// visible output or a side effect, so this transport failure remains
+				// replay-safe. The second burst schedules the 20fps trailing update.
+				emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta" } });
+				emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta" } });
+				throw Object.assign(new Error("provider timed out after retries exhausted"), { code: "ETIMEDOUT" });
+			}
+			// Keep attempt B open beyond the 50ms throttle window. Without closing
+			// attempt A's emitter, its trailing callback publishes in this window.
+			await new Promise((resolve) => setTimeout(resolve, 80));
+			emit(messageEnd("recovered", "completed"));
+		},
+	});
+	const models = [
+		{ id: "model-a", provider: "test" },
+		{ id: "model-b", provider: "test" },
+	];
+	const ctx = {
+		...makeCtx(),
+		model: models[0],
+		modelRegistry: {
+			getAvailable: () => models,
+			getAll: () => models,
+			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+		},
+	};
+	const publishedModels: Array<string | undefined> = [];
+	const originalRandom = Math.random;
+	Math.random = () => 0;
+	try {
+		const response: any = await execSingle(
+			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
+			() => undefined, { depth: 0, trail: [] }, noOpDetails,
+			(update: any) => publishedModels.push(update.details.results[0]?.selectedModel), noSignal(),
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
+			"t-retry-terminal-fence", undefined,
+		);
+		assert.equal(response.isError, undefined);
+		assert.equal(attempts, 2);
+		const retryStart = publishedModels.indexOf("model-b");
+		assert.ok(retryStart >= 0, `retry attempt B published its lifecycle: ${JSON.stringify(publishedModels)}`);
+		assert.equal(
+			publishedModels.slice(retryStart).includes("model-a"),
+			false,
+			"attempt A cannot publish after attempt B takes ownership",
+		);
+	} finally {
+		Math.random = originalRandom;
+	}
+});
+
 test("exhausted bucket does not fall back outside the bucket or report an unstarted retry", async () => {
 	let attempts = 0;
 	setMockBehavior({ onPrompt: async () => {

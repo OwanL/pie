@@ -61,6 +61,9 @@ function createFakeSdk(options?: {
 
 	const listeners: Array<(event: any) => void> = [];
 	let releasePrompt: (() => void) | undefined;
+	const emit = (event: any) => {
+		for (const listener of listeners) listener(event);
+	};
 
 	const session = {
 		agent: { state: { model: { id: "session-model" } } },
@@ -79,9 +82,7 @@ function createFakeSdk(options?: {
 		prompt: async (_prompt: string) => {
 			state.promptCalls++;
 			if (options?.onPrompt) {
-				await options.onPrompt((event) => {
-					for (const listener of listeners) listener(event);
-				});
+				await options.onPrompt(emit);
 				return;
 			}
 			await new Promise<void>((resolve) => {
@@ -111,7 +112,7 @@ function createFakeSdk(options?: {
 		getAgentDir: () => ".",
 	};
 
-	return { sdk, state };
+	return { sdk, state, emit };
 }
 
 test("runSingleAgent returns successful result and captures usage/model", async () => {
@@ -170,6 +171,59 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
+});
+
+test("runSingleAgent fences late SDK events even when unsubscribe is a no-op", async () => {
+	const updates: unknown[] = [];
+	const { bridge, calls } = makeParentBridge();
+	const { sdk, state, emit } = createFakeSdk({
+		onPrompt: async (publish) => {
+			publish({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		(update) => updates.push(update),
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		undefined,
+		undefined,
+		"tool-terminal-fence",
+		bridge,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 50 },
+	);
+
+	const generationAtCompletion = result.progressGeneration;
+	const updatesAtCompletion = updates.length;
+	// createFakeSdk deliberately retains the listener after unsubscribe. These
+	// events model a provider callback already queued behind terminal cleanup.
+	emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "late" } });
+	emit({ type: "tool_execution_start", toolCallId: "late-tool", toolName: "bash" });
+	emit({ type: "tool_execution_update", toolCallId: "late-tool", partialResult: { text: "late tool output" } });
+
+	assert.equal(state.unsubscribeCalls, 1);
+	assert.equal(calls.cancelAll, 1, "final cleanup cancels the attempt-owned parent UI proxy");
+	assert.equal(result.progressGeneration, generationAtCompletion, "late events cannot advance a terminal attempt");
+	assert.equal(result.streamingText, undefined);
+	assert.deepEqual(result.runningTools, []);
+	assert.equal(updates.length, updatesAtCompletion, "late events cannot publish parent UI updates");
 });
 
 test("runSingleAgent publishes model details with the first lifecycle update", async () => {
@@ -334,7 +388,7 @@ test("runSingleAgent aborts the child prompt when the parent aborts after sessio
 	assert.equal(state.promptCalls, 1, "prompt is invoked and then aborted by the parent signal");
 	assert.equal(state.abortCalls, 0, "abort happened before the prompt race was armed; dispose is the cleanup path");
 	assert.equal(state.disposeCalls, 1);
-	assert.equal(calls.cancelAll, 0, "abort listener never fired because the signal was already aborted");
+	assert.equal(calls.cancelAll, 1, "final cleanup cancels the proxy even when the abort listener was armed too late");
 });
 
 test("runSingleAgent returns an abort result when the parent aborts before createSession resolves", async () => {
