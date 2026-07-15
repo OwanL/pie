@@ -1059,6 +1059,11 @@ export class BackendServer {
     const contexts = [...this.sessionContexts.values()];
     this.sessionContexts.clear();
 
+    // Reject provider waiters and clear referenced queue/afterburn timers even
+    // when an SDK runtime ignores abort during shutdown. The global fetch
+    // wrapper is process-owned, so server disposal is its production teardown.
+    ProviderGate.uninstall();
+
     this.stopReviewWatcher?.();
     this.stopReviewWatcher = undefined;
     this.stopProviderProgressObserver?.();

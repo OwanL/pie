@@ -1125,9 +1125,11 @@ describe('ProviderGate — account-pause circuit breaker', () => {
 	});
 
 	test('caller abort releases a slot while a 429 inspection body is stalled', async () => {
+		let sourceCancelCount = 0;
 		globalThis.fetch = async () => {
 			const body = new ReadableStream<Uint8Array>({
 				pull() { return new Promise(() => {}); },
+				cancel() { sourceCancelCount += 1; },
 			});
 			return new Response(body, { status: 429, headers: { 'content-type': 'application/json' } });
 		};
@@ -1140,6 +1142,8 @@ describe('ProviderGate — account-pause circuit breaker', () => {
 		abort.abort();
 		await assert.rejects(pending, ProviderGateAbortError);
 		assert.equal(gate.getMetrics()[0].activeRequests, 0);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(sourceCancelCount, 1, 'caller abort cancels both response tee branches');
 	});
 
 	test('live reconfiguration cannot bypass an armed account pause', async () => {

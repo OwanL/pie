@@ -118,6 +118,23 @@ export interface ProviderGateResilienceOptions {
 
 const DEFAULT_TRANSPORT_FAILURE_THRESHOLD = 2;
 const DEFAULT_TRANSPORT_CIRCUIT_COOLDOWN_SECONDS = 30;
+const MAX_PAUSE_INSPECTION_BYTES = 1024 * 1024;
+
+async function readBoundedInspectionBody(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+	const decoder = new TextDecoder();
+	let body = '';
+	let bytes = 0;
+	for (;;) {
+		const chunk = await reader.read();
+		if (chunk.done) return body + decoder.decode();
+		bytes += chunk.value.byteLength;
+		if (bytes > MAX_PAUSE_INSPECTION_BYTES) {
+			void reader.cancel('provider pause inspection body exceeded limit').catch(() => {});
+			throw new Error('provider pause inspection body exceeded limit');
+		}
+		body += decoder.decode(chunk.value, { stream: true });
+	}
+}
 const MAX_TRANSPORT_CIRCUIT_COOLDOWN_MS = 5 * 60_000;
 
 /** A concurrency slot with optional afterburn sticky-hold. */
@@ -1124,6 +1141,7 @@ export class ProviderGate {
 
 		// Clone so the SDK can still consume the original body.
 		const cloneForInspection = response.clone();
+		const inspectionReader = cloneForInspection.body?.getReader();
 		let bodyText: string;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let removeAbort = () => {};
@@ -1143,17 +1161,25 @@ export class ProviderGate {
 				}
 			});
 			const inspected = await Promise.race([
-				cloneForInspection.text().then((text) => ({ text })),
+				(inspectionReader ? readBoundedInspectionBody(inspectionReader) : Promise.resolve(''))
+					.then((text) => ({ text })),
 				timeout,
 				aborted,
 			]);
 			if (inspected === null) {
-				void cloneForInspection.body?.cancel().catch(() => {});
+				void inspectionReader?.cancel('provider pause inspection timeout').catch(() => {});
 				return null;
 			}
 			bodyText = inspected.text;
 		} catch {
-			if (signal?.aborted) throw new ProviderGateAbortError('inspecting provider response body');
+			if (signal?.aborted) {
+				// The caller will never receive this response. Cancel both tee branches:
+				// cancelling only the inspection clone can leave the source alive while
+				// the untouched original branch remains open.
+				void inspectionReader?.cancel('provider pause inspection aborted').catch(() => {});
+				void response.body?.cancel('provider pause inspection aborted').catch(() => {});
+				throw new ProviderGateAbortError('inspecting provider response body');
+			}
 			// Can't read body — don't arm the breaker (defensive).
 			return null;
 		} finally {
