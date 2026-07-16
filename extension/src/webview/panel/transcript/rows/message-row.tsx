@@ -51,6 +51,7 @@ function renderMessage({
       onContextMenu={onContextMenu}
       renderToolCall={renderToolCall}
       isLastAssistantMessage={isLastAssistantMessage}
+      requestCreatedAt={row.requestCreatedAt}
       pruningHeaderState={row.pruningHeaderState}
       activityState={row.activityState}
       recovery={recovery}

@@ -212,12 +212,26 @@ Repeated identical `onUpdate` snapshots do not renew it.
 `PIE_SUBAGENT_SETTLEMENT_MS` can override the inactivity budget or disable it
 with `0`. Parent cancellation remains immediate.
 
-Phase-specific queue/header/first-token/tool leases, retry backoff and
-`Retry-After`, and an orphan-cleanup registry are planned but are **not current
-runtime controls**. The executable containment today is the outer renewable
-settlement net plus the optional whole-prompt ceiling below. Local settlement
-can release UI/permit ownership even when an in-process upstream operation
-ignores abort, but it cannot quarantine that operation's external side effects.
+Phase-specific queue/header/first-token/tool leases are planned but are **not
+current runtime controls**. Provider-aware retry backoff/`Retry-After` is now
+active: failed transient attempts record bounded per-attempt analytics, exclude
+every configured model of the failed provider from fallback, and wait with a
+clamped Retry-After hint or bounded exponential backoff before replaying a
+safe turn. Auth/client failures and any turn with visible output or tool side
+effects are never retried.
+An orphan cleanup registry is also active: if session creation loses an
+abort/timeout race, the underlying creation promise is retained, and a
+late-resolved session is disposed exactly once without ever reaching setup or
+prompt. The registry retries disposal with bounded backoff, caps total
+retention, exposes observable stats, and drains best-effort on process shutdown.
+Because the upstream `DefaultResourceLoader` has no reliable `dispose()` API,
+cleanup is limited to session disposal and reclaiming leaked exit-signal
+listeners; the loader itself is not torn down.
+
+The executable containment today is the outer renewable settlement net plus the
+optional whole-prompt ceiling below. Local settlement can release UI/permit
+ownership even when an in-process upstream operation ignores abort, but it
+cannot quarantine that operation's external side effects.
 
 Set `PI_SUBAGENT_TIMEOUT_MS` to a positive number of milliseconds only as an
 optional absolute containment ceiling. Unset, empty, zero, negative, and

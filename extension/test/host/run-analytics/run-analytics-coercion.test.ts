@@ -366,6 +366,8 @@ test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defau
       turnLatencyMs: 800,
       overheadMs: 100,
       providerLatencyMs: 700,
+      providerQueueMs: 0,
+      providerQueueAttemptCount: 1,
     },
     {
       // Legacy sample recorded before latency tracking existed.
@@ -395,10 +397,14 @@ test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defau
   assert.equal(a.turnLatencyMs, 800);
   assert.equal(a.overheadMs, 100);
   assert.equal(a.providerLatencyMs, 700);
+  assert.equal(a.providerQueueMs, 0, 'observed immediate grant remains explicit zero');
+  assert.equal(a.providerQueueAttemptCount, 1);
 
   assert.equal(b.turnLatencyMs, null, 'missing latency coerces to null');
   assert.equal(b.overheadMs, null);
   assert.equal(b.providerLatencyMs, null);
+  assert.equal(b.providerQueueMs, null, 'legacy missing queue timing remains unknown');
+  assert.equal(b.providerQueueAttemptCount, 0);
 
   assert.equal(c.turnLatencyMs, null, 'negative coerces to null');
   assert.equal(c.overheadMs, null, 'non-number coerces to null');
@@ -434,6 +440,7 @@ test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compa
       outputTokens: 20,
       cacheReadTokens: 3,
       cacheWriteTokens: 4,
+      durationMs: 250,
     },
     { kind: 'subagent', sourceId: '', occurredAt: '', inputTokens: 10 } as never,
     { kind: 'unknown', sourceId: 'bad', occurredAt: '2026-01-01T00:00:00.000Z' } as never,
@@ -442,7 +449,24 @@ test('coerceRunSnapshot defaults and validates auxiliary LLM usage samples compa
   assert.deepEqual(coerced?.auxiliaryLlmUsage, [snapshot.auxiliaryLlmUsage[0]]);
 });
 
-test('coerceToolUsageRollup preserves per-tool timed call counts', () => {
+test('coerceRunSnapshot defaults retry timing and preserves null measured boundaries', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.retryTimingSamples;
+  assert.deepEqual(coerceRunSnapshot(legacy)?.retryTimingSamples, []);
+
+  const snapshot = makeRunSnapshot();
+  snapshot.retryTimingSamples = [{
+    sourceId: 'req:1',
+    occurredAt: '2026-01-01T00:00:00.000Z',
+    attempt: 1,
+    scheduledDelayMs: 1_000,
+    measuredDelayMs: null,
+    durationMs: 1_500,
+  }];
+  assert.deepEqual(coerceRunSnapshot(snapshot)?.retryTimingSamples, snapshot.retryTimingSamples);
+});
+
+test('coerceToolUsageRollup preserves per-tool timed call counts and unknown critical-path coverage', () => {
   const toolUsage = coerceToolUsageRollup({
     totalCount: 3,
     totalDurationMs: 1200,
@@ -451,6 +475,15 @@ test('coerceToolUsageRollup preserves per-tool timed call counts', () => {
     timedCallCountsByName: { bash: 1, read: 1, edit: 0, invalid: 'x' },
   } as unknown as Parameters<typeof coerceToolUsageRollup>[0]);
   assert.deepEqual(toolUsage.timedCallCountsByName, { bash: 1, read: 1, edit: 0 });
+  assert.equal(toolUsage.criticalPathDurationMs, undefined);
+
+  const measured = coerceToolUsageRollup({
+    totalCount: 1,
+    totalDurationMs: 0,
+    criticalPathDurationMs: 0,
+    timedCallCount: 1,
+  } as unknown as Parameters<typeof coerceToolUsageRollup>[0]);
+  assert.equal(measured.criticalPathDurationMs, 0, 'an explicit measured zero remains distinct from legacy absence');
 });
 
 test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollups', () => {

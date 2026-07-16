@@ -56,6 +56,8 @@ export class BackendLiveTurnAccumulator {
   private terminal?: ChatMessage;
   private watermark?: LiveLifecycleWatermark;
   private readonly settledExecutionIds: string[] = [];
+  private readonly previewBytesByExecutionId = new Map<string, number>();
+  private aggregatePreviewBytes = 0;
   private textBytes = 0;
   private reasoningBytes = 0;
 
@@ -205,11 +207,16 @@ export class BackendLiveTurnAccumulator {
         const tool = this.tools[candidate.executionId];
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
         if (!candidate.durableEntryId) return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
-        const boundedResult = normalizeToolProgress(tool.name, candidate.result);
+        const boundedResult = normalizeLiveToolTerminalResult(tool.name, candidate.result);
         if (jsonByteLength(boundedResult) > LIVE_PIPELINE_LIMITS.previewBytes) {
           return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
         envelope = { ...base, ...candidate, result: boundedResult };
+        const previousPreviewBytes = this.previewBytesByExecutionId.get(candidate.executionId) ?? 0;
+        if (previousPreviewBytes > 0) {
+          this.aggregatePreviewBytes -= previousPreviewBytes;
+          this.previewBytesByExecutionId.delete(candidate.executionId);
+        }
         this.tools[candidate.executionId] = {
           ...tool,
           seq,
@@ -312,11 +319,9 @@ export class BackendLiveTurnAccumulator {
 
     const seq = ++this.seq;
     const baseSeq = seq - 1;
-    const aggregatePreviewBytes = Object.values(this.tools).reduce((total, entry) =>
-      total + (entry.executionId === candidate.executionId
-        ? jsonByteLength(candidate.preview)
-        : jsonByteLength(entry.preview)),
-    0);
+    const candidatePreviewBytes = jsonByteLength(candidate.preview);
+    const previousPreviewBytes = this.previewBytesByExecutionId.get(candidate.executionId) ?? 0;
+    const aggregatePreviewBytes = this.aggregatePreviewBytes - previousPreviewBytes + candidatePreviewBytes;
     if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
       return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
     }
@@ -325,7 +330,10 @@ export class BackendLiveTurnAccumulator {
     const progressRevision = baseProgressRevision + 1;
     const snapshotUpdate = { kind: 'snapshot' as const, preview: candidate.preview };
     const patchUpdate = { kind: 'patch' as const, operations };
-    const update = previous && jsonByteLength(patchUpdate) < jsonByteLength(snapshotUpdate)
+    // candidatePreviewBytes was already measured for aggregate accounting; do
+    // not serialize the multi-megabyte snapshot a second time merely to choose
+    // the wire form. The small constant covers the snapshot wrapper syntax.
+    const update = previous && jsonByteLength(patchUpdate) < candidatePreviewBytes + 32
       ? patchUpdate
       : snapshotUpdate;
     const envelope: TurnSemanticEnvelope = {
@@ -344,6 +352,8 @@ export class BackendLiveTurnAccumulator {
       progressRevision,
       lastProgressAt: occurredAt,
     };
+    this.previewBytesByExecutionId.set(candidate.executionId, candidatePreviewBytes);
+    this.aggregatePreviewBytes = aggregatePreviewBytes;
     this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
     return envelope;
   }
@@ -390,11 +400,23 @@ function isLiveCompactedValue(value: unknown): boolean {
   return typeof value === 'object' && value !== null && (value as { liveCompacted?: unknown }).liveCompacted === true;
 }
 
-function normalizeLiveToolInput(value: unknown): unknown {
+function normalizeLiveToolTerminalResult(toolName: string, value: unknown): unknown {
+  // ask_user has a dedicated completed-state renderer that needs the selected
+  // answer from the real terminal payload. Its progress preview describes the
+  // unanswered prompt and must not replace that result while the turn remains
+  // live. Other tools retain their existing bounded preview normalization.
+  if (toolName.trim().toLowerCase() !== 'ask_user') {
+    return normalizeToolProgress(toolName, value);
+  }
+  const serialized = stringifyLiveJsonSafe(value, '[Unserializable ask_user result]');
+  try { return JSON.parse(serialized) as unknown; }
+  catch { return '[Unserializable ask_user result]'; }
+}
+
+function stringifyLiveJsonSafe(value: unknown, fallback: string): string {
   const seen = new WeakSet<object>();
-  let serialized: string;
   try {
-    serialized = JSON.stringify(value, (_key, item: unknown) => {
+    return JSON.stringify(value, (_key, item: unknown) => {
       if (typeof item === 'bigint') return `${item}n`;
       if (typeof item === 'function' || typeof item === 'symbol') return `[${typeof item}]`;
       if (typeof item === 'object' && item !== null) {
@@ -404,8 +426,12 @@ function normalizeLiveToolInput(value: unknown): unknown {
       return item;
     }) ?? 'null';
   } catch {
-    serialized = '"[Unserializable tool input]"';
+    return JSON.stringify(fallback);
   }
+}
+
+function normalizeLiveToolInput(value: unknown): unknown {
+  const serialized = stringifyLiveJsonSafe(value, '[Unserializable tool input]');
   const originalBytes = Buffer.byteLength(serialized, 'utf8');
   if (originalBytes <= MAX_LIVE_TOOL_INPUT_BYTES) {
     try { return JSON.parse(serialized) as unknown; }

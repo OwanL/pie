@@ -52,7 +52,6 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     // plain host path.
     activePath: null,
     hasPendingExtensionUIRequest: false,
-    activeRunSummary: null,
     isPinned: false,
     hasDeferredTriggers: false,
     hasDeferredTimer: false,
@@ -60,7 +59,6 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     onPointerDown: noop,
     onClick: noop,
     onClose: noop,
-    onMarkComplete: noop,
     ...overrides,
   };
 
@@ -135,7 +133,7 @@ test('pinned tab renders an avatar instead of a label, hides the close button, a
   assert.ok(tab.querySelector('.session-tab-avatar'), 'pinned tab renders the letter-avatar');
   assert.ok(!tab.querySelector('.session-tab-label'), 'pinned tab drops the title text');
   assert.ok(!tab.querySelector('.session-tab-close'), 'pinned tab hides the close button (unpin via context menu)');
-  assert.ok(!tab.querySelector('.session-tab-run-badge'), 'pinned tab drops the run badge (activity shows via the avatar ring)');
+  assert.ok(!tab.querySelector('.session-tab-run-badge'), 'tab does not render run badges');
 
   // The avatar carries the session's first letter so two pinned tabs stay
   // distinguishable without title text. (The deterministic background color is

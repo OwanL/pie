@@ -4,6 +4,8 @@ import test from 'node:test';
 import { BackendServer } from '../../../src/backend';
 import { ExtensionUIBridge } from '../../../src/backend/extension-ui-bridge';
 import { BackendError } from '../../../src/backend/server-io';
+import { createSessionManagerFence, FENCED_ENTRY_ID } from '../../../src/backend/session-manager-fence';
+import type { SdkSessionManager } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
 
 test('stuck recovery terminalizes once and replaces a runtime without awaiting abort', async () => {
@@ -239,4 +241,111 @@ test('throwing best-effort cleanup cannot strand a retired runtime without repla
   assert.equal(context.retired, true);
   assert.equal(events.filter((entry) => entry.event === 'message.aborted').length, 1);
   assert.equal(await context.recoveryPromise, replacement);
+});
+
+test('recoverStuckSession invalidates the old session manager fence before replacement', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const appendCalls: unknown[] = [];
+  const underlyingManager = {
+    getCwd: () => '/repo',
+    getSessionFile: () => '/s',
+    getSessionName: () => undefined,
+    getBranch: () => [],
+    getEntries: () => [],
+    appendMessage: (message: unknown) => {
+      appendCalls.push(message);
+      return 'underlying-msg-id';
+    },
+  };
+  const { manager: fencedManager, fence } = createSessionManagerFence(underlyingManager as SdkSessionManager);
+  const context = {
+    sessionPath: '/s',
+    busySeq: 0,
+    sessionManager: fencedManager,
+    sessionManagerFence: fence,
+    activeRequest: {
+      id: 'request-fence',
+      messageIndex: 1,
+      currentMessageId: 'assistant-1',
+      aborted: false,
+    },
+    session: {
+      isStreaming: true,
+      clearQueue: () => undefined,
+      abortRetry: () => undefined,
+      abortCompaction: () => undefined,
+      abortBranchSummary: () => undefined,
+      abortBash: () => undefined,
+      abort: () => new Promise<void>(() => undefined),
+    },
+  } as unknown as SessionContext;
+  const replacement = { sessionPath: '/s', busySeq: 0, session: { isStreaming: false } } as unknown as SessionContext;
+  server.sdk = { SessionManager: { open: () => ({}) } };
+  server.createSessionContext = async () => {
+    server.sessionContexts.set('/s', replacement);
+    return replacement;
+  };
+  server.emit = () => undefined;
+  server.emitBusyChanged = () => undefined;
+  server.emitSessionOpened = async () => undefined;
+  server.emitSessionListChanged = async () => undefined;
+  server.sessionContexts.set('/s', context);
+
+  assert.equal(fencedManager.appendMessage({ role: 'assistant' }), 'underlying-msg-id');
+  assert.equal(appendCalls.length, 1);
+
+  server.recoverStuckSession(context, 'stalled');
+
+  assert.equal(context.retired, true);
+  assert.equal(fence.isInvalidated(), true);
+  assert.equal(fencedManager.appendMessage({ role: 'assistant' }), FENCED_ENTRY_ID);
+  assert.equal(appendCalls.length, 1, 'retired manager must not append to the underlying store');
+
+  await context.recoveryPromise;
+  assert.equal(server.sessionContexts.get('/s'), replacement);
+});
+
+test('server shutdown invalidates every session manager fence', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const createManager = () => {
+    const calls: unknown[] = [];
+    const underlying = {
+      getCwd: () => '/repo',
+      getSessionFile: () => '/s',
+      getSessionName: () => undefined,
+      getBranch: () => [],
+      getEntries: () => [],
+      appendMessage: (message: unknown) => {
+        calls.push(message);
+        return 'msg-id';
+      },
+    };
+    const { manager, fence } = createSessionManagerFence(underlying as SdkSessionManager);
+    return { manager, fence, calls };
+  };
+  const a = createManager();
+  const b = createManager();
+  server.sessionContexts.set('/a', {
+    sessionPath: '/a',
+    sessionManager: a.manager,
+    sessionManagerFence: a.fence,
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => undefined },
+  } as unknown as SessionContext);
+  server.sessionContexts.set('/b', {
+    sessionPath: '/b',
+    sessionManager: b.manager,
+    sessionManagerFence: b.fence,
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => undefined },
+  } as unknown as SessionContext);
+
+  await server.dispose();
+
+  assert.equal(a.fence.isInvalidated(), true);
+  assert.equal(b.fence.isInvalidated(), true);
+  assert.equal(a.manager.appendMessage({}), FENCED_ENTRY_ID);
+  assert.equal(b.manager.appendMessage({}), FENCED_ENTRY_ID);
+  assert.deepEqual(a.calls, []);
+  assert.deepEqual(b.calls, []);
 });

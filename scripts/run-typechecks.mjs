@@ -29,6 +29,7 @@ export const TYPECHECK_PROJECTS = [
   { id: 'session-reviewer', config: 'extensions/session-reviewer/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'session-changes', config: 'extensions/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'deferred-triggers', config: 'extensions/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+  { id: 'subagent', config: 'extensions/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
 ];
 
 export function parseArgs(argv) {

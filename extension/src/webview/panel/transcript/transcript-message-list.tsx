@@ -48,25 +48,30 @@ export function TranscriptMessageList({
   readonly,
   collapsibleKey,
 }: TranscriptMessageListProps) {
-  return (
-    <>
-      {messages.map((message) => (
-        <MessageItem
-          key={collapsibleKey ? `${message.id}-${collapsibleKey}` : message.id}
-          message={message}
-          isStreaming={false}
-          prefs={prefs}
-          readonly={readonly}
-          workingDirectory={workingDirectory}
-          editingId={null}
-          onEditRequest={noop}
-          onEditConfirm={noop}
-          onEditCancel={noop}
-          onOpenFile={onOpenFile}
-          onContextMenu={onContextMenu}
-          renderToolCall={renderToolCall}
-        />
-      ))}
-    </>
-  );
+  let latestRequestCreatedAt: string | undefined;
+  const items = messages.map((message) => {
+    if (message.role === 'user' && message.status !== 'queued') {
+      latestRequestCreatedAt = message.createdAt;
+    }
+    return (
+      <MessageItem
+        key={collapsibleKey ? `${message.id}-${collapsibleKey}` : message.id}
+        message={message}
+        isStreaming={false}
+        prefs={prefs}
+        readonly={readonly}
+        workingDirectory={workingDirectory}
+        editingId={null}
+        onEditRequest={noop}
+        onEditConfirm={noop}
+        onEditCancel={noop}
+        onOpenFile={onOpenFile}
+        onContextMenu={onContextMenu}
+        renderToolCall={renderToolCall}
+        requestCreatedAt={message.role === 'assistant' ? latestRequestCreatedAt : undefined}
+      />
+    );
+  });
+
+  return <>{items}</>;
 }

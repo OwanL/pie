@@ -7,6 +7,29 @@ export interface AssistantReplyMeta {
   compactText: string;
 }
 
+export interface RequestTimeMeta {
+  compactText: string;
+  title: string;
+}
+
+/** Formats a user request timestamp in the webview's local time zone. */
+export function formatRequestTime(createdAt: string | undefined): RequestTimeMeta | null {
+  if (!createdAt) return null;
+  const requestedAt = new Date(createdAt);
+  if (!Number.isFinite(requestedAt.getTime())) return null;
+
+  return {
+    compactText: requestedAt.toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+    }),
+    title: `Request made ${requestedAt.toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'medium',
+    })}`,
+  };
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   const s = ms / 1000;

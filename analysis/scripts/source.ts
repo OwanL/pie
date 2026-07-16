@@ -39,6 +39,7 @@ import {
   type WarmBashSessionSummarySourceEvent,
   type RunFinalizationReason,
   type RunOutcome,
+  type RetryTimingSample,
   type RunSnapshot,
   type SessionAnalyticsFactors,
   type SourceAnalyticsPayload,
@@ -542,6 +543,9 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     resultIssueCountsByNameAndKind,
     resultIssueSamples,
     totalDurationMs: toNonNegativeInteger(value.totalDurationMs),
+    ...(typeof value.criticalPathDurationMs === 'number' && Number.isFinite(value.criticalPathDurationMs) && value.criticalPathDurationMs >= 0
+      ? { criticalPathDurationMs: Math.trunc(value.criticalPathDurationMs) }
+      : {}),
     timedCallCount: toNonNegativeInteger(value.timedCallCount),
     durationMsByName: coerceCountRecord(value.durationMsByName),
     timedCallCountsByName: coerceCountRecord(value.timedCallCountsByName),
@@ -689,10 +693,14 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       sourceId: entry.sourceId,
       occurredAt: entry.occurredAt,
       modelId: typeof entry.modelId === 'string' && entry.modelId ? entry.modelId : undefined,
+      provider: typeof entry.provider === 'string' && entry.provider ? entry.provider : undefined,
       inputTokens: toNonNegativeInteger(entry.inputTokens),
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) && entry.durationMs >= 0
+        ? { durationMs: Math.trunc(entry.durationMs) }
+        : {}),
     });
   }
   return samples;
@@ -727,9 +735,46 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
       provider: typeof entry.provider === 'string' ? entry.provider : undefined,
+      providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
+      ...(typeof entry.providerQueueAttemptCount === 'number' && Number.isFinite(entry.providerQueueAttemptCount) && entry.providerQueueAttemptCount >= 0
+        ? { providerQueueAttemptCount: Math.trunc(entry.providerQueueAttemptCount) }
+        : {}),
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),
       overheadMs: toNullableNonNegativeInteger(entry.overheadMs),
       providerLatencyMs: toNullableNonNegativeInteger(entry.providerLatencyMs),
+    });
+  }
+  return samples;
+}
+
+function coerceRetryTimingSamples(value: unknown): RetryTimingSample[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const samples: RetryTimingSample[] = [];
+  for (const entry of value) {
+    if (
+      !isRecord(entry)
+      || typeof entry.sourceId !== 'string'
+      || !entry.sourceId
+      || typeof entry.occurredAt !== 'string'
+      || !entry.occurredAt
+      || typeof entry.attempt !== 'number'
+      || !Number.isFinite(entry.attempt)
+      || entry.attempt < 1
+      || typeof entry.scheduledDelayMs !== 'number'
+      || !Number.isFinite(entry.scheduledDelayMs)
+      || entry.scheduledDelayMs < 0
+    ) {
+      continue;
+    }
+    samples.push({
+      sourceId: entry.sourceId,
+      occurredAt: entry.occurredAt,
+      attempt: Math.trunc(entry.attempt),
+      scheduledDelayMs: Math.trunc(entry.scheduledDelayMs),
+      measuredDelayMs: toNullableNonNegativeInteger(entry.measuredDelayMs),
+      durationMs: toNullableNonNegativeInteger(entry.durationMs),
     });
   }
   return samples;
@@ -878,6 +923,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     finalizationReason,
     outcome: outcomeCandidate ?? undefined,
     modelId: coerceOptionalString(value.modelId),
+    provider: coerceOptionalString(value.provider),
     thinkingLevel,
     mixedModelConfig: value.mixedModelConfig === true,
     mixedTreatmentConfig: value.mixedTreatmentConfig === true,
@@ -900,6 +946,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     truncatedAfterCount: toNonNegativeInteger(value.truncatedAfterCount),
     compactionCount: toNonNegativeInteger(value.compactionCount),
     autoRetryCount: toNonNegativeInteger(value.autoRetryCount),
+    retryTimingSamples: coerceRetryTimingSamples(value.retryTimingSamples),
     backendErrorCodes: coerceStringArray(value.backendErrorCodes),
     contextTokens: typeof value.contextTokens === 'number' && Number.isFinite(value.contextTokens)
       ? Math.trunc(value.contextTokens)

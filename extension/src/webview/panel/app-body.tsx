@@ -193,7 +193,6 @@ export function AppBody({ adapter }: AppBodyProps) {
           startingModelSessionPaths={viewState.startingModelSessionPaths}
           unreadFinishedSessionPaths={viewState.unreadFinishedSessionPaths}
           activeSession={viewState.activeSession}
-          activeRunSummary={viewState.activeRunSummary}
           backendReady={viewState.backendReady}
           hideConnectingWheel={derived.transcriptHydrating || derived.needsSessionRecovery}
           pendingExtensionUIRequestsBySession={viewState.pendingExtensionUIRequestsBySession}
@@ -202,7 +201,6 @@ export function AppBody({ adapter }: AppBodyProps) {
           onClose={handlers.handleCloseTab}
           onMove={handlers.handleMoveTab}
           onNew={handlers.handleNewSession}
-          onMarkComplete={handlers.handleMarkComplete}
           onDuplicate={handlers.handleDuplicateTab}
           onTogglePin={handlers.handleTogglePinTab}
           onRunAction={handlers.handleTabRunAction}

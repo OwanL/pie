@@ -26,6 +26,7 @@ import {
 import {
   streamingContentSignature,
   subagentCostSignature,
+  subagentToolCallRevision,
   systemPromptsSignature,
   transcriptUsageSignature,
 } from './indicator-signature';
@@ -72,13 +73,21 @@ export function useComposerIndicators({
     availableModels,
   }), [activeModelId, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultProvider, modelSettings?.defaultThinkingLevel, availableModels]);
 
-  const pricingByModelId = useMemo(() => {
-    const map = new Map<string, TokenPricing>();
+  const modelPricing = useMemo(() => {
+    const byProviderAndId = new Map<string, TokenPricing>();
+    const uniqueById = new Map<string, TokenPricing>();
+    const seenIds = new Set<string>();
     for (const model of availableModels) {
       const pricing = model.subagent?.pricing;
-      if (pricing) map.set(model.id, pricing);
+      if (pricing) byProviderAndId.set(`${model.provider}\0${model.id}`, pricing);
+      if (seenIds.has(model.id)) {
+        uniqueById.delete(model.id);
+      } else {
+        seenIds.add(model.id);
+        if (pricing) uniqueById.set(model.id, pricing);
+      }
     }
-    return map;
+    return { byProviderAndId, uniqueById };
   }, [availableModels]);
 
   const supportsImageInputs = selectedModelInfo?.inputKinds.includes('image') ?? false;
@@ -116,7 +125,17 @@ export function useComposerIndicators({
     () => (contextUsage?.tokens == null ? streamingContentSignature(transcript) : ''),
     [transcript, contextUsage?.tokens],
   );
-  const subagentSig = useMemo(() => subagentCostSignature(transcript), [transcript]);
+  // Cheap O(toolCalls) revision that gates the O(result-tree)
+  // `subagentCostSignature` walk. The host posts a structured-cloned transcript
+  // ~7×/sec while streaming (fresh refs even when byte-identical), so keying the
+  // fingerprint memo on the `transcript` ref would re-walk the multi-megabyte
+  // subagent preview on every snapshot. The revision is built from each tool
+  // call's monotonic `seq` (advances on every structural preview change,
+  // including nested completions) and is stable while only streaming prose
+  // grows — so the fingerprint memo skips its recursive walk on unchanged
+  // snapshots without weakening correctness for nested completion changes.
+  const subagentRev = useMemo(() => subagentToolCallRevision(transcript), [transcript]);
+  const subagentSig = useMemo(() => subagentCostSignature(transcript), [subagentRev]);
   const liveStreamSig = useMemo(() => streamingContentSignature(transcript), [transcript]);
 
   const contextBreakdown = useMemo(
@@ -156,8 +175,10 @@ export function useComposerIndicators({
   // Stable pricing resolver so the completed-cost memo doesn't see a fresh
   // function ref every snapshot.
   const resolvePricing = useMemo(
-    () => (modelId: string) => pricingByModelId.get(modelId),
-    [pricingByModelId],
+    () => (modelId: string, provider?: string) => provider
+      ? modelPricing.byProviderAndId.get(`${provider}\0${modelId}`)
+      : modelPricing.uniqueById.get(modelId),
+    [modelPricing],
   );
 
   // The O(transcript) completed-cost summary and subagent direct-cost walk are

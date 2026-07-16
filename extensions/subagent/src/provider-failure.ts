@@ -1,4 +1,5 @@
 import type { SingleResult } from "../types.js";
+import { parseRetryAfterMs, readRetryPolicy } from "./retry.js";
 
 export const SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV =
   "PIE_SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE";
@@ -68,6 +69,15 @@ export function markProviderReplayUnsafe(
  */
 export function classifyProviderFailure(result: SingleResult, error?: unknown): void {
   if (result.exitCode === 0) return;
+
+  // Preserve a structured Retry-After hint from the original error before it
+  // is discarded; the retry loop reads result.retryAfterMs as its first source.
+  if (error) {
+    const retryAfter = parseRetryAfterMs(error, readRetryPolicy());
+    if (retryAfter !== undefined) {
+      result.retryAfterMs = retryAfter;
+    }
+  }
 
   if (resultHasToolActivity(result)) result.replaySafety = "tool_side_effect";
   else if (result.replaySafety === "partial_output" || resultHasAssistantOutput(result)) result.replaySafety = "partial_output";

@@ -113,6 +113,7 @@ interface MessageItemInnerProps {
   statusTone: StatusTone;
   replyMeta: ReturnType<typeof assistantReplyMeta>;
   assistantMetaTooltip: string | null;
+  requestCreatedAt?: string;
   html: string;
   getMessageRaw: () => string;
   combinedParts: ReturnType<typeof assistantPartsFromMessage> | undefined;
@@ -145,6 +146,7 @@ export function MessageItemInner({
   statusTone,
   replyMeta,
   assistantMetaTooltip,
+  requestCreatedAt,
   html,
   getMessageRaw,
   combinedParts,
@@ -185,6 +187,7 @@ export function MessageItemInner({
         durationMs={message.durationMs}
         replyMeta={replyMeta}
         assistantMetaTooltip={assistantMetaTooltip}
+        requestCreatedAt={requestCreatedAt}
         actions={headerActions}
         customType={message.customType}
       />

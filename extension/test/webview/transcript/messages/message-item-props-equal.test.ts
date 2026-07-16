@@ -91,11 +91,12 @@ test('detects message content difference', () => {
   assert.equal(areMessageItemPropsEqual(prev, next), false);
 });
 
-test('detects isStreaming / readonly / isLastAssistantMessage / editingId / workingDirectory / sessionKey differences', () => {
+test('detects isStreaming / readonly / isLastAssistantMessage / requestCreatedAt / editingId / workingDirectory / sessionKey differences', () => {
   const cases: Array<{ field: keyof MessageItemProps; value: unknown }> = [
     { field: 'isStreaming', value: true },
     { field: 'readonly', value: true },
     { field: 'isLastAssistantMessage', value: true },
+    { field: 'requestCreatedAt', value: '2026-01-01T00:01:00.000Z' },
     { field: 'editingId', value: 'msg-9' },
     { field: 'workingDirectory', value: '/other' },
     { field: 'sessionKey', value: 'other-sess' },

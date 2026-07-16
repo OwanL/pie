@@ -9,6 +9,7 @@ import {
   type PreparedHistoricalSessionSummary,
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
+  type PreparedRetryTimingRow,
   type PreparedToolResultPruningRow,
   type PreparedWarmBashRewriteRow,
   type PreparedWarmBashSummaryRow,
@@ -42,14 +43,18 @@ function aggregateSkillPruningPrepassTokens(run: RunSnapshot): {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  durationMs: number | null;
 } {
-  const result = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const result = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, durationMs: null as number | null };
   for (const sample of run.auxiliaryLlmUsage ?? []) {
     if (sample.kind !== 'skill_pruning_prepass') continue;
     result.inputTokens += normalizeTokenCount(sample.inputTokens);
     result.outputTokens += normalizeTokenCount(sample.outputTokens);
     result.cacheReadTokens += normalizeTokenCount(sample.cacheReadTokens);
     result.cacheWriteTokens += normalizeTokenCount(sample.cacheWriteTokens);
+    if (typeof sample.durationMs === 'number' && Number.isFinite(sample.durationMs) && sample.durationMs >= 0) {
+      result.durationMs = (result.durationMs ?? 0) + sample.durationMs;
+    }
   }
   return result;
 }
@@ -372,6 +377,7 @@ function prepareRun(
     inputKindsUsed: [...run.inputKindsUsed],
     toolCallCount: run.toolUsage.totalCount,
     toolDurationMs: run.toolUsage.totalDurationMs,
+    criticalPathDurationMs: run.toolUsage.criticalPathDurationMs ?? null,
     timedToolCallCount: run.toolUsage.timedCallCount,
     toolFailureCount: run.toolUsage.failureCount,
     resultIssueCount: run.toolUsage.resultIssueCount,
@@ -400,6 +406,7 @@ function prepareRun(
     skillPruningPrepassOutputTokens: prepassTokens.outputTokens,
     skillPruningPrepassCacheReadTokens: prepassTokens.cacheReadTokens,
     skillPruningPrepassCacheWriteTokens: prepassTokens.cacheWriteTokens,
+    skillPruningPrepassDurationMs: prepassTokens.durationMs,
     lastTurnInputTokens: run.lastTurnUsage?.inputTokens ?? null,
     lastTurnOutputTokens: run.lastTurnUsage?.outputTokens ?? null,
     lastTurnCacheReadTokens: run.lastTurnUsage?.cacheReadTokens ?? null,
@@ -1006,12 +1013,37 @@ function prepareTurnThroughput(
       turnLatencyMs: sample.turnLatencyMs,
       overheadMs: sample.overheadMs,
       providerLatencyMs: sample.providerLatencyMs,
+      providerQueueMs: sample.providerQueueMs ?? null,
+      providerQueueAttemptCount: sample.providerQueueAttemptCount ?? 0,
       inputTokens: sample.inputTokens ?? 0,
       cacheReadTokens: sample.cacheReadTokens ?? 0,
       cacheWriteTokens: sample.cacheWriteTokens ?? 0,
       contextTokens: sample.contextTokens ?? null,
     };
   });
+}
+
+function prepareRetryTiming(
+  run: RunSnapshot,
+  familyMap: ReturnType<typeof loadModelFamilyMap>,
+): PreparedRetryTimingRow[] {
+  const modelId = normalizeNullableText(run.modelId);
+  const provider = normalizeNullableText(run.provider);
+  return (run.retryTimingSamples ?? []).map((sample) => ({
+    runId: run.runId,
+    sourceId: sample.sourceId,
+    occurredAt: sample.occurredAt,
+    startedDay: toStartedDay(sample.occurredAt),
+    attempt: sample.attempt,
+    scheduledDelayMs: sample.scheduledDelayMs,
+    measuredDelayMs: sample.measuredDelayMs,
+    durationMs: sample.durationMs,
+    modelId,
+    modelFamily: resolveModelFamily(modelId, familyMap),
+    provider,
+    thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
+    experimentAssignment: normalizeNullableText(run.experimentAssignment),
+  }));
 }
 
 export function prepareSourceAnalytics(source: SourceAnalyticsPayload): PreparedAnalyticsData {
@@ -1067,6 +1099,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const backendErrors: PreparedBackendErrorRow[] = [];
   const fileExtensions: PreparedFileExtensionRow[] = [];
   const turnThroughput: PreparedTurnThroughputRow[] = [];
+  const retryTiming: PreparedRetryTimingRow[] = [];
 
   for (const run of dedupedRuns) {
     const outcome = getRunOutcome(run, outcomesByRunId);
@@ -1077,6 +1110,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     backendErrors.push(...prepareBackendErrors(run, outcome));
     fileExtensions.push(...prepareFileExtensions(run, outcome));
     turnThroughput.push(...prepareTurnThroughput(run, familyMap));
+    retryTiming.push(...prepareRetryTiming(run, familyMap));
   }
 
   const pruningEvents = preparePruningEvents(source.pruningDecisions ?? [], runs);
@@ -1098,6 +1132,7 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     backendErrors,
     fileExtensions,
     turnThroughput,
+    retryTiming,
     pruningEvents,
     pruningSignals,
     toolResultPruning,

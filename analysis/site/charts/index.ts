@@ -13,6 +13,7 @@ import { questionCharts } from './questions.ts';
 import { settingsCharts } from './settings.ts';
 import { throughputCharts } from './throughput.ts';
 import { promptSizeCharts } from './promptsize.ts';
+import { latencyFrictionCharts } from './latency-friction.ts';
 
 /**
  * Registry of all analytics charts added in the gap-analysis pass.
@@ -29,6 +30,7 @@ export const newCharts: ChartEntry[] = [
   ...attributionCharts,
   ...insightsCharts,
   ...throughputCharts,
+  ...latencyFrictionCharts,
   ...toolDurationCharts,
   ...pruningCharts,
   ...errorCharts,

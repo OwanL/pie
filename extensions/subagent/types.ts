@@ -148,6 +148,36 @@ export interface SingleResult {
 	/** Diagnostic when a nested subagent's requested bucket was not allowed and
 	 *  was downgraded (or fell back to the active model) under the nested-bucket cap. */
 	bucketDowngradeReason?: string;
+	/** Stable identity for this dispatched model attempt, shared with the orphan cleanup registry. */
+	attemptId?: string;
+	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
+	attemptRecords?: SubagentAttemptRecord[];
+}
+
+/** Per-attempt analytics persisted on the final subagent result. */
+export interface SubagentAttemptRecord {
+	/** Stable identity for this attempt, shared with the orphan cleanup registry. */
+	attemptId: string;
+	/** Provider that owned the attempted model. */
+	provider?: string;
+	/** Model id used for this attempt. */
+	model?: string;
+	/** Epoch milliseconds when the attempt started. */
+	startedAt?: number;
+	/** Epoch milliseconds when the attempt ended. */
+	completedAt?: number;
+	/** Terminal classification of this attempt. */
+	outcome: "success" | "failure" | "aborted";
+	/** Classified provider/SDK failure metadata, when the attempt failed. */
+	failureClass?: SingleResult["failureClass"];
+	/** Replay-safety observation at attempt end. */
+	replaySafety?: SingleResult["replaySafety"];
+	/** Backoff delay applied before dispatching this attempt (0 for the first attempt). */
+	backoffMs?: number;
+	/** Settlement/stop reason observed for this attempt, when available. */
+	settlementOutcome?: string;
+	/** Orphan cleanup outcome for this attempt's pre-spawn resources, when available. */
+	cleanupOutcome?: string;
 }
 
 export interface SubagentDetails {
@@ -160,5 +190,8 @@ export interface SubagentDetails {
 export type DisplayItem =
 	| { type: "text"; text: string }
 	| { type: "toolCall"; name: string; args: Record<string, any> };
+
+/** Subagent tool result, including the optional `isError` hint the pi runner uses. */
+export type SubagentResult = AgentToolResult<SubagentDetails> & { isError?: boolean };
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;

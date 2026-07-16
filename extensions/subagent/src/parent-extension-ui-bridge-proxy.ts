@@ -14,6 +14,11 @@
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@mariozechner/pi-coding-agent";
 
 /**
+ * Dialog options that have already been stamped by an inner (nested) proxy.
+ */
+type ForwardedDialogOptions = ExtensionUIDialogOptions & { subagentCallId?: string; toolCallId?: string };
+
+/**
  * Minimal interface for the parent bridge — we only need the dialog methods
  * that the ask_user extension (and safeguard) actually call.
  */

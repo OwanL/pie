@@ -345,13 +345,29 @@
           <div id="chart-throughput-vs-concurrency" class="chart-slot"></div>
         </section>
 
+        <header class="dashboard-section span-2">
+          <p class="section-kicker">Latency/friction</p>
+          <h2>Locate hidden waits and parallel work</h2>
+          <p>Measured-only views separate pruning prepasses, provider-gate queues, retry backoff/episodes, and cumulative versus critical-path tool time. Missing legacy timing is excluded rather than shown as zero.</p>
+        </header>
+
         <section class="chart span-2">
-          <h3>Latency decomposition <span class="note" id="latency-decomposition-note">—</span></h3>
+          <h3>Runtime friction timing <span class="note" id="runtime-friction-timing-note">—</span></h3>
+          <div id="chart-runtime-friction-timing" class="chart-slot"></div>
+        </section>
+
+        <section class="chart span-2">
+          <h3>Cumulative vs critical-path tool time <span class="note" id="tool-time-overlap-note">—</span></h3>
+          <div id="chart-tool-time-overlap" class="chart-slot"></div>
+        </section>
+
+        <section class="chart span-2">
+          <h3>Turn latency decomposition <span class="note" id="latency-decomposition-note">—</span></h3>
           <div id="chart-latency-decomposition" class="chart-slot"></div>
         </section>
 
         <section class="chart span-2">
-          <h3>Tool execution time <span class="note" id="tool-duration-note">—</span></h3>
+          <h3>Tool execution time by tool <span class="note" id="tool-duration-note">—</span></h3>
           <div id="chart-tool-duration" class="chart-slot"></div>
         </section>
 

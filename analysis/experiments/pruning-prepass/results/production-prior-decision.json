@@ -1,0 +1,326 @@
+{
+  "generatedAt": "2026-07-16T03:31:03.522Z",
+  "benchmarkVersion": 2,
+  "decisionRule": "Keep when the candidate has a greater-than-50-percent chance of being used before the current request is complete; otherwise prune.",
+  "configuration": {
+    "models": [
+      "qwen3.5:9b"
+    ],
+    "approaches": [
+      "production-keep-list"
+    ],
+    "contexts": [
+      "dialogue-prior-decision"
+    ],
+    "endpoint": "http://127.0.0.1:11434",
+    "itemConcurrency": 4,
+    "output": "analysis/experiments/pruning-prepass/results/production-prior-decision.json"
+  },
+  "approaches": {
+    "production-keep-list": {
+      "description": "Exact production flat keep-list system contract and production-style user payload.",
+      "system": "You are a relevance curator for a coding agent's prompt-pruning prepass. Select the candidate skills and tools the agent will probably invoke before completing the current request.\n\nKeep a candidate when its probability of actual use is greater than 50 percent; omit it otherwise. Count the FULL ARC of implied work: understanding the request, exploring code, editing, validating (build/run/test), debugging, and cleanup. Implementation usually needs file reading, editing, and command/test execution; current external facts need web access; named specialist workflows need their matching skill.\n\nUse recent conversation only to resolve references and continuing work. The latest request wins when it changes, narrows, or stops earlier work. Do not keep an unrelated specialist merely because it could be generally useful.\n\nReturn ONLY a valid JSON object in this exact shape:\n{\"keep\":[]}\nList only supplied candidate names. An empty list means none of the candidates is probably needed. Do not include an explanation or reasoning. Do not wrap in markdown.\n\nUse the greater-than-50-percent probability boundary independently for every candidate. An empty keep list is correct when none is probably needed."
+    }
+  },
+  "results": [
+    {
+      "model": "qwen3.5:9b",
+      "approach": "production-keep-list",
+      "contextMode": "dialogue-prior-decision",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.9467,
+        "keepRecall": 0.8824,
+        "pruneRecall": 1,
+        "falsePrunes": 4,
+        "falseKeeps": 0,
+        "exactCases": 6,
+        "parseFailures": 0,
+        "totalWallMs": 34837,
+        "medianCaseWallMs": 3546,
+        "medianCallMs": 3544,
+        "p95CallMs": 6047,
+        "calls": 10,
+        "promptTokens": 4109,
+        "outputTokens": 123
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 2407.0391000000004,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Add a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\"\n\nCandidate skills:\n- tdd: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n\nCandidate tools:\n- read: Read files from the codebase.\n- edit: Edit existing files using exact text replacement.\n- bash: Run shell commands, builds, and tests.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 2405.7272,
+              "providerMs": 2395.497,
+              "loadMs": 1189.9498,
+              "promptTokens": 405,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 2728.7774999999992,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Diagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\"\n\nCandidate skills:\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n- pi-logs: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for isolated debugging.\n\nCandidate tools:\n- read: Read files from the codebase.\n- bash: Run shell commands, builds, tests, and log queries.\n- edit: Edit existing files.\n- session_review: Review, rate, and close open sessions.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"diagnose\",\"pi-logs\",\"read\",\"bash\"]}",
+              "wallMs": 2727.9839999999995,
+              "providerMs": 2718.2254,
+              "loadMs": 1420.4009,
+              "promptTokens": 418,
+              "outputTokens": 16,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 3545.5290999999997,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Create and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\"\n\nCandidate skills:\n- harness-experiments: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.\n- tdd: Strict test-driven development when explicitly requested.\n- evaluate-sessions: Review and rate currently-open sessions and close completed tabs.\n\nCandidate tools:\n- read: Read files and experiment artifacts.\n- edit: Edit experiment recipes and documentation.\n- bash: Run experiment commands and checks.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"harness-experiments\",\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 3543.9465,
+              "providerMs": 3536.5103,
+              "loadMs": 2380.4654,
+              "promptTokens": 384,
+              "outputTokens": 15,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 3914.7165000000005,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Optimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\"\n\nCandidate skills:\n- harness-experiments: Create and compare controlled baseline-versus-candidate pie harness experiments.\n- add-provider: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a focused feature.\n- tdd: Strict test-driven development when explicitly requested.\n\nCandidate tools:\n- read: Read source, logs, and experiment outputs.\n- edit: Edit source, benchmark assets, and documentation.\n- bash: Run local models, scripts, tests, and builds.\n- web_search: Research current local-model clients and model capabilities on the public web.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"harness-experiments\",\"add-provider\",\"read\",\"edit\",\"bash\",\"web_search\"]}",
+              "wallMs": 3913.5491,
+              "providerMs": 3907.8565,
+              "loadMs": 2305.375,
+              "promptTokens": 459,
+              "outputTokens": 21,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 6047.285600000001,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Do that again for the other provider.\"\n\nRecent conversation (use this to interpret follow-up requests):\n- user: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\n- assistant: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nPrevious prepass kept (weak historical evidence; re-evaluate): add-provider, read, edit, bash, web_search\n\nCandidate skills:\n- add-provider: Add or update API providers, local servers, and models in pie's centralized catalog.\n- evaluate-sessions: Review and rate currently-open sessions.\n\nCandidate tools:\n- read: Read source and configuration files.\n- edit: Edit source and configuration files.\n- bash: Run synchronization and validation commands.\n- web_search: Verify current provider API and model information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"add-provider\",\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 6046.506500000001,
+              "providerMs": 6040.8925,
+              "loadMs": 4873.552,
+              "promptTokens": 460,
+              "outputTokens": 13,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 2462.5769,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Fix that and verify it.\"\n\nRecent conversation (use this to interpret follow-up requests):\n- user: Diagnose the intermittent cancellation hang, but do not modify anything yet.\n- assistant: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nPrevious prepass kept (weak historical evidence; re-evaluate): diagnose, read, bash\n\nCandidate skills:\n- diagnose: Evidence-first workflow for hard or intermittent bugs, including regression verification.\n- tdd: Strict test-first development only when explicitly requested.\n\nCandidate tools:\n- read: Read relevant source and tests.\n- edit: Implement the fix and regression test.\n- bash: Run reproduction and verification tests.\n- web_search: Search the public web for current information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"diagnose\",\"read\",\"bash\"]}",
+              "wallMs": 2461.8668,
+              "providerMs": 2455.0711,
+              "loadMs": 1420.9249,
+              "promptTokens": 440,
+              "outputTokens": 12,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 1921.3833999999988,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Actually stop the implementation. Just summarize the current diff and do not edit or run tests.\"\n\nRecent conversation (use this to interpret follow-up requests):\n- user: Implement the provider queue refactor and add tests.\n- assistant: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nPrevious prepass kept (weak historical evidence; re-evaluate): read, edit, bash\n\nCandidate skills:\n- add-provider: Add or update API providers and models.\n- tdd: Strict test-driven development.\n\nCandidate tools:\n- session_changes: List files changed by this session and return focused diffs.\n- read: Read files or diff artifacts when needed for a summary.\n- edit: Edit existing files.\n- bash: Run shell commands and tests.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"read\",\"session_changes\"]}",
+              "wallMs": 1920.471300000001,
+              "providerMs": 1916.1068,
+              "loadMs": 1018.1366,
+              "promptTokens": 429,
+              "outputTokens": 9,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 5421.5007000000005,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Review and close each pinned tab.\"\n\nCandidate skills:\n- evaluate-sessions: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.\n- pi-logs: Inspect and group pie runtime and session logs for debugging.\n- codebase-maintenance: Broad code-quality audits and maintenance passes.\n\nCandidate tools:\n- session_review: List open sessions, read transcripts, record reviews, and close tabs.\n- subagent: Delegate independent review tasks to parallel agents.\n- read: Read codebase files.\n- edit: Edit codebase files.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"evaluate-sessions\",\"session_review\"]}",
+              "wallMs": 5420.8969,
+              "providerMs": 5410.8562,
+              "loadMs": 4343.3354,
+              "promptTokens": 385,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 3735.9572000000044,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"What changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\"\n\nCandidate skills:\n- add-provider: Add or update an LLM provider in the local model catalog.\n- pi-logs: Inspect pie runtime and session logs.\n\nCandidate tools:\n- web_search: Search the public web for current information.\n- get_search_content: Open search results and retrieve page content.\n- fetch_content: Fetch a known web page and return its content.\n- read: Read local codebase files.\n- edit: Edit local files.\n- bash: Run shell commands and tests.",
+              "text": "{\"keep\":[\"web_search\",\"get_search_content\"]}",
+              "wallMs": 3734.6875,
+              "providerMs": 3723.6499,
+              "loadMs": 2745.7522,
+              "promptTokens": 388,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 2652.010399999999,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "User request: \"Write a three-line haiku about rain on a window.\"\n\nCandidate skills:\n- diagnose: Evidence-first diagnosis for hard bugs.\n- tdd: Strict test-driven development.\n- add-provider: Add or update LLM providers and models.\n\nCandidate tools:\n- read: Read local files.\n- edit: Edit local files.\n- bash: Run shell commands.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[]}",
+              "wallMs": 2651.5184999999983,
+              "providerMs": 2647.8897,
+              "loadMs": 1943.807,
+              "promptTokens": 341,
+              "outputTokens": 5,
+              "valid": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

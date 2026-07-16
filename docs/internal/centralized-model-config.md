@@ -86,8 +86,8 @@ defaults:
 # ── Retry → settings.json.retry ──────────────────────────────────────
 retry:
   enabled: true
-  maxRetries: 6
-  baseDelayMs: 3000
+  maxRetries: 8
+  baseDelayMs: 5000
   provider:
     maxRetries: 2
     maxRetryDelayMs: 60000

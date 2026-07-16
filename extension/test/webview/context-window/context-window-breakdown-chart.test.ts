@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   computeBarLayout,
   kindSuffixFor,
+  remainingTokensForChart,
   segmentColor,
 } from '../../../src/webview/panel/context-window/breakdown-chart';
 import type { ContextWindowBreakdownEntry } from '../../../src/webview/panel/context-window/breakdown';
@@ -74,6 +75,26 @@ test('kindSuffixFor maps breakdown kinds to legend suffixes', () => {
   assert.equal(kindSuffixFor(entry('derived')), 'derived');
   assert.equal(kindSuffixFor(entry('unknown')), '?');
   assert.equal(kindSuffixFor(entry('exact')), undefined);
+});
+
+// ─── remainingTokensForChart ─────────────────────────────────────────────────
+
+test('remainingTokensForChart does not present an unknown window as fully remaining', () => {
+  assert.equal(remainingTokensForChart({
+    usedTokens: null,
+    usedKind: 'unknown',
+    remainingTokens: null,
+    remainingKind: 'unknown',
+    totalWindow: 1000,
+  }), 0);
+
+  assert.equal(remainingTokensForChart({
+    usedTokens: 250,
+    usedKind: 'exact',
+    remainingTokens: null,
+    remainingKind: 'unknown',
+    totalWindow: 1000,
+  }), 750);
 });
 
 // ─── computeBarLayout ────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import {
   type PreparedAgentReviewRow,
   type PreparedRunRow,
   type PreparedTurnThroughputRow,
+  type RetryTimingData,
   type SiteDataBundle,
   type SiteDataFileName,
   type SiteManifest,
@@ -841,6 +842,17 @@ function createFileExtensions(prepared: PreparedAnalyticsData): FileExtensionDat
   };
 }
 
+function createRetryTiming(prepared: PreparedAnalyticsData): RetryTimingData {
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    rows: prepared.retryTiming.map((row) => ({ ...row })),
+    notes: [
+      'scheduledDelayMs is the configured SDK backoff; measuredDelayMs is observed scheduling-to-provider-gate delay; durationMs is the full retry episode span.',
+      'Null measured delay or duration means that timing boundary was not observed. Missing historical retry samples remain absent rather than being presented as zero-duration retries.',
+    ],
+  };
+}
+
 function createTokenThroughput(prepared: PreparedAnalyticsData): TokenThroughputData {
   // Retain every turn (including errored / tokenless ones with null
   // tokensPerSecond) so coverage and error-rate analysis see the full
@@ -879,6 +891,7 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     backendErrors: createBackendErrors(prepared),
     fileExtensions: createFileExtensions(prepared),
     tokenThroughput: createTokenThroughput(prepared),
+    retryTiming: createRetryTiming(prepared),
   };
 }
 
@@ -900,6 +913,7 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'backend-errors.json': bundle.backendErrors,
     'file-types.json': bundle.fileExtensions,
     'token-throughput.json': bundle.tokenThroughput,
+    'retry-timing.json': bundle.retryTiming,
   };
 }
 
@@ -979,6 +993,8 @@ function validateRunSummary(runSummary: unknown): void {
     assert(typeof row.sessionPathHash === 'string', `run-summary.json row ${index} is missing sessionPathHash.`);
     assert(typeof row.toolCallCount === 'number', `run-summary.json row ${index} is missing toolCallCount.`);
     assert(typeof row.toolDurationMs === 'number', `run-summary.json row ${index} is missing toolDurationMs.`);
+    assert(row.criticalPathDurationMs === null || typeof row.criticalPathDurationMs === 'number', `run-summary.json row ${index} has an invalid criticalPathDurationMs.`);
+    assert(row.skillPruningPrepassDurationMs === null || typeof row.skillPruningPrepassDurationMs === 'number', `run-summary.json row ${index} has an invalid skillPruningPrepassDurationMs.`);
     assert(typeof row.timedToolCallCount === 'number', `run-summary.json row ${index} is missing timedToolCallCount.`);
   }
 }
@@ -1229,6 +1245,25 @@ function validateTokenThroughput(data: unknown): asserts data is TokenThroughput
     assert(typeof row.cacheReadTokens === 'number' && row.cacheReadTokens >= 0, `token-throughput.json row ${index} has an invalid cacheReadTokens.`);
     assert(typeof row.cacheWriteTokens === 'number' && row.cacheWriteTokens >= 0, `token-throughput.json row ${index} has an invalid cacheWriteTokens.`);
     assert(row.contextTokens === null || (typeof row.contextTokens === 'number' && row.contextTokens >= 0), `token-throughput.json row ${index} has an invalid contextTokens.`);
+    assert(row.providerQueueMs === null || (typeof row.providerQueueMs === 'number' && row.providerQueueMs >= 0), `token-throughput.json row ${index} has an invalid providerQueueMs.`);
+    assert(typeof row.providerQueueAttemptCount === 'number' && row.providerQueueAttemptCount >= 0, `token-throughput.json row ${index} has an invalid providerQueueAttemptCount.`);
+  });
+}
+
+function validateRetryTiming(data: unknown): asserts data is RetryTimingData {
+  assert(isRecord(data), 'retry-timing.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'retry-timing.json has an unexpected schemaVersion.');
+  assert(Array.isArray(data.rows), 'retry-timing.json is missing rows.');
+  assert(Array.isArray(data.notes), 'retry-timing.json is missing notes.');
+  data.rows.forEach((row, index) => {
+    assert(isRecord(row), `retry-timing.json row ${index} must be an object.`);
+    assert(typeof row.runId === 'string', `retry-timing.json row ${index} is missing runId.`);
+    assert(typeof row.sourceId === 'string', `retry-timing.json row ${index} is missing sourceId.`);
+    assert(typeof row.occurredAt === 'string', `retry-timing.json row ${index} is missing occurredAt.`);
+    assert(typeof row.attempt === 'number' && row.attempt >= 1, `retry-timing.json row ${index} has an invalid attempt.`);
+    assert(typeof row.scheduledDelayMs === 'number' && row.scheduledDelayMs >= 0, `retry-timing.json row ${index} has an invalid scheduledDelayMs.`);
+    assert(row.measuredDelayMs === null || (typeof row.measuredDelayMs === 'number' && row.measuredDelayMs >= 0), `retry-timing.json row ${index} has an invalid measuredDelayMs.`);
+    assert(row.durationMs === null || (typeof row.durationMs === 'number' && row.durationMs >= 0), `retry-timing.json row ${index} has an invalid durationMs.`);
   });
 }
 
@@ -1249,6 +1284,7 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
   validateTokenThroughput(bundle.tokenThroughput);
+  validateRetryTiming(bundle.retryTiming);
 }
 
 export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBundle> {
@@ -1275,5 +1311,6 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     backendErrors: files['backend-errors.json'] as SiteDataBundle['backendErrors'],
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],
     tokenThroughput: files['token-throughput.json'] as SiteDataBundle['tokenThroughput'],
+    retryTiming: files['retry-timing.json'] as SiteDataBundle['retryTiming'],
   };
 }

@@ -1,0 +1,926 @@
+{
+  "generatedAt": "2026-07-16T03:18:39.208Z",
+  "benchmarkVersion": 1,
+  "decisionRule": "Keep when the candidate has a greater-than-50-percent chance of being used before the current request is complete; otherwise prune.",
+  "configuration": {
+    "models": [
+      "qwen3.5:9b"
+    ],
+    "approaches": [
+      "catalog-keep-list"
+    ],
+    "contexts": [
+      "latest",
+      "user-history",
+      "dialogue"
+    ],
+    "endpoint": "http://127.0.0.1:11434",
+    "itemConcurrency": 4,
+    "output": "analysis/experiments/pruning-prepass/results/qwen9-context.json"
+  },
+  "approaches": {
+    "catalog-keep-list": {
+      "description": "One catalog call; positive flat keep-list JSON with no skill/tool category confusion.",
+      "system": "Select the candidate capabilities a coding agent will probably invoke before completing the current request.\nKeep a name when its probability of actual use is greater than 50 percent; omit it otherwise.\nCount implied work: implementation usually needs file reading, editing, and command/test execution; current external facts need web access; named specialist workflows need their matching skill.\nRecent context resolves references. The latest request overrides earlier work when it pivots or stops it.\nReturn only valid JSON in exactly this shape: {\"keep\":[]}\nUse only supplied names. Do not explain and do not wrap the JSON in markdown."
+    }
+  },
+  "results": [
+    {
+      "model": "qwen3.5:9b",
+      "approach": "catalog-keep-list",
+      "contextMode": "latest",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.9333,
+        "keepRecall": 0.8529,
+        "pruneRecall": 1,
+        "falsePrunes": 5,
+        "falseKeeps": 0,
+        "exactCases": 6,
+        "parseFailures": 0,
+        "totalWallMs": 13680,
+        "medianCaseWallMs": 1342,
+        "medianCallMs": 1341,
+        "p95CallMs": 1957,
+        "calls": 10,
+        "promptTokens": 2755,
+        "outputTokens": 118
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 1584.4083000000028,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nSkills:\n- tdd: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n\nTools:\n- read: Read files from the codebase.\n- edit: Edit existing files using exact text replacement.\n- bash: Run shell commands, builds, and tests.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1581.6847000000016,
+              "providerMs": 1565.0569,
+              "loadMs": 740.3402,
+              "promptTokens": 295,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 1958.078300000001,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n- pi-logs: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for isolated debugging.\n\nTools:\n- read: Read files from the codebase.\n- bash: Run shell commands, builds, tests, and log queries.\n- edit: Edit existing files.\n- session_review: Review, rate, and close open sessions.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"diagnose\",\"pi-logs\",\"read\",\"bash\"]}",
+              "wallMs": 1956.5456000000013,
+              "providerMs": 1951.5388,
+              "loadMs": 1048.4352,
+              "promptTokens": 308,
+              "outputTokens": 16,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 1868.3818000000028,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nSkills:\n- harness-experiments: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.\n- tdd: Strict test-driven development when explicitly requested.\n- evaluate-sessions: Review and rate currently-open sessions and close completed tabs.\n\nTools:\n- read: Read files and experiment artifacts.\n- edit: Edit experiment recipes and documentation.\n- bash: Run experiment commands and checks.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"harness-experiments\",\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1867.9903999999988,
+              "providerMs": 1863.9182,
+              "loadMs": 788.3817,
+              "promptTokens": 274,
+              "outputTokens": 15,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 1591.8717999999972,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nSkills:\n- harness-experiments: Create and compare controlled baseline-versus-candidate pie harness experiments.\n- add-provider: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a focused feature.\n- tdd: Strict test-driven development when explicitly requested.\n\nTools:\n- read: Read source, logs, and experiment outputs.\n- edit: Edit source, benchmark assets, and documentation.\n- bash: Run local models, scripts, tests, and builds.\n- web_search: Research current local-model clients and model capabilities on the public web.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"harness-experiments\",\"add-provider\",\"read\",\"edit\",\"bash\",\"web_search\"]}",
+              "wallMs": 1591.3892000000014,
+              "providerMs": 1588.2516,
+              "loadMs": 558.6799,
+              "promptTokens": 349,
+              "outputTokens": 21,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 1183.7929999999978,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nDo that again for the other provider.\n\nSkills:\n- add-provider: Add or update API providers, local servers, and models in pie's centralized catalog.\n- evaluate-sessions: Review and rate currently-open sessions.\n\nTools:\n- read: Read source and configuration files.\n- edit: Edit source and configuration files.\n- bash: Run synchronization and validation commands.\n- web_search: Verify current provider API and model information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1183.3147000000026,
+              "providerMs": 1180.5763,
+              "loadMs": 614.8017,
+              "promptTokens": 250,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 989.3966999999975,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nFix that and verify it.\n\nSkills:\n- diagnose: Evidence-first workflow for hard or intermittent bugs, including regression verification.\n- tdd: Strict test-first development only when explicitly requested.\n\nTools:\n- read: Read relevant source and tests.\n- edit: Implement the fix and regression test.\n- bash: Run reproduction and verification tests.\n- web_search: Search the public web for current information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 988.9344999999994,
+              "providerMs": 986.6993,
+              "loadMs": 487.1901,
+              "promptTokens": 245,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 1072.608500000002,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nSkills:\n- add-provider: Add or update API providers and models.\n- tdd: Strict test-driven development.\n\nTools:\n- session_changes: List files changed by this session and return focused diffs.\n- read: Read files or diff artifacts when needed for a summary.\n- edit: Edit existing files.\n- bash: Run shell commands and tests.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"session_changes\",\"read\"]}",
+              "wallMs": 1072.1851000000024,
+              "providerMs": 1070.0443,
+              "loadMs": 538.5478,
+              "promptTokens": 250,
+              "outputTokens": 9,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 1202.6823000000004,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nReview and close each pinned tab.\n\nSkills:\n- evaluate-sessions: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.\n- pi-logs: Inspect and group pie runtime and session logs for debugging.\n- codebase-maintenance: Broad code-quality audits and maintenance passes.\n\nTools:\n- session_review: List open sessions, read transcripts, record reviews, and close tabs.\n- subagent: Delegate independent review tasks to parallel agents.\n- read: Read codebase files.\n- edit: Edit codebase files.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"evaluate-sessions\",\"session_review\"]}",
+              "wallMs": 1202.2411999999968,
+              "providerMs": 1199.8162,
+              "loadMs": 593.4111,
+              "promptTokens": 275,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 1341.655200000001,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nSkills:\n- add-provider: Add or update an LLM provider in the local model catalog.\n- pi-logs: Inspect pie runtime and session logs.\n\nTools:\n- web_search: Search the public web for current information.\n- get_search_content: Open search results and retrieve page content.\n- fetch_content: Fetch a known web page and return its content.\n- read: Read local codebase files.\n- edit: Edit local files.\n- bash: Run shell commands and tests.",
+              "text": "{\"keep\":[\"web_search\",\"get_search_content\"]}",
+              "wallMs": 1341.2300000000032,
+              "providerMs": 1337.5536,
+              "loadMs": 687.1997,
+              "promptTokens": 278,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 887.2077000000063,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard bugs.\n- tdd: Strict test-driven development.\n- add-provider: Add or update LLM providers and models.\n\nTools:\n- read: Read local files.\n- edit: Edit local files.\n- bash: Run shell commands.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[]}",
+              "wallMs": 886.905399999996,
+              "providerMs": 885.0044,
+              "loadMs": 485.0771,
+              "promptTokens": 231,
+              "outputTokens": 5,
+              "valid": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "qwen3.5:9b",
+      "approach": "catalog-keep-list",
+      "contextMode": "user-history",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.9333,
+        "keepRecall": 0.8529,
+        "pruneRecall": 1,
+        "falsePrunes": 5,
+        "falseKeeps": 0,
+        "exactCases": 6,
+        "parseFailures": 0,
+        "totalWallMs": 11206,
+        "medianCaseWallMs": 1104,
+        "medianCallMs": 1104,
+        "p95CallMs": 1281,
+        "calls": 10,
+        "promptTokens": 2838,
+        "outputTokens": 118
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 1069.3801000000021,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nSkills:\n- tdd: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n\nTools:\n- read: Read files from the codebase.\n- edit: Edit existing files using exact text replacement.\n- bash: Run shell commands, builds, and tests.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1069.0734999999986,
+              "providerMs": 1067.669,
+              "loadMs": 514.3343,
+              "promptTokens": 295,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 1103.9306999999972,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n- pi-logs: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for isolated debugging.\n\nTools:\n- read: Read files from the codebase.\n- bash: Run shell commands, builds, tests, and log queries.\n- edit: Edit existing files.\n- session_review: Review, rate, and close open sessions.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"diagnose\",\"pi-logs\",\"read\",\"bash\"]}",
+              "wallMs": 1103.6745999999985,
+              "providerMs": 1102.0744,
+              "loadMs": 529.1298,
+              "promptTokens": 308,
+              "outputTokens": 16,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 1231.9832999999999,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nSkills:\n- harness-experiments: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.\n- tdd: Strict test-driven development when explicitly requested.\n- evaluate-sessions: Review and rate currently-open sessions and close completed tabs.\n\nTools:\n- read: Read files and experiment artifacts.\n- edit: Edit experiment recipes and documentation.\n- bash: Run experiment commands and checks.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"harness-experiments\",\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1231.5243000000046,
+              "providerMs": 1229.8828,
+              "loadMs": 596.4317,
+              "promptTokens": 274,
+              "outputTokens": 15,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 1280.9195000000036,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nSkills:\n- harness-experiments: Create and compare controlled baseline-versus-candidate pie harness experiments.\n- add-provider: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a focused feature.\n- tdd: Strict test-driven development when explicitly requested.\n\nTools:\n- read: Read source, logs, and experiment outputs.\n- edit: Edit source, benchmark assets, and documentation.\n- bash: Run local models, scripts, tests, and builds.\n- web_search: Research current local-model clients and model capabilities on the public web.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"harness-experiments\",\"add-provider\",\"read\",\"edit\",\"bash\",\"web_search\"]}",
+              "wallMs": 1280.7228000000032,
+              "providerMs": 1279.4325,
+              "loadMs": 534.975,
+              "promptTokens": 349,
+              "outputTokens": 21,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 1194.527900000001,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\n\nCurrent request:\nDo that again for the other provider.\n\nSkills:\n- add-provider: Add or update API providers, local servers, and models in pie's centralized catalog.\n- evaluate-sessions: Review and rate currently-open sessions.\n\nTools:\n- read: Read source and configuration files.\n- edit: Edit source and configuration files.\n- bash: Run synchronization and validation commands.\n- web_search: Verify current provider API and model information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1194.1489999999976,
+              "providerMs": 1192.8161,
+              "loadMs": 540.2408,
+              "promptTokens": 287,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 1193.9648000000016,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\n\nCurrent request:\nFix that and verify it.\n\nSkills:\n- diagnose: Evidence-first workflow for hard or intermittent bugs, including regression verification.\n- tdd: Strict test-first development only when explicitly requested.\n\nTools:\n- read: Read relevant source and tests.\n- edit: Implement the fix and regression test.\n- bash: Run reproduction and verification tests.\n- web_search: Search the public web for current information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1193.586199999998,
+              "providerMs": 1191.5266,
+              "loadMs": 614.1806,
+              "promptTokens": 270,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 1035.0398999999961,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nSkills:\n- add-provider: Add or update API providers and models.\n- tdd: Strict test-driven development.\n\nTools:\n- session_changes: List files changed by this session and return focused diffs.\n- read: Read files or diff artifacts when needed for a summary.\n- edit: Edit existing files.\n- bash: Run shell commands and tests.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"session_changes\",\"read\"]}",
+              "wallMs": 1034.7316999999966,
+              "providerMs": 1032.6819,
+              "loadMs": 533.0778,
+              "promptTokens": 271,
+              "outputTokens": 9,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 1025.5600999999951,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nReview and close each pinned tab.\n\nSkills:\n- evaluate-sessions: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.\n- pi-logs: Inspect and group pie runtime and session logs for debugging.\n- codebase-maintenance: Broad code-quality audits and maintenance passes.\n\nTools:\n- session_review: List open sessions, read transcripts, record reviews, and close tabs.\n- subagent: Delegate independent review tasks to parallel agents.\n- read: Read codebase files.\n- edit: Edit codebase files.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"evaluate-sessions\",\"session_review\"]}",
+              "wallMs": 1025.3127999999997,
+              "providerMs": 1023.236,
+              "loadMs": 547.7091,
+              "promptTokens": 275,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 1032.3666000000012,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nSkills:\n- add-provider: Add or update an LLM provider in the local model catalog.\n- pi-logs: Inspect pie runtime and session logs.\n\nTools:\n- web_search: Search the public web for current information.\n- get_search_content: Open search results and retrieve page content.\n- fetch_content: Fetch a known web page and return its content.\n- read: Read local codebase files.\n- edit: Edit local files.\n- bash: Run shell commands and tests.",
+              "text": "{\"keep\":[\"web_search\",\"get_search_content\"]}",
+              "wallMs": 1032.119200000001,
+              "providerMs": 1030.3708,
+              "loadMs": 555.5105,
+              "promptTokens": 278,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 1037.8323999999993,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard bugs.\n- tdd: Strict test-driven development.\n- add-provider: Add or update LLM providers and models.\n\nTools:\n- read: Read local files.\n- edit: Edit local files.\n- bash: Run shell commands.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[]}",
+              "wallMs": 1037.5377000000008,
+              "providerMs": 1035.9325,
+              "loadMs": 571.8695,
+              "promptTokens": 231,
+              "outputTokens": 5,
+              "valid": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "qwen3.5:9b",
+      "approach": "catalog-keep-list",
+      "contextMode": "dialogue",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.9467,
+        "keepRecall": 0.8824,
+        "pruneRecall": 1,
+        "falsePrunes": 4,
+        "falseKeeps": 0,
+        "exactCases": 6,
+        "parseFailures": 0,
+        "totalWallMs": 12637,
+        "medianCaseWallMs": 1256,
+        "medianCallMs": 1256,
+        "p95CallMs": 1651,
+        "calls": 10,
+        "promptTokens": 2937,
+        "outputTokens": 121
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 1176.6088999999993,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nSkills:\n- tdd: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n\nTools:\n- read: Read files from the codebase.\n- edit: Edit existing files using exact text replacement.\n- bash: Run shell commands, builds, and tests.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1176.2412999999942,
+              "providerMs": 1174.0706,
+              "loadMs": 591.086,
+              "promptTokens": 295,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 1256.4454000000042,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n- pi-logs: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for isolated debugging.\n\nTools:\n- read: Read files from the codebase.\n- bash: Run shell commands, builds, tests, and log queries.\n- edit: Edit existing files.\n- session_review: Review, rate, and close open sessions.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"diagnose\",\"pi-logs\",\"read\",\"bash\"]}",
+              "wallMs": 1256.0569000000032,
+              "providerMs": 1254.0797,
+              "loadMs": 613.3259,
+              "promptTokens": 308,
+              "outputTokens": 16,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 1310.6895000000004,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nSkills:\n- harness-experiments: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.\n- tdd: Strict test-driven development when explicitly requested.\n- evaluate-sessions: Review and rate currently-open sessions and close completed tabs.\n\nTools:\n- read: Read files and experiment artifacts.\n- edit: Edit experiment recipes and documentation.\n- bash: Run experiment commands and checks.\n- web_search: Search the public web for current information.",
+              "text": "{\"keep\":[\"harness-experiments\",\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1310.4035000000003,
+              "providerMs": 1308.4736,
+              "loadMs": 654.3183,
+              "promptTokens": 274,
+              "outputTokens": 15,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 1651.5990999999995,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nSkills:\n- harness-experiments: Create and compare controlled baseline-versus-candidate pie harness experiments.\n- add-provider: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.\n- codebase-maintenance: Broad code-quality audits and maintenance passes; not for a focused feature.\n- tdd: Strict test-driven development when explicitly requested.\n\nTools:\n- read: Read source, logs, and experiment outputs.\n- edit: Edit source, benchmark assets, and documentation.\n- bash: Run local models, scripts, tests, and builds.\n- web_search: Research current local-model clients and model capabilities on the public web.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"harness-experiments\",\"add-provider\",\"read\",\"edit\",\"bash\",\"web_search\"]}",
+              "wallMs": 1651.2929999999978,
+              "providerMs": 1649.136,
+              "loadMs": 764.3835,
+              "promptTokens": 349,
+              "outputTokens": 21,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 1414.7243999999992,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nSkills:\n- add-provider: Add or update API providers, local servers, and models in pie's centralized catalog.\n- evaluate-sessions: Review and rate currently-open sessions.\n\nTools:\n- read: Read source and configuration files.\n- edit: Edit source and configuration files.\n- bash: Run synchronization and validation commands.\n- web_search: Verify current provider API and model information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"web_search\",\"edit\",\"bash\"]}",
+              "wallMs": 1414.2733000000007,
+              "providerMs": 1412.2481,
+              "loadMs": 571.1593,
+              "promptTokens": 322,
+              "outputTokens": 13,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 1304.9981000000043,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nSkills:\n- diagnose: Evidence-first workflow for hard or intermittent bugs, including regression verification.\n- tdd: Strict test-first development only when explicitly requested.\n\nTools:\n- read: Read relevant source and tests.\n- edit: Implement the fix and regression test.\n- bash: Run reproduction and verification tests.\n- web_search: Search the public web for current information.\n- session_review: Review, rate, and close open sessions.",
+              "text": "{\"keep\":[\"read\",\"edit\",\"bash\"]}",
+              "wallMs": 1304.6879999999946,
+              "providerMs": 1302.9454,
+              "loadMs": 648.3708,
+              "promptTokens": 308,
+              "outputTokens": 10,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 1214.557799999995,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nSkills:\n- add-provider: Add or update API providers and models.\n- tdd: Strict test-driven development.\n\nTools:\n- session_changes: List files changed by this session and return focused diffs.\n- read: Read files or diff artifacts when needed for a summary.\n- edit: Edit existing files.\n- bash: Run shell commands and tests.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"session_changes\",\"read\"]}",
+              "wallMs": 1214.2899000000034,
+              "providerMs": 1212.9697,
+              "loadMs": 581.5181,
+              "promptTokens": 297,
+              "outputTokens": 9,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 1149.890999999996,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nReview and close each pinned tab.\n\nSkills:\n- evaluate-sessions: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.\n- pi-logs: Inspect and group pie runtime and session logs for debugging.\n- codebase-maintenance: Broad code-quality audits and maintenance passes.\n\nTools:\n- session_review: List open sessions, read transcripts, record reviews, and close tabs.\n- subagent: Delegate independent review tasks to parallel agents.\n- read: Read codebase files.\n- edit: Edit codebase files.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[\"evaluate-sessions\",\"session_review\"]}",
+              "wallMs": 1149.6690000000017,
+              "providerMs": 1148.3905,
+              "loadMs": 663.3187,
+              "promptTokens": 275,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 1058.0316999999995,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nSkills:\n- add-provider: Add or update an LLM provider in the local model catalog.\n- pi-logs: Inspect pie runtime and session logs.\n\nTools:\n- web_search: Search the public web for current information.\n- get_search_content: Open search results and retrieve page content.\n- fetch_content: Fetch a known web page and return its content.\n- read: Read local codebase files.\n- edit: Edit local files.\n- bash: Run shell commands and tests.",
+              "text": "{\"keep\":[\"web_search\",\"get_search_content\"]}",
+              "wallMs": 1057.7453999999998,
+              "providerMs": 1056.0606,
+              "loadMs": 534.1778,
+              "promptTokens": 278,
+              "outputTokens": 11,
+              "valid": true
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 1099.0971000000063,
+          "callCount": 1,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nSkills:\n- diagnose: Evidence-first diagnosis for hard bugs.\n- tdd: Strict test-driven development.\n- add-provider: Add or update LLM providers and models.\n\nTools:\n- read: Read local files.\n- edit: Edit local files.\n- bash: Run shell commands.\n- web_search: Search the public web.",
+              "text": "{\"keep\":[]}",
+              "wallMs": 1098.8195999999953,
+              "providerMs": 1097.1892,
+              "loadMs": 646.3426,
+              "promptTokens": 231,
+              "outputTokens": 5,
+              "valid": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

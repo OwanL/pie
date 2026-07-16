@@ -1,6 +1,6 @@
 # Handoff: subagent and provider resilience
 
-**Status:** In progress — core subagent/provider reliability implemented; broader acceptance remains open
+**Status:** In progress — core subagent/provider reliability + REM-06 acceptance evidence implemented; remaining gaps noted below
 **Priority:** P0 reliability  
 **Scope:** `extensions/subagent/`, provider request lifecycle, transcript rendering, queued messages, and operational analytics
 
@@ -17,13 +17,12 @@ The structural execution work described below is partially implemented:
 - queued-message correlation, bounded dwell watchdogs, and host-owned Stop / Keep waiting / Remove queued controls are implemented;
 - warm-bash remains non-gating and its marker protocol handles every stdout chunk boundary deterministically.
 
-This handoff is **not yet closed**. Phase-specific subagent leases, bounded
-retry backoff/`Retry-After`, provider-aware failover, a generation-fenced orphan
-registry with shutdown drain, and per-attempt operational analytics are not
-implemented. Its broader definition of done also still requires an end-to-end
-fake-provider matrix using fake clocks (including the simulated >15-minute
-healthy control). Do not infer completion merely from the focused reliability
-suites passing.
+This handoff is **not yet closed**. Phase-specific outer inactivity leases,
+bounded retry/`Retry-After`, provider-aware failover, generation-owned orphan
+cleanup, and the deterministic fake-provider matrix are implemented. Broader
+phase-duration analytics and dedicated queued-message fake-clock coverage remain;
+the acceptance-gap section lists them. Do not infer full operational closure
+merely from the focused reliability suites passing.
 
 ## Why this handoff exists
 
@@ -346,6 +345,41 @@ Do not begin with broad UI refactoring. Establish deterministic provider/lifecyc
 - `extension/src/host/stats-service/` — operational metric capture.
 - `extensions/subagent/test/interrupt-hardening.test.ts` — existing abort/hang characterization.
 - `extensions/subagent/test/settlement.test.ts` — current absolute settlement-net coverage.
+
+## Scenario → test matrix (REM-06 acceptance evidence)
+
+| # | Scenario | Existing test(s) | New test(s) | Status |
+|---|---|---|---|---|
+| 1 | Never returning headers | `provider-gate.test.ts` — stalled headers locally time out and release the slot | — | ✅ |
+| 2 | Headers then no first token | — | `subagent-provider-resilience.test.ts` — provider wait expires on the injected inactivity clock | ✅ |
+| 3 | Periodic slow tokens beyond old 15-min deadline | — | `subagent-provider-resilience.test.ts` — productive run exceeds 15 simulated minutes using the actual settlement clock seam | ✅ |
+| 4 | Mid-stream disconnect | — | `subagent-provider-resilience.test.ts` — transport failure preserves partial output and is not replayed | ✅ |
+| 5 | 429 with/without Retry-After | `retry.test.ts` — `Retry-After hint parsed`, `bounded exponential backoff` | — | ✅ |
+| 6 | 5xx burst followed by recovery | `provider-gate.test.ts` — half-open 503 reopens the circuit and later recovery closes it | — | ✅ |
+| 7 | Auth failure | `retry.test.ts` — auth failures never retry; `provider-failure.test.ts` — auth classified terminal | — | ✅ |
+| 8 | Successful output + hung tool | `settlement.test.ts` — duplicate tool updates do not renew the lease | `subagent-provider-resilience.test.ts` — output is retained when the tool phase expires | ✅ |
+| 9 | `abort()` never settles | `interrupt-hardening.test.ts` — hung child `session.abort()` settles locally | `orphan-cleanup.test.ts` — detached cleanup remains observable | ✅ |
+| 10 | Late deltas after local terminal state | `modes.test.ts` — stale retry-attempt update is fenced | `subagent-provider-resilience.test.ts` — generation high-water rejects stale progress | ✅ |
+| 11 | One hung child among successful siblings | Native sibling tool calls settle independently; `settlement.test.ts` proves latest completed/partial details survive force settlement | — | ✅ (architecture-adjusted) |
+| 12 | Provider circuit open while another healthy | `provider-gate.test.ts` — shared circuit/probe recovery; `retry.test.ts` — failed provider is excluded and another provider succeeds | — | ✅ |
+
+**Test file locations:**
+- `extensions/subagent/test/retry.test.ts` — REM-03: retry/backoff/provider failover/analytics
+- `extensions/subagent/test/settlement.test.ts` — settlement net: force-settle, progress renewal, nested progress
+- `extensions/subagent/test/interrupt-hardening.test.ts` — abort/teardown: Bug 1-3 hardening
+- `extensions/subagent/test/orphan-cleanup.test.ts` — orphan registry: unit + runner integration
+- `extensions/subagent/test/provider-failure.test.ts` — error classification: retry safety, replay, Retry-After
+- `extensions/subagent/test/provider-capacity.test.ts` — capacity model ID exclusions
+- `extension/test/backend/models/provider-gate.test.ts` — provider gate: concurrency, circuit breaker, afterburn
+- `extensions/subagent/test/subagent-provider-resilience.test.ts` — REM-06: productive-run-beyond-15min, different-provider recovery, late-event fencing, orphan observability, sibling preservation
+
+## Still-unimplemented acceptance gaps
+
+The following broader acceptance requirements remain open:
+
+1. **Operational phase-duration analytics** — Per-attempt `attemptRecords` persist model, provider, outcome, failure/replay classification, and backoff. Queue wait, header wait, first-token latency, stream-idle maxima, phase durations, and parent settlement source are not yet projected into the host analytics aggregates.
+
+2. **Dedicated queued-message fake-clock coverage** — Host-owned Stop / Keep waiting / Remove queued controls are implemented, but their correlation and dwell watchdog still lack one end-to-end injected-clock suite. This is outside the subagent/provider matrix above.
 
 ## Definition of done
 

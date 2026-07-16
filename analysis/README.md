@@ -196,6 +196,14 @@ Site-data files:
 - `treatment-comparison.json`
 - `timeline.json`
 - `model-leaderboard.json`
+- `pruning-impact.json`
+- `tool-result-pruning-impact.json`
+- `tool-result-pruning-outcomes.json`
+- `agent-review-comparison.json`
+- `backend-errors.json`
+- `file-types.json`
+- `token-throughput.json`
+- `retry-timing.json` — measured per-attempt scheduled delay, observed delay, and retry-episode duration; absent historical samples remain absent
 
 ## Query names
 
@@ -207,6 +215,10 @@ tool_usage
 tool_failures
 treatment_comparison
 timeline
+pruning_prepass_cost
+warm_bash
+retry_timing
+latency_friction
 ```
 
 Example:
@@ -249,9 +261,12 @@ Do not rely on `file://` loading.
 - **Token usage**: `inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens` are available when the provider reports them. Many older runs have zero token data.
 - **Cost**: `estimatedCostUsd` is the **parent-run** cost derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). `subagentEstimatedCostUsd` is the cost of spawned sub-agent sessions (which bill separately and were historically excluded from run cost), and `totalEstimatedCostUsd` = parent + subagent (the headline spend the overview card and cost-trend now use, falling back to parent-only for legacy runs). The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`. The "Subagent cost attribution" chart stacks parent vs subagent spend by model to expose the hidden sub-agent portion.
 - **Per-turn tokens & context trajectory**: `turnThroughputSamples` now carry per-turn `inputTokens`/`cacheReadTokens`/`cacheWriteTokens`/`contextTokens` (in addition to `outputTokens`/`generationDurationMs`). These enable per-turn cost attribution and the context-growth trajectory chart. Older turns (recorded before this field existed) coerce to `0` (tokens) / `null` (context) and are excluded from those views.
+- **Provider queue timing**: `providerQueueMs` is nullable measured provider-gate wait per turn, and `providerQueueAttemptCount` records how many provider attempts contributed. An explicit `0ms` means an immediate observed grant; absent legacy/ungated observations remain `null` with attempt count `0` and are excluded from queue-duration coverage and medians.
+- **Auxiliary prepass timing**: measured `durationMs` on `skill_pruning_prepass` auxiliary usage is summed per run as `skillPruningPrepassDurationMs`. Runs with no measured prepass duration remain `null`; token-only historical samples are not displayed as zero-duration prepasses.
 - **Per-turn model attribution**: each flattened throughput row attributes its `modelId` from `sample.modelId` when present (per-sample provider attribution, e.g. a sub-agent turn or a mid-run model swap), falling back to the parent run's `modelId`. `mixed_model_config` on the run flags when a run's turns span more than one model.
 - **Throughput artifact retention & concurrency**: the `token-throughput.json` site artifact retains every turn — including errored and tokenless turns with null `tokensPerSecond` — so coverage and error-rate analysis see the full population; chart transforms filter null `tokensPerSecond` at render time only. `concurrentBusySessions` is end-of-turn descriptive telemetry (how many sessions were mid-run when the turn ended); it is not a causal rate-limit signal, so treat any throughput-vs-concurrency correlation as descriptive, not causal.
-- **Compaction & retry**: `compactionCount` (history-compaction `/compact` LLM calls — a hidden billable call whose tokens the SDK does not report back, so they remain absent from token totals) and `autoRetryCount` (backend auto-retries of failed turns) are captured per run. Both are `0` for runs recorded before tracking existed. The "Compaction & retry friction" chart surfaces them by model. Note: compaction token usage is not capturable today (no SDK usage hook); only the count and wall-clock (folded into `busyDurationMs`) are tracked.
+- **Compaction & retry**: `compactionCount` (history-compaction `/compact` LLM calls — a hidden billable call whose tokens the SDK does not report back, so they remain absent from token totals) and `autoRetryCount` (backend auto-retries of failed turns) are captured per run. Both counters are `0` for runs recorded before tracking existed. New `retryTimingSamples` preserve each attempt's scheduled backoff plus nullable measured gate-entry delay and nullable full retry-episode duration in `retry-timing.json` and DuckDB's `retry_timing` table. Historical runs have no rows, not synthetic zero-duration attempts. The "Compaction & retry friction" count chart and measured-only "Runtime friction timing" chart serve different purposes. Note: compaction token usage is not capturable today (no SDK usage hook); only the count and wall-clock (folded into `busyDurationMs`) are tracked.
+- **Tool critical path and overlap**: `toolDurationMs` is cumulative timed-tool duration, while `criticalPathDurationMs` is the non-overlapping union of reliably timed tool intervals. Their non-negative difference is parallel overlap. Legacy runs without interval-union telemetry remain `null` in prepared/site data and are excluded from critical-path/overlap coverage rather than shown as zero; DuckDB and the dashboard expose cumulative, critical-path, and overlap values together.
 - **Task group correlation**: Multiple canonical runs can share a `taskGroupId`; the leaderboard uses only the deterministic latest stable run per task and family, while other views may still report per-run counts.
 - **Case-mix coverage**: Transcript-only sessions join canonical tasks in the ex-ante complexity population. Historical sessions expose prompt character count but not attachment/context counts, which are conservatively zero; post-treatment telemetry is never used.
 - **Small samples**: Model quality cells with fewer than 3 scored runs have highly variable satisfaction averages. Notes in `model-quality.json` flag this.

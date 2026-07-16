@@ -81,10 +81,25 @@ function buildState(opts: BuildOpts = {}): ArchState {
   };
 }
 
-function cmd(corrId: string, defaultModel: string, sessionPath: string = SESSION, thinkingLevel: ThinkingLevel = 'high'): Event {
+function cmd(
+  corrId: string,
+  defaultModel: string,
+  sessionPath: string = SESSION,
+  thinkingLevel: ThinkingLevel = 'high',
+  defaultProvider?: string,
+): Event {
   return {
     kind: 'Command',
-    cmd: { kind: 'SetModel', corrId, sessionPath, modelSettings: { defaultModel, defaultThinkingLevel: thinkingLevel } },
+    cmd: {
+      kind: 'SetModel',
+      corrId,
+      sessionPath,
+      modelSettings: {
+        defaultModel,
+        ...(defaultProvider !== undefined && { defaultProvider }),
+        defaultThinkingLevel: thinkingLevel,
+      },
+    },
   };
 }
 
@@ -108,9 +123,10 @@ test('SessionOpened does not clobber an in-flight optimistic SetModel (global de
   // User picks a new model; the reducer applies it optimistically and records
   // the pending SetModel (SetModelRpc is still in flight).
   const afterSet = reduceFrom(buildState({ defaultModel: 'old-model', sessionModelId: 'old-model' }),
-    cmd('c1', 'new-model'));
+    cmd('c1', 'new-model', SESSION, 'high', 'openai-codex'));
   assert.equal(afterSet.settings.modelSettings?.defaultModel, 'new-model');
   assert.equal(afterSet.sessions.sessions.find((s) => s.path === SESSION)?.modelId, 'new-model');
+  assert.equal(afterSet.sessions.sessions.find((s) => s.path === SESSION)?.provider, 'openai-codex');
   assert.ok(afterSet.pending.setModelByCorrId.c1, 'pending SetModel entry should exist');
 
   // A stale session.opened arrives before settings.set commits: its

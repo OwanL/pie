@@ -4,8 +4,8 @@
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
-    "maxRetries": 6,
-    "baseDelayMs": 3000,
+    "maxRetries": 8,
+    "baseDelayMs": 5000,
     "provider": {
       "maxRetries": 2,
       "maxRetryDelayMs": 60000
@@ -17,15 +17,18 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "llama3.1:8b",
+    "model": "qwen3.5:9b",
     "provider": "ollama",
     "thinkingLevel": "off",
+    "prepass": {
+      "temperature": 0.2
+    },
     "skills": {
-      "strategy": "topK",
+      "strategy": "discretion",
       "ceiling": 5
     },
     "tools": {
-      "strategy": "topK",
+      "strategy": "discretion",
       "ceiling": 10,
       "alwaysKeep": [
         "bash",

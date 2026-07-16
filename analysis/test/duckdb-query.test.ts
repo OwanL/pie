@@ -253,18 +253,18 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
 
   // Spot-check the previously-dropped fields are present and correctly valued.
   // total cost = parent + subagent; fixture runs have no subagent usage, so
-  // total == parent and the friction counters coerce to 0. This also guards
+  // total == parent. The fixture includes one measured retry on run-001. This also guards
   // against positional misalignment between the mapper and the schema.
   const priced = await runDuckDbQuery(
     sharedDbPath,
-    'SELECT estimated_cost_usd, total_estimated_cost_usd, subagent_estimated_cost_usd, compaction_count, auto_retry_count FROM runs WHERE estimated_cost_usd IS NOT NULL LIMIT 1',
+    "SELECT estimated_cost_usd, total_estimated_cost_usd, subagent_estimated_cost_usd, compaction_count, auto_retry_count FROM runs WHERE run_id = 'run-001'",
   );
   if (priced.length > 0) {
     const row = priced[0];
     assert.equal(row['subagent_estimated_cost_usd'], 0, 'fixture runs have no subagent usage → subagent cost is 0');
     assert.equal(row['total_estimated_cost_usd'], row['estimated_cost_usd'], 'total cost = parent + subagent (0)');
     assert.equal(row['compaction_count'], 0, 'legacy fixture runs coerce compaction_count to 0');
-    assert.equal(row['auto_retry_count'], 0, 'legacy fixture runs coerce auto_retry_count to 0');
+    assert.equal(row['auto_retry_count'], 1, 'run-001 includes one measured retry');
   }
 });
 
@@ -392,6 +392,8 @@ test('runs table exposes new captured fields: treatmentChangeKinds, lastTurnUsag
       skillPruningPrepassOutputTokens: 20,
       skillPruningPrepassCacheReadTokens: 5,
       skillPruningPrepassCacheWriteTokens: 3,
+      skillPruningPrepassDurationMs: 450,
+      criticalPathDurationMs: 700,
     };
     const dbPath = path.join(dir, 'usage.duckdb');
     await buildDuckDbDatabase({
@@ -401,12 +403,14 @@ test('runs table exposes new captured fields: treatmentChangeKinds, lastTurnUsag
     });
     const rows = await runDuckDbQuery(
       dbPath,
-      "SELECT treatment_change_kinds, last_turn_reasoning_tokens, skill_pruning_prepass_input_tokens FROM runs WHERE run_id = 'extra-run'",
+      "SELECT treatment_change_kinds, last_turn_reasoning_tokens, skill_pruning_prepass_input_tokens, skill_pruning_prepass_duration_ms, critical_path_duration_ms FROM runs WHERE run_id = 'extra-run'",
     );
     assert.equal(rows.length, 1);
     assert.deepEqual(rows[0]?.['treatment_change_kinds'], ['model', 'thinking']);
     assert.equal(rows[0]?.['last_turn_reasoning_tokens'], '15');
     assert.equal(rows[0]?.['skill_pruning_prepass_input_tokens'], '100');
+    assert.equal(rows[0]?.['skill_pruning_prepass_duration_ms'], '450');
+    assert.equal(rows[0]?.['critical_path_duration_ms'], '700');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -422,6 +426,8 @@ test('turn_throughput table exposes per-turn provider and tool_usage exposes tim
         ...prepared.turnThroughput[0],
         runId: 'throughput-run',
         provider: 'openai',
+        providerQueueMs: 125,
+        providerQueueAttemptCount: 2,
       },
     ];
     const toolUsage = [
@@ -442,9 +448,11 @@ test('turn_throughput table exposes per-turn provider and tool_usage exposes tim
     });
     const tpRows = await runDuckDbQuery(
       dbPath,
-      "SELECT provider FROM turn_throughput WHERE run_id = 'throughput-run'",
+      "SELECT provider, provider_queue_ms, provider_queue_attempt_count FROM turn_throughput WHERE run_id = 'throughput-run'",
     );
     assert.equal(tpRows[0]?.['provider'], 'openai');
+    assert.equal(tpRows[0]?.['provider_queue_ms'], '125');
+    assert.equal(tpRows[0]?.['provider_queue_attempt_count'], 2);
     const toolRows = await runDuckDbQuery(
       dbPath,
       "SELECT timed_call_count, mean_duration_ms FROM tool_usage WHERE run_id = 'throughput-run' AND tool_name = 'bash'",
@@ -454,6 +462,25 @@ test('turn_throughput table exposes per-turn provider and tool_usage exposes tim
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('retry_timing table and named query expose scheduled and measured timing', async () => {
+  const rows = await runNamedDuckDbQuery(sharedDbPath, 'retry_timing');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.['source_id'], 'run-001-retry-1');
+  assert.equal(rows[0]?.['scheduled_delay_ms'], '1000');
+  assert.equal(rows[0]?.['measured_delay_ms'], '1080');
+  assert.equal(rows[0]?.['duration_ms'], '4200');
+});
+
+test('latency_friction query preserves measured coverage and tool overlap', async () => {
+  const rows = await runNamedDuckDbQuery(sharedDbPath, 'latency_friction');
+  const run = rows.find((row) => row['run_id'] === 'run-001');
+  assert.equal(run?.['skill_pruning_prepass_duration_ms'], '350');
+  assert.equal(run?.['median_provider_queue_ms'], 60);
+  assert.equal(run?.['provider_queue_attempt_count'], '2');
+  assert.equal(run?.['median_scheduled_retry_delay_ms'], 1000);
+  assert.equal(run?.['overlapping_tool_duration_ms'], '2300');
 });
 
 test('core_runs exposes model attribution, outcome source, mixed config, and parent/subagent/total cost', async () => {

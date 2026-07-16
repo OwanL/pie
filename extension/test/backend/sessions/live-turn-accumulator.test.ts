@@ -50,6 +50,30 @@ test('normal subagent normalization feeds a JSON-safe accumulator snapshot', () 
   assert.equal(progress?.kind === 'tool.progress' ? progress.update.kind : undefined, 'snapshot');
 });
 
+test('backend accumulator preserves completed ask_user answers for the live transcript', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  value.observe({
+    kind: 'tool.started', executionId: 'ask-execution', parentExecutionId: null, rootExecutionId: 'ask-execution',
+    toolCallId: 'ask-tool', name: 'ask_user',
+    input: { question: 'Choose a scope', options: ['Focused fix', 'Broader cleanup'] }, startedAt: 110,
+  }, 110);
+  const result = {
+    content: [{ type: 'text', text: 'Focused fix' }],
+    details: { answer: 'Focused fix', source: 'option', cancelled: false },
+    isError: false,
+  };
+
+  const terminal = value.observe({
+    kind: 'tool.terminal', executionId: 'ask-execution', status: 'completed', result,
+    durableEntryId: 'ask-entry',
+  }, 120);
+
+  assert.equal(terminal.kind, 'tool.terminal');
+  assert.deepEqual(terminal.kind === 'tool.terminal' ? terminal.result : undefined, result);
+  assert.deepEqual(value.checkpoint().tools[0]?.terminal?.result, result);
+});
+
 test('backend accumulator emits one full subagent preview then incremental patches and suppresses duplicates', () => {
   const value = accumulator();
   value.observe({ kind: 'turn.started' }, 100);

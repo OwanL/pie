@@ -14,6 +14,16 @@ const noop = () => undefined;
 const noopContextMenu = () => undefined;
 const noopRenderToolCall = () => null;
 
+function userMessage(id: string, markdown: string): ChatMessage {
+  return {
+    id,
+    role: 'user',
+    createdAt: '2026-01-01T12:30:00.000Z',
+    markdown,
+    status: 'completed',
+  };
+}
+
 function assistantMessage(id: string, markdown: string): ChatMessage {
   return {
     id,
@@ -47,6 +57,14 @@ test('TranscriptMessageList renders one message block per message', () => {
   assert.ok(matches.length >= 2, 'expected at least two message blocks');
   assert.match(html, /First reply/);
   assert.match(html, /Second reply/);
+});
+
+test('TranscriptMessageList adds the owning request time to nested assistant headers', () => {
+  const request = userMessage('user-1', 'Nested request');
+  const html = render({ messages: [request, assistantMessage('assistant-1', 'Nested reply')] });
+
+  assert.match(html, /datetime="2026-01-01T12:30:00\.000Z"/);
+  assert.match(html, /aria-label="Request made /);
 });
 
 test('TranscriptMessageList renders read-only when readonly is set', () => {

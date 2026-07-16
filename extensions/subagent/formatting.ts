@@ -149,6 +149,7 @@ export function formatSelectionInfo(
 		failedModel?: string;
 		retryCount?: number;
 		modelResolutionDiagnostic?: string;
+		bucketDowngradeReason?: string;
 	},
 	themeFg: (color: any, text: string) => string,
 ): string | undefined {

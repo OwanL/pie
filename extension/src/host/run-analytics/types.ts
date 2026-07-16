@@ -11,6 +11,7 @@ import type {
   RunOutcome,
   RunOutcomeResolution,
   RunSnapshot,
+  RetryTimingSample,
   SessionAnalyticsFactors,
   SubagentTaskScoreRollup,
   TaskBoundaryIntent,
@@ -36,6 +37,7 @@ export type {
   RunOutcome,
   RunOutcomeResolution,
   RunSnapshot,
+  RetryTimingSample,
   SessionAnalyticsFactors,
   SubagentTaskScoreRollup,
   TaskBoundaryIntent,
@@ -66,6 +68,10 @@ export interface TurnLatencyMeasurement {
   overheadMs?: number;
   /** Provider latency: `turn_start` → first reply token, ms. */
   providerLatencyMs?: number;
+  /** Correlated provider-gate permit wait; explicit zero means immediate. */
+  providerQueueMs?: number;
+  /** Number of provider attempts represented by providerQueueMs. */
+  providerQueueAttemptCount?: number;
 }
 
 export interface PersistedSessionRunState {

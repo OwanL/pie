@@ -146,6 +146,15 @@ function successBehavior(text: string): any {
 const noSignal = () => new AbortController().signal;
 const noOpDetails = (mode: any, results: any[]) => ({ mode, agentScope: "user" as const, projectAgentsDir: null, results });
 
+/** Deterministic retry clock: timers resolve immediately when advanced by 0. */
+class FakeClock {
+	nowMs = 0;
+	now(): number { return this.nowMs; }
+	setTimer(_ms: number): { promise: Promise<void>; cancel: () => void } {
+		return { promise: Promise.resolve(), cancel: () => {} };
+	}
+}
+
 // --- executeSingleMode ------------------------------------------------------
 
 test("executeSingleMode: success returns the final assistant output", async () => {
@@ -224,8 +233,8 @@ test("transient provider timeout retries on another model in the same bucket", a
 		},
 	});
 	const models = [
-		{ id: "model-a", provider: "test" },
-		{ id: "model-b", provider: "test" },
+		{ id: "model-a", provider: "provider-a" },
+		{ id: "model-b", provider: "provider-b" },
 	];
 	const ctx = {
 		...makeCtx(),
@@ -238,19 +247,31 @@ test("transient provider timeout retries on another model in the same bucket", a
 	};
 	const originalRandom = Math.random;
 	Math.random = () => 0;
+	const clock = new FakeClock();
 	try {
 		const response: any = await execSingle(
 			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 			() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
-			"t-retry", undefined,
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
+			"t-retry", undefined, undefined, { clock },
 		);
+
 		assert.equal(response.isError, undefined);
 		assert.equal(response.content[0].text, "recovered");
 		assert.equal(attempts, 2);
 		assert.equal(response.details.results[0].retryCount, 1);
 		assert.equal(response.details.results[0].failedModel, "model-a");
 		assert.equal(response.details.results[0].selectedModel, "model-b");
+		const records = response.details.results[0].attemptRecords;
+		assert.equal(records?.length, 2);
+		assert.equal(records?.[0]?.attemptId, response.details.results[0].attemptRecords?.[0]?.attemptId);
+		assert.equal(records?.[0]?.model, "model-a");
+		assert.equal(records?.[0]?.provider, "provider-a");
+		assert.equal(records?.[0]?.outcome, "failure");
+		assert.equal(records?.[1]?.model, "model-b");
+		assert.equal(records?.[1]?.provider, "provider-b");
+		assert.equal(records?.[1]?.outcome, "success");
+		assert.equal(records?.[1]?.backoffMs, 1000);
 	} finally {
 		Math.random = originalRandom;
 	}
@@ -276,8 +297,8 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 		},
 	});
 	const models = [
-		{ id: "model-a", provider: "test" },
-		{ id: "model-b", provider: "test" },
+		{ id: "model-a", provider: "provider-a" },
+		{ id: "model-b", provider: "provider-b" },
 	];
 	const ctx = {
 		...makeCtx(),
@@ -296,8 +317,8 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 			() => undefined, { depth: 0, trail: [] }, noOpDetails,
 			(update: any) => publishedModels.push(update.details.results[0]?.selectedModel), noSignal(),
-			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] } }),
-			"t-retry-terminal-fence", undefined,
+			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
+			"t-retry-terminal-fence", undefined, undefined, { clock: new FakeClock() },
 		);
 		assert.equal(response.isError, undefined);
 		assert.equal(attempts, 2);
@@ -335,8 +356,8 @@ test("exhausted bucket does not fall back outside the bucket or report an unstar
 	const response: any = await execSingle(
 		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
-		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["bucket-model"], frontier: [] } }),
-		"t-exhausted", undefined,
+		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["bucket-model"], frontier: [] }, registryModels: models }),
+		"t-exhausted", undefined, undefined, { clock: new FakeClock() },
 	);
 	assert.equal(response.isError, true);
 	assert.equal(attempts, 1);

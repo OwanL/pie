@@ -128,8 +128,20 @@ export class StatsService implements RunObserver {
     this.tracker.onCompaction(sessionPath);
   }
 
-  onAutoRetry(sessionPath: string): void {
-    this.tracker.onAutoRetry(sessionPath);
+  onAutoRetry(
+    sessionPath: string,
+    timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
+  ): void {
+    this.tracker.onAutoRetry(sessionPath, timing);
+  }
+
+  onAutoRetryMeasured(
+    sessionPath: string,
+    sourceId: string,
+    measuredDelayMs: number | undefined,
+    durationMs: number,
+  ): void {
+    this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
   }
 
   onMessageEdited(sessionPath: string, _messageId: string): void {

@@ -2,7 +2,11 @@
  * Subagent execution orchestrator and supporting functions.
  */
 
-import type { ExtensionAPI, ToolContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { TextContent } from "@mariozechner/pi-ai";
+import type { ToolContext } from "./tool-context.js";
+import { textContent } from "./text-content.js";
+import { realRetryClock, type RetryClock, type RetryTimer } from "./retry.js";
 import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -131,7 +135,7 @@ export { resolveModel, attachSelectionMetadata, isModelFailure, checkTrailLoop, 
 
 /** Standard error response shape used by early returns. */
 export type Mode = "single";
-type ErrorResponse = { content: { type: "text"; text: string }[]; details: SubagentDetails; isError: true };
+type ErrorResponse = { content: TextContent[]; details: SubagentDetails; isError: true };
 
 /** Environment key for the last-resort settlement inactivity budget
  *  (milliseconds). Kept under its existing name for configuration compatibility.
@@ -142,6 +146,37 @@ const SETTLEMENT_ENV = "PIE_SUBAGENT_SETTLEMENT_MS";
  *  it, so productive long-running children are not capped by total wall time;
  *  a completely silent dispatch still cannot dangle the parent forever. */
 export const DEFAULT_SETTLEMENT_MS = 12 * 60 * 1000;
+
+/** Default inactivity lease per observable child phase. Provider queue/header
+ * liveness remains additionally bounded by ProviderGate; these outer leases
+ * guarantee the parent tool call also reaches a terminal decision. */
+export const PHASE_INACTIVITY_MS: Partial<Record<NonNullable<SingleResult['activityPhase']>, number>> = {
+	queued: 10 * 60 * 1000,
+	preparing: 2 * 60 * 1000,
+	waiting_provider: 5 * 60 * 1000,
+	streaming: 3 * 60 * 1000,
+	running_tool: 15 * 60 * 1000,
+	retry_wait: 3 * 60 * 1000,
+	orphaned_cleanup: 60 * 1000,
+};
+
+function hasSettlementOverride(): boolean {
+	const raw = process.env[SETTLEMENT_ENV];
+	return raw !== undefined && raw !== '';
+}
+
+/** Choose the active lease. An explicit compatibility override continues to
+ * control every phase; otherwise the latest child phase owns its own budget. */
+export function resolvePhaseInactivityMs(
+	details: SubagentDetails | undefined,
+	fallbackMs = DEFAULT_SETTLEMENT_MS,
+): number {
+	if (hasSettlementOverride()) return resolveSettlementMs();
+	const activeBudgets = (details?.results ?? [])
+		.filter((result) => result.exitCode === -1)
+		.map((result) => PHASE_INACTIVITY_MS[result.activityPhase ?? 'waiting_provider'] ?? fallbackMs);
+	return activeBudgets.length > 0 ? Math.max(...activeBudgets) : fallbackMs;
+}
 
 /** Resolve the settlement inactivity budget for a subagent tool call.
  *
@@ -299,12 +334,7 @@ const DEFAULT_AGENT_SCOPE: AgentScope = "both";
 /** Returns the standard response when the tool is disabled. */
 function disabledErrorResponse(): ErrorResponse {
 	return {
-		content: [
-			{
-				type: "text",
-				text: "Sub agents are disabled. Enable them by removing the --no-subagent flag or unsetting the PI_SUBAGENT_DISABLED environment variable.",
-			},
-		],
+		content: [textContent("Sub agents are disabled. Enable them by removing the --no-subagent flag or unsetting the PI_SUBAGENT_DISABLED environment variable.")],
 		details: {
 			mode: "single" as const,
 			agentScope: DEFAULT_AGENT_SCOPE,
@@ -318,12 +348,7 @@ function disabledErrorResponse(): ErrorResponse {
 /** Returns the standard response when subagents are disabled via maxDepth = 0. */
 function subagentsDisabledResponse(maxDepth: number): ErrorResponse {
 	return {
-		content: [
-			{
-				type: "text",
-				text: `Subagents are disabled (nesting levels set to ${maxDepth}). Set "Nesting levels" above 0 to delegate to subagents.`,
-			},
-		],
+		content: [textContent(`Subagents are disabled (nesting levels set to ${maxDepth}). Set "Nesting levels" above 0 to delegate to subagents.`)],
 		details: {
 			mode: "single" as const,
 			agentScope: DEFAULT_AGENT_SCOPE,
@@ -337,12 +362,7 @@ function subagentsDisabledResponse(maxDepth: number): ErrorResponse {
 /** Returns the standard response when subagent depth limit is reached. */
 function depthLimitResponse(maxDepth: number): ErrorResponse {
 	return {
-		content: [
-			{
-				type: "text",
-				text: `Subagent depth limit reached (max ${maxDepth}). Cannot spawn further subagents.`,
-			},
-		],
+		content: [textContent(`Subagent depth limit reached (max ${maxDepth}). Cannot spawn further subagents.`)],
 		details: { mode: "single", agentScope: DEFAULT_AGENT_SCOPE, projectAgentsDir: null, results: [] },
 		isError: true,
 	};
@@ -407,10 +427,7 @@ export async function maybeApproveProjectAgents(
 	const dir = discovery.projectAgentsDir ?? "(unknown)";
 	if (!ctx.hasUI) {
 		return {
-			content: [{
-				type: "text",
-				text: `Cannot confirm project-local agents (${names}) in a non-interactive mode. Re-run with UI, or explicitly set confirmProjectAgents: false only for a trusted repository.`,
-			}],
+			content: [textContent(`Cannot confirm project-local agents (${names}) in a non-interactive mode. Re-run with UI, or explicitly set confirmProjectAgents: false only for a trusted repository.`)],
 			details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
 			isError: true,
 		};
@@ -422,7 +439,7 @@ export async function maybeApproveProjectAgents(
 	if (ok) return undefined;
 
 	return {
-		content: [{ type: "text", text: "Canceled: project-local agents not approved." }],
+		content: [textContent("Canceled: project-local agents not approved.")],
 		details: makeDetails(mode, [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
 		isError: true,
 	};
@@ -482,7 +499,7 @@ function dispatchSingle(
 	runtimeCtx: SubagentRuntimeContext,
 	makeDetailsBound: (results: SingleResult[]) => SubagentDetails,
 	onUpdate: OnUpdateCallback,
-	signal: AbortSignal,
+	signal: AbortSignal | undefined,
 	selectionCtx: SelectionContext,
 	toolCallId: string,
 	parentUiBridge: ParentBridge | undefined,
@@ -509,13 +526,16 @@ function dispatchSingle(
 export async function execute(
 	_toolCallId: string,
 	params: SingleSubagentParams,
-	signal: AbortSignal,
+	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback,
 	ctx: ToolContext,
 	_pi: ExtensionAPI,
 	isDisabled: () => boolean,
+	/** Deterministic timer seam for lifecycle acceptance tests. */
+	_internal?: { clock?: RetryClock },
 ) {
 	if (isDisabled()) return disabledErrorResponse();
+	const settlementClock = _internal?.clock ?? realRetryClock;
 
 	const runtimeCtx = readRuntimeContext();
 	const maxDepth = getMaxDepth();
@@ -564,12 +584,7 @@ export async function execute(
 	if (disallowed.length > 0) {
 		const listing = disallowed.map((n) => `"${n}"`).join(", ");
 		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`,
-				},
-			],
+			content: [textContent(`Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`)],
 			details: makeDetailsBound([]),
 			isError: true,
 		};
@@ -607,6 +622,7 @@ export async function execute(
 	// the net fires, completed siblings and partial child output must survive;
 	// only children that are still running are terminalized.
 	let latestDetails: SubagentDetails | undefined;
+	let activeSettlementMs = resolveSettlementMs();
 	const captureDetails = (details: SubagentDetails | undefined): void => {
 		if (!details?.results) return;
 		const previous = latestDetails?.results ?? [];
@@ -620,6 +636,7 @@ export async function execute(
 				streamingReasoning: result.streamingReasoning ?? previous[index]?.streamingReasoning,
 			})),
 		};
+		activeSettlementMs = resolvePhaseInactivityMs(latestDetails);
 	};
 	let renewSettlementDeadline: (() => void) | undefined;
 	const observeProgress = createProgressObserver();
@@ -694,28 +711,30 @@ export async function execute(
 	// abort propagates into runner.ts just like a user "Stop" (the runner's
 	// pre-spawn `raceAbort` and prompt-phase abort both honor it).
 	const settlementController = new AbortController();
-	const combinedRunSignal = combineSignals(signal, settlementController.signal);
+	const combinedRunSignal = signal
+		? combineSignals(signal, settlementController.signal)
+		: { signal: settlementController.signal, cleanup: () => {} };
 	const runSignal = combinedRunSignal.signal;
 
-	let settlementTimer: NodeJS.Timeout | undefined;
+	let settlementTimer: RetryTimer | undefined;
 	let settlementDeadlineActive = true;
-	let lastSettlementProgressAt = Date.now();
+	let lastSettlementProgressAt = settlementClock.now();
 	let resolveSettlementDeadline!: (value: typeof FORCE_SETTLE) => void;
 	const settlementTimerPromise = new Promise<typeof FORCE_SETTLE>((resolve) => {
 		resolveSettlementDeadline = resolve;
 	});
 	const armSettlementDeadline = (): void => {
 		if (!settlementDeadlineActive) return;
-		if (settlementTimer) clearTimeout(settlementTimer);
-		lastSettlementProgressAt = Date.now();
-		settlementTimer = setTimeout(() => {
+		settlementTimer?.cancel();
+		lastSettlementProgressAt = settlementClock.now();
+		const timer = settlementClock.setTimer(activeSettlementMs);
+		settlementTimer = timer;
+		void timer.promise.then(() => {
+			if (settlementTimer !== timer || !settlementDeadlineActive) return;
 			settlementTimer = undefined;
 			settlementDeadlineActive = false;
 			resolveSettlementDeadline(FORCE_SETTLE);
-		}, settlementMs);
-		// Allow the process to exit if this defense-in-depth timer is the only
-		// remaining handle. Normal completion clears it in the finally below.
-		settlementTimer.unref?.();
+		});
 	};
 	renewSettlementDeadline = armSettlementDeadline;
 	armSettlementDeadline();
@@ -760,31 +779,27 @@ export async function execute(
 		// Abort the run so runner.ts can return a proper abort result, then give
 		// the dispatch a short grace to surface that result (prefer the real
 		// abort result over a synthesized one). Loud-log + user-visible message.
-		const idleMs = Math.max(0, Date.now() - lastSettlementProgressAt);
-		const cause = `subagent settlement inactivity deadline exceeded (${settlementMs / 1000}s without progress)`;
+		const idleMs = Math.max(0, settlementClock.now() - lastSettlementProgressAt);
+		const expiredSettlementMs = activeSettlementMs;
+		const cause = `subagent settlement inactivity deadline exceeded (${expiredSettlementMs / 1000}s without progress)`;
 		forceSettlementTriggered = true;
 		settlementController.abort(new Error(cause));
 		logLoud("subagent force-settled", {
 			toolCallId: _toolCallId,
 			mode,
 			stage: "settlement-inactivity-deadline",
-			settlementMs,
+			settlementMs: expiredSettlementMs,
 			idleMs,
 			cause,
 		});
 		deliverUpdate({
-			content: [
-				{ type: "text", text: `⚠ Subagent force-settled after ${settlementMs / 1000}s without progress. This is a bug — please report. See logs for [pie:subagent].` },
-			],
+			content: [textContent(`⚠ Subagent force-settled after ${expiredSettlementMs / 1000}s without progress. This is a bug — please report. See logs for [pie:subagent].`)],
 			details: terminalDetails(cause),
 		});
 
 		const graceMs = resolveSettlementGraceMs();
-		let graceTimer: NodeJS.Timeout | undefined;
-		const gracePromise: Promise<typeof FORCE_SETTLE> = new Promise((resolve) => {
-			graceTimer = setTimeout(() => resolve(FORCE_SETTLE), graceMs);
-			graceTimer.unref?.();
-		});
+		const graceTimer = settlementClock.setTimer(graceMs);
+		const gracePromise: Promise<typeof FORCE_SETTLE> = graceTimer.promise.then(() => FORCE_SETTLE);
 		try {
 			const graceWinner = await Promise.race([dispatchPromise, gracePromise]);
 			if (graceWinner !== FORCE_SETTLE) {
@@ -794,19 +809,14 @@ export async function execute(
 				};
 			}
 		} finally {
-			if (graceTimer) clearTimeout(graceTimer);
+			graceTimer.cancel();
 		}
 
 		// Dispatch still didn't settle after the grace window: synthesize a
 		// terminal error toolResult so the SDK writes a result and the parent
 		// transcript records the failure rather than dangling forever.
 		return {
-			content: [
-				{
-					type: "text",
-					text: `Subagent made no progress for ${settlementMs / 1000}s and was force-settled. This is a bug — please report.`,
-				},
-			],
+			content: [textContent(`Subagent made no progress for ${expiredSettlementMs / 1000}s and was force-settled. This is a bug — please report.`)],
 			details: terminalDetails(cause),
 			isError: true,
 		};
@@ -814,7 +824,7 @@ export async function execute(
 		acceptDispatchUpdates = false;
 		renewSettlementDeadline = undefined;
 		settlementDeadlineActive = false;
-		if (settlementTimer) clearTimeout(settlementTimer);
+		settlementTimer?.cancel();
 		combinedRunSignal.cleanup();
 	}
 }

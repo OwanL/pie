@@ -155,22 +155,27 @@ function estimateSerializedTokens(value: unknown): number {
 }
 
 function estimateToolCallTokens(toolCall: ToolCall): number {
-  // Completed/failed calls are immutable (see `toolCallTokenCache`), so their
-  // estimate is stable — serve from cache to skip the BPE re-tokenisation on
-  // breakdown recomputes. Running calls have no result yet (cheap) and aren't
-  // cached; they become cacheable once their result lands atomically.
-  if (toolCall.status === 'completed' || toolCall.status === 'failed') {
-    const cached = toolCallTokenCache.get(toolCall.id);
-    if (cached !== undefined) {
-      return cached;
-    }
+  // Terminal calls are immutable. Live semantic calls carry a monotonic seq
+  // that advances whenever their assembled preview changes, so the same cache
+  // can also avoid repeatedly JSON-serializing and tokenizing a multi-megabyte
+  // running subagent preview while unrelated snapshots arrive.
+  const terminal = toolCall.status === 'completed' || toolCall.status === 'failed';
+  const revision = terminal
+    ? 'terminal'
+    : typeof toolCall.seq === 'number' && toolCall.seq > 0
+      ? String(toolCall.seq)
+      : undefined;
+  const cacheKey = revision === undefined
+    ? undefined
+    : `${toolCall.id}:${toolCall.status}:${revision}`;
+  if (cacheKey) {
+    const cached = toolCallTokenCache.get(cacheKey);
+    if (cached !== undefined) return cached;
   }
   const tokens = estimateTextTokens(toolCall.name)
     + estimateSerializedTokens(toolCall.input)
     + estimateSerializedTokens(toolCall.result);
-  if (toolCall.status === 'completed' || toolCall.status === 'failed') {
-    toolCallTokenCache.set(toolCall.id, tokens);
-  }
+  if (cacheKey) toolCallTokenCache.set(cacheKey, tokens);
   return tokens;
 }
 
@@ -194,6 +199,81 @@ interface ContributorItem {
   note?: string;
   tokens: number;
   originalIndex: number;
+}
+
+interface AttributionTranscriptScope {
+  transcript: readonly ChatMessage[];
+  compactedHistoryExcluded: boolean;
+}
+
+/**
+ * The display transcript deliberately retains messages that history compaction
+ * removed from the model's prompt. A compaction summary is appended after both
+ * the discarded history and the recent messages retained by pi, but the
+ * current webview protocol does not expose `firstKeptEntryId`, so those two
+ * pre-summary ranges cannot be separated here. Count only the summary and rows
+ * appended after it; the PI-reported residual represents retained pre-summary
+ * messages and other unattributed prompt content. This is less granular than
+ * claiming that the entire historical transcript is still in context.
+ */
+function scopeTranscriptForAttribution(
+  transcript: readonly ChatMessage[],
+): AttributionTranscriptScope {
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    if (transcript[index]?.customType === 'compaction-summary') {
+      return {
+        transcript: transcript.slice(index),
+        compactedHistoryExcluded: true,
+      };
+    }
+  }
+  return { transcript, compactedHistoryExcluded: false };
+}
+
+interface ReconciledContributors {
+  contributors: ContributorItem[];
+  reconciledToReportedUsage: boolean;
+}
+
+/**
+ * Contributor rows are estimates, while `reportedUsedTokens` is the provider's
+ * authoritative prompt footprint. Tokenizer drift, a newly completed tool call,
+ * or unavailable compaction-boundary metadata can make the estimates exceed
+ * that footprint. Proportionally reconcile only the overage case so legend
+ * values remain an actual partition of Used instead of displaying impossible
+ * totals above 100%.
+ */
+function reconcileContributorsToReportedUsage(
+  contributors: readonly ContributorItem[],
+  reportedUsedTokens: number | null,
+): ReconciledContributors {
+  if (reportedUsedTokens === null) {
+    return { contributors: [...contributors], reconciledToReportedUsage: false };
+  }
+
+  const reported = Math.max(0, Math.trunc(reportedUsedTokens));
+  const explicit = contributors.reduce((sum, item) => sum + item.tokens, 0);
+  if (explicit <= reported || explicit <= 0) {
+    return { contributors: [...contributors], reconciledToReportedUsage: false };
+  }
+
+  const allocations = contributors.map((item, index) => {
+    const exact = (item.tokens / explicit) * reported;
+    const tokens = Math.floor(exact);
+    return { item, index, tokens, fraction: exact - tokens };
+  });
+  const remainder = reported - allocations.reduce((sum, item) => sum + item.tokens, 0);
+  const byLargestRemainder = [...allocations].sort((a, b) =>
+    b.fraction - a.fraction || a.index - b.index,
+  );
+  for (let index = 0; index < remainder; index += 1) {
+    byLargestRemainder[index]!.tokens += 1;
+  }
+
+  return {
+    contributors: allocations.map(({ item, tokens }) => ({ ...item, tokens })),
+    reconciledToReportedUsage: true,
+  };
 }
 
 function buildContributors(
@@ -414,6 +494,28 @@ function buildPartialBreakdown(
   };
 }
 
+function buildCompactedUnknownBreakdown(totalWindow: number): ContextWindowBreakdown {
+  const summary: ContextWindowSummary = {
+    usedTokens: null,
+    usedKind: 'unknown',
+    remainingTokens: null,
+    remainingKind: 'unknown',
+    totalWindow,
+  };
+  const footerEntries = buildFooterEntries(summary);
+  const notes = [
+    'Contributor rows are unavailable because the display transcript does not expose which pre-summary messages PI retained.',
+    'Exact used/remaining values are unavailable until PI reports a live context-window snapshot.',
+  ];
+  return {
+    entries: [],
+    footerEntries,
+    summary,
+    notes,
+    title: buildTooltipText([], footerEntries, notes),
+  };
+}
+
 function buildFullEntries(
   contributors: ContributorItem[],
   otherTokens: number,
@@ -445,6 +547,8 @@ function buildFullNotes(
   entries: readonly ContextWindowBreakdownEntry[],
   reportedUsedTokens: number | null,
   totalWindow: number,
+  compactedHistoryExcluded: boolean,
+  reconciledToReportedUsage: boolean,
 ): string[] {
   const notes: string[] = [];
   if (reportedUsedTokens !== null) {
@@ -457,6 +561,12 @@ function buildFullNotes(
   }
   if (entries.some((entry) => entry.kind === 'derived')) {
     notes.push('Derived rows are the PI-reported remainder after subtracting explicit rows.');
+  }
+  if (compactedHistoryExcluded && reportedUsedTokens !== null) {
+    notes.push('Compacted history is excluded; retained pre-summary messages are included in the unattributed PI-reported remainder.');
+  }
+  if (reconciledToReportedUsage) {
+    notes.push('Contributor estimates were proportionally reconciled to PI’s reported used-token total.');
   }
   return notes;
 }
@@ -489,7 +599,16 @@ function buildFullBreakdown(options: BuildContextWindowBreakdownOptions): Contex
   const reportedUsedTokens = contextUsage?.tokens ?? null;
   const totalWindow = contextUsage?.contextWindow ?? effectiveContextWindow;
 
-  const contributors = buildContributors(systemPrompts, transcript);
+  const attributionScope = scopeTranscriptForAttribution(transcript);
+  if (attributionScope.compactedHistoryExcluded && reportedUsedTokens === null) {
+    return buildCompactedUnknownBreakdown(totalWindow);
+  }
+
+  const rawContributors = buildContributors(systemPrompts, attributionScope.transcript);
+  const {
+    contributors,
+    reconciledToReportedUsage,
+  } = reconcileContributorsToReportedUsage(rawContributors, reportedUsedTokens);
   const explicitTokens = contributors.reduce((sum, item) => sum + item.tokens, 0);
   const estimatedUsedTokens = explicitTokens;
 
@@ -518,7 +637,13 @@ function buildFullBreakdown(options: BuildContextWindowBreakdownOptions): Contex
   };
 
   const footerEntries = buildFooterEntries(summary);
-  const notes = buildFullNotes(entries, reportedUsedTokens, totalWindow);
+  const notes = buildFullNotes(
+    entries,
+    reportedUsedTokens,
+    totalWindow,
+    attributionScope.compactedHistoryExcluded,
+    reconciledToReportedUsage,
+  );
 
   return {
     entries,

@@ -16,6 +16,7 @@ import type {
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
+  RetryMeasuredPayload,
   RetryStartedPayload,
   RetryStuckPayload,
   SessionListChangedPayload,
@@ -41,6 +42,7 @@ import {
   isPreflightFailedPayload,
   isQueuedDeliveredPayload,
   isRetryEndedPayload,
+  isRetryMeasuredPayload,
   isRetryStartedPayload,
   isRetryStuckPayload,
   isSessionListChangedPayload,
@@ -72,6 +74,7 @@ export interface SessionBackendEventHandlers {
   onQueuedDelivered(payload: QueuedDeliveredPayload): void;
   onRetryStarted(payload: RetryStartedPayload): void;
   onRetryEnded(payload: RetryEndedPayload): void;
+  onRetryMeasured(payload: RetryMeasuredPayload): void;
   onCompaction(payload: CompactionPayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
   onRetryStuck(payload: RetryStuckPayload): void;
@@ -164,6 +167,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'retry.ended':
       dispatch(event, isRetryEndedPayload, handlers.onRetryEnded);
+      return;
+    case 'retry.measured':
+      dispatch(event, isRetryMeasuredPayload, handlers.onRetryMeasured);
       return;
     case 'compaction.ended':
       dispatch(event, isCompactionPayload, handlers.onCompaction);

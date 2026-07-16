@@ -19,7 +19,6 @@ interface SessionTabsProps {
   startingModelSessionPaths: string[];
   unreadFinishedSessionPaths: string[];
   activeSession: SessionSummary | null;
-  activeRunSummary: ActiveRunSummary | null;
   backendReady?: boolean;
   hideConnectingWheel?: boolean;
   pendingExtensionUIRequestsBySession: Record<string, Record<string, import('../../../shared/protocol').ExtensionUIRequestPayload>>;
@@ -28,13 +27,12 @@ interface SessionTabsProps {
   onClose: (path: string) => void;
   onMove: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
   onNew: () => void;
-  onMarkComplete: () => void;
   onDuplicate: (path: string) => void;
   onTogglePin: (path: string) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   /** Session paths that own a pending deferred trigger. Tabs in this set have
-   *  their close × and mark-done badge greyed out with an explanatory tooltip
-   *  (the trigger must be cancelled first, from the status strip). */
+   *  their close × greyed out with an explanatory tooltip (the trigger must be
+   *  cancelled first, from the status strip). */
   deferredSessionPaths: string[];
   /** Session paths whose pending deferred trigger includes a timer. */
   deferredTimerSessionPaths: string[];
@@ -56,7 +54,6 @@ export function SessionTabs({
   startingModelSessionPaths,
   unreadFinishedSessionPaths,
   activeSession,
-  activeRunSummary,
   backendReady,
   hideConnectingWheel,
   pendingExtensionUIRequestsBySession,
@@ -65,7 +62,6 @@ export function SessionTabs({
   onClose,
   onMove,
   onNew,
-  onMarkComplete,
   onDuplicate,
   onTogglePin,
   onRunAction,
@@ -326,7 +322,6 @@ export function SessionTabs({
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
-            activeRunSummary={tabPath === effectiveActivePath ? activeRunSummary : null}
             isPinned={pinnedPathSet.has(tabPath)}
             hasDeferredTriggers={deferredPathSet.has(tabPath)}
             hasDeferredTimer={deferredTimerPathSet.has(tabPath)}
@@ -334,7 +329,6 @@ export function SessionTabs({
             onPointerDown={onPointerDown}
             onClick={onClick}
             onClose={onClose}
-            onMarkComplete={onMarkComplete}
           />,
         ])}
         <DropGap index={renderedTabPaths.length} dropIndex={activeDropIndex} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />

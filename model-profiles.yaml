@@ -92,6 +92,71 @@ profiles:
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
     cost: 6
+  - provider: openai-codex
+    id: gpt-5.6-sol
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
+    cost: 25
+  - provider: openai-codex
+    id: gpt-5.6-terra
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
+    cost: 10
+  - provider: openai-codex
+    id: gpt-5.6-luna
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
+    cost: 6
+  - provider: openai-codex
+    id: gpt-5.5
+    eligible: true
+    thinking:
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+    cost: 25
+  - provider: openai-codex
+    id: gpt-5.4
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+    cost: 10
+  - provider: openai-codex
+    id: gpt-5.4-mini
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+    disabled_reason: null
+    cost: 3
   - provider: github-copilot
     id: gpt-5.3-codex
     eligible: true
@@ -420,6 +485,13 @@ profiles:
       - minimal
     disabled_reason: Too small for agentic work
     cost: 4
+  - provider: ollama
+    id: qwen3.5:9b
+    eligible: false
+    thinking:
+      - minimal
+    disabled_reason: Local model; reserved for pruning prepass
+    cost: 8
   - provider: ollama
     id: qwen2.5:7b-instruct
     eligible: false

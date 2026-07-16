@@ -1,0 +1,2534 @@
+{
+  "generatedAt": "2026-07-16T03:08:24.783Z",
+  "benchmarkVersion": 1,
+  "decisionRule": "Keep when the candidate has a greater-than-50-percent chance of being used before the current request is complete; otherwise prune.",
+  "configuration": {
+    "models": [
+      "qwen2.5:7b-instruct"
+    ],
+    "approaches": [
+      "catalog-keep-bits-v2",
+      "item-keep-bit-v2",
+      "item-prune-bit-v2"
+    ],
+    "contexts": [
+      "dialogue"
+    ],
+    "endpoint": "http://127.0.0.1:11434",
+    "itemConcurrency": 4,
+    "output": "analysis/experiments/pruning-prepass/results/qwen-v2-prompts.json"
+  },
+  "approaches": {
+    "catalog-keep-bits-v2": {
+      "description": "One catalog call; reinforced exact-length aligned bits, where 1 means keep.",
+      "system": "Make a separate KEEP-or-PRUNE decision for EVERY numbered candidate.\nKEEP (1) when the capability is more likely than not to be invoked before the current request is complete. PRUNE (0) otherwise.\nImplementation normally needs code reading, editing, and command/test execution even when those steps are not named.\nCurrent external facts normally need web access. Named specialist workflows normally need the matching skill.\nDo not keep an unrelated specialist merely because it could be generally useful.\nRecent context resolves references such as \"that\". An explicit latest-message pivot overrides old work.\nExample: for 3 candidates whose decisions are KEEP, PRUNE, KEEP, output exactly 101.\nNever output one overall decision. Output one bit per candidate, in order, and nothing else."
+    },
+    "item-keep-bit-v2": {
+      "description": "One independent call per candidate; reinforced usage examples and 1 means keep.",
+      "system": "Classify ONE candidate capability for a coding agent. Output exactly 1 for KEEP or 0 for PRUNE.\nKEEP when it is more likely than not that the agent will invoke this capability before completing the current request.\nImplementation normally invokes file reading, editing, and command/test execution even if unstated. Current external facts invoke web access. Named specialist workflows invoke the matching skill.\nPRUNE unrelated specialist capabilities. Recent context only resolves references; an explicit latest-message pivot wins.\nJudge actual likely invocation, not whether the capability sounds generally useful. Return one character only."
+    },
+    "item-prune-bit-v2": {
+      "description": "One independent call per candidate; fail-safe framing where 1 means prune.",
+      "system": "Classify ONE candidate capability for a coding agent. Output exactly 1 for PRUNE or 0 for KEEP.\nPRUNE only when it is more likely than not that the agent will NOT invoke this capability before completing the current request.\nImplementation normally invokes file reading, editing, and command/test execution even if unstated. Current external facts invoke web access. Named specialist workflows invoke the matching skill.\nRecent context only resolves references; an explicit latest-message pivot wins. Do not keep an unrelated specialist merely because it could be generally useful.\nJudge actual likely invocation. Return one character only."
+    }
+  },
+  "results": [
+    {
+      "model": "qwen2.5:7b-instruct",
+      "approach": "catalog-keep-bits-v2",
+      "contextMode": "dialogue",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.4533,
+        "keepRecall": 1,
+        "pruneRecall": 0,
+        "falsePrunes": 0,
+        "falseKeeps": 41,
+        "exactCases": 0,
+        "parseFailures": 10,
+        "totalWallMs": 7732,
+        "medianCaseWallMs": 695,
+        "medianCallMs": 694,
+        "p95CallMs": 1203,
+        "calls": 10,
+        "promptTokens": 3435,
+        "outputTokens": 40
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 960.2646999999997,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidates (7, preserve this order):\n1. [skill] tdd: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.\n2. [skill] codebase-maintenance: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.\n3. [skill] diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n4. [tool] read: Read files from the codebase.\n5. [tool] edit: Edit existing files using exact text replacement.\n6. [tool] bash: Run shell commands, builds, and tests.\n7. [tool] web_search: Search the public web for current information.",
+              "text": "101",
+              "wallMs": 958.9602,
+              "providerMs": 950.7468,
+              "loadMs": 656.6125,
+              "promptTokens": 344,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 1029.2563,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidates (8, preserve this order):\n1. [skill] diagnose: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.\n2. [skill] pi-logs: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.\n3. [skill] codebase-maintenance: Broad code-quality audits and maintenance passes; not for isolated debugging.\n4. [tool] read: Read files from the codebase.\n5. [tool] bash: Run shell commands, builds, tests, and log queries.\n6. [tool] edit: Edit existing files.\n7. [tool] session_review: Review, rate, and close open sessions.\n8. [tool] web_search: Search the public web for current information.",
+              "text": "101",
+              "wallMs": 1028.3125,
+              "providerMs": 1024.0002,
+              "loadMs": 793.2584,
+              "promptTokens": 360,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 1203.3772000000004,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidates (7, preserve this order):\n1. [skill] harness-experiments: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.\n2. [skill] tdd: Strict test-driven development when explicitly requested.\n3. [skill] evaluate-sessions: Review and rate currently-open sessions and close completed tabs.\n4. [tool] read: Read files and experiment artifacts.\n5. [tool] edit: Edit experiment recipes and documentation.\n6. [tool] bash: Run experiment commands and checks.\n7. [tool] web_search: Search the public web for current information.",
+              "text": "101",
+              "wallMs": 1202.6487999999995,
+              "providerMs": 1198.3177,
+              "loadMs": 968.0727,
+              "promptTokens": 323,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 852.8163000000004,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidates (9, preserve this order):\n1. [skill] harness-experiments: Create and compare controlled baseline-versus-candidate pie harness experiments.\n2. [skill] add-provider: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.\n3. [skill] codebase-maintenance: Broad code-quality audits and maintenance passes; not for a focused feature.\n4. [skill] tdd: Strict test-driven development when explicitly requested.\n5. [tool] read: Read source, logs, and experiment outputs.\n6. [tool] edit: Edit source, benchmark assets, and documentation.\n7. [tool] bash: Run local models, scripts, tests, and builds.\n8. [tool] web_search: Research current local-model clients and model capabilities on the public web.\n9. [tool] session_review: Review, rate, and close open sessions.",
+              "text": "101",
+              "wallMs": 851.8288000000002,
+              "providerMs": 847.6243,
+              "loadMs": 632.1676,
+              "promptTokens": 404,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 651.9124999999995,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidates (7, preserve this order):\n1. [skill] add-provider: Add or update API providers, local servers, and models in pie's centralized catalog.\n2. [skill] evaluate-sessions: Review and rate currently-open sessions.\n3. [tool] read: Read source and configuration files.\n4. [tool] edit: Edit source and configuration files.\n5. [tool] bash: Run synchronization and validation commands.\n6. [tool] web_search: Verify current provider API and model information.\n7. [tool] session_review: Review, rate, and close open sessions.",
+              "text": "101",
+              "wallMs": 650.9546,
+              "providerMs": 644.8692,
+              "loadMs": 423.3321,
+              "promptTokens": 368,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 565.8167999999996,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidates (7, preserve this order):\n1. [skill] diagnose: Evidence-first workflow for hard or intermittent bugs, including regression verification.\n2. [skill] tdd: Strict test-first development only when explicitly requested.\n3. [tool] read: Read relevant source and tests.\n4. [tool] edit: Implement the fix and regression test.\n5. [tool] bash: Run reproduction and verification tests.\n6. [tool] web_search: Search the public web for current information.\n7. [tool] session_review: Review, rate, and close open sessions.",
+              "text": "101",
+              "wallMs": 565.2524999999996,
+              "providerMs": 561.3729,
+              "loadMs": 359.311,
+              "promptTokens": 356,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 695.0361999999996,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidates (7, preserve this order):\n1. [skill] add-provider: Add or update API providers and models.\n2. [skill] tdd: Strict test-driven development.\n3. [tool] session_changes: List files changed by this session and return focused diffs.\n4. [tool] read: Read files or diff artifacts when needed for a summary.\n5. [tool] edit: Edit existing files.\n6. [tool] bash: Run shell commands and tests.\n7. [tool] web_search: Search the public web.",
+              "text": "010",
+              "wallMs": 694.3384000000005,
+              "providerMs": 691.067,
+              "loadMs": 494.8679,
+              "promptTokens": 343,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 609.9134000000004,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidates (8, preserve this order):\n1. [skill] evaluate-sessions: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.\n2. [skill] pi-logs: Inspect and group pie runtime and session logs for debugging.\n3. [skill] codebase-maintenance: Broad code-quality audits and maintenance passes.\n4. [tool] session_review: List open sessions, read transcripts, record reviews, and close tabs.\n5. [tool] subagent: Delegate independent review tasks to parallel agents.\n6. [tool] read: Read codebase files.\n7. [tool] edit: Edit codebase files.\n8. [tool] web_search: Search the public web.",
+              "text": "101",
+              "wallMs": 609.3915000000006,
+              "providerMs": 605.1602,
+              "loadMs": 385.3207,
+              "promptTokens": 327,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 548.584600000001,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidates (8, preserve this order):\n1. [skill] add-provider: Add or update an LLM provider in the local model catalog.\n2. [skill] pi-logs: Inspect pie runtime and session logs.\n3. [tool] web_search: Search the public web for current information.\n4. [tool] get_search_content: Open search results and retrieve page content.\n5. [tool] fetch_content: Fetch a known web page and return its content.\n6. [tool] read: Read local codebase files.\n7. [tool] edit: Edit local files.\n8. [tool] bash: Run shell commands and tests.",
+              "text": "101",
+              "wallMs": 548.1114000000007,
+              "providerMs": 544.0054,
+              "loadMs": 362.2842,
+              "promptTokens": 330,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 615.321899999999,
+          "callCount": 1,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidates (7, preserve this order):\n1. [skill] diagnose: Evidence-first diagnosis for hard bugs.\n2. [skill] tdd: Strict test-driven development.\n3. [skill] add-provider: Add or update LLM providers and models.\n4. [tool] read: Read local files.\n5. [tool] edit: Edit local files.\n6. [tool] bash: Run shell commands.\n7. [tool] web_search: Search the public web.",
+              "text": "001",
+              "wallMs": 614.6743999999999,
+              "providerMs": 612.0345,
+              "loadMs": 440.1841,
+              "promptTokens": 280,
+              "outputTokens": 4,
+              "valid": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "qwen2.5:7b-instruct",
+      "approach": "item-keep-bit-v2",
+      "contextMode": "dialogue",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.8667,
+        "keepRecall": 0.7647,
+        "pruneRecall": 0.9512,
+        "falsePrunes": 8,
+        "falseKeeps": 2,
+        "exactCases": 3,
+        "parseFailures": 10,
+        "totalWallMs": 28024,
+        "medianCaseWallMs": 2709,
+        "medianCallMs": 1345,
+        "p95CallMs": 1835,
+        "calls": 75,
+        "promptTokens": 14261,
+        "outputTokens": 151
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 1971.0998,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.",
+              "text": "KEEP",
+              "wallMs": 938.7366999999995,
+              "providerMs": 933.0595,
+              "loadMs": 609.8936,
+              "promptTokens": 191,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.",
+              "text": "0",
+              "wallMs": 773.0286000000015,
+              "providerMs": 762.7484,
+              "loadMs": 600.2175,
+              "promptTokens": 191,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.",
+              "text": "0",
+              "wallMs": 1007.6044000000002,
+              "providerMs": 997.8835,
+              "loadMs": 606.3298,
+              "promptTokens": 184,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files from the codebase.",
+              "text": "0",
+              "wallMs": 848.7789000000012,
+              "providerMs": 836.0556,
+              "loadMs": 600.6581,
+              "promptTokens": 177,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files using exact text replacement.",
+              "text": "KEEP",
+              "wallMs": 1033.1666000000005,
+              "providerMs": 1028.7638,
+              "loadMs": 942.6711,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands, builds, and tests.",
+              "text": "0",
+              "wallMs": 1042.5125000000007,
+              "providerMs": 1034.7776,
+              "loadMs": 919.2647,
+              "promptTokens": 179,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1031.0437999999995,
+              "providerMs": 1028.0921,
+              "loadMs": 867.9469,
+              "promptTokens": 179,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 2708.9738000000016,
+          "callCount": 8,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.",
+              "text": "KEEP",
+              "wallMs": 997.4171999999999,
+              "providerMs": 987.8008,
+              "loadMs": 875.4913,
+              "promptTokens": 190,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.",
+              "text": "0",
+              "wallMs": 1104.6506000000008,
+              "providerMs": 1095.6055,
+              "loadMs": 979.8924,
+              "promptTokens": 196,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for isolated debugging.",
+              "text": "0",
+              "wallMs": 1185.4664999999986,
+              "providerMs": 1177.896,
+              "loadMs": 998.3231,
+              "promptTokens": 192,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files from the codebase.",
+              "text": "KEEP",
+              "wallMs": 1267.1471999999994,
+              "providerMs": 1259.6127,
+              "loadMs": 1029.7135,
+              "promptTokens": 183,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands, builds, tests, and log queries.",
+              "text": "KEEP",
+              "wallMs": 1251.5505000000012,
+              "providerMs": 1244.8263,
+              "loadMs": 1120.763,
+              "promptTokens": 188,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files.",
+              "text": "0",
+              "wallMs": 1416.4161999999997,
+              "providerMs": 1411.8226,
+              "loadMs": 1315.9487,
+              "promptTokens": 180,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 1432.7782000000007,
+              "providerMs": 1426.6407,
+              "loadMs": 1302.717,
+              "promptTokens": 186,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1439.183500000001,
+              "providerMs": 1436.1006,
+              "loadMs": 1275.1755,
+              "promptTokens": 185,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 2555.5240999999987,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "harness-experiments",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: harness-experiments\nCandidate description: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.",
+              "text": "KEEP",
+              "wallMs": 1459.9735999999994,
+              "providerMs": 1443.8628,
+              "loadMs": 1293.9168,
+              "promptTokens": 189,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development when explicitly requested.",
+              "text": "0",
+              "wallMs": 1548.7294000000002,
+              "providerMs": 1531.983,
+              "loadMs": 1298.4603,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Review and rate currently-open sessions and close completed tabs.",
+              "text": "0",
+              "wallMs": 1360.6437999999998,
+              "providerMs": 1354.8068,
+              "loadMs": 1254.2471,
+              "promptTokens": 182,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files and experiment artifacts.",
+              "text": "KEEP",
+              "wallMs": 1250.3990000000013,
+              "providerMs": 1245.9132,
+              "loadMs": 1137.1004,
+              "promptTokens": 175,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit experiment recipes and documentation.",
+              "text": "KEEP",
+              "wallMs": 1111.3438999999998,
+              "providerMs": 1108.2283,
+              "loadMs": 1008.0027,
+              "promptTokens": 175,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run experiment commands and checks.",
+              "text": "KEEP",
+              "wallMs": 1094.4399000000012,
+              "providerMs": 1089.3909,
+              "loadMs": 936.0502,
+              "promptTokens": 175,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1094.471599999999,
+              "providerMs": 1091.2008,
+              "loadMs": 909.9047,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 3593.446200000002,
+          "callCount": 9,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "harness-experiments",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: harness-experiments\nCandidate description: Create and compare controlled baseline-versus-candidate pie harness experiments.",
+              "text": "KEEP",
+              "wallMs": 1233.5078999999969,
+              "providerMs": 1215.9323,
+              "loadMs": 1032.519,
+              "promptTokens": 203,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.",
+              "text": "0",
+              "wallMs": 1503.3271999999997,
+              "providerMs": 1486.012,
+              "loadMs": 1123.1238,
+              "promptTokens": 211,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for a focused feature.",
+              "text": "0",
+              "wallMs": 1412.8739000000023,
+              "providerMs": 1400.8898,
+              "loadMs": 1112.4633,
+              "promptTokens": 205,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development when explicitly requested.",
+              "text": "0",
+              "wallMs": 1320.1546999999991,
+              "providerMs": 1312.1964,
+              "loadMs": 1087.0821,
+              "promptTokens": 197,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read source, logs, and experiment outputs.",
+              "text": "KEEP",
+              "wallMs": 1471.7754999999997,
+              "providerMs": 1467.7088,
+              "loadMs": 1376.956,
+              "promptTokens": 197,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit source, benchmark assets, and documentation.",
+              "text": "KEEP",
+              "wallMs": 1464.2885999999999,
+              "providerMs": 1460.039,
+              "loadMs": 1302.6775,
+              "promptTokens": 197,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run local models, scripts, tests, and builds.",
+              "text": "KEEP",
+              "wallMs": 1546.3532000000014,
+              "providerMs": 1540.056,
+              "loadMs": 1323.9853,
+              "promptTokens": 199,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Research current local-model clients and model capabilities on the public web.",
+              "text": "0",
+              "wallMs": 1369.0341000000008,
+              "providerMs": 1363.2358,
+              "loadMs": 1201.8637,
+              "promptTokens": 202,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 886.6748999999982,
+              "providerMs": 883.2616,
+              "loadMs": 797.8812,
+              "promptTokens": 198,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 2337.258099999999,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            true,
+            true,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update API providers, local servers, and models in pie's centralized catalog.",
+              "text": "KEEP",
+              "wallMs": 1265.6899999999987,
+              "providerMs": 1257.1489,
+              "loadMs": 1154.6061,
+              "promptTokens": 237,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Review and rate currently-open sessions.",
+              "text": "0",
+              "wallMs": 1171.3375000000015,
+              "providerMs": 1167.3617,
+              "loadMs": 1032.9861,
+              "promptTokens": 228,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read source and configuration files.",
+              "text": "0",
+              "wallMs": 1430.2445000000007,
+              "providerMs": 1425.6638,
+              "loadMs": 1193.9026,
+              "promptTokens": 225,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit source and configuration files.",
+              "text": "KEEP",
+              "wallMs": 1344.7540999999983,
+              "providerMs": 1341.0266,
+              "loadMs": 1187.1721,
+              "promptTokens": 225,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run synchronization and validation commands.",
+              "text": "KEEP",
+              "wallMs": 949.3479999999981,
+              "providerMs": 944.191,
+              "loadMs": 847.7636,
+              "promptTokens": 225,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Verify current provider API and model information.",
+              "text": "1",
+              "wallMs": 997.277900000001,
+              "providerMs": 994.9657,
+              "loadMs": 901.5933,
+              "promptTokens": 228,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 989.806700000001,
+              "providerMs": 988.0308,
+              "loadMs": 836.9084,
+              "promptTokens": 229,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 2677.1712000000007,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            true,
+            false,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first workflow for hard or intermittent bugs, including regression verification.",
+              "text": "KEEP",
+              "wallMs": 1522.9765999999981,
+              "providerMs": 1517.9091,
+              "loadMs": 1254.1016,
+              "promptTokens": 223,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-first development only when explicitly requested.",
+              "text": "0",
+              "wallMs": 1438.7342000000026,
+              "providerMs": 1434.7904,
+              "loadMs": 1236.1152,
+              "promptTokens": 220,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read relevant source and tests.",
+              "text": "KEEP",
+              "wallMs": 1339.1938999999984,
+              "providerMs": 1335.7699,
+              "loadMs": 1199.4344,
+              "promptTokens": 216,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Implement the fix and regression test.",
+              "text": "0",
+              "wallMs": 1256.1506999999983,
+              "providerMs": 1251.2939,
+              "loadMs": 1126.4244,
+              "promptTokens": 217,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run reproduction and verification tests.",
+              "text": "KEEP",
+              "wallMs": 1070.8063000000002,
+              "providerMs": 1067.2036,
+              "loadMs": 955.7913,
+              "promptTokens": 216,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1127.8039000000026,
+              "providerMs": 1117.6371,
+              "loadMs": 1023.345,
+              "promptTokens": 219,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "session_review",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 1236.2546999999977,
+              "providerMs": 1228.9938,
+              "loadMs": 1099.1685,
+              "promptTokens": 220,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 2551.8253000000004,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update API providers and models.",
+              "text": "0",
+              "wallMs": 1238.3379999999997,
+              "providerMs": 1233.7717,
+              "loadMs": 1111.9946,
+              "promptTokens": 213,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "tdd",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development.",
+              "text": "0",
+              "wallMs": 1408.5144,
+              "providerMs": 1403.8469,
+              "loadMs": 1146.6045,
+              "promptTokens": 210,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "session_changes",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: session_changes\nCandidate description: List files changed by this session and return focused diffs.",
+              "text": "KEEP",
+              "wallMs": 1329.0044000000016,
+              "providerMs": 1324.1178,
+              "loadMs": 1123.4287,
+              "promptTokens": 216,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files or diff artifacts when needed for a summary.",
+              "text": "PRUNE",
+              "wallMs": 1533.7502000000022,
+              "providerMs": 1531.1701,
+              "loadMs": 1210.8888,
+              "promptTokens": 215,
+              "outputTokens": 3,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files.",
+              "text": "0",
+              "wallMs": 1023.906799999997,
+              "providerMs": 1018.2621,
+              "loadMs": 929.2543,
+              "promptTokens": 208,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands and tests.",
+              "text": "0",
+              "wallMs": 1070.4327000000012,
+              "providerMs": 1064.6541,
+              "loadMs": 956.7079,
+              "promptTokens": 210,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1141.5141000000003,
+              "providerMs": 1137.5361,
+              "loadMs": 1031.6655,
+              "promptTokens": 210,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 2968.3545000000013,
+          "callCount": 8,
+          "parseValid": false,
+          "predictedKeep": [
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.",
+              "text": "KEEP",
+              "wallMs": 1401.6188000000002,
+              "providerMs": 1355.2688,
+              "loadMs": 1253.3382,
+              "promptTokens": 170,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect and group pie runtime and session logs for debugging.",
+              "text": "0",
+              "wallMs": 1492.6205999999984,
+              "providerMs": 1450.589,
+              "loadMs": 1269.9613,
+              "promptTokens": 163,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes.",
+              "text": "0",
+              "wallMs": 1581.2400000000016,
+              "providerMs": 1550.9908,
+              "loadMs": 1311.1004,
+              "promptTokens": 160,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: List open sessions, read transcripts, record reviews, and close tabs.",
+              "text": "KEEP",
+              "wallMs": 1305.4292999999998,
+              "providerMs": 1275.5151,
+              "loadMs": 1127.3326,
+              "promptTokens": 164,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "subagent",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: subagent\nCandidate description: Delegate independent review tasks to parallel agents.",
+              "text": "0",
+              "wallMs": 1358.1526000000013,
+              "providerMs": 1353.3218,
+              "loadMs": 1259.5167,
+              "promptTokens": 158,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read codebase files.",
+              "text": "0",
+              "wallMs": 1361.770099999998,
+              "providerMs": 1358.5194,
+              "loadMs": 1234.8,
+              "promptTokens": 154,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit codebase files.",
+              "text": "0",
+              "wallMs": 1388.0043000000005,
+              "providerMs": 1381.598,
+              "loadMs": 1281.4753,
+              "promptTokens": 154,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1385.361100000002,
+              "providerMs": 1382.2257,
+              "loadMs": 1217.7731,
+              "promptTokens": 155,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 3716.211099999997,
+          "callCount": 8,
+          "parseValid": false,
+          "predictedKeep": [
+            false,
+            false,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update an LLM provider in the local model catalog.",
+              "text": "0",
+              "wallMs": 1791.4859999999971,
+              "providerMs": 1777.7508,
+              "loadMs": 1515.6085,
+              "promptTokens": 182,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect pie runtime and session logs.",
+              "text": "0",
+              "wallMs": 1511.1549999999988,
+              "providerMs": 1506.6467,
+              "loadMs": 1294.4475,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "KEEP",
+              "wallMs": 1695.3089,
+              "providerMs": 1672.9054,
+              "loadMs": 1491.3808,
+              "promptTokens": 177,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "get_search_content",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: get_search_content\nCandidate description: Open search results and retrieve page content.",
+              "text": "KEEP",
+              "wallMs": 1597.5188999999991,
+              "providerMs": 1581.9028,
+              "loadMs": 1481.8853,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "fetch_content",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: fetch_content\nCandidate description: Fetch a known web page and return its content.",
+              "text": "KEEP",
+              "wallMs": 1938.613599999997,
+              "providerMs": 1934.9686,
+              "loadMs": 1828.783,
+              "promptTokens": 179,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read local codebase files.",
+              "text": "0",
+              "wallMs": 2012.8885999999984,
+              "providerMs": 2009.2333,
+              "loadMs": 1844.3824,
+              "promptTokens": 174,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit local files.",
+              "text": "0",
+              "wallMs": 1834.9838000000018,
+              "providerMs": 1832.2873,
+              "loadMs": 1715.4077,
+              "promptTokens": 172,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands and tests.",
+              "text": "0",
+              "wallMs": 1923.721000000005,
+              "providerMs": 1918.9158,
+              "loadMs": 1658.1863,
+              "promptTokens": 174,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 2943.7367999999988,
+          "callCount": 7,
+          "parseValid": false,
+          "predictedKeep": [
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard bugs.",
+              "text": "0",
+              "wallMs": 1813.9401999999973,
+              "providerMs": 1805.7485,
+              "loadMs": 1657.0145,
+              "promptTokens": 161,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development.",
+              "text": "0",
+              "wallMs": 1469.5224000000017,
+              "providerMs": 1460.2547,
+              "loadMs": 1360.4969,
+              "promptTokens": 160,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update LLM providers and models.",
+              "text": "0",
+              "wallMs": 1662.2017999999953,
+              "providerMs": 1655.7641,
+              "loadMs": 1531.5509,
+              "promptTokens": 164,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read local files.",
+              "text": "0",
+              "wallMs": 1571.423999999999,
+              "providerMs": 1557.3081,
+              "loadMs": 1414.4983,
+              "promptTokens": 158,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit local files.",
+              "text": "KEEP",
+              "wallMs": 1301.3824000000022,
+              "providerMs": 1295.7201,
+              "loadMs": 1194.7249,
+              "promptTokens": 158,
+              "outputTokens": 2,
+              "valid": false,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands.",
+              "text": "0",
+              "wallMs": 1368.546699999999,
+              "providerMs": 1363.1908,
+              "loadMs": 1269.9531,
+              "promptTokens": 158,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1198.3732000000018,
+              "providerMs": 1183.0569,
+              "loadMs": 1087.5963,
+              "promptTokens": 160,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "qwen2.5:7b-instruct",
+      "approach": "item-prune-bit-v2",
+      "contextMode": "dialogue",
+      "summary": {
+        "decisions": 75,
+        "accuracy": 0.2667,
+        "keepRecall": 0.5882,
+        "pruneRecall": 0,
+        "falsePrunes": 14,
+        "falseKeeps": 41,
+        "exactCases": 0,
+        "parseFailures": 0,
+        "totalWallMs": 27207,
+        "medianCaseWallMs": 2737,
+        "medianCallMs": 1303,
+        "p95CallMs": 1599,
+        "calls": 75,
+        "promptTokens": 14486,
+        "outputTokens": 150
+      },
+      "trials": [
+        {
+          "caseId": "isolated-feature",
+          "wallMs": 2515.0785000000033,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.",
+              "text": "0",
+              "wallMs": 1624.9765000000043,
+              "providerMs": 1617.7317,
+              "loadMs": 1302.046,
+              "promptTokens": 194,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.",
+              "text": "0",
+              "wallMs": 1521.9112999999998,
+              "providerMs": 1514.1285,
+              "loadMs": 1277.2985,
+              "promptTokens": 194,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.",
+              "text": "0",
+              "wallMs": 1360.1682999999975,
+              "providerMs": 1353.6342,
+              "loadMs": 1158.9131,
+              "promptTokens": 187,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files from the codebase.",
+              "text": "0",
+              "wallMs": 1441.4426999999996,
+              "providerMs": 1433.9053,
+              "loadMs": 1273.409,
+              "promptTokens": 180,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files using exact text replacement.",
+              "text": "0",
+              "wallMs": 987.741200000004,
+              "providerMs": 981.9585,
+              "loadMs": 890.0635,
+              "promptTokens": 181,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands, builds, and tests.",
+              "text": "0",
+              "wallMs": 986.7569000000003,
+              "providerMs": 981.5356,
+              "loadMs": 901.0449,
+              "promptTokens": 182,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nAdd a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 991.0492999999988,
+              "providerMs": 987.4532,
+              "loadMs": 876.048,
+              "promptTokens": 182,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "diagnosis-read-only",
+          "wallMs": 2198.4113999999972,
+          "callCount": 8,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.",
+              "text": "1",
+              "wallMs": 1252.4233999999997,
+              "providerMs": 1246.4004,
+              "loadMs": 955.9968,
+              "promptTokens": 193,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.",
+              "text": "0",
+              "wallMs": 1158.4308999999994,
+              "providerMs": 1154.1068,
+              "loadMs": 951.2794,
+              "promptTokens": 199,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for isolated debugging.",
+              "text": "0",
+              "wallMs": 1074.816899999998,
+              "providerMs": 1071.2489,
+              "loadMs": 950.0708,
+              "promptTokens": 195,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files from the codebase.",
+              "text": "1",
+              "wallMs": 1333.9464999999982,
+              "providerMs": 1330.4415,
+              "loadMs": 970.2901,
+              "promptTokens": 186,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands, builds, tests, and log queries.",
+              "text": "0",
+              "wallMs": 871.3932999999961,
+              "providerMs": 867.358,
+              "loadMs": 789.4066,
+              "promptTokens": 191,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files.",
+              "text": "0",
+              "wallMs": 868.8917000000001,
+              "providerMs": 865.7342,
+              "loadMs": 745.8677,
+              "promptTokens": 183,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 855.0492000000013,
+              "providerMs": 852.2723,
+              "loadMs": 728.4789,
+              "promptTokens": 189,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nDiagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 862.0186999999933,
+              "providerMs": 858.9465,
+              "loadMs": 692.7336,
+              "promptTokens": 188,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "controlled-experiment",
+          "wallMs": 2757.3496000000014,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "harness-experiments",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: harness-experiments\nCandidate description: Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.",
+              "text": "1",
+              "wallMs": 1556.9019999999946,
+              "providerMs": 1551.6969,
+              "loadMs": 1231.8827,
+              "promptTokens": 192,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development when explicitly requested.",
+              "text": "0",
+              "wallMs": 1469.5851000000039,
+              "providerMs": 1465.1044,
+              "loadMs": 1218.6232,
+              "promptTokens": 181,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Review and rate currently-open sessions and close completed tabs.",
+              "text": "0",
+              "wallMs": 1378.1466,
+              "providerMs": 1374.6306,
+              "loadMs": 1194.1719,
+              "promptTokens": 185,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files and experiment artifacts.",
+              "text": "0",
+              "wallMs": 1296.094799999999,
+              "providerMs": 1293.0619,
+              "loadMs": 1191.7538,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit experiment recipes and documentation.",
+              "text": "0",
+              "wallMs": 1119.3796999999977,
+              "providerMs": 1113.3819,
+              "loadMs": 1000.3251,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run experiment commands and checks.",
+              "text": "1",
+              "wallMs": 1377.1270999999979,
+              "providerMs": 1373.3336,
+              "loadMs": 1215.0527,
+              "promptTokens": 178,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nCreate and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1195.6153999999951,
+              "providerMs": 1191.4445,
+              "loadMs": 1107.1449,
+              "promptTokens": 181,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "pruner-model-research",
+          "wallMs": 3712.6347000000023,
+          "callCount": 9,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "harness-experiments",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: harness-experiments\nCandidate description: Create and compare controlled baseline-versus-candidate pie harness experiments.",
+              "text": "1",
+              "wallMs": 1696.7420000000056,
+              "providerMs": 1691.6895,
+              "loadMs": 1453.0291,
+              "promptTokens": 206,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.",
+              "text": "0",
+              "wallMs": 1512.4161999999997,
+              "providerMs": 1508.5242,
+              "loadMs": 1396.308,
+              "promptTokens": 214,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes; not for a focused feature.",
+              "text": "0",
+              "wallMs": 1598.6820999999982,
+              "providerMs": 1594.4743,
+              "loadMs": 1450.2528,
+              "promptTokens": 208,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development when explicitly requested.",
+              "text": "0",
+              "wallMs": 1770.6491999999998,
+              "providerMs": 1767.1725,
+              "loadMs": 1460.1534,
+              "promptTokens": 200,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read source, logs, and experiment outputs.",
+              "text": "0",
+              "wallMs": 1124.4774999999936,
+              "providerMs": 1120.3527,
+              "loadMs": 1002.9119,
+              "promptTokens": 200,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit source, benchmark assets, and documentation.",
+              "text": "0",
+              "wallMs": 1119.3034999999945,
+              "providerMs": 1115.661,
+              "loadMs": 1010.9144,
+              "promptTokens": 200,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run local models, scripts, tests, and builds.",
+              "text": "1",
+              "wallMs": 1302.875500000002,
+              "providerMs": 1298.3253,
+              "loadMs": 1182.9889,
+              "promptTokens": 202,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Research current local-model clients and model capabilities on the public web.",
+              "text": "0",
+              "wallMs": 1307.6444000000047,
+              "providerMs": 1301.897,
+              "loadMs": 1189.2219,
+              "promptTokens": 205,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nOptimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 1073.115300000005,
+              "providerMs": 1064.1809,
+              "loadMs": 975.4576,
+              "promptTokens": 201,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-provider",
+          "wallMs": 2342.3623000000007,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update API providers, local servers, and models in pie's centralized catalog.",
+              "text": "1",
+              "wallMs": 1270.7019,
+              "providerMs": 1264.7861,
+              "loadMs": 982.786,
+              "promptTokens": 240,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Review and rate currently-open sessions.",
+              "text": "0",
+              "wallMs": 1369.9219000000012,
+              "providerMs": 1365.6765,
+              "loadMs": 993.7689,
+              "promptTokens": 231,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read source and configuration files.",
+              "text": "0",
+              "wallMs": 1167.6589000000022,
+              "providerMs": 1164.0994,
+              "loadMs": 968.2215,
+              "promptTokens": 228,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit source and configuration files.",
+              "text": "0",
+              "wallMs": 1079.457699999999,
+              "providerMs": 1077.0965,
+              "loadMs": 948.4352,
+              "promptTokens": 228,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run synchronization and validation commands.",
+              "text": "1",
+              "wallMs": 1093.4285000000018,
+              "providerMs": 1089.2342,
+              "loadMs": 996.7497,
+              "promptTokens": 228,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Verify current provider API and model information.",
+              "text": "0",
+              "wallMs": 1086.4539000000004,
+              "providerMs": 1083.5383,
+              "loadMs": 988.3981,
+              "promptTokens": 231,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Recent conversation (oldest to newest):\nUSER: Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation.\nASSISTANT: Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]\n\nCurrent request:\nDo that again for the other provider.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 1070.6681000000026,
+              "providerMs": 1067.8711,
+              "loadMs": 975.3241,
+              "promptTokens": 232,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "follow-up-fix",
+          "wallMs": 2474.008799999996,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first workflow for hard or intermittent bugs, including regression verification.",
+              "text": "0",
+              "wallMs": 1246.3214999999982,
+              "providerMs": 1231.7034,
+              "loadMs": 857.6974,
+              "promptTokens": 226,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-first development only when explicitly requested.",
+              "text": "0",
+              "wallMs": 965.0972000000038,
+              "providerMs": 958.4462,
+              "loadMs": 832.421,
+              "promptTokens": 223,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read relevant source and tests.",
+              "text": "0",
+              "wallMs": 1084.671000000002,
+              "providerMs": 1070.4219,
+              "loadMs": 850.5959,
+              "promptTokens": 219,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Implement the fix and regression test.",
+              "text": "0",
+              "wallMs": 1402.6065999999992,
+              "providerMs": 1395.9625,
+              "loadMs": 879.7337,
+              "promptTokens": 220,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run reproduction and verification tests.",
+              "text": "0",
+              "wallMs": 1342.9199999999983,
+              "providerMs": 1337.0856,
+              "loadMs": 1240.4518,
+              "promptTokens": 219,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "0",
+              "wallMs": 1300.2952000000005,
+              "providerMs": 1272.0315,
+              "loadMs": 1116.8537,
+              "promptTokens": 222,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Recent conversation (oldest to newest):\nUSER: Diagnose the intermittent cancellation hang, but do not modify anything yet.\nASSISTANT: The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]\n\nCurrent request:\nFix that and verify it.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: Review, rate, and close open sessions.",
+              "text": "0",
+              "wallMs": 1226.5320000000065,
+              "providerMs": 1214.8867,
+              "loadMs": 1053.0704,
+              "promptTokens": 223,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "explicit-pivot",
+          "wallMs": 2737.094299999997,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update API providers and models.",
+              "text": "0",
+              "wallMs": 1303.0486999999994,
+              "providerMs": 1297.434,
+              "loadMs": 1181.4679,
+              "promptTokens": 216,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development.",
+              "text": "0",
+              "wallMs": 1556.743699999999,
+              "providerMs": 1549.7234,
+              "loadMs": 1218.5017,
+              "promptTokens": 213,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_changes",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: session_changes\nCandidate description: List files changed by this session and return focused diffs.",
+              "text": "1",
+              "wallMs": 1392.2810000000027,
+              "providerMs": 1386.4766,
+              "loadMs": 1195.3087,
+              "promptTokens": 219,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read files or diff artifacts when needed for a summary.",
+              "text": "0",
+              "wallMs": 1468.561099999999,
+              "providerMs": 1464.2456,
+              "loadMs": 1199.7869,
+              "promptTokens": 218,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit existing files.",
+              "text": "0",
+              "wallMs": 1068.3482999999978,
+              "providerMs": 1064.2712,
+              "loadMs": 967.7578,
+              "promptTokens": 211,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands and tests.",
+              "text": "0",
+              "wallMs": 1182.617299999998,
+              "providerMs": 1179.1574,
+              "loadMs": 1074.4403,
+              "promptTokens": 213,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Recent conversation (oldest to newest):\nUSER: Implement the provider queue refactor and add tests.\nASSISTANT: I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]\n\nCurrent request:\nActually stop the implementation. Just summarize the current diff and do not edit or run tests.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1265.379200000003,
+              "providerMs": 1262.8289,
+              "loadMs": 1170.0051,
+              "promptTokens": 213,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "session-review",
+          "wallMs": 2869.3934999999983,
+          "callCount": 8,
+          "parseValid": true,
+          "predictedKeep": [
+            false,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "evaluate-sessions",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: evaluate-sessions\nCandidate description: Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.",
+              "text": "1",
+              "wallMs": 1239.9511999999959,
+              "providerMs": 1225.9708,
+              "loadMs": 1102.7932,
+              "promptTokens": 173,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect and group pie runtime and session logs for debugging.",
+              "text": "0",
+              "wallMs": 1426.0408000000025,
+              "providerMs": 1412.2804,
+              "loadMs": 1237.5168,
+              "promptTokens": 166,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "codebase-maintenance",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: skill\nCandidate name: codebase-maintenance\nCandidate description: Broad code-quality audits and maintenance passes.",
+              "text": "0",
+              "wallMs": 1330.970699999998,
+              "providerMs": 1321.2614,
+              "loadMs": 1236.0181,
+              "promptTokens": 163,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "session_review",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: session_review\nCandidate description: List open sessions, read transcripts, record reviews, and close tabs.",
+              "text": "1",
+              "wallMs": 1506.088300000003,
+              "providerMs": 1498.662,
+              "loadMs": 1263.2767,
+              "promptTokens": 167,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "subagent",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: subagent\nCandidate description: Delegate independent review tasks to parallel agents.",
+              "text": "0",
+              "wallMs": 1253.9973000000027,
+              "providerMs": 1247.4503,
+              "loadMs": 1140.3015,
+              "promptTokens": 161,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read codebase files.",
+              "text": "0",
+              "wallMs": 1351.4328000000023,
+              "providerMs": 1348.6268,
+              "loadMs": 1246.5947,
+              "promptTokens": 157,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit codebase files.",
+              "text": "0",
+              "wallMs": 1344.1278999999995,
+              "providerMs": 1336.343,
+              "loadMs": 1203.854,
+              "promptTokens": 157,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nReview and close each pinned tab.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1357.9002000000037,
+              "providerMs": 1355.1734,
+              "loadMs": 1243.7547,
+              "promptTokens": 158,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "current-web-research",
+          "wallMs": 2927.684599999993,
+          "callCount": 8,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            false,
+            false,
+            false,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update an LLM provider in the local model catalog.",
+              "text": "0",
+              "wallMs": 1240.5990999999995,
+              "providerMs": 1208.4204,
+              "loadMs": 1022.9179,
+              "promptTokens": 185,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "pi-logs",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: skill\nCandidate name: pi-logs\nCandidate description: Inspect pie runtime and session logs.",
+              "text": "0",
+              "wallMs": 1403.951700000005,
+              "providerMs": 1376.099,
+              "loadMs": 1097.4653,
+              "promptTokens": 181,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web for current information.",
+              "text": "1",
+              "wallMs": 1329.2540000000008,
+              "providerMs": 1316.572,
+              "loadMs": 1053.3418,
+              "promptTokens": 180,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "get_search_content",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: get_search_content\nCandidate description: Open search results and retrieve page content.",
+              "text": "1",
+              "wallMs": 1159.4489999999932,
+              "providerMs": 1148.0793,
+              "loadMs": 1037.8154,
+              "promptTokens": 181,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "fetch_content",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: fetch_content\nCandidate description: Fetch a known web page and return its content.",
+              "text": "1",
+              "wallMs": 1495.6609000000026,
+              "providerMs": 1491.5715,
+              "loadMs": 1405.791,
+              "promptTokens": 182,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": false
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read local codebase files.",
+              "text": "0",
+              "wallMs": 1588.1114000000016,
+              "providerMs": 1583.9109,
+              "loadMs": 1407.7933,
+              "promptTokens": 177,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit local files.",
+              "text": "0",
+              "wallMs": 1417.7622999999949,
+              "providerMs": 1414.651,
+              "loadMs": 1297.5219,
+              "promptTokens": 175,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nWhat changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands and tests.",
+              "text": "0",
+              "wallMs": 1522.1881999999969,
+              "providerMs": 1516.8264,
+              "loadMs": 1423.6662,
+              "promptTokens": 177,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        },
+        {
+          "caseId": "no-capability-needed",
+          "wallMs": 2672.549199999994,
+          "callCount": 7,
+          "parseValid": true,
+          "predictedKeep": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "calls": [
+            {
+              "candidate": "diagnose",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: diagnose\nCandidate description: Evidence-first diagnosis for hard bugs.",
+              "text": "0",
+              "wallMs": 1486.4483999999939,
+              "providerMs": 1480.7501,
+              "loadMs": 1232.6849,
+              "promptTokens": 164,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "tdd",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: tdd\nCandidate description: Strict test-driven development.",
+              "text": "0",
+              "wallMs": 1401.0809000000008,
+              "providerMs": 1397.2058,
+              "loadMs": 1215.1411,
+              "promptTokens": 163,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "add-provider",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: skill\nCandidate name: add-provider\nCandidate description: Add or update LLM providers and models.",
+              "text": "0",
+              "wallMs": 1308.3683999999994,
+              "providerMs": 1304.2282,
+              "loadMs": 1177.6815,
+              "promptTokens": 167,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "read",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: read\nCandidate description: Read local files.",
+              "text": "0",
+              "wallMs": 1585.1203999999998,
+              "providerMs": 1580.2266,
+              "loadMs": 1245.2207,
+              "promptTokens": 161,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "edit",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: edit\nCandidate description: Edit local files.",
+              "text": "0",
+              "wallMs": 1216.6021000000037,
+              "providerMs": 1209.8526,
+              "loadMs": 1102.9206,
+              "promptTokens": 161,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "bash",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: bash\nCandidate description: Run shell commands.",
+              "text": "0",
+              "wallMs": 1016.4325000000026,
+              "providerMs": 1014.2141,
+              "loadMs": 906.626,
+              "promptTokens": 161,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            },
+            {
+              "candidate": "web_search",
+              "user": "Current request:\nWrite a three-line haiku about rain on a window.\n\nCandidate kind: tool\nCandidate name: web_search\nCandidate description: Search the public web.",
+              "text": "0",
+              "wallMs": 1185.2526999999973,
+              "providerMs": 1172.9829,
+              "loadMs": 1062.9295,
+              "promptTokens": 163,
+              "outputTokens": 2,
+              "valid": true,
+              "keep": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

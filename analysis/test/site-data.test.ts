@@ -17,8 +17,8 @@ test('site data generation writes the expected files and passes validation', asy
     await writeSiteData(dir, bundle);
 
     const roundTrip = await readSiteDataBundle(dir);
-    assert.equal(roundTrip.manifest.schemaVersion, 4);
-    assert.equal(roundTrip.modelLeaderboard.schemaVersion, 4);
+    assert.equal(roundTrip.manifest.schemaVersion, 5);
+    assert.equal(roundTrip.modelLeaderboard.schemaVersion, 5);
     assert.equal(roundTrip.manifest.completedRunCount, 7);
     assert.equal(roundTrip.runSummary.rows.length, 8);
     assert.ok(roundTrip.verificationImpact.summaryRows.length > 0);
@@ -324,7 +324,7 @@ test('site data validation rejects malformed tool usage payloads', async () => {
   );
 });
 
-test('model leaderboard validation requires v4 evidence and interval fields', async () => {
+test('model leaderboard validation requires current evidence and interval fields', async () => {
   const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
   const missingEvidence = deepClone(bundle) as any;
   delete missingEvidence.modelLeaderboard.rows[0].userEvidenceMass;
@@ -462,6 +462,8 @@ test('token-throughput artifact retains errored/tokenless turns and validates pe
     turnLatencyMs: null,
     overheadMs: null,
     providerLatencyMs: null,
+    providerQueueMs: null,
+    providerQueueAttemptCount: 0,
     inputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -480,4 +482,17 @@ test('token-throughput artifact retains errored/tokenless turns and validates pe
   assert.equal(retained[0]?.cacheReadTokens, 0);
   assert.equal(retained[0]?.cacheWriteTokens, 0);
   assert.equal(retained[0]?.contextTokens, null);
+  assert.equal(retained[0]?.providerQueueMs, null);
+  assert.equal(retained[0]?.providerQueueAttemptCount, 0);
+
+  assert.equal(bundle.retryTiming.rows.length, 1);
+  assert.equal(bundle.retryTiming.rows[0]?.scheduledDelayMs, 1000);
+  assert.equal(bundle.retryTiming.rows[0]?.measuredDelayMs, 1080);
+  assert.equal(bundle.retryTiming.rows[0]?.durationMs, 4200);
+  const measuredRun = bundle.runSummary.rows.find((row) => row.runId === 'run-001');
+  assert.equal(measuredRun?.skillPruningPrepassDurationMs, 350);
+  assert.equal(measuredRun?.criticalPathDurationMs, 6200);
+  const legacyRun = bundle.runSummary.rows.find((row) => row.runId === 'run-002');
+  assert.equal(legacyRun?.skillPruningPrepassDurationMs, null);
+  assert.equal(legacyRun?.criticalPathDurationMs, null);
 });

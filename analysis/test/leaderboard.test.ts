@@ -9,7 +9,7 @@ import { deepClone, loadFixture } from './helpers.ts';
 test('family leaderboard ranks every observed non-unknown family with regularized source channels', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
-  assert.equal(leaderboard.schemaVersion, 4);
+  assert.equal(leaderboard.schemaVersion, 5);
   assert.deepEqual(leaderboard.sourceWeights, { user: 0.6, agent: 0.25, process: 0.15 });
   assert.deepEqual(leaderboard.shrinkage, { user: 4, agent: 8, process: 20 });
   const ranked = leaderboard.rows.filter((row) => row.modelId !== '(unknown)');
@@ -97,6 +97,7 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
     inputKindsUsed: overrides.inputKindsUsed ?? [],
     toolCallCount: overrides.toolCallCount ?? 0,
     toolDurationMs: overrides.toolDurationMs ?? 0,
+    criticalPathDurationMs: overrides.criticalPathDurationMs ?? null,
     timedToolCallCount: overrides.timedToolCallCount ?? 0,
     toolFailureCount: overrides.toolFailureCount ?? 0,
     resultIssueCount: overrides.resultIssueCount ?? 0,
@@ -125,6 +126,7 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
     skillPruningPrepassOutputTokens: overrides.skillPruningPrepassOutputTokens ?? 0,
     skillPruningPrepassCacheReadTokens: overrides.skillPruningPrepassCacheReadTokens ?? 0,
     skillPruningPrepassCacheWriteTokens: overrides.skillPruningPrepassCacheWriteTokens ?? 0,
+    skillPruningPrepassDurationMs: overrides.skillPruningPrepassDurationMs ?? null,
     lastTurnInputTokens: overrides.lastTurnInputTokens ?? null,
     lastTurnOutputTokens: overrides.lastTurnOutputTokens ?? null,
     lastTurnCacheReadTokens: overrides.lastTurnCacheReadTokens ?? null,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { LlmPruningInput } from "../llm-scorer.js";
+import { buildPruningSystemPrompt, type LlmPruningInput } from "../llm-scorer.js";
 import type { PruningConfig } from "../types.js";
 import type { PrepassRunResult } from "./pruning-types.js";
 
@@ -53,6 +53,10 @@ export function buildPrepassFingerprint(
 	includeRecentConversation = true,
 ): string {
 	const value = {
+		// Prompt wording and output contract are part of the decision function.
+		// Including the resolved prompt prevents a hot-reloaded/new extension from
+		// reusing a cached decision produced under an older contract.
+		systemPrompt: buildPruningSystemPrompt(config),
 		contextFile: input.contextFile ?? null,
 		...(includeRecentConversation ? { recentConversation: input.recentConversation ?? [] } : {}),
 		skills: input.skills.map(({ name, description }) => ({ name, description })),

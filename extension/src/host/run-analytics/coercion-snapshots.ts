@@ -1,6 +1,6 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
 import { RUN_ANALYTICS_SCHEMA_VERSION } from './types';
-import type { AgentReviewEntry, AuxiliaryLlmUsageSample, OutcomeHistoryLogEntry, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
+import type { AgentReviewEntry, AuxiliaryLlmUsageSample, OutcomeHistoryLogEntry, RetryTimingSample, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
 import { coerceFunctionalSettings } from './coercion-functional-settings';
 import {
@@ -68,15 +68,20 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
     ) {
       continue;
     }
+    const durationMs = typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) && entry.durationMs >= 0
+      ? Math.trunc(entry.durationMs)
+      : undefined;
     samples.push({
       kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
       sourceId: entry.sourceId,
       occurredAt: entry.occurredAt,
       modelId: typeof entry.modelId === 'string' && entry.modelId ? entry.modelId : undefined,
+      ...(typeof entry.provider === 'string' && entry.provider ? { provider: entry.provider } : {}),
       inputTokens: toNonNegativeInteger(entry.inputTokens),
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(durationMs === undefined ? {} : { durationMs }),
     });
   }
   return samples;
@@ -87,6 +92,24 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
  * samples are dropped; older runs recorded before sampling existed coerce to
  * an empty array.
  */
+function coerceRetryTimingSamples(value: unknown): RetryTimingSample[] {
+  if (!Array.isArray(value)) return [];
+  const samples: RetryTimingSample[] = [];
+  for (const entry of value) {
+    if (!isObjectRecord(entry) || typeof entry.sourceId !== 'string' || !entry.sourceId
+      || typeof entry.occurredAt !== 'string' || !entry.occurredAt) continue;
+    samples.push({
+      sourceId: entry.sourceId,
+      occurredAt: entry.occurredAt,
+      attempt: toNonNegativeInteger(entry.attempt),
+      scheduledDelayMs: toNonNegativeInteger(entry.scheduledDelayMs),
+      measuredDelayMs: toNullableNonNegativeInteger(entry.measuredDelayMs),
+      durationMs: toNullableNonNegativeInteger(entry.durationMs),
+    });
+  }
+  return samples;
+}
+
 function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
   if (!Array.isArray(value)) {
     return [];
@@ -117,6 +140,8 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
       provider: typeof entry.provider === 'string' ? entry.provider : undefined,
+      providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
+      providerQueueAttemptCount: toNonNegativeInteger(entry.providerQueueAttemptCount),
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),
       overheadMs: toNullableNonNegativeInteger(entry.overheadMs),
       providerLatencyMs: toNullableNonNegativeInteger(entry.providerLatencyMs),
@@ -250,6 +275,7 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     truncatedAfterCount: Math.trunc(c.truncatedAfterCount),
     compactionCount: toNonNegativeInteger(candidate.compactionCount),
     autoRetryCount: toNonNegativeInteger(candidate.autoRetryCount),
+    retryTimingSamples: coerceRetryTimingSamples(candidate.retryTimingSamples),
     backendErrorCodes: [...c.backendErrorCodes],
     contextTokens: candidate.contextTokens ?? null,
     contextLimit: candidate.contextLimit ?? null,

@@ -65,6 +65,29 @@ test('buildTranscriptRows keeps system prompts, paging gaps, and messages in dis
   assert.equal(rows[3]?.kind === 'message' ? rows[3].message.id : null, 'assistant-1');
 });
 
+test('buildTranscriptRows associates each assistant header with its owning user request time', () => {
+  const firstUser = makeMessage('user-1', 'user');
+  firstUser.createdAt = '2026-05-16T09:15:00.000Z';
+  const secondUser = makeMessage('user-2', 'user');
+  secondUser.createdAt = '2026-05-16T10:45:00.000Z';
+
+  const rows = buildTranscriptRows({
+    transcript: [
+      firstUser,
+      makeMessage('assistant-1', 'assistant'),
+      secondUser,
+      makeMessage('assistant-2', 'assistant'),
+    ],
+    systemPromptCount: 0,
+    hasOlder: false,
+    hasNewer: false,
+    busy: false,
+  });
+
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].requestCreatedAt : null, firstUser.createdAt);
+  assert.equal(rows[3]?.kind === 'message' ? rows[3].requestCreatedAt : null, secondUser.createdAt);
+});
+
 test('buildTranscriptRows omits optional system and gap rows when not needed', () => {
   const rows = buildTranscriptRows({
     transcript: [makeMessage('assistant-1', 'assistant')],
@@ -76,6 +99,7 @@ test('buildTranscriptRows omits optional system and gap rows when not needed', (
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message']);
+  assert.equal(rows[0]?.kind === 'message' ? rows[0].requestCreatedAt : null, undefined);
 });
 
 test('buildTranscriptRows does not create a systemPrompts row for pruning alone', () => {
@@ -387,6 +411,7 @@ test('queued follow-ups do not steal active tool activity or create a reply belo
   assistant.toolCalls = [{ id: 'tool-1', name: 'bash', input: {}, status: 'running', startedAt: 1 }];
   const queued = makeMessage('queued-1', 'user');
   queued.status = 'queued';
+  queued.createdAt = '2026-05-16T01:00:00.000Z';
   const transcript = [user, assistant, queued];
   const activityState = deriveTurnActivityState({
     busy: true,
@@ -405,6 +430,7 @@ test('queued follow-ups do not steal active tool activity or create a reply belo
   const assistantRow = rows[1];
   assert.ok(assistantRow?.kind === 'message');
   assert.equal(assistantRow.activityState?.phase, 'runningTool');
+  assert.equal(assistantRow.requestCreatedAt, user.createdAt);
 });
 
 test('pending assistant placeholder stays before queued follow-ups', () => {
@@ -424,6 +450,7 @@ test('pending assistant placeholder stays before queued follow-ups', () => {
   assert.deepEqual(rows.map((row) => row.kind === 'message' ? row.message.id : row.kind), [
     'user-1', 'assistant-placeholder:user-1', 'queued-1',
   ]);
+  assert.equal(rows[1]?.kind === 'message' ? rows[1].requestCreatedAt : null, user.createdAt);
 });
 
 test('buildTranscriptRows shows standalone typingIndicator when busy with empty transcript', () => {

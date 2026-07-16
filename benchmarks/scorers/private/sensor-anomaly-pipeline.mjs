@@ -1,1 +1,30 @@
-import{pathToFileURL}from"node:url";import{join}from"node:path";const[w,t]=process.argv.slice(2),{train,predict}=await import(`${pathToFileURL(join(w,"src/model.mjs"))}?x=${Date.now()}`),{makeSamples}=await import(pathToFileURL(join(t,"fixture/scripts/samples.mjs"))),{classificationMetrics}=await import(pathToFileURL(join(t,"fixture/src/metrics.mjs")));const runs=[],started=performance.now();try{for(const [a,b,shift]of[[101,307,-.2],[211,419,.15],[337,601,.4],[449,733,-.35]]){const training=makeSamples(a,360,shift/2),test=makeSamples(b,260,shift),model=JSON.parse(JSON.stringify(train(training))),pred=test.map(s=>predict(model,s.features));if(!pred.every(x=>x===0||x===1))throw new Error("predict must return binary labels");runs.push(classificationMetrics(test.map(s=>s.label),pred));}}catch(error){console.log(JSON.stringify({valid:false,score:0,metrics:{error:String(error)}}));process.exit(1);}const runtimeMs=performance.now()-started,valid=runtimeMs<1000,score=runs.reduce((n,r)=>n+r.balancedAccuracy,0)/runs.length;console.log(JSON.stringify({valid,score:Math.max(0,Math.min(1,score)),metrics:{runtimeMs,sensitivity:runs.reduce((n,r)=>n+r.sensitivity,0)/runs.length,specificity:runs.reduce((n,r)=>n+r.specificity,0)/runs.length}}));if(!valid)process.exitCode=1;
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { emitScore, runIsolatedCases } from "./isolated-cases.mjs";
+
+const [workspace, taskDir, mode, encodedCase] = process.argv.slice(2);
+if (mode === "--case") {
+  try {
+    const [trainingSeed, testSeed, shift] = JSON.parse(encodedCase);
+    const { train, predict } = await import(`${pathToFileURL(join(workspace, "src/model.mjs"))}?case=${trainingSeed}`);
+    const { makeSamples } = await import(pathToFileURL(join(taskDir, "fixture/scripts/samples.mjs")));
+    const { classificationMetrics } = await import(pathToFileURL(join(taskDir, "fixture/src/metrics.mjs")));
+    const training = makeSamples(trainingSeed, 360, shift / 2);
+    const test = makeSamples(testSeed, 260, shift);
+    const started = performance.now();
+    const model = JSON.parse(JSON.stringify(train(training)));
+    const predictions = test.map(sample => predict(model, sample.features));
+    if (!predictions.every(value => value === 0 || value === 1)) throw new Error("predict must return binary labels");
+    const metrics = classificationMetrics(test.map(sample => sample.label), predictions);
+    emitScore({ valid: true, quality: metrics.balancedAccuracy, runtimeMs: performance.now() - started, metrics });
+  } catch (error) {
+    emitScore({ valid: false, metrics: { error: String(error) } });
+  }
+} else {
+  const cases = [[101, 307, -0.2], [211, 419, 0.15], [337, 601, 0.4], [449, 733, -0.35]];
+  const isolated = runIsolatedCases(import.meta.url, workspace, taskDir, cases);
+  const runtimeMs = isolated.runs.reduce((sum, run) => sum + run.runtimeMs, 0);
+  const valid = isolated.valid && runtimeMs < 1000;
+  const average = key => isolated.runs.reduce((sum, run) => sum + (run.metrics?.[key] || 0), 0) / isolated.runs.length;
+  emitScore({ valid, score: valid ? isolated.runs.reduce((sum, run) => sum + run.quality, 0) / isolated.runs.length : 0, metrics: valid ? { runtimeMs, sensitivity: average("sensitivity"), specificity: average("specificity") } : { runtimeMs, ...isolated.failure } });
+}

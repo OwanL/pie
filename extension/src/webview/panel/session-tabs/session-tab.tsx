@@ -3,9 +3,8 @@
 
 import { memo } from 'preact/compat';
 
-import type { ActiveRunSummary, SessionSummary } from '../../../shared/protocol';
+import type { SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
-import { getSessionTabRunBadge } from './run-state';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 
 export interface SessionTabProps {
@@ -23,11 +22,10 @@ export interface SessionTabProps {
    *  this component's `memo()` and re-rendered every tab each snapshot). */
   activePath: string | null;
   hasPendingExtensionUIRequest: boolean;
-  activeRunSummary: ActiveRunSummary | null;
   isPinned: boolean;
-  /** True when this session owns a pending deferred trigger — greys out the
-   *  close × and mark-done badge with an explanatory tooltip (the trigger must
-   *  be cancelled first, from the status strip). */
+  /** True when this session owns a pending deferred trigger — disables the
+   *  close × with an explanatory tooltip (the trigger must be cancelled first,
+   *  from the status strip). */
   hasDeferredTriggers: boolean;
   /** True when a pending deferred trigger includes a timer. */
   hasDeferredTimer: boolean;
@@ -35,7 +33,6 @@ export interface SessionTabProps {
   onPointerDown: (event: PointerEvent, sourceIndex: number, sourcePath: string) => void;
   onClick: (tabPath: string) => void;
   onClose: (tabPath: string) => void;
-  onMarkComplete: () => void;
 }
 
 // Memoized so non-source tabs skip re-render during a drag (the parent
@@ -52,7 +49,6 @@ export const SessionTab = memo(function SessionTab({
   unreadFinishedPathSet,
   activePath,
   hasPendingExtensionUIRequest,
-  activeRunSummary,
   isPinned,
   hasDeferredTriggers,
   hasDeferredTimer,
@@ -60,7 +56,6 @@ export const SessionTab = memo(function SessionTab({
   onPointerDown,
   onClick,
   onClose,
-  onMarkComplete,
 }: SessionTabProps) {
   const session = sessionByPath.get(tabPath);
   const label = session?.name ?? 'New Session';
@@ -71,23 +66,6 @@ export const SessionTab = memo(function SessionTab({
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath) && !hasDeferredTimer;
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
-  const review = session
-    ? { done: session.done, rating: session.rating, completion: session.completion, reason: session.reviewReason }
-    : undefined;
-  const hasReview = !!(review && (review.done !== undefined || review.rating !== undefined));
-  const reviewText = review
-    ? `${review.done ? '✓' : '○'}${typeof review.rating === 'number' ? review.rating : ''}`
-    : '';
-  const reviewTone = review?.completion === 'fully'
-    ? 'done'
-    : review?.completion === 'setback'
-      ? 'setback'
-      : review?.done
-        ? 'done'
-        : 'partial';
-  const reviewTitle = review
-    ? `Reviewed: done=${review.done ?? false}, rating=${review.rating ?? '—'}/5, completion=${review.completion ?? '—'}${review.reason ? ` — ${review.reason}` : ''}`
-    : '';
   const title = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
     : isPreparing
@@ -98,10 +76,8 @@ export const SessionTab = memo(function SessionTab({
           ? `${label} (finished, unread)`
           : label;
 
-  // A pending deferred trigger blocks closing the tab and marking it done —
-  // the trigger must be cancelled first (from the status strip) so it is not
-  // orphaned. Surfaced as a disabled state + explanatory tooltip on both the
-  // close × and the run badge.
+  // A pending deferred trigger blocks closing the tab until it is cancelled
+  // from the status strip, preventing the trigger from being orphaned.
   const deferredBlockTitle = 'Pending deferred trigger(s) — cancel from the status bar first.';
 
   const classBits = ['session-tab'];
@@ -149,35 +125,9 @@ export const SessionTab = memo(function SessionTab({
                   ? <span class="session-tab-finished" aria-hidden="true" />
                   : null}
             <span class="session-tab-label">{label}</span>
-            {hasReview ? (
-              <span
-                class={`session-tab-review-badge ${reviewTone}`}
-                title={reviewTitle}
-                aria-label={reviewTitle}
-              >{reviewText}</span>
-            ) : null}
           </>
         )}
       </button>
-      {isActive && !isPinned && (
-        (() => {
-          const badge = getSessionTabRunBadge(activeRunSummary);
-          if (!badge) return null;
-          return (
-            <button
-              class={`session-tab-run-badge ${badge.tone}`}
-              type="button"
-              title={hasDeferredTriggers ? deferredBlockTitle : badge.title}
-              aria-label={hasDeferredTriggers ? deferredBlockTitle : badge.title}
-              aria-disabled={hasDeferredTriggers ? 'true' : undefined}
-              disabled={hasDeferredTriggers}
-              onClick={onMarkComplete}
-            >
-              {badge.text}
-            </button>
-          );
-        })()
-      )}
       {!isPinned && (
         <button
           class="session-tab-close"

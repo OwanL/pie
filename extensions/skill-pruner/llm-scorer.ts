@@ -66,10 +66,10 @@ function loadPromptTemplate(): string {
 	} catch {
 		return [
 			"You are a relevance curator for a coding agent's prompt-pruning prepass.",
-			"Judge relevance across the full arc of the work. Default to KEEPING; remove only clearly irrelevant items.",
+			"Keep a candidate when it is more likely than not to be used across the full arc of the work.",
 			"Return ONLY a valid JSON object in this exact shape:",
-			'{"pruneSkills":[],"pruneTools":[]}',
-			"List only items to REMOVE; empty lists keep everything. Do not include an explanation or reasoning. Do not wrap in markdown.",
+			'{"keep":[]}',
+			"List only supplied candidate names. Do not include an explanation or reasoning. Do not wrap in markdown.",
 			"",
 			"{{STRATEGY_INSTRUCTION}}",
 		].join("\n");
@@ -82,9 +82,9 @@ function resolvePromptTemplate(): string {
 
 function buildStrategyInstruction(config: PruningConfig): string {
 	if (config.skills.strategy === "topK") {
-		return `The agent's context is most effective with at most ${config.skills.ceiling} skills and ${config.tools?.ceiling ?? 10} tools. Prefer keeping the most relevant; if you judge more than that as relevant, remove the least relevant to approach the ceiling. Still never remove something the arc of the work plausibly needs.`;
+		return `The preferred context size is at most ${config.skills.ceiling} skills and ${config.tools?.ceiling ?? 10} tools. Use that only as a tie-breaker for borderline candidates; never omit a candidate whose probability of use is greater than 50 percent.`;
 	}
-	return "Use discretion: remove only items you are confident are irrelevant to the entire arc of the work. You are not expected to remove anything — an empty result is correct when nothing is clearly irrelevant.";
+	return "Use the greater-than-50-percent probability boundary independently for every candidate. An empty keep list is correct when none is probably needed.";
 }
 
 /** Build the system prompt for the pruning LLM call. */
@@ -154,13 +154,13 @@ export function buildPruningUserMessage(input: LlmPruningInput): string {
 		lines.push("", `Context file: ${input.contextFile}`);
 	}
 
-	lines.push("", "Available skills (list any to REMOVE):");
+	lines.push("", "Candidate skills:");
 	for (const s of input.skills) {
 		// Skills: generous cap, no early sentence cut — preserve "Use when …" triggers.
 		lines.push(`- ${s.name}: ${compactDescription(s.description, SKILL_DESCRIPTION_CHAR_CAP, false)}`);
 	}
 
-	lines.push("", "Available tools (list any to REMOVE):");
+	lines.push("", "Candidate tools:");
 	for (const t of input.tools) {
 		lines.push(`- ${t.name}: ${compactDescription(t.description)}`);
 	}
@@ -176,21 +176,21 @@ export interface ParsedLlmResponse {
 	 * True ONLY when parsing genuinely failed (the phase-3 fallback): the
 	 * response could not be read as JSON or an embedded JSON block, so we
 	 * resolved to keep-all rather than risk misparsing prose. Deliberately
-	 * NOT set when phases 1/2 succeed with legitimately empty prune lists —
-	 * that is an intentional keep-all, not a failure. This flag is the only
-	 * way analytics can tell parse-failure keep-all apart from intentional
-	 * keep-all (both produce empty prune lists).
+	 * NOT set when phases 1/2 succeed with a valid response. This flag is the
+	 * only way analytics can tell parse-failure keep-all apart from an
+	 * intentional result that happens to keep everything.
 	 */
 	keptAllDueToParseFailure?: boolean;
 }
 
-/** Sentinel for "keep everything" — returned whenever the response can't be confidently read as a prune list. */
+/** Sentinel for "keep everything" — returned whenever the response contract is unreadable. */
 const EMPTY_PRUNE: ParsedLlmResponse = { pruneSkills: [], pruneTools: [], keptAllDueToParseFailure: true };
 
 /**
- * Convert an already-parsed object into a `ParsedLlmResponse`, filtering
- * the prune lists against the known name sets. Returns `null` if the input
- * is not a plain object, allowing the caller to fall through.
+ * Convert an already-parsed response into internal prune lists. The current
+ * flat keep-list contract is complemented against the known candidates; the
+ * former typed prune-list contract remains readable for backward compatibility.
+ * Returns `null` when the response shape is unreadable.
  */
 function buildParsedResponse(
 	parsed: unknown,
@@ -198,6 +198,23 @@ function buildParsedResponse(
 	knownTools: Set<string>,
 ): ParsedLlmResponse | null {
 	if (!parsed || typeof parsed !== "object") return null;
+	const keepRaw = (parsed as { keep?: unknown }).keep;
+	if (keepRaw !== undefined) {
+		if (!Array.isArray(keepRaw)) return null;
+		const knownNames = new Set([...knownSkills, ...knownTools]);
+		// A malformed/unknown positive name is unsafe to ignore: because omission
+		// means prune, silently dropping a misspelling could remove the capability
+		// the model meant to keep. Treat the whole response as unreadable so the
+		// correction retry (and ultimately fail-open keep-all) owns the ambiguity.
+		if (keepRaw.some((name) => typeof name !== "string" || !knownNames.has(name))) return null;
+		const kept = new Set(keepRaw as string[]);
+		return {
+			pruneSkills: [...knownSkills].filter((name) => !kept.has(name)),
+			pruneTools: [...knownTools].filter((name) => !kept.has(name)),
+		};
+	}
+	// Backward-compatible read path for cached decisions, tests, and responses
+	// produced by older prompt versions. New calls request the flat `keep` shape.
 	const rawSkills = Array.isArray((parsed as { pruneSkills?: unknown }).pruneSkills)
 		? (parsed as { pruneSkills: unknown[] }).pruneSkills
 		: undefined;
@@ -255,10 +272,10 @@ function removeTrailingJsonCommas(candidate: string): string {
 }
 
 /**
- * Parse the LLM response as a prune list. Any failure to read a valid
- * prune list resolves to "keep everything" (empty prune lists) — the safe,
- * hesitant default. We deliberately do NOT scrape known names out of prose,
- * because prose usually names items to KEEP, which would invert intent.
+ * Parse the LLM response into internal prune lists. Any unreadable response
+ * resolves to "keep everything" (empty prune lists), the safe fail-open
+ * default. We deliberately do NOT scrape names out of prose because their
+ * keep/prune intent would be ambiguous.
  */
 export function parseLlmResponse(raw: string, knownSkills: Set<string>, knownTools: Set<string>): ParsedLlmResponse {
 	// Phase 1: strict JSON parse of the whole response.
@@ -314,7 +331,7 @@ export async function runLlmPruning(
 			{ role: "assistant", content: invalidResponseToCorrect.slice(0, 2_000) },
 			{
 				role: "user",
-				content: 'That response was not valid JSON. Try again and return ONLY {"pruneSkills":[],"pruneTools":[]} with the appropriate names in the arrays.',
+				content: 'That response was not valid JSON. Try again and return ONLY {"keep":[]} with the candidate names that are more likely than not to be used.',
 			},
 		);
 	}

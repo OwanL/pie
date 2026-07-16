@@ -339,6 +339,7 @@ export function handleSessionMetadataChanged(state: ArchState, event: Extract<Ev
     return {
       ...s,
       ...(event.modelId !== undefined && { modelId: event.modelId }),
+      ...(event.provider !== undefined && { provider: event.provider }),
       ...(event.thinkingLevel !== undefined && { thinkingLevel: event.thinkingLevel }),
     };
   });

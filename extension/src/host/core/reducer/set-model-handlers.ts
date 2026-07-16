@@ -57,12 +57,13 @@ export function applySetModelOptimistic(
     // Global default model (what new sessions / the picker fall back to).
     draft.settings.modelSettings = modelSettings;
 
-    // Per-session model badge (the current session's modelId/thinkingLevel).
+    // Per-session model badge (the current session's provider/model/thinking level).
     const idx = draft.sessions.sessions.findIndex((s) => s.path === sessionPath);
     if (idx >= 0) {
       draft.sessions.sessions[idx] = {
         ...draft.sessions.sessions[idx],
         modelId: modelSettings.defaultModel,
+        ...(modelSettings.defaultProvider !== undefined && { provider: modelSettings.defaultProvider }),
         thinkingLevel: modelSettings.defaultThinkingLevel,
       };
     }

@@ -4,7 +4,7 @@ Uses an LLM to score and prune skills/tools based on relevance to the current ta
 
 ## How it works
 
-Before each agent turn, `skill-pruner` sends the user prompt + available skill/tool descriptions to an LLM (via `@earendil-works/pi-ai`). To keep the prepass itself cheap, the input context is kept lean: each candidate description is compacted to its leading relevance summary (whitespace collapsed; tools cut at the first sentence boundary within ~180 chars since their later text is usage caveats, skills capped more generously so their "Use when …" triggers survive), and only the last few user/assistant exchanges (capped per message) are included. When prior turns exist, it also includes the most recent user/assistant exchanges (read from the session tree, stopping at any compaction boundary) so follow-up prompts like "fix this" or "do that again" are judged in context rather than as standalone two-word requests. The LLM returns a **prune list** — the skills and tools it judges safe to *remove* for this turn — and `skill-pruner` then:
+Before each agent turn, `skill-pruner` sends the user prompt + available skill/tool descriptions to an LLM (via `@earendil-works/pi-ai`). To keep the prepass itself cheap, the input context is kept lean: each candidate description is compacted to its leading relevance summary (whitespace collapsed; tools cut at the first sentence boundary within ~180 chars since their later text is usage caveats, skills capped more generously so their "Use when …" triggers survive), and only the last few user/assistant exchanges (capped per message) are included. When prior turns exist, it also includes the most recent user/assistant exchanges (read from the session tree, stopping at any compaction boundary) so follow-up prompts like "fix this" or "do that again" are judged in context rather than as standalone two-word requests. The LLM returns one flat **keep list** — candidates with a greater-than-50% chance of actual use before the request is complete — and `skill-pruner` derives the internal skill/tool prune lists by complement. The flat list avoids small models putting a tool name in a skill array (or vice versa). It then:
 
 1. Keeps every skill the LLM did **not** prune. `pinned` / `alwaysKeep` skills are protected and can never be pruned — they're excluded from the prepass entirely so the model never sees them or spends tokens reasoning about them, then re-added unconditionally afterward.
 2. Keeps every tool the LLM did not prune, additionally protecting any dependency of a kept tool (so pruning a tool never strands a tool that needs it).
@@ -12,9 +12,9 @@ Before each agent turn, `skill-pruner` sends the user prompt + available skill/t
 4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
 5. Logs the decision — including tool pruning — to `data/pruning.jsonl`.
 
-The scorer returns only the tiny JSON prune-list shape `{"pruneSkills":[],"pruneTools":[]}` with no explanation. The parser remains compatible with older responses containing an optional `reasoning` field.
+The scorer returns only the tiny JSON shape `{"keep":[]}` with no explanation. The parser remains backward-compatible with the former `{"pruneSkills":[],"pruneTools":[]}` response and its optional `reasoning` field so cached/test responses remain readable.
 
-The model is **keep-biased**: an empty prune list keeps everything, so "return nothing" always means "prune nothing". The parser first recovers safe common formatting mistakes (including fenced/embedded JSON and trailing commas). If a non-empty response is still unreadable, the prepass retries once at the same thinking level with the invalid output plus an explicit JSON-only correction; only a second unreadable response falls back to keeping everything. Pruning 100% of a category triggers a **keep-all safeguard**: everything is kept (with a recorded reason) rather than leaving the agent with nothing. The tool safeguard always fires on a 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune (e.g. a simple text edit where none of the specialized skills are relevant) is allowed through whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
+The parser is **fail-open**: unreadable output keeps everything. It first recovers safe common formatting mistakes (including fenced/embedded JSON and trailing commas). If a non-empty response is still unreadable, the prepass retries once at the same thinking level with the invalid output plus an explicit JSON-only correction; only a second unreadable response falls back to keeping everything. A valid empty keep list means no optional candidate is probably needed. Pruning 100% of a category still triggers a **keep-all safeguard** when it would strand the agent. The tool safeguard always fires on a true 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune is allowed whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
 
 A `request_tool` recovery tool lets the agent re-enable a pruned tool mid-session; each recovery is logged to `data/pruning.jsonl` as the over-pruning quality signal.
 
@@ -30,6 +30,7 @@ Add a `pruning` block to `settings.json`:
     "provider": "github-copilot",
     "thinkingLevel": "minimal",
     "prepass": {
+      "temperature": 0.2,
       "timeoutMs": { "minimal": 30000, "low": 45000 },
       "maxTransportRetries": 2,
       "transportBackoffBaseMs": 1000,
@@ -61,14 +62,14 @@ Add a `pruning` block to `settings.json`:
 | `model` | `"gpt-5.4-mini"` | LLM model for relevance scoring |
 | `provider` | `"github-copilot"` | Provider for the scoring model |
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
-| `prepass` | _(built-in defaults)_ | Output, timeout, and manual retry budgets for the LLM prepass call; see [Prepass options](#prepass-options) |
+| `prepass` | _(built-in defaults)_ | Sampling, output, timeout, and manual retry controls for the LLM prepass call; see [Prepass options](#prepass-options) |
 | `autoSkipBelowTokens` | `1200` | Skip the LLM and keep all when the assembled prepass input (system prompt plus candidates) is below this estimate. Set `null` to disable |
 
 ### Skills options
 
 | Option | Default | Description |
 |---|---|---|
-| `strategy` | `"discretion"` | Pruning strategy (`discretion` = keep-biased, prune only clearly irrelevant items; `topK` = also steer toward the ceiling by pruning the least relevant) |
+| `strategy` | `"discretion"` | Pruning strategy (`discretion` = apply the >50% probability boundary independently; `topK` = use the ceiling only to break ties between borderline candidates) |
 | `ceiling` | `8` | Soft guidance communicated to the LLM on the effective context size; **not** a hard cap (hard-enforcing it would force over-pruning) |
 | `pinned` | `[]` | Skills protected from pruning regardless of the LLM's list |
 | `alwaysKeep` | `[]` | Skills protected from pruning regardless of the LLM's list (set via the UI's "Omitted skills (never pruned)") |
@@ -84,10 +85,11 @@ Add a `pruning` block to `settings.json`:
 
 ### Prepass options
 
-Tunable knobs for the LLM prepass call itself (timeouts + retry budgets). Every field is optional — an absent field (or an absent `prepass` block entirely) keeps the built-in default, so you only override the budgets you want to change.
+Tunable knobs for the LLM prepass call itself. Every field is optional — an absent field (or an absent `prepass` block entirely) keeps the provider/built-in default, so you only override the controls you want to change.
 
 | Option | Default | Description |
 |---|---|---|
+| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2, forwarded on every initial, correction, retry, and thinking-downgrade call. Local binary-classification experiments favored `.2`; omit it for providers/models that do not accept temperature overrides |
 | `maxOutputTokens` | _(disabled)_ | Optional scorer output cap, forwarded as pi-ai `maxTokens` on every initial, retry, and thinking-downgrade call. Use cautiously: some providers count hidden reasoning against this budget and may exhaust a low cap before emitting JSON |
 | `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
 | `maxTransportRetries` | `2` | Max extension-level classified transport retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables them. pi-ai `maxRetries` is always `0`, avoiding nested retry amplification |
@@ -96,7 +98,7 @@ Tunable knobs for the LLM prepass call itself (timeouts + retry budgets). Every 
 
 The latest successful parse-valid result is cached per session for 30 minutes. It is reused only when the catalog/config/context fingerprint is unchanged and the next prompt is identical or is an explicit continuation/retry phrase such as `continue`, `go ahead`, `retry`, or `fix this`. Cache hits still apply selection, emit feedback and analytics, and are marked `cached`; arbitrary short prompts are never reused. A second, bounded LRU cache (max 64 entries) additionally reuses a prior session's decision across sessions, but only on an **exact** prompt + fingerprint match (whitespace-normalized) — never on continuation prompts, which are context-dependent. The per-session cache is consulted first (it owns continuation semantics); a cross-session hit is promoted to the per-session cache so this session's later continuations still reuse it.
 
-Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`, which emit encrypted reasoning tokens before the prune-list JSON):
+Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`, which emit encrypted reasoning tokens before the keep-list JSON):
 
 | Thinking level | Default timeout |
 |---|---|

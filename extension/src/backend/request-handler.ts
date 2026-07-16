@@ -620,6 +620,7 @@ async function handleMessageSend(
   const attemptId = crypto.randomUUID();
   const canonicalMessageId = `${requestId}:1`;
   const modelId = context.session.model?.id;
+  const provider = context.session.model?.provider;
   const thinkingLevel = normalizeThinkingLevel(context.session.thinkingLevel);
   context.activeRequest = {
     id: requestId,
@@ -636,6 +637,7 @@ async function handleMessageSend(
       startedAt: Date.now(),
     }),
     modelId,
+    provider,
     thinkingLevel,
     // The first turn has no preceding tool call, so its latency window opens at
     // prompt-send. Subsequent turns overwrite this on `tool_execution_end`.
@@ -913,6 +915,7 @@ async function handleMessageInterrupt(
     const message = `Provider teardown did not settle within ${watchdogMs}ms. Pie interrupted the turn locally and is replacing the session runtime.`;
     const active = context.activeRequest;
     context.retired = true;
+    context.sessionManagerFence?.invalidate();
     context.uiBridge?.dispose();
     if (active?.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
     active?.pendingDurableToolTerminals?.clear();

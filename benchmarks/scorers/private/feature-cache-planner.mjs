@@ -1,1 +1,27 @@
-import{pathToFileURL}from"node:url";import{join}from"node:path";import{readFile}from"node:fs/promises";const[w,t]=process.argv.slice(2),{buildCachePlan}=await import(`${pathToFileURL(join(w,"src/planner.mjs"))}?x=${Date.now()}`),{evaluatePlan}=await import(pathToFileURL(join(t,"fixture/src/cache-runtime.mjs"))),{makeCatalog}=await import(pathToFileURL(join(t,"fixture/scripts/catalog.mjs"))),config=JSON.parse(await readFile(join(t,"fixture/config/cache.json"))),runs=[],started=performance.now();try{for(const seed of[107,239,419,601,887]){const f=makeCatalog(seed,34);runs.push(evaluatePlan(f,config,buildCachePlan(structuredClone(f),structuredClone(config))));}}catch(error){console.log(JSON.stringify({valid:false,score:0,metrics:{error:String(error)}}));process.exit(1);}const runtimeMs=performance.now()-started,valid=runs.every(r=>r.valid)&&runtimeMs<1000,score=valid?runs.reduce((n,r)=>n+r.quality,0)/runs.length:0;console.log(JSON.stringify({valid,score:Math.max(0,Math.min(1,score)),metrics:{runtimeMs,savedCompute:runs.reduce((n,r)=>n+(r.metrics.savedCompute||0),0)/runs.length,freshnessPenalty:runs.reduce((n,r)=>n+(r.metrics.freshnessPenalty||0),0)/runs.length,usedBytes:runs.reduce((n,r)=>n+(r.metrics.usedBytes||0),0)/runs.length}}));if(!valid)process.exitCode=1;
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { emitScore, runIsolatedCases } from "./isolated-cases.mjs";
+
+const [workspace, taskDir, mode, encodedCase] = process.argv.slice(2);
+if (mode === "--case") {
+  try {
+    const seed = JSON.parse(encodedCase);
+    const { buildCachePlan } = await import(`${pathToFileURL(join(workspace, "src/planner.mjs"))}?case=${seed}`);
+    const { evaluatePlan } = await import(pathToFileURL(join(taskDir, "fixture/src/cache-runtime.mjs")));
+    const { makeCatalog } = await import(pathToFileURL(join(taskDir, "fixture/scripts/catalog.mjs")));
+    const config = JSON.parse(await readFile(join(taskDir, "fixture/config/cache.json")));
+    const features = makeCatalog(seed, 34);
+    const started = performance.now();
+    const run = evaluatePlan(features, config, buildCachePlan(structuredClone(features), structuredClone(config)));
+    emitScore({ valid: run.valid, quality: run.quality, runtimeMs: performance.now() - started, metrics: run.metrics });
+  } catch (error) {
+    emitScore({ valid: false, metrics: { error: String(error) } });
+  }
+} else {
+  const isolated = runIsolatedCases(import.meta.url, workspace, taskDir, [107, 239, 419, 601, 887]);
+  const runtimeMs = isolated.runs.reduce((sum, run) => sum + run.runtimeMs, 0);
+  const valid = isolated.valid && runtimeMs < 1000;
+  const average = key => isolated.runs.reduce((sum, run) => sum + (run.metrics?.[key] || 0), 0) / isolated.runs.length;
+  emitScore({ valid, score: valid ? isolated.runs.reduce((sum, run) => sum + run.quality, 0) / isolated.runs.length : 0, metrics: valid ? { runtimeMs, savedCompute: average("savedCompute"), freshnessPenalty: average("freshnessPenalty"), usedBytes: average("usedBytes") } : { runtimeMs, ...isolated.failure } });
+}

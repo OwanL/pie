@@ -31,6 +31,7 @@ test('prepareSourceAnalytics preserves run timing totals and failure-only tool r
   run.toolUsage.totalCount = 2;
   run.toolUsage.timedCallCount = 2;
   run.toolUsage.totalDurationMs = 12_500;
+  run.toolUsage.criticalPathDurationMs = 9_000;
   run.toolUsage.countsByName = { bash: 2 };
   run.toolUsage.durationMsByName = { bash: 500, '(unknown)': 12_000 };
   run.toolUsage.failureCountsByName = { '(unknown)': 3 };
@@ -43,6 +44,7 @@ test('prepareSourceAnalytics preserves run timing totals and failure-only tool r
   );
 
   assert.equal(preparedRun?.toolDurationMs, 12_500);
+  assert.equal(preparedRun?.criticalPathDurationMs, 9_000);
   assert.equal(preparedRun?.timedToolCallCount, 2);
   assert.deepEqual(unknownUsage && {
     callCount: unknownUsage.callCount,
@@ -116,6 +118,7 @@ test('prepareSourceAnalytics aggregates skill-pruning prepass tokens without dou
       outputTokens: 20,
       cacheReadTokens: 5,
       cacheWriteTokens: 3,
+      durationMs: 250,
     },
     {
       kind: 'skill_pruning_prepass',
@@ -137,6 +140,7 @@ test('prepareSourceAnalytics aggregates skill-pruning prepass tokens without dou
   assert.equal(row.skillPruningPrepassOutputTokens, 30);
   assert.equal(row.skillPruningPrepassCacheReadTokens, 5);
   assert.equal(row.skillPruningPrepassCacheWriteTokens, 3);
+  assert.equal(row.skillPruningPrepassDurationMs, 250);
   assert.equal(row.inputTokens, 1000);
 });
 
@@ -164,14 +168,44 @@ test('prepareSourceAnalytics preserves per-turn provider in throughput rows', as
   const run = fixture.completedRuns[0] as any;
   run.provider = 'openai';
   run.turnThroughputSamples = [
-    { endedAt: '2026-05-10T14:08:00.000Z', outputTokens: 100, generationDurationMs: 1000, concurrentBusySessions: 1, status: 'completed' },
+    { endedAt: '2026-05-10T14:08:00.000Z', outputTokens: 100, generationDurationMs: 1000, concurrentBusySessions: 1, status: 'completed', providerQueueMs: 75, providerQueueAttemptCount: 2 },
     { endedAt: '2026-05-10T14:09:00.000Z', outputTokens: 200, generationDurationMs: 2000, concurrentBusySessions: 1, status: 'completed', provider: 'anthropic' },
   ];
 
   const prepared = prepareSourceAnalytics(fixture);
   const rows = prepared.turnThroughput.filter((row) => row.runId === run.runId);
   assert.equal(rows[0]?.provider, 'openai');
+  assert.equal(rows[0]?.providerQueueMs, 75);
+  assert.equal(rows[0]?.providerQueueAttemptCount, 2);
   assert.equal(rows[1]?.provider, 'anthropic');
+  assert.equal(rows[1]?.providerQueueMs, null);
+  assert.equal(rows[1]?.providerQueueAttemptCount, 0);
+});
+
+test('prepareSourceAnalytics flattens retry timing with run attribution', async () => {
+  const fixture = deepClone(await loadFixture());
+  const run = fixture.completedRuns[0] as any;
+  run.provider = 'openai';
+
+  const prepared = prepareSourceAnalytics(fixture);
+  const retry = prepared.retryTiming.find((row) => row.runId === run.runId);
+  assert.deepEqual(retry && {
+    sourceId: retry.sourceId,
+    attempt: retry.attempt,
+    scheduledDelayMs: retry.scheduledDelayMs,
+    measuredDelayMs: retry.measuredDelayMs,
+    durationMs: retry.durationMs,
+    modelId: retry.modelId,
+    provider: retry.provider,
+  }, {
+    sourceId: 'run-001-retry-1',
+    attempt: 1,
+    scheduledDelayMs: 1000,
+    measuredDelayMs: 1080,
+    durationMs: 4200,
+    modelId: 'gpt-4.1',
+    provider: 'openai',
+  });
 });
 
 test('prepareSourceAnalytics exposes tool result issue rows separate from execution failures', async () => {

@@ -100,19 +100,22 @@ afterEach(() => {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-test('provider transport phases keep headers and raw chunks as distinct observations', async () => {
-	const observations: string[] = [];
-	const stop = observeProviderTransport((observation) => observations.push(observation.kind));
+test('provider transport phases correlate one attempt and explicitly record an immediate zero queue', async () => {
+	const observations: Array<{ kind: string; attemptId: string; queueDurationMs?: number }> = [];
+	const stop = observeProviderTransport((observation) => observations.push(observation));
 	try {
 		ProviderGate.install([BASE_CONFIG], 0);
 		const response = await fetch(`${TEST_BASE}/chat/completions`, makeInit('session-progress'));
 		await response.text();
-		assert.deepEqual(observations, [
+		assert.deepEqual(observations.map((observation) => observation.kind), [
+			'gate_acquired',
 			'headers_wait',
 			'headers_received',
 			'raw_chunk',
 			'transport_terminal',
 		]);
+		assert.equal(observations[0]?.queueDurationMs, 0);
+		assert.equal(new Set(observations.map((observation) => observation.attemptId)).size, 1);
 	} finally {
 		stop();
 	}
@@ -195,6 +198,36 @@ describe('ProviderGate — concurrency limiting', () => {
 		]);
 
 		assert.equal(maxInFlight, 1, 'only 1 request should be in-flight at a time');
+	});
+
+	test('queued grants report measured duration under their own attempt identity', async () => {
+		const observations: Array<{ sessionId: string; attemptId: string; kind: string; queueDurationMs?: number }> = [];
+		const stop = observeProviderTransport((observation) => observations.push(observation));
+		let releaseFirst!: () => void;
+		const held = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls += 1;
+			if (calls === 1) await held;
+			return makeStreamingResponse([new TextEncoder().encode('data: ok\n\n')]);
+		};
+		try {
+			ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1, queueWaitSeconds: 0 }], 0);
+			const first = fetch(TEST_BASE + '/chat', makeInit('queue-first'));
+			while (calls < 1) await new Promise((resolve) => setImmediate(resolve));
+			const second = fetch(TEST_BASE + '/chat', makeInit('queue-second'));
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			releaseFirst();
+			await Promise.all([first, second]);
+
+			const queued = observations.find((observation) => observation.sessionId === 'queue-second' && observation.kind === 'gate_queue');
+			const acquired = observations.find((observation) => observation.sessionId === 'queue-second' && observation.kind === 'gate_acquired');
+			assert.ok(queued && acquired);
+			assert.equal(acquired.attemptId, queued.attemptId);
+			assert.ok((acquired.queueDurationMs ?? 0) >= 15);
+		} finally {
+			stop();
+		}
 	});
 
 	test('saturated queue rejects with ProviderGateSaturatedError', async () => {
@@ -572,7 +605,10 @@ describe('ProviderGate — header-phase timeout', () => {
 		};
 		const gate = ProviderGate.install([config], 0, {
 			transportFailureThreshold: 2,
-			transportCircuitCooldownSeconds: 0.05,
+			// Keep this well above event-loop scheduling jitter from the fully
+			// parallel pre-commit suite. This test verifies immediate local
+			// short-circuiting, not half-open cooldown expiry.
+			transportCircuitCooldownSeconds: 5,
 		});
 
 		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('s1')), ProviderGateHeaderTimeoutError);

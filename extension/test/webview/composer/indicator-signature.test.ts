@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { ChatMessage, SystemPromptEntry } from '../../../src/shared/protocol';
+import type { ChatMessage, SystemPromptEntry, ToolCall } from '../../../src/shared/protocol';
 import {
   streamingContentSignature,
   subagentCostSignature,
+  subagentToolCallRevision,
   systemPromptsSignature,
   transcriptUsageSignature,
 } from '../../../src/webview/panel/composer/indicator-signature';
@@ -187,4 +188,94 @@ test('subagentCostSignature uses the parts tool-call path when toolCalls is abse
   toolCall.status = 'completed';
   toolCall.result = { content: [], details: { mode: 'single', results: [] } };
   assert.notEqual(subagentCostSignature(completed), sig);
+});
+
+// ── subagentToolCallRevision (REM-04: cheap revision gate for subagentCostSignature) ──
+
+test('subagentToolCallRevision is stable while only the streaming message text grows', () => {
+  // The revision is built from the tool call's monotonic `seq`, not the growing
+  // streaming prose. Growing the message markdown must NOT change the revision
+  // — this is what lets the `subagentCostSignature` useMemo skip its recursive
+  // walk on unchanged snapshots.
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: 'w0',
+    toolCalls: [{ id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1, seq: 5 }],
+  })];
+  const rev = subagentToolCallRevision(base);
+  const grown = structuredClone(base);
+  grown[0].markdown += ' growing prose';
+  assert.equal(subagentToolCallRevision(grown), rev);
+});
+
+test('subagentToolCallRevision changes when the subagent seq advances (preview change)', () => {
+  // A seq advance signals a structural preview change (streaming-text append,
+  // usage update, etc.). The revision must change so the fingerprint memo
+  // re-runs and reflects the new content.
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: 'w0',
+    toolCalls: [{ id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1, seq: 5 }],
+  })];
+  const rev = subagentToolCallRevision(base);
+  const advanced = structuredClone(base);
+  (advanced[0].toolCalls![0] as ToolCall).seq = 6;
+  assert.notEqual(subagentToolCallRevision(advanced), rev);
+});
+
+test('subagentToolCallRevision changes when the last message tool call completes (result lands)', () => {
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: 'w0',
+    toolCalls: [{ id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1 }],
+  })];
+  const rev = subagentToolCallRevision(base);
+  const completed = structuredClone(base);
+  completed[0].toolCalls![0].status = 'completed';
+  completed[0].toolCalls![0].result = { content: [], details: { mode: 'single', results: [] } };
+  assert.notEqual(subagentToolCallRevision(completed), rev);
+});
+
+test('subagentToolCallRevision changes when a nested subagent completes (parent seq advances)', () => {
+  // Correctness for nested completion changes: a nested subagent completing
+  // causes the backend to emit a progress event for the parent tool, advancing
+  // its `seq`. The revision must change so the cost fingerprint re-runs and
+  // picks up the nested result's new exitCode/usage/cost.
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: 'w0',
+    toolCalls: [{
+      id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1, seq: 5,
+      result: { mode: 'single', results: [{ agent: 'a', task: 't', exitCode: -1, messages: [] }] },
+    }],
+  })];
+  const rev = subagentToolCallRevision(base);
+  const nested = structuredClone(base);
+  (nested[0].toolCalls![0] as ToolCall).seq = 6;
+  assert.notEqual(subagentToolCallRevision(nested), rev,
+    'parent seq advance (nested completion) changes the revision');
+});
+
+test('subagentToolCallRevision and subagentCostSignature are stable together (memo skip proof)', () => {
+  // The revision gates the fingerprint memo: when the revision is unchanged,
+  // the memo skips `subagentCostSignature` entirely. This proves both are
+  // stable under the same "only streaming prose grew" condition, so the memo
+  // skip is sound — the fingerprint would not have changed anyway.
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: 'w0',
+    toolCalls: [{ id: 'tc1', name: 'subagent', input: {}, status: 'running', startedAt: 1, seq: 5,
+      result: { mode: 'single', results: [{ agent: 'a', task: 't', exitCode: -1, messages: [] }] } }],
+  })];
+  const rev = subagentToolCallRevision(base);
+  const sig = subagentCostSignature(base);
+  const grown = structuredClone(base);
+  grown[0].markdown += ' more streaming prose';
+  assert.equal(subagentToolCallRevision(grown), rev, 'revision stable');
+  assert.equal(subagentCostSignature(grown), sig, 'fingerprint stable');
 });

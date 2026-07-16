@@ -90,6 +90,14 @@ export function kindSuffixFor(entry: ContextWindowBreakdownEntry): string | unde
   return undefined;
 }
 
+export function remainingTokensForChart(
+  summary: ContextWindowBreakdown['summary'],
+): number {
+  if (summary.remainingTokens !== null) return summary.remainingTokens;
+  if (summary.usedTokens === null) return 0;
+  return Math.max(summary.totalWindow - summary.usedTokens, 0);
+}
+
 export interface BarLayout {
   /** Per-used-segment width (% of the bar), after min-width bumping and
    *  saturation scaling. Length matches the input `usedSegments`. */
@@ -153,7 +161,10 @@ function ContextWindowBreakdownChartBase({
   }
 
   const used = summary.usedTokens ?? 0;
-  const remaining = summary.remainingTokens ?? Math.max(total - used, 0);
+  // Null means unknown, not "the whole window remains". In particular, a
+  // freshly reopened compacted session may have neither a PI usage snapshot nor
+  // enough boundary metadata to estimate used/remaining safely.
+  const remaining = remainingTokensForChart(summary);
 
   const usedSegments: Segment[] = entries
     .filter((e) => (e.tokens ?? 0) > 0)

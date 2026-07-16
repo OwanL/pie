@@ -132,6 +132,8 @@ export interface ChatMessage {
   draftingToolCall?: DraftingToolCall;
   /** Model id used for this assistant response, when the backend can determine it. */
   modelId?: string;
+  /** Provider that served this response; disambiguates model ids shared across providers. */
+  provider?: string;
   /** Reasoning/thinking level used for this assistant response, when available. */
   thinkingLevel?: ThinkingLevel;
   status: 'streaming' | 'completed' | 'interrupted' | 'error' | 'queued';
@@ -167,6 +169,11 @@ export interface ChatMessage {
    * Undefined when not measurable.
    */
   providerLatencyMs?: number;
+  /** Provider-gate permit wait across correlated attempts for this turn. Zero
+   * is an observed immediate grant; undefined means unavailable. */
+  providerQueueMs?: number;
+  /** Number of correlated provider attempts included in `providerQueueMs`. */
+  providerQueueAttemptCount?: number;
   /** Token accounting reported by the provider for this assistant turn, when available. */
   usage?: AssistantUsage;
   /** Custom message type from a pi extension (e.g. 'pruning-result'). Present on system messages mapped from custom_message entries. */

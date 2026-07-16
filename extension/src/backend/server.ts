@@ -69,6 +69,7 @@ import {
 } from './transcript-window';
 import type { SessionEntryLike } from './transcript';
 import { createRuntimeFactory } from './runtime-factory.js';
+import { createSessionManagerFence } from './session-manager-fence';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
 
@@ -157,6 +158,14 @@ export class BackendServer {
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
   private stopProviderProgressObserver?: () => void;
+  /** Captures request+turn ownership at an attempt's first synchronous gate
+   * observation so a late acquisition cannot be charged to a newer request. */
+  private readonly providerAttemptOwners = new Map<string, {
+    context: SessionContext;
+    requestId: string;
+    turnSequence: number;
+    retryId?: string;
+  }>();
 
   constructor(options: { sdkPath: string; cwd: string }) {
     this.sdkPath = options.sdkPath;
@@ -199,10 +208,50 @@ export class BackendServer {
     });
 
     this.stopProviderProgressObserver = observeProviderTransport((observation) => {
-      const context = [...this.sessionContexts.values()].find((candidate) =>
+      const currentContext = [...this.sessionContexts.values()].find((candidate) =>
         candidate.session.sessionManager.getSessionId?.() === observation.sessionId,
       );
-      const accumulator = context?.activeRequest?.liveTurnAccumulator;
+      const currentRequest = currentContext?.activeRequest;
+      let owner = this.providerAttemptOwners.get(observation.attemptId);
+      if (!owner && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')
+        && currentContext && currentRequest && currentRequest.providerTurnSequence !== undefined) {
+        owner = {
+          context: currentContext,
+          requestId: currentRequest.id,
+          turnSequence: currentRequest.providerTurnSequence,
+          retryId: currentRequest.retryTiming?.retryId,
+        };
+        this.providerAttemptOwners.set(observation.attemptId, owner);
+      }
+
+      const ownerRequest = owner?.context.activeRequest;
+      const ownsCurrentRequest = owner !== undefined && ownerRequest?.id === owner.requestId;
+      if (owner && ownerRequest?.id === owner.requestId) {
+        if (owner.retryId !== undefined
+          && ownerRequest.retryTiming?.retryId === owner.retryId
+          && ownerRequest.retryTiming.providerAttemptStartedAt === undefined
+          && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')) {
+          ownerRequest.retryTiming.providerAttemptStartedAt = observation.occurredAt;
+        }
+        if (observation.kind === 'gate_acquired'
+          && typeof observation.queueDurationMs === 'number'
+          && Number.isFinite(observation.queueDurationMs)) {
+          const queueByTurn = ownerRequest.providerQueueByTurn ?? new Map();
+          const previous = queueByTurn.get(owner.turnSequence) ?? { durationMs: 0, attemptCount: 0 };
+          queueByTurn.set(owner.turnSequence, {
+            durationMs: previous.durationMs + Math.max(0, Math.trunc(observation.queueDurationMs)),
+            attemptCount: previous.attemptCount + 1,
+          });
+          ownerRequest.providerQueueByTurn = queueByTurn;
+        }
+      }
+      if (observation.kind === 'gate_rejected' || observation.kind === 'headers_received'
+        || observation.kind === 'transport_terminal' || observation.kind === 'transport_error') {
+        this.providerAttemptOwners.delete(observation.attemptId);
+      }
+
+      const context = owner?.context ?? currentContext;
+      const accumulator = ownsCurrentRequest ? ownerRequest.liveTurnAccumulator : undefined;
       const checkpointSeq = accumulator?.checkpoint().checkpointSeq ?? 0;
       if (context && accumulator && checkpointSeq > 0) {
         if (observation.kind === 'gate_queue') {
@@ -217,7 +266,8 @@ export class BackendServer {
           kind: 'transition',
           identifiers: {
             session: context.sessionPath,
-            ...(context.activeRequest?.id ? { request: context.activeRequest.id } : {}),
+            ...(ownsCurrentRequest && owner ? { request: owner.requestId } : {}),
+            attempt: observation.attemptId,
           },
           phase: observation.kind === 'gate_queue'
             ? 'provider_gate_queue'
@@ -350,6 +400,7 @@ export class BackendServer {
       cleanup('watchdog cleanup', () => existing.willRetryWatchdogClear?.());
       cleanup('UI disposal', () => existing.uiBridge?.dispose());
       cleanup('unsubscribe', () => existing.unsubscribe());
+      cleanup('session manager fence', () => existing.sessionManagerFence?.invalidate());
       // A provider teardown can wedge the old runtime. The replacement becomes
       // authoritative immediately; old disposal is bounded best-effort and
       // must not block local recovery or the next send.
@@ -385,11 +436,14 @@ export class BackendServer {
   }): Promise<SessionContext> {
     return await timed('buildSessionContext', async () => {
       const { sessionManager, reason } = options;
+      const { manager: fencedSessionManager, fence: sessionManagerFence } = createSessionManagerFence(sessionManager);
       const previousSessionFile = this.viewedSessionPath;
-      const runtime = await this.sdk.createAgentSessionRuntime(this.createRuntimeFactory(), {
-        cwd: sessionManager.getCwd() || this.startupCwd,
+      let runtime: SessionContext['runtime'] | undefined;
+      try {
+      runtime = await this.sdk.createAgentSessionRuntime(this.createRuntimeFactory(), {
+        cwd: fencedSessionManager.getCwd() || this.startupCwd,
         agentDir: this.agentDir,
-        sessionManager,
+        sessionManager: fencedSessionManager,
         sessionStartEvent: previousSessionFile
           ? {
               type: 'session_start',
@@ -402,7 +456,6 @@ export class BackendServer {
       const session = runtime.session;
       const sessionPath = this.resolveSessionPath(session);
       if (!sessionPath) {
-        await runtime.dispose();
         throw new Error('The PI session did not expose a session path.');
       }
 
@@ -413,6 +466,7 @@ export class BackendServer {
         unsubscribe: () => undefined,
         busySeq: 0,
         lastContextUsage: undefined,
+        sessionManagerFence,
       };
 
       // Wire the ExtensionUI bridge so extensions can ask questions through the webview.
@@ -463,6 +517,17 @@ export class BackendServer {
       }
 
       return context;
+      } catch (error) {
+        sessionManagerFence.invalidate();
+        if (runtime) {
+          try {
+            await runtime.dispose();
+          } catch {
+            // Construction failure remains authoritative; disposal is best effort.
+          }
+        }
+        throw error;
+      }
     });
   }
 
@@ -592,13 +657,30 @@ export class BackendServer {
     if (!contextWindow) {
       return undefined;
     }
-    return deriveContextUsageFromBranch(
+    const measuredUsage = deriveContextUsageFromBranch(
       context.session.sessionManager.getBranch(),
       contextWindow,
     );
+    if (measuredUsage) {
+      context.postCompactionEstimatedTokens = undefined;
+      return measuredUsage;
+    }
+
+    const estimatedTokens = context.postCompactionEstimatedTokens;
+    if (estimatedTokens === undefined) {
+      return undefined;
+    }
+    return {
+      tokens: estimatedTokens,
+      contextWindow,
+      percent: Math.min(100, Math.max(0, (estimatedTokens / contextWindow) * 100)),
+    };
   }
 
-  private emitContextUsageChanged(context: SessionContext): void {
+  private emitContextUsageChanged(context: SessionContext, postCompactionEstimatedTokens?: number): void {
+    if (postCompactionEstimatedTokens !== undefined) {
+      context.postCompactionEstimatedTokens = postCompactionEstimatedTokens;
+    }
     const nextUsage = this.getContextUsage(context) ?? null;
     const previousUsage = context.lastContextUsage;
     const changed = previousUsage === undefined
@@ -937,7 +1019,9 @@ export class BackendServer {
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
       emitBusyChanged: (sessionContext, busy) => this.emitBusyChanged(sessionContext, busy),
-      emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
+      emitContextUsageChanged: (sessionContext, postCompactionEstimatedTokens) => (
+        this.emitContextUsageChanged(sessionContext, postCompactionEstimatedTokens)
+      ),
       emitSessionOpened: (sessionPath, selectionToken) => this.emitSessionOpened(sessionPath, selectionToken),
       emitSessionListChanged: () => this.emitSessionListChanged(),
       recoverStuckSession: (sessionContext, reason) => {
@@ -972,6 +1056,7 @@ export class BackendServer {
         });
       }
     };
+    bestEffort('session manager fence', () => context.sessionManagerFence?.invalidate());
     bestEffort('watchdog cleanup', () => context.willRetryWatchdogClear?.());
     context.willRetryWatchdogClear = undefined;
     if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
@@ -1068,11 +1153,13 @@ export class BackendServer {
     this.stopReviewWatcher = undefined;
     this.stopProviderProgressObserver?.();
     this.stopProviderProgressObserver = undefined;
+    this.providerAttemptOwners.clear();
 
     for (const context of contexts) {
       context.willRetryWatchdogClear?.();
       context.uiBridge?.dispose();
       context.unsubscribe();
+      context.sessionManagerFence?.invalidate();
       await context.runtime.dispose();
     }
   }

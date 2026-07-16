@@ -30,6 +30,8 @@ export interface MessageItemProps {
   onContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
   isLastAssistantMessage?: boolean;
+  /** Timestamp of the user request that owns this assistant reply. */
+  requestCreatedAt?: string;
   /** Pruning diagnostics folded into this assistant turn's header, when present. */
   pruningHeaderState?: PruningHeaderState;
   /** Structured in-flight activity for the current turn (last assistant row only). */
@@ -62,6 +64,7 @@ export function MessageItemView({
   onContextMenu,
   renderToolCall,
   isLastAssistantMessage,
+  requestCreatedAt,
   pruningHeaderState,
   activityState,
   recovery,
@@ -136,6 +139,7 @@ export function MessageItemView({
         statusTone={derived.statusTone}
         replyMeta={derived.replyMeta}
         assistantMetaTooltip={derived.assistantMetaTooltip}
+        requestCreatedAt={requestCreatedAt}
         html={derived.html}
         getMessageRaw={derived.getMessageRaw}
         combinedParts={combinedParts}
@@ -174,7 +178,7 @@ export const MessageItem = memo(MessageItemView, areMessageItemPropsEqual);
  * `useCallback`-stable from `useAppHandlers`; `prefs` is reference-stabilized
  * in `hydrateViewState`; `recovery` is interned by `userId`; `renderToolCall`
  * is `useCallback`-stable) or primitives (`isStreaming`, `editingId`,
- * `sessionKey`, …), so shallow `===` is correct for them.
+ * `requestCreatedAt`, `sessionKey`, …), so shallow `===` is correct for them.
  *
  * `activityState` and `pruningHeaderState` are fresh references on every
  * snapshot (they come from the freshly-rebuilt `rows` array). That's fine: they
@@ -192,6 +196,7 @@ export function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageIt
     prev.workingDirectory === next.workingDirectory &&
     prev.editingId === next.editingId &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&
+    prev.requestCreatedAt === next.requestCreatedAt &&
     prev.sessionKey === next.sessionKey &&
     prev.onEditRequest === next.onEditRequest &&
     prev.onEditConfirm === next.onEditConfirm &&

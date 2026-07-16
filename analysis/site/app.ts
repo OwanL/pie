@@ -15,6 +15,7 @@ import type {
   ModelQualityData,
   OverviewData,
   PruningImpactData,
+  RetryTimingData,
   RunSummaryData,
   PreparedRunRow,
   PreparedToolUsageRow,
@@ -39,6 +40,7 @@ interface DashboardData {
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;
+  retryTiming: RetryTimingData;
   modelLeaderboard: ModelLeaderboardData;
 }
 
@@ -4375,6 +4377,7 @@ async function renderCharts(
     runs,
     toolRows,
     turnThroughputRows: data.tokenThroughput.rows,
+    retryTimingRows: data.retryTiming.rows,
     renderToken,
     pruning: data.pruningImpact,
     backendErrors: data.backendErrors,
@@ -4497,6 +4500,10 @@ function emptyTokenThroughputData(schemaVersion: number): TokenThroughputData {
   return { schemaVersion, rows: [], notes: [] };
 }
 
+function emptyRetryTimingData(schemaVersion: number): RetryTimingData {
+  return { schemaVersion, rows: [], notes: [] };
+}
+
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -4505,7 +4512,7 @@ async function main(): Promise<void> {
     fetchJson<RunSummaryData>('./data/run-summary.json'),
   ]);
 
-  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput, modelLeaderboard] = await Promise.all([
+  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard] = await Promise.all([
     fetchOptionalJson<OverviewData>('./data/overview.json'),
     fetchOptionalJson<ModelQualityData>('./data/model-quality.json'),
     fetchOptionalJson<VerificationImpactData>('./data/verification-impact.json'),
@@ -4516,11 +4523,12 @@ async function main(): Promise<void> {
     fetchOptionalJson<BackendErrorData>('./data/backend-errors.json'),
     fetchOptionalJson<FileExtensionData>('./data/file-types.json'),
     fetchOptionalJson<TokenThroughputData>('./data/token-throughput.json'),
+    fetchOptionalJson<RetryTimingData>('./data/retry-timing.json'),
     fetchOptionalJson<ModelLeaderboardData>('./data/model-leaderboard.json'),
   ]);
 
   const precomputedAvailable = Boolean(
-    overview && modelQuality && verificationImpact && toolUsage && treatmentComparison && timeline && pruningImpact && backendErrors && fileExtensions && tokenThroughput && modelLeaderboard,
+    overview && modelQuality && verificationImpact && toolUsage && treatmentComparison && timeline && pruningImpact && backendErrors && fileExtensions && tokenThroughput && retryTiming && modelLeaderboard,
   );
 
   if (!precomputedAvailable) {
@@ -4540,6 +4548,7 @@ async function main(): Promise<void> {
     backendErrors: backendErrors ?? emptyBackendErrorsData(manifest.schemaVersion),
     fileExtensions: fileExtensions ?? emptyFileExtensionsData(manifest.schemaVersion),
     tokenThroughput: tokenThroughput ?? emptyTokenThroughputData(manifest.schemaVersion),
+    retryTiming: retryTiming ?? emptyRetryTimingData(manifest.schemaVersion),
     modelLeaderboard: modelLeaderboard ?? createModelLeaderboardFromRuns(runSummary.rows),
   };
 

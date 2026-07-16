@@ -7,6 +7,7 @@ import type { ChatMessage } from '../../../../shared/protocol';
 import {
   assistantReplyMeta,
   formatDuration,
+  formatRequestTime,
   roleLabel,
 } from '../header';
 import { MessageHeader } from '../message-header';
@@ -53,6 +54,7 @@ interface MessageItemHeaderProps {
   durationMs: number | undefined;
   replyMeta: ReturnType<typeof assistantReplyMeta>;
   assistantMetaTooltip: string | null;
+  requestCreatedAt?: string;
   actions: ComponentChildren;
   /** Host-side synthetic-send tag. `'deferred-trigger'` surfaces an
    *  "Auto-resume" label on the user bubble so the wake-up message is
@@ -66,6 +68,7 @@ export function MessageItemHeader({
   durationMs,
   replyMeta,
   assistantMetaTooltip,
+  requestCreatedAt,
   actions,
   customType,
 }: MessageItemHeaderProps) {
@@ -73,11 +76,15 @@ export function MessageItemHeader({
   // is a host-injected user message, so badge it with "Auto-resume" to make
   // that visible while keeping it honest (still a user-role bubble).
   const userLabel = customType === 'deferred-trigger' ? 'Auto-resume' : null;
+  const requestTime = role === 'assistant' ? formatRequestTime(requestCreatedAt) : null;
   return (
     <MessageHeader
       label={role !== 'user' ? roleLabel(role) : userLabel}
       duration={role === 'assistant' && !isCurrentlyStreaming && durationMs !== undefined ? formatDuration(durationMs) : null}
       meta={replyMeta?.compactText ?? null}
+      timestamp={requestTime?.compactText ?? null}
+      timestampTitle={requestTime?.title}
+      timestampDateTime={requestCreatedAt}
       title={assistantMetaTooltip ?? undefined}
       actions={actions}
       align={role === 'user' ? 'end' : 'start'}

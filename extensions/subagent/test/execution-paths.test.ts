@@ -439,9 +439,9 @@ test("runSingleAgent returns an abort result when the parent aborts before creat
 
 	releaseCreateSession?.();
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	assert.equal(state.promptCalls, 0);
-	assert.equal(state.abortCalls, 0, "no session existed to abort");
-	assert.equal(state.disposeCalls, 0, "late-created sessions are not tracked after the caller settled");
+	assert.equal(state.promptCalls, 0, "a late-resolved orphan never reaches prompt");
+	assert.equal(state.abortCalls, 0, "no session existed to abort at local settlement");
+	assert.equal(state.disposeCalls, 1, "late-created sessions are tracked by the orphan registry and disposed exactly once");
 });
 
 test("runSingleAgent returns timeout failure and calls cancelAll", async () => {

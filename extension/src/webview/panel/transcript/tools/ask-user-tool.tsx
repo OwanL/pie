@@ -86,6 +86,10 @@ function AskUserCompleted({ toolCall, parsedInput, parsedResult, onContextMenu }
   const contextType = getToolCallContextType('ask_user');
   const handleContextMenu = (e: MouseEvent) => onContextMenu(contextType, JSON.stringify(toolCall, null, 2), e);
   const questionHtml = useMemo(() => renderMarkdown(parsedInput.question), [parsedInput.question]);
+  const contextHtml = useMemo(
+    () => (parsedInput.context ? renderMarkdown(parsedInput.context) : ''),
+    [parsedInput.context],
+  );
 
   return (
     <div
@@ -96,6 +100,29 @@ function AskUserCompleted({ toolCall, parsedInput, parsedResult, onContextMenu }
         <span class="ask-user-icon ask-user-icon-completed" aria-hidden="true"><QuestionIcon /></span>
         <div class="ask-user-question ask-user-question-completed ask-prose" dangerouslySetInnerHTML={{ __html: questionHtml }} />
       </div>
+      {parsedInput.context && (
+        <div class="ask-user-context ask-prose" dangerouslySetInnerHTML={{ __html: contextHtml }} />
+      )}
+      {parsedInput.options.length > 0 && (
+        <div class="ask-user-options">
+          <span class="ask-user-answer-label">Options:</span>
+          <div class="ask-user-option-list" role="list" aria-label="Proposed answers">
+            {parsedInput.options.map((option, index) => {
+              const selected = parsedResult?.source === 'option' && parsedResult.answer === option;
+              return (
+                <span
+                  key={`${option}-${index}`}
+                  class={`ask-user-option${selected ? ' ask-user-option-selected' : ''}`}
+                  role="listitem"
+                  aria-label={selected ? `${option}, selected answer` : undefined}
+                >
+                  {option}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {parsedResult && !parsedResult.cancelled && (
         <div class="ask-user-answer">
           <span class="ask-user-answer-label">Answer:</span>

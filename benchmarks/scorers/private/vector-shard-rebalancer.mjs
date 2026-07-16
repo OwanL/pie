@@ -1,1 +1,27 @@
-import {pathToFileURL} from "node:url";import {join} from "node:path";import {readFile} from "node:fs/promises";const[w,t]=process.argv.slice(2);const{rebalance}=await import(`${pathToFileURL(join(w,"src/rebalance.mjs"))}?x=${Date.now()}`),{evaluatePlacement}=await import(pathToFileURL(join(t,"fixture/src/topology-runtime.mjs"))),{makeTopology}=await import(pathToFileURL(join(t,"fixture/scripts/topology-data.mjs")));const limits=JSON.parse(await readFile(join(t,"fixture/config/rebalance.json"))),runs=[],started=performance.now();try{for(const seed of[109,227,401,599,811]){const top=makeTopology(seed,21);runs.push(evaluatePlacement(top,limits,rebalance(structuredClone(top),structuredClone(limits))));}}catch(error){console.log(JSON.stringify({valid:false,score:0,metrics:{error:String(error)}}));process.exit(1);}const runtimeMs=performance.now()-started,valid=runs.every(r=>r.valid)&&runtimeMs<1000,score=valid?runs.reduce((n,r)=>n+r.quality,0)/runs.length:0;console.log(JSON.stringify({valid,score:Math.max(0,Math.min(1,score)),metrics:{runtimeMs,peakUtilization:runs.reduce((n,r)=>n+(r.metrics.peakUtilization||1),0)/runs.length,migrationCost:runs.reduce((n,r)=>n+(r.metrics.migrationCost||0),0)/runs.length}}));if(!valid)process.exitCode=1;
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { emitScore, runIsolatedCases } from "./isolated-cases.mjs";
+
+const [workspace, taskDir, mode, encodedCase] = process.argv.slice(2);
+if (mode === "--case") {
+  try {
+    const seed = JSON.parse(encodedCase);
+    const { rebalance } = await import(`${pathToFileURL(join(workspace, "src/rebalance.mjs"))}?case=${seed}`);
+    const { evaluatePlacement } = await import(pathToFileURL(join(taskDir, "fixture/src/topology-runtime.mjs")));
+    const { makeTopology } = await import(pathToFileURL(join(taskDir, "fixture/scripts/topology-data.mjs")));
+    const limits = JSON.parse(await readFile(join(taskDir, "fixture/config/rebalance.json")));
+    const topology = makeTopology(seed, 21);
+    const started = performance.now();
+    const run = evaluatePlacement(topology, limits, rebalance(structuredClone(topology), structuredClone(limits)));
+    emitScore({ valid: run.valid, quality: run.quality, runtimeMs: performance.now() - started, metrics: run.metrics });
+  } catch (error) {
+    emitScore({ valid: false, metrics: { error: String(error) } });
+  }
+} else {
+  const isolated = runIsolatedCases(import.meta.url, workspace, taskDir, [109, 227, 401, 599, 811]);
+  const runtimeMs = isolated.runs.reduce((sum, run) => sum + run.runtimeMs, 0);
+  const valid = isolated.valid && runtimeMs < 1000;
+  const average = key => isolated.runs.reduce((sum, run) => sum + (run.metrics?.[key] || 0), 0) / isolated.runs.length;
+  emitScore({ valid, score: valid ? isolated.runs.reduce((sum, run) => sum + run.quality, 0) / isolated.runs.length : 0, metrics: valid ? { runtimeMs, peakUtilization: average("peakUtilization"), migrationCost: average("migrationCost") } : { runtimeMs, ...isolated.failure } });
+}

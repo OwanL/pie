@@ -472,6 +472,56 @@ test('buildSessionCostIndicator uses assistant message model pricing when availa
   assert.match(result.tooltip, /Output:\s+\$0\.2000 \(10,000 tokens\)/);
 });
 
+test('buildCompletedCostSummary resolves shared model ids by serving provider', () => {
+  const usage = {
+    inputTokens: 1_000_000,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 1_000_000,
+  };
+  const transcript = [
+    { id: 'codex', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const, modelId: 'shared-model', provider: 'openai-codex', usage },
+    { id: 'copilot', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const, modelId: 'shared-model', provider: 'github-copilot', usage },
+  ];
+  const seen: string[] = [];
+  const completed = buildCompletedCostSummary(makeSummary(), transcript, undefined, (modelId, provider) => {
+    seen.push(`${provider}/${modelId}`);
+    if (provider === 'openai-codex') return { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 };
+    if (provider === 'github-copilot') return { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 };
+    return undefined;
+  });
+
+  assert.deepEqual(seen, ['openai-codex/shared-model', 'github-copilot/shared-model']);
+  assert.equal(completed.totalCost, 7);
+});
+
+test('provider-less shared ids stay unpriced when the resolver reports ambiguity', () => {
+  const transcript = [{
+    id: 'legacy',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: '',
+    status: 'completed' as const,
+    modelId: 'shared-model',
+    usage: {
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 1_000_000,
+    },
+  }];
+  const completed = buildCompletedCostSummary(
+    makeSummary(),
+    transcript,
+    { input: 99, output: 99, cacheRead: 99, cacheWrite: 99 },
+    () => undefined,
+  );
+  assert.equal(completed.totalCost, 0);
+  assert.equal(completed.pricedTurnCount, 0);
+});
+
 test('buildSessionCostIndicator shows a live estimate while running without completed usage', () => {
   const transcript = [
     {

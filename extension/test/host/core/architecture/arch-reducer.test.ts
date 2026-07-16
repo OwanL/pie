@@ -516,6 +516,7 @@ test('reducer: MessageStarted with new requestId creates currentTurn and assista
     messageId: 'msg-1',
     requestId: 'req-1',
     modelId: 'gpt-5',
+    provider: 'openai-codex',
     thinkingLevel: 'high',
     timestamp: 1,
   };
@@ -532,6 +533,7 @@ test('reducer: MessageStarted with new requestId creates currentTurn and assista
   assert.equal(msg!.role, 'assistant');
   assert.equal(msg!.status, 'streaming');
   assert.equal(msg!.modelId, 'gpt-5');
+  assert.equal(msg!.provider, 'openai-codex');
   assert.equal(msg!.thinkingLevel, 'high');
   // No SyncEffects
   assert.equal(result.effects.length, 0);
@@ -560,6 +562,7 @@ test('reducer: MessageStarted with same requestId creates alias and updates cano
     messageId: 'msg-2',
     requestId: 'req-1',
     modelId: 'gpt-5',
+    provider: 'github-copilot',
     timestamp: 1,
   };
 
@@ -573,6 +576,7 @@ test('reducer: MessageStarted with same requestId creates alias and updates cano
   const canonical = result.state.transcript.bySession['/s']?.find((m: ChatMessage) => m.id === 'msg-1');
   assert.ok(canonical, 'canonical message should still exist');
   assert.equal(canonical!.status, 'streaming');
+  assert.equal(canonical!.provider, 'github-copilot');
   // No SyncEffects
   assert.equal(result.effects.length, 0);
 });

@@ -129,6 +129,8 @@ export class SessionRunTracker {
     state.endedTurnIdsInCurrentRun.clear();
     state.startedToolCallIdsInCurrentRun.clear();
     state.finishedToolCallIdsInCurrentRun.clear();
+    state.toolNamesByCallIdInCurrentRun.clear();
+    state.toolExecutionIntervalsInCurrentRun = [];
     state.busyStartedAt = null;
 
     run.sendCount += 1;
@@ -178,7 +180,11 @@ export class SessionRunTracker {
     const outputTokens = toNonNegativeInt(details.prepassOutputTokens);
     const cacheReadTokens = toNonNegativeInt(details.prepassCacheReadTokens);
     const cacheWriteTokens = toNonNegativeInt(details.prepassCacheWriteTokens);
-    if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
+    const durationMs = typeof details.prepassLatencyMs === 'number'
+      && Number.isFinite(details.prepassLatencyMs) && details.prepassLatencyMs >= 0
+      ? Math.trunc(details.prepassLatencyMs)
+      : undefined;
+    if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0 && durationMs === undefined) {
       return;
     }
 
@@ -196,6 +202,7 @@ export class SessionRunTracker {
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
+      ...(durationMs === undefined ? {} : { durationMs }),
     }];
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();
@@ -252,7 +259,8 @@ export class SessionRunTracker {
     const hasLatency = latency !== undefined
       && (latency.turnLatencyMs !== undefined
         || latency.overheadMs !== undefined
-        || latency.providerLatencyMs !== undefined);
+        || latency.providerLatencyMs !== undefined
+        || latency.providerQueueMs !== undefined);
     if (generationDurationMs > 0 || outputTokens > 0 || status !== 'completed' || hasLatency) {
       const sample: TurnThroughputSample = {
         endedAt: this.runState.isoNow(),
@@ -269,6 +277,8 @@ export class SessionRunTracker {
         turnLatencyMs: finiteOrNull(latency?.turnLatencyMs),
         overheadMs: finiteOrNull(latency?.overheadMs),
         providerLatencyMs: finiteOrNull(latency?.providerLatencyMs),
+        providerQueueMs: finiteOrNull(latency?.providerQueueMs),
+        providerQueueAttemptCount: toNonNegativeInt(latency?.providerQueueAttemptCount),
       };
       run.turnThroughputSamples = [...run.turnThroughputSamples, sample];
     }
@@ -284,12 +294,13 @@ export class SessionRunTracker {
       return;
     }
 
-    if (state.startedToolCallIdsInCurrentRun.has(toolCall.id)) {
+    if (!toolCall.id || state.startedToolCallIdsInCurrentRun.has(toolCall.id)) {
       return;
     }
     state.startedToolCallIdsInCurrentRun.add(toolCall.id);
 
-    const normalizedName = normalizeToolCallName(toolCall.name) || toolCall.name;
+    const normalizedName = normalizeToolCallName(toolCall.name) || toolCall.name.trim() || '(unknown)';
+    state.toolNamesByCallIdInCurrentRun.set(toolCall.id, normalizedName);
     run.toolUsage.totalCount += 1;
     incrementNamedCount(run.toolUsage.countsByName, normalizedName);
     run.updatedAt = this.runState.isoNow();
@@ -303,15 +314,24 @@ export class SessionRunTracker {
       return;
     }
 
-    if (state.finishedToolCallIdsInCurrentRun.has(toolCall.id)) {
+    if (!toolCall.id || state.finishedToolCallIdsInCurrentRun.has(toolCall.id)) {
       return;
     }
     state.finishedToolCallIdsInCurrentRun.add(toolCall.id);
 
-    const normalizedName = normalizeToolCallName(toolCall.name) || toolCall.name || '(unknown)';
+    const terminalName = normalizeToolCallName(toolCall.name) || toolCall.name.trim() || '(unknown)';
+    const startedName = state.toolNamesByCallIdInCurrentRun.get(toolCall.id);
+    const normalizedName = terminalName === '(unknown)' ? (startedName ?? terminalName) : terminalName;
+    if (startedName && startedName !== normalizedName) {
+      const previousCount = run.toolUsage.countsByName[startedName] ?? 0;
+      if (previousCount <= 1) delete run.toolUsage.countsByName[startedName];
+      else run.toolUsage.countsByName[startedName] = previousCount - 1;
+      incrementNamedCount(run.toolUsage.countsByName, normalizedName);
+      state.toolNamesByCallIdInCurrentRun.set(toolCall.id, normalizedName);
+    }
     const analysis = analyzeToolCall(toolCall);
 
-    this.recordToolDuration(run, normalizedName, toolCall);
+    this.recordToolDuration(run, state, normalizedName, toolCall);
 
     if (toolCall.status === 'failed') {
       if (analysis.failure) {
@@ -342,16 +362,40 @@ export class SessionRunTracker {
   }
 
   /** Roll up a tool call's execution duration (when reported and finite). */
-  private recordToolDuration(run: RunSnapshot, normalizedName: string, toolCall: ToolCall): void {
-    if (typeof toolCall.durationMs === 'number' && Number.isFinite(toolCall.durationMs) && toolCall.durationMs >= 0) {
-      const durationMs = Math.trunc(toolCall.durationMs);
-      run.toolUsage.totalDurationMs += durationMs;
-      run.toolUsage.timedCallCount += 1;
-      run.toolUsage.durationMsByName[normalizedName] =
-        (run.toolUsage.durationMsByName[normalizedName] ?? 0) + durationMs;
-      run.toolUsage.timedCallCountsByName[normalizedName] =
-        (run.toolUsage.timedCallCountsByName[normalizedName] ?? 0) + 1;
+  private recordToolDuration(
+    run: RunSnapshot,
+    state: { toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }> },
+    normalizedName: string,
+    toolCall: ToolCall,
+  ): void {
+    if (typeof toolCall.durationMs !== 'number' || !Number.isFinite(toolCall.durationMs) || toolCall.durationMs < 0) {
+      return;
     }
+    const durationMs = Math.trunc(toolCall.durationMs);
+    run.toolUsage.totalDurationMs += durationMs;
+    run.toolUsage.timedCallCount += 1;
+    run.toolUsage.durationMsByName[normalizedName] =
+      (run.toolUsage.durationMsByName[normalizedName] ?? 0) + durationMs;
+    run.toolUsage.timedCallCountsByName[normalizedName] =
+      (run.toolUsage.timedCallCountsByName[normalizedName] ?? 0) + 1;
+
+    if (typeof toolCall.startedAt !== 'number' || !Number.isFinite(toolCall.startedAt)) return;
+    const startedAt = toolCall.startedAt;
+    const endedAt = startedAt + durationMs;
+    let newlyCoveredMs = Math.max(0, endedAt - startedAt);
+    for (const interval of state.toolExecutionIntervalsInCurrentRun) {
+      newlyCoveredMs -= Math.max(0, Math.min(endedAt, interval.endedAt) - Math.max(startedAt, interval.startedAt));
+    }
+    const next = [...state.toolExecutionIntervalsInCurrentRun, { startedAt, endedAt }]
+      .sort((left, right) => left.startedAt - right.startedAt);
+    const merged: Array<{ startedAt: number; endedAt: number }> = [];
+    for (const interval of next) {
+      const previous = merged[merged.length - 1];
+      if (!previous || interval.startedAt > previous.endedAt) merged.push({ ...interval });
+      else previous.endedAt = Math.max(previous.endedAt, interval.endedAt);
+    }
+    state.toolExecutionIntervalsInCurrentRun = merged;
+    run.toolUsage.criticalPathDurationMs = (run.toolUsage.criticalPathDurationMs ?? 0) + Math.max(0, newlyCoveredMs);
   }
 
   /** Record an execution failure: the tool could not complete its job. */
@@ -560,16 +604,52 @@ export class SessionRunTracker {
     this.runState.persist(state.currentRun ? undefined : run);
   }
 
-  /** Count an auto-retry attempt (transient provider error retried by the SDK)
-   *  against the relevant run. */
-  onAutoRetry(sessionPath: string): void {
+  /** Count an auto-retry and retain its configured backoff even before a
+   * measured terminal boundary becomes available. */
+  onAutoRetry(
+    sessionPath: string,
+    timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
+  ): void {
     const state = this.runState.sessions.get(sessionPath);
     const run = state ? (state.currentRun ?? state.lastRun) : null;
-    if (!run || !state) {
-      return;
-    }
+    if (!run || !state) return;
 
+    const samples = run.retryTimingSamples ?? [];
+    if (timing && samples.some((sample) => sample.sourceId === timing.sourceId)) return;
     run.autoRetryCount = (run.autoRetryCount ?? 0) + 1;
+    if (timing) {
+      run.retryTimingSamples = [...samples, {
+        sourceId: timing.sourceId,
+        occurredAt: timing.occurredAt,
+        attempt: toNonNegativeInt(timing.attempt),
+        scheduledDelayMs: toNonNegativeInt(timing.scheduledDelayMs),
+        measuredDelayMs: null,
+        durationMs: null,
+      }];
+    }
+    run.updatedAt = this.runState.isoNow();
+    this.runState.persist(state.currentRun ? undefined : run);
+  }
+
+  onAutoRetryMeasured(
+    sessionPath: string,
+    sourceId: string,
+    measuredDelayMs: number | undefined,
+    durationMs: number,
+  ): void {
+    const state = this.runState.sessions.get(sessionPath);
+    const run = state ? (state.currentRun ?? state.lastRun) : null;
+    if (!run || !state || !sourceId) return;
+    const samples = run.retryTimingSamples ?? [];
+    const index = samples.findIndex((sample) => sample.sourceId === sourceId);
+    if (index < 0) return;
+    const existing = samples[index]!;
+    const updated = {
+      ...existing,
+      measuredDelayMs: measuredDelayMs === undefined ? null : toNonNegativeInt(measuredDelayMs),
+      durationMs: toNonNegativeInt(durationMs),
+    };
+    run.retryTimingSamples = samples.map((sample, sampleIndex) => sampleIndex === index ? updated : sample);
     run.updatedAt = this.runState.isoNow();
     this.runState.persist(state.currentRun ? undefined : run);
   }

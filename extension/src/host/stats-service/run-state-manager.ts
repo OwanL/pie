@@ -94,6 +94,8 @@ export class SessionRunStateManager {
         endedTurnIdsInCurrentRun: new Set<string>(),
         startedToolCallIdsInCurrentRun: new Set<string>(),
         finishedToolCallIdsInCurrentRun: new Set<string>(),
+        toolNamesByCallIdInCurrentRun: new Map<string, string>(),
+        toolExecutionIntervalsInCurrentRun: [],
         busyStartedAt: sessionState.busyStartedAt,
       });
       this.syncSessionSummary(sessionPath);
@@ -157,6 +159,7 @@ export class SessionRunStateManager {
       truncatedAfterCount: 0,
       compactionCount: 0,
       autoRetryCount: 0,
+      retryTimingSamples: [],
       backendErrorCodes: [],
       contextTokens: null,
       contextLimit: null,
@@ -210,6 +213,8 @@ export class SessionRunStateManager {
     state.endedTurnIdsInCurrentRun.clear();
     state.startedToolCallIdsInCurrentRun.clear();
     state.finishedToolCallIdsInCurrentRun.clear();
+    state.toolNamesByCallIdInCurrentRun.clear();
+    state.toolExecutionIntervalsInCurrentRun = [];
     state.busyStartedAt = null;
 
     this.syncSessionSummary(sessionPath);

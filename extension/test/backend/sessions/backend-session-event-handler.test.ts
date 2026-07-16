@@ -57,6 +57,7 @@ function createDeps(options: { captureLive?: boolean } = {}) {
   const sessionOpened: string[] = [];
   let listChangedCount = 0;
   let contextUsageChangedCount = 0;
+  const contextUsageEstimates: Array<number | undefined> = [];
 
   const deps: BackendSessionEventHandlerDeps = {
     emit(event, payload) {
@@ -65,8 +66,9 @@ function createDeps(options: { captureLive?: boolean } = {}) {
     emitBusyChanged(_context, nextBusy) {
       busy.push(nextBusy);
     },
-    emitContextUsageChanged() {
+    emitContextUsageChanged(_context, postCompactionEstimatedTokens) {
       contextUsageChangedCount += 1;
+      contextUsageEstimates.push(postCompactionEstimatedTokens);
     },
     async emitSessionOpened(sessionPath) {
       sessionOpened.push(sessionPath);
@@ -77,8 +79,35 @@ function createDeps(options: { captureLive?: boolean } = {}) {
     recoverStuckSession() {},
   };
 
-  return { deps, emitted, busy, sessionOpened, getListChangedCount: () => listChangedCount, getContextUsageChangedCount: () => contextUsageChangedCount };
+  return {
+    deps,
+    emitted,
+    busy,
+    sessionOpened,
+    contextUsageEstimates,
+    getListChangedCount: () => listChangedCount,
+    getContextUsageChangedCount: () => contextUsageChangedCount,
+  };
 }
+
+test('compaction_end publishes the SDK post-compaction estimate immediately', () => {
+  const { deps, contextUsageEstimates, sessionOpened } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100_000,
+      estimatedTokensAfter: 12_345.9,
+      details: {},
+    },
+  });
+
+  assert.deepEqual(contextUsageEstimates, [12_345]);
+  assert.deepEqual(sessionOpened, [context.sessionPath]);
+});
 
 test('handleSdkSessionEvent ignores unsupported or incomplete events', () => {
   const { deps, emitted, busy, getContextUsageChangedCount, getListChangedCount } = createDeps();
@@ -176,6 +205,7 @@ test('message_start and message_update emit assistant events and update request 
       id: 'req-1',
       messageIndex: 0,
       modelId: 'claude-test',
+      provider: 'github-copilot',
       thinkingLevel: 'high',
       aborted: false,
     },
@@ -214,6 +244,7 @@ test('message_start and message_update emit assistant events and update request 
     messageId: 'req-1:1',
     sessionPath: '/workspace/session.jsonl',
     modelId: 'claude-test',
+    provider: 'github-copilot',
     thinkingLevel: 'high',
   });
   assert.deepEqual(emitted[1]?.payload, {
@@ -420,6 +451,7 @@ test('tool execution events emit progress only when an active assistant message 
     input: { command: 'npm test' },
     result: { ok: true },
     status: 'failed',
+    startedAt: (emitted[2]?.payload as { startedAt: number }).startedAt,
     durationMs: (emitted[2]?.payload as { durationMs: number }).durationMs,
     durableEntryId: (emitted[2]?.payload as { durableEntryId: string }).durableEntryId,
   });
@@ -740,6 +772,36 @@ test('auto_retry_start emits retry.started with attempt/delay/error', () => {
   }]);
 });
 
+test('retry timing correlates scheduled delay with measured provider delay and duration', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: { id: 'req-retry', messageIndex: 1, aborted: false },
+  });
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'auto_retry_start',
+    attempt: 2,
+    maxAttempts: 3,
+    delayMs: 4_000,
+    errorMessage: '429',
+  });
+  const started = context.activeRequest?.retryTiming?.startedAt;
+  assert.equal(typeof started, 'number');
+  context.activeRequest!.retryTiming!.providerAttemptStartedAt = started!;
+  handleSdkSessionEvent(deps, context, {
+    type: 'auto_retry_end', success: true, attempt: 2,
+  });
+
+  assert.equal((emitted[0]?.payload as any).retryId, 'req-retry:2');
+  assert.equal((emitted[0]?.payload as any).delayMs, 4_000);
+  assert.deepEqual(emitted.map((entry) => entry.event), [
+    'retry.started', 'retry.measured', 'retry.ended',
+  ]);
+  assert.equal((emitted[1]?.payload as any).retryId, 'req-retry:2');
+  assert.equal((emitted[1]?.payload as any).measuredDelayMs, 0);
+  assert.equal(typeof (emitted[1]?.payload as any).durationMs, 'number');
+});
+
 test('auto_retry_end emits retry.ended with success/finalError', () => {
   const { deps, emitted } = createDeps();
   const context = createContext();
@@ -998,26 +1060,13 @@ test('tool execution and message end events cover completed payloads and fallbac
   } as any);
 
   assert.deepEqual(emitted.map((entry) => entry.event), [
-    'tool.finished',
     'message.finished',
     'message.finished',
   ]);
-  assert.deepEqual(emitted[0]?.payload, {
-    requestId: 'req-7',
-    sessionPath: '/workspace/session.jsonl',
-    messageId: 'req-7:3',
-    toolCallId: '',
-    name: '',
-    input: undefined,
-    result: { ok: true },
-    status: 'completed',
-    durationMs: 0,
-    durableEntryId: (emitted[0]?.payload as { durableEntryId: string }).durableEntryId,
-  });
-  assert.equal((emitted[1]?.payload as any).message.id, 'req-7b:last');
-  assert.equal((emitted[1]?.payload as any).message.status, 'completed');
-  assert.equal((emitted[2]?.payload as any).message.id, 'req-7c:5');
-  assert.equal((emitted[2]?.payload as any).message.durationMs, undefined);
+  assert.equal((emitted[0]?.payload as any).message.id, 'req-7b:last');
+  assert.equal((emitted[0]?.payload as any).message.status, 'completed');
+  assert.equal((emitted[1]?.payload as any).message.id, 'req-7c:5');
+  assert.equal((emitted[1]?.payload as any).message.durationMs, undefined);
   assert.equal(getContextUsageChangedCount(), 2);
 });
 
@@ -1226,6 +1275,33 @@ test('turn latency is measured from the turn boundary, turn_start, and first con
   } finally {
     Date.now = originalNow;
   }
+});
+
+test('message_end aggregates correlated queue timing across folded provider turns', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-queue',
+      messageIndex: 1,
+      currentMessageId: 'req-queue:1',
+      lastAssistantMessageId: 'req-queue:1',
+      providerTurnSequence: 3,
+      providerQueueByTurn: new Map([
+        [1, { durationMs: 25, attemptCount: 1 }],
+        [3, { durationMs: 0, attemptCount: 1 }],
+      ]),
+      aborted: false,
+    },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end',
+    message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'end_turn' },
+  } as any);
+
+  const message = (emitted.find((entry) => entry.event === 'message.finished')?.payload as any).message;
+  assert.equal(message.providerQueueMs, 25);
+  assert.equal(message.providerQueueAttemptCount, 2);
+  assert.equal(context.activeRequest?.providerQueueByTurn?.size, 0, 'emitted observations are consumed');
 });
 
 test('tool_execution_end advances the turn boundary and message_start resets the first-delta marker', () => {

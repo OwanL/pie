@@ -16,6 +16,7 @@ import {
   userPartsFromContent,
 } from '../../../src/backend/transcript/content';
 import type { ChatMessage, ChatMessagePart } from '../../../src/shared/protocol';
+import { mapAssistantMessage, mapTranscript, type SessionEntryLike } from '../../../src/backend/transcript';
 import type { ContentPart, MessageLike } from '../../../src/backend/transcript/types';
 
 function assistantTarget(parts?: ChatMessagePart[]): ChatMessage {
@@ -271,4 +272,27 @@ test('assistantStatus, usage helpers, and systemMessage normalize edge cases', (
     markdown: 'hello',
     status: 'completed',
   });
+});
+
+test('assistant transcript mapping preserves the serving provider', () => {
+  const mapped = mapAssistantMessage('assistant-1', {
+    role: 'assistant',
+    provider: 'openai-codex',
+    model: 'shared-model',
+    content: [{ type: 'text', text: 'done' }],
+  });
+  assert.equal(mapped.provider, 'openai-codex');
+
+  const entries: SessionEntryLike[] = [{
+    id: 'assistant-2',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    type: 'message',
+    message: {
+      role: 'assistant',
+      provider: 'github-copilot',
+      model: 'shared-model',
+      content: [{ type: 'text', text: 'persisted' }],
+    },
+  }];
+  assert.equal(mapTranscript(entries)[0]?.provider, 'github-copilot');
 });

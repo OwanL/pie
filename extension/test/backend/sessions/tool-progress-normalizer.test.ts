@@ -97,6 +97,24 @@ test('subagent previews retain full streaming text plus a cumulative counter inc
   }
 });
 
+test('unchanged modern subagent revision reuses its recursive normalized preview', () => {
+  const child = {
+    attemptId: 'attempt-cache-1', progressGeneration: 7,
+    agent: 'worker', task: 'large task', exitCode: -1,
+    messages: Array.from({ length: 200 }, (_, index) => ({
+      role: 'assistant', content: [{ type: 'text', text: `${index}:${'x'.repeat(2_000)}` }],
+    })),
+  };
+  const first = normalizeToolProgress('subagent', { details: { mode: 'single', results: [child] } });
+  const duplicate = normalizeToolProgress('subagent', { details: { mode: 'single', results: [child] } });
+  assert.equal(duplicate, first, 'duplicate generation skips recursive JSON-safe cloning');
+
+  const advanced = normalizeToolProgress('subagent', {
+    details: { mode: 'single', results: [{ ...child, progressGeneration: 8 }] },
+  });
+  assert.notEqual(advanced, first, 'a new generation invalidates the normalization cache');
+});
+
 test('generic preview handles cyclic, bigint and throwing values without throwing', () => {
   const cyclic: Record<string, unknown> = { count: 10n };
   cyclic.self = cyclic;

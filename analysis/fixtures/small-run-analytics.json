@@ -74,12 +74,37 @@
       "interruptedCount": 0,
       "messageEditCount": 1,
       "truncatedAfterCount": 0,
+      "autoRetryCount": 1,
+      "retryTimingSamples": [
+        {
+          "sourceId": "run-001-retry-1",
+          "occurredAt": "2026-05-10T14:07:00.000Z",
+          "attempt": 1,
+          "scheduledDelayMs": 1000,
+          "measuredDelayMs": 1080,
+          "durationMs": 4200
+        }
+      ],
       "backendErrorCodes": [],
       "contextTokens": 18200,
       "inputTokens": 15200,
       "outputTokens": 3200,
       "cacheReadTokens": 4800,
       "cacheWriteTokens": 0,
+      "auxiliaryLlmUsage": [
+        {
+          "kind": "skill_pruning_prepass",
+          "sourceId": "run-001-prepass-1",
+          "occurredAt": "2026-05-10T14:05:01.000Z",
+          "modelId": "gpt-4.1-mini",
+          "provider": "openai",
+          "inputTokens": 180,
+          "outputTokens": 12,
+          "cacheReadTokens": 40,
+          "cacheWriteTokens": 0,
+          "durationMs": 350
+        }
+      ],
       "tokenReportedTurnCount": 2,
       "contextLimit": 200000,
       "filesystemPathRefCount": 2,
@@ -91,6 +116,19 @@
       ],
       "toolUsage": {
         "totalCount": 6,
+        "totalDurationMs": 8500,
+        "criticalPathDurationMs": 6200,
+        "timedCallCount": 6,
+        "durationMsByName": {
+          "read": 1500,
+          "bash": 6000,
+          "edit": 1000
+        },
+        "timedCallCountsByName": {
+          "read": 3,
+          "bash": 2,
+          "edit": 1
+        },
         "failureCount": 0,
         "countsByName": {
           "read": 3,
@@ -185,14 +223,18 @@
           "outputTokens": 1800,
           "generationDurationMs": 28000,
           "concurrentBusySessions": 1,
-          "status": "completed"
+          "status": "completed",
+          "providerQueueMs": 120,
+          "providerQueueAttemptCount": 1
         },
         {
           "endedAt": "2026-05-10T14:12:00.000Z",
           "outputTokens": 1400,
           "generationDurationMs": 33000,
           "concurrentBusySessions": 2,
-          "status": "completed"
+          "status": "completed",
+          "providerQueueMs": 0,
+          "providerQueueAttemptCount": 1
         }
       ]
     },

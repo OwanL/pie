@@ -92,6 +92,8 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     const prefix = `run-summary.json row ${index}`;
     assertCountField(row.toolCallCount, `${prefix}.toolCallCount`);
     assertFiniteNonNegative(row.toolDurationMs, `${prefix}.toolDurationMs`);
+    assertFiniteNullableNonNegative(row.criticalPathDurationMs, `${prefix}.criticalPathDurationMs`);
+    assertFiniteNullableNonNegative(row.skillPruningPrepassDurationMs, `${prefix}.skillPruningPrepassDurationMs`);
     assertCountField(row.timedToolCallCount, `${prefix}.timedToolCallCount`);
     assertCountField(row.toolFailureCount, `${prefix}.toolFailureCount`);
     assertCountField(row.inputTokens, `${prefix}.inputTokens`);
@@ -362,6 +364,17 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     assertFiniteNonNegative(row.generationDurationMs, `${prefix}.generationDurationMs`);
     assertFiniteNonNegative(row.outputTokens, `${prefix}.outputTokens`);
     assertFiniteNonNegative(row.concurrentBusySessions, `${prefix}.concurrentBusySessions`);
+    assertFiniteNullableNonNegative(row.providerQueueMs, `${prefix}.providerQueueMs`);
+    assertNonNegativeInteger(row.providerQueueAttemptCount, `${prefix}.providerQueueAttemptCount`);
+  }
+
+  for (const [index, row] of bundle.retryTiming.rows.entries()) {
+    const prefix = `retry-timing.json row ${index}`;
+    assertNonNegativeInteger(row.attempt, `${prefix}.attempt`);
+    if (row.attempt < 1) throw new Error(`${prefix}.attempt must be at least 1.`);
+    assertFiniteNonNegative(row.scheduledDelayMs, `${prefix}.scheduledDelayMs`);
+    assertFiniteNullableNonNegative(row.measuredDelayMs, `${prefix}.measuredDelayMs`);
+    assertFiniteNullableNonNegative(row.durationMs, `${prefix}.durationMs`);
   }
 }
 

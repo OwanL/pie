@@ -17,7 +17,7 @@ import type {
   RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
-  TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
+  TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
   VerificationRollup, RunSnapshot, TaskBoundaryIntent,
 } from '../../shared/run-analytics-contracts.js';
 
@@ -26,13 +26,13 @@ export type {
   RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
-  TurnThroughputSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
+  TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
   VerificationRollup, RunSnapshot, TaskBoundaryIntent,
 };
 
 export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
 
-export const SITE_DATA_SCHEMA_VERSION = 4;
+export const SITE_DATA_SCHEMA_VERSION = 5;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
 export const GENERATOR_VERSION = 'analysis-v1';
 
@@ -53,6 +53,7 @@ export const SITE_DATA_FILE_NAMES = [
   'backend-errors.json',
   'file-types.json',
   'token-throughput.json',
+  'retry-timing.json',
 ] as const;
 
 export type SiteDataFileName = (typeof SITE_DATA_FILE_NAMES)[number];
@@ -258,6 +259,8 @@ export interface PreparedRunRow {
   toolCallCount: number;
   /** Cumulative wall-clock duration reported by timed tool calls. */
   toolDurationMs: number;
+  /** Non-overlapping timed tool duration; null when the source predates interval tracking. */
+  criticalPathDurationMs: number | null;
   /** Number of tool calls that reported an execution duration. */
   timedToolCallCount: number;
   toolFailureCount: number;
@@ -297,6 +300,8 @@ export interface PreparedRunRow {
   skillPruningPrepassCacheReadTokens: number;
   /** Aggregate skill-pruning prepass cache-write tokens (0 when none). */
   skillPruningPrepassCacheWriteTokens: number;
+  /** Aggregate measured skill-pruning prepass duration; null when no timing was reported. */
+  skillPruningPrepassDurationMs: number | null;
   /** Full last-turn usage scalar fields, nullable when absent. */
   lastTurnInputTokens: number | null;
   lastTurnOutputTokens: number | null;
@@ -464,6 +469,10 @@ export interface PreparedTurnThroughputRow {
   turnLatencyMs: number | null;
   overheadMs: number | null;
   providerLatencyMs: number | null;
+  /** Time waiting for provider-gate permits; null when no gate observation exists. */
+  providerQueueMs: number | null;
+  /** Provider attempts represented by queue timing; 0 means unavailable. */
+  providerQueueAttemptCount: number;
   /** Input tokens reported for this turn (0 when unreported). */
   inputTokens: number;
   /** Cache-read tokens reported for this turn (0 when unreported). */
@@ -472,6 +481,23 @@ export interface PreparedTurnThroughputRow {
   cacheWriteTokens: number;
   /** Context-window token count at the end of this turn (null when unreported). */
   contextTokens: number | null;
+}
+
+/** One prepared auto-retry timing observation with run-level attribution. */
+export interface PreparedRetryTimingRow {
+  runId: string;
+  sourceId: string;
+  occurredAt: string;
+  startedDay: string;
+  attempt: number;
+  scheduledDelayMs: number;
+  measuredDelayMs: number | null;
+  durationMs: number | null;
+  modelId: string | null;
+  modelFamily: string | null;
+  provider: string | null;
+  thinkingLevel: ThinkingLevel | null;
+  experimentAssignment: string | null;
 }
 
 /** Prepared non-success result issue row for DuckDB + site-data. */
@@ -711,6 +737,7 @@ export interface PreparedAnalyticsData {
   backendErrors: PreparedBackendErrorRow[];
   fileExtensions: PreparedFileExtensionRow[];
   turnThroughput: PreparedTurnThroughputRow[];
+  retryTiming: PreparedRetryTimingRow[];
   pruningEvents: PreparedPruningEventRow[];
   pruningSignals: PreparedPruningSignalRow[];
   toolResultPruning: PreparedToolResultPruningRow[];
@@ -1249,6 +1276,12 @@ export interface TokenThroughputData {
   notes: string[];
 }
 
+export interface RetryTimingData {
+  schemaVersion: number;
+  rows: PreparedRetryTimingRow[];
+  notes: string[];
+}
+
 export interface SiteDataBundle {
   manifest: SiteManifest;
   overview: OverviewData;
@@ -1266,4 +1299,5 @@ export interface SiteDataBundle {
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;
+  retryTiming: RetryTimingData;
 }

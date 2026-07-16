@@ -255,6 +255,7 @@ test("loadConfig parses a full prepass block", () => {
 	const settingsPath = tempSettings(JSON.stringify({
 		pruning: {
 			prepass: {
+				temperature: 0.2,
 				timeoutMs: { minimal: 20000, low: 30000 },
 				maxOutputTokens: 512,
 				maxTransportRetries: 4,
@@ -265,12 +266,20 @@ test("loadConfig parses a full prepass block", () => {
 	}));
 	const result = loadConfig(settingsPath);
 	assert.deepEqual(result.prepass, {
+		temperature: 0.2,
 		timeoutMs: { minimal: 20000, low: 30000 },
 		maxOutputTokens: 512,
 		maxTransportRetries: 4,
 		transportBackoffBaseMs: 500,
 		oauthRaceBackoffMs: 0,
 	});
+});
+
+test("loadConfig validates prepass temperature", () => {
+	assert.equal(loadConfig(tempSettings(JSON.stringify({ pruning: { prepass: { temperature: 0 } } }))).prepass?.temperature, 0);
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({ pruning: { prepass: { temperature: 2.1 } } }))));
+	assert.equal(result.prepass, undefined);
+	assert.ok(warnings.some((warning) => warning.includes("pruning.prepass.temperature")));
 });
 
 test("loadConfig parses a partial timeoutMs map", () => {

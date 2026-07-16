@@ -742,9 +742,9 @@ test("prepassTimeoutMs: scales by attempt index", () => {
 });
 
 test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutputTokens", async () => {
-	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333 } });
-	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number }> = [];
-	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number }) => {
+	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333, temperature: 0.2 } });
+	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number; temperature?: number }> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number; temperature?: number }) => {
 		seenOptions.push(options);
 		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
 	};
@@ -758,6 +758,7 @@ test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutpu
 	for (const options of seenOptions) {
 		assert.equal(options.maxRetries, 0);
 		assert.equal(options.maxTokens, 333);
+		assert.equal(options.temperature, 0.2);
 	}
 });
 
@@ -778,6 +779,7 @@ test("runPruningPrepass: omits maxTokens by default and disables pi-ai retries",
 	for (const options of seenOptions) {
 		assert.equal(options.maxRetries, 0);
 		assert.equal(options.maxTokens, undefined);
+		assert.equal((options as { temperature?: number }).temperature, undefined);
 	}
 });
 

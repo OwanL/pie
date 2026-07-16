@@ -432,6 +432,11 @@ export function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     resultIssueCountsByNameAndKind,
     resultIssueSamples,
     totalDurationMs: toNonNegativeInteger(value.totalDurationMs),
+    ...(typeof value.criticalPathDurationMs === 'number'
+      && Number.isFinite(value.criticalPathDurationMs)
+      && value.criticalPathDurationMs >= 0
+      ? { criticalPathDurationMs: Math.trunc(value.criticalPathDurationMs) }
+      : {}),
     timedCallCount: toNonNegativeInteger(value.timedCallCount),
     durationMsByName: coerceNonNegativeIntegerRecord(value.durationMsByName),
     timedCallCountsByName: coerceNonNegativeIntegerRecord(value.timedCallCountsByName),

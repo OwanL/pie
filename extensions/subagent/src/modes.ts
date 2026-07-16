@@ -3,13 +3,15 @@
  * positional helper. Parallel and chain orchestration were intentionally
  * removed; use sibling subagent tool calls or later turns instead.
  */
-import type { ToolContext } from "@mariozechner/pi-coding-agent";
+import type { ToolContext } from "./tool-context.js";
 import type { AgentConfig } from "../agents.js";
 import type { OnUpdateCallback, SingleResult, SubagentDetails } from "../types.js";
 import type { SubagentRuntimeContext } from "../runner.js";
 import type { SelectionContext } from "./selection.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import { executeSingleTask, type SingleSubagentParams } from "./single.js";
+import type { RetryClock } from "./retry.js";
+import { resolveModel } from "./selection.js";
 
 export type SubagentParams = SingleSubagentParams;
 
@@ -27,6 +29,11 @@ export function executeSingleMode(
 	parentUiBridge: ParentBridge | undefined,
 	parentSessionId?: string,
 	allToolNames?: string[],
+	/** Internal test seam for retry/backoff/analytics. */
+	internalSeam?: {
+		clock?: RetryClock;
+		runAttempt?: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
+	},
 ) {
 	return executeSingleTask({
 		params,
@@ -41,5 +48,6 @@ export function executeSingleMode(
 		parentUiBridge,
 		parentSessionId,
 		allToolNames,
+		_internal: internalSeam,
 	});
 }

@@ -4,7 +4,6 @@ import test from 'node:test';
 import {
   COMPOSER_MARK_DONE_ACTION,
   getComposerRunControls,
-  getSessionTabRunBadge,
   getSessionTabRunMenuItems,
 } from '../../../src/webview/panel/session-tabs/run-state';
 
@@ -103,34 +102,6 @@ test('getComposerRunControls surfaces queued new-task state', () => {
     },
     action: null,
   });
-});
-
-test('getSessionTabRunBadge highlights open and unrated runs', () => {
-  assert.deepEqual(getSessionTabRunBadge({
-    runId: 'run-open',
-    status: 'open',
-    scored: false,
-  }), {
-    text: 'Done',
-    tone: 'open',
-    title: 'Click to mark this run complete and record a rating. You can also right-click the tab for task actions.',
-  });
-
-  assert.deepEqual(getSessionTabRunBadge({
-    runId: 'run-rate',
-    status: 'closed_unscored',
-    scored: false,
-  }), {
-    text: 'Rate',
-    tone: 'pending-score',
-    title: 'Click to record the outcome for this completed run. You can also right-click the tab for task actions.',
-  });
-
-  assert.equal(getSessionTabRunBadge({
-    runId: 'run-scored',
-    status: 'scored',
-    scored: true,
-  }), null);
 });
 
 test('run-state helpers handle queued states and unknown statuses defensively', () => {

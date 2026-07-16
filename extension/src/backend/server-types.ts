@@ -2,13 +2,29 @@ import type { ContextWindowUsage, ThinkingLevel, ToolFinishedPayload } from '../
 import type { DisplayTranscriptCache } from './transcript-window';
 import type { ExtensionUIBridge } from './extension-ui-bridge';
 import type { SdkBuildSystemPromptOptions, SdkRuntime, SdkSession } from './sdk';
+import type { SessionManagerFence } from './session-manager-fence';
 import type { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 
 export interface ActiveRequest {
   id: string;
   messageIndex: number;
   modelId?: string;
+  /** Provider selected when this request started. */
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
+  /** Monotonic SDK turn identity used to keep provider-attempt timing attached
+   * to the turn that initiated it, even when a stale attempt settles later. */
+  providerTurnSequence?: number;
+  /** Correlated provider-gate queue rollups keyed by providerTurnSequence. */
+  providerQueueByTurn?: Map<number, { durationMs: number; attemptCount: number }>;
+  /** Auto-retry attempt currently being measured. */
+  retryTiming?: {
+    retryId: string;
+    attempt: number;
+    startedAt: number;
+    scheduledDelayMs: number;
+    providerAttemptStartedAt?: number;
+  };
   currentMessageId?: string;
   lastAssistantMessageId?: string;
   currentMessageStartedAt?: number;
@@ -78,6 +94,9 @@ export interface SessionContext {
   /** Per-session monotonic counter for `busy.changed` events. */
   busySeq: number;
   lastContextUsage?: ContextWindowUsage | null;
+  /** SDK estimate of the compacted prompt footprint. Retained until the next
+   * assistant usage provides an authoritative measured footprint. */
+  postCompactionEstimatedTokens?: number;
   displayTranscriptCache?: DisplayTranscriptCache;
   /** UI bridge for extension UI requests within this session. */
   uiBridge?: ExtensionUIBridge;
@@ -112,6 +131,12 @@ export interface SessionContext {
   recoveryPromise?: Promise<SessionContext>;
   /** This runtime was locally terminalized and must ignore subsequent SDK events. */
   retired?: boolean;
+  /**
+   * Fence controller for this runtime's SessionManager. Invalidated
+   * synchronously on retirement/replacement/shutdown so the retired runtime
+   * cannot generate further persisted session entries.
+   */
+  sessionManagerFence?: SessionManagerFence;
 }
 
 export interface SessionPromptState {

@@ -135,6 +135,43 @@ function lastNonQueuedMessage(transcript: readonly ChatMessage[]): ChatMessage |
   return undefined;
 }
 
+/**
+ * Cheap O(toolCalls) revision of the last non-queued message's subagent tool
+ * calls, used to gate the O(result-tree) {@link subagentCostSignature} walk.
+ *
+ * The host posts a structured-cloned `ViewState` ~7×/sec while streaming, so the
+ * `transcript` array (and every nested object) is a fresh reference on every
+ * snapshot even when byte-identical. Keying the `subagentCostSignature` memo on
+ * the `transcript` ref recomputes the recursive fingerprint walk on every
+ * snapshot. This revision is a cheap surrogate built from each tool call's
+ * monotonic `seq` (projected from the live `LiveToolRecord.seq`, which advances
+ * on every progress AND terminal event). The backend assembles the complete
+ * recursively-renderable child preview and emits a progress event whenever it
+ * structurally changes — including nested completions, usage/cost updates, and
+ * streaming-text appends — so the parent tool's `seq` captures every
+ * transition that could change the cost fingerprint.
+ *
+ * The revision is STABLE while only the streaming prose grows (no `seq` advance
+ * → no structural preview change → same fingerprint), and CHANGES exactly when
+ * the fingerprint could change. Using it as the `useMemo` dependency for
+ * `subagentCostSignature` skips the recursive walk on unchanged snapshots
+ * without weakening correctness for nested completion changes (a nested
+ * subagent completing advances the parent's `seq`, invalidating the revision).
+ */
+export function subagentToolCallRevision(transcript: readonly ChatMessage[]): string {
+  const last = lastNonQueuedMessage(transcript);
+  if (!last) return `${transcript.length}|`;
+  const tcs = last.toolCalls ?? [];
+  const partTcs = last.parts
+    ?.filter((p) => p.kind === 'toolCall')
+    .map((p) => p.toolCall) ?? [];
+  const calls = tcs.length ? tcs : partTcs;
+  const rev = calls
+    .map((tc) => `${tc.id}:${tc.status}:${tc.name ?? ''}:${tc.seq ?? 0}:${tc.result !== undefined ? 1 : 0}`)
+    .join(',');
+  return `${transcript.length}|${rev}`;
+}
+
 export function subagentCostSignature(transcript: readonly ChatMessage[]): string {
   const last = lastNonQueuedMessage(transcript);
   if (!last) return `${transcript.length}|`;

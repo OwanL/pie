@@ -22,8 +22,8 @@ function makeConfig(overrides: Partial<PruningConfig> = {}): PruningConfig {
 test("buildPruningSystemPrompt includes discretion instruction for discretion strategy", () => {
 	const config = makeConfig();
 	const prompt = buildPruningSystemPrompt(config);
-	assert.ok(prompt.includes("Use discretion"));
-	assert.ok(prompt.includes("confident are irrelevant"));
+	assert.ok(prompt.includes("greater-than-50-percent probability boundary"));
+	assert.ok(prompt.includes("independently for every candidate"));
 	assert.ok(!prompt.includes("at most"));
 });
 
@@ -34,7 +34,8 @@ test("buildPruningSystemPrompt includes topK instruction for topK strategy", () 
 	});
 	const prompt = buildPruningSystemPrompt(config);
 	assert.ok(prompt.includes("at most 5 skills and 8 tools"));
-	assert.ok(!prompt.includes("Use discretion"));
+	assert.ok(prompt.includes("tie-breaker"));
+	assert.ok(prompt.includes("greater than 50 percent"));
 });
 
 test("buildPruningSystemPrompt always includes core rules", () => {
@@ -42,10 +43,10 @@ test("buildPruningSystemPrompt always includes core rules", () => {
 	assert.ok(prompt.includes("relevance curator"));
 	assert.ok(prompt.includes("JSON object"));
 	assert.ok(prompt.includes("Do not wrap in markdown"));
-	assert.ok(prompt.includes('{"pruneSkills":[],"pruneTools":[]}'));
+	assert.ok(prompt.includes('{"keep":[]}'));
 	assert.match(prompt, /do not include an explanation or reasoning/i);
 	assert.ok(!prompt.includes('{"reasoning"'));
-	assert.ok(prompt.includes("REMOVE"), "prompt must frame the task as removal (prune-list)");
+	assert.match(prompt, /probability of actual use is greater than 50 percent/i);
 });
 
 test("buildPruningSystemPrompt works with __setPromptTemplate test seam", () => {
@@ -55,7 +56,7 @@ test("buildPruningSystemPrompt works with __setPromptTemplate test seam", () => 
 		const config = makeConfig({ skills: { strategy: "discretion", ceiling: 8, pinned: [], alwaysKeep: [] } });
 		const prompt = buildPruningSystemPrompt(config);
 		assert.ok(prompt.includes("Custom template with 8 skills and 10 tools"));
-		assert.ok(prompt.includes("Use discretion"));
+		assert.ok(prompt.includes("greater-than-50-percent probability boundary"));
 	} finally {
 		__setPromptTemplate(null);
 	}
@@ -65,7 +66,7 @@ test("buildPruningSystemPrompt works with __setPromptTemplate test seam", () => 
 // buildPruningUserMessage tests
 // ---------------------------------------------------------------------------
 
-test("buildPruningUserMessage includes user request and skill/tool lists framed as removal", () => {
+test("buildPruningUserMessage includes user request and candidate skill/tool lists", () => {
 	const msg = buildPruningUserMessage({
 		userPrompt: "refactor this code",
 		skills: [{ name: "code-simplification", description: "Simplifies code" }],
@@ -73,9 +74,9 @@ test("buildPruningUserMessage includes user request and skill/tool lists framed 
 		config: makeConfig(),
 	});
 	assert.ok(msg.includes('User request: "refactor this code"'));
-	assert.ok(msg.includes("Available skills (list any to REMOVE):"));
+	assert.ok(msg.includes("Candidate skills:"));
 	assert.ok(msg.includes("- code-simplification: Simplifies code"));
-	assert.ok(msg.includes("Available tools (list any to REMOVE):"));
+	assert.ok(msg.includes("Candidate tools:"));
 	assert.ok(msg.includes("- read: Read files"));
 });
 
@@ -129,9 +130,9 @@ test("buildPruningUserMessage lists only the provided candidates and emits no pr
 		tools: [{ name: "read", description: "Read files" }],
 		config: makeConfig(),
 	});
-	assert.ok(msg.includes("Available skills (list any to REMOVE):"));
+	assert.ok(msg.includes("Candidate skills:"));
 	assert.ok(msg.includes("- alpha: a"));
-	assert.ok(msg.includes("Available tools (list any to REMOVE):"));
+	assert.ok(msg.includes("Candidate tools:"));
 	assert.ok(msg.includes("- read: Read files"));
 	assert.ok(!msg.includes("Protected skills"), "builder must not emit protected-skill framing");
 	assert.ok(!msg.includes("Protected tools"), "builder must not emit protected-tool framing");
@@ -197,6 +198,40 @@ test("buildPruningUserMessage keeps a skill's 'Use when' trigger (no early sente
 // ---------------------------------------------------------------------------
 // parseLlmResponse tests
 // ---------------------------------------------------------------------------
+
+test("parseLlmResponse converts the flat keep list into internal prune lists", () => {
+	const knownSkills = new Set(["alpha", "beta", "gamma"]);
+	const knownTools = new Set(["read", "edit", "bash"]);
+	const result = parseLlmResponse('{"keep":["alpha","read","bash"]}', knownSkills, knownTools);
+	assert.deepEqual(result.pruneSkills, ["beta", "gamma"]);
+	assert.deepEqual(result.pruneTools, ["edit"]);
+	assert.equal(result.keptAllDueToParseFailure, undefined);
+});
+
+test("parseLlmResponse treats a valid empty keep list as prune-all, not a parse failure", () => {
+	const knownSkills = new Set(["alpha", "beta"]);
+	const knownTools = new Set(["read", "edit"]);
+	const result = parseLlmResponse('{"keep":[]}', knownSkills, knownTools);
+	assert.deepEqual(result.pruneSkills, ["alpha", "beta"]);
+	assert.deepEqual(result.pruneTools, ["read", "edit"]);
+	assert.equal(result.keptAllDueToParseFailure, undefined);
+});
+
+test("parseLlmResponse fails open on unknown keep-list names instead of pruning a likely misspelling", () => {
+	const knownSkills = new Set(["alpha"]);
+	const knownTools = new Set(["read"]);
+	const result = parseLlmResponse('{"keep":["read","unknown"]}', knownSkills, knownTools);
+	assert.deepEqual(result.pruneSkills, []);
+	assert.deepEqual(result.pruneTools, []);
+	assert.equal(result.keptAllDueToParseFailure, true);
+});
+
+test("parseLlmResponse rejects a non-array keep field and fails open", () => {
+	const result = parseLlmResponse('{"keep":"alpha"}', new Set(["alpha"]), new Set(["read"]));
+	assert.deepEqual(result.pruneSkills, []);
+	assert.deepEqual(result.pruneTools, []);
+	assert.equal(result.keptAllDueToParseFailure, true);
+});
 
 test("parseLlmResponse parses valid JSON prune-list response", () => {
 	const knownSkills = new Set(["alpha", "beta", "gamma"]);
@@ -357,7 +392,7 @@ test("runLlmPruning calls completeFn and returns parsed prune lists", async () =
 	};
 
 	const completeFn = async () => ({
-		text: '{"pruneSkills": ["frontend-design"], "pruneTools": []}',
+		text: '{"keep":["code-simplification","read","edit"]}',
 		thinking: 'Frontend skill is irrelevant to a pure refactor.',
 	});
 
@@ -365,7 +400,7 @@ test("runLlmPruning calls completeFn and returns parsed prune lists", async () =
 	assert.deepEqual(result.prunedSkills, ["frontend-design"]);
 	assert.deepEqual(result.prunedTools, []);
 	assert.ok(result.latencyMs >= 0);
-	assert.ok(result.rawResponse.includes("frontend-design"));
+	assert.ok(result.rawResponse.includes("code-simplification"));
 	assert.equal(result.keptAllDueToParseFailure, undefined);
 });
 

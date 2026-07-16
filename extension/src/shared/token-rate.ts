@@ -125,6 +125,12 @@ export interface Accumulator {
    * result index is stable because the subagent extension seeds a fixed-size
    * results array and updates entries in place by task index. */
   subagentTokens: Map<string, number>;
+  /** Cached subagent projection keyed by a monotonic revision signature. When
+   * the signature is unchanged across ticks, the recursive extraction + BPE
+   * tokenization is skipped entirely. `undefined` when the current transcript
+   * has subagent calls without a monotonic `seq` (durable/test calls), in which
+   * case the cache is unsound and bypassed. */
+  subagentProjectionCache?: { signature: string; projection: SubagentProjection };
 }
 
 export function createAccumulator(now: number): Accumulator {
@@ -245,6 +251,27 @@ interface RunningSubagent {
   result: SubagentSingleResult;
 }
 
+/** Projected token-rate view of the running subagents in a transcript.
+ *
+ * Pre-computes the per-result token estimates (and the descendant-inclusive
+ * filter) once per monotonic-revision change so that unchanged previews skip the
+ * recursive extraction + BPE tokenization on subsequent ticks. The host
+ * `TokenRateService` ticks every running session every 200 ms; without this
+ * cache, a multi-megabyte live subagent preview would be re-walked and
+ * re-tokenized on every tick even while the subagent is stalled in a tool call
+ * or waiting for the provider (STATE_CONTRACT § REM-04). */
+interface SubagentProjection {
+  /** Counted running subagents (descendant-inclusive filter applied) with
+   * pre-computed token estimates, so unchanged revisions skip re-tokenization. */
+  counted: Array<{ key: string; tokens: number; streaming: boolean }>;
+  /** Number of running subagents before the descendant-inclusive filter. */
+  runningCount: number;
+  /** Whether any running subagent is actively streaming (its `streaming` flag). */
+  anyStreaming: boolean;
+  /** Sum of estimated tokens across counted subagents (for `liveOutputTokens`). */
+  totalTokens: number;
+}
+
 /** Nominal max recursion depth into nested subagent results. Mirrors the
  * runner's DEFAULT_MAX_DEPTH so token-counting and the nesting guards stay
  * aligned: depth-2 output is counted one level below depth-1. */
@@ -324,22 +351,79 @@ function subagentsForTokenCounting(running: RunningSubagent[]): RunningSubagent[
   });
 }
 
+/**
+ * Cheap O(toolCalls) revision signature of every subagent tool call in the
+ * transcript, built from the monotonic per-tool `seq` (projected from the live
+ * `LiveToolRecord.seq`, which advances on every progress AND terminal event).
+ * The backend assembles the complete recursively-renderable child preview and
+ * emits a progress event whenever it structurally changes — including nested
+ * completions, usage/cost updates, and streaming-text appends — so the parent
+ * tool's `seq` captures every transition that could change the extracted
+ * running subagents or their token estimates.
+ *
+ * Returns `null` (bypass cache) when any subagent call lacks a monotonic `seq`:
+ * durable messages loaded from disk and test fixtures carry no `seq`, and their
+ * content can change between ticks without advancing the signature, so caching
+ * by `seq` would be unsound for them. Live (running) tool calls always carry a
+ * positive `seq` projected from the live pipeline state.
+ */
+function subagentRevisionSignature(transcript: readonly ChatMessage[]): string | null {
+  const parts: string[] = [`${transcript.length}`];
+  for (const message of transcript) {
+    for (const tc of message.toolCalls ?? []) {
+      if (tc.name !== 'subagent') continue;
+      if (typeof tc.seq !== 'number' || tc.seq <= 0) return null;
+      parts.push(`${tc.id}:${tc.status}:${tc.seq}:${tc.result !== undefined ? 1 : 0}`);
+    }
+  }
+  return parts.join('|');
+}
+
+/**
+ * Extract the running subagents and their token estimates, caching the result
+ * by {@link subagentRevisionSignature}. On a cache hit (unchanged revision) the
+ * recursive `findRunningSubagents` walk and `estimatedSubagentOutputTokens`
+ * BPE tokenization are skipped entirely — the pre-computed projection is reused.
+ * On a cache miss the full recursive extraction + tokenization runs and the
+ * result is cached for subsequent ticks with the same revision.
+ */
+function projectRunningSubagents(transcript: ChatMessage[], acc: Accumulator): SubagentProjection {
+  const signature = subagentRevisionSignature(transcript);
+  if (signature !== null && acc.subagentProjectionCache?.signature === signature) {
+    return acc.subagentProjectionCache.projection;
+  }
+  const running = findRunningSubagents(transcript);
+  const counted = subagentsForTokenCounting(running);
+  const entries = counted.map(({ key, result }) => ({
+    key,
+    tokens: estimatedSubagentOutputTokens(result),
+    streaming: result.streaming === true,
+  }));
+  const projection: SubagentProjection = {
+    counted: entries,
+    runningCount: running.length,
+    anyStreaming: running.some(({ result }) => result.streaming === true),
+    totalTokens: entries.reduce((sum, entry) => sum + entry.tokens, 0),
+  };
+  acc.subagentProjectionCache = signature !== null ? { signature, projection } : undefined;
+  return projection;
+}
+
 function computeSubagentDelta(
   acc: Accumulator,
-  running: RunningSubagent[],
+  counted: Array<{ key: string; tokens: number }>,
 ): number {
   let delta = 0;
   const seenIds = new Set<string>();
 
-  for (const { key, result } of running) {
+  for (const { key, tokens } of counted) {
     // Composite key: a parallel call shares one toolCallId across all its
     // results, so the index is required to track each result's own growth;
     // nesting adds the parent key so depth-2+ results never collide.
     seenIds.add(key);
-    const current = estimatedSubagentOutputTokens(result);
     const previous = acc.subagentTokens.get(key) ?? 0;
-    delta += Math.max(0, current - previous);
-    acc.subagentTokens.set(key, current);
+    delta += Math.max(0, tokens - previous);
+    acc.subagentTokens.set(key, tokens);
   }
 
   // Drop snapshots for subagent results that are no longer running so the map
@@ -515,13 +599,9 @@ export function tickTokenRate(
     pruneContentTokenMap(acc, streamingId);
   }
 
-  const runningSubagents = findRunningSubagents(transcript);
-  const countedSubagents = subagentsForTokenCounting(runningSubagents);
-  const subagentDelta = computeSubagentDelta(acc, countedSubagents);
-  const liveOutputTokens = currentTokens + countedSubagents.reduce(
-    (sum, { result }) => sum + estimatedSubagentOutputTokens(result),
-    0,
-  );
+  const subagentProjection = projectRunningSubagents(transcript, acc);
+  const subagentDelta = computeSubagentDelta(acc, subagentProjection.counted);
+  const liveOutputTokens = currentTokens + subagentProjection.totalTokens;
 
   const totalDelta = mainDelta + subagentDelta;
   if (totalDelta > 0) {
@@ -529,7 +609,7 @@ export function tickTokenRate(
   }
 
   const mainActive = streaming !== null && !toolBlocked;
-  const subagentActive = runningSubagents.length > 0;
+  const subagentActive = subagentProjection.runningCount > 0;
   // Once the first token has arrived, a streaming message is generating for the
   // whole span until it completes or a tool call begins — INCLUDING mid-stream
   // output stalls (provider slow-downs). Pausing the clock on those stalls hid
@@ -555,9 +635,7 @@ export function tickTokenRate(
   // clock advancing for the whole tool call, collapsing the rate to 0 tok/s
   // while a nested scout was plainly active (its own tool calls excluded it).
   const mainProducedOutput = currentTokens > 0;
-  const subagentProducedOutput = runningSubagents.some(
-    ({ result }) => result.streaming === true,
-  );
+  const subagentProducedOutput = subagentProjection.anyStreaming;
   const generating =
     totalDelta > 0
     || (mainActive && mainProducedOutput)
@@ -572,7 +650,7 @@ export function tickTokenRate(
   acc.lastWall = now;
 
   const latencyStats = computeTurnLatencyStats(transcript);
-  const reportedTurnRate = !generating && streaming === null && runningSubagents.length === 0
+  const reportedTurnRate = !generating && streaming === null && subagentProjection.runningCount === 0
     ? latestReportedTurnRate(transcript)
     : null;
   const state = buildState(acc, generating, streaming, toolBlocked, latencyStats, reportedTurnRate);

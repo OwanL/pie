@@ -1,0 +1,179 @@
+{
+  "version": 2,
+  "decisionRule": "Keep when the candidate has a greater-than-50-percent chance of being used before the current request is complete; otherwise prune.",
+  "cases": [
+    {
+      "id": "isolated-feature",
+      "request": "Add a HEAD /api/artifacts/:path route using the existing artifact store and add focused tests. Implement it and run the relevant checks.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "tdd", "description": "Strict test-driven development. Use only when the user explicitly asks for TDD or test-first work.", "expectedKeep": false },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audits and maintenance passes; not for a one-off feature or isolated edit.", "expectedKeep": false },
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read files from the codebase.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit existing files using exact text replacement.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands, builds, and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "diagnosis-read-only",
+      "request": "Diagnose why the backend intermittently hangs after cancellation. Reproduce it, inspect runtime logs, and report the root cause with evidence. Do not implement a fix.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard, unclear, intermittent, or performance bugs.", "expectedKeep": true },
+        { "kind": "skill", "name": "pi-logs", "description": "Inspect and group pie debug, session, and truncated-tool logs when debugging runtime behaviour.", "expectedKeep": true },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audits and maintenance passes; not for isolated debugging.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read files from the codebase.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands, builds, tests, and log queries.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit existing files.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review, rate, and close open sessions.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "controlled-experiment",
+      "request": "Create and run a controlled baseline-versus-candidate harness experiment for the new retry policy, compare the outcomes, and document the result.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "harness-experiments", "description": "Create, execute, resume, and compare controlled baseline-versus-candidate pie harness experiments.", "expectedKeep": true },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-driven development when explicitly requested.", "expectedKeep": false },
+        { "kind": "skill", "name": "evaluate-sessions", "description": "Review and rate currently-open sessions and close completed tabs.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read files and experiment artifacts.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit experiment recipes and documentation.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run experiment commands and checks.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "pruner-model-research",
+      "request": "Optimize the skill-pruning prepass. Forge and benchmark alternative binary prompts and context selections against local models. Pull useful Ollama models if needed and explore whether LM Studio would be better. Implement the strongest evidence-backed improvement.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "harness-experiments", "description": "Create and compare controlled baseline-versus-candidate pie harness experiments.", "expectedKeep": true },
+        { "kind": "skill", "name": "add-provider", "description": "Add or update local model servers, OpenAI-compatible endpoints, providers, and models in pie's model catalog.", "expectedKeep": true },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audits and maintenance passes; not for a focused feature.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-driven development when explicitly requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read source, logs, and experiment outputs.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source, benchmark assets, and documentation.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run local models, scripts, tests, and builds.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Research current local-model clients and model capabilities on the public web.", "expectedKeep": true },
+        { "kind": "tool", "name": "session_review", "description": "Review, rate, and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "follow-up-provider",
+      "request": "Do that again for the other provider.",
+      "older": [
+        { "role": "user", "text": "Earlier, review a UI rendering issue." },
+        { "role": "assistant", "text": "The unrelated UI review is complete. [tools used: read]" },
+        { "role": "user", "text": "Then summarize the test suite without changing it." },
+        { "role": "assistant", "text": "The test-suite summary is complete. [tools used: read, bash]" }
+      ],
+      "recent": [
+        { "role": "user", "text": "Add the Acme OpenAI-compatible provider, verify its current API fields, update the model catalog, and run sync validation." },
+        { "role": "assistant", "text": "Acme is added and validated. The other requested provider, Northstar, remains. [tools used: read, web_search, edit, bash]" }
+      ],
+      "previousKeep": ["add-provider", "read", "edit", "bash", "web_search"],
+      "candidates": [
+        { "kind": "skill", "name": "add-provider", "description": "Add or update API providers, local servers, and models in pie's centralized catalog.", "expectedKeep": true },
+        { "kind": "skill", "name": "evaluate-sessions", "description": "Review and rate currently-open sessions.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read source and configuration files.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source and configuration files.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run synchronization and validation commands.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Verify current provider API and model information.", "expectedKeep": true },
+        { "kind": "tool", "name": "session_review", "description": "Review, rate, and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "follow-up-fix",
+      "request": "Fix that and verify it.",
+      "older": [
+        { "role": "user", "text": "Add a provider catalog entry." },
+        { "role": "assistant", "text": "The provider entry was added. [tools used: web_search, edit, bash]" }
+      ],
+      "recent": [
+        { "role": "user", "text": "Diagnose the intermittent cancellation hang, but do not modify anything yet." },
+        { "role": "assistant", "text": "The abort listener is registered after the race can already settle, leaving the request pending. The fix belongs in request-handler.ts. [tools used: read, bash]" }
+      ],
+      "previousKeep": ["diagnose", "read", "bash"],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first workflow for hard or intermittent bugs, including regression verification.", "expectedKeep": true },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first development only when explicitly requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read relevant source and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement the fix and regression test.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run reproduction and verification tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review, rate, and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "explicit-pivot",
+      "request": "Actually stop the implementation. Just summarize the current diff and do not edit or run tests.",
+      "older": [
+        { "role": "user", "text": "Research current queue implementations on the web." },
+        { "role": "assistant", "text": "Research is complete. [tools used: web_search]" },
+        { "role": "user", "text": "Draft the refactor plan." },
+        { "role": "assistant", "text": "The plan calls for source edits and regression tests." }
+      ],
+      "recent": [
+        { "role": "user", "text": "Implement the provider queue refactor and add tests." },
+        { "role": "assistant", "text": "I have inspected the queue and am ready to edit the scheduler. [tools used: read, bash]" }
+      ],
+      "previousKeep": ["read", "edit", "bash"],
+      "candidates": [
+        { "kind": "skill", "name": "add-provider", "description": "Add or update API providers and models.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-driven development.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_changes", "description": "List files changed by this session and return focused diffs.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read files or diff artifacts when needed for a summary.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit existing files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands and tests.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "session-review",
+      "request": "Review and close each pinned tab.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "evaluate-sessions", "description": "Autonomously review and rate currently-open sessions, mark finished work done, and close tabs.", "expectedKeep": true },
+        { "kind": "skill", "name": "pi-logs", "description": "Inspect and group pie runtime and session logs for debugging.", "expectedKeep": false },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audits and maintenance passes.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "List open sessions, read transcripts, record reviews, and close tabs.", "expectedKeep": true },
+        { "kind": "tool", "name": "subagent", "description": "Delegate independent review tasks to parallel agents.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read codebase files.", "expectedKeep": false },
+        { "kind": "tool", "name": "edit", "description": "Edit codebase files.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "current-web-research",
+      "request": "What changed in the OpenAI Responses API this week? Give me a concise summary with citations to the official documentation and changelog.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "add-provider", "description": "Add or update an LLM provider in the local model catalog.", "expectedKeep": false },
+        { "kind": "skill", "name": "pi-logs", "description": "Inspect pie runtime and session logs.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": true },
+        { "kind": "tool", "name": "get_search_content", "description": "Open search results and retrieve page content.", "expectedKeep": true },
+        { "kind": "tool", "name": "fetch_content", "description": "Fetch a known web page and return its content.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read local codebase files.", "expectedKeep": false },
+        { "kind": "tool", "name": "edit", "description": "Edit local files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands and tests.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "no-capability-needed",
+      "request": "Write a three-line haiku about rain on a window.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard bugs.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-driven development.", "expectedKeep": false },
+        { "kind": "skill", "name": "add-provider", "description": "Add or update LLM providers and models.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read local files.", "expectedKeep": false },
+        { "kind": "tool", "name": "edit", "description": "Edit local files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false }
+      ]
+    }
+  ]
+}

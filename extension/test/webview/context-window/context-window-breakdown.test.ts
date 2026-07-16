@@ -180,6 +180,125 @@ test('buildContextWindowBreakdown aggregates repeated non-file tools by normaliz
   assert.ok((toolEntries[0]?.tokens ?? 0) > 0);
 });
 
+test('buildContextWindowBreakdown excludes pre-compaction display history from active-context attribution', () => {
+  const breakdown = buildContextWindowBreakdown({
+    contextUsage: {
+      tokens: 1000,
+      contextWindow: 200000,
+      percent: 0.5,
+    },
+    effectiveContextWindow: 200000,
+    systemPrompts: [],
+    transcript: [
+      makeMessage({
+        id: 'old-assistant',
+        role: 'assistant',
+        toolCalls: [{
+          id: 'old-subagent',
+          name: 'subagent',
+          input: { task: 'old task' },
+          result: 'x'.repeat(20_000),
+          status: 'completed',
+        }],
+      }),
+      makeMessage({ id: 'retained-user', role: 'user', markdown: 'recent work retained by pi' }),
+      makeMessage({
+        id: 'compaction',
+        role: 'system',
+        customType: 'compaction-summary',
+        markdown: 'Summary of the older conversation.',
+      }),
+      makeMessage({
+        id: 'new-assistant',
+        role: 'assistant',
+        toolCalls: [{
+          id: 'new-bash',
+          name: 'bash',
+          input: { command: 'pwd' },
+          result: '/repo',
+          status: 'completed',
+        }],
+      }),
+    ],
+    isPartial: false,
+  });
+
+  assert.equal(
+    breakdown.entries.some((entry) => entry.label === 'Tool: subagent'),
+    false,
+    'historical tools before the latest compaction summary are no longer in the active prompt',
+  );
+  assert.equal(breakdown.entries.some((entry) => entry.label === 'Tool: bash'), true);
+  assert.equal(breakdown.entries.some((entry) => entry.key === 'other'), true);
+  assert.ok(breakdown.notes.some((note) => note.includes('Compacted history is excluded')));
+});
+
+test('buildContextWindowBreakdown reconciles estimated contributors that exceed reported usage', () => {
+  const breakdown = buildContextWindowBreakdown({
+    contextUsage: {
+      tokens: 25,
+      contextWindow: 1000,
+      percent: 2.5,
+    },
+    effectiveContextWindow: 1000,
+    systemPrompts: [],
+    transcript: [makeMessage({
+      role: 'assistant',
+      toolCalls: [
+        {
+          id: 'oversized-subagent',
+          name: 'subagent',
+          input: { task: 'large result' },
+          result: 'x'.repeat(20_000),
+          status: 'completed',
+        },
+        {
+          id: 'oversized-bash',
+          name: 'bash',
+          input: { command: 'large output' },
+          result: 'y'.repeat(10_000),
+          status: 'completed',
+        },
+      ],
+    })],
+    isPartial: false,
+  });
+
+  const attributedTokens = breakdown.entries.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0);
+  const subagentTokens = breakdown.entries.find((entry) => entry.label === 'Tool: subagent')?.tokens ?? 0;
+  const bashTokens = breakdown.entries.find((entry) => entry.label === 'Tool: bash')?.tokens ?? 0;
+  assert.equal(attributedTokens, 25, 'contributor rows must partition the PI-reported used total');
+  assert.ok(subagentTokens > bashTokens && bashTokens > 0, 'multiple contributors retain proportional weight');
+  assert.equal(breakdown.entries.some((entry) => entry.key === 'other'), false);
+  assert.equal(breakdown.summary.usedTokens, 25);
+  assert.equal(breakdown.summary.remainingTokens, 975);
+  assert.ok(breakdown.notes.some((note) => note.includes('proportionally reconciled')));
+});
+
+test('buildContextWindowBreakdown reports unknown usage after compaction when PI has no snapshot', () => {
+  const breakdown = buildContextWindowBreakdown({
+    contextUsage: null,
+    effectiveContextWindow: 200000,
+    systemPrompts: [],
+    transcript: [
+      makeMessage({ id: 'retained-user', role: 'user', markdown: 'recent work retained by pi' }),
+      makeMessage({
+        id: 'compaction',
+        role: 'system',
+        customType: 'compaction-summary',
+        markdown: 'Summary of the older conversation.',
+      }),
+    ],
+    isPartial: false,
+  });
+
+  assert.deepEqual(breakdown.entries, []);
+  assert.equal(breakdown.summary.usedTokens, null);
+  assert.equal(breakdown.summary.remainingTokens, null);
+  assert.ok(breakdown.notes.some((note) => note.includes('does not expose which pre-summary messages PI retained')));
+  assert.equal(breakdown.notes.some((note) => note.includes('PI-reported remainder')), false);
+});
+
 test('buildContextWindowBreakdown estimates footer values without a PI usage snapshot', () => {
   const breakdown = buildContextWindowBreakdown({
     contextUsage: {
@@ -223,12 +342,13 @@ test('buildContextWindowBreakdown suppresses contributor rows when transcript is
 
 // ─── per-tool-call token cache ──────────────────────────────────────────────
 
-function makeToolCall(overrides: Partial<{ id: string; name: string; input: unknown; result: unknown; status: 'running' | 'completed' | 'failed' }> = {}): {
+function makeToolCall(overrides: Partial<{ id: string; name: string; input: unknown; result: unknown; status: 'running' | 'completed' | 'failed'; seq: number }> = {}): {
   id: string;
   name: string;
   input: unknown;
   result?: unknown;
   status: 'running' | 'completed' | 'failed';
+  seq?: number;
 } {
   return {
     id: 'tool-1',
@@ -281,6 +401,20 @@ test('per-tool-call token cache: running tool calls are not cached (no result ye
   clearToolCallTokenCache();
   buildWithToolCalls([makeToolCall({ id: 'running-1', status: 'running', result: undefined })]);
   assert.equal(getToolCallTokenCacheSize(), 0, 'running calls have no result and are not cached');
+});
+
+test('per-tool-call token cache: a running live revision is reused and invalidated by seq', () => {
+  clearToolCallTokenCache();
+  const payload = { details: { results: [{ messages: ['x'.repeat(20_000)] }] } };
+  const running = makeToolCall({ id: 'running-live-1', name: 'subagent', status: 'running', seq: 7, result: payload });
+  const first = buildWithToolCalls([running]);
+  assert.equal(getToolCallTokenCacheSize(), 1);
+  const second = buildWithToolCalls([{ ...running, result: { changedWithoutRevision: true } }]);
+  assert.equal(getToolCallTokenCacheSize(), 1, 'unchanged seq reuses the cached serialized/tokenized preview');
+  assert.deepEqual(second.entries, first.entries);
+
+  buildWithToolCalls([{ ...running, seq: 8, result: { changedAtNewRevision: true } }]);
+  assert.equal(getToolCallTokenCacheSize(), 2, 'new seq computes and caches a new estimate');
 });
 
 test('per-tool-call token cache: distinct completed calls are bounded by LRU eviction', () => {

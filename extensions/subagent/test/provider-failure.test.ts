@@ -90,3 +90,16 @@ test("visible output and tool execution prevent replay", () => {
   assert.equal(tool.retryable, true);
   assert.equal(tool.replaySafety, "tool_side_effect");
 });
+
+test("classifyProviderFailure preserves structured Retry-After from the original error", () => {
+  const result = failure();
+  const error = Object.assign(new Error("rate limited"), {
+    status: 429,
+    headers: { "retry-after": "120" },
+  });
+  classifyProviderFailure(result, error);
+  assert.equal(result.failureClass, "rate_limit");
+  assert.equal(result.retryable, true);
+  // 120 seconds * 1000 = 120000ms, clamped to the default policy max (120s).
+  assert.equal(result.retryAfterMs, 120_000);
+});

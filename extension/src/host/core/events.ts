@@ -339,6 +339,7 @@ export interface MessageStartedEvent {
   messageId: string;
   requestId?: string;
   modelId?: string;
+  provider?: string;
   thinkingLevel?: ChatMessage['thinkingLevel'];
   timestamp: number;
 }
@@ -532,11 +533,12 @@ export interface ActiveRunSummaryChangedEvent {
   summary: ActiveRunSummary | null;
 }
 
-/** Emitted when session metadata (modelId/thinkingLevel) changes. */
+/** Emitted when session model metadata changes. */
 export interface SessionMetadataChangedEvent {
   kind: 'SessionMetadataChanged';
   sessionPath: string;
   modelId?: string;
+  provider?: string;
   thinkingLevel?: ChatMessage['thinkingLevel'];
 }
 

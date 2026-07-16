@@ -655,6 +655,8 @@ export class ProviderGate {
 	private transportFailureThreshold: number;
 	private transportCircuitCooldownMs: number;
 	private uninstallCapacityBridge: (() => void) | null = null;
+	/** Monotonic identity for correlating all observations from one wrapped fetch. */
+	private nextProviderAttemptId = 0;
 
 	private constructor(
 		configs: ProviderConcurrencyConfig[],
@@ -938,6 +940,7 @@ export class ProviderGate {
 		const sessionId = this.extractSessionId(init);
 		const requestClass = this.extractRequestClass(init);
 		const signal = init?.signal ?? undefined;
+		const attemptId = `${config.provider}:${++this.nextProviderAttemptId}`;
 
 		// Account suspension and repeated transport stalls are independent shared
 		// circuits. Both reject before consuming a concurrency slot.
@@ -947,13 +950,25 @@ export class ProviderGate {
 		let transportProbeToken = this.beginTransportAttempt(config.provider);
 
 		// Acquire a concurrency slot. Queue and header waits are separate phases.
-		if (sessionId && !pool.canClaimImmediately(sessionId)) {
-			publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'gate_queue' });
+		// Classify the synchronous fast path before awaiting so an immediate permit
+		// is recorded as an explicit zero rather than timer-resolution noise.
+		const immediatelyClaimable = pool.canClaimImmediately(sessionId);
+		const queueStartedAt = performance.now();
+		if (sessionId && !immediatelyClaimable) {
+			publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'gate_queue' });
 		}
 		let slotIndex: number;
 		try {
 			slotIndex = await pool.acquire(sessionId, signal, requestClass);
+			if (sessionId) publishProviderTransportObservation({
+				sessionId,
+				provider: config.provider,
+				attemptId,
+				kind: 'gate_acquired',
+				queueDurationMs: immediatelyClaimable ? 0 : Math.max(0, Math.trunc(performance.now() - queueStartedAt)),
+			});
 		} catch (error) {
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'gate_rejected' });
 			this.cancelTransportAttempt(config.provider, transportProbeToken);
 			throw error;
 		}
@@ -971,11 +986,12 @@ export class ProviderGate {
 			}
 		} catch (error) {
 			this.cancelTransportAttempt(config.provider, transportProbeToken);
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
 		const pauseGenerationAtAdmission = pool.pauseGeneration();
-		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_wait' });
+		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'headers_wait' });
 
 		let receivedHeaders = false;
 		try {
@@ -994,7 +1010,7 @@ export class ProviderGate {
 			} else {
 				this.recordTransportSuccess(config.provider, transportProbeToken);
 			}
-			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'headers_received' });
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'headers_received' });
 
 			// Account-pause detection: 429/403 with suspension body.
 			const pauseInfo = await this.extractAccountPause(response, config.provider, signal);
@@ -1016,7 +1032,7 @@ export class ProviderGate {
 			// If the response has a body, wrap it to release the slot on
 			// stream completion (and arm the idle watchdog if configured).
 			if (response.body) {
-				return this.wrapStream(response, config.provider, pool, slotIndex, sessionId, signal);
+				return this.wrapStream(response, config.provider, pool, slotIndex, sessionId, attemptId, signal);
 			}
 
 			// No body — release immediately.
@@ -1034,7 +1050,7 @@ export class ProviderGate {
 				// half-open probe failures would let an ordinary outage retry forever.
 				this.recordTransportFailure(config.provider, transportProbeToken);
 			}
-			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, kind: 'transport_error' });
+			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'transport_error' });
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
@@ -1259,6 +1275,7 @@ export class ProviderGate {
 		pool: ProviderPool,
 		slotIndex: number,
 		sessionId: string | null,
+		attemptId: string,
 		signal: AbortSignal | undefined,
 	): Response {
 		const originalBody = response.body!;
@@ -1304,7 +1321,7 @@ export class ProviderGate {
 					timer = setTimeout(() => {
 						if (settled) return;
 						settled = true;
-						if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_error' });
+						if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_error' });
 						reader.cancel().catch(() => {});
 						try {
 							controller.error(
@@ -1326,20 +1343,20 @@ export class ProviderGate {
 						clearTimer();
 						if (settled) return;
 						if (done) {
-							if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_terminal' });
+							if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_terminal' });
 							controller.close();
 							settled = true;
 							releaseSlot(true);
 							return;
 						}
 						if (value) {
-							if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'raw_chunk' });
+							if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'raw_chunk' });
 							controller.enqueue(value);
 						}
 						armTimer();
 					}
 				} catch (err) {
-					if (sessionId) publishProviderTransportObservation({ sessionId, provider, kind: 'transport_error' });
+					if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_error' });
 					clearTimer();
 					if (!settled) {
 						settled = true;

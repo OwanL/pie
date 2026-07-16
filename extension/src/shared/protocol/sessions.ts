@@ -205,6 +205,7 @@ export interface MessageStartedPayload {
   messageId: string;
   sessionPath: string;
   modelId?: string;
+  provider?: string;
   thinkingLevel?: ThinkingLevel;
 }
 
@@ -255,6 +256,9 @@ export interface ToolFinishedPayload {
   input?: unknown;
   result: unknown;
   status: Extract<ToolCall['status'], 'completed' | 'failed'>;
+  /** Backend execution start, repeated so interval analytics do not depend on
+   * an in-memory/transcript tool.started record surviving until terminal. */
+  startedAt?: number;
   /** Wall-clock execution time in milliseconds for this tool call. */
   durationMs?: number;
   /** Stable grouping for concurrently-running sibling calls. */
@@ -379,6 +383,12 @@ export interface RetryStartedPayload {
   maxAttempts: number;
   delayMs: number;
   errorMessage: string;
+  /** Backend request identity; present on timing-aware backends. */
+  requestId?: string;
+  /** Stable request+retry-attempt source key for analytics deduplication. */
+  retryId?: string;
+  /** Epoch milliseconds when the SDK scheduled this retry. */
+  startedAt?: number;
 }
 
 /** Emitted by the backend when an auto-retry attempt concludes — on success
@@ -390,6 +400,18 @@ export interface RetryEndedPayload {
   success: boolean;
   attempt: number;
   finalError?: string;
+}
+
+/** Analytics-only terminal timing for one retry attempt. Emitted when another
+ * attempt supersedes it or the retry episode ends. */
+export interface RetryMeasuredPayload {
+  sessionPath: string;
+  requestId: string;
+  retryId: string;
+  /** Observed scheduling→provider-attempt delay; absent for ungated providers. */
+  measuredDelayMs?: number;
+  /** Observed scheduling→attempt terminal/superseding boundary. */
+  durationMs: number;
 }
 
 /** Emitted by the backend when a history-compaction (`/compact`) LLM call

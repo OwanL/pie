@@ -20,14 +20,14 @@ import { PROVIDER_GATE_REQUEST_CLASS_HEADER, PROVIDER_GATE_REQUEST_CLASS_SKILL_P
 // ceilings, not waits: a call that completes early returns immediately.
 //
 // Calibrated for REASONING models (e.g. gpt-5-mini), which emit encrypted
-// reasoning tokens before the prune-list JSON. The previous values
+// reasoning tokens before the keep-list JSON. The previous values
 // (minimal/low = 20s) were sized for a non-reasoning model and aborted
 // gpt-5-mini mid-reasoning on complex tool sets — the abort surfaced as
 // `stopReason=aborted` + "OpenAI Responses stream ended before a terminal
 // response event" (the AbortSignal fires → SSE iterator ends with no
 // terminal event → pi-ai sets aborted). `aborted` never matches the
 // transport-retry regex, so it failed open ~40s into every turn (20s low
-// + 40s minimal-downgrade) instead of ever producing a prune list.
+// + 40s minimal-downgrade) instead of ever producing a keep list.
 // 45s for `low` comfortably covers gpt-5-mini reasoning on a ~15-tool set.
 export const LLM_TIMEOUT_MS_BY_THINKING_LEVEL: Record<string, number> = {
 	minimal: 30_000,
@@ -484,6 +484,7 @@ export async function runPruningPrepass(
 	// merged over the built-in defaults. Absent fields keep the calibrated
 	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
 	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs, maxOutputTokens } = resolvePrepassBudgets(activeConfig);
+	const temperature = activeConfig.prepass?.temperature;
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
@@ -497,6 +498,7 @@ export async function runPruningPrepass(
 				// Disable pi-ai retries so only the classified manual loop below
 				// controls retry count and backoff (avoids nested amplification).
 				maxRetries: 0,
+				...(temperature !== undefined ? { temperature } : {}),
 				...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
 				signal: AbortSignal.timeout(timeoutMs),
 				...auth,
@@ -534,6 +536,7 @@ export async function runPruningPrepass(
 						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
 							reasoning: thinkingLevel,
 							maxRetries: 0,
+							...(temperature !== undefined ? { temperature } : {}),
 							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
 							signal: AbortSignal.timeout(timeoutMs),
 							...auth,

@@ -4,6 +4,8 @@ import { estimateTextTokens } from '../shared/tokenize.js';
 const MAX_TAIL_CHARS = 8_192;
 const MAX_SUMMARY_CHARS = 1_024;
 const MAX_TASK_CHARS = 4_096;
+const SUBAGENT_NORMALIZATION_CACHE_MAX = 64;
+const subagentNormalizationCache = new Map<string, ToolPreview>();
 
 export function normalizeToolProgress(toolName: string, value: unknown): ToolPreview {
   const normalizedName = toolName.trim().toLowerCase();
@@ -52,6 +54,22 @@ function normalizeSubagent(value: unknown): ToolPreview {
           ? record.details
           : [];
   const mode = normalizeSubagentMode(details?.mode ?? record?.mode);
+  // Modern runner snapshots carry a unique attempt id and monotonic progress
+  // generation per child. Reuse the already JSON-safe recursive projection for
+  // duplicate callbacks instead of cloning multi-megabyte messages again.
+  const revisionParts = rawChildren.map((value) => {
+    const child = asRecord(value);
+    const attemptId = stringField(child, ['attemptId']);
+    const generation = numberField(child, 'progressGeneration');
+    return attemptId && generation !== undefined ? `${attemptId}:${generation}` : undefined;
+  });
+  const revision = revisionParts.length > 0 && revisionParts.every((part): part is string => part !== undefined)
+    ? `${mode}|${revisionParts.join('|')}`
+    : undefined;
+  if (revision) {
+    const cached = subagentNormalizationCache.get(revision);
+    if (cached) return cached;
+  }
   const children: SubagentChildPreview[] = [];
   for (let index = 0; index < rawChildren.length; index += 1) {
     const child = asRecord(rawChildren[index]);
@@ -105,9 +123,17 @@ function normalizeSubagent(value: unknown): ToolPreview {
       stderr: boundedTailOptional(stringField(child, ['stderr']), MAX_TAIL_CHARS),
     });
   }
-  return toJsonSafe({
+  const normalized = toJsonSafe({
     kind: 'subagent', mode, children, omittedChildren: Math.max(0, rawChildren.length - children.length),
   }) as ToolPreview;
+  if (revision) {
+    subagentNormalizationCache.set(revision, normalized);
+    if (subagentNormalizationCache.size > SUBAGENT_NORMALIZATION_CACHE_MAX) {
+      const oldest = subagentNormalizationCache.keys().next().value;
+      if (oldest !== undefined) subagentNormalizationCache.delete(oldest);
+    }
+  }
+  return normalized;
 }
 
 function normalizeNumberRecord(value: unknown): Record<string, number> | undefined {

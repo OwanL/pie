@@ -118,18 +118,13 @@ test('provider-qualified profileOrder entries support duplicate model ids across
     profileOrder: Array<string | { provider: string; id: string }>;
     providers: Record<string, { models: Array<Record<string, unknown>> }>;
   };
-  const id = 'gpt-5.6-sol';
-  const original = source.providers['github-copilot'].models.find((model) => model.id === id);
-  assert.ok(original);
-  source.providers['openai-codex'].models.push({ ...original, name: 'Codex GPT-5.6 Sol' });
-  const profileIndex = source.profileOrder.indexOf(id);
-  assert.ok(profileIndex >= 0);
-  source.profileOrder.splice(
-    profileIndex,
-    1,
-    { provider: 'github-copilot', id },
-    { provider: 'openai-codex', id },
-  );
+  const id = 'test-shared-model';
+  for (const provider of ['github-copilot', 'openai-codex']) {
+    const template = source.providers[provider].models[0];
+    assert.ok(template);
+    source.providers[provider].models.push({ ...template, id, name: `${provider} test model` });
+    source.profileOrder.push({ provider, id });
+  }
 
   const generated = YAML.parse(mod.generate(source, parseCommitted('settings.json')).modelProfilesYaml) as {
     profiles: Array<{ provider: string; id: string }>;
@@ -138,6 +133,31 @@ test('provider-qualified profileOrder entries support duplicate model ids across
     generated.profiles.filter((profile) => profile.id === id).map((profile) => profile.provider),
     ['github-copilot', 'openai-codex'],
   );
+});
+
+test('every built-in OpenAI Codex GPT model has pie-side token pricing', async () => {
+  const mod = await loadSyncModule();
+  const source = mod.loadSource(repoRoot);
+  const generated = mod.generate(source, parseCommitted('settings.json')).modelsJson as {
+    providers: Record<string, { modelOverrides?: Record<string, { cost?: Record<string, unknown> }> }>;
+  };
+  const overrides = generated.providers['openai-codex'].modelOverrides ?? {};
+  const expected = [
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.3-codex-spark',
+  ];
+  for (const id of expected) {
+    assert.deepEqual(
+      Object.keys(overrides[id]?.cost ?? {}).filter((key) => key !== 'tiers').sort(),
+      ['cacheRead', 'cacheWrite', 'input', 'output'],
+      `${id} should have complete token pricing`,
+    );
+  }
 });
 
 test('settings.json merge preserves user-selected chat and pruning models while overwriting retry', async () => {

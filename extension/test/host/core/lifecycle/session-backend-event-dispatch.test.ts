@@ -26,6 +26,7 @@ function createHandlers() {
     onQueuedDelivered: (payload) => calls.push({ name: 'message.queuedDelivered', payload }),
     onRetryStarted: (payload) => calls.push({ name: 'retry.started', payload }),
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
+    onRetryMeasured: (payload) => calls.push({ name: 'retry.measured', payload }),
     onCompaction: (payload) => calls.push({ name: 'compaction.ended', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
     onRetryStuck: (payload) => calls.push({ name: 'retry.stuck', payload }),
@@ -169,6 +170,19 @@ test('dispatchSessionBackendEvent routes tool-call draft deltas', () => {
   dispatchSessionBackendEvent({ event: 'message.toolCallDelta', payload }, handlers);
 
   assert.deepEqual(calls, [{ name: 'message.toolCallDelta', payload }]);
+});
+
+test('dispatchSessionBackendEvent routes correlated retry timing', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    requestId: 'req-1',
+    retryId: 'req-1:2',
+    measuredDelayMs: 4_025,
+    durationMs: 5_100,
+  };
+  dispatchSessionBackendEvent({ event: 'retry.measured', payload }, handlers);
+  assert.deepEqual(calls, [{ name: 'retry.measured', payload }]);
 });
 
 test('dispatchSessionBackendEvent routes operational-error payloads', () => {

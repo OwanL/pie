@@ -20,6 +20,7 @@ SELECT
   image_input_count,
   tool_call_count,
   tool_duration_ms,
+  critical_path_duration_ms,
   timed_tool_call_count,
   tool_failure_count,
   verification_total_count,
@@ -31,6 +32,7 @@ SELECT
   cache_read_tokens,
   cache_write_tokens,
   token_reported_turn_count,
+  skill_pruning_prepass_duration_ms,
   estimated_cost_usd,
   subagent_estimated_cost_usd,
   total_estimated_cost_usd

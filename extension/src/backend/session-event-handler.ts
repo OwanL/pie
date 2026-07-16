@@ -10,6 +10,7 @@ import type {
   MessageToolCallDeltaPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
+  RetryMeasuredPayload,
   RetryStartedPayload,
   ToolFinishedPayload,
   ToolProgressPayload,
@@ -399,11 +400,19 @@ function extractUserMessageText(message: { content?: unknown }): string {
 export interface BackendSessionEventHandlerDeps {
   emit(event: string, payload?: unknown): void;
   emitBusyChanged(context: SessionContext, busy: boolean): void;
-  emitContextUsageChanged(context: SessionContext): void;
+  emitContextUsageChanged(context: SessionContext, postCompactionEstimatedTokens?: number): void;
   emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void>;
   emitSessionListChanged(): Promise<void>;
   /** Terminalize a stuck runtime locally and replace it before the session becomes reusable. */
   recoverStuckSession(context: SessionContext, reason: string): void;
+}
+
+function readPostCompactionEstimatedTokens(result: unknown): number | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const value = (result as { estimatedTokensAfter?: unknown }).estimatedTokensAfter;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : undefined;
 }
 
 function emitLatestPruningResult(
@@ -522,6 +531,26 @@ function emitSemanticCandidate(
   return envelope;
 }
 
+function finishRetryTiming(
+  deps: BackendSessionEventHandlerDeps,
+  context: SessionContext,
+  endedAt: number,
+): void {
+  const active = context.activeRequest;
+  const timing = active?.retryTiming;
+  if (!active || !timing) return;
+  deps.emit('retry.measured', {
+    sessionPath: context.sessionPath,
+    requestId: active.id,
+    retryId: timing.retryId,
+    ...(timing.providerAttemptStartedAt === undefined
+      ? {}
+      : { measuredDelayMs: Math.max(0, timing.providerAttemptStartedAt - timing.startedAt) }),
+    durationMs: Math.max(0, endedAt - timing.startedAt),
+  } satisfies RetryMeasuredPayload);
+  active.retryTiming = undefined;
+}
+
 function emitRejectedObservation(
   deps: BackendSessionEventHandlerDeps,
   context: SessionContext,
@@ -578,6 +607,7 @@ export function handleSdkSessionEvent(
         return;
       }
       context.activeRequest.turnStartedAt = Date.now();
+      context.activeRequest.providerTurnSequence = (context.activeRequest.providerTurnSequence ?? 0) + 1;
       const liveSeq = context.activeRequest.liveTurnAccumulator?.checkpoint().checkpointSeq ?? 0;
       if (liveSeq === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
@@ -661,6 +691,7 @@ export function handleSdkSessionEvent(
         messageId: context.activeRequest.currentMessageId,
         sessionPath: context.sessionPath,
         modelId: context.activeRequest.modelId,
+        ...(context.activeRequest.provider ? { provider: context.activeRequest.provider } : {}),
         thinkingLevel: context.activeRequest.thinkingLevel,
       } satisfies MessageStartedPayload);
       // Context usage is based on the latest completed assistant usage and has
@@ -770,7 +801,11 @@ export function handleSdkSessionEvent(
         args: summarizeToolArgs(event.args),
       });
 
-      const toolCallId = event.toolCallId ?? '';
+      const toolCallId = event.toolCallId?.trim() ?? '';
+      if (!toolCallId) {
+        emitRejectedObservation(deps, context, 'malformed_observation');
+        return;
+      }
       const startedAt = Date.now();
       const toolStartTimes = context.activeRequest.toolStartTimes ?? new Map<string, number>();
       const parallelGroups = context.activeRequest.toolParallelGroupByCallId ?? new Map<string, string>();
@@ -853,7 +888,11 @@ export function handleSdkSessionEvent(
       // anchor on the last tool to finish.
       context.activeRequest.turnBoundaryAt = Date.now();
 
-      const toolCallId = event.toolCallId ?? '';
+      const toolCallId = event.toolCallId?.trim() ?? '';
+      if (!toolCallId) {
+        emitRejectedObservation(deps, context, 'malformed_observation');
+        return;
+      }
       const startMetadata = context.activeRequest.toolStartMetadata?.get(toolCallId);
       context.activeRequest.toolStartMetadata?.delete(toolCallId);
       const toolName = event.toolName?.trim() || startMetadata?.name || '';
@@ -868,7 +907,7 @@ export function handleSdkSessionEvent(
         });
       }
 
-      const durationMs = resolveToolDurationMs(context, toolCallId);
+      const timing = resolveToolTiming(context, toolCallId);
       const terminal: ToolFinishedPayload = {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
@@ -878,7 +917,8 @@ export function handleSdkSessionEvent(
         input: event.args !== undefined ? event.args : startMetadata?.input,
         result: event.result,
         status: event.isError ? 'failed' : 'completed',
-        durationMs,
+        startedAt: timing?.startedAt,
+        durationMs: timing?.durationMs,
       };
       const pending = context.activeRequest.pendingDurableToolTerminals
         ?? new Map<string, ToolFinishedPayload>();
@@ -1039,11 +1079,29 @@ export function handleSdkSessionEvent(
         ? event.message
         : { ...event.message, errorMessage: mergedErrorMessage };
 
-      const message = mapAssistantMessage(messageId, assistantEventMessage as any, durationMs, {        modelId: context.activeRequest.modelId,
+      // A persisted assistant message may represent several provider turns when
+      // intermediate tool-use messages are folded into the final durable turn.
+      // Aggregate every queue observation retained since the previous emitted
+      // terminal rather than attributing only the final provider turn.
+      const providerQueueEntries = [...(context.activeRequest.providerQueueByTurn?.values() ?? [])];
+      const providerQueue = providerQueueEntries.length === 0
+        ? undefined
+        : providerQueueEntries.reduce(
+          (total, entry) => ({
+            durationMs: total.durationMs + entry.durationMs,
+            attemptCount: total.attemptCount + entry.attemptCount,
+          }),
+          { durationMs: 0, attemptCount: 0 },
+        );
+      const message = mapAssistantMessage(messageId, assistantEventMessage as any, durationMs, {
+        modelId: context.activeRequest.modelId,
+        provider: context.activeRequest.provider,
         thinkingLevel: context.activeRequest.thinkingLevel,
         turnLatencyMs,
         overheadMs,
         providerLatencyMs,
+        providerQueueMs: providerQueue?.durationMs,
+        providerQueueAttemptCount: providerQueue?.attemptCount,
       });
 
       message.durableEntryId = event.sessionEntryId;
@@ -1065,6 +1123,12 @@ export function handleSdkSessionEvent(
 
       const stopReason = typeof event.message.stopReason === 'string' ? event.message.stopReason : '';
       const expectsToolExecution = stopReason === 'toolUse' || stopReason === 'tool_use';
+      if (!expectsToolExecution) {
+        // The queue observations above now belong to this emitted terminal.
+        // Tool-use intermediates are not emitted, so retain their observations
+        // until the later terminal that represents the complete durable turn.
+        context.activeRequest.providerQueueByTurn?.clear();
+      }
       if (!expectsToolExecution && context.activeRequest.liveTurnAccumulator) {
         const branch = context.session.sessionManager?.getBranch?.() as SessionEntryLike[] | undefined;
         const durableTurnFromBranch = branch
@@ -1075,11 +1139,14 @@ export function handleSdkSessionEvent(
         const durableTurn = {
           ...durableTurnFromBranch,
           modelId: message.modelId ?? durableTurnFromBranch.modelId,
+          provider: message.provider ?? durableTurnFromBranch.provider,
           thinkingLevel: message.thinkingLevel ?? durableTurnFromBranch.thinkingLevel,
           durationMs: message.durationMs ?? durableTurnFromBranch.durationMs,
           turnLatencyMs: message.turnLatencyMs,
           overheadMs: message.overheadMs,
           providerLatencyMs: message.providerLatencyMs,
+          providerQueueMs: message.providerQueueMs,
+          providerQueueAttemptCount: message.providerQueueAttemptCount,
           errorDetail: message.errorDetail ?? durableTurnFromBranch.errorDetail,
           durableEntryId: event.sessionEntryId,
         };
@@ -1228,7 +1295,10 @@ export function handleSdkSessionEvent(
       // compaction visibly surface the generated summary instead of only
       // appearing after reopen. Failed/aborted attempts append nothing.
       if (event.result) {
-        deps.emitContextUsageChanged(context);
+        // The new prompt has not produced assistant usage yet, but the SDK
+        // supplies its post-compaction token estimate. Publish that immediately
+        // instead of clearing the indicator until the next user message.
+        deps.emitContextUsageChanged(context, readPostCompactionEstimatedTokens(event.result));
         void deps.emitSessionOpened(context.sessionPath);
         void deps.emitSessionListChanged();
       }
@@ -1239,6 +1309,8 @@ export function handleSdkSessionEvent(
     }
     case 'auto_retry_start': {
       clearSemanticLease(context);
+      const startedAt = Date.now();
+      finishRetryTiming(deps, context, startedAt);
       if (context.activeRequest) {
         context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.errorMessage)
           ?? context.activeRequest.lastRetryErrorMessage;
@@ -1254,17 +1326,30 @@ export function handleSdkSessionEvent(
         phase: 'retry_wait',
         inactivityBudgetMs: (event.delayMs ?? 0) + resolveWillRetryWatchdogGraceMs(),
       });
+      const requestId = context.activeRequest?.id;
+      const attempt = event.attempt ?? 0;
+      const retryId = requestId ? `${requestId}:${attempt}` : undefined;
+      if (context.activeRequest && retryId) {
+        context.activeRequest.retryTiming = {
+          retryId,
+          attempt,
+          startedAt,
+          scheduledDelayMs: Math.max(0, event.delayMs ?? 0),
+        };
+      }
       deps.emit('retry.started', {
         sessionPath: context.sessionPath,
-        attempt: event.attempt ?? 0,
+        attempt,
         maxAttempts: event.maxAttempts ?? 0,
         delayMs: event.delayMs ?? 0,
         errorMessage: event.errorMessage ?? '',
+        ...(requestId && retryId ? { requestId, retryId, startedAt } : {}),
       } satisfies RetryStartedPayload);
       return;
     }
 
     case 'auto_retry_end': {
+      finishRetryTiming(deps, context, Date.now());
       if (context.activeRequest) {
         if (event.success === true) {
           context.activeRequest.lastRetryErrorMessage = undefined;
@@ -1311,21 +1396,21 @@ function sdkTraceEventKind(eventType: string) {
 }
 
 /**
- * Resolve the wall-clock execution time for a finished tool call using the
- * start timestamp recorded at `tool_execution_start`. Falls back to 0 when the
- * start was never seen (e.g. an end event arrives without a matching start).
+ * Resolve a finished tool's measured execution interval. Missing starts stay
+ * unknown; they must not be converted into plausible zero-duration calls.
  */
 function resolveUnexpectedInterruptReason(reason: string | undefined): string {
   const trimmed = reason?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_UNEXPECTED_INTERRUPT_REASON;
 }
 
-function resolveToolDurationMs(context: SessionContext, toolCallId: string): number {
+function resolveToolTiming(
+  context: SessionContext,
+  toolCallId: string,
+): { startedAt: number; durationMs: number } | undefined {
   const startedAt = context.activeRequest?.toolStartTimes?.get(toolCallId);
   context.activeRequest?.toolStartTimes?.delete(toolCallId);
   context.activeRequest?.toolParallelGroupByCallId?.delete(toolCallId);
-  if (startedAt === undefined) {
-    return 0;
-  }
-  return Math.max(0, Date.now() - startedAt);
+  if (startedAt === undefined) return undefined;
+  return { startedAt, durationMs: Math.max(0, Date.now() - startedAt) };
 }

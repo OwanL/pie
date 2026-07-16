@@ -14,6 +14,7 @@
 import type {
   BackendErrorData,
   FileExtensionData,
+  PreparedRetryTimingRow,
   PreparedRunRow,
   PreparedToolUsageRow,
   PreparedTurnThroughputRow,
@@ -53,6 +54,8 @@ export interface ChartContext {
   toolRows: PreparedToolUsageRow[];
   /** All per-turn throughput rows (filter to ctx.runs via runId when needed). */
   turnThroughputRows: PreparedTurnThroughputRow[];
+  /** All per-attempt retry timing rows (filter to ctx.runs via runId when needed). */
+  retryTimingRows: PreparedRetryTimingRow[];
   /** Token used to abort superseded renders. */
   renderToken: number;
   pruning: PruningImpactData;

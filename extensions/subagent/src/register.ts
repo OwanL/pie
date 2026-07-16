@@ -23,6 +23,7 @@ import { discoverAgents } from "../agents.js";
 import { SubagentParams, prepareSubagentArguments, BUCKET_GUIDANCE as BUCKET_GUIDANCE_BASE } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
+import type { OnUpdateCallback } from "../types.js";
 import { getMaxInflight } from "./concurrency-limit.js";
 
 const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, high, or xhigh.";
@@ -123,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 		prepareArguments: prepareSubagentArguments,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			return execute(_toolCallId, params, signal, onUpdate, ctx, pi, isDisabledFn);
+			return execute(_toolCallId, params, signal, onUpdate as OnUpdateCallback, ctx, pi, isDisabledFn);
 		},
 
 		renderCall(args, theme, context) {

@@ -123,7 +123,7 @@ export interface TokenPricing {
   cacheWrite: number;
 }
 
-export type TokenPricingResolver = (modelId: string) => TokenPricing | undefined;
+export type TokenPricingResolver = (modelId: string, provider?: string) => TokenPricing | undefined;
 
 interface CostUsage {
   inputTokens: number;
@@ -553,7 +553,13 @@ export function buildCompletedCostSummary(
   for (const message of transcript) {
     if (message.role !== 'assistant' || !message.usage) continue;
     sawTranscriptUsage = true;
-    const messagePricing = message.modelId ? pricingForModel?.(message.modelId) ?? fallbackPricing : fallbackPricing;
+    // A model id alone is not a billing identity: Codex and Copilot can expose
+    // the same id at different rates. When a resolver exists, let it reject an
+    // ambiguous provider-less id rather than silently applying the currently
+    // selected provider's fallback pricing to a historical turn.
+    const messagePricing = message.modelId
+      ? pricingForModel ? pricingForModel(message.modelId, message.provider) : fallbackPricing
+      : fallbackPricing;
     addCompletedUsageCost(completed, message.usage, messagePricing, message.modelId);
   }
 

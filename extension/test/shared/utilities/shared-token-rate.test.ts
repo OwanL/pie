@@ -497,3 +497,143 @@ test('a reasoning-only subagent stream (streaming flag, no streamingText) advanc
   // cumTokens is 0 (nothing counted yet) -> totalDelta 0, but generating via the flag.
   assert.equal(acc.cumTokens, 0);
 });
+
+// --- REM-04: monotonic-revision projection cache for subagent token counting ---
+
+/** A v4 subagent preview call carrying a monotonic `seq` (projected from the
+ *  live `LiveToolRecord.seq`) and a `cumulativeOutputTokens` counter. */
+function previewCallWithSeq(id: string, tokens: number, seq: number): ToolCall {
+  return {
+    id,
+    name: 'subagent',
+    input: {},
+    status: 'running',
+    seq,
+    result: {
+      kind: 'subagent',
+      mode: 'single',
+      omittedChildren: 0,
+      children: [{
+        id: 'child-1', agent: 'worker', task: 't', phase: 'running',
+        streaming: true,
+        streamingText: 'same bounded tail',
+        cumulativeOutputTokens: tokens,
+      }],
+    },
+  };
+}
+
+test('REM-04: unchanged subagent revision reuses the cached projection (no re-extraction)', () => {
+  // The monotonic `seq` is the cache key. When it is unchanged across ticks the
+  // recursive extraction + tokenization is skipped — a content change without a
+  // seq advance is NOT reflected, proving the extraction was skipped (if it had
+  // run, it would read the new counter). This matches the backend's contract
+  // that identical cumulative SDK updates consume no sequence and emit nothing.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+
+  tickTokenRate(acc, [{ ...m, toolCalls: [previewCallWithSeq('sub1', 100, 1)] }], BASE_NOW + 1000);
+  assert.equal(acc.cumTokens, 100);
+  assert.ok(acc.subagentProjectionCache, 'projection cache populated after first extraction');
+  assert.ok(
+    acc.subagentProjectionCache!.signature.includes('sub1:running:1:1'),
+    `signature encodes id:status:seq:result-presence, got: ${acc.subagentProjectionCache!.signature}`,
+  );
+
+  // Same seq=1 but cumulativeOutputTokens changed to 200. The cache hits (seq
+  // unchanged) → the cached projection (tokens=100) is reused → cumTokens stays
+  // 100 (delta 0), NOT 200. If the extraction had re-run it would read 200.
+  tickTokenRate(acc, [{ ...m, toolCalls: [previewCallWithSeq('sub1', 200, 1)] }], BASE_NOW + 2000);
+  assert.equal(acc.cumTokens, 100, 'unchanged revision reuses cached projection (200 ignored)');
+});
+
+test('REM-04: a seq advance (preview change) re-extracts the projection', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+
+  tickTokenRate(acc, [{ ...m, toolCalls: [previewCallWithSeq('sub1', 100, 1)] }], BASE_NOW + 1000);
+  assert.equal(acc.cumTokens, 100);
+
+  // seq advances 1 → 2: cache miss → re-extract → reads the new counter (250).
+  tickTokenRate(acc, [{ ...m, toolCalls: [previewCallWithSeq('sub1', 250, 2)] }], BASE_NOW + 2000);
+  assert.equal(acc.cumTokens, 250, 'seq advance re-extracts and reads the new counter');
+  assert.ok(
+    acc.subagentProjectionCache!.signature.includes('sub1:running:2:1'),
+    'cache signature updated to the new seq',
+  );
+});
+
+test('REM-04: subagent calls without a monotonic seq bypass the projection cache', () => {
+  // Durable messages loaded from disk and test fixtures carry no `seq`. Their
+  // content can change between ticks without advancing the signature, so caching
+  // by `seq` would be unsound — the cache is bypassed and content changes are
+  // always reflected.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const call = (tokens: number): ToolCall => ({
+    id: 'sub1', name: 'subagent', input: {}, status: 'running',
+    result: {
+      kind: 'subagent', mode: 'single', omittedChildren: 0,
+      children: [{ id: 'c1', agent: 'a', task: 't', phase: 'running',
+        streaming: true, cumulativeOutputTokens: tokens }],
+    },
+  });
+
+  tickTokenRate(acc, [{ ...m, toolCalls: [call(100)] }], BASE_NOW + 1000);
+  assert.equal(acc.cumTokens, 100);
+  assert.equal(acc.subagentProjectionCache, undefined, 'no seq → cache not populated');
+
+  // Content changes without seq → always re-extracted (no stale cache).
+  tickTokenRate(acc, [{ ...m, toolCalls: [call(200)] }], BASE_NOW + 2000);
+  assert.equal(acc.cumTokens, 200, 'no cache → content change always reflected');
+});
+
+test('REM-04: large-payload characterization — unchanged revision skips repeat recursive tokenization', () => {
+  // A legacy (no cumulativeOutputTokens) subagent with many messages: the
+  // recursive extraction + BPE tokenization of the full message tree is the
+  // dominant per-tick cost the cache eliminates. This proves deterministically
+  // that an unchanged revision avoids repeat work: a much larger payload under
+  // the same seq is NOT re-tokenized (the cached projection is reused), while a
+  // seq advance re-extracts and tokenizes the larger payload.
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+
+  const buildCall = (text: string, seq: number): ToolCall => ({
+    id: 'sub1', name: 'subagent', input: {}, status: 'running', seq,
+    result: {
+      mode: 'single',
+      results: [{
+        agent: 'a', task: 't', exitCode: -1, streaming: true,
+        messages: Array.from({ length: 200 }, (_, i) => ({
+          role: 'assistant',
+          content: [{ type: 'text', text: `${text}-${i}` }],
+        })),
+      }],
+    },
+  });
+
+  // First tick: full recursive extraction + tokenization runs.
+  const smallText = tokenText(50);
+  const state1 = tickTokenRate(acc, [{ ...m, toolCalls: [buildCall(smallText, 1)] }], BASE_NOW + 1000);
+  const firstTokens = state1.liveOutputTokens!;
+  assert.ok(firstTokens > 0, 'first extraction tokenized the payload');
+  assert.ok(acc.subagentProjectionCache, 'cache populated after first extraction');
+
+  // Second tick: SAME seq=1 but a 10× larger payload (more text per message).
+  // The cache hits (seq unchanged) → the cached projection is reused → the
+  // larger payload is NOT re-tokenized. liveOutputTokens stays at the cached
+  // value. If the extraction had re-run, liveOutputTokens would be ~10× larger.
+  const largeText = tokenText(500);
+  const state2 = tickTokenRate(acc, [{ ...m, toolCalls: [buildCall(largeText, 1)] }], BASE_NOW + 2000);
+  assert.equal(
+    state2.liveOutputTokens, firstTokens,
+    'unchanged revision reuses cached projection — larger payload not re-tokenized',
+  );
+
+  // Third tick: seq advances to 2 → cache miss → re-extracts the larger payload.
+  const state3 = tickTokenRate(acc, [{ ...m, toolCalls: [buildCall(largeText, 2)] }], BASE_NOW + 3000);
+  assert.ok(
+    state3.liveOutputTokens! > firstTokens * 2,
+    'seq advance re-extracts — larger payload tokenized',
+  );
+});

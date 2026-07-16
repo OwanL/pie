@@ -199,6 +199,9 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   run.inputKindsUsed = ['filesystemPathRef', 'bogus', 42];
   run.cacheReadTokens = -2;
   run.tokenReportedTurnCount = 4.9;
+  run.compactionCount = -1;
+  run.autoRetryCount = 'invalid';
+  run.retryTimingSamples = undefined;
 
   run.analyticsFactors = {
     promptFamily: 42,
@@ -319,6 +322,8 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   assert.equal(coerced?.toolUsage.subagentCacheWriteTokens, 0);
   assert.equal(coerced?.compactionCount, 0);
   assert.equal(coerced?.autoRetryCount, 0);
+  assert.deepEqual(coerced?.retryTimingSamples, []);
+  assert.equal(coerced?.toolUsage.criticalPathDurationMs, undefined);
 
   assert.deepEqual(coerced?.fileExtensions.readCountsByExtension, {});
   assert.deepEqual(coerced?.fileExtensions.writeCountsByExtension, { '.ts': 2 });
@@ -652,6 +657,37 @@ test('coerceRunSnapshot preserves per-turn throughput provider attribution', asy
   ];
   const coerced = coerceRunSnapshot(run);
   assert.equal(coerced?.turnThroughputSamples[0]?.provider, 'openai');
+});
+
+test('coerceRunSnapshot preserves measured runtime timing and legacy absence', async () => {
+  const fixture = await loadFixture();
+  const run = deepClone(fixture.completedRuns[0]) as any;
+  run.provider = 'openai';
+  run.auxiliaryLlmUsage[0].durationMs = 350.9;
+  run.turnThroughputSamples[0].providerQueueMs = 120.8;
+  run.turnThroughputSamples[0].providerQueueAttemptCount = 2.9;
+  run.retryTimingSamples.push({ sourceId: '', occurredAt: run.startedAt, attempt: 2, scheduledDelayMs: 10 });
+
+  const coerced = coerceRunSnapshot(run)!;
+  assert.equal(coerced.provider, 'openai');
+  assert.equal(coerced.auxiliaryLlmUsage?.[0]?.durationMs, 350);
+  assert.equal(coerced.turnThroughputSamples[0]?.providerQueueMs, 120);
+  assert.equal(coerced.turnThroughputSamples[0]?.providerQueueAttemptCount, 2);
+  assert.equal(coerced.retryTimingSamples?.length, 1, 'malformed retry timing is dropped');
+  assert.equal(coerced.retryTimingSamples?.[0]?.scheduledDelayMs, 1000);
+  assert.equal(coerced.toolUsage.criticalPathDurationMs, 6200);
+
+  delete run.auxiliaryLlmUsage[0].durationMs;
+  delete run.turnThroughputSamples[0].providerQueueMs;
+  delete run.turnThroughputSamples[0].providerQueueAttemptCount;
+  delete run.toolUsage.criticalPathDurationMs;
+  delete run.retryTimingSamples;
+  const legacy = coerceRunSnapshot(run)!;
+  assert.equal(legacy.auxiliaryLlmUsage?.[0]?.durationMs, undefined);
+  assert.equal(legacy.turnThroughputSamples[0]?.providerQueueMs, null);
+  assert.equal(legacy.turnThroughputSamples[0]?.providerQueueAttemptCount, undefined);
+  assert.equal(legacy.toolUsage.criticalPathDurationMs, undefined);
+  assert.deepEqual(legacy.retryTimingSamples, []);
 });
 
 test('coerceRunSnapshot coerces per-tool timed call counts compatibly', async () => {

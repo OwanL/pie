@@ -28,6 +28,9 @@ export interface ToolPruningConfig {
  * whole map.
  */
 export interface PrepassConfig {
+	/** Sampling temperature forwarded to the scorer provider. Keep low for the
+	 * binary relevance task; omit for provider/model defaults. */
+	temperature?: number;
 	/** Optional maximum scorer output tokens. Disabled by default because
 	 * reasoning tokens count against this budget on some providers. */
 	maxOutputTokens?: number;

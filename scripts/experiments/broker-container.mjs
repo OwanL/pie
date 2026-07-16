@@ -7,8 +7,6 @@ const broker=await startBroker({
   apiKey,
   token:required("PIE_BROKER_TOKEN"),
   upstream:process.env.PIE_BENCHMARK_UPSTREAM,
-  maxRequests:Number(required("PIE_BROKER_MAX_REQUESTS")),
-  maxOutputTokens:Number(required("PIE_BROKER_MAX_OUTPUT_TOKENS")),
   timeoutMs:Number(required("PIE_BROKER_TIMEOUT_MS")),
   listenHost:"0.0.0.0",
   listenPort:8787,

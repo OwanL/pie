@@ -33,7 +33,7 @@ The workflow should be exposed through `skills/harness-experiments/SKILL.md`, bu
 - **Git worktrees:** isolate baseline, candidate, and task executions.
 - **Headless pi process:** runs target agents and emits structured events.
 
-A skill is not a security boundary. Any guarantee concerning credentials, providers, immutable fixtures, budgets, or cleanup must exist in executable code.
+A skill is not a security boundary. Any guarantee concerning credentials, providers, immutable fixtures, liveness limits, or cleanup must exist in executable code.
 
 ## 3. Scope
 
@@ -153,7 +153,7 @@ Passing the real `UMANS_API_KEY` into the target process would still expose it t
 6. The broker injects the real Umans credential upstream.
 7. It forwards the relevant OpenAI-compatible payload and Umans session-affinity/request-id headers transparently so the broker does not change routing behavior.
 8. It strips target authorization before forwarding, never forwards arbitrary target headers, and validates the upstream destination.
-9. It enforces request/concurrency/time budgets and records redacted request metadata.
+9. It enforces provider/concurrency policy and the trial lifetime while recording redacted request and token metadata; it does not cap requests or output tokens.
 10. The token expires and the broker closes when the trial or experiment ends.
 
 The target may see the ephemeral token, but it cannot learn the real credential or use another provider. The broker must never log authorization headers or the upstream key.
@@ -169,7 +169,7 @@ Provider restriction applies to every model call, not only the main target turn:
 - history compaction is disabled for short benchmark tasks unless compaction is under test;
 - retries stay on the selected Umans model and cannot fail over;
 - no fallback chains may reference other providers;
-- standalone pi does not enforce pie backend's `providers.<id>.concurrency` settings, so the benchmark broker is the sole target-request concurrency and budget authority;
+- standalone pi does not enforce pie backend's `providers.<id>.concurrency` settings, so the benchmark broker is the sole target-request concurrency authority;
 - any custom treatment that initiates a model call must route through the broker and allowed registry;
 - the broker rejects unrecognized model IDs even if candidate code constructs a raw request.
 
@@ -281,8 +281,6 @@ execution:
   randomSeed: 417291
 budgets:
   trialTimeoutMs: 900000
-  maxRequestsPerTrial: 30
-  maxOutputTokensPerTrial: 100000
 completedTrialIds: []
 ```
 
@@ -413,14 +411,14 @@ A startup assertion serializes the effective available models, loaded resources,
 
 ### 7.2 Trial lifecycle
 
-1. Validate experiment, task, recipe, budgets, and lock.
+1. Validate experiment, task, recipe, liveness limits, and lock.
 2. Create a fresh task worktree/copy from the fixture hash.
 3. Generate a temporary benchmark agent directory and minimal model catalog.
 4. Start the credential broker and mint an ephemeral trial token.
 5. Build the allowlisted child environment.
 6. Spawn the target with explicit model, thinking, tools, and resources.
 7. Stream JSONL events to a bounded artifact writer.
-8. Enforce wall-clock, request, output-token, and inactivity budgets.
+8. Enforce only the wall-clock liveness limit while observing uncapped request and output-token usage.
 9. On settlement, terminate the target and broker cleanly.
 10. Run scorers externally against the final task workspace.
 11. Capture diff, metrics, checks, policy results, and hashes.
@@ -462,6 +460,8 @@ Umans advertises unlimited usage, not unlimited concurrency or perfect availabil
 
 The evaluator agent does not assign the primary score.
 
+Primary eligibility describes measurement integrity, not task success. Deterministic task failures—including invalid solutions, bounded scorer timeouts caused by candidate code, and policy violations—remain primary outcomes and reduce pass rate; excluding them would introduce survivorship bias. Provider/security isolation failures, malformed event streams, missing startup attestation, controller/process failures, genuine provider failures, and scorer infrastructure/artifact failures are diagnostic-only.
+
 ### 8.2 Comparison report
 
 `compare` produces:
@@ -477,7 +477,7 @@ The evaluator agent does not assign the primary score.
 - methodology limitations;
 - verdict: `promising`, `inconclusive`, `regressed`, or `invalid`.
 
-No automatic winner is declared from one run. Promotion thresholds belong in suite configuration and require, at minimum:
+No automatic winner is declared from one run. A reusable source-of-truth reference additionally requires the complete frozen suite, both declared models, three repetitions, concurrency one, all planned trials completed, every pair primary-eligible, no provider/security integrity failure, and human review of the report and representative failures. Historical reference scores do not replace a later experiment's contemporaneous matched baseline. Promotion thresholds belong in suite configuration and require, at minimum:
 
 - no primary pass-rate regression;
 - improvement on the declared hypothesis metric;
@@ -570,7 +570,7 @@ Deliver:
 - trial worker/controller;
 - exact resource/model/tool configuration;
 - JSONL event capture;
-- budgets and process-tree termination;
+- liveness limits, usage observation, and process-tree termination;
 - immutable per-trial results;
 - pairing/randomization/resume scheduler.
 
@@ -688,7 +688,7 @@ A fake local OpenAI-compatible provider should cover runner tests. Real Umans ca
 - Candidate changes under `extension/src/` still require the normal extension build when that treatment tier is introduced.
 - Raw events and task source may contain sensitive code; follow `SECURITY.md` storage rules.
 - The runner should cap artifact sizes and preserve a bounded tail plus an explicit raw-artifact path when truncation occurs.
-- Unlimited Umans billing does not remove liveness, abuse, or concurrency constraints. The broker and experiment manifest retain conservative request and concurrency budgets.
+- Request and output-token usage are observed but uncapped so target agents can finish. Wall-clock liveness, provider isolation, and concurrency constraints remain enforced.
 
 ## 13. Open questions before implementation
 

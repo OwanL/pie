@@ -13,6 +13,7 @@ import {
 	setPrepassCacheNowForTesting,
 } from "../src/prepass-cache.js";
 import type { LlmPruningInput } from "../llm-scorer.js";
+import { __setPromptTemplate } from "../llm-scorer.js";
 import type { PrepassRunResult } from "../src/pruning-types.js";
 import type { PruningConfig } from "../types.js";
 
@@ -37,6 +38,14 @@ const result: PrepassRunResult = {
 test.afterEach(() => {
 	clearPrepassCacheForTesting();
 	setPrepassCacheNowForTesting(null);
+	__setPromptTemplate(null);
+});
+
+test("fingerprint changes when the resolved prepass prompt contract changes", () => {
+	const before = buildPrepassFingerprint(input("implement it"), config);
+	__setPromptTemplate('New output contract {"keep":[]} {{STRATEGY_INSTRUCTION}}');
+	const after = buildPrepassFingerprint(input("implement it"), config);
+	assert.notEqual(after, before);
 });
 
 test("cache hits exact and explicit continuation prompts with cache metadata", () => {

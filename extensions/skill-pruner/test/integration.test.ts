@@ -737,7 +737,7 @@ test("always-keep / pinned skills and tools are never sent to the prepass", asyn
 
 		// Prunable candidates are still presented to the model...
 		assert.ok(capturedUserMessage.includes("duckdb-query-optimization"), "prunable skill is a candidate");
-		assert.ok(capturedUserMessage.includes("Available tools (list any to REMOVE):"));
+		assert.ok(capturedUserMessage.includes("Candidate tools:"));
 		// ...but every protected (never-prune) item is absent, by name AND by
 		// description, and there is no "Protected …" framing line anywhere.
 		assert.ok(!capturedUserMessage.includes("frontend-design"), "alwaysKeep skill name not surfaced to prepass");

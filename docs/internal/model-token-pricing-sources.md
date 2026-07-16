@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-06-19 (Ollama Cloud refreshed live via OpenRouter; Umans section added with opportunity-cost mirror; Copilot unchanged)
+**Retrieval date:** 2026-07-16 (OpenAI Codex catalog refreshed from official OpenAI pricing; Ollama Cloud rates last refreshed 2026-06-19 via OpenRouter)
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -12,6 +12,7 @@ Every non-zero cost field in `models.json` MUST have a corresponding row in this
 
 For each model in `model-profiles.yaml`:
 - **GitHub Copilot models**: Token pricing sourced from official GitHub Copilot billing documentation. 1 AI credit = $0.01 USD.
+- **OpenAI Codex models**: Opportunity-cost rates sourced from the official [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) table. Codex is subscription-billed here, but these rates make its token use comparable with the other providers. Long-context tiers and the 272K threshold match OpenAI's catalog metadata bundled with pi-ai.
 - **Ollama Cloud models**: Live per-token pricing from the [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD-per-token to USD per 1M tokens. OpenRouter aggregates upstream provider rates (DeepSeek, Google, z-ai/GLM, Moonshot/Kimi, Alibaba/Qwen, MiniMax, NVIDIA, OpenAI); these are real billed rates, not compute estimates. The earlier H100-@-$3/hr compute-estimate methodology is preserved in `ollama-pro-cloud-models-ranked.md` for historical reference only.
 - **Umans models**: Subscription coding plans (`api.code.umans.ai`) — unlimited tokens for the plan holder, so the per-token cost billed to the user is $0. For the cost indicator, umans entries that share an underlying model with an Ollama Cloud twin mirror that twin's live OpenRouter API rate (opportunity-cost estimate, consistent with every other model's `cost` block); proprietary umans models with no public API twin remain $0. Cache usage is still captured for token accounting (see Umans section).
 - **Ollama Local models**: Free/local (no API cost).
@@ -99,6 +100,28 @@ Cache write pricing is NOT published for Google Copilot models.
 | Model ID | Input | Cached Input | Output | Confidence | Notes |
 |---|---|---|---|---|---|
 | grok-code-fast-1 | unknown | unknown | unknown | unknown | No public token pricing found. The cost:13 heuristic in model-profiles.yaml is a manual estimate. |
+
+---
+
+## OpenAI Codex Models
+
+**Source:** [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
+**Retrieval date:** 2026-07-16
+**Units:** USD per 1M tokens.
+
+The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. All six built-in GPT models previously missing pie-side overrides are now represented; this lets the picker and session indicator resolve their pricing instead of reporting them as unpriced.
+
+| Model ID | Input | Cached Input | Cache Write | Output | Long-context Input | Long-context Cached | Long-context Cache Write | Long-context Output | Confidence |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| gpt-5.6-sol | $5.00 | $0.50 | $6.25 | $30.00 | $10.00 | $1.00 | $12.50 | $45.00 | official |
+| gpt-5.6-terra | $2.50 | $0.25 | $3.125 | $15.00 | $5.00 | $0.50 | $6.25 | $22.50 | official |
+| gpt-5.6-luna | $1.00 | $0.10 | $1.25 | $6.00 | $2.00 | $0.20 | $2.50 | $9.00 | official |
+| gpt-5.5 | $5.00 | $0.50 | $0 | $30.00 | $10.00 | $1.00 | $0 | $45.00 | official |
+| gpt-5.4 | $2.50 | $0.25 | $0 | $15.00 | $5.00 | $0.50 | $0 | $22.50 | official |
+| gpt-5.4-mini | $0.75 | $0.075 | $0 | $4.50 | — | — | — | — | official |
+| gpt-5.3-codex-spark | $1.75 | $0.175 | $0 | $14.00 | — | — | — | — | official-inferred |
+
+`gpt-5.3-codex-spark` inherits the published `gpt-5.3-codex` rates from OpenAI's Codex pricing row, matching pi-ai's built-in model metadata. Long-context tiers apply above 272K input tokens.
 
 ---
 
@@ -270,3 +293,4 @@ No models remain at `unknown` confidence as of 2026-06-19:
 | 2026-06-15 | Synced Ollama Cloud model list: added glm-5, kimi-k2.7-code, minimax-m2.1, minimax-m2.5; removed 21 models no longer on cloud page |
 | 2026-06-17 | Added `glm-5.2:cloud` with compute-estimate pricing (active params estimated 40B pending official spec) |
 | 2026-06-19 | **Ollama Cloud refresh to live API pricing.** Replaced stale compute-estimate cost blocks for all 22 compute-estimate Ollama Cloud models with live per-token rates from the OpenRouter model API (`/api/v1/models`), including cache-read where OpenRouter exposes it, and added the previously-missing `glm-5.2:cloud` price (`z-ai/glm-5.2`). Supersedes the 2026-06-04 Portkey snapshot (several Portkey values were stale or mis-mapped, e.g. `kimi-k2.7-code` had matched base `kimi-k2`, `minimax-m3` was 2× the live rate). Added the Umans section: twinned umans entries mirror their Ollama Cloud twin's OpenRouter rate as an opportunity-cost `cost` block (consistent with all other models); proprietary `umans-coder`/`flash`/`qwen3.6-35b-a3b` remain $0 (no public API twin). Cache captured via the shared `openai-completions` path. Newly-listed `umans-qwen3.6-35b-a3b` model + profile added. Copilot models unchanged (already official GitHub token pricing). |
+| 2026-07-16 | Added official OpenAI opportunity-cost pricing and long-context tiers for all built-in `openai-codex` GPT-5.4–5.6 models, eliminating unpriced Codex sessions. Corrected GPT-5.6 Terra cache-write precision from $3.12 to the published $3.125. |

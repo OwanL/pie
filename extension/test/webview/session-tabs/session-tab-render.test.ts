@@ -27,7 +27,6 @@ test('pending new-session tab shows background preparation without disabling int
     unreadFinishedPathSet: new Set<string>(),
     activePath: tabPath,
     hasPendingExtensionUIRequest: false,
-    activeRunSummary: null,
     isPinned: false,
     hasDeferredTriggers: false,
     hasDeferredTimer: false,
@@ -35,10 +34,47 @@ test('pending new-session tab shows background preparation without disabling int
     onPointerDown: () => undefined,
     onClick: () => undefined,
     onClose: () => undefined,
-    onMarkComplete: () => undefined,
   }));
 
   assert.match(html, /preparing in background/);
   assert.match(html, /session-tab-running/);
   assert.doesNotMatch(html, /session-tab-main[^>]*disabled/);
+});
+
+test('tab omits run and review badges', () => {
+  const tabPath = '/sessions/reviewed';
+  const summary: SessionSummary = {
+    path: tabPath,
+    name: 'Reviewed Session',
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 1,
+    done: true,
+    rating: 5,
+    completion: 'fully',
+  };
+  const html = renderToString(h(SessionTab, {
+    tabPath,
+    index: 0,
+    sessionByPath: new Map([[tabPath, summary]]),
+    openIndexByPath: new Map([[tabPath, 0]]),
+    runningPathSet: new Set<string>(),
+    startingModelPathSet: new Set<string>(),
+    unreadFinishedPathSet: new Set<string>(),
+    activePath: tabPath,
+    hasPendingExtensionUIRequest: false,
+    isPinned: false,
+    hasDeferredTriggers: false,
+    hasDeferredTimer: false,
+    onContextMenu: () => undefined,
+    onPointerDown: () => undefined,
+    onClick: () => undefined,
+    onClose: () => undefined,
+  }));
+
+  assert.match(html, /session-tab-label[^>]*>Reviewed Session</);
+  assert.doesNotMatch(html, /session-tab-run-badge/);
+  assert.doesNotMatch(html, /session-tab-review-badge/);
+  assert.doesNotMatch(html, />Done</);
+  assert.doesNotMatch(html, />✓5</);
 });

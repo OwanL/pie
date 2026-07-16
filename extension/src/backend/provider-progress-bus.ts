@@ -1,5 +1,7 @@
 export type ProviderTransportObservationKind =
   | 'gate_queue'
+  | 'gate_acquired'
+  | 'gate_rejected'
   | 'headers_wait'
   | 'headers_received'
   | 'raw_chunk'
@@ -9,8 +11,12 @@ export type ProviderTransportObservationKind =
 export interface ProviderTransportObservation {
   sessionId: string;
   provider: string;
+  /** Unique to one wrapped fetch attempt, including SDK retries. */
+  attemptId: string;
   kind: ProviderTransportObservationKind;
   occurredAt: number;
+  /** Present on gate_acquired; 0 is an explicit immediate permit grant. */
+  queueDurationMs?: number;
 }
 
 type Listener = (observation: ProviderTransportObservation) => void;

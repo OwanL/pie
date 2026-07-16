@@ -65,10 +65,13 @@ export function mapAssistantMessage(
   durationMs?: number,
   metadata?: {
     modelId?: string;
+    provider?: string;
     thinkingLevel?: ThinkingLevel;
     turnLatencyMs?: number;
     overheadMs?: number;
     providerLatencyMs?: number;
+    providerQueueMs?: number;
+    providerQueueAttemptCount?: number;
   },
 ): ChatMessage {
   const parts = Array.isArray(message.content) ? message.content : undefined;
@@ -81,6 +84,7 @@ export function mapAssistantMessage(
     parts: messageParts,
     thinking: thinkingFromParts(parts),
     modelId: message.model ?? metadata?.modelId,
+    provider: message.provider ?? metadata?.provider,
     thinkingLevel: metadata?.thinkingLevel,
     status: assistantStatus(message),
     errorDetail: message.errorMessage,
@@ -89,6 +93,8 @@ export function mapAssistantMessage(
     turnLatencyMs: metadata?.turnLatencyMs,
     overheadMs: metadata?.overheadMs,
     providerLatencyMs: metadata?.providerLatencyMs,
+    providerQueueMs: metadata?.providerQueueMs,
+    providerQueueAttemptCount: metadata?.providerQueueAttemptCount,
     usage: usageFromMessage(message),
   };
 }
@@ -139,6 +145,7 @@ export function mapCustomMessage(
 interface MapLoopState {
   currentAssistant: ChatMessage | undefined;
   currentModelId: string | undefined;
+  currentProvider: string | undefined;
   currentThinkingLevel: ThinkingLevel | undefined;
 }
 
@@ -231,16 +238,17 @@ function mapAssistantTurn(
     ? entryTs - message.timestamp
     : undefined;
   const assistantModelId = message.model ?? state.currentModelId;
+  const assistantProvider = message.provider ?? state.currentProvider;
   const assistantThinkingLevel = state.currentThinkingLevel;
   const turnUsage = usageFromMessage(message);
-  if (message.model) {
-    state.currentModelId = message.model;
-  }
+  if (message.model) state.currentModelId = message.model;
+  if (message.provider) state.currentProvider = message.provider;
 
   const currentAssistant = state.currentAssistant;
   if (currentAssistant) {
     mergeAssistantTurn(currentAssistant, parts, messageParts, {
       modelId: assistantModelId,
+      provider: assistantProvider,
       thinkingLevel: assistantThinkingLevel,
       durationMs,
       turnUsage,
@@ -259,6 +267,7 @@ function mapAssistantTurn(
     parts: messageParts,
     thinking: parts ? thinkingFromParts(parts) : undefined,
     modelId: assistantModelId,
+    provider: assistantProvider,
     thinkingLevel: assistantThinkingLevel,
     status: assistantStatus(message),
     errorDetail: message.errorMessage,
@@ -277,6 +286,7 @@ function mergeAssistantTurn(
   messageParts: ChatMessage['parts'],
   update: {
     modelId: string | undefined;
+    provider: string | undefined;
     thinkingLevel: ThinkingLevel | undefined;
     durationMs: number | undefined;
     turnUsage: ReturnType<typeof usageFromMessage>;
@@ -307,6 +317,9 @@ function mergeAssistantTurn(
   }
   if (update.modelId) {
     current.modelId = update.modelId;
+  }
+  if (update.provider) {
+    current.provider = update.provider;
   }
   if (update.thinkingLevel) {
     current.thinkingLevel = update.thinkingLevel;
@@ -408,6 +421,7 @@ export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
   const state: MapLoopState = {
     currentAssistant: undefined,
     currentModelId: undefined,
+    currentProvider: undefined,
     currentThinkingLevel: undefined,
   };
 

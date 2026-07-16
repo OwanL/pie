@@ -193,6 +193,16 @@ export interface TurnThroughputSample {
   /** Provider paired with modelId when known. */
   provider?: string;
   /**
+   * Time spent waiting for provider-gate concurrency permits across the HTTP
+   * attempts belonging to this turn. Zero is an explicit immediate grant;
+   * null means no correlated gate observation was available (for example an
+   * ungated provider or a historical record).
+   */
+  providerQueueMs?: number | null;
+  /** Number of provider attempts represented by `providerQueueMs`. Optional on
+   * the wire; 0 means queue timing was unavailable, not an inferred zero. */
+  providerQueueAttemptCount?: number;
+  /**
    * Total turn latency: previous tool end (or prompt send) → first reply
    * token, in ms. Null when not measurable for this turn.
    */
@@ -252,6 +262,31 @@ export interface AuxiliaryLlmUsageSample {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Wall-clock duration of the auxiliary call when measured. Undefined for
+   * historical samples and sources that expose usage but no timing. */
+  durationMs?: number;
+}
+
+/** One auto-retry attempt's configured backoff and observed runtime timing. */
+export interface RetryTimingSample {
+  /** Stable request+retry-attempt correlation key used for idempotent updates. */
+  sourceId: string;
+  /** ISO timestamp when the SDK scheduled the retry. */
+  occurredAt: string;
+  /** One-based SDK retry attempt number. */
+  attempt: number;
+  /** Backoff requested by the SDK before this attempt. */
+  scheduledDelayMs: number;
+  /**
+   * Observed SDK delay from retry scheduling until the attempt entered the
+   * provider gate. Null when that provider was not observable through the gate.
+   */
+  measuredDelayMs: number | null;
+  /**
+   * Wall-clock span from retry scheduling until the next retry was scheduled
+   * or the retry episode ended. Null when no terminal boundary was observed.
+   */
+  durationMs: number | null;
 }
 
 export interface ToolUsageRollup {
@@ -282,6 +317,13 @@ export interface ToolUsageRollup {
   resultIssueSamples: ToolResultIssueSample[];
   /** Cumulative wall-clock execution time (ms) across all timed tool calls. */
   totalDurationMs: number;
+  /**
+   * Non-overlapping tool execution time (ms): the union of all reliably timed
+   * tool execution intervals. Unlike `totalDurationMs`, parallel calls are not
+   * double-counted. Absent means no reliable interval coverage (including
+   * historical rollups); an explicit 0 means measured zero execution time.
+   */
+  criticalPathDurationMs?: number;
   /** Number of completed/failed tool calls that reported an execution duration. */
   timedCallCount: number;
   /** Cumulative execution time (ms) per normalized tool name. */
@@ -414,6 +456,8 @@ export interface RunSnapshot {
    * recorded before the counter existed.
    */
   autoRetryCount?: number;
+  /** Per-attempt retry backoff and measured timing. Empty for historical runs. */
+  retryTimingSamples?: RetryTimingSample[];
   backendErrorCodes: string[];
   contextTokens: number | null;
   contextLimit: number | null;

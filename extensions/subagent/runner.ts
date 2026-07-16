@@ -8,16 +8,19 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Message, Model } from "@mariozechner/pi-ai";
-import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
+import type {
+	AgentSession,
+	CreateAgentSessionOptions,
+	CreateAgentSessionResult,
+	DefaultResourceLoader,
+	ModelRegistry,
+	ResourceDiagnostic,
+	SessionManager,
+	Skill,
+} from "@mariozechner/pi-coding-agent";
 
-/** Minimal local shapes for the skills filter, avoiding a static import of
- *  Skill/ResourceDiagnostic from the SDK (tsx retains that import at module-load
- *  time in ESM contexts without a resolve hook, breaking execution-path tests
- *  that mock the SDK lazily). Runtime behaviour is unchanged: the override fn
- *  only reads `skill.name` and passes diagnostics through. */
-type SubagentSkill = { name: string };
-type SubagentSkillsOverride = (base: { skills: SubagentSkill[]; diagnostics: unknown[] }) => { skills: SubagentSkill[]; diagnostics: unknown[] };
 import type { AgentConfig } from "./agents.js";
+import { textContent } from "./src/text-content.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
@@ -40,6 +43,9 @@ import {
 	type ParentBridge,
 } from "./src/parent-extension-ui-bridge-proxy.js";
 import { inflightSemaphore, type Release } from "./src/concurrency-limit.js";
+import { globalOrphanRegistry, type OrphanCleanupRegistry } from "./src/cleanup.js";
+
+type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 
 /**
  * Minimal contract for the session events emitted by the pi SDK's
@@ -112,29 +118,23 @@ interface ResourceLoaderLike {
 }
 
 interface SubagentSdk {
-	createSession: (args: {
-		cwd: string;
-		modelRegistry: ModelRegistry;
-		model: Model<any> | undefined;
-		thinkingLevel: ThinkingLevel | undefined;
-		tools: string[] | undefined;
-		sessionManager: unknown;
-		resourceLoader: ResourceLoaderLike;
-	}) => Promise<{ session: SessionLike }>;
-	createResourceLoader: (args: {
-		cwd: string;
-		agentDir: string;
-		appendSystemPrompt: string[] | undefined;
-		noExtensions: boolean;
-		/** Optional filter applied to the loaded skills before they enter the
-		 *  subagent's system prompt. Used to inherit the parent's pruned set. */
-		skillsOverride?: SubagentSkillsOverride;
-	}) => ResourceLoaderLike;
-	createSessionManager: (cwd: string) => unknown;
+	createSession: (args: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
+	createResourceLoader: (args: ConstructorParameters<typeof DefaultResourceLoader>[0]) => DefaultResourceLoader;
+	createSessionManager: (cwd: string) => SessionManager;
 	getAgentDir: () => string;
 }
 
 let cachedSdkPromise: Promise<SubagentSdk> | undefined;
+let orphanAttemptCounter = 0;
+
+/**
+ * Generate a stable, globally-unique attempt identity. The same id is used for
+ * orphan cleanup registry entries and per-attempt analytics, so a late-resolved
+ * pre-spawn session can be correlated with its dispatch attempt.
+ */
+export function nextAttemptIdentity(agentName: string, toolCallId: string | undefined): string {
+	return `${agentName}:${toolCallId ?? "no-tool-call"}:${orphanAttemptCounter++}`;
+}
 
 async function loadSubagentSdk(): Promise<SubagentSdk> {
 	if (!cachedSdkPromise) {
@@ -143,7 +143,7 @@ async function loadSubagentSdk(): Promise<SubagentSdk> {
 			createResourceLoader: (args) => new sdk.DefaultResourceLoader(args),
 			createSessionManager: (cwd) => sdk.SessionManager.inMemory(cwd),
 			getAgentDir: sdk.getAgentDir,
-		}));
+		} as SubagentSdk));
 	}
 	return cachedSdkPromise;
 }
@@ -359,7 +359,7 @@ function createUpdateEmitter(
 		const finalOutput = getFinalOutput(result.messages);
 		const text = finalOutput || streamingTextRef.value || "(running...)";
 		onUpdate({
-			content: [{ type: "text", text }],
+			content: [textContent(text)],
 			details: makeDetails([result]),
 		});
 	};
@@ -442,6 +442,29 @@ function recordAssistantMessage(result: SingleResult, msg: SubagentEventMessage)
  * the subscription and replayed once its `message_end` arrives.
  */
 function progressFingerprint(value: unknown): string {
+	// Nested modern subagent updates expose unique attempt ids and monotonic
+	// progress generations. They are a complete cheap revision key for the
+	// recursive result, avoiding JSON.stringify over multi-megabyte transcripts
+	// merely to suppress a duplicate callback.
+	if (value && typeof value === "object") {
+		const root = value as Record<string, unknown>;
+		const details = root.details && typeof root.details === "object"
+			? root.details as Record<string, unknown>
+			: undefined;
+		const results = Array.isArray(details?.results) ? details.results : undefined;
+		if (results && results.length > 0) {
+			const revisions = results.map((item) => {
+				if (!item || typeof item !== "object") return undefined;
+				const result = item as Record<string, unknown>;
+				return typeof result.attemptId === "string" && Number.isSafeInteger(result.progressGeneration)
+					? `${result.attemptId}:${result.progressGeneration}`
+					: undefined;
+			});
+			if (revisions.every((revision): revision is string => revision !== undefined)) {
+				return `subagent:${revisions.join("|")}`;
+			}
+		}
+	}
 	const seen = new WeakSet<object>();
 	try {
 		return JSON.stringify(value, (_key, candidate) => {
@@ -835,6 +858,11 @@ function buildCombinedAbortSignal(parentSignal: AbortSignal | undefined, timeout
 	return { timeoutSignal, combinedSignal: signal, onAbort, cleanup: cleanupTimeout };
 }
 
+/** Preserve visible partial prose before terminalization clears live-only fields. */
+function preservePartialOutput(result: SingleResult): void {
+	if (!result.finalOutput && result.streamingText) result.finalOutput = result.streamingText;
+}
+
 /** Clear every field that can make a terminal child look active. Nested tool
  * end events are not guaranteed to arrive when a provider aborts or throws, so
  * terminalization — not tool_execution_end — owns this cleanup. */
@@ -852,6 +880,7 @@ function applyTimeoutFailure(result: SingleResult, timeoutMs: number, stage?: st
 	const suffix = stage ? ` (while ${stage})` : "";
 	result.errorMessage = `Subagent timed out after ${timeoutMs / 1000}s waiting for model response${suffix}.`;
 	classifyProviderFailure(result);
+	preservePartialOutput(result);
 	clearLiveState(result);
 	setActivity(result, "failed", result.errorMessage);
 }
@@ -864,6 +893,7 @@ function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: s
 	} else {
 		result.exitCode = 0;
 	}
+	preservePartialOutput(result);
 	clearLiveState(result);
 	if (parentAborted && result.exitCode === 0) {
 		result.exitCode = 1;
@@ -896,6 +926,7 @@ function applyThrownError(result: SingleResult, err: unknown, stage?: string, pa
 	result.errorMessage = (result.errorMessage || message) + suffix;
 	result.stderr = result.stderr || message;
 	classifyProviderFailure(result, err);
+	preservePartialOutput(result);
 	clearLiveState(result);
 	setActivity(result, interrupted ? "cancelled" : "failed", result.errorMessage);
 }
@@ -1046,7 +1077,10 @@ export async function runSingleAgent(
 	_internal?: {
 		sdk?: SubagentSdk;
 		timeoutMs?: number;
+		orphanRegistry?: OrphanCleanupRegistry;
 	},
+	/** Stable identity for this attempt; used by orphan registry and analytics. */
+	attemptId?: string,
 ): Promise<SingleResult> {
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
@@ -1164,7 +1198,11 @@ export async function runSingleAgent(
 	// `finally` below reclaim exactly those additions so the host's listener
 	// count stays bounded across many sibling/nested subagent runs.
 	const signalListenersBefore = snapshotSignalListeners();
+	const resolvedAttemptId = attemptId ?? nextAttemptIdentity(agentName, _toolCallId);
+	currentResult.attemptId = resolvedAttemptId;
+	const orphanRegistry = _internal?.orphanRegistry ?? globalOrphanRegistry;
 	let session: SessionLike;
+	let createSessionPromise: Promise<CreateAgentSessionResult> | undefined;
 	// Publish before resource loading begins; otherwise a slow loader leaves the
 	// parent showing its synthetic "Starting" state with no real child status.
 	emitUpdate();
@@ -1182,7 +1220,7 @@ export async function runSingleAgent(
 		}
 		setActivity(currentResult, "preparing", "creating subagent session");
 		emitUpdate();
-		const createSessionPromise = sdk.createSession({
+		createSessionPromise = sdk.createSession({
 			cwd: sessionCwd,
 			modelRegistry,
 			model: resolvedModel,
@@ -1194,14 +1232,72 @@ export async function runSingleAgent(
 		const created = parentAlreadyAborted
 			? await raceTimeout("creating subagent session (already-aborted)", ALREADY_ABORTED_TIMEOUT_MS, createSessionPromise)
 			: await raceAbort(signal, createSessionPromise, "creating subagent session");
-		session = created.session;
+		session = created.session as SessionLike;
 	} catch (err) {
 		// Pre-spawn abort or failure: never reach the prompt phase. Return a
 		// loud failure result so `execute()` always settles and the parent
 		// transcript/toolResult is written. This is the structural guarantee
 		// that a stuck worker can't silently dangle the parent session.
+		//
+		// REM-02: if session creation lost the abort/timeout race, retain
+		// ownership of the underlying promise. A late resolution may still
+		// produce a session; fence it from setup/prompt, dispose it exactly
+		// once, reclaim attempt-owned loader listeners, and never retain a
+		// process permit. The orphan registry handles retry/backoff and
+		// best-effort drain.
+		const interrupted = parentAlreadyAborted || !!signal?.aborted || (err as { name?: string } | null)?.name === "AbortError";
+		if (createSessionPromise && interrupted) {
+			const capturedCreatePromise = createSessionPromise;
+			const capturedListenersBefore = signalListenersBefore;
+			// Every registry retry observes the same in-flight cleanup task. This
+			// matters when a registry timeout wins while createSession is still
+			// pending: a later retry must keep awaiting that task rather than report
+			// false completion or create a second eventual disposer. A synchronous
+			// dispose failure clears the memoized task so bounded retry can try again.
+			let cleanupTask: Promise<void> | undefined;
+			orphanRegistry.register(resolvedAttemptId, () => {
+				if (cleanupTask) return cleanupTask;
+				cleanupTask = (async () => {
+					let lateSession: SessionLike | undefined;
+					try {
+						const late = await capturedCreatePromise;
+						lateSession = late.session as SessionLike | undefined;
+					} catch {
+						// createSession itself ultimately failed — nothing to clean up.
+						return;
+					}
+					if (!lateSession) return;
+					// The race was lost before this session reached setup/prompt.
+					// Dispose it immediately; never set UI context, subscribe, or run
+					// a prompt. Reclaim the loader-leaked listeners afterwards.
+					logLoud("subagent orphan create resolved", {
+						toolCallId: _toolCallId,
+						agent: agentName,
+						task,
+						attemptId: resolvedAttemptId,
+					});
+					try {
+						lateSession.dispose();
+					} catch (error) {
+						logLoud("subagent orphan dispose failed", {
+							toolCallId: _toolCallId,
+							agent: agentName,
+							task,
+							attemptId: resolvedAttemptId,
+							error: toErrorMessage(error),
+						});
+						reclaimOrphanedSignalListeners(capturedListenersBefore);
+						throw error;
+					}
+					reclaimOrphanedSignalListeners(capturedListenersBefore);
+				})().catch((error) => {
+					cleanupTask = undefined;
+					throw error;
+				});
+				return cleanupTask;
+			});
+		}
 		currentResult.exitCode = 1;
-		const interrupted = parentAlreadyAborted || signal?.aborted === true || (err as { name?: string } | null)?.name === "AbortError";
 		if (interrupted) currentResult.stopReason = "aborted";
 		currentResult.errorMessage = toErrorMessage(err);
 		currentResult.stderr = currentResult.errorMessage;
@@ -1216,7 +1312,7 @@ export async function runSingleAgent(
 			error: currentResult.errorMessage,
 		});
 		onUpdate?.({
-			content: [{ type: "text", text: `⚠ ${agentName}: ${currentResult.errorMessage}` }],
+			content: [textContent(`⚠ ${agentName}: ${currentResult.errorMessage}`)],
 			details: makeDetails([currentResult]),
 		});
 		emitUpdate.close();
@@ -1445,10 +1541,10 @@ export async function runSingleAgent(
 			cleanup();
 		}
 
-		applyStopReason(currentResult, signal?.aborted === true, stageRef.value);
+		applyStopReason(currentResult, !!signal?.aborted, stageRef.value);
 		return currentResult;
 	} catch (err) {
-		applyThrownError(currentResult, err, stageRef.value, signal?.aborted === true);
+		applyThrownError(currentResult, err, stageRef.value, !!signal?.aborted);
 		return currentResult;
 	} finally {
 		cleanupOwnedSession();

@@ -114,6 +114,7 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
     onContextMenu: noopContextMenu,
     renderToolCall: () => h('span', { class: 'rendered-tool' }, 'rendered tool'),
     isLastAssistantMessage: true,
+    requestCreatedAt: '2026-01-01T12:34:56.000Z',
   }));
 
   assert.match(assistantHtml, /Reasoning/);
@@ -121,6 +122,8 @@ test('rendered MessageItem covers assistant, editable user, and image-user branc
   assert.match(assistantHtml, /Hello <strong>world<\/strong>/);
   assert.match(assistantHtml, /Agent is responding/);
   assert.match(assistantHtml, /claude-sonnet-4-5:cloud high/);
+  assert.match(assistantHtml, /datetime="2026-01-01T12:34:56\.000Z"/);
+  assert.match(assistantHtml, /title="Request made /);
 
   const editingHtml = renderToString(h(MessageItem, {
     message: userMessage(),

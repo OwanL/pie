@@ -36,7 +36,7 @@
     "extension:test": "node ./scripts/run-tests.mjs --package extension",
     "extension:typecheck": "node ./scripts/run-typechecks.mjs --project extension",
     "extensions:test": "node ./scripts/run-tests.mjs --package ask-user --package copilot-model-discovery --package cwd-skills --package safeguard --package skill-pruner --package subagent --package web-access-compat --package warm-bash --package tool-result-pruner --package session-reviewer --package session-changes --package deferred-triggers",
-    "extensions:typecheck": "node ./scripts/run-typechecks.mjs --project ask-user --project copilot-model-discovery --project cwd-skills --project safeguard --project skill-pruner --project web-access-compat --project warm-bash --project tool-result-pruner --project session-reviewer --project session-changes --project deferred-triggers",
+    "extensions:typecheck": "node ./scripts/run-typechecks.mjs --project ask-user --project copilot-model-discovery --project cwd-skills --project safeguard --project skill-pruner --project web-access-compat --project warm-bash --project tool-result-pruner --project session-reviewer --project session-changes --project deferred-triggers --project subagent",
     "experiment:create": "node ./scripts/experiments/cli.mjs create",
     "experiment:status": "node ./scripts/experiments/cli.mjs status",
     "experiment:watch": "node ./scripts/experiments/cli.mjs watch",

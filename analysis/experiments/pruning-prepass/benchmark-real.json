@@ -1,0 +1,301 @@
+{
+  "version": 1,
+  "source": "De-identified local Pie session prompts from 2026-07-15/16; spelling, vagueness, and brain-dump wording preserved.",
+  "decisionRule": "Keep when the candidate has a greater-than-50-percent chance of being used before the request is complete.",
+  "cases": [
+    {
+      "id": "real-reply-header-time",
+      "request": "Add the time for when the request was made to the agent reply header",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard bugs or performance regressions.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first red-green-refactor development when explicitly requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read source files and existing tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search local source code for symbols and text.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit existing source files.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run builds, typechecks, and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review, rate, and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-first-recommendation-analytics",
+      "request": "Implement changes per the first reomcmendation only, ie just add more analytics",
+      "recent": [
+        { "role": "user", "text": "What are the main slowdowns in pie? what things increase the time it takes for task completion?" },
+        { "role": "assistant", "text": "The first recommendation is to add queue wait, prepass, time-to-first-token, per-tool, and critical-path analytics before changing behaviour." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for unclear bugs and performance regressions.", "expectedKeep": false },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality and maintenance audit, not a focused feature.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read analytics source and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search for analytics events and consumers.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement analytics changes.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run focused tests and typechecks.", "expectedKeep": true },
+        { "kind": "tool", "name": "session_changes", "description": "Inspect the session's changed files and focused diff.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Research current information on the web.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-actionable-slowdowns",
+      "request": "Which of these can we address? ie which are actionable",
+      "recent": [
+        { "role": "user", "text": "What are the main slowdowns in pie? what things increase the time it takes for task completion?" },
+        { "role": "assistant", "text": "The main measured slowdowns are repeated model inference, long-running tools, provider queueing, large context, prepasses, retries, and sequential tool round trips." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first workflow to reproduce and root-cause bugs or performance regressions.", "expectedKeep": false },
+        { "kind": "skill", "name": "harness-experiments", "description": "Create and compare controlled baseline-versus-candidate experiments.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read local reports and source when evidence is needed.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search local reports and source.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run commands and tests.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web for current facts.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-vague-go-ahead",
+      "request": "Yes, go ahead with this",
+      "recent": [
+        { "role": "user", "text": "I think it would be convienient to re-load the same previously open files on refresh rather than a full reset. Like how the geometry processor does it" },
+        { "role": "assistant", "text": "I will mirror Geometry Processor: local adapter disk cache, lightweight browser references, restore files after refresh, remove files and derived layers without Azure." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for unclear or intermittent bugs.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first development only when explicitly requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read the fingerprint and Geometry Processor implementations.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search source for file persistence and restore flows.", "expectedKeep": true },
+        { "kind": "tool", "name": "find", "description": "Find relevant files by path and pattern.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement the agreed changes.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Build and run relevant tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-fingerprinting-brain-dump",
+      "request": "There are many broken things about the current version of the fingerprinting tool, things such as references to azure and such, when this is meant to be a local only version of the tool that reads and writes to the registry config. Currently as it stands there are many broken things about it. For example, If I upload a pdf, then try to delete it I get an alert in the browser saying something about some error, mentioning azure. Files are treated as just artifacts to test against, we dont care about them, we should be able to add and delete files at will, just likke the geometry processor. Ask questions to ensure we are aligned.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for bugs, failures, and performance regressions.", "expectedKeep": true },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audit and maintenance pass.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read current and comparison implementation files.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search for Azure references, delete flows, and registry handling.", "expectedKeep": true },
+        { "kind": "tool", "name": "find", "description": "Find relevant project files.", "expectedKeep": true },
+        { "kind": "tool", "name": "ask_user", "description": "Ask a focused clarifying question when scope materially changes the solution.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run local inspection or reproduction commands.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-unpriced-models",
+      "request": "Many models are unpriced. Fix this",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "add-provider", "description": "Add or update providers, endpoints, models, pricing, and centralized model catalog data.", "expectedKeep": true },
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard bugs.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read model catalogs and sync rules.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Locate missing pricing entries.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Update the source-of-truth model catalog.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run model sync and validation.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Verify current official model pricing.", "expectedKeep": true },
+        { "kind": "tool", "name": "session_review", "description": "Review and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-context-numbers-investigate",
+      "request": "As you can see here the numbers do not add up propperly for the context window, investigate",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for broken behavior and performance regressions.", "expectedKeep": true },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first development only when requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read context accounting source and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search for context-window calculations.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run focused reproduction and inspection commands.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement a fix.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search current public information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-old-repo-verify",
+      "request": "I think this bug is also present in the old repo, can you verify this?",
+      "recent": [
+        { "role": "user", "text": "Yes but there are matches, but changing match visibility effects 0 features" },
+        { "role": "assistant", "text": "The visibility toggle updates UI state, but the rendered match layer appears not to consume it." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for bugs and regressions.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read the old and current implementations.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Search both repositories for the visibility flow.", "expectedKeep": true },
+        { "kind": "tool", "name": "find", "description": "Locate the old repository files.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run commands to compare or verify behavior.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_changes", "description": "Inspect the current session diff.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-visibility-followup",
+      "request": "But when I change the match visibility nothing changes?",
+      "recent": [
+        { "role": "user", "text": "what does this icon mean? the number" },
+        { "role": "assistant", "text": "The number is the count of loaded features matching that fingerprint; clicking a row filters or highlights matching features." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for reported bugs and broken behavior.", "expectedKeep": true },
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audit and maintenance pass.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read UI state and rendering code.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Trace match visibility through the codebase.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run focused checks or reproduction.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement a fix.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-icon-number",
+      "request": "what does this icon mean? the number",
+      "recent": [
+        { "role": "assistant", "text": "The fingerprint sidebar shows rows for Page Boundary, dash, test, and Unfiltered with an icon and a numeric count." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Diagnose broken behavior and hard bugs.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read the relevant UI component.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Locate the icon and count in source.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run builds and tests.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-clickable-upload",
+      "request": "Make these in the fingerprint UI clickable to open the default OS file picker, along side the existing drop behaviour. This should match the UX of the geometry processor file adding",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first bug diagnosis.", "expectedKeep": false },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first development only when explicitly requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read both UI implementations.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Find upload handlers and components.", "expectedKeep": true },
+        { "kind": "tool", "name": "find", "description": "Locate relevant component files.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement the clickable file picker behavior.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Build and test the UI.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search current public information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-remove-done-no-subagents",
+      "request": "Remove the 'done' ui here, dont use sub agents for this task",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "codebase-maintenance", "description": "Broad code-quality audit and maintenance pass.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read the relevant UI component.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Locate the done UI.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Remove the UI and update tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run build and focused tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "subagent", "description": "Delegate independent work to parallel agents.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search the public web.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-and-main-ui",
+      "request": "and in main ui",
+      "recent": [
+        { "role": "user", "text": "sub agent UI looks like this after answering. We should see the proposed questions as well as the selected answer" },
+        { "role": "assistant", "text": "Implemented this in the completed subagent question UI; proposed options and the selected answer are now preserved." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first bug diagnosis.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read the corresponding main UI renderer.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Find the main UI question rendering path.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Apply the same completed-question behavior.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run UI tests and build.", "expectedKeep": true },
+        { "kind": "tool", "name": "session_changes", "description": "Inspect the focused diff.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-active-fingerprint-bug",
+      "request": "As you can see here, the tree view shows a fingerprint as active, however it actually is not",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for reported bugs and broken UI state.", "expectedKeep": true },
+        { "kind": "skill", "name": "tdd", "description": "Strict test-first development only when requested.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read tree view and active-state code.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Trace active fingerprint state.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Reproduce and verify the UI behavior.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Implement and test the fix implied by the bug report.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search current public information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-provider-retries",
+      "request": "Make pie more robust against slow / stalled providers by increasing time between retries and number of retries",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for failures and performance regressions.", "expectedKeep": false },
+        { "kind": "skill", "name": "harness-experiments", "description": "Create controlled baseline-versus-candidate experiments.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read provider retry and timeout handling.", "expectedKeep": true },
+        { "kind": "tool", "name": "grep", "description": "Locate retry budgets and tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Increase and harden retry budgets.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Run retry and provider tests.", "expectedKeep": true },
+        { "kind": "tool", "name": "web_search", "description": "Search current provider documentation.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review and close sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-review-pinned",
+      "request": "Review and close each pinned tab",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "evaluate-sessions", "description": "Review and rate open sessions, mark work done, and close tabs.", "expectedKeep": true },
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first bug diagnosis.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "List, read, rate, and close open sessions.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read local source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Run shell commands.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-deferred-monitor",
+      "request": "[deferred trigger fired: timer elapsed after 3600000ms]\n\nA deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\nTask note:\nContinue monitoring current-pie-control-r1-2026-07-16. At 20/48: 18 primary, 8 failed outcomes, 7 policy failures, 2 diagnostic provider failures, 0 rejected. Continue unless controller/security failure.",
+      "recent": [],
+      "candidates": [
+        { "kind": "skill", "name": "harness-experiments", "description": "Create, monitor, resume, and compare controlled harness experiments.", "expectedKeep": true },
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first diagnosis for hard failures.", "expectedKeep": false },
+        { "kind": "tool", "name": "bash", "description": "Inspect experiment status and controller health.", "expectedKeep": true },
+        { "kind": "tool", "name": "read", "description": "Read experiment journals and trial output.", "expectedKeep": true },
+        { "kind": "tool", "name": "defer_trigger", "description": "Register another deferred continuation while external work remains live.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit source files.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false },
+        { "kind": "tool", "name": "session_review", "description": "Review open sessions.", "expectedKeep": false }
+      ]
+    },
+    {
+      "id": "real-vague-control-confirmation",
+      "request": "Yes this is what I mean.",
+      "recent": [
+        { "role": "user", "text": "Now run the baseline / control benchmark" },
+        { "role": "assistant", "text": "For a proper control, I will run current baseline against a no-op matched control. Both use identical Pie behavior; measured differences estimate normal variance." },
+        { "role": "user", "text": "what do you mean no op" },
+        { "role": "assistant", "text": "No-op means no candidate modification. Baseline and candidate run the same fixtures with the same behavior to establish reference performance and variability." }
+      ],
+      "candidates": [
+        { "kind": "skill", "name": "harness-experiments", "description": "Create, run, resume, and compare controlled baseline-versus-candidate experiments.", "expectedKeep": true },
+        { "kind": "skill", "name": "diagnose", "description": "Evidence-first bug diagnosis.", "expectedKeep": false },
+        { "kind": "tool", "name": "read", "description": "Read experiment recipes and results.", "expectedKeep": true },
+        { "kind": "tool", "name": "bash", "description": "Launch and monitor benchmark runs.", "expectedKeep": true },
+        { "kind": "tool", "name": "write", "description": "Create experiment recipe or journal artifacts.", "expectedKeep": true },
+        { "kind": "tool", "name": "defer_trigger", "description": "Schedule continuation while a long experiment runs.", "expectedKeep": true },
+        { "kind": "tool", "name": "edit", "description": "Edit product source code.", "expectedKeep": false },
+        { "kind": "tool", "name": "web_search", "description": "Search public web information.", "expectedKeep": false }
+      ]
+    }
+  ]
+}

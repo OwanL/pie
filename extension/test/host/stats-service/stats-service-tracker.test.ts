@@ -423,6 +423,23 @@ test('a turn with measurable latency still records a sample even with negligible
   assert.equal(samples[0]?.generationDurationMs, 0);
 });
 
+test('an explicit immediate provider-gate grant is preserved as zero with attempt coverage', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  harness.tracker.onAssistantTurnEnded(
+    harness.sessionPath,
+    'turn-immediate-provider-grant',
+    0,
+    undefined,
+    'completed',
+    { providerQueueMs: 0, providerQueueAttemptCount: 1 },
+  );
+
+  const sample = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.turnThroughputSamples[0];
+  assert.equal(sample?.providerQueueMs, 0);
+  assert.equal(sample?.providerQueueAttemptCount, 1);
+});
+
 test('an overhead-only turn (no content delta) still records its measured overhead', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);
@@ -468,6 +485,50 @@ test('duplicate tool.started and tool.finished events do not double-count', () =
   assert.equal(run?.toolUsage.timedCallCount, 1, 'duplicate tool.finished must not double-count timedCallCount');
   assert.equal(run?.toolUsage.totalDurationMs, 100, 'duplicate tool.finished must not double-count duration');
   assert.equal(run?.toolUsage.timedCallCountsByName['bash'], 1, 'per-tool timed call count is recorded');
+});
+
+test('untimed tools leave critical-path coverage unknown and reconcile a terminal tool name', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  harness.tracker.onToolStarted(harness.sessionPath, { id: 'late-name', name: '', input: {}, status: 'running' });
+
+  let usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  assert.equal(usage?.criticalPathDurationMs, undefined);
+  assert.equal(usage?.countsByName['(unknown)'], 1);
+
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    id: 'late-name', name: 'bash', input: {}, status: 'completed',
+  });
+  usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  assert.equal(usage?.criticalPathDurationMs, undefined);
+  assert.equal(usage?.countsByName['(unknown)'], undefined);
+  assert.equal(usage?.countsByName['bash'], 1);
+});
+
+test('tool critical path is the union of execution intervals and missing timing stays unknown', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const calls: ToolCall[] = [
+    { id: 'a', name: 'bash', input: {}, status: 'completed', startedAt: 1_000, durationMs: 100 },
+    { id: 'b', name: 'read', input: {}, status: 'completed', startedAt: 1_050, durationMs: 100 },
+    { id: 'c', name: '', input: {}, status: 'completed', startedAt: 1_200, durationMs: 20 },
+  ];
+  for (const call of calls) {
+    harness.tracker.onToolStarted(harness.sessionPath, { ...call, status: 'running' });
+    harness.tracker.onToolFinished(harness.sessionPath, call);
+  }
+  harness.tracker.onToolStarted(harness.sessionPath, { id: 'missing-start', name: '', input: {}, status: 'running' });
+  harness.tracker.onToolFinished(harness.sessionPath, {
+    id: 'missing-start', name: '', input: {}, status: 'completed',
+  });
+
+  const usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  assert.equal(usage?.totalDurationMs, 220);
+  assert.equal(usage?.criticalPathDurationMs, 170);
+  assert.equal(usage?.timedCallCount, 3, 'missing timing must not become a zero-duration call');
+  assert.equal(usage?.countsByName['(unknown)'], 2, 'missing names retain explicit unknown attribution');
+  assert.equal(usage?.durationMsByName['(unknown)'], 20);
 });
 
 test('assistant turn usage with NaN or negative values does not corrupt counters', () => {
@@ -595,6 +656,54 @@ test('skill-pruning usage records the actual model and ignores duplicate CustomM
     outputTokens: 45,
     cacheReadTokens: 6,
     cacheWriteTokens: 7,
+  }]);
+});
+
+test('skill-pruning duration is retained even when the provider reports no tokens', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  harness.tracker.onSkillPruningUsage(
+    harness.sessionPath,
+    'pruning-duration-only',
+    '2026-01-01T00:00:00.250Z',
+    { prepassModel: 'openai/pruner', prepassLatencyMs: 321 },
+  );
+
+  assert.deepEqual(
+    harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage,
+    [{
+      kind: 'skill_pruning_prepass',
+      sourceId: 'pruning-duration-only',
+      occurredAt: '2026-01-01T00:00:00.250Z',
+      modelId: 'openai/pruner',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      durationMs: 321,
+    }],
+  );
+});
+
+test('retry timing keeps scheduled delay and updates measured delay/duration idempotently', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const timing = {
+    sourceId: 'request-1:2',
+    occurredAt: '2026-01-01T00:00:00.500Z',
+    attempt: 2,
+    scheduledDelayMs: 4_000,
+  };
+  harness.tracker.onAutoRetry(harness.sessionPath, timing);
+  harness.tracker.onAutoRetry(harness.sessionPath, timing);
+  harness.tracker.onAutoRetryMeasured(harness.sessionPath, timing.sourceId, 4_025, 5_200);
+
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.autoRetryCount, 1);
+  assert.deepEqual(run?.retryTimingSamples, [{
+    ...timing,
+    measuredDelayMs: 4_025,
+    durationMs: 5_200,
   }]);
 });
 

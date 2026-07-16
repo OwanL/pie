@@ -202,6 +202,7 @@ Node `v24.16.0`, Windows x64:
 
 - `streaming-pipeline-2026-07-15T11-47-31-543Z.json`: current burst sync was
   about 21.2 µs/delta at 0 rows and 53.0 µs/delta at 100 rows; the tool lookup
+
   index reduced the 1,000-row microbenchmark from about 89.5 µs to 0.063 µs.
 - `analytics-2026-07-15T11-47-43-583Z.json`: a 2,000-run cold tick used about
   97.6 ms query + 100.9 ms compute + 4.2 ms clone; warm compute fell to

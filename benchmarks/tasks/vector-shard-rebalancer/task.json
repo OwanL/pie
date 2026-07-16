@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "vector-shard-rebalancer",
-  "version": 4,
+  "version": 5,
   "promptFile": "prompt.md",
   "fixture": {
     "type": "directory",
@@ -27,8 +27,7 @@
     "timeoutMs": 900000,
     "checkTimeoutMs": 30000,
     "scorerTimeoutMs": 10000,
-    "maxBashTimeoutSeconds": 60,
-    "inactivityTimeoutMs": 300000
+    "maxBashTimeoutSeconds": 60
   },
   "checks": {
     "public": [

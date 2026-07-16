@@ -23,7 +23,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   // Atomic live-pipeline cutover: the sequenced turn.started event owns active
   // lifecycle and optimistic-send commit. Legacy events remain analytics-only.
   if (state.livePipeline.turnsBySession[event.sessionPath]) return { state, effects: [] };
-  const { sessionPath, messageId, requestId, modelId, thinkingLevel, timestamp } = event;
+  const { sessionPath, messageId, requestId, modelId, provider, thinkingLevel, timestamp } = event;
   const currentTurn = state.pending.currentTurnBySession[sessionPath];
 
   // Determine if this is a continuation (alias) of an existing turn
@@ -82,6 +82,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
         appendContinuationSeparator(canonical);
         canonical.draftingToolCall = undefined;
         if (modelId) canonical.modelId = modelId;
+        if (provider) canonical.provider = provider;
         if (thinkingLevel) canonical.thinkingLevel = thinkingLevel;
         canonical.status = 'streaming';
       }
@@ -91,6 +92,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
       if (existing) {
         existing.draftingToolCall = undefined;
         if (modelId) existing.modelId = modelId;
+        if (provider) existing.provider = provider;
         if (thinkingLevel) existing.thinkingLevel = thinkingLevel;
       } else {
         // New message: create it
@@ -100,6 +102,7 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
           createdAt: new Date(timestamp).toISOString(),
           markdown: '',
           modelId,
+          provider,
           thinkingLevel,
           parts: [],
           status: 'streaming',
@@ -226,6 +229,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
         canonical.status = normalizedMessage.status;
         canonical.draftingToolCall = undefined;
         if (normalizedMessage.modelId) canonical.modelId = normalizedMessage.modelId;
+        if (normalizedMessage.provider) canonical.provider = normalizedMessage.provider;
         if (normalizedMessage.thinkingLevel) canonical.thinkingLevel = normalizedMessage.thinkingLevel;
         if (normalizedMessage.durationMs !== undefined) {
           canonical.durationMs = (canonical.durationMs ?? 0) + normalizedMessage.durationMs;

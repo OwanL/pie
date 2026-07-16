@@ -36,6 +36,7 @@ import type {
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
+  RetryMeasuredPayload,
   RetryStartedPayload,
   RetryStuckPayload,
   SessionListChangedPayload,
@@ -159,6 +160,8 @@ export function isMessageStartedPayload(value: unknown): value is MessageStarted
     && isString(value.requestId)
     && isString(value.messageId)
     && isString(value.sessionPath)
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
   );
 }
 
@@ -245,6 +248,7 @@ export function isToolFinishedPayload(value: unknown): value is ToolFinishedPayl
     && isString(value.toolCallId)
     && (value.name === undefined || isString(value.name))
     && (value.status === 'completed' || value.status === 'failed')
+    && isOptionalFiniteNumber(value.startedAt)
     && isOptionalFiniteNumber(value.durationMs)
     && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
     && (value.durableEntryId === undefined || isString(value.durableEntryId))
@@ -349,6 +353,9 @@ export function isRetryStartedPayload(value: unknown): value is RetryStartedPayl
     && isFiniteNumber(value.maxAttempts)
     && isFiniteNumber(value.delayMs)
     && isString(value.errorMessage)
+    && isOptionalString(value.requestId)
+    && isOptionalString(value.retryId)
+    && isOptionalFiniteNumber(value.startedAt)
   );
 }
 
@@ -359,6 +366,17 @@ export function isRetryEndedPayload(value: unknown): value is RetryEndedPayload 
     && isBoolean(value.success)
     && isFiniteNumber(value.attempt)
     && isOptionalString(value.finalError)
+  );
+}
+
+export function isRetryMeasuredPayload(value: unknown): value is RetryMeasuredPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isString(value.requestId)
+    && isString(value.retryId)
+    && isOptionalFiniteNumber(value.measuredDelayMs)
+    && isFiniteNumber(value.durationMs)
   );
 }
 

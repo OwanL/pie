@@ -145,7 +145,7 @@ export function onToolFinished(
     input: payload.input !== undefined ? payload.input : existing?.input,
     result: payload.result,
     status: payload.status,
-    startedAt: existing?.startedAt,
+    startedAt: payload.startedAt ?? existing?.startedAt,
     durationMs: payload.durationMs,
     parallelGroupId: payload.parallelGroupId ?? existing?.parallelGroupId,
     durableEntryId: payload.durableEntryId,

@@ -9,6 +9,7 @@ import type {
   PreparedFileExtensionRow,
   PreparedPruningEventRow,
   PreparedPruningSignalRow,
+  PreparedRetryTimingRow,
   PreparedToolResultIssueRow,
   PreparedToolResultPruningRow,
   PreparedWarmBashRewriteRow,
@@ -34,6 +35,8 @@ export const QUERY_FILE_BY_NAME = {
   timeline: path.resolve(SCRIPT_DIR, '../queries/timeline.sql'),
   pruning_prepass_cost: path.resolve(SCRIPT_DIR, '../queries/pruning_prepass_cost.sql'),
   warm_bash: path.resolve(SCRIPT_DIR, '../queries/warm_bash.sql'),
+  retry_timing: path.resolve(SCRIPT_DIR, '../queries/retry_timing.sql'),
+  latency_friction: path.resolve(SCRIPT_DIR, '../queries/latency_friction.sql'),
 } as const;
 
 export type NamedQuery = keyof typeof QUERY_FILE_BY_NAME;
@@ -160,6 +163,8 @@ interface DuckDbRunRow {
   last_turn_total_tokens: number | null;
   last_turn_reasoning_tokens: number | null;
   treatment_change_kinds: string[];
+  critical_path_duration_ms: number | null;
+  skill_pruning_prepass_duration_ms: number | null;
 }
 
 interface DuckDbToolUsageRow {
@@ -391,6 +396,24 @@ interface DuckDbTurnThroughputRow {
   cache_write_tokens: number;
   context_tokens: number | null;
   provider: string | null;
+  provider_queue_ms: number | null;
+  provider_queue_attempt_count: number;
+}
+
+interface DuckDbRetryTimingRow {
+  run_id: string;
+  source_id: string;
+  occurred_at: string;
+  started_day: string;
+  attempt: number;
+  scheduled_delay_ms: number;
+  measured_delay_ms: number | null;
+  duration_ms: number | null;
+  model_id: string | null;
+  model_family: string | null;
+  provider: string | null;
+  thinking_level: string | null;
+  experiment_assignment: string | null;
 }
 
 function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
@@ -511,6 +534,8 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     last_turn_total_tokens: row.lastTurnTotalTokens,
     last_turn_reasoning_tokens: row.lastTurnReasoningTokens,
     treatment_change_kinds: row.treatmentChangeKinds,
+    critical_path_duration_ms: row.criticalPathDurationMs,
+    skill_pruning_prepass_duration_ms: row.skillPruningPrepassDurationMs,
   };
 }
 
@@ -763,6 +788,26 @@ function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnTh
     cache_write_tokens: row.cacheWriteTokens,
     context_tokens: row.contextTokens,
     provider: row.provider,
+    provider_queue_ms: row.providerQueueMs,
+    provider_queue_attempt_count: row.providerQueueAttemptCount,
+  };
+}
+
+function toDuckDbRetryTimingRow(row: PreparedRetryTimingRow): DuckDbRetryTimingRow {
+  return {
+    run_id: row.runId,
+    source_id: row.sourceId,
+    occurred_at: row.occurredAt,
+    started_day: row.startedDay,
+    attempt: row.attempt,
+    scheduled_delay_ms: row.scheduledDelayMs,
+    measured_delay_ms: row.measuredDelayMs,
+    duration_ms: row.durationMs,
+    model_id: row.modelId,
+    model_family: row.modelFamily,
+    provider: row.provider,
+    thinking_level: row.thinkingLevel,
+    experiment_assignment: row.experimentAssignment,
   };
 }
 
@@ -781,6 +826,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   warmBashSummariesPath: string;
   agentReviewsPath: string;
   turnThroughputPath: string;
+  retryTimingPath: string;
 }> {
   await ensureDir(exportsDir);
   const runsPath = path.join(exportsDir, 'runs.json');
@@ -797,6 +843,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const warmBashSummariesPath = path.join(exportsDir, 'warm-bash-summaries.json');
   const agentReviewsPath = path.join(exportsDir, 'agent-reviews.json');
   const turnThroughputPath = path.join(exportsDir, 'turn-throughput.json');
+  const retryTimingPath = path.join(exportsDir, 'retry-timing.json');
 
   await Promise.all([
     writeJsonFile(runsPath, prepared.runs.map(toDuckDbRunRow)),
@@ -813,9 +860,10 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(warmBashSummariesPath, prepared.warmBashSummaries.map(toDuckDbWarmBashSummaryRow)),
     writeJsonFile(agentReviewsPath, prepared.agentReviews.map(toDuckDbAgentReviewRow)),
     writeJsonFile(turnThroughputPath, prepared.turnThroughput.map(toDuckDbTurnThroughputRow)),
+    writeJsonFile(retryTimingPath, prepared.retryTiming.map(toDuckDbRetryTimingRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath, retryTimingPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -956,7 +1004,9 @@ CREATE TABLE runs (
   last_turn_cache_write_tokens BIGINT,
   last_turn_total_tokens BIGINT,
   last_turn_reasoning_tokens BIGINT,
-  treatment_change_kinds VARCHAR[]
+  treatment_change_kinds VARCHAR[],
+  critical_path_duration_ms BIGINT,
+  skill_pruning_prepass_duration_ms BIGINT
 );
 `.trim();
 }
@@ -1234,7 +1284,29 @@ CREATE TABLE turn_throughput (
   cache_read_tokens BIGINT,
   cache_write_tokens BIGINT,
   context_tokens BIGINT,
-  provider VARCHAR
+  provider VARCHAR,
+  provider_queue_ms BIGINT,
+  provider_queue_attempt_count INTEGER
+);
+`.trim();
+}
+
+function retryTimingTableSchema(): string {
+  return `
+CREATE TABLE retry_timing (
+  run_id VARCHAR,
+  source_id VARCHAR,
+  occurred_at TIMESTAMP,
+  started_day DATE,
+  attempt INTEGER,
+  scheduled_delay_ms BIGINT,
+  measured_delay_ms BIGINT,
+  duration_ms BIGINT,
+  model_id VARCHAR,
+  model_family VARCHAR,
+  provider VARCHAR,
+  thinking_level VARCHAR,
+  experiment_assignment VARCHAR
 );
 `.trim();
 }
@@ -1337,6 +1409,7 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'warm_bash_summaries', warmBashSummariesTableSchema(), stagingPaths.warmBashSummariesPath);
     await populateTableFromJson(connection, 'agent_reviews', agentReviewTableSchema(), stagingPaths.agentReviewsPath);
     await populateTableFromJson(connection, 'turn_throughput', turnThroughputTableSchema(), stagingPaths.turnThroughputPath);
+    await populateTableFromJson(connection, 'retry_timing', retryTimingTableSchema(), stagingPaths.retryTimingPath);
     await createDerivedViews(connection);
   } finally {
     await closeDuckDb(instance, connection);

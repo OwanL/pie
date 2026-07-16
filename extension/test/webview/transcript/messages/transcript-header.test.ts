@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assistantReplyMeta, formatThinkingLevelLabel, formatAssistantMetaTooltip } from '../../../../src/webview/panel/transcript/header';
+import { assistantReplyMeta, formatThinkingLevelLabel, formatAssistantMetaTooltip, formatRequestTime } from '../../../../src/webview/panel/transcript/header';
 import type { ChatMessage } from '../../../../src/shared/protocol';
 
 function assistantMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
@@ -14,6 +14,18 @@ function assistantMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     ...overrides,
   };
 }
+
+test('formatRequestTime renders valid request timestamps in local time', () => {
+  const createdAt = '2026-01-01T12:34:56.000Z';
+  const requestedAt = new Date(createdAt);
+
+  assert.deepEqual(formatRequestTime(createdAt), {
+    compactText: requestedAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+    title: `Request made ${requestedAt.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })}`,
+  });
+  assert.equal(formatRequestTime('not-a-date'), null);
+  assert.equal(formatRequestTime(undefined), null);
+});
 
 test('assistantReplyMeta returns compact inline assistant metadata', () => {
   const meta = assistantReplyMeta(assistantMessage({

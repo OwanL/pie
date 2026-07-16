@@ -23,6 +23,10 @@ export interface SessionRunState {
   startedToolCallIdsInCurrentRun: Set<string>;
   /** Tool call IDs whose `onToolFinished` has already been processed — guards against duplicate `tool.finished` events double-counting durations, failures, and file mutations. */
   finishedToolCallIdsInCurrentRun: Set<string>;
+  /** Start-time attribution by call id, used to reconcile a name first learned at terminal time. */
+  toolNamesByCallIdInCurrentRun: Map<string, string>;
+  /** Merged, non-overlapping completed tool intervals for critical-path union. */
+  toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }>;
   busyStartedAt: string | null;
 }
 
@@ -47,7 +51,16 @@ export interface RunObserver {
   onToolFinished(sessionPath: string, toolCall: ToolCall): void;
   onInterrupted(sessionPath: string): void;
   onCompaction(sessionPath: string): void;
-  onAutoRetry(sessionPath: string): void;
+  onAutoRetry(
+    sessionPath: string,
+    timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
+  ): void;
+  onAutoRetryMeasured(
+    sessionPath: string,
+    sourceId: string,
+    measuredDelayMs: number | undefined,
+    durationMs: number,
+  ): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onBackendError(sessionPath: string | undefined, code: string): void;
@@ -81,6 +94,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onInterrupted: () => undefined,
   onCompaction: () => undefined,
   onAutoRetry: () => undefined,
+  onAutoRetryMeasured: () => undefined,
   onMessageEdited: () => undefined,
   onTruncatedAfter: () => undefined,
   onBackendError: () => undefined,
@@ -116,6 +130,8 @@ export function emptySessionRunState(): SessionRunState {
     endedTurnIdsInCurrentRun: new Set<string>(),
     startedToolCallIdsInCurrentRun: new Set<string>(),
     finishedToolCallIdsInCurrentRun: new Set<string>(),
+    toolNamesByCallIdInCurrentRun: new Map<string, string>(),
+    toolExecutionIntervalsInCurrentRun: [],
     busyStartedAt: null,
   };
 }

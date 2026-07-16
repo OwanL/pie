@@ -6,7 +6,7 @@ import { isPruningResultMessage, pruningDetailsFromMessage, type PruningHeaderSt
 export type TranscriptRow =
   | { kind: 'systemPrompts'; key: string }
   | { kind: 'topGap'; key: string }
-  | { kind: 'message'; key: string; message: ChatMessage; pruningHeaderState?: PruningHeaderState; activityState?: TurnActivityState | null; transcriptIndex?: number }
+  | { kind: 'message'; key: string; message: ChatMessage; requestCreatedAt?: string; pruningHeaderState?: PruningHeaderState; activityState?: TurnActivityState | null; transcriptIndex?: number }
   | { kind: 'typingIndicator'; key: string; activityState?: TurnActivityState | null }
   | { kind: 'bottomGap'; key: string };
 
@@ -82,10 +82,17 @@ function pushAssistantRow(
         kind: 'message',
         key: `message:${message.id}`,
         message,
+        requestCreatedAt: acc.latestUserMessage?.createdAt,
         pruningHeaderState: acc.pendingPruning.state,
         transcriptIndex: index,
       }
-    : { kind: 'message', key: `message:${message.id}`, message, transcriptIndex: index };
+    : {
+        kind: 'message',
+        key: `message:${message.id}`,
+        message,
+        requestCreatedAt: acc.latestUserMessage?.createdAt,
+        transcriptIndex: index,
+      };
   acc.rows.push(row);
   acc.lastAssistantRowIndexSinceUser = acc.rows.length - 1;
   acc.pendingPruning = null;
@@ -181,12 +188,14 @@ function maybeAddPlaceholderAssistant(
         kind: 'message',
         key: `message:${placeholderAssistantId}`,
         message: baseMessage,
+        requestCreatedAt: latestUserMessage?.createdAt,
         pruningHeaderState: pendingPruningHeaderState,
       }
     : {
         kind: 'message',
         key: `message:${placeholderAssistantId}`,
         message: baseMessage,
+        requestCreatedAt: latestUserMessage?.createdAt,
       };
   const firstQueuedIndex = rows.findIndex(
     (row) => row.kind === 'message' && row.message.role === 'user' && row.message.status === 'queued',

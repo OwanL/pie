@@ -325,6 +325,13 @@ export function loadConfig(
 		const rawPrepass = raw.prepass;
 		const prepass: PrepassConfig = {};
 
+		if (typeof rawPrepass.temperature === "number" && Number.isFinite(rawPrepass.temperature)
+			&& rawPrepass.temperature >= 0 && rawPrepass.temperature <= 2) {
+			prepass.temperature = rawPrepass.temperature;
+		} else if (rawPrepass.temperature !== undefined) {
+			warn("invalid pruning.prepass.temperature; must be a finite number from 0 to 2; using provider default");
+		}
+
 		assignPositiveInteger(
 			rawPrepass.maxOutputTokens,
 			(value) => { prepass.maxOutputTokens = value; },

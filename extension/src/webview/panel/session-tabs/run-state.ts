@@ -7,12 +7,6 @@ export interface SessionTabRunMenuItem {
   label: string;
 }
 
-export interface SessionTabRunBadge {
-  text: string;
-  tone: 'open' | 'pending-score';
-  title: string;
-}
-
 export interface ComposerRunStatus {
   text: string;
   tone: 'open' | 'pending-score' | 'subtle';
@@ -62,29 +56,6 @@ export function getSessionTabRunMenuItems(runSummary: ActiveRunSummary | null): 
       ];
     default:
       return [];
-  }
-}
-
-export function getSessionTabRunBadge(runSummary: ActiveRunSummary | null): SessionTabRunBadge | null {
-  if (!runSummary) {
-    return null;
-  }
-
-  switch (runSummary.status) {
-    case 'open':
-      return {
-        text: 'Done',
-        tone: 'open',
-        title: 'Click to mark this run complete and record a rating. You can also right-click the tab for task actions.',
-      };
-    case 'closed_unscored':
-      return {
-        text: 'Rate',
-        tone: 'pending-score',
-        title: 'Click to record the outcome for this completed run. You can also right-click the tab for task actions.',
-      };
-    default:
-      return null;
   }
 }
 

@@ -14,6 +14,7 @@ import type {
   PreflightFailedPayload,
   QueuedDeliveredPayload,
   RetryEndedPayload,
+  RetryMeasuredPayload,
   RetryStartedPayload,
   RetryStuckPayload,
 } from '../../../shared/protocol';
@@ -100,6 +101,7 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
     messageId: payload.messageId,
     requestId: payload.requestId,
     modelId: payload.modelId,
+    provider: payload.provider,
     thinkingLevel: payload.thinkingLevel,
     timestamp: Date.now(),
   });
@@ -110,11 +112,12 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
   if (payload.modelId) {
     const archState = deps.getArchState();
     const session = archState.sessions.sessions.find((s: any) => s.path === sessionPath);
-    if (session && (session.modelId !== payload.modelId || session.thinkingLevel !== payload.thinkingLevel)) {
+    if (session && (session.modelId !== payload.modelId || session.provider !== payload.provider || session.thinkingLevel !== payload.thinkingLevel)) {
       deps.dispatchArch({
         kind: 'SessionMetadataChanged',
         sessionPath,
         modelId: payload.modelId,
+        provider: payload.provider,
         thinkingLevel: payload.thinkingLevel,
       });
     }
@@ -162,11 +165,14 @@ export function onMessageFinished(
     message.durationMs ?? 0,
     message.usage,
     toTurnThroughputStatus(message.status),
-    message.turnLatencyMs !== undefined || message.overheadMs !== undefined || message.providerLatencyMs !== undefined
+    message.turnLatencyMs !== undefined || message.overheadMs !== undefined
+      || message.providerLatencyMs !== undefined || message.providerQueueMs !== undefined
       ? {
           turnLatencyMs: message.turnLatencyMs,
           overheadMs: message.overheadMs,
           providerLatencyMs: message.providerLatencyMs,
+          providerQueueMs: message.providerQueueMs,
+          providerQueueAttemptCount: message.providerQueueAttemptCount,
         }
       : undefined,
   );
@@ -287,7 +293,13 @@ export function onRetryStarted(payload: RetryStartedPayload, deps: HandlerDeps):
   if (!sessionPath) {
     return;
   }
-  deps.runObserver.onAutoRetry(sessionPath);
+  const hasTiming = payload.retryId && payload.startedAt !== undefined;
+  deps.runObserver.onAutoRetry(sessionPath, hasTiming ? {
+    sourceId: payload.retryId!,
+    occurredAt: new Date(payload.startedAt!).toISOString(),
+    attempt: payload.attempt,
+    scheduledDelayMs: payload.delayMs,
+  } : undefined);
   deps.dispatchArch({
     kind: 'RetryStarted',
     sessionPath,
@@ -296,6 +308,17 @@ export function onRetryStarted(payload: RetryStartedPayload, deps: HandlerDeps):
     delayMs: payload.delayMs,
     errorMessage: payload.errorMessage,
   });
+}
+
+export function onRetryMeasured(payload: RetryMeasuredPayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('retry.measured', payload.sessionPath);
+  if (!sessionPath) return;
+  deps.runObserver.onAutoRetryMeasured(
+    sessionPath,
+    payload.retryId,
+    payload.measuredDelayMs,
+    payload.durationMs,
+  );
 }
 
 export function onRetryEnded(payload: RetryEndedPayload, deps: HandlerDeps): void {

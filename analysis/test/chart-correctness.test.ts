@@ -10,6 +10,7 @@ import type {
 import { modelFamilyKey } from '../site/lib.ts';
 import { pruningRecoveryMetrics, pruningRecoverySpec } from '../site/charts/pruning.ts';
 import { satisfactionIntervalSpec, settingComparisonRows } from '../site/charts/settings.ts';
+import { runtimeFrictionTimingRows, toolTimeOverlapRows } from '../site/charts/latency-friction.ts';
 import {
   effectiveThroughputRows,
   throughputByModelRows,
@@ -124,6 +125,35 @@ function throughputTurn(
 ): PreparedTurnThroughputRow {
   return { runId, modelId, modelFamily, tokensPerSecond, concurrentBusySessions, endedAt } as PreparedTurnThroughputRow;
 }
+
+test('latency/friction transforms exclude absent legacy timing and expose overlap', () => {
+  const ctx = {
+    runs: [
+      { runId: 'measured', status: 'scored', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: 300, toolDurationMs: 1000, criticalPathDurationMs: 700 },
+      { runId: 'legacy', status: 'scored', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: null, toolDurationMs: 900, criticalPathDurationMs: null },
+    ],
+    turnThroughputRows: [
+      { runId: 'measured', providerQueueMs: 50 },
+      { runId: 'legacy', providerQueueMs: null },
+    ],
+    retryTimingRows: [
+      { runId: 'measured', scheduledDelayMs: 1000, measuredDelayMs: 1100, durationMs: 3000 },
+    ],
+  } as any;
+
+  assert.deepEqual(runtimeFrictionTimingRows(ctx).map((row) => [row.component, row.medianMs, row.observationCount]), [
+    ['Skill-pruning prepass', 300, 1],
+    ['Provider queue', 50, 1],
+    ['Retry scheduled delay', 1000, 1],
+    ['Retry measured delay', 1100, 1],
+    ['Retry episode duration', 3000, 1],
+  ]);
+  assert.deepEqual(toolTimeOverlapRows(ctx).map((row) => [row.component, row.medianMs, row.runCount]), [
+    ['Cumulative', 1000, 1],
+    ['Critical path', 700, 1],
+    ['Parallel overlap', 300, 1],
+  ]);
+});
 
 test('throughput transforms group provider ids by family and use concurrency-bin medians with visible n', () => {
   const rows = effectiveThroughputRows(

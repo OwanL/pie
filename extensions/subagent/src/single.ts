@@ -1,11 +1,13 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { ToolContext } from "@mariozechner/pi-coding-agent";
+import type { ToolContext } from "./tool-context.js";
 import type { AgentConfig } from "../agents.js";
 import { getFinalOutput } from "../formatting.js";
 import {
 	runSingleAgent,
 	subagentRuntime,
 	consumeTreeSlot,
+	getMaxTreeSessions,
+	nextAttemptIdentity,
 	type SubagentRuntimeContext,
 } from "../runner.js";
 import type { Static } from "@mariozechner/pi-ai";
@@ -15,6 +17,8 @@ import {
 	type OnUpdateCallback,
 	type SingleResult,
 	type SubagentDetails,
+	type SubagentResult,
+	type SubagentAttemptRecord,
 } from "../types.js";
 import {
 	resolveModel,
@@ -26,10 +30,23 @@ import {
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import type { ThinkingLevel } from "../bucket-selector.js";
 import { compactSingleResult } from "./result-compaction.js";
+import { textContent } from "./text-content.js";
+import {
+	readRetryPolicy,
+	parseRetryAfterMs,
+	clampRetryAfter,
+	computeBackoffMs,
+	abortableDelay,
+	providerForModel,
+	excludeProviderModels,
+	buildAttemptRecord,
+	type RetryClock,
+	realRetryClock,
+} from "./retry.js";
 
 export type SingleSubagentParams = Static<typeof SubagentParams>;
 type MakeDetails = (results: SingleResult[]) => SubagentDetails;
-type SingleResultEnvelope = AgentToolResult<SubagentDetails>;
+type SingleResultEnvelope = SubagentResult;
 
 function failureMessage(result: SingleResult): string {
 	return result.errorMessage || result.stderr || result.finalOutput || getFinalOutput(result.messages) || "(no output)";
@@ -48,50 +65,122 @@ interface RunWithModelRetryArgs {
 	selectionCtx: SelectionContext;
 	childDepth: number;
 	buildRuntime: () => SubagentRuntimeContext;
-	signal: AbortSignal;
-	runAttempt: (resolved: Awaited<ReturnType<typeof resolveModel>>) => Promise<SingleResult>;
+	signal: AbortSignal | undefined;
+	toolCallId: string;
+	task: string;
+	clock: RetryClock;
+	runAttempt: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
 }
+
+
 
 async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleResult> {
 	let result: SingleResult | undefined;
 	let retryCount = 0;
 	let lastFailedModel: string | undefined;
+	const attemptRecords: SubagentAttemptRecord[] = [];
+	const excludeModels = new Set<string>(args.excludeModels);
+	const policy = readRetryPolicy();
+	const clock = args.clock;
+	let nextBackoffMs = 0;
 
 	for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt++) {
+		if (attempt > 0) retryCount++; // tentative count; undone if no eligible model
+
+		const runtimeCtx = args.buildRuntime();
+		// Preserve the immediate tree-limit failure at entry without charging an
+		// undispatched attempt. Retries perform the same check after model
+		// eligibility is known.
+		if (attempt === 0 && runtimeCtx.budget && runtimeCtx.budget.sessions >= getMaxTreeSessions()) {
+			throw new Error(`Sub-agent tree session limit reached (max ${getMaxTreeSessions()} sessions across the nested tree).`);
+		}
 		const resolved = await resolveModel(
 			args.agent,
 			args.selectionCtx,
 			args.activeModelId,
 			args.bucket,
 			args.thinkingLevel as ThinkingLevel | undefined,
-			args.excludeModels,
+			excludeModels,
 			args.childDepth,
 		);
-		result = await subagentRuntime.run(args.buildRuntime(), () => args.runAttempt(resolved));
-		attachSelectionMetadata(result, resolved);
 
-		if (args.signal.aborted) break;
+		// Provider failover is stricter than normal bucket exhaustion: it may only
+		// dispatch another configured model from the same bucket, and must not
+		// retry the same provider that just failed. The first attempt may fall back
+		// to the caller's active model when the bucket is empty, but retries are
+		// never allowed to escape the bucket.
+		const hasEligibleModel = resolved.modelOverride && !excludeModels.has(resolved.modelOverride);
+		const isFallback = resolved.selection?.fallback === true;
+		if (!hasEligibleModel || (isFallback && attempt > 0)) {
+			// No eligible model remains; preserve the last failure (if any) and stop.
+			retryCount--;
+			break;
+		}
+
+		// Charge only an attempt that is about to dispatch. A missing retry target
+		// therefore consumes neither tree budget nor attempt analytics.
+		if (runtimeCtx.budget && runtimeCtx.budget.sessions >= getMaxTreeSessions()) {
+			if (attempt === 0) {
+				throw new Error(`Sub-agent tree session limit reached (max ${getMaxTreeSessions()} sessions across the nested tree).`);
+			}
+			retryCount--;
+			break;
+		}
+		const treeLimitError = consumeTreeSlot(runtimeCtx.budget);
+		if (treeLimitError) {
+			if (attempt === 0) throw new Error(treeLimitError);
+			retryCount--;
+			break;
+		}
+
+		const attemptId = nextAttemptIdentity(args.agent.name, args.toolCallId);
+		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId));
+		attachSelectionMetadata(result, resolved);
+		result.attemptId = attemptId;
+		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
+
+		if (args.signal?.aborted) break;
 		const failure = args.selectionCtx.fallbackOnProviderFailure !== false
 			&& resolved.selection?.fallback !== true
 			&& isModelFailure(result, resolved.modelOverride, !!args.selectionCtx.bucketAssignments);
 		if (!failure || attempt >= MAX_MODEL_RETRIES) break;
 
-		args.excludeModels.add(resolved.modelOverride!);
-		const next = await resolveModel(
-			args.agent,
-			args.selectionCtx,
-			args.activeModelId,
-			args.bucket,
-			args.thinkingLevel as ThinkingLevel | undefined,
-			args.excludeModels,
-			args.childDepth,
-		);
-		// An exhausted bucket normally falls back to the parent's active model.
-		// Provider failover is stricter: it may only dispatch another configured
-		// model from this same bucket, never escape to an out-of-bucket parent.
-		if (!next.modelOverride || next.selection?.fallback === true || args.excludeModels.has(next.modelOverride)) break;
+		// REM-03: provider-aware failover excludes every configured model belonging
+		// to the failed provider so fallback cannot retry that provider. Prefer the
+		// provider stamped on the result (the actual runtime provider) over an
+		// ambiguous model-id-to-provider registry lookup. If the result provider is
+		// unmapped, fall back to excluding the failed model id so the same target
+		// is never retried.
+		const failedProvider = result.provider ?? providerForModel(resolved.modelOverride, args.selectionCtx.registryModels);
+		if (failedProvider) {
+			excludeProviderModels(failedProvider, args.selectionCtx.registryModels, excludeModels);
+		}
+		excludeModels.add(resolved.modelOverride);
 		lastFailedModel = resolved.modelOverride;
-		retryCount++;
+
+		// REM-03: parse Retry-After hints, clamp to a bounded maximum, and fall back
+		// to bounded exponential backoff. The wait is immediately abortable.
+		const retryAfter = result.retryAfterMs !== undefined
+			? clampRetryAfter(result.retryAfterMs, policy)
+			: parseRetryAfterMs(result.errorMessage ? new Error(result.errorMessage) : undefined, policy)
+				?? parseRetryAfterMs(result.stderr ? new Error(result.stderr) : undefined, policy);
+		const baseBackoff = computeBackoffMs(retryCount, policy);
+		const backoffMs = retryAfter ?? baseBackoff;
+		result.retryAfterMs = backoffMs;
+
+		if (backoffMs > 0) {
+			result.activityPhase = "retry_wait";
+			result.activityDetail = `waiting ${backoffMs}ms to retry`;
+			result.activitySince = clock.now();
+		}
+		try {
+			await abortableDelay(backoffMs, args.signal, clock);
+		} catch {
+			// Parent aborted during the wait: stop retrying and use the last result.
+			break;
+		}
+
+		nextBackoffMs = backoffMs;
 	}
 
 	if (!result) throw new Error("Subagent did not produce a result.");
@@ -99,6 +188,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		result.failedModel = lastFailedModel;
 		result.retryCount = retryCount;
 	}
+	result.attemptRecords = attemptRecords;
 	return result;
 }
 
@@ -111,23 +201,27 @@ export async function executeSingleTask(args: {
 	runtimeCtx: SubagentRuntimeContext;
 	makeDetails: MakeDetails;
 	onUpdate: OnUpdateCallback;
-	signal: AbortSignal;
+	signal: AbortSignal | undefined;
 	selectionCtx: SelectionContext;
 	toolCallId: string;
 	parentUiBridge: ParentBridge | undefined;
 	parentSessionId: string | undefined;
 	allToolNames: string[] | undefined;
+	/** Internal test seam for retry/backoff/analytics. */
+	_internal?: {
+		clock?: RetryClock;
+		runAttempt?: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
+	};
 }): Promise<SingleResultEnvelope> {
-	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, selectionCtx } = args;
+	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, selectionCtx, _internal } = args;
 	if (checkTrailLoop(params.agent, runtimeCtx.trail)) {
 		throw new Error(`Trail loop detected: agent "${params.agent}" already appeared twice in ancestor chain.`);
 	}
-	const treeLimitError = consumeTreeSlot(runtimeCtx.budget);
-	if (treeLimitError) throw new Error(treeLimitError);
 
 	const agent = agents.find((candidate) => candidate.name === params.agent);
 	if (!agent) throw new Error(`Unknown subagent: ${params.agent}`);
 
+	const injectedRunAttempt = _internal?.runAttempt;
 	const result = await runWithModelRetry({
 		agent,
 		excludeModels: new Set<string>(),
@@ -137,6 +231,9 @@ export async function executeSingleTask(args: {
 		selectionCtx,
 		childDepth: runtimeCtx.depth + 1,
 		signal,
+		toolCallId: args.toolCallId,
+		task: params.task,
+		clock: _internal?.clock ?? realRetryClock,
 		buildRuntime: () => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, params.agent],
@@ -146,47 +243,51 @@ export async function executeSingleTask(args: {
 			keptSkills: runtimeCtx.keptSkills,
 			processPermitScope: runtimeCtx.processPermitScope,
 		}),
-		runAttempt: (resolved) => {
-			const selection = resolved.selection ?? {
-				modelId: resolved.modelOverride ?? ctx.model?.id ?? "",
-				thinkingLevel: resolved.thinkingLevel,
-				bucket: resolved.bucket ?? "medium",
-				pool: [],
-				fallback: true,
-			};
-			return runSingleAgent(
-				ctx.cwd,
-				agents,
-				params.agent,
-				params.task,
-				params.cwd,
-				undefined,
-				signal,
-				onUpdate,
-				(results) => makeDetails(results),
-				ctx.modelRegistry,
-				ctx.model,
-				selection,
-				selectionCtx.disabledProviders,
-				args.toolCallId,
-				args.parentUiBridge,
-				args.parentSessionId,
-				args.allToolNames,
-			);
-		},
+		runAttempt: injectedRunAttempt
+			? (resolved, attemptId) => injectedRunAttempt(resolved, attemptId)
+			: (resolved, attemptId) => {
+				const selection = resolved.selection ?? {
+					modelId: resolved.modelOverride ?? ctx.model?.id ?? "",
+					thinkingLevel: resolved.thinkingLevel,
+					bucket: resolved.bucket ?? "medium",
+					pool: [],
+					fallback: true,
+				};
+				return runSingleAgent(
+					ctx.cwd,
+					agents,
+					params.agent,
+					params.task,
+					params.cwd,
+					undefined,
+					signal,
+					onUpdate,
+					(results) => makeDetails(results),
+					ctx.modelRegistry,
+					ctx.model,
+					selection,
+					selectionCtx.disabledProviders,
+					args.toolCallId,
+					args.parentUiBridge,
+					args.parentSessionId,
+					args.allToolNames,
+					undefined,
+					attemptId,
+				);
+			},
 	});
 
 	const compact = compactSingleResult(result);
 	const details = makeDetails([compact]);
 	if (isResultError(result)) {
 		return {
-			content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${failureMessage(compact)}` }],
+			content: [textContent(`Agent ${result.stopReason || "failed"}: ${failureMessage(compact)}`)],
 			details,
 			isError: true,
 		};
 	}
 	return {
-		content: [{ type: "text", text: compact.finalOutput || "(no output)" }],
+		content: [textContent(compact.finalOutput || "(no output)")],
 		details,
 	};
 }
