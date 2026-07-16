@@ -49,7 +49,7 @@
     "experiment:run": "node ./scripts/experiments/cli.mjs run",
     "experiment:compare": "node ./scripts/experiments/cli.mjs compare",
     "experiment:clean": "node ./scripts/experiments/cli.mjs clean",
-    "experiment:test": "node --test scripts/experiments/test/*.test.mjs",
+    "experiment:test": "node --test --test-concurrency=1 scripts/experiments/test/*.test.mjs",
     "experiment:image:build": "node --input-type=module -e \"import('./scripts/experiments/lib/container-runtime.mjs').then(m=>console.log(m.buildContainerImage()))\"",
     "experiment:calibrate": "node ./scripts/experiments/calibrate.mjs",
     "sync-models": "node ./scripts/sync-models.mjs"

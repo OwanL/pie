@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "current-pie-noop-control-c3-r1",
+  "baseCommit": "22e80aa18d5783a7d8b26efbcc14c53677084606",
+  "type": "settings-overlay",
+  "hypothesisDimension": "matched-no-op-control-concurrency-3",
+  "changedPaths": [],
+  "apply": {},
+  "contentHash": "13fe7ebb8decce25fac007893af400f72c94bba212138836c1c184f533808344",
+  "validation": [
+    "npm run experiment:test",
+    "npm run experiment:calibrate"
+  ]
+}
