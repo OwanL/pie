@@ -15,6 +15,61 @@ test('shallowConfigEqual returns true for structurally equal prefs (scalars + to
   assert.equal(shallowConfigEqual(a, b), true);
 });
 
+test('pickStable reuses full structured-cloned prefs with nested JSON-like config', () => {
+  const stable = structuredClone({
+    ...DEFAULT_CHAT_PREFS,
+    subagentBuckets: {
+      small: ['small-model'],
+      medium: ['medium-model'],
+      frontier: ['frontier-model'],
+    },
+    subagentProviderTogglesBySession: {
+      '/session/a': { openai: true, anthropic: false },
+    },
+    providerConcurrency: {
+      openai: { maxConcurrentRequests: 3, afterburnSeconds: 10 },
+    },
+  });
+  const equivalentClone = structuredClone(stable);
+
+  assert.equal(pickStable(stable, equivalentClone), stable);
+});
+
+test('pickStable adopts a structured-cloned prefs candidate after a nested leaf changes', () => {
+  const stable = structuredClone({
+    ...DEFAULT_CHAT_PREFS,
+    subagentBuckets: {
+      small: ['small-model'],
+      medium: ['medium-model'],
+      frontier: [],
+    },
+    subagentProviderTogglesBySession: {
+      '/session/a': { openai: true },
+    },
+    providerConcurrency: {
+      openai: { maxConcurrentRequests: 3 },
+    },
+  });
+  const changedClone = structuredClone(stable);
+  changedClone.providerConcurrency.openai!.maxConcurrentRequests = 4;
+
+  assert.equal(pickStable(stable, changedClone), changedClone);
+});
+
+test('shallowConfigEqual fails open for fresh unsupported object prototypes', () => {
+  class UnsupportedConfig {
+    constructor(readonly value: string) {}
+  }
+
+  assert.equal(
+    shallowConfigEqual(
+      { custom: new UnsupportedConfig('same') },
+      { custom: new UnsupportedConfig('same') },
+    ),
+    false,
+  );
+});
+
 test('shallowConfigEqual returns true for the same reference', () => {
   const a = { ...DEFAULT_CHAT_PREFS };
   assert.equal(shallowConfigEqual(a, a), true);

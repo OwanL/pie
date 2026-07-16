@@ -174,3 +174,50 @@ test('app commit reports only a transcript block that survives the render grace 
     ['structure_mismatch'],
   );
 });
+
+test('switching the active session remounts the transcript surface', () => {
+  const root = document.getElementById('root')!;
+  const window = {
+    loadedStart: 0,
+    loadedEnd: 0,
+    totalCount: 0,
+    hasOlder: false,
+    hasNewer: false,
+    isPartial: false,
+    hasUserMessages: false,
+  };
+  const props = {
+    openTabPaths: ['/session/a', '/session/b'],
+    activeSessionPath: '/session/a',
+    transcript: [],
+    transcriptWindow: window,
+    transcriptLoaded: true,
+    busy: false,
+    prefs: { showPruningMessages: true },
+    pruningSettings: {},
+    systemPrompts: [],
+    pruningResult: null,
+    workingDirectory: null,
+    editingId: null,
+    onEditRequest() {},
+    onEditConfirm() {},
+    onEditCancel() {},
+    onOpenFile() {},
+    onContextMenu() {},
+    postMessage() {},
+  };
+
+  render(h(TranscriptHost, props as never), root);
+  const firstSurface = root.querySelector('.transcript-surface');
+  assert.ok(firstSurface);
+
+  render(h(TranscriptHost, {
+    ...props,
+    activeSessionPath: '/session/b',
+  } as never), root);
+  const secondSurface = root.querySelector('.transcript-surface');
+  assert.ok(secondSurface);
+
+  assert.notEqual(secondSurface, firstSurface, 'session identity must be a component remount boundary');
+  render(null, root);
+});

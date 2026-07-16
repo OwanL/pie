@@ -315,6 +315,7 @@ export function TranscriptHost({
     >
       {activeSessionPath && openTabPaths.includes(activeSessionPath) && (
         <TranscriptSurface
+          key={activeSessionPath}
           sessionPath={activeSessionPath}
           isActive
           sessionKey={sessionKey ?? activeSessionPath}

@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useContext, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
 import type { ChatPrefs, ToolCall } from '../../../shared/protocol';
 import { shouldOpenSubagentContextMenu } from './interactions';
 import { handleTranscriptClick } from './transcript-click-handler';
@@ -491,11 +492,13 @@ function SubagentSingleBlock({
   // Collapsed cards keep a compact task/live-output preview. Expanded cards
   // already show the full child transcript, so repeating the preview there is
   // redundant.
-  const previewTail = subagentPreviewTail(
-    singleResult,
-    ACTIVITY_TAIL_MAX_LINES,
-    status === 'running' || status === 'idle',
-  );
+  const previewTail = open
+    ? undefined
+    : subagentPreviewTail(
+        singleResult,
+        ACTIVITY_TAIL_MAX_LINES,
+        status === 'running' || status === 'idle',
+      );
 
   // Check if this subagent has a pending ask_user request (for blinking indicator).
   const askUserCtx = useContext(AskUserContext);
@@ -719,7 +722,45 @@ function SubagentBlock({
   );
 }
 
-export function ToolCallItem({
+function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallItemProps): boolean {
+  if (
+    previous.prefs !== next.prefs
+    || previous.workingDirectory !== next.workingDirectory
+    || previous.onOpenFile !== next.onOpenFile
+    || previous.onContextMenu !== next.onContextMenu
+    || previous.renderToolCall !== next.renderToolCall
+  ) {
+    return false;
+  }
+
+  const left = previous.toolCall;
+  const right = next.toolCall;
+  // Every live-pipeline tool update advances seq. Legacy running calls have no
+  // producer revision, so fail open and render them defensively on every tick.
+  if (
+    (left.status === 'running' || right.status === 'running')
+    && (!Number.isSafeInteger(left.seq) || !Number.isSafeInteger(right.seq))
+  ) {
+    return false;
+  }
+
+  // Tool input is immutable after tool.started. Terminal results are immutable;
+  // live result/progress changes are represented by seq. Presence is still a
+  // barrier so an undefined-to-defined result cannot be hidden.
+  return left.id === right.id
+    && left.name === right.name
+    && left.status === right.status
+    && left.startedAt === right.startedAt
+    && left.durationMs === right.durationMs
+    && left.parallelGroupId === right.parallelGroupId
+    && left.executionId === right.executionId
+    && left.seq === right.seq
+    && left.phase === right.phase
+    && left.durableEntryId === right.durableEntryId
+    && (left.result === undefined) === (right.result === undefined);
+}
+
+function ToolCallItemBody({
   toolCall,
   prefs,
   workingDirectory,
@@ -727,10 +768,6 @@ export function ToolCallItem({
   onContextMenu,
   renderToolCall,
 }: ToolCallItemProps) {
-  // ToolCallItem is the common lifecycle boundary for every renderer. Keeping
-  // commit evidence here ensures specialized subagent/ask-user/web-search
-  // renderers cannot bypass the canonical tool leaf.
-  useCommittedToolLeaf(toolCall);
   const subagentResult = getRenderableSubagentResultFromToolCall(toolCall);
   const rendererName = toolCall.name === 'subagent' || !!subagentResult ? 'subagent' : toolCall.name;
   const Renderer = getToolRenderer(rendererName) ?? getToolRenderer('__default');
@@ -764,6 +801,16 @@ export function ToolCallItem({
       onContextMenu={handleContextMenu}
     />
   );
+}
+
+const MemoizedToolCallItemBody = memo(ToolCallItemBody, areToolCallItemPropsEqual);
+
+export function ToolCallItem(props: ToolCallItemProps) {
+  // Keep commit evidence outside the memoized heavy body: every parent/context
+  // revision reaches the canonical leaf even when an equivalent structured
+  // clone can reuse historical markdown/tool/subagent rendering.
+  useCommittedToolLeaf(props.toolCall);
+  return <MemoizedToolCallItemBody {...props} />;
 }
 
 /** Subagent renderer exposed for registry registration. */

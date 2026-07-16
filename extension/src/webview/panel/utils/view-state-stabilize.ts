@@ -9,60 +9,77 @@
  * on every snapshot. To make those barriers effective we reuse the previous
  * reference when a config object's content is structurally unchanged.
  *
- * Only the small, flat, infrequently-changing config objects (`prefs`,
+ * Only the small, infrequently-changing JSON-like config objects (`prefs`,
  * `pruningSettings`, `pruningCatalog`) are stabilized here. The transcript is
  * left untouched (it changes shape every snapshot while streaming, and a
  * correct content comparison would be O(n) per tick).
  */
 
-/**
- * Compare two collections (plain object or array) whose *values* are
- * primitives, by key/index. Used for `Record<string, boolean>` toggle maps and
- * `string[]` keep-lists without recursing into nested objects.
- */
-function primitiveCollectionsEqual(a: object, b: object): boolean {
-  // An array and a plain object can share the same keys (e.g. both empty →
-  // `Object.keys` `[]`), so guard the shape first to avoid a false positive
-  // that would let a malformed value reuse a stale reference.
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const ka = Object.keys(a);
-  const kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  const aa = a as Record<string, unknown>;
-  const bb = b as Record<string, unknown>;
-  for (const k of ka) {
-    if (aa[k] !== bb[k]) return false;
-  }
-  return true;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**
- * Structural equality for the small, flat config objects posted on every host
- * `state` message (`prefs`, `pruningSettings`, `pruningCatalog`). Scalar fields
- * are compared with `===`; object/array fields (toggle records, keep-lists,
- * skill/tool catalogs) are compared via {@link primitiveCollectionsEqual}.
- *
- * Generic over keys so newly-added scalar fields are covered automatically
- * without touching this helper. Fails SAFE: a non-primitive collection whose
- * values are themselves objects is compared by reference (which differs for
- * fresh host-serialized objects), so it reports "not equal" and falls back to
- * the fresh reference rather than reusing a stale one.
+ * Recursive equality for the small JSON-like config values posted on every
+ * host `state` message. Arrays are compared by index and plain records by key,
+ * including nested arrays/maps such as ChatPrefs' model buckets and per-session
+ * provider settings. Unsupported prototypes fail open so a class/Date/Map from
+ * a malformed snapshot can never cause a stale reference to be reused.
  */
-export function shallowConfigEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  if (a === b) return true;
-  const ka = Object.keys(a);
-  const kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  for (const k of ka) {
-    const av = a[k];
-    const bv = b[k];
-    if (av === bv) continue;
-    if (av && bv && typeof av === 'object' && typeof bv === 'object') {
-      if (primitiveCollectionsEqual(av, bv)) continue;
+function jsonLikeConfigEqual(
+  left: unknown,
+  right: unknown,
+  leftAncestors: WeakSet<object>,
+  rightAncestors: WeakSet<object>,
+): boolean {
+  if (Object.is(left, right)) return true;
+
+  const leftIsArray = Array.isArray(left);
+  const rightIsArray = Array.isArray(right);
+  if (leftIsArray || rightIsArray) {
+    if (!leftIsArray || !rightIsArray || left.length !== right.length) return false;
+    if (leftAncestors.has(left) || rightAncestors.has(right)) return false;
+    leftAncestors.add(left);
+    rightAncestors.add(right);
+    try {
+      for (let index = 0; index < left.length; index += 1) {
+        if ((index in left) !== (index in right)) return false;
+        if (!jsonLikeConfigEqual(left[index], right[index], leftAncestors, rightAncestors)) return false;
+      }
+      return true;
+    } finally {
+      leftAncestors.delete(left);
+      rightAncestors.delete(right);
     }
-    return false;
   }
-  return true;
+
+  if (!isPlainRecord(left) || !isPlainRecord(right)) return false;
+  if (leftAncestors.has(left) || rightAncestors.has(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  leftAncestors.add(left);
+  rightAncestors.add(right);
+  try {
+    for (const key of leftKeys) {
+      if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+      if (!jsonLikeConfigEqual(left[key], right[key], leftAncestors, rightAncestors)) return false;
+    }
+    return true;
+  } finally {
+    leftAncestors.delete(left);
+    rightAncestors.delete(right);
+  }
+}
+
+/**
+ * Structural equality for host-delivered config objects. The historical export
+ * name is retained for callers; comparison now follows nested JSON-like data.
+ */
+export function shallowConfigEqual(a: object, b: object): boolean {
+  return jsonLikeConfigEqual(a, b, new WeakSet<object>(), new WeakSet<object>());
 }
 
 /**
@@ -71,7 +88,7 @@ export function shallowConfigEqual(a: Record<string, unknown>, b: Record<string,
  * otherwise adopt `candidate`. Pure and stateless; the caller owns the cached
  * reference (e.g. a module-level `let`).
  */
-export function pickStable<T extends Record<string, unknown>>(stable: T | null, candidate: T): T {
+export function pickStable<T extends object>(stable: T | null, candidate: T): T {
   if (stable && shallowConfigEqual(stable, candidate)) {
     return stable;
   }

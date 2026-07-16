@@ -105,8 +105,8 @@ export interface HostSyncState {
  * Fill gaps in host-delivered state with safe defaults and log violations.
  * Prevents render crashes when the host omits newly-added nested fields.
  *
- * `prefs` / `pruningSettings` / `pruningCatalog` are reference-stabilised (flat
- * objects, via `pickStable`), and `availableModels` is stabilised via the
+ * `prefs` / `pruningSettings` / `pruningCatalog` are reference-stabilised (small
+ * JSON-like objects, via `pickStable`), and `availableModels` is stabilised via the
  * dedicated `pickStableModelList` (its nested `ModelInfo` elements defeat
  * `shallowConfigEqual`). The host re-serialises the whole `ViewState` on every
  * snapshot (fresh refs even when content is unchanged), which would otherwise
@@ -153,12 +153,11 @@ function useHydrateViewState() {
       ...raw.pruningCatalog,
     });
     stablePruningCatalogRef.current = pruningCatalog;
-    // `availableModels` is an array of nested `ModelInfo` objects, which
-    // `shallowConfigEqual`/`pickStable` cannot stabilise (nested clones → fresh
-    // refs → always reported unequal). Run it through the dedicated stabilizer
-    // so downstream `useMemo` deps and `memo()` barriers keyed on the
-    // `availableModels` ref (model-state, pricing-by-model-id, Composer) hold
-    // across snapshots whose model list didn't actually change.
+    // `availableModels` can be much larger than the small config objects above
+    // and benefits from its purpose-built model signatures. Run it through the
+    // dedicated stabilizer so downstream `useMemo` deps and `memo()` barriers
+    // keyed on the `availableModels` ref (model-state, pricing-by-model-id,
+    // Composer) hold across snapshots whose model list did not actually change.
     const availableModels = pickStableModelList(stableAvailableModelsRef.current, raw.availableModels);
     stableAvailableModelsRef.current = availableModels;
     return {
