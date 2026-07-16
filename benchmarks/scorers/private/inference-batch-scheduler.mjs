@@ -19,7 +19,7 @@ if (mode === "--case") {
     emitScore({ valid: false, metrics: { error: String(error) } });
   }
 } else {
-  const isolated = runIsolatedCases(import.meta.url, workspace, taskDir, [103, 211, 389, 557, 701]);
+  const isolated = await runIsolatedCases(import.meta.url, workspace, taskDir, [103, 211, 389, 557, 701]);
   const runtimeMs = isolated.runs.reduce((sum, run) => sum + run.runtimeMs, 0);
   const valid = isolated.valid && runtimeMs < 1000;
   const average = key => isolated.runs.reduce((sum, run) => sum + (run.metrics?.[key] || 0), 0) / isolated.runs.length;

@@ -50,6 +50,7 @@ test("a trailing provider error cannot censor completed checked work", () => {
 test("measurement-integrity failures remain diagnostic-only", () => {
   for (const input of [
     { processClassification: "malformed_event" },
+    { processClassification: "cleanup_failure" },
     { processClassification: "target_failure", assistantError: { stopReason: "error" } },
     { processClassification: "target_failure", assistantError: { stopReason: "error" }, targetPolicyViolations: [{ type: "unrelated_changes" }] },
     { providerPolicyViolation: true },

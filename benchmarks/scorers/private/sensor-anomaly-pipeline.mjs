@@ -22,7 +22,7 @@ if (mode === "--case") {
   }
 } else {
   const cases = [[101, 307, -0.2], [211, 419, 0.15], [337, 601, 0.4], [449, 733, -0.35]];
-  const isolated = runIsolatedCases(import.meta.url, workspace, taskDir, cases);
+  const isolated = await runIsolatedCases(import.meta.url, workspace, taskDir, cases);
   const runtimeMs = isolated.runs.reduce((sum, run) => sum + run.runtimeMs, 0);
   const valid = isolated.valid && runtimeMs < 1000;
   const average = key => isolated.runs.reduce((sum, run) => sum + (run.metrics?.[key] || 0), 0) / isolated.runs.length;

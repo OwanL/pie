@@ -1,6 +1,7 @@
 const INFRASTRUCTURE_TERMINAL_STATES = new Set([
   "malformed_event",
   "process_error",
+  "cleanup_failure",
   "provider_failure",
   "provider_policy_violation",
 ]);
@@ -37,7 +38,7 @@ export function classifyTrialOutcome({
   const infrastructureReasons = new Set();
   if (!startupSnapshot) infrastructureReasons.add("missing_startup_snapshot");
   if (providerPolicyViolation) infrastructureReasons.add("provider_policy_violation");
-  if (processClassification === "malformed_event" || processClassification === "process_error") infrastructureReasons.add(processClassification);
+  if (["malformed_event", "process_error", "cleanup_failure"].includes(processClassification)) infrastructureReasons.add(processClassification);
   if (effectiveProviderFailure) infrastructureReasons.add("provider_failure");
   if (INFRASTRUCTURE_TERMINAL_STATES.has(terminalState)) infrastructureReasons.add(terminalState);
   if (privateCheck?.artifactLimit) infrastructureReasons.add("scorer_artifact_limit");
