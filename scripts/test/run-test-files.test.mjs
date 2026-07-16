@@ -3,8 +3,10 @@
 // exercised separately by hand).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   inferRepoRoot,
   resolveLocalTsx,
@@ -16,12 +18,12 @@ import {
 } from '../run-test-files.mjs';
 
 const repoRoot = inferRepoRoot();
+const expectedRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const fwd = (p) => p.replace(/\\/g, '/');
 
 test('inferRepoRoot resolves to the pie repo root', () => {
-  assert.equal(fwd(inferRepoRoot()), fwd(repoRoot));
-  // sanity: the package.json we must not edit lives here
-  assert.equal(path.basename(repoRoot), 'pie');
+  assert.equal(fwd(inferRepoRoot()), fwd(expectedRepoRoot));
+  assert.ok(fs.existsSync(path.join(repoRoot, 'package.json')));
 });
 
 test('resolveLocalTsx finds the package-local tsx cli for each cwd', () => {

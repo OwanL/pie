@@ -23,6 +23,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mapFilesToPackages } from './lib/test-packages.mjs';
+import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
@@ -135,6 +136,7 @@ function runRunTests(runTestsScript, args, cwd, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [runTestsScript, ...args], withProcessTreeIsolation({
       cwd,
+      env: withoutGitRepositoryEnv(process.env),
       stdio: 'inherit',
       windowsHide: true,
     }));

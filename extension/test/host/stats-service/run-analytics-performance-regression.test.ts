@@ -291,18 +291,22 @@ test('Phase 3: start marks a stale auto-export dirty and refreshes it', async ()
     await fs.writeFile(autoExportPath, JSON.stringify({ staleMarker: true }), 'utf8');
     await fs.utimes(autoExportPath, oldTime, oldTime);
 
+    let signalTimerScheduled!: () => void;
+    const timerScheduled = new Promise<void>((resolve) => { signalTimerScheduled = resolve; });
     const storage = new RunAnalyticsStorage({
       dataOutcomesRootPath: root,
       workspaceId: 'stale-auto-export',
       now: () => new Date(),
       serializeSessions: () => ({}),
       autoExportIntervalMs: 20,
+      autoExportSetTimeout: (callback, ms) => {
+        signalTimerScheduled();
+        return setTimeout(callback, ms);
+      },
     });
 
     await storage.start();
-    await waitFor(() => Promise.resolve(
-      (storage as unknown as { autoExportTimer: ReturnType<typeof setTimeout> | null }).autoExportTimer !== null,
-    ));
+    await timerScheduled;
 
     assert.ok(
       (storage as unknown as { autoExportTimer: ReturnType<typeof setTimeout> | null }).autoExportTimer !== null,
@@ -365,33 +369,49 @@ test('Phase 3: start auto-export failures are retried and do not block startup',
 
 test('automatic export refreshes within its configured bounded interval', async () => {
   await withTempDir(async (root) => {
+    const autoExportIntervalMs = 20;
+    const scheduledTimers: Array<{ callback: () => void; delayMs: number }> = [];
+    let signalTimerScheduled!: () => void;
+    let timerScheduled = new Promise<void>((resolve) => { signalTimerScheduled = resolve; });
+    const takeScheduledTimer = async (): Promise<{ callback: () => void; delayMs: number }> => {
+      if (scheduledTimers.length === 0) await timerScheduled;
+      const timer = scheduledTimers.shift();
+      assert.ok(timer, 'auto-export schedules a timer');
+      timerScheduled = new Promise<void>((resolve) => { signalTimerScheduled = resolve; });
+      return timer;
+    };
     const storage = new RunAnalyticsStorage({
       dataOutcomesRootPath: root,
       workspaceId: 'bounded-auto-export',
       now: () => new Date(),
       serializeSessions: () => ({}),
-      autoExportIntervalMs: 20,
+      autoExportIntervalMs,
+      autoExportSetTimeout: (callback, delayMs) => {
+        scheduledTimers.push({ callback, delayMs });
+        signalTimerScheduled();
+        return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+      },
     });
     await storage.start();
     const autoExportPath = path.join(storage.getStorageDir(), 'run-analytics.json');
-    // Phase 3: wait for the scheduled startup export before using it as a baseline.
-    await waitFor(async () => {
-      try {
-        await fs.stat(autoExportPath);
-        return true;
-      } catch {
-        return false;
-      }
-    }, 500);
+    const startupTimer = await takeScheduledTimer();
+    assert.ok(startupTimer.delayMs > 0 && startupTimer.delayMs <= autoExportIntervalMs,
+      'startup refresh honors the configured positive interval bound');
+    startupTimer.callback();
+    await (storage as unknown as { persistenceQueue: Promise<void> }).persistenceQueue;
 
     const recordedAt = new Date().toISOString();
     storage.schedulePersist(undefined, outcome('bounded', recordedAt));
     await storage.flush();
 
-    await waitFor(async () => {
-      const payload = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { outcomes: OutcomeHistoryLogEntry[] };
-      return payload.outcomes.some((entry) => entry.runId === 'bounded');
-    }, 2000);
+    const postFlushTimer = await takeScheduledTimer();
+    assert.ok(postFlushTimer.delayMs > 0 && postFlushTimer.delayMs <= autoExportIntervalMs,
+      'post-flush refresh honors the configured positive interval bound');
+    postFlushTimer.callback();
+    await (storage as unknown as { persistenceQueue: Promise<void> }).persistenceQueue;
+
+    const payload = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { outcomes: OutcomeHistoryLogEntry[] };
+    assert.ok(payload.outcomes.some((entry) => entry.runId === 'bounded'));
     await storage.dispose();
   });
 });

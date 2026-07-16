@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   inferRepoRoot,
   getChangedFiles,
@@ -15,11 +16,12 @@ import {
 } from '../run-changed-tests.mjs';
 
 const repoRoot = inferRepoRoot();
+const expectedRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const fwd = (p) => p.replace(/\\/g, '/');
 
 test('inferRepoRoot resolves to the pie repo root', () => {
-  assert.equal(fwd(inferRepoRoot()), fwd(repoRoot));
-  assert.equal(path.basename(repoRoot), 'pie');
+  assert.equal(fwd(inferRepoRoot()), fwd(expectedRepoRoot));
+  assert.ok(fs.existsSync(path.join(repoRoot, 'package.json')));
 });
 
 test('getChangedFiles returns repo-relative forward-slash paths from git', async () => {

@@ -147,11 +147,12 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
     stdio: 'ignore',
     windowsHide: true,
   }));
-  // Subscribe immediately: under full-suite load the 500 ms watchdog can fire
-  // before the pid-file polling below completes, and EventEmitter does not
-  // replay an already-emitted close event to a late listener.
+  // Subscribe immediately because EventEmitter does not replay an already-
+  // emitted close event to a late listener. Arm the watchdog only after the
+  // fixture has published its grandchild pid; otherwise a loaded Windows run
+  // can kill fixture setup before the behavior under test is observable.
   const rootClosed = new Promise((resolve) => root.once('close', resolve));
-  const watchdog = watchChildProcess(root, { timeoutMs: 500, label: 'integration tree' });
+  let watchdog;
 
   try {
     let grandchildPid;
@@ -165,6 +166,7 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.ok(grandchildPid > 0, 'root process must publish its grandchild pid');
+    watchdog = watchChildProcess(root, { timeoutMs: 500, label: 'integration tree' });
 
     let closeTimer;
     try {
@@ -191,7 +193,7 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
     }
     assert.equal(alive, false, `grandchild ${grandchildPid} survived taskkill /T`);
   } finally {
-    watchdog.cleanup();
+    watchdog?.cleanup();
     killProcessTree(root);
     await rm(tempDir, { recursive: true, force: true });
   }

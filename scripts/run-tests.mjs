@@ -10,6 +10,7 @@ import {
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
+import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
@@ -427,7 +428,7 @@ function runChildProcess(command, args, cwd, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: { ...process.env, FORCE_COLOR: '0' },
+      env: { ...withoutGitRepositoryEnv(process.env), FORCE_COLOR: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }));
