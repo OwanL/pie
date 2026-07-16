@@ -1,18 +1,6 @@
 {
-  // Typecheck gate for the skill-pruner extension. Siblings subagent/ask-user
-  // already had a tsconfig; skill-pruner did not, so CI (`tsx --test` only,
-  // no tsc) never caught type errors here — e.g. the llm-scorer.ts filter
-  // narrowing and stale PruningDecision test fixtures (both fixed).
-  //
-  // `module: preserve` + `moduleResolution: bundler` allow `import.meta` and
-  // `.js`-extension imports without a package.json "type": "module".
-  //
-  // The `@earendil-works/pi-*` peer packages are provided by the pi runtime
-  // (globally installed) and are NOT in this repo's node_modules, so tsc
-  // cannot resolve them. They are declared as opaque ambient modules in
-  // `types-global.d.ts` (imports resolve to `any`) so this gate covers
-  // skill-pruner's INTERNAL types — its real purpose — without flagging drift
-  // against the evolving pi API surface (tracked separately in TODO.md).
+  // Bundler resolution supports import.meta and .js imports without changing
+  // package type. Runtime-provided peers are stubbed in types-global.d.ts.
   "compilerOptions": {
     "target": "ES2022",
     "module": "preserve",
