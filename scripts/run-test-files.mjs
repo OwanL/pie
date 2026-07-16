@@ -244,16 +244,16 @@ function runGroup(group, args, signal) {
       label: `${group.id} focused tests`,
       onTerminate: ({ reason }) => {
         const detail = reason === 'timeout' ? ` after ${timeoutMs}ms` : '';
-        console.error(`\n✖ ${group.id} test process ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; killed process tree.`);
+        console.error(`\n✖ ${group.id} test process ${reason === 'timeout' ? 'timed out' : `was aborted (${signal?.reason?.message ?? 'signal'})`}${detail}; killed process tree.`);
       },
     });
-    child.on('error', (error) => {
-      watchdog.cleanup();
+    child.on('error', async (error) => {
+      await watchdog.settle().catch(() => {});
       reject(error);
     });
-    child.on('close', (code) => {
-      watchdog.cleanup();
-      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
+    child.on('close', async (code) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
     });
   });
 }

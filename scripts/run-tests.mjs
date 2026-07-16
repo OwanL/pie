@@ -540,14 +540,15 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}) {
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.on('error', (error) => {
-      watchdog.cleanup();
+    child.on('error', async (error) => {
+      await watchdog.settle().catch(() => {});
       reject(error);
     });
-    child.on('close', (exitCode, closeSignal) => {
-      watchdog.cleanup();
+    child.on('close', async (exitCode, closeSignal) => {
+      const cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
+      if (!cleanup.gone) stderr += `\nProcess-tree cleanup failed; surviving owned PIDs: ${cleanup.survivors.join(', ')}.\n`;
       resolve({
-        exitCode: watchdog.timedOut || watchdog.aborted ? 1 : (exitCode ?? 0),
+        exitCode: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (exitCode ?? 0),
         signal: closeSignal,
         stdout,
         stderr,

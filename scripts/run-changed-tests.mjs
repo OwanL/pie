@@ -150,13 +150,13 @@ function runRunTests(runTestsScript, args, cwd, signal) {
         console.error(`\nChanged-test runner ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; killed process tree.`);
       },
     });
-    child.on('error', (error) => {
-      watchdog.cleanup();
+    child.on('error', async (error) => {
+      await watchdog.settle().catch(() => {});
       reject(error);
     });
-    child.on('close', (code) => {
-      watchdog.cleanup();
-      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
+    child.on('close', async (code) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
     });
   });
 }

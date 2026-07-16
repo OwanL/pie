@@ -93,15 +93,15 @@ function runProject(project, signal) {
     });
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', (error) => {
-      watchdog.cleanup();
+    child.on('error', async (error) => {
+      await watchdog.settle().catch(() => {});
       resolve({ project, code: 1, output: String(error), durationMs: performance.now() - started });
     });
-    child.on('close', (code) => {
-      watchdog.cleanup();
+    child.on('close', async (code) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
       resolve({
         project,
-        code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1),
+        code: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 1),
         output,
         durationMs: performance.now() - started,
       });
