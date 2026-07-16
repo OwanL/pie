@@ -5,19 +5,19 @@ import { isPruningResultMessage, pruningDetailsFromMessage, type PruningHeaderSt
 
 export type TranscriptRow =
   | { kind: 'systemPrompts'; key: string }
-  | { kind: 'topGap'; key: string }
+  | { kind: 'topGap'; key: string; hiddenCount?: number }
   | { kind: 'message'; key: string; message: ChatMessage; requestCreatedAt?: string; pruningHeaderState?: PruningHeaderState; activityState?: TurnActivityState | null; transcriptIndex?: number }
   | { kind: 'typingIndicator'; key: string; activityState?: TurnActivityState | null }
-  | { kind: 'bottomGap'; key: string };
+  | { kind: 'bottomGap'; key: string; hiddenCount?: number };
 
 interface BuildTranscriptRowsOptions {
   transcript: readonly ChatMessage[];
   systemPromptCount: number;
   hasOlder: boolean;
   hasNewer: boolean;
+  olderCount?: number;
+  newerCount?: number;
   busy: boolean;
-  /** Deprecated: retained for older call sites; pruning now renders per assistant turn. */
-  hasPruningResult?: boolean;
   /** Controls whether pruning-result custom messages are attached to assistant headers. */
   showPruningMessages?: boolean;
   /** Structured in-flight activity state for the current busy phase. */
@@ -228,6 +228,8 @@ export function buildTranscriptRows({
   systemPromptCount,
   hasOlder,
   hasNewer,
+  olderCount,
+  newerCount,
   busy,
   showPruningMessages = true,
   activityState = null,
@@ -239,7 +241,11 @@ export function buildTranscriptRows({
     rows.push({ kind: 'systemPrompts', key: 'system-prompts' });
   }
   if (hasOlder) {
-    rows.push({ kind: 'topGap', key: 'gap:older' });
+    rows.push({
+      kind: 'topGap',
+      key: 'gap:older',
+      ...(olderCount !== undefined ? { hiddenCount: olderCount } : {}),
+    });
   }
 
   const acc = processTranscriptMessages(transcript, showPruningMessages);
@@ -261,7 +267,11 @@ export function buildTranscriptRows({
   }
 
   if (hasNewer) {
-    rows.push({ kind: 'bottomGap', key: 'gap:newer' });
+    rows.push({
+      kind: 'bottomGap',
+      key: 'gap:newer',
+      ...(newerCount !== undefined ? { hiddenCount: newerCount } : {}),
+    });
   }
   return rows;
 }

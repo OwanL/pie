@@ -16,11 +16,11 @@ export interface TranscriptWindowBudgets {
  * and webview paging behavior.
  */
 export const TRANSCRIPT_WINDOW_BUDGETS: TranscriptWindowBudgets = {
-  // Keep initial open/preload payloads lean. Older history remains one click or
-  // automatic page request away, while 60 rows comfortably covers the recent
-  // conversation and cuts cold-tab mapping/serialization/render work by 40%.
+  // Keep initial open/preload payloads lean while making deep history quick to
+  // traverse. A 120-row page reaches the longest observed session in at most
+  // 18 actions without raising the 240-row in-memory cap.
   tailCount: 60,
-  pageSize: 40,
+  pageSize: 120,
   maxLoadedCount: 240,
   inactiveTailCount: 40,
   inactiveTtlMs: 2 * 60 * 1000,

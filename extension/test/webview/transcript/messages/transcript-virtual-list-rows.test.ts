@@ -53,7 +53,6 @@ test('buildTranscriptRows keeps system prompts, paging gaps, and messages in dis
     hasOlder: true,
     hasNewer: true,
     busy: false,
-    hasPruningResult: false,
   });
 
   assert.deepEqual(
@@ -63,6 +62,21 @@ test('buildTranscriptRows keeps system prompts, paging gaps, and messages in dis
   assert.equal(rows[2]?.kind, 'message');
   assert.equal(rows[2]?.kind === 'message' ? rows[2].message.id : null, 'user-1');
   assert.equal(rows[3]?.kind === 'message' ? rows[3].message.id : null, 'assistant-1');
+});
+
+test('buildTranscriptRows exposes exact unloaded counts on paging gaps', () => {
+  const rows = buildTranscriptRows({
+    transcript: [makeMessage('assistant-1', 'assistant')],
+    systemPromptCount: 0,
+    hasOlder: true,
+    hasNewer: true,
+    olderCount: 1_942,
+    newerCount: 75,
+    busy: false,
+  });
+
+  assert.deepEqual(rows[0], { kind: 'topGap', key: 'gap:older', hiddenCount: 1_942 });
+  assert.deepEqual(rows.at(-1), { kind: 'bottomGap', key: 'gap:newer', hiddenCount: 75 });
 });
 
 test('buildTranscriptRows associates each assistant header with its owning user request time', () => {
@@ -95,7 +109,6 @@ test('buildTranscriptRows omits optional system and gap rows when not needed', (
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: false,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message']);
@@ -109,7 +122,6 @@ test('buildTranscriptRows does not create a systemPrompts row for pruning alone'
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message']);
@@ -126,7 +138,6 @@ test('buildTranscriptRows attaches pruning-result details to the following assis
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -159,7 +170,6 @@ test('buildTranscriptRows hides pruning-result messages when pruning summaries a
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: false,
     showPruningMessages: false,
   });
 
@@ -186,7 +196,6 @@ test('buildTranscriptRows falls back to a raw pruning system message when detail
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -214,7 +223,6 @@ test('buildTranscriptRows keeps a stable assistant placeholder shell when prunin
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: true,
     activityState,
     pendingAssistantModelId: 'gpt-5.4',
     pendingAssistantThinkingLevel: 'xhigh',
@@ -256,7 +264,6 @@ test('buildTranscriptRows preserves pruning result when the run ends before an a
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -277,7 +284,6 @@ test('buildTranscriptRows folds late pruning-result into the existing streaming 
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -302,7 +308,6 @@ test('buildTranscriptRows folds late pruning-result into a completed assistant r
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: true,
   });
 
   assert.deepEqual(rows.map((row) => row.kind), ['message', 'message']);
@@ -332,7 +337,6 @@ test('buildTranscriptRows shows a pending pruning header in a stable assistant p
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
     pendingAssistantModelId: 'gpt-5.4',
     pendingAssistantThinkingLevel: 'xhigh',
@@ -369,7 +373,6 @@ test('buildTranscriptRows suppresses standalone typingIndicator when busy and la
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
   });
 
@@ -397,7 +400,6 @@ test('buildTranscriptRows suppresses standalone typingIndicator when assistant i
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
   });
 
@@ -466,7 +468,6 @@ test('buildTranscriptRows shows standalone typingIndicator when busy with empty 
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
   });
 

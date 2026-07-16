@@ -190,9 +190,11 @@ export function TranscriptHost({
     systemPromptCount: systemPrompts.length,
     hasOlder: transcriptWindow.hasOlder,
     hasNewer: transcriptWindow.hasNewer,
+    olderCount: transcriptWindow.loadedStart,
+    newerCount: Math.max(0, transcriptWindow.totalCount - transcriptWindow.loadedEnd),
     busy,
     showPruningMessages: prefs.showPruningMessages,
-  }), [transcript, systemPrompts.length, transcriptWindow.hasOlder, transcriptWindow.hasNewer, busy, prefs.showPruningMessages]);
+  }), [transcript, systemPrompts.length, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages]);
   const rowIndexByMessageId = useMemo(() => {
     const result = new Map<string, number>();
     for (let index = 0; index < commitRows.length && index < 256; index += 1) {

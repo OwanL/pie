@@ -39,7 +39,6 @@ function useTranscriptRows({
   transcriptWindow,
   busy,
   liveTurnPhase,
-  pruningResult,
   prefs,
   pruningSettings,
   pendingAssistantModelId,
@@ -50,7 +49,6 @@ function useTranscriptRows({
   transcriptWindow: TranscriptWindow;
   busy: boolean;
   liveTurnPhase?: TranscriptVirtualListProps['liveTurnPhase'];
-  pruningResult: PruningResult | null;
   prefs: ChatPrefs;
   pruningSettings: PruningSettings;
   pendingAssistantModelId?: string;
@@ -71,13 +69,14 @@ function useTranscriptRows({
     systemPromptCount: systemPrompts.length,
     hasOlder: transcriptWindow.hasOlder,
     hasNewer: transcriptWindow.hasNewer,
+    olderCount: transcriptWindow.loadedStart,
+    newerCount: Math.max(0, transcriptWindow.totalCount - transcriptWindow.loadedEnd),
     busy,
-    hasPruningResult: pruningResult !== null,
     showPruningMessages: prefs.showPruningMessages,
     activityState,
     pendingAssistantModelId,
     pendingAssistantThinkingLevel,
-  }), [systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, busy, pruningResult, prefs.showPruningMessages, activityState, pendingAssistantModelId, pendingAssistantThinkingLevel]);
+  }), [systemPrompts.length, transcript, transcriptWindow.hasOlder, transcriptWindow.hasNewer, transcriptWindow.loadedStart, transcriptWindow.loadedEnd, transcriptWindow.totalCount, busy, prefs.showPruningMessages, activityState, pendingAssistantModelId, pendingAssistantThinkingLevel]);
 
   return rows;
 }
@@ -313,7 +312,6 @@ export function TranscriptVirtualList({
     transcriptWindow,
     busy,
     liveTurnPhase,
-    pruningResult,
     prefs,
     pruningSettings,
     pendingAssistantModelId,

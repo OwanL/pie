@@ -67,6 +67,39 @@ test('buildPagedTranscriptWindow newer paging advances once max window budget is
   assert.deepEqual({ start: newerPage.loadedStart, end: newerPage.loadedEnd }, { start: 220, end: 460 });
 });
 
+test('default transcript budgets keep the longest observed session fully reachable in at most 18 page actions', () => {
+  const cache = buildCache(2_182);
+  let window = buildTailTranscriptWindow(cache).transcriptWindow;
+  let olderActions = 0;
+
+  while (window.hasOlder) {
+    window = buildPagedTranscriptWindow(cache, {
+      direction: 'older',
+      loadedStart: window.loadedStart,
+      loadedEnd: window.loadedEnd,
+    }).transcriptWindow;
+    olderActions += 1;
+    assert.ok(window.loadedEnd - window.loadedStart <= 240);
+    assert.ok(olderActions <= 18, 'older history should not require more than 18 page actions');
+  }
+
+  assert.equal(window.loadedStart, 0);
+
+  let newerActions = 0;
+  while (window.hasNewer) {
+    window = buildPagedTranscriptWindow(cache, {
+      direction: 'newer',
+      loadedStart: window.loadedStart,
+      loadedEnd: window.loadedEnd,
+    }).transcriptWindow;
+    newerActions += 1;
+    assert.ok(window.loadedEnd - window.loadedStart <= 240);
+    assert.ok(newerActions <= 18, 'latest history should not require more than 18 page actions');
+  }
+
+  assert.equal(window.loadedEnd, 2_182);
+});
+
 test('buildDisplayTranscriptCache records transcript fingerprints and stale detection', () => {
   const entries = [
     {

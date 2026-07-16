@@ -21,7 +21,7 @@ import renderToString from 'preact-render-to-string';
 import { useBufferedText } from '../../../src/webview/panel/transcript/use-buffered-text';
 
 import { buildTranscriptRows, estimateTranscriptRowSize } from '../../../src/webview/panel/transcript/virtual-list-rows';
-import { AGENT_ACTIVITY_LABELS, derivePendingActivityLabel, deriveTurnActivityState } from '../../../src/webview/panel/transcript/activity';
+import { AGENT_ACTIVITY_LABELS, deriveTurnActivityState } from '../../../src/webview/panel/transcript/activity';
 import { isPanelBooting, resolvePanelSurface } from '../../../src/webview/panel/panel-state';
 import { derivePruningResult } from '../../../src/host/core/projection';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, type ChatMessage } from '../../../src/shared/protocol';
@@ -81,7 +81,6 @@ test('buildTranscriptRows adds an assistant placeholder row when busy after a us
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
   });
 
@@ -108,7 +107,6 @@ test('buildTranscriptRows omits typingIndicator when last message is already str
     hasOlder: false,
     hasNewer: false,
     busy: true,
-    hasPruningResult: false,
     activityState,
   });
 
@@ -124,7 +122,6 @@ test('buildTranscriptRows omits typingIndicator when not busy', () => {
     hasOlder: false,
     hasNewer: false,
     busy: false,
-    hasPruningResult: false,
   });
 
   const kinds = rows.map((r) => r.kind);
@@ -138,7 +135,6 @@ test('buildTranscriptRows keeps the assistant placeholder before bottomGap', () 
     hasOlder: false,
     hasNewer: true,
     busy: true,
-    hasPruningResult: false,
   });
 
   const kinds = rows.map((r) => r.kind);
@@ -150,95 +146,6 @@ test('estimateTranscriptRowSize returns stable size for typingIndicator', () => 
   assert.equal(
     estimateTranscriptRowSize({ kind: 'typingIndicator', key: 'typing-indicator' }),
     40,
-  );
-});
-
-test('derivePendingActivityLabel names pruning prepass after a user prompt', () => {
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [makeMessage('user-1', 'user')],
-      prefs: DEFAULT_CHAT_PREFS,
-      pruningSettings: DEFAULT_PRUNING_SETTINGS,
-    }),
-    AGENT_ACTIVITY_LABELS.pruning,
-  );
-});
-
-test('derivePendingActivityLabel falls back when skill-pruner is disabled', () => {
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [makeMessage('user-1', 'user')],
-      prefs: { ...DEFAULT_CHAT_PREFS, extensionToggles: { 'skill-pruner': false } },
-      pruningSettings: DEFAULT_PRUNING_SETTINGS,
-    }),
-    AGENT_ACTIVITY_LABELS.preparing,
-  );
-
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [makeMessage('user-1', 'user')],
-      prefs: DEFAULT_CHAT_PREFS,
-      pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, mode: 'off' },
-    }),
-    AGENT_ACTIVITY_LABELS.preparing,
-  );
-});
-
-test('derivePendingActivityLabel advances after pruning and assistant phases', () => {
-  const pruningMessage = {
-    id: 'prune-1',
-    role: 'system',
-    createdAt: '2026-05-16T00:00:01.000Z',
-    markdown: 'Pruned',
-    status: 'completed',
-    customType: 'pruning-result',
-    customDetails: {
-      includedSkills: ['debugging'],
-      excludedSkills: [],
-      includedTools: ['read'],
-      excludedTools: [],
-      mode: 'auto',
-      skillTokensSaved: 0,
-      toolTokensSaved: 0,
-    },
-  } as unknown as ChatMessage;
-
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [makeMessage('user-1', 'user'), pruningMessage],
-      prefs: DEFAULT_CHAT_PREFS,
-      pruningSettings: DEFAULT_PRUNING_SETTINGS,
-    }),
-    AGENT_ACTIVITY_LABELS.startingModel,
-  );
-
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [
-        makeMessage('user-1', 'user'),
-        makeMessage('assistant-1', 'assistant', {
-          toolCalls: [{ id: 'tool-1', name: 'read', input: {}, status: 'running' }],
-        }),
-      ],
-      prefs: DEFAULT_CHAT_PREFS,
-      pruningSettings: DEFAULT_PRUNING_SETTINGS,
-    }),
-    'running read',
-  );
-
-  assert.equal(
-    derivePendingActivityLabel({
-      busy: true,
-      transcript: [makeMessage('user-1', 'user'), makeMessage('assistant-1', 'assistant')],
-      prefs: DEFAULT_CHAT_PREFS,
-      pruningSettings: DEFAULT_PRUNING_SETTINGS,
-    }),
-    AGENT_ACTIVITY_LABELS.thinking,
   );
 });
 

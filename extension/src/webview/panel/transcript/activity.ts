@@ -21,8 +21,6 @@ export const AGENT_ACTIVITY_LABELS = {
   thinking: 'thinking',
 } as const;
 
-export type AgentActivityLabel = typeof AGENT_ACTIVITY_LABELS[keyof typeof AGENT_ACTIVITY_LABELS];
-
 /**
  * Structured in-flight activity state for the current turn.
  * Represents active processing phases only (while busy=true).
@@ -291,19 +289,4 @@ export function deriveTurnActivityState({
     ariaLabel: 'Agent is preparing response',
     pendingModelLabel: formatModelLabel(pendingAssistantModelId, pendingAssistantThinkingLevel),
   };
-}
-
-/**
- * Legacy compatibility wrapper for deriveTurnActivityState.
- * Returns the label string for existing call sites that expect a simple string.
- * @deprecated Use deriveTurnActivityState for structured activity state.
- */
-export function derivePendingActivityLabel({
-  busy,
-  transcript,
-  prefs,
-  pruningSettings,
-}: Omit<PendingActivityOptions, 'pendingAssistantModelId' | 'pendingAssistantThinkingLevel'>): AgentActivityLabel | null {
-  const state = deriveTurnActivityState({ busy, transcript, prefs, pruningSettings });
-  return state?.label as AgentActivityLabel | null;
 }
