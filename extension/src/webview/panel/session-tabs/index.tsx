@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
 
 import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionSummary } from '../../../shared/protocol';
 import { DropGap } from './drop-gap';
@@ -46,7 +47,65 @@ function hasPendingRequest(
   return !!sessionMap && Object.keys(sessionMap).length > 0;
 }
 
-export function SessionTabs({
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function openSessionNamesEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
+  const previousNames = new Map(previous.sessions.map((session) => [session.path, session.name]));
+  const nextNames = new Map(next.sessions.map((session) => [session.path, session.name]));
+  return previous.openTabPaths.every((path) => previousNames.get(path) === nextNames.get(path));
+}
+
+function pendingRequestsEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
+  return previous.openTabPaths.every((path) => (
+    hasPendingRequest(previous.pendingExtensionUIRequestsBySession, path)
+    === hasPendingRequest(next.pendingExtensionUIRequestsBySession, path)
+  ));
+}
+
+function runSummariesEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
+  return previous.openTabPaths.every((path) => {
+    const left = previous.runSummariesBySession[path];
+    const right = next.runSummariesBySession[path];
+    return left === right || (
+      left?.runId === right?.runId
+      && left?.status === right?.status
+      && left?.scored === right?.scored
+      && left?.nextSendStartsNewTask === right?.nextSendStartsNewTask
+    );
+  });
+}
+
+function areSessionTabsPropsEqual(
+  previous: Readonly<SessionTabsProps>,
+  next: Readonly<SessionTabsProps>,
+): boolean {
+  return previous === next || (
+    previous.activeSession?.path === next.activeSession?.path
+    && previous.backendReady === next.backendReady
+    && previous.hideConnectingWheel === next.hideConnectingWheel
+    && previous.onSelect === next.onSelect
+    && previous.onClose === next.onClose
+    && previous.onMove === next.onMove
+    && previous.onNew === next.onNew
+    && previous.onDuplicate === next.onDuplicate
+    && previous.onTogglePin === next.onTogglePin
+    && previous.onRunAction === next.onRunAction
+    && stringArraysEqual(previous.openTabPaths, next.openTabPaths)
+    && stringArraysEqual(previous.pinnedTabPaths, next.pinnedTabPaths)
+    && stringArraysEqual(previous.runningSessionPaths, next.runningSessionPaths)
+    && stringArraysEqual(previous.startingModelSessionPaths, next.startingModelSessionPaths)
+    && stringArraysEqual(previous.unreadFinishedSessionPaths, next.unreadFinishedSessionPaths)
+    && stringArraysEqual(previous.deferredSessionPaths, next.deferredSessionPaths)
+    && stringArraysEqual(previous.deferredTimerSessionPaths, next.deferredTimerSessionPaths)
+    && openSessionNamesEqual(previous, next)
+    && pendingRequestsEqual(previous, next)
+    && runSummariesEqual(previous, next)
+  );
+}
+
+function SessionTabsView({
   sessions,
   openTabPaths,
   pinnedTabPaths,
@@ -373,5 +432,7 @@ export function SessionTabs({
     </div>
   );
 }
+
+export const SessionTabs = memo(SessionTabsView, areSessionTabsPropsEqual);
 
 export { SessionTab } from './session-tab';
