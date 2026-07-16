@@ -69,8 +69,12 @@ async function waitForReadyWorkers(pool: { getStats(): { ready: number } }, coun
 }
 
 const BASH = findTestBash();
+const RUN_INTEGRATION_TESTS = process.env.PIE_RUN_INTEGRATION_TESTS === '1';
 
-describe('warm-bash pool (real bash round-trip)', { concurrency: false }, () => {
+describe('warm-bash pool (real bash round-trip)', {
+  concurrency: false,
+  skip: RUN_INTEGRATION_TESTS ? false : 'set PIE_RUN_INTEGRATION_TESTS=1 to run real-shell integration tests',
+}, () => {
   // Loaded dynamically (tsx) — typed loosely; the assertions guard behaviour.
   let Pool: any;
   let createOps: any;

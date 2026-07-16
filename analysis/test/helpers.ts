@@ -14,8 +14,13 @@ export async function withTempDir(run: (dir: string) => Promise<void>): Promise<
   }
 }
 
+// Parsing and coercing the analytics fixture is CPU-heavy. Cache the immutable
+// baseline per test worker and clone it so callers remain isolated.
+let fixturePromise: Promise<SourceAnalyticsPayload> | undefined;
+
 export async function loadFixture(): Promise<SourceAnalyticsPayload> {
-  return await readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
+  fixturePromise ??= readSourceAnalyticsPayload(DEFAULT_FIXTURE_PATH);
+  return structuredClone(await fixturePromise);
 }
 
 export function deepClone<TValue>(value: TValue): TValue {

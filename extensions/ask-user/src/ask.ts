@@ -3,7 +3,7 @@ import { CUSTOM_SENTINEL } from './types.js';
 
 export interface AskPort {
   ui: {
-    select(title: string, options: string[], opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string }): Promise<string | undefined>;
+    select(title: string, options: string[], opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string; allowCustom?: boolean }): Promise<string | undefined>;
     input(title: string, placeholder?: string, opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string }): Promise<string | undefined>;
   };
   signal?: AbortSignal;
@@ -24,7 +24,11 @@ export async function runAsk(input: AskUserInput, port: AskPort): Promise<AskRes
     selectOptions.push(CUSTOM_SENTINEL);
   }
 
-  const picked = await port.ui.select(input.question, selectOptions, { signal: port.signal, ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}) });
+  const picked = await port.ui.select(input.question, selectOptions, {
+    signal: port.signal,
+    allowCustom,
+    ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
+  });
   if (picked === undefined) {
     return cancelled();
   }

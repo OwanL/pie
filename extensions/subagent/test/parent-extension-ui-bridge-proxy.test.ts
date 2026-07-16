@@ -73,6 +73,12 @@ describe("ParentExtensionUIBridgeProxy", () => {
       assert.equal(opts.subagentCallId, CALL_ID);
       assert.equal(opts.toolCallId, CALL_ID);
     });
+
+    it("preserves ask_user custom-answer metadata", async () => {
+      await proxy.select("Title", ["x"], { allowCustom: true } as any);
+
+      assert.equal((mock.calls.select[0].args[2] as { allowCustom?: boolean }).allowCustom, true);
+    });
   });
 
   describe("confirm", () => {

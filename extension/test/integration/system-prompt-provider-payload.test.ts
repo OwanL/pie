@@ -26,7 +26,12 @@ async function close(server: http.Server): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-test('real SDK raw picker state omits both system message and tool schemas', { timeout: 30_000 }, async () => {
+test('real SDK raw picker state omits both system message and tool schemas', {
+  timeout: 30_000,
+  skip: process.env.PIE_RUN_INTEGRATION_TESTS === '1'
+    ? false
+    : 'run npm run test:integration to exercise the real SDK/provider boundary',
+}, async () => {
   const requests: CapturedRequest[] = [];
   let resolveRequest!: () => void;
   const requestCaptured = new Promise<void>((resolve) => { resolveRequest = resolve; });

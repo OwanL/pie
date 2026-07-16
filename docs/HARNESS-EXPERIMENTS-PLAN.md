@@ -280,7 +280,7 @@ execution:
   randomizeOrder: true
   randomSeed: 417291
 budgets:
-  trialTimeoutMs: 900000
+  trialTimeoutMs: 3600000
 completedTrialIds: []
 ```
 
@@ -348,7 +348,7 @@ policy:
   subagents: deny
   allowedTools: [read, edit, write, bash, grep, find, ls]
 limits:
-  timeoutMs: 600000
+  timeoutMs: 3600000
 checks:
   public:
     - npm test

@@ -112,11 +112,12 @@ test('select: emits options and returns the chosen value', async () => {
   assert.equal(await pending, 'b');
 });
 
-test('select: forwards subagentCallId and toolCallId when provided', async () => {
+test('select: forwards ownership and custom-answer metadata when provided', async () => {
   const { bridge, captured } = makeBridge();
-  const pending = bridge.select('Pick one', ['a'], { subagentCallId: 'sub-1', toolCallId: 'tc-1' });
+  const pending = bridge.select('Pick one', ['a'], { subagentCallId: 'sub-1', toolCallId: 'tc-1', allowCustom: true });
   assert.equal(captured[0].payload.subagentCallId, 'sub-1');
   assert.equal(captured[0].payload.toolCallId, 'tc-1');
+  assert.equal(captured[0].payload.method === 'select' && captured[0].payload.allowCustom, true);
   resolveLast(bridge, captured, { value: 'a' });
   assert.equal(await pending, 'a');
 });

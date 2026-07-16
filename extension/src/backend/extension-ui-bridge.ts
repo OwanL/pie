@@ -12,6 +12,8 @@ interface DialogOptions {
   timeout?: number;
   subagentCallId?: string;
   toolCallId?: string;
+  /** Ask-style select prompts may accept a value outside the preset options. */
+  allowCustom?: boolean;
 }
 
 export interface ExtensionUIBridgeEmitter {
@@ -44,7 +46,7 @@ export class ExtensionUIBridge {
 
   async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
     const id = crypto.randomUUID();
-    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
+    const payload: ExtensionUIRequestPayload = { id, method: 'select', title, options, allowCustom: opts?.allowCustom, sessionPath: this.sessionPath, subagentCallId: opts?.subagentCallId, toolCallId: opts?.toolCallId, timeout: opts?.timeout };
     const response = await this.emitAndAwait(id, payload, opts);
     if (response.cancelled) return undefined;
     return response.value;

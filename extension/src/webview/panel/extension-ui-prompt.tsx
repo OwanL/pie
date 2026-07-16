@@ -54,6 +54,7 @@ export function ExtensionUIPrompt({ sessionPath, request, postMessage, variant =
           id={request.id}
           title={request.title}
           options={request.options}
+          allowCustom={request.allowCustom}
           timeout={request.timeout}
           extensionId={request.extensionId}
           rootClass={rootClass}
@@ -185,6 +186,7 @@ interface SelectPromptProps {
   id: string;
   title: string;
   options: string[];
+  allowCustom?: boolean;
   timeout?: number;
   extensionId?: string;
   rootClass: string;
@@ -193,7 +195,14 @@ interface SelectPromptProps {
   onRespond: (r: ExtensionUIResponsePayload) => void;
 }
 
-function SelectPrompt({ id, title, options, timeout, extensionId, rootClass, context, sourceLabel, onRespond }: SelectPromptProps) {
+function SelectPrompt({ id, title, options, allowCustom, timeout, extensionId, rootClass, context, sourceLabel, onRespond }: SelectPromptProps) {
+  // Keep the explicit metadata as the source of truth. The sentinel remains in
+  // the option list for compatibility with older ask_user versions, while this
+  // fallback prevents transport/filtering changes from silently removing the
+  // free-form answer control.
+  const displayedOptions = allowCustom && !options.includes(CUSTOM_SENTINEL)
+    ? [...options, CUSTOM_SENTINEL]
+    : options;
   const containerRef = useRef<HTMLDivElement>(null);
   const remaining = useCountdown(timeout);
   const [customValue, setCustomValue] = useState('');
@@ -240,12 +249,12 @@ function SelectPrompt({ id, title, options, timeout, extensionId, rootClass, con
   const handleOptionsKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
       e.preventDefault();
-      const next = (focusIndex + 1) % options.length;
+      const next = (focusIndex + 1) % displayedOptions.length;
       setFocusIndex(next);
       optionRefs.current[next]?.focus();
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
       e.preventDefault();
-      const prev = (focusIndex - 1 + options.length) % options.length;
+      const prev = (focusIndex - 1 + displayedOptions.length) % displayedOptions.length;
       setFocusIndex(prev);
       optionRefs.current[prev]?.focus();
     } else if (e.key === 'Home') {
@@ -254,12 +263,12 @@ function SelectPrompt({ id, title, options, timeout, extensionId, rootClass, con
       optionRefs.current[0]?.focus();
     } else if (e.key === 'End') {
       e.preventDefault();
-      const last = options.length - 1;
+      const last = displayedOptions.length - 1;
       setFocusIndex(last);
       optionRefs.current[last]?.focus();
     }
     // Enter/Space activate the focused button via its native click handler.
-  }, [focusIndex, options.length]);
+  }, [focusIndex, displayedOptions.length]);
 
   const handleCustomSubmit = useCallback(() => {
     if (customValue.trim()) {
@@ -291,7 +300,7 @@ function SelectPrompt({ id, title, options, timeout, extensionId, rootClass, con
       </div>
       <div class="ext-prompt-row">
         <div class="ext-prompt-options" onKeyDown={handleOptionsKeyDown} role="listbox" aria-label={title}>
-          {options.map((option, i) =>
+          {displayedOptions.map((option, i) =>
             option === CUSTOM_SENTINEL ? (
               <button
                 key={option}

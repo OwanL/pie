@@ -25,6 +25,7 @@ export type { PrepassRunResult, PrepassUsage, SkillPruningResult, ToolPruningRes
 export {
 	getRecentConversation,
 	getCompleteFn,
+	completeOllamaNative,
 	resolveModel,
 	resolveAuth,
 	prepassTimeoutMs,

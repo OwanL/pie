@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { CONTAINER_IMAGE, containerImageDigest, startContainerBroker } from "../lib/container-runtime.mjs";
+import { CONTAINER_IMAGE, containerImageDigest, cleanupLabeledDockerResources, startContainerBroker } from "../lib/container-runtime.mjs";
 
 const exec=promisify(execFile);
 async function fakeProvider(){const server=http.createServer(async(req,res)=>{for await(const _ of req){}res.writeHead(200,{"content-type":"application/json"});res.end(JSON.stringify({choices:[{message:{role:"assistant",content:"ok"},finish_reason:"stop"}],usage:{prompt_tokens:1,completion_tokens:1}}));});await new Promise(ok=>server.listen(0,"0.0.0.0",ok));return{url:`http://host.docker.internal:${server.address().port}/v1`,close:()=>new Promise(ok=>server.close(ok))};}
@@ -16,4 +16,21 @@ test("container target reaches only its broker network and receives no credentia
  try{broker=await startContainerBroker({experimentId,trialId,trialDir:dir,apiKey:"container-secret-canary",upstream:provider.url,timeoutMs:30000,onLog:()=>{}});const script=`const token=process.argv[1],hostUrl=process.argv[2]; const broker=await fetch('http://broker:8787/v1/chat/completions',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({model:'umans-glm-5.2',messages:[{role:'user',content:'x'}]})}); let internet=false,host=false; try{await fetch('https://example.com',{signal:AbortSignal.timeout(2500)});internet=true}catch{} try{await fetch(hostUrl,{signal:AbortSignal.timeout(2500)});host=true}catch{} console.log(JSON.stringify({broker:broker.status,internet,host,secrets:Object.keys(process.env).filter(k=>/KEY|SECRET|TOKEN|AUTH/.test(k)),secretFile:await import('node:fs').then(fs=>fs.existsSync('/run/secrets/umans'))}));`;
  const {stdout}=await exec("docker",["run","--rm","--name",broker.targetName,"--network",broker.network,"--cap-drop","ALL","--security-opt","no-new-privileges","--read-only","--tmpfs","/tmp:rw,noexec,nosuid,size=16m",CONTAINER_IMAGE,"-e",script,broker.token,provider.url],{timeout:15000});const result=JSON.parse(stdout.trim());assert.deepEqual(result,{broker:200,internet:false,host:false,secrets:[],secretFile:false});const network=JSON.parse((await exec("docker",["network","inspect",broker.network])).stdout)[0];assert.equal(network.Internal,true);
  }finally{await broker?.close();await provider.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test("cleanupLabeledDockerResources removes labeled containers and networks",{timeout:30000},async()=>{
+ const experimentId=`cleanup-test-${process.pid}`;
+ const network=`pie-net-cleanup-${process.pid}`;
+ const container=`pie-container-cleanup-${process.pid}`;
+ try{
+  await exec("docker",["network","create","--label","pie.benchmark=true","--label",`pie.experiment=${experimentId}`,network]);
+  await exec("docker",["run","-d","--rm","--name",container,"--network",network,"--label","pie.benchmark=true","--label",`pie.experiment=${experimentId}`,CONTAINER_IMAGE,"sleep","30"]);
+  await cleanupLabeledDockerResources(experimentId);
+  await assert.rejects(exec("docker",["inspect",container]),/not found|no such/i);
+  await assert.rejects(exec("docker",["network","inspect",network]),/not found|no such/i);
+ }catch(error){
+  try{await exec("docker",["rm","-f",container]);}catch{}
+  try{await exec("docker",["network","rm","-f",network]);}catch{}
+  throw error;
+ }
 });

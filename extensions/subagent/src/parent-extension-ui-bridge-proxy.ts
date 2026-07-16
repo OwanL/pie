@@ -16,14 +16,14 @@ import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@mariozechner
 /**
  * Dialog options that have already been stamped by an inner (nested) proxy.
  */
-type ForwardedDialogOptions = ExtensionUIDialogOptions & { subagentCallId?: string; toolCallId?: string };
+type ForwardedDialogOptions = ExtensionUIDialogOptions & { subagentCallId?: string; toolCallId?: string; allowCustom?: boolean };
 
 /**
  * Minimal interface for the parent bridge — we only need the dialog methods
  * that the ask_user extension (and safeguard) actually call.
  */
 export interface ParentBridge {
-  select(title: string, options: string[], opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<string | undefined>;
+  select(title: string, options: string[], opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string; allowCustom?: boolean }): Promise<string | undefined>;
   confirm(title: string, message: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<boolean>;
   input(title: string, placeholder?: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<string | undefined>;
   notify(message: string, type?: "info" | "warning" | "error", subagentCallId?: string): void;
@@ -54,11 +54,17 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
     signal?: AbortSignal;
     subagentCallId?: string;
     toolCallId?: string;
+    allowCustom?: boolean;
   } {
     const inner = opts as ForwardedDialogOptions | undefined;
     const subagentCallId = inner?.subagentCallId ?? this.subagentCallId;
     const toolCallId = inner?.toolCallId ?? this.subagentCallId;
-    return { signal: opts?.signal, subagentCallId, toolCallId };
+    return {
+      signal: opts?.signal,
+      subagentCallId,
+      toolCallId,
+      ...(inner?.allowCustom !== undefined ? { allowCustom: inner.allowCustom } : {}),
+    };
   }
 
   // ── Dialog methods (delegated to parent bridge) ──────────────────────────

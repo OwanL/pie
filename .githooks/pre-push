@@ -5,4 +5,7 @@ repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
 echo "pre-push: running full repository verification..."
-npm run verify
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) cmd.exe //d //s //c "npm run verify" ;;
+  *) npm run verify ;;
+esac

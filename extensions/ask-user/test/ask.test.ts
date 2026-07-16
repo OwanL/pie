@@ -63,7 +63,7 @@ describe('runAsk', () => {
     });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].method, 'select');
-    assert.deepEqual(calls[0].args, ['Which style?', ['camelCase', 'snake_case', CUSTOM_SENTINEL], { signal }]);
+    assert.deepEqual(calls[0].args, ['Which style?', ['camelCase', 'snake_case', CUSTOM_SENTINEL], { signal, allowCustom: true }]);
   });
 
   test('treats a value returned outside the preset options as an inline custom answer', async () => {
@@ -147,7 +147,7 @@ describe('runAsk', () => {
 
   test('passes the question as the select title and renders context separately', async () => {
     const { runAsk, CUSTOM_SENTINEL } = await loadAsk();
-    const { port, calls } = makePort({ selectResult: 'snake_case' });
+    const { port, calls, signal } = makePort({ selectResult: 'snake_case' });
 
     const result = await runAsk({
       question: 'Which style?',
@@ -161,6 +161,7 @@ describe('runAsk', () => {
     assert.deepEqual(calls[0].args[0], 'Which style?');
     assert.deepEqual(calls[0].args[1], ['camelCase', 'snake_case']);
     assert.equal((calls[0].args[1] as string[]).includes(CUSTOM_SENTINEL), false);
+    assert.deepEqual(calls[0].args[2], { signal, allowCustom: false });
   });
 
   test('forwards toolCallId to select and input prompts', async () => {
@@ -170,7 +171,7 @@ describe('runAsk', () => {
     await runAsk({ question: 'Which style?', options: ['camelCase'] }, port);
 
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].args, ['Which style?', ['camelCase', CUSTOM_SENTINEL], { signal, toolCallId: 'tc-123' }]);
+    assert.deepEqual(calls[0].args, ['Which style?', ['camelCase', CUSTOM_SENTINEL], { signal, allowCustom: true, toolCallId: 'tc-123' }]);
     assert.deepEqual(calls[1].args, ['Your answer', undefined, { signal, toolCallId: 'tc-123' }]);
   });
 });

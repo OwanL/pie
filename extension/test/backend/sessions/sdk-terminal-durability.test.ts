@@ -25,7 +25,11 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-test('fresh SDK reopen retains terminal entries when the writer exits before publication', async () => {
+test('fresh SDK reopen retains terminal entries when the writer exits before publication', {
+  skip: process.env.PIE_RUN_INTEGRATION_TESTS === '1'
+    ? false
+    : 'run npm run test:integration to exercise cross-process SDK durability',
+}, async () => {
   await withTempDir(async (tempDir) => {
     const sdk = await loadSdk(SDK_ROOT);
     const sdkModuleUrl = pathToFileURL(path.join(SDK_ROOT, 'dist', 'index.js')).href;

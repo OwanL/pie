@@ -38,6 +38,7 @@ const {
 	PREPASS_MAX_TRANSPORT_RETRIES,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 	getRecentConversation,
+	completeOllamaNative,
 	subagentContext,
 	SKILLS_BLOCK_RE,
 } = require("../src/pruning.ts") as typeof import("../src/pruning.js");
@@ -739,6 +740,45 @@ test("prepassTimeoutMs: scales by attempt index", () => {
 	assert.equal(prepassTimeoutMs("minimal", 0, { minimal: 10000 }), 10000);
 	assert.equal(prepassTimeoutMs("minimal", 1, { minimal: 10000 }), 20000);
 	assert.equal(prepassTimeoutMs("minimal", 2, { minimal: 10000 }), 30000);
+});
+
+test("completeOllamaNative disables thinking and maps native usage", async () => {
+	let requestedUrl = "";
+	let requestedBody: Record<string, unknown> = {};
+	const result = await completeOllamaNative(
+		{ id: "qwen3.5:9b", baseUrl: "http://localhost:11434/v1" },
+		[{ role: "user", content: "Return JSON" }],
+		{ reasoning: "off", maxTokens: 512, temperature: 0.2 },
+		async (input: string | URL, init?: RequestInit) => {
+			requestedUrl = String(input);
+			requestedBody = JSON.parse(String(init?.body));
+			return new Response(JSON.stringify({
+				message: { content: '{"keep":["read"]}' },
+				done_reason: "stop",
+				prompt_eval_count: 20,
+				eval_count: 6,
+			}), { status: 200 });
+		},
+	);
+
+	assert.equal(requestedUrl, "http://localhost:11434/api/chat");
+	assert.equal(requestedBody.think, false);
+	assert.deepEqual(requestedBody.options, { num_predict: 512, temperature: 0.2 });
+	assert.equal(result.text, '{"keep":["read"]}');
+	assert.equal(result.stopReason, "stop");
+	assert.deepEqual(result.usage, { input: 20, output: 6, cacheRead: 0, cacheWrite: 0 });
+});
+
+test("completeOllamaNative surfaces HTTP status for transport retry classification", async () => {
+	await assert.rejects(
+		completeOllamaNative(
+			{ id: "qwen3.5:9b", baseUrl: "http://localhost:11434/v1" },
+			[{ role: "user", content: "Return JSON" }],
+			{ reasoning: "off" },
+			async () => new Response("busy", { status: 503 }),
+		),
+		/Ollama API error \(503\): busy/,
+	);
 });
 
 test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutputTokens", async () => {

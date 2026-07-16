@@ -146,12 +146,78 @@ export function getRecentConversation(ctx: unknown, maxMessages = RECENT_CONVERS
 	return recent.reverse();
 }
 
+type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Use Ollama's native chat endpoint for local prepasses. Ollama's OpenAI-compatible
+ * endpoint currently ignores its native `think: false` control, so reasoning-first
+ * models such as Qwen 3.5 can spend the entire output budget on hidden reasoning
+ * and return no text. The native endpoint is the same call shape used by the
+ * prepass benchmarks and lets an `off` reasoning level actually disable thinking.
+ */
+export async function completeOllamaNative(
+	model: unknown,
+	context: Array<{ role: string; content: string }>,
+	options: Record<string, unknown>,
+	fetchFn: FetchLike = fetch,
+): Promise<{ text: string; thinking: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }> {
+	const modelObj = model as { id?: unknown; baseUrl?: unknown };
+	if (typeof modelObj.id !== "string" || typeof modelObj.baseUrl !== "string") {
+		throw new Error("Invalid Ollama model configuration");
+	}
+	const url = new URL(modelObj.baseUrl);
+	url.pathname = `${url.pathname.replace(/\/(?:v1)?\/?$/, "")}/api/chat`;
+	const headers = {
+		"content-type": "application/json",
+		...((options.headers && typeof options.headers === "object") ? options.headers as Record<string, string> : {}),
+	};
+	const response = await fetchFn(url, {
+		method: "POST",
+		headers,
+		signal: options.signal as AbortSignal | undefined,
+		body: JSON.stringify({
+			model: modelObj.id,
+			messages: context,
+			stream: false,
+			think: options.reasoning !== "off" && options.reasoning !== undefined,
+			options: {
+				...(typeof options.maxTokens === "number" ? { num_predict: options.maxTokens } : {}),
+				...(typeof options.temperature === "number" ? { temperature: options.temperature } : {}),
+			},
+		}),
+	});
+	if (!response.ok) {
+		const detail = (await response.text()).slice(0, 500);
+		throw new Error(`Ollama API error (${response.status}): ${detail || response.statusText}`);
+	}
+	const payload = await response.json() as {
+		message?: { content?: unknown; thinking?: unknown };
+		done_reason?: unknown;
+		prompt_eval_count?: unknown;
+		eval_count?: unknown;
+	};
+	return {
+		text: typeof payload.message?.content === "string" ? payload.message.content : "",
+		thinking: typeof payload.message?.thinking === "string" ? payload.message.thinking : "",
+		stopReason: typeof payload.done_reason === "string" ? payload.done_reason : undefined,
+		usage: {
+			input: typeof payload.prompt_eval_count === "number" ? payload.prompt_eval_count : 0,
+			output: typeof payload.eval_count === "number" ? payload.eval_count : 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+	};
+}
+
 export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 	const override = getCompleteFnOverride();
 	if (override === false) return null;
 	if (override) return override;
 
 	const adapter: CompleteSimpleFn = async (model, context, options) => {
+		if ((model as { provider?: unknown })?.provider === "ollama") {
+			return completeOllamaNative(model, context, options);
+		}
 		if (state._piCompleteSimple === undefined) {
 			try {
 				const piAi = await import("@earendil-works/pi-ai");

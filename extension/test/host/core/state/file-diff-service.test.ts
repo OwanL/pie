@@ -39,6 +39,8 @@ function mockUri(p: string): Record<string, unknown> {
   };
 }
 
+const integrationTest = process.env.PIE_RUN_INTEGRATION_TESTS === '1' ? test : test.skip;
+
 const vscodeMock = {
   workspace: {
     workspaceFolders: undefined as Array<{ uri: { fsPath: string } }> | undefined,
@@ -276,7 +278,7 @@ async function withTempRepo(run: (dir: string) => Promise<void>): Promise<void> 
   }
 }
 
-test('resolveBaselineRef returns the pre-change commit when the agent change has been committed', async () => {
+integrationTest('resolveBaselineRef returns the pre-change commit when the agent change has been committed', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'f.txt');
     await fs.writeFile(file, 'v1\n');
@@ -294,7 +296,7 @@ test('resolveBaselineRef returns the pre-change commit when the agent change has
   });
 });
 
-test('resolveBaselineRef returns HEAD when the change is uncommitted (dirty working tree)', async () => {
+integrationTest('resolveBaselineRef returns HEAD when the change is uncommitted (dirty working tree)', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'f.txt');
     await fs.writeFile(file, 'v1\n');
@@ -311,7 +313,7 @@ test('resolveBaselineRef returns HEAD when the change is uncommitted (dirty work
   });
 });
 
-test('resolveBaselineRef falls back to HEAD for an untracked file', async () => {
+integrationTest('resolveBaselineRef falls back to HEAD for an untracked file', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'new.txt');
     await fs.writeFile(file, 'hi\n'); // never committed
@@ -321,7 +323,7 @@ test('resolveBaselineRef falls back to HEAD for an untracked file', async () => 
   });
 });
 
-test('resolveBaselineRef is robust to unrelated later commits that do not touch the file', async () => {
+integrationTest('resolveBaselineRef is robust to unrelated later commits that do not touch the file', async () => {
   // The agent committed the file, then the user committed an UNRELATED file —
   // HEAD no longer touches f.txt, but the baseline must still be the pre-change
   // commit (found via `git log -- <path>`), not the unrelated HEAD.
@@ -339,7 +341,7 @@ test('resolveBaselineRef is robust to unrelated later commits that do not touch 
   });
 });
 
-test('resolveBaselineRef finds the pre-deletion commit for a file the agent deleted and committed', async () => {
+integrationTest('resolveBaselineRef finds the pre-deletion commit for a file the agent deleted and committed', async () => {
   // kind=deleted → modifiedUri is the empty diff; the LEFT side must be the
   // file's content just before deletion. The walk skips the delete commit
   // (file absent on both sides → no diff) and lands on the last content commit.
@@ -358,7 +360,7 @@ test('resolveBaselineRef finds the pre-deletion commit for a file the agent dele
   });
 });
 
-test('openFileDiff diffs a committed agent change against the pre-change baseline, not HEAD', async () => {
+integrationTest('openFileDiff diffs a committed agent change against the pre-change baseline, not HEAD', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'f.txt');
     await fs.writeFile(file, 'v1\n');
@@ -383,7 +385,7 @@ test('openFileDiff diffs a committed agent change against the pre-change baselin
   });
 });
 
-test('openFileDiff uses the empty diff for a created file regardless of git state', async () => {
+integrationTest('openFileDiff uses the empty diff for a created file regardless of git state', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'created.txt');
     await fs.writeFile(file, 'new\n');
@@ -404,7 +406,7 @@ test('openFileDiff uses the empty diff for a created file regardless of git stat
   });
 });
 
-test('openFileDiff does not open a dead URI when a created file no longer exists', async () => {
+integrationTest('openFileDiff does not open a dead URI when a created file no longer exists', async () => {
   await withTempRepo(async (dir) => {
     const svc = new FileDiffService(() =>
       archStateWith({
@@ -421,7 +423,7 @@ test('openFileDiff does not open a dead URI when a created file no longer exists
   });
 });
 
-test('openFileDiff treats an existing modified file without a Git baseline as newly created', async () => {
+integrationTest('openFileDiff treats an existing modified file without a Git baseline as newly created', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-diff-test-'));
   try {
     await fs.writeFile(path.join(dir, 'f.txt'), 'current\n');
@@ -444,7 +446,7 @@ test('openFileDiff treats an existing modified file without a Git baseline as ne
   }
 });
 
-test('openFileDiff does not open a bogus Git URI for a deleted non-git file', async () => {
+integrationTest('openFileDiff does not open a bogus Git URI for a deleted non-git file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-diff-test-'));
   try {
     const svc = new FileDiffService(() =>
@@ -463,7 +465,7 @@ test('openFileDiff does not open a bogus Git URI for a deleted non-git file', as
   }
 });
 
-test('openFileDiff shows the Git baseline for a deleted committed file', async () => {
+integrationTest('openFileDiff shows the Git baseline for a deleted committed file', async () => {
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'f.txt');
     await fs.writeFile(file, 'before\n');

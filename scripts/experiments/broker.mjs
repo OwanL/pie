@@ -4,7 +4,7 @@ import { ALLOWED_MODELS, redact } from "./lib/core.mjs";
 
 const SAFE_RESPONSE_HEADERS=["content-type","cache-control","x-request-id","x-session-id","x-session-affinity"];
 const SAFE_REQUEST_HEADERS=["content-type","accept","x-request-id","x-session-id","x-session-affinity"];
-export async function startBroker({upstream="https://api.code.umans.ai/v1",apiKey,timeoutMs=900000,onLog=()=>{},token=randomBytes(32).toString("base64url"),listenHost="127.0.0.1",listenPort=0,advertisedHost=listenHost}) {
+export async function startBroker({upstream="https://api.code.umans.ai/v1",apiKey,timeoutMs=3600000,onLog=()=>{},token=randomBytes(32).toString("base64url"),listenHost="127.0.0.1",listenPort=0,advertisedHost=listenHost}) {
   if(!apiKey) throw new Error("UMANS_API_KEY is required by the controller");
   const started=Date.now(); let requests=0,outputTokens=0,closed=false;
   const server=http.createServer(async(req,res)=>{

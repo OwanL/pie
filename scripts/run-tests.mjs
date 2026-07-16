@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,6 +20,7 @@ const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const reporterSpecifier = pathToFileURL(path.join(__dirname, 'test-reporter.mjs')).href;
+const fastCachePath = path.join(repoRoot, '.cache', 'test-results', 'unit-suite.json');
 
 const PACKAGE_CONFIGS = [
   {
@@ -173,11 +177,12 @@ for (const config of PACKAGE_CONFIGS) {
 }
 
 function printHelp() {
-  console.log(`Usage: npm run test -- [--package <id>] [--fast] [--test-name-pattern <regex>] [-- <node:test args>]\n\n` +
-    `Runs package tests in isolation with concise output and package-level coverage gates.\n\n` +
+  console.log(`Usage: npm run test -- [--package <id>] [--fast] [--integration] [--test-name-pattern <regex>] [-- <node:test args>]\n\n` +
+    `Runs package tests in isolation with concise output and optional package-level coverage gates.\n\n` +
     `Options:\n` +
     `  --package <id>            Run only the selected package. Repeatable.\n` +
     `  --fast                    Developer loop: parallel test files, skip coverage collection/gates.\n` +
+    `  --integration             Include slow real-SDK and real-shell integration tests.\n` +
     `  --test-name-pattern <re>  Forward a name filter to node:test.\n` +
     `  --list                    Print available package ids.\n` +
     `  --help                    Show this help.\n` +
@@ -199,6 +204,7 @@ export function parseArgs(argv) {
   let listOnly = false;
   let helpOnly = false;
   let fast = false;
+  let integration = false;
   let forwarding = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -221,6 +227,10 @@ export function parseArgs(argv) {
     }
     if (arg === '--fast') {
       fast = true;
+      continue;
+    }
+    if (arg === '--integration') {
+      integration = true;
       continue;
     }
     if (arg === '--package') {
@@ -252,7 +262,7 @@ export function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}. Use -- before additional node:test arguments.`);
   }
 
-  return { selected, listOnly, helpOnly, fast, testArgs };
+  return { selected, listOnly, helpOnly, fast, integration, testArgs };
 }
 
 function resolveSelectedPackages(selectedIds) {
@@ -275,6 +285,79 @@ function resolveSelectedPackages(selectedIds) {
     resolved.push(config);
   }
   return resolved;
+}
+
+export function groupFastPackageConfigs(configs) {
+  if (configs.length <= 1) {
+    return configs;
+  }
+
+  const groups = new Map();
+  for (const config of configs) {
+    const key = `${config.cwd}\0${config.tsxConfig ?? ''}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.members.push(config);
+      existing.testGlobs.push(...config.testGlobs);
+      continue;
+    }
+    groups.set(key, {
+      ...config,
+      members: [config],
+      testGlobs: [...config.testGlobs],
+      coverage: false,
+    });
+  }
+
+  return [...groups.values()].map((group) => {
+    const ids = group.members.map((member) => member.id);
+    const isRootGroup = group.cwd === repoRoot && !group.tsxConfig;
+    const fastConcurrency = group.id === 'extension' ? 8
+      : group.id === 'analysis' ? 4
+        : group.id === 'subagent' ? 2
+          : isRootGroup ? 4
+            : undefined;
+    return {
+      ...group,
+      id: ids.length === 1 ? ids[0] : `${ids.length} root packages`,
+      fastConcurrency,
+    };
+  });
+}
+
+function repoTestFingerprint() {
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', repoRoot, ...args], { encoding: 'buffer', windowsHide: true });
+    if (result.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed while building the test-cache key`);
+    }
+    return result.stdout;
+  };
+  const hash = createHash('sha256');
+  hash.update(process.version);
+  hash.update(git('rev-parse', 'HEAD'));
+  hash.update(git('diff', '--binary', 'HEAD'));
+  const untracked = git('ls-files', '--others', '--exclude-standard', '-z')
+    .toString('utf8').split('\0').filter(Boolean).sort();
+  for (const relativePath of untracked) {
+    hash.update(relativePath);
+    hash.update(readFileSync(path.join(repoRoot, relativePath)));
+  }
+  return hash.digest('hex');
+}
+
+async function readFastCache(fingerprint) {
+  try {
+    const cached = JSON.parse(await readFile(fastCachePath, 'utf8'));
+    return cached.fingerprint === fingerprint ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeFastCache(fingerprint, totals) {
+  await mkdir(path.dirname(fastCachePath), { recursive: true });
+  await writeFile(fastCachePath, JSON.stringify({ fingerprint, totals }), 'utf8');
 }
 
 function formatPercent(value) {
@@ -381,7 +464,9 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     // Full verification is serialized for deterministic shared-env fixtures.
     // Fast mode lets node:test parallelize independent test files, which is
     // substantially quicker for the 2k+ extension suite.
-    ...(fast ? [] : ['--test-concurrency=1']),
+    ...(fast
+      ? (config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])
+      : ['--test-concurrency=1']),
     ...(collectCoverage ? ['--experimental-test-coverage'] : []),
     `--test-reporter=${reporterSpecifier}`,
     ...(collectCoverage ? config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`) : []),
@@ -424,11 +509,11 @@ function indent(text, prefix = '  ') {
     .join('\n');
 }
 
-function runChildProcess(command, args, cwd, signal) {
+function runChildProcess(command, args, cwd, signal, envOverrides = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: { ...withoutGitRepositoryEnv(process.env), FORCE_COLOR: '0' },
+      env: { ...withoutGitRepositoryEnv(process.env), FORCE_COLOR: '0', ...envOverrides },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }));
@@ -473,7 +558,7 @@ function runChildProcess(command, args, cwd, signal) {
   });
 }
 
-async function runPackage(config, fast = false, testArgs = [], signal) {
+async function runPackage(config, fast = false, integration = false, testArgs = [], signal) {
   const args = buildTestArgs(config, fast, testArgs);
   // Invoke the package-local tsx CLI directly rather than routing through npx
   // and a platform shell. This preserves regexes/spaces in forwarded node:test
@@ -483,6 +568,7 @@ async function runPackage(config, fast = false, testArgs = [], signal) {
     [resolveLocalTsx(config.cwd), ...args],
     config.cwd,
     signal,
+    integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
   );
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
@@ -601,10 +687,44 @@ async function main() {
     return;
   }
 
+  const cacheable = parsedArgs.fast
+    && parsedArgs.selected.length === 0
+    && !parsedArgs.integration
+    && process.env.PIE_RUN_INTEGRATION_TESTS !== '1'
+    && parsedArgs.testArgs.length === 0;
+  let fingerprint;
+  if (cacheable) {
+    try {
+      fingerprint = repoTestFingerprint();
+      const cached = await readFastCache(fingerprint);
+      if (cached) {
+        const totals = cached.totals;
+        console.log(`✓ cached repo-wide unit suite — ${totals.passed} passed, ${totals.skipped} skipped`);
+        console.log('\nSummary: unchanged sources match the last successful unit run.');
+        return;
+      }
+    } catch {
+      // Cache failures must never prevent tests from running.
+      fingerprint = undefined;
+    }
+  }
+
+  // A separate node:test runner per package multiplies Node's default worker
+  // count and badly oversubscribes the machine. Fast repo-wide runs combine
+  // packages that share a cwd/tsx configuration, then divide file concurrency
+  // across the four resulting runners.
+  const executionConfigs = parsedArgs.fast ? groupFastPackageConfigs(selectedPackages) : selectedPackages;
+
   const processAbort = abortOnProcessSignals();
   let results;
   try {
-    results = await Promise.all(selectedPackages.map((config) => runPackage(config, parsedArgs.fast, parsedArgs.testArgs, processAbort.signal)));
+    results = await Promise.all(executionConfigs.map((config) => runPackage(
+      config,
+      parsedArgs.fast,
+      parsedArgs.integration,
+      parsedArgs.testArgs,
+      processAbort.signal,
+    )));
   } finally {
     processAbort.dispose();
   }
@@ -620,6 +740,16 @@ async function main() {
   console.log('');
   if (failedResults.length === 0) {
     console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
+    if (fingerprint) {
+      try {
+        // Do not cache a pass if files changed while the suite was running.
+        if (repoTestFingerprint() === fingerprint) {
+          await writeFastCache(fingerprint, totals);
+        }
+      } catch {
+        // A failed cache write does not change a successful test result.
+      }
+    }
     return;
   }
 

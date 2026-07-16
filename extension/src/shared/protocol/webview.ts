@@ -24,7 +24,7 @@ export interface ExtensionUIRequestBase {
 /** A pending extension UI request (backend → host → webview). */
 export type ExtensionUIRequestPayload =
   | (ExtensionUIRequestBase & { method: 'confirm'; title: string; message: string })
-  | (ExtensionUIRequestBase & { method: 'select'; title: string; options: string[] })
+  | (ExtensionUIRequestBase & { method: 'select'; title: string; options: string[]; allowCustom?: boolean })
   | (ExtensionUIRequestBase & { method: 'input'; title: string; placeholder?: string })
   | (ExtensionUIRequestBase & { method: 'notify'; message: string; notifyType?: 'info' | 'warning' | 'error' });
 

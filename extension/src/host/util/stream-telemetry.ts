@@ -68,7 +68,7 @@ function ensureTimer(): void {
   if (timer !== undefined) {
     return;
   }
-  timer = setInterval(flush, FLUSH_INTERVAL_MS);
+  timer = setInterval(flushStreamDiag, FLUSH_INTERVAL_MS);
   // Never keep the extension host alive solely for diagnostics.
   timer.unref?.();
 }
@@ -82,7 +82,8 @@ function pct(arr: number[], p: number): number {
   return sorted[idx];
 }
 
-function flush(): void {
+/** Flush the current diagnostic window immediately (also used on orderly shutdown and in tests). */
+export function flushStreamDiag(): void {
   const w = current;
   current = emptyWindow();
   const activity =

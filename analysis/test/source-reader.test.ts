@@ -80,7 +80,7 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
       'utf8',
     );
 
-    const loaded = await loadSourceAnalytics({ storageDir: dir });
+    const loaded = await loadSourceAnalytics({ storageDir: dir, ...withoutLocalSessionDiscovery(dir) });
     assert.equal(loaded.sourceKind, 'storage-dir');
     assert.equal(loaded.source.completedRuns.length, 2);
     assert.equal(loaded.source.openRuns.length, 1);
@@ -88,6 +88,14 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
     assert.equal(loaded.source.workspaceKey, path.basename(dir));
   });
 });
+
+function withoutLocalSessionDiscovery(dir: string) {
+  return {
+    configuredSessionsDir: path.join(dir, 'no-configured-sessions'),
+    legacySessionsDir: path.join(dir, 'no-legacy-sessions'),
+    reviewSidecarPath: path.join(dir, 'no-reviews.jsonl'),
+  };
+}
 
 async function writeRunSnapshotsJsonl(dir: string, runs: RunSnapshot[]): Promise<void> {
   const lines = runs.map((run) => JSON.stringify({
@@ -116,7 +124,7 @@ test('loadSourceAnalytics aggregates every run store under an outcomes root', as
     await fs.writeFile(path.join(storeA, 'outcome-history.jsonl'), '', 'utf8');
     await fs.writeFile(path.join(storeB, 'outcome-history.jsonl'), '', 'utf8');
 
-    const loaded = await loadSourceAnalytics({ outcomesRoot });
+    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
     assert.equal(loaded.sourceKind, 'all-stores');
     assert.equal(loaded.sourcePath, outcomesRoot);
     assert.equal(loaded.source.workspaceKey, 'all');
@@ -140,7 +148,7 @@ test('loadSourceAnalytics dedupes the same runId across stores via prepare', asy
     await fs.writeFile(path.join(storeA, 'outcome-history.jsonl'), '', 'utf8');
     await fs.writeFile(path.join(storeB, 'outcome-history.jsonl'), '', 'utf8');
 
-    const loaded = await loadSourceAnalytics({ outcomesRoot });
+    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
     assert.equal(loaded.source.completedRuns.length, 2); // merged before dedup
     const prepared = prepareSourceAnalytics(loaded.source);
     assert.equal(prepared.runs.length, 1); // deduped to a single run
@@ -149,7 +157,7 @@ test('loadSourceAnalytics dedupes the same runId across stores via prepare', asy
 
 test('loadSourceAnalytics falls back to the fixture when no run stores exist', async () => {
   await withTempDir(async (outcomesRoot) => {
-    const loaded = await loadSourceAnalytics({ outcomesRoot });
+    const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
     assert.equal(loaded.sourceKind, 'fixture');
     assert.equal(loaded.sourcePath, DEFAULT_FIXTURE_PATH);
   });
@@ -730,7 +738,7 @@ test('loadSourceAnalytics attaches local side-channel logs for storage-dir sourc
       'utf8',
     );
 
-    const loaded = await loadSourceAnalytics({ storageDir: store });
+    const loaded = await loadSourceAnalytics({ storageDir: store, ...withoutLocalSessionDiscovery(configRoot) });
     assert.equal(loaded.sourceKind, 'storage-dir');
     assert.equal(loaded.source.pruningEvents.length, 1);
     assert.equal(loaded.source.pruningEvents[0]?.sessionId, 'local');
