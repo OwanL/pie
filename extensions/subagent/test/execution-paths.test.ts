@@ -167,6 +167,9 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(result.usage.input, 11);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.42);
+	assert.ok(result.phaseDurationsMs && "preparing" in result.phaseDurationsMs, "terminal attempts retain producer-owned phase timing evidence");
+	assert.ok(result.phaseDurationsMs && "waiting_provider" in result.phaseDurationsMs);
+	assert.ok(result.phaseDurationsMs && "running_tool" in result.phaseDurationsMs);
 	assert.deepEqual(result.runningTools, [], "terminalization clears nested tools even when tool_execution_end is omitted");
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);

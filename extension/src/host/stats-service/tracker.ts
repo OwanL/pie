@@ -15,7 +15,10 @@ import type {
   ToolCall,
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
-import { getRenderableSubagentResult } from '../../shared/subagent-result';
+import {
+  getRenderableSubagentResult,
+  getTerminalSubagentAttemptSamplesFromToolCall,
+} from '../../shared/subagent-result';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   normalizeExperimentAssignment,
@@ -347,6 +350,7 @@ export class SessionRunTracker {
     if (analysis.subagentCallCount > 0) {
       this.recordSubagentUsage(run, analysis, toolCall);
       this.recordSubagentThroughput(run, toolCall);
+      this.recordSubagentLifecycle(run, toolCall);
     }
 
     if (analysis.verificationKinds.length > 0) {
@@ -513,6 +517,28 @@ export class SessionRunTracker {
       }];
     });
     run.auxiliaryLlmUsage = [...samples, ...additions];
+  }
+
+  /** Persist terminal child-attempt diagnostics exactly once per stable attempt id.
+   * Every terminal subagent tool call is accounted for at ingestion: a call
+   * without parseable records increments explicit unknown coverage, so mixed
+   * runs (one well-formed call plus one malformed call) stay mixed on reload. */
+  private recordSubagentLifecycle(run: RunSnapshot, toolCall: ToolCall): void {
+    const { samples: additions, coverageComplete } = getTerminalSubagentAttemptSamplesFromToolCall(toolCall);
+    // Presence of an empty list is meaningful: this run has new-format
+    // lifecycle ingestion, so aggregate code must not apply the legacy fallback.
+    // Persisting source IDs makes terminal replay after checkpoint restore
+    // idempotent even though process-local finished-tool sets are rebuilt.
+    run.unknownSubagentAttemptRecordSourceIds ??= [];
+    if (!coverageComplete && !run.unknownSubagentAttemptRecordSourceIds.includes(toolCall.id)) {
+      run.unknownSubagentAttemptRecordSourceIds = [...run.unknownSubagentAttemptRecordSourceIds, toolCall.id];
+    }
+    const existing = run.subagentAttemptSamples ?? [];
+    const seen = new Set(existing.map((sample) => sample.sourceId));
+    const unique = additions.filter((sample) => !seen.has(sample.sourceId));
+    if (unique.length > 0) {
+      run.subagentAttemptSamples = [...existing, ...unique];
+    }
   }
 
   /** Forward nested subagent per-turn throughput into the parent run snapshot. */

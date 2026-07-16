@@ -24,7 +24,7 @@ import { textContent } from "./src/text-content.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
-import type { OnUpdateCallback, SingleResult, SubagentDetails } from "./types.js";
+import type { OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -44,6 +44,7 @@ import {
 } from "./src/parent-extension-ui-bridge-proxy.js";
 import { inflightSemaphore, type Release } from "./src/concurrency-limit.js";
 import { globalOrphanRegistry, type OrphanCleanupRegistry } from "./src/cleanup.js";
+import type { RetryClock } from "./src/retry.js";
 
 type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
 
@@ -321,6 +322,26 @@ function markProgress(result: SingleResult): void {
 	result.lastProgressAt = Date.now();
 }
 
+/** Attempt phases whose elapsed time can be measured locally. `retry_wait` is
+ * deliberately absent: retry.ts records the reported backoff on the following
+ * attempt, avoiding a second count of the same wait. */
+const TIMED_ATTEMPT_PHASES = new Set<SubagentAttemptPhase>([
+	"queued", "preparing", "waiting_provider", "streaming", "running_tool", "orphaned_cleanup",
+]);
+
+/** Close the previous observed phase into a fixed-key, finite accumulator. */
+function accumulatePhaseDuration(result: SingleResult, now: number): void {
+	const previous = result.activityPhase;
+	const since = result.activitySince;
+	if (!previous || !TIMED_ATTEMPT_PHASES.has(previous as SubagentAttemptPhase)
+		|| typeof since !== "number" || !Number.isFinite(since)) return;
+	const elapsed = Math.max(0, Math.trunc(now - since));
+	const phase = previous as SubagentAttemptPhase;
+	const prior = result.phaseDurationsMs?.[phase] ?? 0;
+	const total = Math.min(Number.MAX_SAFE_INTEGER, prior + elapsed);
+	result.phaseDurationsMs = { ...result.phaseDurationsMs, [phase]: total };
+}
+
 /** Move the published lifecycle state forward. Returns whether this was a real
  * transition and records one progress generation only for such transitions. */
 function setActivity(
@@ -329,9 +350,11 @@ function setActivity(
 	detail?: string,
 ): boolean {
 	if (result.activityPhase === phase && result.activityDetail === detail) return false;
+	const now = Date.now();
+	accumulatePhaseDuration(result, now);
 	result.activityPhase = phase;
 	result.activityDetail = detail;
-	result.activitySince = Date.now();
+	result.activitySince = now;
 	if (phase === "completed" || phase === "failed" || phase === "cancelled") {
 		result.completedAt = result.activitySince;
 	}
@@ -917,7 +940,13 @@ function applyStopReason(result: SingleResult, parentAborted: boolean, stage?: s
 }
 
 /** Apply a thrown error to a result, preserving any previously-recorded message. */
-function applyThrownError(result: SingleResult, err: unknown, stage?: string, parentAborted = false): void {
+function applyThrownError(
+	result: SingleResult,
+	err: unknown,
+	stage?: string,
+	parentAborted = false,
+	clock?: RetryClock,
+): void {
 	result.exitCode = 1;
 	const interrupted = parentAborted || (err as { name?: string } | null)?.name === "AbortError";
 	if (interrupted) result.stopReason = "aborted";
@@ -925,7 +954,7 @@ function applyThrownError(result: SingleResult, err: unknown, stage?: string, pa
 	const suffix = stage && !message.includes(`(while ${stage})`) ? ` (while ${stage})` : "";
 	result.errorMessage = (result.errorMessage || message) + suffix;
 	result.stderr = result.stderr || message;
-	classifyProviderFailure(result, err);
+	classifyProviderFailure(result, err, clock);
 	preservePartialOutput(result);
 	clearLiveState(result);
 	setActivity(result, interrupted ? "cancelled" : "failed", result.errorMessage);
@@ -1078,6 +1107,7 @@ export async function runSingleAgent(
 		sdk?: SubagentSdk;
 		timeoutMs?: number;
 		orphanRegistry?: OrphanCleanupRegistry;
+		clock?: RetryClock;
 	},
 	/** Stable identity for this attempt; used by orphan registry and analytics. */
 	attemptId?: string,
@@ -1544,7 +1574,7 @@ export async function runSingleAgent(
 		applyStopReason(currentResult, !!signal?.aborted, stageRef.value);
 		return currentResult;
 	} catch (err) {
-		applyThrownError(currentResult, err, stageRef.value, !!signal?.aborted);
+		applyThrownError(currentResult, err, stageRef.value, !!signal?.aborted, _internal?.clock);
 		return currentResult;
 	} finally {
 		cleanupOwnedSession();

@@ -24,7 +24,7 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import type { SingleResult } from "../types.js";
-import { parseRetryAfterMs, computeBackoffMs, abortableDelay, readRetryPolicy } from "../src/retry.js";
+import { parseRetryAfterMs, computeBackoffMs, abortableDelay, buildAttemptRecord, readRetryPolicy } from "../src/retry.js";
 
 // ---------------------------------------------------------------------------
 // Mock SDK + hook (same technique as modes.test.ts)
@@ -75,6 +75,9 @@ if (!(globalThis as { __PIE_SDK_HOOK_REGISTERED__?: boolean }).__PIE_SDK_HOOK_RE
 const __require = createRequire(import.meta.url);
 const __modesPath = path.resolve("extensions/subagent/src/modes.ts");
 const { executeSingleMode } = __require(__modesPath) as typeof import("../src/modes.js");
+const { resolvePhaseInactivityMs, PHASE_INACTIVITY_MS } = __require(
+	path.resolve("extensions/subagent/src/execute.ts"),
+) as typeof import("../src/execute.js");
 const execSingle = executeSingleMode as any;
 
 const agentDir = mkdtempSync(path.join(tmpdir(), "retry-agents-"));
@@ -139,6 +142,22 @@ test("parseRetryAfterMs recognizes seconds, ms, headers, and HTTP dates", () => 
 	assert.ok(fromDate != null && fromDate >= 85_000 && fromDate <= 95_000, "HTTP date");
 });
 
+test("parseRetryAfterMs HTTP-date parsing uses an injected now value deterministically", () => {
+	const policy = { ...readRetryPolicy(), maxRetryAfterMs: 600_000 };
+	const now = new Date("2026-07-16T12:00:00.000Z").getTime();
+	const future = new Date(now + 90_000).toUTCString();
+	assert.equal(parseRetryAfterMs({ headers: { "retry-after": future } } as any, policy, now), 90_000, "injected now value");
+	const clock = { now: () => now + 60_000, setTimer: () => ({ promise: Promise.resolve(), cancel: () => {} }) };
+	assert.equal(parseRetryAfterMs({ headers: { "retry-after": future } } as any, policy, clock), 30_000, "injected clock");
+});
+
+test("parseRetryAfterMs preserves an explicit immediate retry", () => {
+	const policy = readRetryPolicy();
+	assert.equal(parseRetryAfterMs({ retryAfterMs: 0 }, policy), 0);
+	assert.equal(parseRetryAfterMs({ retryAfter: 0 }, policy), 0);
+	assert.equal(parseRetryAfterMs({ headers: { "retry-after": "0" } }, policy), 0);
+});
+
 test("parseRetryAfterMs clamps to policy maximum", () => {
 	const policy = { ...readRetryPolicy(), maxRetryAfterMs: 30_000 };
 	assert.equal(parseRetryAfterMs({ retryAfter: 600 } as any, policy), 30_000, "clamp seconds");
@@ -150,6 +169,17 @@ test("computeBackoffMs is bounded exponential", () => {
 	assert.equal(computeBackoffMs(0, policy), 1_000);
 	assert.equal(computeBackoffMs(3, policy), 8_000);
 	assert.equal(computeBackoffMs(10, policy), 10_000, "bounded at max");
+});
+
+test("buildAttemptRecord carries only bounded execution-phase evidence, never retry_wait", () => {
+	const record = buildAttemptRecord(syntheticResult({
+		exitCode: 0,
+		stopReason: "completed",
+		phaseDurationsMs: { preparing: 12, waiting_provider: 34, retry_wait: 99 } as any,
+	}), 250);
+	assert.deepEqual(record.phaseDurationsMs, { preparing: 12, waiting_provider: 34 });
+	assert.equal(record.backoffMs, 250, "retry backoff stays separately reported");
+	assert.equal(record.attemptSettlementOutcome, "completed");
 });
 
 test("abortableDelay rejects immediately when already aborted", async () => {
@@ -466,6 +496,88 @@ test("retry wait is immediately abortable", async () => {
 	const response = await responsePromise;
 	assert.equal(secondAttemptStarted, false, "abort during backoff must prevent the retry attempt");
 	assert.equal(response.details.results[0].retryCount, undefined);
+});
+
+test("retry wait publishes a running snapshot with advanced progressGeneration", async () => {
+	const models = [
+		{ id: "model-a", provider: "provider-a" },
+		{ id: "model-b", provider: "provider-b" },
+	];
+	const clock = new PendingClock();
+	const snapshots: SingleResult[] = [];
+
+	const responsePromise = execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" },
+		makeCtx(models),
+		makeAgents(),
+		() => undefined,
+		{ depth: 0, trail: [] },
+		noOpDetails,
+		(partial: any) => {
+			const result = partial.details?.results?.[0];
+			if (result) snapshots.push(result);
+		},
+		noSignal(),
+		selCtx({
+			alwaysParentModel: false,
+			fallbackOnProviderFailure: true,
+			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			registryModels: models,
+		}),
+		"t-retry-wait-gen",
+		undefined,
+		undefined,
+		undefined,
+		{
+			clock,
+			runAttempt: (resolved: any, _attemptId: string) => {
+				const model = resolved.modelOverride;
+				if (model === "model-a") {
+					return Promise.resolve(
+						syntheticResult({
+							exitCode: 1,
+							stopReason: "error",
+							errorMessage: "timed out",
+							stderr: "timed out",
+							selectedModel: model,
+							model,
+							provider: "provider-a",
+							retryable: true,
+							replaySafety: "safe",
+							failureClass: "timeout",
+							progressGeneration: 3,
+						}),
+					);
+				}
+				return Promise.resolve(
+					syntheticResult({
+						exitCode: 0,
+						stopReason: "completed",
+						selectedModel: model,
+						model,
+						provider: "provider-b",
+					}),
+				);
+			},
+		},
+	);
+
+	// Flush the synchronous retry-wait snapshot emission.
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+	const waitSnapshot = snapshots.find((s) => s.activityPhase === "retry_wait");
+	assert.ok(waitSnapshot, "retry_wait snapshot must be emitted via onUpdate");
+	assert.equal(waitSnapshot.exitCode, -1, "retry_wait is an active child lifecycle, not a terminal attempt snapshot");
+	assert.equal(waitSnapshot.progressGeneration, 4, "progressGeneration must advance for retry_wait");
+	assert.ok(waitSnapshot.lastProgressAt != null, "lastProgressAt must be set");
+	assert.equal(
+		resolvePhaseInactivityMs(noOpDetails("single", [waitSnapshot])),
+		PHASE_INACTIVITY_MS.retry_wait,
+		"outer settlement must use the retry_wait phase budget",
+	);
+
+	await clock.advance(1_000_000);
+	const response = await responsePromise;
+	assert.equal(response.isError, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -808,7 +920,89 @@ test("per-attempt analytics records are bounded and include attempt identity", a
 	assert.equal(records?.[2]?.model, "model-c");
 	assert.equal(records?.[2]?.outcome, "success");
 	assert.ok(records?.[0]?.startedAt != null && records?.[0]?.completedAt != null);
-	assert.ok(records?.[0]?.settlementOutcome != null);
+	assert.ok(records?.[0]?.attemptSettlementOutcome != null);
+});
+
+test("attempt records satisfy the host-analytics extraction contract", async () => {
+	// The host extraction (getTerminalSubagentAttemptSamplesFromToolCall) reads
+	// result.details.results[].attemptRecords and maps each record to a
+	// SubagentAttemptSample with reported/measured/estimated/unknown provenance.
+	// This test pins the producer side of that contract so a field rename or a
+	// missing field is caught in the subagent package, not only in the host.
+	const models = [
+		{ id: "model-a", provider: "provider-a" },
+		{ id: "model-b", provider: "provider-b" },
+	];
+	const clock = new ImmediateClock();
+	const response: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" },
+		makeCtx(models),
+		makeAgents(),
+		() => undefined,
+		{ depth: 0, trail: [] },
+		noOpDetails,
+		undefined,
+		noSignal(),
+		selCtx({
+			alwaysParentModel: false,
+			fallbackOnProviderFailure: true,
+			bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] },
+			registryModels: models,
+		}),
+		"t-extraction-contract",
+		undefined,
+		undefined,
+		undefined,
+		{
+			clock,
+			runAttempt: (resolved: any, _attemptId: string) => {
+				const model = resolved.modelOverride;
+				if (model === "model-a") {
+					return Promise.resolve(
+						syntheticResult({
+							exitCode: 1,
+							stopReason: "error",
+							errorMessage: "timed out",
+							stderr: "timed out",
+							selectedModel: model,
+							model,
+							provider: "provider-a",
+							retryable: true,
+							replaySafety: "safe",
+							failureClass: "timeout",
+						}),
+					);
+				}
+				return Promise.resolve(
+					syntheticResult({
+						exitCode: 0,
+						stopReason: "completed",
+						selectedModel: model,
+						model,
+						provider: "provider-b",
+					}),
+				);
+			},
+		},
+	);
+
+	assert.equal(response.isError, undefined);
+	const records = response.details.results[0].attemptRecords;
+	assert.ok(Array.isArray(records), "attemptRecords must be an array for host extraction");
+	assert.equal(records.length, 2);
+	// First attempt: zero backoff (reported immediate), terminal failure.
+	assert.equal(records[0].outcome, "failure");
+	assert.equal(records[0].backoffMs, 0, "first attempt reports zero backoff");
+	assert.equal(records[0].replaySafety, "safe", "replaySafety is present for host aggregation");
+	assert.equal(records[0].cleanupOutcome, undefined, "cleanupOutcome is unset — host treats as unknown");
+	assert.equal(records[0].phaseDurationsMs, undefined, "injected results without runner evidence remain explicitly unavailable");
+	assert.ok(typeof records[0].attemptId === "string" && records[0].attemptId.length > 0);
+	assert.ok(records[0].startedAt != null && records[0].completedAt != null, "timestamps present for measured duration");
+	assert.ok(records[0].attemptSettlementOutcome != null, "attempt settlement outcome is present without claiming parent settlement provenance");
+	// Retry attempt: non-zero backoff, terminal success, cleanup unknown.
+	assert.equal(records[1].outcome, "success");
+	assert.equal(records[1].backoffMs, 1_000, "retry attempt reports the backoff waited before it");
+	assert.equal(records[1].cleanupOutcome, undefined, "cleanupOutcome is unset — host treats as unknown");
 });
 
 // ---------------------------------------------------------------------------

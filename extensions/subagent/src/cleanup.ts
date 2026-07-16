@@ -25,17 +25,19 @@ export interface CleanupTimer {
 /** Clock and timer abstraction so tests can inject deterministic control. */
 export interface CleanupScheduler {
 	now(): number;
-	setTimer(ms: number): CleanupTimer;
+	/** Keep the timer referenced when it owns a shutdown drain. Ordinary orphan
+	 * retry timers stay unreferenced so they never retain the process alone. */
+	setTimer(ms: number, referenced?: boolean): CleanupTimer;
 }
 
 /** Real clock/timer scheduler used in production. */
 export const realScheduler: CleanupScheduler = {
 	now: () => Date.now(),
-	setTimer: (ms) => {
+	setTimer: (ms, referenced = false) => {
 		let handle: ReturnType<typeof setTimeout> | undefined;
 		const promise = new Promise<void>((resolve) => {
 			handle = setTimeout(resolve, ms);
-			handle.unref?.();
+			if (!referenced) handle.unref?.();
 		});
 		return {
 			promise,
@@ -183,7 +185,9 @@ export class OrphanCleanupRegistry {
 			const start = this.scheduler.now();
 			const maxWaitMs = 60_000;
 			while (this.hasActive()) {
-				await this.scheduler.setTimer(10).promise;
+				// A beforeExit drain must keep Node alive while it polls; the orphan
+				// retry/backoff timers it is waiting on are deliberately unreferenced.
+				await this.scheduler.setTimer(10, true).promise;
 				if (this.scheduler.now() - start > maxWaitMs) break;
 			}
 		})();

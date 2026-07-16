@@ -847,3 +847,55 @@ test('computeAggregateStats: intraday series capped at 240 for thousands of same
   assert.equal(finalCost.byProvider[0]!.key, 'openai');
   assert.equal(finalCost.byModel[0]!.key, 'm');
 });
+
+test('aggregate lifecycle stats merge completed and open attempt evidence without inventing unknown values as zero', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>();
+  const completed = makeRun({
+    runId: 'completed-lifecycle',
+    subagentAttemptSamples: [{
+      sourceId: 'done:0:a', attemptId: 'a', retryIndex: 0, outcome: 'failure',
+      durationMs: 120, durationSource: 'measured', backoffMs: 0, backoffSource: 'reported',
+      phaseDurationsMs: { preparing: 20, waiting_provider: 100 }, phaseDurationsSource: 'measured',
+      attemptSettlementOutcome: 'error', attemptSettlementSource: 'reported', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
+    }],
+  });
+  const open = makeRun({
+    runId: 'open-lifecycle', sessionPath: '/s/open',
+    // One parsed call plus one malformed call: explicit 1 must win over this
+    // call count (rather than the legacy fallback of 2).
+    unknownSubagentAttemptRecordSourceIds: ['legacy-missing'],
+    toolUsage: { ...makeRun({}).toolUsage, subagentCallCount: 2 },
+    subagentAttemptSamples: [{
+      sourceId: 'open:0:b', attemptId: 'b', retryIndex: 1, outcome: 'success',
+      durationMs: null, durationSource: 'unknown', backoffMs: 250, backoffSource: 'reported',
+      phaseDurationsMs: null, phaseDurationsSource: 'unknown',
+      attemptSettlementOutcome: 'completed', attemptSettlementSource: 'reported', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
+    }],
+  });
+  const legacyUnavailable = makeRun({
+    runId: 'legacy-lifecycle', sessionPath: '/s/legacy',
+    toolUsage: { ...makeRun({}).toolUsage, subagentCallCount: 1 },
+  });
+  const stats = finalizeAggregateStats(
+    mergeAggregateStatsAccumulators(
+      accumulateAggregateStats([completed], pricingMap),
+      accumulateAggregateStats([open, legacyUnavailable], pricingMap),
+    ),
+    NOW, [], {}, 0,
+  );
+
+  assert.deepEqual(stats.subagentLifecycle.outcomeCounts, { success: 1, failure: 1, aborted: 0 });
+  assert.equal(stats.subagentLifecycle.attemptDuration.measuredMs, 120);
+  assert.equal(stats.subagentLifecycle.attemptDuration.measuredCount, 1);
+  assert.equal(stats.subagentLifecycle.attemptDuration.unknownCount, 1);
+  assert.equal(stats.subagentLifecycle.retries.attemptCount, 1);
+  assert.equal(stats.subagentLifecycle.retries.backoff.reportedMs, 250);
+  assert.equal(stats.subagentLifecycle.attemptSettlements.reportedCount, 2);
+  assert.equal(stats.subagentLifecycle.parentSettlement.unknownCount, 2, 'attempt stop reasons never claim parent settlement provenance');
+  assert.equal(stats.subagentLifecycle.cleanupTelemetry.reportedCount, 0);
+  assert.equal(stats.subagentLifecycle.cleanupTelemetry.unknownCount, 2, 'missing cleanup telemetry is not an orphan occurrence');
+  assert.deepEqual(stats.subagentLifecycle.phaseDurations.measuredMsByPhase, { preparing: 20, waiting_provider: 100 });
+  assert.deepEqual(stats.subagentLifecycle.phaseDurations.measuredCountByPhase, { preparing: 1, waiting_provider: 1 });
+  assert.equal(stats.subagentLifecycle.phaseDurations.unknownAttemptCount, 1);
+  assert.equal(stats.subagentLifecycle.unknownAttemptRecordCallCount, 2, 'one mixed-run malformed call plus one legacy unavailable call remain unknown');
+});

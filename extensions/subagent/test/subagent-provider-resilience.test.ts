@@ -94,6 +94,7 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_TIMEOUT_MS",
 	"PIE_SUBAGENT_MAX_INFLIGHT",
 	"PIE_SUBAGENT_ALWAYS_PARENT_MODEL",
+	"PIE_SUBAGENT_BUCKETS_JSON",
 	"PI_CODING_AGENT_DIR",
 	"PI_SUBAGENT_TIMEOUT_MS",
 	"PI_SUBAGENT_DEPTH",
@@ -169,10 +170,11 @@ class FakeScheduler implements CleanupScheduler {
 		const deadline = this.nowMs + ms;
 		let resolve: () => void;
 		const promise = new Promise<void>((r) => { resolve = r; });
-		this.timers.push({ deadline, resolve: resolve! });
+		const timer = { deadline, resolve: resolve! };
+		this.timers.push(timer);
 		return {
 			promise,
-			cancel: () => { this.timers = this.timers.filter((t) => t.deadline !== deadline); },
+			cancel: () => { this.timers = this.timers.filter((t) => t !== timer); },
 		};
 	}
 
@@ -186,7 +188,7 @@ class FakeScheduler implements CleanupScheduler {
 				.sort((a, b) => a.deadline - b.deadline)[0];
 			if (!next) { this.nowMs = target; break; }
 			this.nowMs = next.deadline;
-			this.timers = this.timers.filter((t) => t.deadline !== next.deadline);
+			this.timers = this.timers.filter((t) => t !== next);
 			next.resolve();
 			await Promise.resolve();
 		}
@@ -375,13 +377,81 @@ test("execute(): output followed by a hung tool is bounded and retains the outpu
 
 // ===========================================================================
 // 2. DIFFERENT-PROVIDER RECOVERY
-//    — Covered by modes.test.ts (transient provider timeout retries)
-//      and retry.test.ts (provider-aware failover, Retry-After, auth safety).
-//      The execute() path delegates to executeSingleTask → runWithModelRetry
-//      which has identical retry logic. The key REM-06 scenario — productive
-//      runs surviving past 15 simulated minutes via the renewable lease —
-//      is tested in section 1 above.
 // ===========================================================================
+
+test("execute(): injected clock drives Retry-After wait and provider failover", async () => {
+	const savedRandom = Math.random;
+	Math.random = () => 0;
+	try {
+		delete process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL;
+		process.env.PIE_SUBAGENT_SETTLEMENT_MS = "300000";
+		process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
+		process.env.PIE_SUBAGENT_BUCKETS_JSON = JSON.stringify({
+			small: [],
+			medium: ["model-a", "model-b"],
+			frontier: [],
+		});
+
+		const clock = new FakeClock();
+		let attempt = 0;
+		setMockBehavior({
+			onPrompt: async (emit: (event: unknown) => void) => {
+				attempt++;
+				if (attempt === 1) {
+					throw Object.assign(new Error("rate limited"), {
+						status: 429,
+						headers: { "retry-after": new Date(clock.now() + 2_000).toUTCString() },
+					});
+				}
+				emit(messageEnd("done after retry", "completed"));
+			},
+		});
+
+		const phases: string[] = [];
+		const responseP = execute(
+			"tool-retry-clock",
+			{ agent: "worker", task: "do work" } as never,
+			new AbortController().signal,
+			(partial) => {
+				const phase = partial.details?.results?.[0]?.activityPhase;
+				if (phase) phases.push(phase);
+			},
+			{
+				cwd: agentDir,
+				hasUI: false,
+				model: { id: "model-a", provider: "provider-a" },
+				modelRegistry: {
+					getAvailable: () => [
+						{ id: "model-a", provider: "provider-a" },
+						{ id: "model-b", provider: "provider-b" },
+					],
+					getAll: () => [],
+					find: () => undefined,
+				},
+			} as never,
+			{ getAllTools: () => [] } as never,
+			() => false,
+			{ clock },
+		);
+
+		// Wait for the retry_wait phase to be published, then deterministically
+		// advance the fake clock through the Retry-After delay.
+		while (!phases.includes("retry_wait") && clock.elapsed() < 100) {
+			await Promise.resolve();
+		}
+		await clock.advance(2_000);
+		const response = await within(3000, responseP);
+
+		assert.equal(response.isError, undefined, "retry should succeed");
+		assert.equal(attempt, 2, "both attempts must dispatch");
+		assert.ok(phases.includes("retry_wait"), "retry_wait phase must be observable via onUpdate");
+		assert.equal(response.details.results[0]?.retryCount, 1);
+		assert.equal(response.details.results[0]?.failedModel, "model-a");
+		assert.ok(clock.elapsed() >= 2_000, "fake clock must advance through the Retry-After wait");
+	} finally {
+		Math.random = savedRandom;
+	}
+});
 
 // ===========================================================================
 // 3. LATE-EVENT FENCING

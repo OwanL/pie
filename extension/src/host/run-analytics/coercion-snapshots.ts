@@ -1,4 +1,5 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
+import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../../shared/run-analytics-contracts.js';
 import { RUN_ANALYTICS_SCHEMA_VERSION } from './types';
 import type { AgentReviewEntry, AuxiliaryLlmUsageSample, OutcomeHistoryLogEntry, RetryTimingSample, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
@@ -105,6 +106,91 @@ function coerceRetryTimingSamples(value: unknown): RetryTimingSample[] {
       scheduledDelayMs: toNonNegativeInteger(entry.scheduledDelayMs),
       measuredDelayMs: toNullableNonNegativeInteger(entry.measuredDelayMs),
       durationMs: toNullableNonNegativeInteger(entry.durationMs),
+    });
+  }
+  return samples;
+}
+
+const SUBAGENT_ATTEMPT_PHASES: readonly SubagentAttemptPhase[] = [
+  'queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'orphaned_cleanup',
+];
+
+function coercePhaseDurations(value: unknown): Partial<Record<SubagentAttemptPhase, number>> | null {
+  if (!isObjectRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length === 0 || keys.some((key) => !SUBAGENT_ATTEMPT_PHASES.includes(key as SubagentAttemptPhase))) return null;
+  const durations: Partial<Record<SubagentAttemptPhase, number>> = {};
+  for (const phase of SUBAGENT_ATTEMPT_PHASES) {
+    if (!(phase in value)) continue;
+    const duration = toNullableNonNegativeInteger(value[phase]);
+    if (duration === null || duration > Number.MAX_SAFE_INTEGER) return null;
+    durations[phase] = duration;
+  }
+  return durations;
+}
+
+function coerceSubagentAttemptSamples(value: unknown): SubagentAttemptSample[] | undefined {
+  // Absence (and a malformed collection) means unavailable lifecycle data, not
+  // a zero-attempt result. An explicit empty array remains a valid report.
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  const sources = new Set<LifecycleValueSource>(['reported', 'measured', 'estimated', 'unknown']);
+  const outcomes = new Set(['success', 'failure', 'aborted']);
+  const samples: SubagentAttemptSample[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isObjectRecord(entry) || typeof entry.sourceId !== 'string' || !entry.sourceId
+      || typeof entry.attemptId !== 'string' || !entry.attemptId
+      || !outcomes.has(entry.outcome as string)
+      || !sources.has(entry.durationSource as LifecycleValueSource)
+      || !sources.has(entry.backoffSource as LifecycleValueSource)
+      || !sources.has(entry.phaseDurationsSource as LifecycleValueSource)
+      || !sources.has(entry.attemptSettlementSource as LifecycleValueSource)
+      || entry.parentSettlementSource !== 'unknown'
+      || !sources.has(entry.cleanupSource as LifecycleValueSource)
+      || seen.has(entry.sourceId)) continue;
+    const durationMs = toNullableNonNegativeInteger(entry.durationMs);
+    const backoffMs = toNullableNonNegativeInteger(entry.backoffMs);
+    const phaseDurationsMs = coercePhaseDurations(entry.phaseDurationsMs);
+    // A claimed value without its matching provenance is malformed: preserve
+    // uncertainty rather than silently treating it as reported/measured.
+    const durationSource = durationMs === null || entry.durationSource === 'unknown'
+      ? 'unknown'
+      : entry.durationSource as LifecycleValueSource;
+    const backoffSource = backoffMs === null || entry.backoffSource === 'unknown'
+      ? 'unknown'
+      : entry.backoffSource as LifecycleValueSource;
+    const attemptSettlementOutcome = typeof entry.attemptSettlementOutcome === 'string' && entry.attemptSettlementOutcome.trim()
+      ? entry.attemptSettlementOutcome.trim()
+      : null;
+    const cleanupOutcome = typeof entry.cleanupOutcome === 'string' && entry.cleanupOutcome.trim()
+      ? entry.cleanupOutcome.trim()
+      : null;
+    seen.add(entry.sourceId);
+    samples.push({
+      sourceId: entry.sourceId,
+      attemptId: entry.attemptId,
+      retryIndex: toNonNegativeInteger(entry.retryIndex),
+      provider: typeof entry.provider === 'string' && entry.provider ? entry.provider : undefined,
+      model: typeof entry.model === 'string' && entry.model ? entry.model : undefined,
+      outcome: entry.outcome as SubagentAttemptSample['outcome'],
+      failureClass: typeof entry.failureClass === 'string' && entry.failureClass ? entry.failureClass : undefined,
+      replaySafety: typeof entry.replaySafety === 'string' && entry.replaySafety ? entry.replaySafety : undefined,
+      durationMs,
+      durationSource,
+      backoffMs,
+      backoffSource,
+      phaseDurationsMs,
+      // Runner phase timing is local elapsed evidence: accept only an explicit
+      // measured provenance; any other persisted label remains unavailable.
+      phaseDurationsSource: phaseDurationsMs !== null && entry.phaseDurationsSource === 'measured'
+        ? 'measured'
+        : 'unknown',
+      attemptSettlementOutcome,
+      attemptSettlementSource: attemptSettlementOutcome ? entry.attemptSettlementSource as LifecycleValueSource : 'unknown',
+      parentSettlementSource: 'unknown',
+      cleanupOutcome,
+      cleanupSource: cleanupOutcome ? entry.cleanupSource as LifecycleValueSource : 'unknown',
     });
   }
   return samples;
@@ -238,6 +324,10 @@ function isValidRunSnapshotCandidate(candidate: Partial<RunSnapshot>): boolean {
 
 function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
   const c = candidate as RunSnapshot;
+  const subagentAttemptSamples = coerceSubagentAttemptSamples(candidate.subagentAttemptSamples);
+  const unknownSubagentAttemptRecordSourceIds = Array.isArray(candidate.unknownSubagentAttemptRecordSourceIds)
+    ? [...new Set(candidate.unknownSubagentAttemptRecordSourceIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+    : undefined;
   return {
     sessionPath: c.sessionPath,
     runId: c.runId,
@@ -276,6 +366,8 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
     compactionCount: toNonNegativeInteger(candidate.compactionCount),
     autoRetryCount: toNonNegativeInteger(candidate.autoRetryCount),
     retryTimingSamples: coerceRetryTimingSamples(candidate.retryTimingSamples),
+    ...(subagentAttemptSamples === undefined ? {} : { subagentAttemptSamples }),
+    ...(unknownSubagentAttemptRecordSourceIds === undefined ? {} : { unknownSubagentAttemptRecordSourceIds }),
     backendErrorCodes: [...c.backendErrorCodes],
     contextTokens: candidate.contextTokens ?? null,
     contextLimit: candidate.contextLimit ?? null,

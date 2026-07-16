@@ -268,6 +268,51 @@ export interface AuxiliaryLlmUsageSample {
 }
 
 /** One auto-retry attempt's configured backoff and observed runtime timing. */
+/** The provenance of a lifecycle value. `reported` is supplied by the
+ * subagent extension, `measured` is derived from two observed timestamps,
+ * `estimated` is an explicitly-labelled future estimate, and `unknown` is
+ * deliberately not a zero/default. */
+export type LifecycleValueSource = 'reported' | 'measured' | 'estimated' | 'unknown';
+
+export type SubagentAttemptOutcome = 'success' | 'failure' | 'aborted';
+/** Producer-owned execution phases. Retry backoff is represented separately,
+ * never as a phase duration, so it cannot be double-counted. */
+export type SubagentAttemptPhase = 'queued' | 'preparing' | 'waiting_provider' | 'streaming' | 'running_tool' | 'orphaned_cleanup';
+
+/** A terminal subagent model-attempt record, normalized by the host. */
+export interface SubagentAttemptSample {
+  /** Stable tool-call/child/attempt identity for idempotent terminal delivery. */
+  sourceId: string;
+  attemptId: string;
+  /** Zero-based position within this child dispatch; values above zero are retries. */
+  retryIndex: number;
+  provider?: string;
+  model?: string;
+  outcome: SubagentAttemptOutcome;
+  failureClass?: string;
+  replaySafety?: string;
+  /** Measured from reported start/end timestamps, explicitly estimated, or unknown. */
+  durationMs: number | null;
+  durationSource: LifecycleValueSource;
+  /** Backoff before this attempt. Explicit 0 is a reported immediate retry. */
+  backoffMs: number | null;
+  backoffSource: LifecycleValueSource;
+  /** Per-phase elapsed evidence from the subagent runner. Null means phase
+   * telemetry was absent or malformed, never zero duration. */
+  phaseDurationsMs: Partial<Record<SubagentAttemptPhase, number>> | null;
+  phaseDurationsSource: 'measured' | 'unknown';
+  /** Stop/activity outcome for this attempt. It is not the parent tool-call's
+   * settlement source, which is unavailable to this producer. */
+  attemptSettlementOutcome: string | null;
+  attemptSettlementSource: LifecycleValueSource;
+  /** Parent settlement source is deliberately unavailable in subagent attempt
+   * telemetry; retained explicitly so consumers cannot infer it from stopReason. */
+  parentSettlementSource: 'unknown';
+  /** Cleanup telemetry; absence is unavailable coverage, not an orphan claim. */
+  cleanupOutcome: string | null;
+  cleanupSource: LifecycleValueSource;
+}
+
 export interface RetryTimingSample {
   /** Stable request+retry-attempt correlation key used for idempotent updates. */
   sourceId: string;
@@ -458,6 +503,14 @@ export interface RunSnapshot {
   autoRetryCount?: number;
   /** Per-attempt retry backoff and measured timing. Empty for historical runs. */
   retryTimingSamples?: RetryTimingSample[];
+  /** Terminal subagent attempt records. Absent means legacy/unavailable, never
+   * an inferred zero-attempt lifecycle. */
+  subagentAttemptSamples?: SubagentAttemptSample[];
+  /** Stable terminal subagent tool-call IDs whose attempt records were absent,
+   * partially missing, or malformed. Presence (including an empty array)
+   * distinguishes new tracked runs from legacy snapshots, while persisted IDs
+   * keep terminal replay after checkpoint restore idempotent. */
+  unknownSubagentAttemptRecordSourceIds?: string[];
   backendErrorCodes: string[];
   contextTokens: number | null;
   contextLimit: number | null;

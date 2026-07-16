@@ -160,6 +160,8 @@ export class SessionRunStateManager {
       compactionCount: 0,
       autoRetryCount: 0,
       retryTimingSamples: [],
+      subagentAttemptSamples: [],
+      unknownSubagentAttemptRecordSourceIds: [],
       backendErrorCodes: [],
       contextTokens: null,
       contextLimit: null,

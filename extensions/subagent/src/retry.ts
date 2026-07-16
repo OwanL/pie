@@ -7,7 +7,7 @@
  */
 
 import type { ModelProviderRef } from "./provider-toggles.js";
-import type { SingleResult, SubagentAttemptRecord, UsageStats } from "../types.js";
+import type { SingleResult, SubagentAttemptPhase, SubagentAttemptRecord, UsageStats } from "../types.js";
 
 /** Cancelable timer handle returned by {@link RetryClock.setTimer}. */
 export interface RetryTimer {
@@ -99,7 +99,8 @@ export function zeroUsage(): UsageStats {
  * The result is clamped to the policy maximum. Returns undefined when no
  * recognizable hint is present.
  */
-export function parseRetryAfterMs(error: unknown, policy: RetryPolicy): number | undefined {
+export function parseRetryAfterMs(error: unknown, policy: RetryPolicy, now: number | RetryClock = Date.now()): number | undefined {
+	const nowMs = typeof now === "number" ? now : now.now();
 	if (!error || typeof error !== "object") return undefined;
 	const record = error as Record<string, unknown>;
 
@@ -108,7 +109,7 @@ export function parseRetryAfterMs(error: unknown, policy: RetryPolicy): number |
 	if (directMs !== undefined) return clampRetryAfter(directMs, policy);
 
 	const retryAfter = record.retryAfter;
-	if (typeof retryAfter === "number" && Number.isFinite(retryAfter)) {
+	if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0) {
 		// Retry-After is conventionally seconds, but some SDKs already return ms.
 		const ms = retryAfter > 1e10 ? retryAfter : retryAfter * 1000;
 		return clampRetryAfter(ms, policy);
@@ -117,7 +118,7 @@ export function parseRetryAfterMs(error: unknown, policy: RetryPolicy): number |
 	// Header shapes.
 	const headerValue = headerRetryAfter(record);
 	if (headerValue !== undefined) {
-		const parsed = parseHeaderRetryAfter(headerValue);
+		const parsed = parseHeaderRetryAfter(headerValue, nowMs);
 		if (parsed !== undefined) return clampRetryAfter(parsed, policy);
 	}
 
@@ -125,7 +126,7 @@ export function parseRetryAfterMs(error: unknown, policy: RetryPolicy): number |
 }
 
 function numericMs(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
 	return undefined;
 }
 
@@ -148,15 +149,15 @@ function extractHeaders(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-function parseHeaderRetryAfter(value: string): number | undefined {
+function parseHeaderRetryAfter(value: string, now = Date.now()): number | undefined {
 	const trimmed = value.trim();
 	const asSeconds = Number(trimmed);
-	if (!Number.isNaN(asSeconds) && Number.isFinite(asSeconds) && asSeconds > 0) {
+	if (!Number.isNaN(asSeconds) && Number.isFinite(asSeconds) && asSeconds >= 0) {
 		return asSeconds * 1000;
 	}
 	// Recognize HTTP-date (Retry-After: <http-date>).
 	const date = Date.parse(trimmed);
-	if (!Number.isNaN(date)) return date - Date.now();
+	if (!Number.isNaN(date)) return date - now;
 	return undefined;
 }
 
@@ -219,10 +220,30 @@ export function excludeProviderModels(
 	}
 }
 
+const ATTEMPT_PHASES: readonly SubagentAttemptPhase[] = [
+	"queued", "preparing", "waiting_provider", "streaming", "running_tool", "orphaned_cleanup",
+];
+
+/** Copy only finite, fixed-key producer timing evidence into the terminal
+ * record. This keeps the parent-facing payload bounded even if a result was
+ * assembled by an extension/test seam rather than runner.ts. */
+function safePhaseDurations(value: SingleResult["phaseDurationsMs"]): SubagentAttemptRecord["phaseDurationsMs"] {
+	if (!value) return undefined;
+	const copied: Partial<Record<SubagentAttemptPhase, number>> = {};
+	for (const phase of ATTEMPT_PHASES) {
+		const duration = value[phase];
+		if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0) {
+			copied[phase] = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(duration));
+		}
+	}
+	return Object.keys(copied).length > 0 ? copied : undefined;
+}
+
 /** Derive the per-attempt analytics record from a completed attempt result. */
 export function buildAttemptRecord(result: SingleResult, backoffMs?: number): SubagentAttemptRecord {
 	const outcome: SubagentAttemptRecord["outcome"] =
 		result.exitCode === 0 ? "success" : result.stopReason === "aborted" ? "aborted" : "failure";
+	const phaseDurationsMs = safePhaseDurations(result.phaseDurationsMs);
 	return {
 		attemptId: result.attemptId ?? "unknown",
 		provider: result.provider,
@@ -235,7 +256,8 @@ export function buildAttemptRecord(result: SingleResult, backoffMs?: number): Su
 		failureClass: result.failureClass,
 		replaySafety: result.replaySafety,
 		backoffMs,
-		settlementOutcome: result.stopReason ?? result.activityPhase,
+		...(phaseDurationsMs ? { phaseDurationsMs } : {}),
+		attemptSettlementOutcome: result.stopReason ?? result.activityPhase,
 		cleanupOutcome: undefined,
 	};
 }

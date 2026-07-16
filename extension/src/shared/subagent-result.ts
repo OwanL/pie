@@ -1,4 +1,5 @@
 import type { ToolCall } from './protocol';
+import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../shared/run-analytics-contracts.js';
 import { isRecord } from './type-guards';
 
 /**
@@ -103,6 +104,8 @@ export interface SubagentSingleResult {
   selectionFitScores?: number[];
   /** Number of model retries before success. */
   retryCount?: number;
+  /** Terminal model-attempt diagnostics emitted by the subagent extension. */
+  attemptRecords?: unknown[];
   /** Streaming text from the current in-progress assistant turn. */
   streamingText?: string;
   /** Streaming reasoning (thinking) from the current in-progress assistant
@@ -413,6 +416,115 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
   }
 
   return undefined;
+}
+
+/**
+ * Safely parse the bounded terminal attempt records emitted by the subagent
+ * extension. This deliberately reads the raw terminal payload rather than the
+ * renderable cast above: analytics must reject malformed extension data instead
+ * of letting it become a zero-valued lifecycle observation.
+ */
+export function getTerminalSubagentAttemptSamplesFromToolCall(
+  toolCall: Pick<ToolCall, 'id' | 'result' | 'status'>,
+): { samples: SubagentAttemptSample[]; coverageComplete: boolean } {
+  if (!toolCall.id || toolCall.status === 'running' || !isRecord(toolCall.result)) {
+    return { samples: [], coverageComplete: false };
+  }
+  const direct = Array.isArray(toolCall.result.results)
+    ? toolCall.result.results
+    : isRecord(toolCall.result.details) && Array.isArray(toolCall.result.details.results)
+      ? toolCall.result.details.results
+      : [];
+  const samples: SubagentAttemptSample[] = [];
+  const seen = new Set<string>();
+  let coverageComplete = direct.length > 0;
+  for (const [resultIndex, result] of direct.entries()) {
+    if (!isRecord(result) || !Array.isArray(result.attemptRecords) || result.attemptRecords.length === 0) {
+      coverageComplete = false;
+      continue;
+    }
+    for (const [retryIndex, record] of result.attemptRecords.entries()) {
+      if (!isRecord(record) || typeof record.attemptId !== 'string' || !record.attemptId.trim()
+        || (record.outcome !== 'success' && record.outcome !== 'failure' && record.outcome !== 'aborted')) {
+        coverageComplete = false;
+        continue;
+      }
+      const attemptId = record.attemptId.trim();
+      const sourceId = `${toolCall.id}:${resultIndex}:${attemptId}`;
+      if (seen.has(sourceId)) continue;
+      seen.add(sourceId);
+      const startedAt = finiteNonNegative(record.startedAt);
+      const completedAt = finiteNonNegative(record.completedAt);
+      const measuredDuration = startedAt !== null && completedAt !== null && completedAt >= startedAt
+        ? completedAt - startedAt
+        : null;
+      // Reserved for a future extension producer. An estimate is accepted only
+      // when explicitly labelled; no parent/tool duration is used as a proxy.
+      const estimatedDuration = measuredDuration === null ? finiteNonNegative(record.estimatedDurationMs) : null;
+      const backoffMs = finiteNonNegative(record.backoffMs);
+      const phaseDurationsMs = parsePhaseDurations(record.phaseDurationsMs);
+      const attemptSettlementOutcome = nonEmptyUnknownString(record.attemptSettlementOutcome);
+      const cleanupOutcome = nonEmptyUnknownString(record.cleanupOutcome);
+      samples.push({
+        sourceId,
+        attemptId,
+        retryIndex,
+        provider: nonEmptyUnknownString(record.provider),
+        model: nonEmptyUnknownString(record.model),
+        outcome: record.outcome,
+        failureClass: nonEmptyUnknownString(record.failureClass),
+        replaySafety: nonEmptyUnknownString(record.replaySafety),
+        durationMs: measuredDuration ?? estimatedDuration,
+        durationSource: lifecycleSource(measuredDuration, estimatedDuration, 'measured'),
+        backoffMs,
+        backoffSource: backoffMs === null ? 'unknown' : 'reported',
+        phaseDurationsMs,
+        phaseDurationsSource: phaseDurationsMs === null ? 'unknown' : 'measured',
+        attemptSettlementOutcome: attemptSettlementOutcome ?? null,
+        attemptSettlementSource: attemptSettlementOutcome ? 'reported' : 'unknown',
+        parentSettlementSource: 'unknown',
+        cleanupOutcome: cleanupOutcome ?? null,
+        cleanupSource: cleanupOutcome ? 'reported' : 'unknown',
+      });
+    }
+  }
+  return { samples, coverageComplete };
+}
+
+const ATTEMPT_PHASES: readonly SubagentAttemptPhase[] = [
+  'queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'orphaned_cleanup',
+];
+
+/** Accept only the fixed, finite producer map. retry_wait is intentionally not
+ * accepted because retry.ts reports its backoff separately. */
+function parsePhaseDurations(value: unknown): Partial<Record<SubagentAttemptPhase, number>> | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length === 0 || keys.some((key) => !ATTEMPT_PHASES.includes(key as SubagentAttemptPhase))) return null;
+  const parsed: Partial<Record<SubagentAttemptPhase, number>> = {};
+  for (const phase of ATTEMPT_PHASES) {
+    if (!(phase in value)) continue;
+    const duration = finiteNonNegative(value[phase]);
+    if (duration === null) return null;
+    parsed[phase] = duration;
+  }
+  return parsed;
+}
+
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.trunc(value) : null;
+}
+
+function nonEmptyUnknownString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function lifecycleSource(
+  measured: number | null,
+  estimated: number | null,
+  measuredSource: LifecycleValueSource,
+): LifecycleValueSource {
+  return measured !== null ? measuredSource : estimated !== null ? 'estimated' : 'unknown';
 }
 
 export function getRenderableSubagentResultFromToolCall(

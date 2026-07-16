@@ -743,3 +743,67 @@ test('subagent tool call stamps modelId from result.model when sample lacks mode
   assert.equal(run?.turnThroughputSamples.length, 1);
   assert.equal(run?.turnThroughputSamples[0]?.modelId, 'anthropic/claude-sub');
 });
+
+test('terminal subagent attempt records are parsed safely and remain idempotent', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const tool: ToolCall = {
+    id: 'subagent-attempts', name: 'subagent', input: { agent: 'worker', task: 'work' }, status: 'completed',
+    result: { details: { results: [{
+      agent: 'worker', task: 'work', exitCode: 0, messages: [],
+      attemptRecords: [
+        { attemptId: 'first', outcome: 'failure', startedAt: 100, completedAt: 250, backoffMs: 0, phaseDurationsMs: { preparing: 50, waiting_provider: 100 }, attemptSettlementOutcome: 'error' },
+        { attemptId: 'retry', outcome: 'success', startedAt: 500, completedAt: 900, backoffMs: 250, phaseDurationsMs: { waiting_provider: 400 }, attemptSettlementOutcome: 'completed' },
+        { attemptId: '', outcome: 'success' },
+        { attemptId: 'bad-outcome', outcome: 'maybe' },
+      ],
+    }] } },
+  };
+  harness.tracker.onToolStarted(harness.sessionPath, { ...tool, status: 'running' });
+  harness.tracker.onToolFinished(harness.sessionPath, tool);
+  harness.tracker.onToolFinished(harness.sessionPath, tool);
+
+  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.subagentAttemptSamples;
+  assert.equal(samples?.length, 2, 'duplicate terminal delivery and malformed records must not inflate samples');
+  assert.deepEqual(samples?.map((sample) => ({
+    sourceId: sample.sourceId, durationMs: sample.durationMs, durationSource: sample.durationSource,
+    backoffMs: sample.backoffMs, phaseDurationsMs: sample.phaseDurationsMs, phaseDurationsSource: sample.phaseDurationsSource, cleanupSource: sample.cleanupSource,
+  })), [
+    { sourceId: 'subagent-attempts:0:first', durationMs: 150, durationSource: 'measured', backoffMs: 0, phaseDurationsMs: { preparing: 50, waiting_provider: 100 }, phaseDurationsSource: 'measured', cleanupSource: 'unknown' },
+    { sourceId: 'subagent-attempts:0:retry', durationMs: 400, durationSource: 'measured', backoffMs: 250, phaseDurationsMs: { waiting_provider: 400 }, phaseDurationsSource: 'measured', cleanupSource: 'unknown' },
+  ]);
+  assert.deepEqual(harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.unknownSubagentAttemptRecordSourceIds,
+    ['subagent-attempts'], 'partially malformed child records leave this call explicitly incomplete');
+});
+
+test('subagent lifecycle retains explicit unknown coverage for a malformed terminal call in a mixed run', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const valid: ToolCall = {
+    id: 'subagent-valid', name: 'subagent', input: { agent: 'worker', task: 'work' }, status: 'completed',
+    result: { details: { results: [{ agent: 'worker', task: 'work', exitCode: 0, messages: [],
+      attemptRecords: [{ attemptId: 'ok', outcome: 'success', phaseDurationsMs: { preparing: 1 }, attemptSettlementOutcome: 'completed' }],
+    }] } },
+  };
+  const malformed: ToolCall = {
+    id: 'subagent-malformed', name: 'subagent', input: { agent: 'worker', task: 'work' }, status: 'completed',
+    result: { details: { results: [{ agent: 'worker', task: 'work', exitCode: 1, messages: [], attemptRecords: [{ attemptId: '', outcome: 'wat' }] }] } },
+  };
+  for (const terminal of [valid, malformed]) {
+    harness.tracker.onToolStarted(harness.sessionPath, { ...terminal, status: 'running' });
+    harness.tracker.onToolFinished(harness.sessionPath, terminal);
+  }
+  const run = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun;
+  assert.equal(run?.subagentAttemptSamples?.length, 1);
+  assert.deepEqual(run?.unknownSubagentAttemptRecordSourceIds, ['subagent-malformed'],
+    'one malformed call remains explicitly unknown beside one parsed call');
+
+  const restored = createHarness();
+  restored.tracker.restore(harness.tracker.serializeSessions());
+  restored.tracker.onToolFinished(restored.sessionPath, malformed);
+  assert.deepEqual(
+    restored.tracker.serializeSessions()[restored.sessionPath]?.currentRun?.unknownSubagentAttemptRecordSourceIds,
+    ['subagent-malformed'],
+    'checkpoint restore plus terminal replay remains idempotent',
+  );
+});

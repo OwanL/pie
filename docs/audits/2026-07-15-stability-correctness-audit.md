@@ -41,12 +41,19 @@ pre-push gate in 305.1 seconds: generated models in sync, 14/14 configured
 TypeScript projects, lint, 15/15 packages (4,428 passed, 0 failed, 4 skipped),
 and the isolated production build. It was pushed without force.
 
+A later mixed implementation checkpoint (`f5fb9df`) completed REM-01 through
+REM-06 alongside unrelated model, benchmark, harness, analytics, pruning, and UI
+work. Independent follow-up review then corrected the retry-clock/`retry_wait`
+acceptance seam and made the process-exit orphan drain retain the event loop
+while it is active. Because that checkpoint is mixed and concurrent working-tree
+edits remain, it is not evidence of a clean isolated whole-repository checkpoint.
+
 This evidence does **not** justify claiming that every long-running in-process
 operation is quarantined or that pie is fully ready for unattended real work.
-The highest residual risks are generation-unfenced SDK writes/side effects from
-retired runtimes, incomplete subagent retry/orphan controls, and the absence of
-real-browser end-to-end paint/interaction testing (VS Code manipulation was
-prohibited during this audit).
+The highest residual risks are arbitrary external effects from retired in-process
+runtimes, heuristic resource-loader listener reclamation, incomplete producer
+correlation for parent settlement/orphan outcomes and provider subphases, and the absence of real-browser end-to-end
+paint/interaction testing (VS Code manipulation was prohibited during this audit).
 
 ## Initial repository and verification state
 
@@ -115,9 +122,9 @@ extensions, and external side-effect authority with the parent.
 | ID | Severity | Subsystem | Evidence / root cause | Resolution and evidence | Commit | Residual risk |
 |---|---|---|---|---|---|---|
 | INF-01 | P1 | Build safety | Pre-push used the syncing extension build, which could modify the active installed extension. | Hook uses `--no-sync`; safety test pins the command. | `84869cb` | Manual installed-extension validation intentionally omitted. |
-| INF-02 | P1 | Verification | Script tests and generated-model safety were not first-class changed-file/pre-commit gates; focused script tests used an inconsistent cwd; most root maintenance scripts selected no tests. | Added package/generation gates, flake characterization, repo-root focused execution, and mapping of supported root `scripts/*.mjs` changes to the scripts suite. | `b27b3b9`, `befdd85`, `a6e0de2`, `02aef45` | Subagent is still absent from the configured TypeScript project list; see REM-05. |
+| INF-02 | P1 | Verification | Script tests and generated-model safety were not first-class changed-file/pre-commit gates; focused script tests used an inconsistent cwd; most root maintenance scripts selected no tests. | Added package/generation gates, flake characterization, repo-root focused execution, mapping of supported root `scripts/*.mjs` changes to the scripts suite, and the subagent release project to the canonical TypeScript list. | `b27b3b9`, `befdd85`, `a6e0de2`, `02aef45`, `f5fb9df` | The canonical gate still cannot prove isolation when unrelated concurrent changes share the working tree. |
 | BE-01 | P0 | Provider headers | Header timeout depended on upstream honoring abort, so a fetch could retain a slot forever. | Local promise settlement and exact release; deterministic abort-ignoring fetch tests. | `1418579` | An in-process upstream may still continue external work after local settlement. |
-| BE-02 | P0 | Runtime recovery | Semantic timeout retired UI events but reused/stalled the same runtime. | Stuck contexts are fenced and replaced; sends wait for authoritative recovery. | `fb0517a`, `5daf3a2` | SDK persistence/external effects from the retired runtime are not generation-fenced; see REM-01. |
+| BE-02 | P0 | Runtime recovery | Semantic timeout retired UI events but reused/stalled the same runtime. | Stuck contexts are fenced and replaced; sends wait for authoritative recovery. The SDK `SessionManager` persistence boundary is generation-owned and invalidated on every retirement/replacement/shutdown path, so late retired-runtime JSONL writes are rejected while replacement-runtime writes remain authoritative. | `fb0517a`, `5daf3a2`, `f5fb9df` | In-process tool/provider/extension side effects outside `SessionManager` persistence remain unenforceable without runtime isolation. |
 | BE-03 | P1 | Recovery race | Interrupt checked recovery only before awaiting abort; semantic recovery could start during that await and both watchdogs would replace the runtime. | Revalidate ownership after the abort race; deterministic delayed-abort race test. | `42d7386` | Recovery construction remains split across call sites rather than one server `ensureRecovery` primitive. |
 | BE-04 | P2 | Extension UI | `cancelAll()` settled existing dialogs but a retired runtime could emit new late dialogs/notices. | Permanent bridge `dispose()` fence at replacement, semantic/interrupt retirement, and shutdown; normal Stop keeps reusable cancellation. | `e99d8b4` | This fences UI requests, not arbitrary SDK/tool external side effects. |
 | PG-01 | P1 | Transport circuit | Ordinary connect failures were not counted; 5xx half-open responses could close a circuit; queued requests did not always revalidate. | Count pre-header failures, reopen on retryable 5xx, and revalidate after queue admission. | `eff240d` | The gate deliberately does not replay responses; SDK retry policy remains separate. |
@@ -128,12 +135,12 @@ extensions, and external side-effect authority with the parent.
 | TR-01 | P0 | Live checkpoints | Equal/older checkpoints and late terminal repair could overwrite newer live authority. | Monotonic checkpoint acceptance, tombstones, and terminal guards. | `27fc019`, `2d4c5a2` | Real webview/VS Code paint behavior remains manually untested. |
 | TR-02 | P1 | Transcript commit | The registry silently rejected leaves above 512 even though valid live tool history is unbounded by contract. | Remove leaf cap; retain the pure 600-tool decision case and add a mounted-provider characterization proving all 601 accepted leaves traverse `reportLeaf`. | `64aa65d`, `7a0a775` | A future aggregate proof should remain renderer-owned and revision-bound. |
 | UI-01 | P1 | Send recovery | Post-ack/preflight failure could lose draft inputs or leave readiness recovery idle; background inputs could attach to the active composer. | Lossless promoted rollback, imperative readiness retry, session-scoped drafts/inputs; contract tests/docs. | `9725286` | None known in characterized paths. |
-| UI-02 | P1 | Indicators | Transcript-derived memo signatures omitted session identity, so equal-shaped tabs could show stale cost/context values. | Key every transcript-derived memo by `sessionPath`; equal-shape switch test. | `c4a5883` | Recursive large subagent payload scans remain a performance risk; see REM-04. |
+| UI-02 | P1 | Indicators | Transcript-derived memo signatures omitted session identity, so equal-shaped tabs could show stale cost/context values. | Key every transcript-derived memo by `sessionPath`; add revision-keyed caches for recursive subagent previews, token-rate projections, costs, normalization, context breakdowns, and preview-byte accounting; characterize equal-shape switches and stable revisions. | `c4a5883`, `f5fb9df` | Cache soundness depends on the existing globally unique attempt/tool IDs and monotonic live `seq` contract; real-browser main-thread cost is still unmeasured. |
 | UI-03 | P1 | Live cost | Canonical context footprint combines uncached/cache channels but was priced entirely at the uncached input rate; a live model with no pricing was displayed as a known `$0.00`. | Keep live context tokens unclassified, price only known output, and render unpriced live usage as unavailable rather than zero; distinct-rate and no-pricing tests cover label, tooltip, and ARIA. | `2840e69`, `7a0a775` | The exact live total remains unknown until provider channel usage arrives. |
 | UI-04 | P2 | Auto-follow | Settled bottom-follow scheduled another rAF before checking zero delta, retaining a no-op 60 Hz callback. | Quiesce at target; transcript, virtual-size, session, and resize signals restart it; empty-queue/resize tests. | `326c757` | Real-browser frame/paint impact is not measured. |
 | UI-05 | P1 | Terminal extension UI | Direct semantic `turn.terminal` committed durable state but did not clear its session's pending extension dialog; replayed terminal events had the same gap. | Every committed semantic terminal now clears pending extension-UI requests, with direct and repair-path coverage. | `7a0a775` | A dialog already rendered by an unresponsive webview still depends on the next state delivery. |
 | SEC-01 | P1 | Diagnostics | Log messages, nested string values, stderr tails, dropped-line reasons, and raw notices could carry credentials; per-chunk stderr redaction leaked suffixes when a label/value straddled chunks. | Shared redactor at persistence/transport/webview boundaries; stderr now buffers bounded raw bytes and redacts only complete log/diagnostic boundaries; every byte split of a labeled credential is characterized. | `94de53a`, `7a0a775` | Redaction is pattern-based; arbitrary secrets without recognizable context cannot be guaranteed. |
-| SA-01 | P0 | Subagent admission | An already-aborted child acquired with no signal and could wait forever behind the process cap. | Pass the aborted signal; saturated-cap test proves prompt local settlement and no session creation. | `fa2621b` | Late session creation after a separate pre-spawn abort race remains orphanable; see REM-02. |
+| SA-01 | P0 | Subagent admission | An already-aborted child acquired with no signal and could wait forever behind the process cap. | Pass the aborted signal; saturated-cap test proves prompt local settlement and no session creation. Late session-creation promises are now retained by an attempt-owned orphan registry, fenced from setup/prompt, and disposed exactly once with bounded retry. | `fa2621b`, `f5fb9df` | Resource-loader disposal is unavailable; listener reclamation remains heuristic and unsafe for overlapping loader lifetimes (REM-07). |
 | SA-02 | P0 | Subagent cleanup | Exceptions after session creation but before prompt `try/finally` leaked session and root permit. | Single exact-once cleanup owner established immediately after creation; `setUIContext` and subscribe failures each tested with capacity-one follow-up. | `fa2621b` | Upstream loader has no reliable disposal API; listener reclamation remains heuristic. |
 | SA-03 | P1 | Attempt ownership | No-op unsubscribe and trailing throttled callbacks let a failed attempt mutate/publish after retry or terminal cleanup. | Close attempt emitter, fence every subscription callback before teardown, and cancel parent UI proxy in final cleanup. | `f8c9cd8` | In-process upstream side effects remain outside the local fence. |
 | SA-04 | P1 | Retired UI proxy | The SDK or an extension could retain a child UI proxy after terminal cleanup and use it to create a new parent dialog after the one-shot cancellation. | Attempt cleanup permanently disposes the proxy; captured post-terminal select/input/confirm/notify calls are fenced while active nested identity forwarding remains covered. | `2431f71` | This fences extension UI only, not arbitrary retained SDK/tool callbacks. |
@@ -150,7 +157,7 @@ extensions, and external side-effect authority with the parent.
 | Concurrent stale success after suspension | Two controlled in-flight responses | Older success cannot clear newer pause generation | Passed |
 | Ordinary transient 429 | Controlled response | Does not misclassify as account suspension | Passed |
 | 429 headers with stalled inspection body | Stalling body + caller abort | Inspection is bounded/abortable and releases the slot | Passed |
-| Retry hint parsing/backoff | Provider gate and SDK are separate | No central replay; subagent-specific bounded `Retry-After` is not implemented | Open |
+| Retry hint parsing/backoff | Numeric and HTTP-date hints, injected clock, abort/backoff/failover tests | Subagent replay-safe transient failures use bounded abortable `Retry-After`/exponential delay and exclude the failed provider; provider gate itself still does not replay responses | Passed |
 | Stalled response body | Idle watchdog | Errors stream and releases slot | Passed |
 | Caller abort before/after headers | Controlled abort | Releases promptly; cancellation is not provider failure | Passed |
 | Queue expiry and queued abort | Controlled queue | Bounded rejection/removal | Passed |
@@ -189,7 +196,7 @@ an outage. No prompt was replayed after visible output or tool activity.
 | Live cost | Current context footprint plus streaming estimate | Cache/category uncertainty must be labeled rather than priced with false precision. |
 | Subagent direct cost | Nested terminal subagent result usage | Session-keyed after this audit; large recursive previews can still be expensive. |
 | Provider state | ProviderGate pool/circuit/account state | Active, queued, cap, pause, strikes, and afterburn now survive live overrides. |
-| Timing/activity | Backend/session/subagent lifecycle observations | Outer settlement timing is implemented; phase-specific subagent lease/retry analytics remain incomplete. |
+| Timing/activity | Backend/session/subagent lifecycle observations | Phase-specific renewable outer leases and persisted per-attempt provider/model/outcome/failure/replay/backoff records are implemented. Host aggregation of attempt duration, settlement, retry backoff, and orphan-cleanup provenance is implemented (concurrent analytics work); granular per-phase durations (queue/header/first-token/stream-idle) remain uncaptured by the subagent lifecycle. |
 
 Unknown or unclassified data should remain explicit. In particular, a combined
 context footprint is not evidence that every token was billed at the uncached
@@ -251,10 +258,11 @@ A future real-browser trace should measure host snapshot build through
   failed, 4 skipped; extension coverage 90.4% lines / 84.3% branches;
   subagent 97.9% / 89.8%. The earlier pushed checkpoint had 4,410 tests; the
   first four post-review full hooks had 4,427 before the shutdown test landed.
-- Configured typecheck is incremental and parallel (14 projects, 8.5 s in the
-  first pushed checkpoint). The subagent package is not yet one of those projects;
-  its existing tsconfig exposes unresolved SDK compatibility and stale test
-  fixture types when invoked directly.
+- Configured typecheck is incremental and parallel. The original pushed
+  checkpoint covered 14 projects; the canonical list now covers 15, including
+  `extensions/subagent/tsconfig.release.json`. Source/release compatibility is
+  therefore checked without treating stale test-fixture types as production
+  errors.
 - No hooks were bypassed. The first push attempt hit the coordinator's
   four-minute wrapper timeout and pushed nothing; it was rerun unchanged with a
   longer outer timeout and completed in 305.2 seconds.
@@ -278,8 +286,12 @@ A future real-browser trace should measure host snapshot build through
 - `extensions/subagent/README.md` now distinguishes transcript isolation from
   security/process isolation and describes the actually implemented timeout
   controls.
-- `HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md` no longer claims phase leases,
-  orphan retries, or shutdown drain are complete.
+- `HANDOFF_SUBAGENT_PROVIDER_RESILIENCE.md` records phase leases, bounded
+  provider-aware retry, orphan ownership/drain, and the deterministic matrix as
+  implemented. Host persistence/coercion/aggregation now covers attempt timing,
+  measured runner phases, retry/backoff, attempt outcomes, and unknown telemetry
+  coverage; parent settlement source, eventual orphan outcome, provider subphase
+  correlation, and queued-message fake-clock end-to-end coverage remain open.
 - This report is linked from `docs/INDEX.md`.
 
 ## Verification commands and outcomes
@@ -334,6 +346,27 @@ gate elapsed: 305.1 s
 push: c4a5883..74df856 (no force)
 ```
 
+The REM-01–06 follow-up was verified on the mixed working tree after independent
+review. It was not run as an isolated canonical pre-push checkpoint because
+unrelated benchmark, harness, pruning, extension, model/settings, and test-runner
+edits were concurrently changing:
+
+```text
+git diff --check: passed
+sync-models --check: passed
+typecheck: 15/15 projects passed
+subagent: 544 passed, 0 failed, 0 skipped
+scripts: 66 passed, 0 failed, 0 skipped
+affected extension tests: 237 passed, 0 failed, 0 skipped
+production extension build: passed and synced
+canonical pre-push gate: not run; isolation could not be established safely
+```
+
+The initial parallel attempts to launch the subagent and scripts package suites
+both returned the test coordinator's `no-ready-worker` result. They were rerun
+sequentially and passed as reported above; this was invocation contention, not a
+test failure.
+
 The real-provider check was an automated external smoke, distinct from the
 deterministic suites:
 
@@ -352,15 +385,22 @@ Development Host, watcher, or syncing extension build was run. Therefore the
 manual visual/keyboard/screen-reader, real paint latency, focus restoration,
 notification, and forced-backend-crash smoke cases remain unperformed.
 
-## Remaining prioritized work
+## REM-01–06 follow-up status
 
-| ID | Priority | Remaining work | Why it remains |
+| ID | Status | Implemented boundary | Residual risk |
 |---|---|---|---|
-| REM-01 | P1 | Add generation ownership at the SDK session persistence boundary, or isolate runtimes in workers/processes. | Event fencing cannot prevent a retired in-process SDK prompt/abort from appending to the same JSONL or causing late external side effects. |
-| REM-02 | P1 | Track and dispose sessions/resource loaders that resolve after a pre-spawn abort race. | Local settlement releases the permit, but a late creation promise can become an invisible in-process orphan. |
-| REM-03 | P1 | Implement provider-aware subagent attempt identity, bounded abortable backoff/`Retry-After`, per-attempt tree budget, and an orphan registry/shutdown drain. | Current fallback can retry the same failed provider, has no backoff, and counts a multi-attempt task as one tree session. |
-| REM-04 | P1 | Bound/collapse repeated recursive signature, JSON serialization, and tokenization work for multi-megabyte live subagent previews; cache token-rate projections by live revision. | Valid payloads up to the protocol ceiling can still consume the webview/host main thread repeatedly. |
-| REM-05 | P1 | Make subagent source a supported configured TypeScript project, separating source/test configs and reconciling SDK compatibility types. | Direct `tsc` currently exposes module/type drift that the release gate does not see. |
-| REM-06 | P1 | Build the complete fake-clock provider/subagent matrix, including >15-minute productive control and persisted per-attempt analytics. | Required acceptance evidence is still incomplete. |
-| REM-07 | P2 | Replace heuristic process-listener reclamation with upstream loader disposal and coordinate overlapping loader lifetimes. | One subagent scope can otherwise remove another overlapping scope's SDK listener. |
-| REM-08 | P2 | Replace the legacy streaming microbenchmark with production v5 envelopes/window sizes and add a real-browser trace. | Current numbers cannot establish end-to-visible or paint latency. |
+| REM-01 | Completed | Generation-owned `SessionManager` persistence fence on construction, retirement, replacement, recovery, and shutdown; focused late-write/replacement-write tests. | Arbitrary in-process external side effects remain outside the persistence fence. |
+| REM-02 | Completed | Late session creation remains attempt-owned; setup/prompt are fenced; disposal is exact-once and bounded through the orphan registry. | Upstream resource loaders have no reliable disposable ownership API. |
+| REM-03 | Completed | Provider-aware attempt IDs/exclusion, replay-safety classification, bounded abortable `Retry-After`/backoff, per-dispatch tree charging, attempt records, best-effort shutdown drain, and host persistence/coercion/aggregation of attempt and measured runner-phase evidence. | Parent settlement source, eventual orphan cleanup outcome, and provider queue/header/first-token/stream-idle subphase correlation remain explicitly unknown. |
+| REM-04 | Completed | Revision-keyed caches cover recursive preview normalization/signatures, token rates, costs, context breakdowns, and preview-byte accounting. | Soundness relies on monotonic revision and globally unique ID contracts; real-browser impact remains unmeasured. |
+| REM-05 | Completed | Subagent source has a release tsconfig in the canonical 15-project typecheck list. | Test fixtures remain intentionally outside that production config. |
+| REM-06 | Completed for the documented subagent/provider matrix | Fake-clock phase leases, >15-minute productive control, retry/failover, replay fencing, partial-output preservation, and orphan observability are covered. | Host aggregation of attempt records is implemented (concurrent analytics work). The queued-message dwell watchdog and Stop/Keep/Remove offer (§F) are not yet implemented, so dedicated fake-clock end-to-end coverage is blocked on that implementation. |
+
+## Next prioritized work
+
+1. Complete lifecycle producer correlation for provider subphases, parent settlement source, and eventual orphan cleanup outcomes; host attempt/runner-phase/retry persistence and aggregation is implemented.
+2. Queued-message dwell watchdog and Stop/Keep/Remove offer (§F) — not yet implemented (an earlier handoff draft overstated this as done); dedicated fake-clock end-to-end coverage is blocked until it exists.
+3. REM-08 real-browser traces and production-v5 benchmark replacement.
+4. REM-07 disposable resource-loader ownership and overlapping-lifetime safety.
+5. A design decision on child-process runtime isolation for enforceable
+   containment of arbitrary external side effects.

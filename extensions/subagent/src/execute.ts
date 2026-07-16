@@ -505,6 +505,7 @@ function dispatchSingle(
 	parentUiBridge: ParentBridge | undefined,
 	parentSessionId: string | undefined,
 	allToolNames: string[] | undefined,
+	clock: RetryClock,
 ) {
 	return executeSingleTask({
 		params,
@@ -519,6 +520,7 @@ function dispatchSingle(
 		parentUiBridge,
 		parentSessionId,
 		allToolNames,
+		_internal: { clock },
 	});
 }
 
@@ -704,6 +706,7 @@ export async function execute(
 			ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
 			parentSessionId,
 			allToolNames,
+			settlementClock,
 		);
 	}
 
@@ -752,6 +755,7 @@ export async function execute(
 		ctx.hasUI ? (ctx.ui as unknown as ParentBridge) : undefined,
 		parentSessionId,
 		allToolNames,
+		settlementClock,
 	);
 	// Observe a late rejection from an orphaned dispatch so it never surfaces as
 	// unhandled, but retain the root cause in diagnostics after force-settlement.
@@ -803,6 +807,11 @@ export async function execute(
 		try {
 			const graceWinner = await Promise.race([dispatchPromise, gracePromise]);
 			if (graceWinner !== FORCE_SETTLE) {
+				// The settled dispatch may carry terminal attempt analytics that were
+				// never emitted through onUpdate. Capture them before applying the
+				// force-settlement terminal projection so host persistence retains the
+				// real attempt evidence instead of degrading this call to unknown.
+				captureDetails(graceWinner.details);
 				return {
 					...graceWinner,
 					details: terminalDetails(cause),

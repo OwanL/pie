@@ -24,6 +24,7 @@ import type {
   AggregateSeriesPoint,
   AggregateSeriesSegment,
   AggregateStats,
+  AggregateSubagentLifecycleStats,
 } from '../../shared/protocol';
 import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
@@ -141,6 +142,7 @@ export interface AggregateStatsAccumulator {
   lastRunEndedMs: number;
   lastRun: AggregateLastRun | null;
   runCount: number;
+  subagentLifecycle: AggregateSubagentLifecycleStats;
 }
 
 /** Optional pure-computation instrumentation used by regression tests/benchmarks. */
@@ -184,6 +186,104 @@ interface WeekStats {
 interface LiveStats {
   liveTokensPerSecond: number;
   runningSessionCount: number;
+}
+
+function createSubagentLifecycleStats(): AggregateSubagentLifecycleStats {
+  return {
+    attemptCount: 0,
+    outcomeCounts: { success: 0, failure: 0, aborted: 0 },
+    attemptDuration: { reportedMs: 0, reportedCount: 0, measuredMs: 0, measuredCount: 0, estimatedMs: 0, estimatedCount: 0, unknownCount: 0 },
+    attemptSettlements: { reportedCount: 0, unknownCount: 0, byOutcome: {} },
+    parentSettlement: { unknownCount: 0 },
+    retries: { attemptCount: 0, backoff: { reportedMs: 0, reportedCount: 0, estimatedMs: 0, estimatedCount: 0, unknownCount: 0 } },
+    cleanupTelemetry: { reportedCount: 0, unknownCount: 0, byOutcome: {} },
+    phaseDurations: { measuredMsByPhase: {}, measuredCountByPhase: {}, unknownAttemptCount: 0 },
+    unknownAttemptRecordCallCount: 0,
+  };
+}
+
+function addSubagentLifecycleStats(
+  target: AggregateSubagentLifecycleStats,
+  source: AggregateSubagentLifecycleStats,
+): void {
+  target.attemptCount += source.attemptCount;
+  for (const outcome of ['success', 'failure', 'aborted'] as const) target.outcomeCounts[outcome] += source.outcomeCounts[outcome];
+  for (const key of ['reportedMs', 'reportedCount', 'measuredMs', 'measuredCount', 'estimatedMs', 'estimatedCount', 'unknownCount'] as const) {
+    target.attemptDuration[key] += source.attemptDuration[key];
+  }
+  for (const key of ['reportedCount', 'unknownCount'] as const) {
+    target.attemptSettlements[key] += source.attemptSettlements[key];
+    target.cleanupTelemetry[key] += source.cleanupTelemetry[key];
+  }
+  target.parentSettlement.unknownCount += source.parentSettlement.unknownCount;
+  for (const [outcome, count] of Object.entries(source.attemptSettlements.byOutcome)) target.attemptSettlements.byOutcome[outcome] = (target.attemptSettlements.byOutcome[outcome] ?? 0) + count;
+  for (const [outcome, count] of Object.entries(source.cleanupTelemetry.byOutcome)) target.cleanupTelemetry.byOutcome[outcome] = (target.cleanupTelemetry.byOutcome[outcome] ?? 0) + count;
+  for (const [phase, duration] of Object.entries(source.phaseDurations.measuredMsByPhase)) target.phaseDurations.measuredMsByPhase[phase] = (target.phaseDurations.measuredMsByPhase[phase] ?? 0) + duration;
+  for (const [phase, count] of Object.entries(source.phaseDurations.measuredCountByPhase)) target.phaseDurations.measuredCountByPhase[phase] = (target.phaseDurations.measuredCountByPhase[phase] ?? 0) + count;
+  target.phaseDurations.unknownAttemptCount += source.phaseDurations.unknownAttemptCount;
+  target.retries.attemptCount += source.retries.attemptCount;
+  for (const key of ['reportedMs', 'reportedCount', 'estimatedMs', 'estimatedCount', 'unknownCount'] as const) target.retries.backoff[key] += source.retries.backoff[key];
+  target.unknownAttemptRecordCallCount += source.unknownAttemptRecordCallCount;
+}
+
+function accumulateSubagentLifecycle(run: RunSnapshot, target: AggregateSubagentLifecycleStats): void {
+  const samples = run.subagentAttemptSamples ?? [];
+  // New tracker ingestion persists this count even when other calls in the run
+  // had valid records. Historical snapshots lack it, so retain their conservative
+  // call-count fallback instead of treating a mixed run as fully covered.
+  target.unknownAttemptRecordCallCount += run.unknownSubagentAttemptRecordSourceIds?.length
+    ?? (run.toolUsage?.subagentCallCount ?? 0);
+  for (const sample of samples) {
+    target.attemptCount += 1;
+    target.outcomeCounts[sample.outcome] += 1;
+    if (sample.durationMs === null || sample.durationSource === 'unknown') {
+      target.attemptDuration.unknownCount += 1;
+    } else if (sample.durationSource === 'measured') {
+      target.attemptDuration.measuredMs += sample.durationMs;
+      target.attemptDuration.measuredCount += 1;
+    } else if (sample.durationSource === 'estimated') {
+      target.attemptDuration.estimatedMs += sample.durationMs;
+      target.attemptDuration.estimatedCount += 1;
+    } else {
+      target.attemptDuration.reportedMs += sample.durationMs;
+      target.attemptDuration.reportedCount += 1;
+    }
+    if (sample.attemptSettlementOutcome && sample.attemptSettlementSource === 'reported') {
+      target.attemptSettlements.reportedCount += 1;
+      target.attemptSettlements.byOutcome[sample.attemptSettlementOutcome] = (target.attemptSettlements.byOutcome[sample.attemptSettlementOutcome] ?? 0) + 1;
+    } else {
+      target.attemptSettlements.unknownCount += 1;
+    }
+    // Attempt stop/activity outcomes cannot establish how the parent tool call
+    // settled. Keep that unavailable provenance explicit for every attempt.
+    target.parentSettlement.unknownCount += 1;
+    if (sample.phaseDurationsMs === null || sample.phaseDurationsSource === 'unknown') {
+      target.phaseDurations.unknownAttemptCount += 1;
+    } else {
+      for (const [phase, duration] of Object.entries(sample.phaseDurationsMs)) {
+        target.phaseDurations.measuredMsByPhase[phase] = (target.phaseDurations.measuredMsByPhase[phase] ?? 0) + duration;
+        target.phaseDurations.measuredCountByPhase[phase] = (target.phaseDurations.measuredCountByPhase[phase] ?? 0) + 1;
+      }
+    }
+    if (sample.retryIndex > 0) {
+      target.retries.attemptCount += 1;
+      if (sample.backoffMs === null || sample.backoffSource === 'unknown') {
+        target.retries.backoff.unknownCount += 1;
+      } else if (sample.backoffSource === 'estimated') {
+        target.retries.backoff.estimatedMs += sample.backoffMs;
+        target.retries.backoff.estimatedCount += 1;
+      } else {
+        target.retries.backoff.reportedMs += sample.backoffMs;
+        target.retries.backoff.reportedCount += 1;
+      }
+    }
+    if (sample.cleanupOutcome && sample.cleanupSource === 'reported') {
+      target.cleanupTelemetry.reportedCount += 1;
+      target.cleanupTelemetry.byOutcome[sample.cleanupOutcome] = (target.cleanupTelemetry.byOutcome[sample.cleanupOutcome] ?? 0) + 1;
+    } else {
+      target.cleanupTelemetry.unknownCount += 1;
+    }
+  }
 }
 
 function createProviderAccumulator(provider: string): ProviderAccumulator {
@@ -531,6 +631,7 @@ export function accumulateAggregateStats(
   let totalCacheWriteTokens = 0;
   let totalThroughputOutputTokens = 0;
   let totalThroughputGenerationMs = 0;
+  const subagentLifecycle = createSubagentLifecycleStats();
 
   // Most-recent run (max finalized/updated/started timestamp across all runs).
   let lastRun: AggregateLastRun | null = null;
@@ -563,6 +664,7 @@ export function accumulateAggregateStats(
     instrumentation?.onRunAccumulated?.(run);
     if (run.sessionPath) sessionPaths.add(run.sessionPath);
     const dayMs = runDayMs(run);
+    accumulateSubagentLifecycle(run, subagentLifecycle);
     const usage = attributedRunUsage(run, pricingMap, dayMs);
     const runCost = usage.reduce((sum, item) => sum + item.cost, 0);
     const runInputTokens = usage.reduce((sum, item) => sum + item.inputTokens, 0);
@@ -733,6 +835,7 @@ export function accumulateAggregateStats(
     lastRunEndedMs,
     lastRun,
     runCount: runs.length,
+    subagentLifecycle,
   };
 }
 
@@ -783,6 +886,7 @@ export function mergeAggregateStatsAccumulators(
     lastRunEndedMs: -1,
     lastRun: null,
     runCount: 0,
+    subagentLifecycle: createSubagentLifecycleStats(),
   };
 
   for (const source of accumulators) {
@@ -838,6 +942,7 @@ export function mergeAggregateStatsAccumulators(
     merged.totalThroughputOutputTokens += source.totalThroughputOutputTokens;
     merged.totalThroughputGenerationMs += source.totalThroughputGenerationMs;
     merged.runCount += source.runCount;
+    addSubagentLifecycleStats(merged.subagentLifecycle, source.subagentLifecycle);
 
     for (const [date, samples] of source.costSamplesByDay) {
       const target = merged.costSamplesByDay.get(date);
@@ -1336,6 +1441,7 @@ export function prepareAggregateStatsLayer(
       lastRunEndedMs: source.lastRunEndedMs,
       lastRun: source.lastRun,
       runCount: source.runCount,
+      subagentLifecycle: source.subagentLifecycle,
     },
   };
 }
@@ -1450,6 +1556,7 @@ export function finalizeAggregateStats(
     liveTokensPerSecond: liveStats.liveTokensPerSecond,
     runningSessionCount: liveStats.runningSessionCount,
     openTabCount,
+    subagentLifecycle: acc.subagentLifecycle,
     totalCost: canonicalCostValue(acc.totalCost),
     costByProvider,
     tokensPerSecond,

@@ -1,5 +1,5 @@
 import type { SingleResult } from "../types.js";
-import { parseRetryAfterMs, readRetryPolicy } from "./retry.js";
+import { parseRetryAfterMs, readRetryPolicy, type RetryClock } from "./retry.js";
 
 export const SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV =
   "PIE_SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE";
@@ -67,13 +67,13 @@ export function markProviderReplayUnsafe(
  * become retryable; auth/client/model errors remain terminal. Replay is allowed
  * only before visible output or tool execution, preventing duplicate effects.
  */
-export function classifyProviderFailure(result: SingleResult, error?: unknown): void {
+export function classifyProviderFailure(result: SingleResult, error?: unknown, now?: number | RetryClock): void {
   if (result.exitCode === 0) return;
 
   // Preserve a structured Retry-After hint from the original error before it
   // is discarded; the retry loop reads result.retryAfterMs as its first source.
   if (error) {
-    const retryAfter = parseRetryAfterMs(error, readRetryPolicy());
+    const retryAfter = parseRetryAfterMs(error, readRetryPolicy(), now ?? Date.now());
     if (retryAfter !== undefined) {
       result.retryAfterMs = retryAfter;
     }

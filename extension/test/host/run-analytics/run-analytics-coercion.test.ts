@@ -547,3 +547,35 @@ test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollup
   assert.deepEqual(toolUsage.resultIssueSamples[0]?.verificationKinds, ['test']);
   assert.equal(toolUsage.resultIssueSamples[1]?.resultIssueKind, 'probe_no_match');
 });
+
+test('coerceRunSnapshot preserves lifecycle unknowns and rejects malformed attempt samples', () => {
+  const legacy = makeRunSnapshot();
+  assert.equal(coerceRunSnapshot(legacy)?.subagentAttemptSamples, undefined, 'legacy absence stays unavailable');
+
+  const snapshot = makeRunSnapshot();
+  snapshot.unknownSubagentAttemptRecordSourceIds = ['tool-missing', 'tool-missing'];
+  snapshot.subagentAttemptSamples = [
+    {
+      sourceId: 'tool:0:attempt', attemptId: 'attempt', retryIndex: 1, outcome: 'success',
+      durationMs: 0, durationSource: 'measured', backoffMs: 0, backoffSource: 'reported',
+      phaseDurationsMs: { preparing: 0 }, phaseDurationsSource: 'measured',
+      attemptSettlementOutcome: 'completed', attemptSettlementSource: 'reported', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
+    },
+    {
+      sourceId: 'bad', attemptId: 'bad', retryIndex: 0, outcome: 'wat',
+      durationMs: 20, durationSource: 'measured', backoffMs: 0, backoffSource: 'reported',
+      phaseDurationsMs: null, phaseDurationsSource: 'unknown',
+      attemptSettlementOutcome: null, attemptSettlementSource: 'unknown', parentSettlementSource: 'unknown', cleanupOutcome: null, cleanupSource: 'unknown',
+    } as never,
+  ];
+  const coerced = coerceRunSnapshot(snapshot)?.subagentAttemptSamples;
+  assert.equal(coerced?.length, 1);
+  assert.deepEqual(coerceRunSnapshot(snapshot)?.unknownSubagentAttemptRecordSourceIds, ['tool-missing'],
+    'explicit mixed-run unknown coverage persists idempotently through coercion');
+  assert.equal(coerced?.[0]?.durationMs, 0, 'measured zero remains a measurement');
+  assert.deepEqual(coerced?.[0]?.phaseDurationsMs, { preparing: 0 }, 'measured phase zero remains evidence');
+  assert.equal(coerced?.[0]?.cleanupSource, 'unknown', 'unset current cleanup is not fabricated');
+
+  snapshot.subagentAttemptSamples = { malformed: true } as never;
+  assert.equal(coerceRunSnapshot(snapshot)?.subagentAttemptSamples, undefined, 'malformed collection stays unavailable');
+});

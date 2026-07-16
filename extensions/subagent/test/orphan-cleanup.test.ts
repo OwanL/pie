@@ -67,13 +67,15 @@ test.after(() => {
 
 class FakeScheduler implements CleanupScheduler {
 	private timers: Array<{ deadline: number; resolve: () => void }> = [];
+	readonly referencedTimers: boolean[] = [];
 	nowMs = 0;
 
 	now(): number {
 		return this.nowMs;
 	}
 
-	setTimer(ms: number): { promise: Promise<void>; cancel: () => void } {
+	setTimer(ms: number, referenced = false): { promise: Promise<void>; cancel: () => void } {
+		this.referencedTimers.push(referenced);
 		const deadline = this.nowMs + ms;
 		let resolve!: () => void;
 		const promise = new Promise<void>((r) => {
@@ -367,6 +369,29 @@ test("OrphanCleanupRegistry: drain waits for active entries to complete", async 
 
 	// Drain should resolve immediately when there is no active work.
 	await within(100, registry.drain());
+});
+
+test("OrphanCleanupRegistry: active drain uses a referenced polling timer", async () => {
+	const scheduler = new FakeScheduler();
+	const registry = new OrphanCleanupRegistry(
+		{
+			maxEntries: 8,
+			initialRetryMs: 1_000,
+			maxRetryMs: 1_000,
+			retryMultiplier: 1,
+			maxAttempts: 1,
+			cleanupTimeoutMs: 5_000,
+		},
+		scheduler,
+	);
+
+	registry.register("drain-ref", () => scheduler.setTimer(100).promise);
+	await sleep(5);
+	const draining = registry.drain();
+	await Promise.resolve();
+	assert.equal(scheduler.referencedTimers.at(-1), true, "drain polling must retain the process during beforeExit");
+	await scheduler.advance(110);
+	await within(100, draining);
 });
 
 test("OrphanCleanupRegistry: stats reflect pending/disposing/completed/failed totals", async () => {

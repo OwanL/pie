@@ -118,6 +118,58 @@ export interface AggregateLastRunTurn {
 }
 
 /** Summary of the most recently finalized run across all sessions. */
+/** Host aggregation of terminal subagent lifecycle evidence. Every source
+ * bucket is explicit so unavailable fields cannot silently turn into zeros. */
+export interface AggregateSubagentLifecycleStats {
+  /** Parsed terminal attempt records. */
+  attemptCount: number;
+  outcomeCounts: Record<'success' | 'failure' | 'aborted', number>;
+  /** Attempt timing is only summed within its stated provenance bucket. */
+  attemptDuration: {
+    reportedMs: number;
+    reportedCount: number;
+    measuredMs: number;
+    measuredCount: number;
+    estimatedMs: number;
+    estimatedCount: number;
+    unknownCount: number;
+  };
+  /** Stop/activity outcomes reported by child attempts. These do not identify
+   * the parent tool-call settlement source. */
+  attemptSettlements: { reportedCount: number; unknownCount: number; byOutcome: Record<string, number> };
+  /** Parent settlement provenance is unavailable from attempt telemetry. */
+  parentSettlement: { unknownCount: number };
+  retries: {
+    attemptCount: number;
+    backoff: { reportedMs: number; reportedCount: number; estimatedMs: number; estimatedCount: number; unknownCount: number };
+  };
+  /** Cleanup telemetry coverage/outcomes. Unknown does not mean an attempt was
+   * orphaned; it only means no cleanup telemetry was reported. */
+  cleanupTelemetry: { reportedCount: number; unknownCount: number; byOutcome: Record<string, number> };
+  /** Measured phase duration coverage. Unknown counts attempts whose phase map
+   * was unavailable/malformed; it is not a count for every absent phase. */
+  phaseDurations: {
+    measuredMsByPhase: Record<string, number>;
+    measuredCountByPhase: Record<string, number>;
+    unknownAttemptCount: number;
+  };
+  /** Terminal subagent calls from runs that did not preserve parseable attempt
+   * records. This is unknown coverage, not zero attempts. */
+  unknownAttemptRecordCallCount: number;
+}
+
+export const EMPTY_SUBAGENT_LIFECYCLE_STATS: AggregateSubagentLifecycleStats = {
+  attemptCount: 0,
+  outcomeCounts: { success: 0, failure: 0, aborted: 0 },
+  attemptDuration: { reportedMs: 0, reportedCount: 0, measuredMs: 0, measuredCount: 0, estimatedMs: 0, estimatedCount: 0, unknownCount: 0 },
+  attemptSettlements: { reportedCount: 0, unknownCount: 0, byOutcome: {} },
+  parentSettlement: { unknownCount: 0 },
+  retries: { attemptCount: 0, backoff: { reportedMs: 0, reportedCount: 0, estimatedMs: 0, estimatedCount: 0, unknownCount: 0 } },
+  cleanupTelemetry: { reportedCount: 0, unknownCount: 0, byOutcome: {} },
+  phaseDurations: { measuredMsByPhase: {}, measuredCountByPhase: {}, unknownAttemptCount: 0 },
+  unknownAttemptRecordCallCount: 0,
+};
+
 export interface AggregateLastRun {
   /** Cost (USD) of the run, derived from its tokens × pricing. */
   cost: number;
@@ -274,6 +326,8 @@ export interface AggregateStats {
   runningSessionCount: number;
   /** Number of currently-open session tabs (current UI state, not analytics). */
   openTabCount: number;
+  /** Terminal subagent lifecycle evidence across completed and open runs. */
+  subagentLifecycle: AggregateSubagentLifecycleStats;
   /** Live warm-bash pool metrics (ready/warming counts + execution breakdown),
    *  polled from the backend. See {@link WarmBashStats}. */
   warmBash: WarmBashStats;
@@ -330,6 +384,7 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   liveTokensPerSecond: 0,
   runningSessionCount: 0,
   openTabCount: 0,
+  subagentLifecycle: EMPTY_SUBAGENT_LIFECYCLE_STATS,
   warmBash: EMPTY_WARM_BASH_STATS,
   providerGate: EMPTY_PROVIDER_GATE_STATS,
   totalCost: 0,

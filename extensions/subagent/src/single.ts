@@ -69,6 +69,8 @@ interface RunWithModelRetryArgs {
 	toolCallId: string;
 	task: string;
 	clock: RetryClock;
+	makeDetails: MakeDetails;
+	onUpdate?: OnUpdateCallback;
 	runAttempt: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
 }
 
@@ -158,12 +160,9 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		excludeModels.add(resolved.modelOverride);
 		lastFailedModel = resolved.modelOverride;
 
-		// REM-03: parse Retry-After hints, clamp to a bounded maximum, and fall back
-		// to bounded exponential backoff. The wait is immediately abortable.
-		const retryAfter = result.retryAfterMs !== undefined
-			? clampRetryAfter(result.retryAfterMs, policy)
-			: parseRetryAfterMs(result.errorMessage ? new Error(result.errorMessage) : undefined, policy)
-				?? parseRetryAfterMs(result.stderr ? new Error(result.stderr) : undefined, policy);
+		// REM-03: use a structured Retry-After hint when present, otherwise bounded
+		// exponential backoff. The wait is immediately abortable.
+		const retryAfter = result.retryAfterMs !== undefined ? clampRetryAfter(result.retryAfterMs, policy) : undefined;
 		const baseBackoff = computeBackoffMs(retryCount, policy);
 		const backoffMs = retryAfter ?? baseBackoff;
 		result.retryAfterMs = backoffMs;
@@ -172,6 +171,22 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			result.activityPhase = "retry_wait";
 			result.activityDetail = `waiting ${backoffMs}ms to retry`;
 			result.activitySince = clock.now();
+			result.lastProgressAt = clock.now();
+			result.progressGeneration = (result.progressGeneration ?? 0) + 1;
+			// The completed attempt remains terminal for analytics, but the child
+			// dispatch is still active while it waits to retry. Publish that transient
+			// lifecycle as running so the outer phase resolver applies retry_wait's
+			// bounded inactivity lease instead of its generic fallback.
+			const retryWaitSnapshot: SingleResult = {
+				...result,
+				exitCode: -1,
+				stopReason: undefined,
+				completedAt: undefined,
+			};
+			args.onUpdate?.({
+				content: [textContent(result.finalOutput || result.streamingText || result.streamingReasoning || result.activityDetail || "(running...)")],
+				details: args.makeDetails([retryWaitSnapshot]),
+			});
 		}
 		try {
 			await abortableDelay(backoffMs, args.signal, clock);
@@ -234,6 +249,8 @@ export async function executeSingleTask(args: {
 		toolCallId: args.toolCallId,
 		task: params.task,
 		clock: _internal?.clock ?? realRetryClock,
+		makeDetails,
+		onUpdate,
 		buildRuntime: () => ({
 			depth: runtimeCtx.depth + 1,
 			trail: [...runtimeCtx.trail, params.agent],
@@ -271,7 +288,7 @@ export async function executeSingleTask(args: {
 					args.parentUiBridge,
 					args.parentSessionId,
 					args.allToolNames,
-					undefined,
+					{ clock: _internal?.clock ?? realRetryClock },
 					attemptId,
 				);
 			},

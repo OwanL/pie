@@ -39,6 +39,10 @@ export interface SubagentTurnThroughputSample {
 	modelId?: string;
 }
 
+/** Attempt phases with producer-owned elapsed-time evidence. `retry_wait` is
+ * intentionally excluded: retry backoff is reported separately per attempt. */
+export type SubagentAttemptPhase = "queued" | "preparing" | "waiting_provider" | "streaming" | "running_tool" | "orphaned_cleanup";
+
 export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
@@ -112,6 +116,9 @@ export interface SingleResult {
 	 * the child changes phase. */
 	startedAt?: number;
 	completedAt?: number;
+	/** Accumulated elapsed time in observed attempt phases. Only terminal
+	 * attempt records consume this bounded, producer-owned evidence. */
+	phaseDurationsMs?: Partial<Record<SubagentAttemptPhase, number>>;
 	/** Monotonically increasing per-child progress sequence. Incremented only for
 	 * credible child activity, allowing parents to distinguish real work from
 	 * duplicate `onUpdate` snapshots without relying on wall-clock timestamps. */
@@ -172,11 +179,17 @@ export interface SubagentAttemptRecord {
 	failureClass?: SingleResult["failureClass"];
 	/** Replay-safety observation at attempt end. */
 	replaySafety?: SingleResult["replaySafety"];
-	/** Backoff delay applied before dispatching this attempt (0 for the first attempt). */
+	/** Backoff delay applied before dispatching this attempt (0 for the first attempt).
+	 * This is intentionally separate from phaseDurationsMs: retry_wait must not
+	 * be counted both as elapsed phase time and retry backoff. */
 	backoffMs?: number;
-	/** Settlement/stop reason observed for this attempt, when available. */
-	settlementOutcome?: string;
-	/** Orphan cleanup outcome for this attempt's pre-spawn resources, when available. */
+	/** Bounded producer-measured duration for each entered execution phase. */
+	phaseDurationsMs?: Partial<Record<SubagentAttemptPhase, number>>;
+	/** Terminal stop/activity outcome for this attempt, not the parent tool-call
+	 * settlement source (which this producer does not observe). */
+	attemptSettlementOutcome?: string;
+	/** Cleanup telemetry outcome when known; absence means telemetry unavailable,
+	 * not that this ordinary attempt was orphaned. */
 	cleanupOutcome?: string;
 }
 
