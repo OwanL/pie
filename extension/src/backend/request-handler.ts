@@ -148,6 +148,7 @@ export interface BackendRequestHandlerDeps {
   sdkPath: string;
   agentDir: string;
   startupCwd: string;
+  sessionDir?: string;
   sdk: SdkModule;
   getSessionContext(sessionPath?: string): SessionContext | undefined;
   createSessionContext(
@@ -294,7 +295,10 @@ async function handleSessionCreate(
 ): Promise<unknown> {
   const params = validateSessionCreate(request.params);
   const cwd = params.cwd || deps.startupCwd;
-  const context = await deps.createSessionContext(deps.sdk.SessionManager.create(cwd), 'new');
+  const context = await deps.createSessionContext(
+    deps.sdk.SessionManager.create(cwd, deps.sessionDir),
+    'new',
+  );
   deps.setViewedSessionPath(context.sessionPath);
   const createPayload = await deps.buildSessionOpenedPayload(
     context.sessionPath,
@@ -331,7 +335,11 @@ async function handleSessionDuplicate(
   const params = validateSessionDuplicate(request.params);
   const sourceContext = deps.getSessionContext(params.sessionPath);
   const sourceCwd = sourceContext?.session.sessionManager.getCwd() ?? deps.startupCwd;
-  const forkedManager = deps.sdk.SessionManager.forkFrom(params.sessionPath, sourceCwd);
+  const forkedManager = deps.sdk.SessionManager.forkFrom(
+    params.sessionPath,
+    sourceCwd,
+    deps.sessionDir,
+  );
   const context = await deps.createSessionContext(forkedManager, 'new');
   deps.setViewedSessionPath(context.sessionPath);
   const duplicatePayload = await deps.buildSessionOpenedPayload(

@@ -209,6 +209,7 @@ export interface SdkSessionInfo {
   path: string;
   cwd: string;
   name?: string;
+  firstMessage?: string;
   modified: Date;
   messageCount: number;
 }
@@ -222,10 +223,10 @@ export interface SdkModule {
   };
   SessionManager: {
     continueRecent: (cwd: string) => SdkSessionManager;
-    create: (cwd: string) => SdkSessionManager;
+    create: (cwd: string, sessionDir?: string) => SdkSessionManager;
     open: (sessionPath: string) => SdkSessionManager;
     forkFrom: (sourcePath: string, targetCwd: string, sessionDir?: string) => SdkSessionManager;
-    listAll: () => Promise<SdkSessionInfo[]>;
+    listAll: (sessionDir?: string) => Promise<SdkSessionInfo[]>;
   };
   createAgentSessionServices: (options: unknown) => Promise<unknown>;
   createAgentSessionFromServices: (options: unknown) => Promise<unknown>;

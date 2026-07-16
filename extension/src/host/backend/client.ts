@@ -1,9 +1,8 @@
 import * as cp from 'node:child_process';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
-import { getDeferredTriggersDir } from '../../shared/deferred-triggers-paths';
+import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
 import { RequestTracker, type RequestOptions } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
 import { redactSensitiveText } from '../../shared/sensitive-redaction';
@@ -136,36 +135,45 @@ export class BackendClient implements vscode.Disposable {
     // the sdkPath we already resolved via `npm root -g` and pass it through.
     const trustedRoot = deriveTrustedSdkRoot(options.sdkPath);
     const trustedRootEnv = trustedRoot ? { PIE_TRUSTED_SDK_ROOT: trustedRoot } : {};
-    const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
-    const sessionDirEnv = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
-      || (agentDir ? path.join(agentDir, 'data', 'outcomes', 'sessions') : undefined);
+    const {
+      agentDir: agentDirEnv,
+      sessionDir: sessionDirEnv,
+      reviewsDir: reviewsDirEnv,
+      triggersDir: triggersDirEnv,
+    } = resolveHostSessionStoragePaths(
+      process.env.PI_CODING_AGENT_DIR,
+      process.env.PI_CODING_AGENT_SESSION_DIR,
+    );
     // Session reviews live in a sibling of the sessions dir so the backend
     // (reader) and the session_review tool (writer) — same process — agree on
     // the sidecar location via `PIE_REVIEWS_DIR`.
-    const reviewsDirEnv = sessionDirEnv
-      ? path.join(path.dirname(sessionDirEnv), 'session-reviews')
-      : undefined;
     // Deferred-trigger sidecar (sibling of sessions dir). The host registry
     // (reader/fire-writer) and the `defer_trigger` tool (register/cancel
-    // writer) agree on the location: the host derives it via
-    // `getDeferredTriggersDir()` (same env), the backend tool reads
-    // `PIE_TRIGGERS_DIR` set here.
-    const triggersDirEnv = getDeferredTriggersDir();
+    // writer) agree on the location through the shared session path resolver;
+    // the backend tool reads `PIE_TRIGGERS_DIR` set here.
+    const backendEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PIE_EDITOR_VERSION: vscode.version,
+      ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
+      ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
+      PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
+      PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),
+      ...trustedRootEnv,
+    };
+    // Do not leak blank/raw relative values through process.env: the child
+    // receives only the normalized authority, or no override so SDK defaults
+    // remain intact.
+    delete backendEnv.PI_CODING_AGENT_DIR;
+    delete backendEnv.PI_CODING_AGENT_SESSION_DIR;
+    if (agentDirEnv) backendEnv.PI_CODING_AGENT_DIR = agentDirEnv;
+    if (sessionDirEnv) backendEnv.PI_CODING_AGENT_SESSION_DIR = sessionDirEnv;
+
     const proc = cp.spawn(
       options.nodePath,
       [options.backendPath, '--sdkPath', options.sdkPath, '--cwd', options.cwd],
       {
         cwd: options.cwd,
-        env: {
-          ...process.env,
-          PIE_EDITOR_VERSION: vscode.version,
-          ...(sessionDirEnv ? { PI_CODING_AGENT_SESSION_DIR: sessionDirEnv } : {}),
-          ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
-          ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
-          PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
-          PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),
-          ...trustedRootEnv,
-        },
+        env: backendEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
         shell: false,
       },
@@ -175,6 +183,7 @@ export class BackendClient implements vscode.Disposable {
       backendPath: options.backendPath,
       cwd: options.cwd,
       sdkPath: options.sdkPath,
+      agentDir: agentDirEnv ?? null,
       sessionDir: sessionDirEnv ?? null,
       reviewsDir: reviewsDirEnv ?? null,
       triggersDir: triggersDirEnv ?? null,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import * as cp from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import Module from 'node:module';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
@@ -61,7 +62,12 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   // through when the derived trusted root is undefined. Isolate the var so
   // the assertion below is deterministic regardless of the host environment.
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
   delete process.env.PIE_TRUSTED_SDK_ROOT;
+  const agentDir = path.resolve('/mock/agent');
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_SESSION_DIR = 'data/outcomes/sessions';
 
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
@@ -118,6 +124,11 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(payload.sdkPath, '/mock/sdk');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
+    const spawnedEnv = spawnOptions?.env as NodeJS.ProcessEnv | undefined;
+    assert.equal(spawnedEnv?.PI_CODING_AGENT_DIR, agentDir);
+    assert.equal(spawnedEnv?.PI_CODING_AGENT_SESSION_DIR, path.join(agentDir, 'data/outcomes/sessions'));
+    assert.equal(spawnedEnv?.PIE_REVIEWS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
+    assert.equal(spawnedEnv?.PIE_TRIGGERS_DIR, path.join(agentDir, 'data/outcomes/deferred-triggers'));
 
     Object.defineProperty(fakeProc.stdin, 'write', {
       configurable: true,
@@ -149,5 +160,9 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     moduleWithLoad._load = originalLoad;
     if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
     else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+    else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir;
   }
 });

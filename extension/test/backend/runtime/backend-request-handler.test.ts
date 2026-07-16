@@ -240,6 +240,64 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
   assert.deepEqual(settings, { defaultModel: 'model-a', defaultThinkingLevel: 'medium' });
 });
 
+test('session.create returns a session from the configured backend session directory', async () => {
+  const harness = createHarness();
+  const configuredDir = path.resolve('/configured/sessions');
+  const sdkFallbackDir = path.resolve('/sdk-default/sessions');
+
+  harness.deps.sessionDir = configuredDir;
+  harness.deps.sdk.SessionManager.create = ((cwd: string, sessionDir?: string) => ({
+    cwd,
+    sessionPath: path.join(sessionDir ?? sdkFallbackDir, 'new-session.jsonl'),
+  })) as unknown as typeof harness.deps.sdk.SessionManager.create;
+  harness.deps.createSessionContext = async (sessionManager, reason) => {
+    const manager = sessionManager as unknown as { sessionPath: string };
+    harness.createCalls.push({ cwd: '/custom', reason });
+    return { ...harness.context, sessionPath: manager.sessionPath };
+  };
+  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath } as any);
+
+  const created = await handleBackendRequest(harness.deps, {
+    id: 'create-canonical',
+    method: 'session.create',
+    params: { cwd: '/custom' },
+  }) as { sessionPath: string };
+
+  assert.equal(created.sessionPath, path.join(configuredDir, 'new-session.jsonl'));
+});
+
+test('session.duplicate returns a fork from the configured backend session directory', async () => {
+  const harness = createHarness();
+  const configuredDir = path.resolve('/configured/sessions');
+  const sdkFallbackDir = path.resolve('/sdk-default/sessions');
+  harness.deps.sessionDir = configuredDir;
+  harness.context.session.sessionManager = {
+    getCwd: () => '/source-cwd',
+  } as SessionContext['session']['sessionManager'];
+  harness.deps.sdk.SessionManager.forkFrom = ((
+    _sourcePath: string,
+    targetCwd: string,
+    sessionDir?: string,
+  ) => ({
+    cwd: targetCwd,
+    sessionPath: path.join(sessionDir ?? sdkFallbackDir, 'forked-session.jsonl'),
+  })) as unknown as typeof harness.deps.sdk.SessionManager.forkFrom;
+  harness.deps.createSessionContext = async (sessionManager, reason) => {
+    const manager = sessionManager as unknown as { cwd: string; sessionPath: string };
+    harness.createCalls.push({ cwd: manager.cwd, reason });
+    return { ...harness.context, sessionPath: manager.sessionPath };
+  };
+  harness.deps.buildSessionOpenedPayload = async (sessionPath) => ({ sessionPath } as any);
+
+  const duplicated = await handleBackendRequest(harness.deps, {
+    id: 'duplicate-canonical',
+    method: 'session.duplicate',
+    params: { sessionPath: harness.context.sessionPath },
+  }) as { sessionPath: string };
+
+  assert.equal(duplicated.sessionPath, path.join(configuredDir, 'forked-session.jsonl'));
+});
+
 test('message.send accepts requests, handles preflight rejection, and guards concurrent sends', async () => {
   const acceptedHarness = createHarness();
   const accepted = await handleBackendRequest(acceptedHarness.deps, {

@@ -15,6 +15,7 @@ import {
   type RequestEnvelope,
   type SessionListChangedPayload,
   type SessionOpenedPayload,
+  type SessionSummary,
   type SystemPromptEntry,
   type ThinkingLevel,
   type TranscriptPageDirection,
@@ -24,12 +25,14 @@ import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } fr
 import { deriveContextUsageFromBranch } from './context-usage';
 import { ExtensionUIBridge } from './extension-ui-bridge';
 import { handleBackendRequest } from './request-handler';
+import { resolveBackendSessionDir } from './session-directory';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
+  buildCurrentSummary,
   listAvailableModels,
-  listSessions as listSessionSummaries,
   resolveActiveModel,
 } from './session-metadata';
+import { SessionCatalog } from './session-catalog';
 import { ensureReviewsDir, startReviewWatcher } from './session-review-store';
 import {
   readSystemPromptTogglesForSession,
@@ -110,6 +113,7 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
 /** Module-level guard: install the fatal handlers at most once even if
  *  `start()` is invoked more than once. */
 let backendFatalHandlersInstalled = false;
+const SESSION_CATALOG_POLL_INTERVAL_MS = 10_000;
 
 /** Surface swallowed promise rejections and uncaught exceptions on stderr (the
  *  host captures backend stderr) instead of letting them die invisibly. We
@@ -148,15 +152,21 @@ export class BackendServer {
   private sdk!: SdkModule;
   private readonly sdkPath: string;
   private readonly startupCwd: string;
+  private sessionDir?: string;
+  private sessionDirResolved = false;
   private agentDir = '';
   private authStorage: unknown;
   private viewedSessionPath?: string;
   private readonly sessionContexts = new Map<string, SessionContext>();
+  private readonly sessionCatalog = new SessionCatalog();
   /** Deduplicates concurrent opens/preloads for the same cold session. */
   private readonly pendingSessionContexts = new Map<string, Promise<SessionContext>>();
   private systemPromptModulePromise?: Promise<SdkSystemPromptModule>;
   /** Disposer for the session-review sidecar watcher (see `startReviewWatcher`). */
   private stopReviewWatcher?: () => void;
+  private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
+  private sessionCatalogPollingActive = false;
+  private sessionCatalogPollInFlight = false;
   private stopProviderProgressObserver?: () => void;
   /** Captures request+turn ownership at an attempt's first synchronous gate
    * observation so a late acquisition cannot be charged to a newer request. */
@@ -172,6 +182,17 @@ export class BackendServer {
     this.startupCwd = options.cwd;
   }
 
+  private getSessionDir(): string | undefined {
+    if (!this.sessionDirResolved) {
+      this.sessionDir = resolveBackendSessionDir(
+        this.agentDir,
+        process.env.PI_CODING_AGENT_SESSION_DIR,
+      );
+      this.sessionDirResolved = true;
+    }
+    return this.sessionDir;
+  }
+
   async start(): Promise<void> {
     // Install fatal handlers first so even an early spawn-time rejection is
     // surfaced. Idempotent (module-level guard).
@@ -179,6 +200,7 @@ export class BackendServer {
     await timed('start.loadSdk', async () => {
       this.sdk = await loadSdk(this.sdkPath);
       this.agentDir = this.sdk.getAgentDir();
+      this.getSessionDir();
     });
 
     // Install the host-side provider gate BEFORE any session runtime is
@@ -361,6 +383,7 @@ export class BackendServer {
     this.stopReviewWatcher = startReviewWatcher(() => {
       void this.emitSessionListChanged();
     });
+    this.startSessionCatalogPolling();
   }
 
   private createRuntimeFactory() {
@@ -905,10 +928,44 @@ export class BackendServer {
 
   private async emitSessionListChanged(): Promise<void> {
     const payload: SessionListChangedPayload = {
-      sessions: await listSessionSummaries(this.sdk),
+      sessions: await this.listSessionSummaries(),
       activeSessionPath: this.viewedSessionPath,
     };
     this.emit('session.list.changed', payload);
+  }
+
+  private async listSessionSummaries(): Promise<SessionSummary[]> {
+    const liveSummaries = [...this.sessionContexts.values()]
+      .filter((context) => !context.retired)
+      .map((context) => buildCurrentSummary(context, this.startupCwd));
+    return await this.sessionCatalog.list(this.sdk, this.getSessionDir(), liveSummaries, this.agentDir);
+  }
+
+  private startSessionCatalogPolling(intervalMs = SESSION_CATALOG_POLL_INTERVAL_MS): void {
+    if (this.sessionCatalogPollTimer) return;
+    this.sessionCatalogPollingActive = true;
+    this.sessionCatalogPollTimer = setInterval(() => {
+      void this.pollSessionCatalog();
+    }, intervalMs);
+    this.sessionCatalogPollTimer.unref();
+  }
+
+  private async pollSessionCatalog(): Promise<void> {
+    if (!this.sessionCatalogPollingActive || this.sessionCatalogPollInFlight) return;
+    this.sessionCatalogPollInFlight = true;
+    try {
+      const changed = await this.sessionCatalog.invalidateIfInventoryChanged(
+        this.agentDir,
+        this.getSessionDir(),
+      );
+      if (changed && this.sessionCatalogPollingActive) await this.emitSessionListChanged();
+    } catch (error) {
+      backendWarn('backend-session', 'catalogInventoryPoll.failed', {
+        error: toErrorMessage(error),
+      });
+    } finally {
+      this.sessionCatalogPollInFlight = false;
+    }
   }
 
   private emitBusyChanged(context: SessionContext, busy: boolean): void {
@@ -983,10 +1040,12 @@ export class BackendServer {
   }
 
   private async handleRequest(request: RequestEnvelope): Promise<unknown> {
+    const sessionDir = this.getSessionDir();
     return await handleBackendRequest({
       sdkPath: this.sdkPath,
       agentDir: this.agentDir,
       startupCwd: this.startupCwd,
+      sessionDir,
       sdk: this.sdk,
       getSessionContext: (sessionPath) => this.getSessionContext(sessionPath),
       createSessionContext: (sessionManager, reason) => this.createSessionContext(sessionManager, reason),
@@ -1007,7 +1066,7 @@ export class BackendServer {
       emitBusyChanged: (context, busy) => this.emitBusyChanged(context, busy),
       emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),
       emitSessionListChanged: () => this.emitSessionListChanged(),
-      listSessions: () => listSessionSummaries(this.sdk),
+      listSessions: () => this.listSessionSummaries(),
       listAvailableModels: (context) => listAvailableModels(context, this.agentDir),
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
@@ -1149,6 +1208,9 @@ export class BackendServer {
     // wrapper is process-owned, so server disposal is its production teardown.
     ProviderGate.uninstall();
 
+    this.sessionCatalogPollingActive = false;
+    if (this.sessionCatalogPollTimer) clearInterval(this.sessionCatalogPollTimer);
+    this.sessionCatalogPollTimer = undefined;
     this.stopReviewWatcher?.();
     this.stopReviewWatcher = undefined;
     this.stopProviderProgressObserver?.();

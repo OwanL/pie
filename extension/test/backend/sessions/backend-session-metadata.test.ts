@@ -302,3 +302,104 @@ test('listSessions derives placeholder names from the session file and sorts by 
     assert.equal(sessions[1]?.isPlaceholder, false);
   });
 });
+
+test('listSessions derives names from SDK metadata without rereading the transcript file', async () => {
+  const missingPath = path.resolve('/not-present/session.jsonl');
+  const sdk = {
+    SessionManager: {
+      listAll: async () => [{
+        path: missingPath,
+        cwd: '/repo',
+        modified: new Date('2026-01-01T00:00:00.000Z'),
+        messageCount: 1,
+        firstMessage: 'Make session switching fast and transparent',
+      }],
+    },
+  } as Pick<SdkModule, 'SessionManager'> as SdkModule;
+
+  const sessions = await listSessions(sdk);
+
+  assert.equal(sessions[0]?.name, 'Make Session Switching Fast');
+  assert.equal(sessions[0]?.isPlaceholder, false);
+});
+
+test('listSessions merges configured and legacy SDK roots without hiding history', async () => {
+  const configuredDir = path.resolve('/configured/sessions');
+  const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
+  const legacyPath = path.resolve('/sdk-default/sessions/legacy.jsonl');
+  const sdk = {
+    SessionManager: {
+      listAll: async (sessionDir?: string) => sessionDir === configuredDir
+        ? [{
+            path: canonicalPath,
+            cwd: '/repo',
+            name: 'Canonical Session',
+            modified: new Date('2026-01-02T00:00:00.000Z'),
+            messageCount: 1,
+          }]
+        : [{
+            path: legacyPath,
+            cwd: '/repo',
+            name: 'Legacy Session',
+            modified: new Date('2026-01-01T00:00:00.000Z'),
+            messageCount: 1,
+          }],
+    },
+  } as Pick<SdkModule, 'SessionManager'> as SdkModule;
+
+  const sessions = await listSessions(sdk, configuredDir);
+
+  assert.deepEqual(sessions.map((session) => session.path), [canonicalPath, legacyPath]);
+});
+
+test('listSessions de-duplicates paths using platform filesystem semantics', async () => {
+  const configuredDir = path.resolve('/configured/sessions');
+  const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
+  const duplicatePath = process.platform === 'win32' ? canonicalPath.toUpperCase() : canonicalPath;
+  const info = (pathname: string, name: string) => ({
+    path: pathname,
+    cwd: '/repo',
+    name,
+    modified: new Date('2026-01-01T00:00:00.000Z'),
+    messageCount: 1,
+  });
+  const sdk = {
+    SessionManager: {
+      listAll: async (sessionDir?: string) => [
+        sessionDir ? info(canonicalPath, 'Canonical') : info(duplicatePath, 'Legacy duplicate'),
+      ],
+    },
+  } as Pick<SdkModule, 'SessionManager'> as SdkModule;
+
+  const sessions = await listSessions(sdk, configuredDir);
+
+  assert.deepEqual(sessions.map((session) => session.name), ['Canonical']);
+});
+
+test('listSessions includes migrated per-cwd directories under the configured root', async () => {
+  await withTempDir(async (configuredDir) => {
+    const nestedDir = path.join(configuredDir, '--workspace--');
+    await fs.mkdir(nestedDir);
+    const flatPath = path.join(configuredDir, 'flat.jsonl');
+    const nestedPath = path.join(nestedDir, 'nested.jsonl');
+    const sdk = {
+      SessionManager: {
+        listAll: async (sessionDir?: string) => {
+          if (sessionDir === configuredDir) return [{
+            path: flatPath, cwd: '/repo', name: 'Flat',
+            modified: new Date('2026-01-02T00:00:00.000Z'), messageCount: 1,
+          }];
+          if (sessionDir === nestedDir) return [{
+            path: nestedPath, cwd: '/repo', name: 'Nested',
+            modified: new Date('2026-01-01T00:00:00.000Z'), messageCount: 1,
+          }];
+          return [];
+        },
+      },
+    } as Pick<SdkModule, 'SessionManager'> as SdkModule;
+
+    const sessions = await listSessions(sdk, configuredDir);
+
+    assert.deepEqual(sessions.map((session) => session.path), [flatPath, nestedPath]);
+  });
+});

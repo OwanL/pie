@@ -129,6 +129,15 @@ See git history (commit `d581d83`) for historical context on the migration from 
 - JSON-RPC over stdio. Request/response plus streaming event lines.
 - Backend events carry `sessionPath` — missing `sessionPath` is a protocol defect.
 - The host serializes all RPCs per session to prevent races.
+- The host normalizes one absolute agent/session storage authority and supplies
+  it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; with neither
+  configured, the embedded SDK keeps its own defaults. The backend uses the
+  canonical session root for create and fork. Listing caches a path-deduplicated
+  canonical + legacy compatibility inventory, overlays live sessions and fresh
+  reviews, and polls a cheap JSONL filename signature so external
+  additions/removals invalidate the cache. Missing roots count as empty;
+  inaccessible roots retain the last complete catalog until a safe refresh.
+  Explicit resume/recovery paths remain migration-free.
 
 ### Host ↔ Webview
 

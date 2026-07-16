@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
 import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../shared/session-name';
 import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
@@ -7,12 +8,13 @@ import type {
   SessionSummary,
 } from '../shared/protocol';
 import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs';
-import type { SdkModule } from './sdk';
+import type { SdkModule, SdkSessionInfo } from './sdk';
 import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
 import { backendTrace } from './diag';
+import { backendSessionPathKey } from './session-directory';
 
 function textFromSessionMessageContent(content: unknown): string {
   if (typeof content === 'string') {
@@ -58,14 +60,44 @@ export async function deriveNameFromFile(filePath: string): Promise<string> {
   return NEW_SESSION_NAME;
 }
 
-export async function listSessions(sdk: SdkModule): Promise<SessionSummary[]> {
-  const reviews = readReviews();
-  const sessions = await sdk.SessionManager.listAll();
+async function deriveSessionInfoName(session: SdkSessionInfo): Promise<string> {
+  const firstMessage = session.firstMessage?.trim();
+  if (firstMessage === '(no messages)') return NEW_SESSION_NAME;
+  if (firstMessage) return deriveSessionNameFromText(firstMessage).name;
+  return await deriveNameFromFile(session.path);
+}
+
+export async function discoverSessionSummaries(
+  sdk: SdkModule,
+  sessionDir?: string,
+): Promise<SessionSummary[]> {
+  let configuredDirs: string[] = [];
+  if (sessionDir) {
+    configuredDirs = [sessionDir];
+    try {
+      const entries = await fs.readdir(sessionDir, { withFileTypes: true });
+      configuredDirs.push(...entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => path.join(sessionDir, entry.name)));
+    } catch {
+      // The SDK call below preserves its existing missing/unreadable-dir fallback.
+    }
+  }
+  const sources = await Promise.all([
+    ...configuredDirs.map((dir) => sdk.SessionManager.listAll(dir)),
+    sdk.SessionManager.listAll(),
+  ]);
+  const byPath = new Map<string, SdkSessionInfo>();
+  for (const session of sources.flat()) {
+    const key = backendSessionPathKey(session.path);
+    if (!byPath.has(key)) byPath.set(key, session);
+  }
+  const sessions = [...byPath.values()];
   const summaries = await Promise.all(
     sessions.map(async (session) => {
       const summary = summarizeSession(session);
       if (summary.name === NEW_SESSION_NAME && session.path) {
-        const derived = await deriveNameFromFile(session.path);
+        const derived = await deriveSessionInfoName(session);
         if (derived !== NEW_SESSION_NAME) {
           summary.name = derived;
           summary.isPlaceholder = false;
@@ -73,10 +105,22 @@ export async function listSessions(sdk: SdkModule): Promise<SessionSummary[]> {
           summary.isPlaceholder = true;
         }
       }
-      return mergeReviewIntoSummary(summary, reviews);
+      return summary;
     }),
   );
   return summaries.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+}
+
+export function applySessionReviews(summaries: readonly SessionSummary[]): SessionSummary[] {
+  const reviews = readReviews();
+  return summaries.map((summary) => mergeReviewIntoSummary(summary, reviews));
+}
+
+export async function listSessions(
+  sdk: SdkModule,
+  sessionDir?: string,
+): Promise<SessionSummary[]> {
+  return applySessionReviews(await discoverSessionSummaries(sdk, sessionDir));
 }
 
 export function deriveSessionName(context: SessionContext): { name: string; isPlaceholder: boolean } {

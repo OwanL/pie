@@ -1,4 +1,4 @@
-import * as path from 'node:path';
+import { resolveHostSessionStoragePaths } from './session-storage-paths';
 
 /**
  * Shared derivation of the deferred-triggers sidecar directory.
@@ -25,8 +25,8 @@ export const TRIGGERS_FILE = 'triggers.jsonl';
 export const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
 
 export function getDeferredTriggersDir(): string | undefined {
-  const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
-  const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR?.trim()
-    || (agentDir ? path.join(agentDir, 'data', 'outcomes', 'sessions') : undefined);
-  return sessionDir ? path.join(path.dirname(sessionDir), 'deferred-triggers') : undefined;
+  return resolveHostSessionStoragePaths(
+    process.env.PI_CODING_AGENT_DIR,
+    process.env.PI_CODING_AGENT_SESSION_DIR,
+  ).triggersDir;
 }
