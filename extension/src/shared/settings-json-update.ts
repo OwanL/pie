@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 
 import { atomicWriteText } from './atomic-write';
 
@@ -20,6 +20,35 @@ function sleep(milliseconds: number): Promise<void> {
 
 function isErrno(error: unknown, code: string): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === code;
+}
+
+const EXISTING_LOCK_CONTENTION_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+export type FileUpdateLockContention = 'confirmed' | 'unconfirmed' | 'none';
+
+/**
+ * `open(..., 'wx')` normally reports EEXIST for an existing lock, but Windows
+ * and some shared filesystems can report a permission/sharing error instead.
+ * A qualifying error with an absent path is unconfirmed because a prior lock
+ * may have disappeared between open and stat. The acquire loop gives that
+ * race one retry without turning persistent permission errors into timeouts.
+ *
+ * Exported so the platform-error classification can be covered without
+ * relying on an intermittent operating-system error.
+ */
+export async function classifyFileUpdateLockContention(
+  error: unknown,
+  lockPath: string,
+): Promise<FileUpdateLockContention> {
+  if (isErrno(error, 'EEXIST')) return 'confirmed';
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (!code || !EXISTING_LOCK_CONTENTION_CODES.has(code)) return 'none';
+  try {
+    await fs.stat(lockPath);
+    return 'confirmed';
+  } catch (statError) {
+    return isErrno(statError, 'ENOENT') ? 'unconfirmed' : 'none';
+  }
 }
 
 async function removeStaleLock(lockPath: string, staleMs: number): Promise<void> {
@@ -48,18 +77,28 @@ export async function withFileUpdateLock<T>(
   const startedAt = Date.now();
   const token = `${process.pid}:${randomUUID()}`;
   let handle: fs.FileHandle | undefined;
+  let retriedUnconfirmedContention = false;
 
   while (!handle) {
     try {
       handle = await fs.open(lockPath, 'wx');
       await handle.writeFile(`${token}\n`, 'utf8');
+      retriedUnconfirmedContention = false;
     } catch (error) {
       if (handle) {
         await handle.close().catch(() => undefined);
         handle = undefined;
         await fs.unlink(lockPath).catch(() => undefined);
       }
-      if (!isErrno(error, 'EEXIST')) throw error;
+      const contention = await classifyFileUpdateLockContention(error, lockPath);
+      if (contention === 'none') throw error;
+      if (contention === 'unconfirmed') {
+        if (retriedUnconfirmedContention) throw error;
+        retriedUnconfirmedContention = true;
+        await sleep(retryMs);
+        continue;
+      }
+      retriedUnconfirmedContention = false;
       await removeStaleLock(lockPath, staleMs);
       if (Date.now() - startedAt >= timeoutMs) {
         throw new Error(`Timed out waiting for settings update lock ${lockPath} after ${timeoutMs}ms.`);

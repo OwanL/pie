@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { updateSettingsJsonObject, withFileUpdateLock } from '../../../src/shared/settings-json-update';
+import {
+  classifyFileUpdateLockContention,
+  updateSettingsJsonObject,
+  withFileUpdateLock,
+} from '../../../src/shared/settings-json-update';
 
 async function withTempSettings(run: (file: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-settings-update-'));
@@ -50,6 +54,62 @@ test('a missing settings file is created from an empty object', async () => {
   await withTempSettings(async (file) => {
     await updateSettingsJsonObject(file, (current) => ({ ...current, pruning: { mode: 'shadow' } }));
     assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { pruning: { mode: 'shadow' } });
+  });
+});
+
+function errorWithCode(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
+test('platform lock errors distinguish confirmed, unconfirmed, and unrelated failures', async () => {
+  await withTempSettings(async (file) => {
+    const lockPath = `${file}.pie-lock`;
+
+    await fs.writeFile(lockPath, 'holder\n', 'utf8');
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+      assert.equal(await classifyFileUpdateLockContention(errorWithCode(code), lockPath), 'confirmed', code);
+    }
+
+    await fs.unlink(lockPath);
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+      assert.equal(await classifyFileUpdateLockContention(errorWithCode(code), lockPath), 'unconfirmed', code);
+    }
+    assert.equal(await classifyFileUpdateLockContention(errorWithCode('EEXIST'), lockPath), 'confirmed');
+    assert.equal(await classifyFileUpdateLockContention(errorWithCode('ENOENT'), lockPath), 'none');
+  });
+});
+
+test('an unconfirmed platform lock error gets one retry before acquisition succeeds', async (t) => {
+  await withTempSettings(async (file) => {
+    const realOpen = fs.open.bind(fs);
+    let openCalls = 0;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      openCalls += 1;
+      if (openCalls === 1) throw errorWithCode('EPERM');
+      return realOpen(...args);
+    });
+
+    let ran = false;
+    await withFileUpdateLock(file, async () => { ran = true; }, { retryMs: 1 });
+
+    assert.equal(ran, true);
+    assert.equal(openCalls, 2);
+  });
+});
+
+test('a persistent unconfirmed platform lock error is propagated on the second attempt', async (t) => {
+  await withTempSettings(async (file) => {
+    let openCalls = 0;
+    t.mock.method(fs, 'open', async () => {
+      openCalls += 1;
+      throw errorWithCode('EPERM');
+    });
+
+    await assert.rejects(
+      withFileUpdateLock(file, async () => undefined, { retryMs: 1 }),
+      (error: NodeJS.ErrnoException) => error.code === 'EPERM',
+    );
+    assert.equal(openCalls, 2);
   });
 });
 
