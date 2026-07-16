@@ -450,6 +450,88 @@ describe('warm-bash pool (real bash round-trip)', {
   });
 });
 
+describe('warm-bash operations routing (shell-free)', () => {
+  test('routes an echo command through the in-process fast path', async () => {
+    const createOps = await loadOps();
+    const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    const fallbackOps: AnyOps = {
+      exec: async () => { throw new Error('fallback must not run'); },
+    };
+    const { onData, text } = sink();
+    const ops = createOps({ pool: null, fastPathEnabled: true, fallbackOps, metrics });
+
+    const result = await ops.exec('echo ready', process.cwd(), { onData });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(text(), 'ready\n');
+    assert.deepEqual(metrics, { totalFastPath: 1, totalWarm: 0, totalFallback: 0 });
+  });
+
+  test('routes shell syntax through an available warm worker', async () => {
+    const createOps = await loadOps();
+    const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    let receivedCommand = '';
+    const pool: AnyPool = {
+      exec: async (options) => {
+        receivedCommand = options.command;
+        options.onData(Buffer.from('warm\n'));
+        return { exitCode: 0 };
+      },
+      dispose: () => undefined,
+    };
+    const fallbackOps: AnyOps = {
+      exec: async () => { throw new Error('fallback must not run'); },
+    };
+    const { onData, text } = sink();
+    const ops = createOps({ pool, fastPathEnabled: true, fallbackOps, metrics });
+
+    const result = await ops.exec('echo warm | cat', process.cwd(), { onData });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(receivedCommand, 'echo warm | cat');
+    assert.equal(text(), 'warm\n');
+    assert.deepEqual(metrics, { totalFastPath: 0, totalWarm: 1, totalFallback: 0 });
+  });
+
+  test('falls back when no warm worker is available', async () => {
+    const createOps = await loadOps();
+    const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    let fallbackCalls = 0;
+    const fallbackOps: AnyOps = {
+      exec: async () => {
+        fallbackCalls++;
+        return { exitCode: 7 };
+      },
+    };
+    const ops = createOps({ pool: null, fastPathEnabled: false, fallbackOps, metrics });
+
+    const result = await ops.exec('echo fallback | cat', process.cwd(), { onData: () => undefined });
+
+    assert.equal(result.exitCode, 7);
+    assert.equal(fallbackCalls, 1);
+    assert.deepEqual(metrics, { totalFastPath: 0, totalWarm: 0, totalFallback: 1 });
+  });
+
+  test('falls back when a simple fast-path program cannot be resolved', async () => {
+    const createOps = await loadOps();
+    const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
+    let fallbackCommand = '';
+    const fallbackOps: AnyOps = {
+      exec: async (command) => {
+        fallbackCommand = command;
+        return { exitCode: 127 };
+      },
+    };
+    const ops = createOps({ pool: null, fastPathEnabled: true, fallbackOps, metrics });
+
+    const result = await ops.exec('pie-clearly-missing-program argument', process.cwd(), { onData: () => undefined });
+
+    assert.equal(result.exitCode, 127);
+    assert.equal(fallbackCommand, 'pie-clearly-missing-program argument');
+    assert.deepEqual(metrics, { totalFastPath: 0, totalWarm: 0, totalFallback: 1 });
+  });
+});
+
 describe('MarkerStripper', () => {
   test('strips complete marker and parses exit code from a single chunk', () => {
     const chunks: Buffer[] = [];
