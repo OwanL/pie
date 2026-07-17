@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "stable-noop-baseline-r1-2026-07-17",
+  "baseCommit": "11d9536eac174dfb697bc7876ca3e1d3b884c8ab",
+  "type": "settings-overlay",
+  "hypothesisDimension": "matched-no-op-control",
+  "changedPaths": [],
+  "apply": {},
+  "contentHash": "13fe7ebb8decce25fac007893af400f72c94bba212138836c1c184f533808344",
+  "validation": [
+    "npm run experiment:test",
+    "npm run experiment:calibrate"
+  ]
+}
