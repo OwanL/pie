@@ -30,6 +30,7 @@ const {
 	applyToolSelection,
 	runPruningPrepass,
 	resolvePrepassBudgets,
+	resolvePrepassTemperature,
 	prepassTimeoutMs,
 	clonePruningConfig,
 	resolveAuth,
@@ -619,18 +620,24 @@ test("runPruningPrepass: 500 then recovery on retry -> returns parsed pruned ski
 	assert.equal(result.error, null);
 });
 
-test("runPruningPrepass: malformed JSON is retried once with a correction prompt", async () => {
-	const cfg = config();
+test("runPruningPrepass: malformed JSON correction preserves local-model temperature", async () => {
+	const cfg = config({
+		model: "qwen3.5:9b",
+		provider: "ollama",
+		thinkingLevel: "off",
+		prepass: { temperature: 0.2 },
+	});
 	let calls = 0;
-	const completeFn = async (_model: unknown, context: Array<{ role: string; content: string }>) => {
+	const completeFn = async (_model: unknown, context: Array<{ role: string; content: string }>, options: { temperature?: number }) => {
 		calls++;
+		assert.equal(options.temperature, 0.2);
 		if (calls === 1) return { text: "I would keep alpha and read" };
 		assert.deepEqual(context.slice(-2).map((message) => message.role), ["assistant", "user"]);
 		assert.match(context.at(-1)?.content ?? "", /not valid JSON/i);
 		return { text: '{"pruneSkills":["beta"],"pruneTools":[]}', stopReason: "stop" };
 	};
 	const result = await runPruningPrepass(
-		{ modelRegistry: modelRegistryStub() },
+		{ modelRegistry: { find: () => ({ id: "qwen3.5:9b", provider: "ollama", api: "openai-completions" }) } },
 		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
 		cfg,
 		completeFn as any,
@@ -684,21 +691,26 @@ test("runPruningPrepass: persistent 500 -> terminal error surfaced (not swallowe
 	assert.match(result.error, /500/);
 });
 
-test("runPruningPrepass: thrown transport error retried before failing open", async () => {
-	const cfg = config();
-	let calls = 0;
-	const completeFn = async () => {
-		calls++;
-		if (calls === 1) throw new Error("OpenAI API error (503): 503 Service Unavailable");
+test("runPruningPrepass: thrown transport retry preserves local-model temperature", async () => {
+	const cfg = config({
+		model: "qwen3.5:9b",
+		provider: "ollama",
+		thinkingLevel: "off",
+		prepass: { temperature: 0.2, transportBackoffBaseMs: 0 },
+	});
+	const temperatures: Array<number | undefined> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { temperature?: number }) => {
+		temperatures.push(options.temperature);
+		if (temperatures.length === 1) throw new Error("Ollama API error (503): Service Unavailable");
 		return { text: '{"pruneSkills":["beta"],"pruneTools":[]}', stopReason: "stop" };
 	};
 	const result = await runPruningPrepass(
-		{ modelRegistry: modelRegistryStub() },
+		{ modelRegistry: { find: () => ({ id: "qwen3.5:9b", provider: "ollama", api: "openai-completions" }) } },
 		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
 		cfg,
 		completeFn as any,
 	);
-	assert.equal(calls, 2, "thrown transport error should be retried");
+	assert.deepEqual(temperatures, [0.2, 0.2], "initial call and thrown-error retry should use the local temperature");
 	assert.deepEqual(result.prunedSkills, ["beta"]);
 	assert.equal(result.error, null);
 });
@@ -724,6 +736,14 @@ test("resolvePrepassBudgets: merges config overrides over defaults", () => {
 	assert.equal(b.maxTransportRetries, 5);
 	assert.equal(b.transportBackoffBaseMs, 250);
 	assert.equal(b.maxOutputTokens, 333);
+});
+
+test("resolvePrepassTemperature: preserves temperature only for the Ollama provider", () => {
+	assert.equal(resolvePrepassTemperature({ provider: "ollama", api: "openai-completions" }, 0.2), 0.2);
+	assert.equal(resolvePrepassTemperature({ provider: "openai-codex", api: "openai-codex-responses" }, 0.2), undefined);
+	assert.equal(resolvePrepassTemperature({ provider: "github-copilot", api: "openai-responses" }, 0.2), undefined);
+	assert.equal(resolvePrepassTemperature({ provider: "custom-cloud", api: "anthropic-messages" }, 0.2), undefined);
+	assert.equal(resolvePrepassTemperature({ provider: "ollama" }, undefined), undefined);
 });
 
 test("prepassTimeoutMs: uses override when present, built-in otherwise", () => {
@@ -781,15 +801,20 @@ test("completeOllamaNative surfaces HTTP status for transport retry classificati
 	);
 });
 
-test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutputTokens", async () => {
-	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333, temperature: 0.2 } });
+test("runPruningPrepass: disables pi-ai retries and forwards configured Ollama controls", async () => {
+	const cfg = config({
+		model: "qwen3.5:9b",
+		provider: "ollama",
+		thinkingLevel: "off",
+		prepass: { maxTransportRetries: 7, maxOutputTokens: 333, temperature: 0.2 },
+	});
 	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number; temperature?: number }> = [];
 	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number; temperature?: number }) => {
 		seenOptions.push(options);
 		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
 	};
 	await runPruningPrepass(
-		{ modelRegistry: modelRegistryStub() },
+		{ modelRegistry: { find: () => ({ id: "qwen3.5:9b", provider: "ollama", api: "openai-completions" }) } },
 		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
 		cfg,
 		completeFn as any,
@@ -799,6 +824,32 @@ test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutpu
 		assert.equal(options.maxRetries, 0);
 		assert.equal(options.maxTokens, 333);
 		assert.equal(options.temperature, 0.2);
+	}
+});
+
+test("runPruningPrepass: omits configured temperature from openai-codex initial and retry calls", async () => {
+	const cfg = config({
+		model: "gpt-5.4-mini",
+		provider: "openai-codex",
+		prepass: { temperature: 0.2, transportBackoffBaseMs: 0 },
+	});
+	const seenOptions: Array<{ temperature?: number }> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { temperature?: number }) => {
+		seenOptions.push(options);
+		if (seenOptions.length === 1) {
+			return { text: "", stopReason: "error", errorMessage: "Codex error: 500 Internal Server Error" };
+		}
+		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+	};
+	await runPruningPrepass(
+		{ modelRegistry: { find: () => ({ id: "gpt-5.4-mini", provider: "openai-codex", api: "openai-codex-responses" }) } },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.equal(seenOptions.length, 2, "returned transport error should be retried");
+	for (const options of seenOptions) {
+		assert.equal(Object.hasOwn(options, "temperature"), false, "non-Ollama options must omit the temperature property");
 	}
 });
 

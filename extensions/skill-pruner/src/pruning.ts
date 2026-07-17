@@ -36,6 +36,7 @@ export {
 	isTransportErrorMessage,
 	PREPASS_MAX_TRANSPORT_RETRIES,
 	resolvePrepassBudgets,
+	resolvePrepassTemperature,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 } from "./prepass.js";

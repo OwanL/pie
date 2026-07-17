@@ -89,7 +89,7 @@ Tunable knobs for the LLM prepass call itself. Every field is optional — an ab
 
 | Option | Default | Description |
 |---|---|---|
-| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2, forwarded on every initial, correction, retry, and thinking-downgrade call. Local binary-classification experiments favored `.2`; omit it for providers/models that do not accept temperature overrides |
+| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2. Ollama binary-classification experiments favored `.2`, so the override is forwarded on every initial, correction, retry, and thinking-downgrade call only when the resolved provider is Ollama. All non-Ollama providers use their own default and receive no temperature parameter |
 | `maxOutputTokens` | _(disabled)_ | Optional scorer output cap, forwarded as pi-ai `maxTokens` on every initial, retry, and thinking-downgrade call. Use cautiously: some providers count hidden reasoning against this budget and may exhaust a low cap before emitting JSON |
 | `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
 | `maxTransportRetries` | `2` | Max extension-level classified transport retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables them. pi-ai `maxRetries` is always `0`, avoiding nested retry amplification |

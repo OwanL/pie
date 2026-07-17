@@ -1,6 +1,6 @@
 {
   "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "high",
+  "defaultThinkingLevel": "xhigh",
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
@@ -17,9 +17,9 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "qwen3.5:9b",
-    "provider": "ollama",
-    "thinkingLevel": "off",
+    "model": "gpt-5.4-mini",
+    "provider": "openai-codex",
+    "thinkingLevel": "minimal",
     "prepass": {
       "temperature": 0.2
     },
