@@ -19,10 +19,10 @@ try{
   const model=modelRegistry.find("umans",config.model); if(!model) throw new Error(`Selected model missing: ${config.model}`);
   const runtime=sdk.createExtensionRuntime(),eventBus=sdk.createEventBus(),policyViolations=[];
   const loaded=config.extensions?.length?await extensionLoader.loadExtensions(config.extensions,config.cwd,eventBus,runtime):{extensions:[],errors:[],runtime};
-  const policyExtension=await extensionLoader.loadExtensionFromFactory((pi)=>pi.on("tool_call",(event)=>{capBashTimeout(event,config.maxBashTimeoutSeconds||60);const violation=classifyToolCall(event,config.cwd);if(violation){policyViolations.push(violation);return{block:true,reason:violation.reason};}}),config.cwd,eventBus,runtime,"<inline:benchmark-policy>");
+  const policyExtension=await extensionLoader.loadExtensionFromFactory((pi)=>pi.on("tool_call",(event)=>{capBashTimeout(event,config.maxBashTimeoutSeconds||60);const violation=classifyToolCall(event,config.cwd);if(violation){policyViolations.push(violation);return{block:true,reason:violation.reason};}}),config.cwd,eventBus,runtime,"<inline:workspace-policy>");
   loaded.extensions.push(policyExtension);
   if(loaded.errors?.length) throw new Error(`Extension load failed: ${JSON.stringify(loaded.errors)}`);
-  const basePrompt=`You are a coding agent in an offline controlled benchmark. Work only in ${config.cwd}. Do not access credentials, profiles, external networks, or paths outside this task. Use only the available tools and finish by verifying the requested change.`;
+  const basePrompt=`You are a coding agent working in an existing repository. Work only in ${config.cwd}. Do not access credentials, profiles, external networks, or paths outside this repository. Use only the available tools and finish by verifying the requested change.`;
   const resourceLoader={
     getExtensions:()=>loaded,
     getSkills:()=>({skills:[],diagnostics:[]}),getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),

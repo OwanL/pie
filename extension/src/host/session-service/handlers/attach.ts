@@ -7,7 +7,7 @@ import type { OnSessionCompleted } from '../types';
 import type { BusyChangedPayload, EventEnvelope, SessionOpenedPayload } from '../../../shared/protocol';
 import { resolveSessionOpenedTranscript } from '../../core/session-opened-transcript';
 import { deriveFileChangesFromTranscript } from '../../core/file-change-derivation';
-import { deriveAvailableExtensions } from './session.js';
+import { deriveAvailableExtensions } from '../available-extensions.js';
 import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
 import { backendExitEvents, type InterruptedSessionActivity } from '../backend-exit-events.js';
@@ -193,7 +193,7 @@ function applyPostDispatchState(
   }
   if (payload.analyticsFactors) {
     deps.dispatchArch({ kind: 'AvailableExtensionsChanged', extensions: deriveAvailableExtensions(
-      payload.analyticsFactors.selectedToolIds,
+      payload.analyticsFactors.activeExtensions,
     ) });
   }
   deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: deriveFileChangesFromTranscript(transcript) });

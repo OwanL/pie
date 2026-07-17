@@ -185,7 +185,7 @@ export function TurnActivityTailBody({ tail, continuous = false }: TurnActivityT
   const joined = sourceText || continuous
     ? collapseSpaces(revealed.length > TAIL_RENDER_MAX_CHARS ? revealed.slice(revealed.length - TAIL_RENDER_MAX_CHARS) : revealed)
     : revealed;
-  const { pushY, animating, overflows, refs } = useTailConsoleScroll(
+  const { pushY, animating, overflows, singleRow, refs } = useTailConsoleScroll(
     joined,
     source,
     hasContent,
@@ -215,7 +215,11 @@ export function TurnActivityTailBody({ tail, continuous = false }: TurnActivityT
       */}
       <div
         ref={refs.containerRef}
-        class={cx('turn-activity-tail-content', showFade && 'truncated')}
+        class={cx(
+          'turn-activity-tail-content',
+          singleRow && 'turn-activity-tail-content-single-row',
+          showFade && 'truncated',
+        )}
       >
         {hasContent ? (
           <span
@@ -281,6 +285,8 @@ interface TailConsoleScroll {
   animating: boolean;
   /** True when the wrapped text is taller than the reserved block (top fade). */
   overflows: boolean;
+  /** True when the rendered content occupies exactly one visual row. */
+  singleRow: boolean;
   refs: TailConsoleScrollRefs;
 }
 
@@ -331,6 +337,10 @@ function useTailConsoleScroll(
   // so this stays false for them and the measure is authoritative; subagent /
   // multi-tool tails can still seed true from multiple item lines.
   const [overflows, setOverflows] = useState(initialOverflow);
+  // A one-row preview does not need the configured multi-row stability budget.
+  // This is measured from layout rather than source newlines because the source
+  // is collapsed and can either fit or wrap depending on the panel width.
+  const [singleRow, setSingleRow] = useState(false);
   const [pushY, setPushY] = useState(0);
   const [animating, setAnimating] = useState(false);
 
@@ -366,6 +376,7 @@ function useTailConsoleScroll(
       setPushY(0);
       setAnimating(false);
       setOverflows(false);
+      setSingleRow(false);
       return;
     }
     const el = textRef.current;
@@ -383,6 +394,7 @@ function useTailConsoleScroll(
     const lineCount = Math.max(1, Math.round(textH / ACTIVITY_TAIL_ROW_HEIGHT_PX));
     const nextOverflow = textH > containerH + 0.5;
     setOverflows((prev) => (prev !== nextOverflow ? nextOverflow : prev));
+    setSingleRow((prev) => (prev !== (lineCount === 1) ? lineCount === 1 : prev));
 
     if (suppressRef.current) {
       // New stream / mount: adopt the current line count as the baseline peak
@@ -415,7 +427,7 @@ function useTailConsoleScroll(
 
   useEffect(() => () => cancelRaf(), []);
 
-  return { pushY, animating, overflows, refs: { containerRef, textRef } };
+  return { pushY, animating, overflows, singleRow, refs: { containerRef, textRef } };
 }
 
 /** A subagent that has been dispatched but hasn't started executing yet — the

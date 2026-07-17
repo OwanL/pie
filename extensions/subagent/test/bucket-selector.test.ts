@@ -257,18 +257,72 @@ describe("selectModel", () => {
     assert.deepEqual(result.pool, ["model-b"]);
   });
 
-  it("returns fallback when allowedModelIds filters out everything", () => {
+  it("falls back to the next lower bucket when provider toggles remove the requested tier", () => {
+    const assignments: BucketAssignments = {
+      small: ["small-enabled"],
+      medium: ["medium-enabled"],
+      frontier: ["frontier-disabled"],
+    };
+    const config = makeConfig([
+      { id: "small-enabled" },
+      { id: "medium-enabled" },
+      { id: "frontier-disabled" },
+    ]);
+
+    const result = selectModel(
+      "frontier",
+      undefined,
+      assignments,
+      config,
+      new Set(["small-enabled", "medium-enabled"]),
+      undefined,
+      ACTIVE_MODEL,
+    );
+
+    assert.equal(result.fallback, false);
+    assert.equal(result.bucket, "medium");
+    assert.equal(result.modelId, "medium-enabled");
+    assert.deepEqual(result.pool, ["medium-enabled"]);
+  });
+
+  it("walks past unavailable intermediate buckets without upgrading", () => {
+    const assignments: BucketAssignments = {
+      small: ["small-enabled"],
+      medium: ["medium-disabled"],
+      frontier: ["frontier-enabled"],
+    };
+    const config = makeConfig([
+      { id: "small-enabled" },
+      { id: "medium-disabled" },
+      { id: "frontier-enabled" },
+    ]);
+
+    const result = selectModel(
+      "medium",
+      undefined,
+      assignments,
+      config,
+      new Set(["small-enabled", "frontier-enabled"]),
+      undefined,
+      ACTIVE_MODEL,
+    );
+
+    assert.equal(result.bucket, "small");
+    assert.equal(result.modelId, "small-enabled");
+  });
+
+  it("does not fall back to an active model excluded by provider toggles", () => {
     const assignments: BucketAssignments = {
       small: [],
       medium: ["model-a"],
       frontier: [],
     };
     const config = makeConfig([{ id: "model-a" }]);
-    const allowed = new Set(["model-z"]); // no match
+    const allowed = new Set(["model-z"]); // neither bucket nor active model is available
 
     const result = selectModel("medium", undefined, assignments, config, allowed, undefined, ACTIVE_MODEL);
     assert.equal(result.fallback, true);
-    assert.equal(result.modelId, ACTIVE_MODEL);
+    assert.equal(result.modelId, "");
   });
 
   it("combines excludeModels and allowedModelIds filters", () => {

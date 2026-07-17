@@ -1,1 +1,1 @@
-{"name":"lyra-rebalance-slice","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","benchmark":"node scripts/topology-benchmark.mjs"}}
+{"name":"lyra-vector-rebalancer","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","evaluate":"node scripts/topology-evaluation.mjs"}}

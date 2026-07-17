@@ -1,6 +1,6 @@
 import http from "node:http";
 import { randomBytes } from "node:crypto";
-import { ALLOWED_MODELS, redact } from "./lib/core.mjs";
+import { ALLOWED_MODELS, redact } from "./lib/runtime-support.mjs";
 
 const SAFE_RESPONSE_HEADERS=["content-type","cache-control","x-request-id","x-session-id","x-session-affinity"];
 const SAFE_REQUEST_HEADERS=["content-type","accept","x-request-id","x-session-id","x-session-affinity"];
@@ -11,7 +11,7 @@ export async function startBroker({upstream="https://api.code.umans.ai/v1",apiKe
     const record={at:new Date().toISOString(),method:req.method,path:req.url,accepted:false};let logged=false;
     try{
       if(closed||Date.now()-started>timeoutMs) throw Object.assign(new Error("Broker token expired"),{status:401});
-      if(req.headers.authorization!==`Bearer ${token}`) throw Object.assign(new Error("Invalid benchmark token"),{status:401});
+      if(req.headers.authorization!==`Bearer ${token}`) throw Object.assign(new Error("Invalid session token"),{status:401});
       requests++;
       const chunks=[]; for await(const c of req) chunks.push(c); const rawBody=Buffer.concat(chunks);if(rawBody.length>10_000_000)throw Object.assign(new Error("Request body too large"),{status:413}); let payload={}; try{payload=JSON.parse(rawBody)}catch{throw Object.assign(new Error("Invalid JSON payload"),{status:400});}
       record.model=payload.model; if(!ALLOWED_MODELS.includes(payload.model)) throw Object.assign(new Error(`Model not allowed: ${payload.model}`),{status:403,classification:"provider_policy_violation"});

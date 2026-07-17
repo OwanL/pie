@@ -48,6 +48,40 @@ test('continuous subagent preview bounds its retained animation history', () => 
   assert.ok(stream.accumulated.length <= CONTINUOUS_PREVIEW_MAX_CHARS);
 });
 
+test('TurnActivityTailBody uses only one row when its content fits on one visual line', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const makeTail = (sourceText: string) => ({
+    kind: 'reasoning' as const,
+    lines: [sourceText],
+    sourceText,
+    truncated: false,
+    cursor: false,
+    reservedRows: 4,
+  });
+  try {
+    act(() => render(h(TurnActivityTailBody, { tail: makeTail('short') }), container));
+    const content = container.querySelector<HTMLElement>('.turn-activity-tail-content');
+    const text = container.querySelector<HTMLElement>('.turn-activity-tail-text');
+    assert.ok(content);
+    assert.ok(text);
+
+    let textHeight = 18;
+    Object.defineProperty(text, 'clientHeight', { configurable: true, get: () => textHeight });
+    Object.defineProperty(content, 'clientHeight', { configurable: true, get: () => 72 });
+
+    act(() => render(h(TurnActivityTailBody, { tail: makeTail('short text') }), container));
+    assert.ok(content.classList.contains('turn-activity-tail-content-single-row'));
+
+    textHeight = 36;
+    act(() => render(h(TurnActivityTailBody, { tail: makeTail('short text now wrapping') }), container));
+    assert.ok(!content.classList.contains('turn-activity-tail-content-single-row'));
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
 test('TurnActivityTailBody continuous mode retains rows across an empty transition', () => {
   const container = document.createElement('div');
   document.body.appendChild(container);

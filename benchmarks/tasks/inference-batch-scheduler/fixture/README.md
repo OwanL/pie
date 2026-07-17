@@ -1,6 +1,6 @@
 # Atlas queue replay
 
-Small extraction of the queue scheduler used for offline incident replay. Run `npm test` and `npm run benchmark`.
+Queue scheduler used for offline incident replay. Run `npm test` and `npm run evaluate`.
 
 `planBatches(requests, limits)` receives requests with required `id`, `model`, `inputTokens`, `outputTokens`, `arrivalMs`, `priority`, and `deadlineMs` fields. Every request must appear exactly once in the returned ID batches.
 

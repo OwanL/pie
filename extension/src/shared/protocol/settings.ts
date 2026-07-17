@@ -99,9 +99,10 @@ export type UiDensity = 'compact' | 'comfortable' | 'spacious';
 
 /**
  * User-configured model buckets for subagent model selection. Each bucket is a
- * list of model ids; `selectModel` picks uniformly at random from the requested
- * bucket. Empty buckets fall back to the parent's active model. Mirrored to the
- * in-process subagent extension via {@link SUBAGENT_BUCKETS_ENV}.
+ * list of model ids; `selectModel` picks uniformly at random from the highest
+ * eligible bucket at or below the request. Exhausting those buckets falls back
+ * to the parent's active model. Mirrored to the in-process subagent extension
+ * via {@link SUBAGENT_BUCKETS_ENV}.
  */
 export interface SubagentBuckets {
   small: string[];
@@ -202,9 +203,10 @@ export interface ChatPrefs {
    *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
   bashDefaultTimeout: number;
   /** User-configured model ids per bucket for subagent model selection. The
-   *  subagent tool picks uniformly at random from the requested bucket; an empty
-   *  bucket falls back to the parent's active model. Mirrored to the in-process
-   *  subagent extension via PIE_SUBAGENT_BUCKETS_JSON. Default: all empty. */
+   *  subagent tool picks uniformly at random from the highest eligible bucket at
+   *  or below the request; exhaustion falls back to the parent's active model.
+   *  Mirrored to the in-process subagent extension via PIE_SUBAGENT_BUCKETS_JSON.
+   *  Default: all empty. */
   subagentBuckets: SubagentBuckets;
   /** Per-tier allowlist restricting which buckets nested subagents (depth ≥ 1)
    *  may use. A nested subagent requesting a disallowed tier is downgraded to the

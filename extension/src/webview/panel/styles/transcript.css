@@ -651,11 +651,14 @@
 }
 
 /* Reserved output rows: the content block reserves the configured content-row
-   budget (2 by default) so the block height stays constant as content streams
-   in. --activity-tail-content-min-height is the host-set pref var (driven by
-   activityTailLines in app-body as content rows × the 18px row height); 36px
-   is the bundled :root default (2 rows × 18px) used before the effect runs. */
+   budget (2 by default) so the block height stays constant as multi-row content
+   streams in. A measured single visual row opts out below, avoiding an empty
+   reserved area beneath short activity. --activity-tail-content-min-height is
+   the host-set pref var (driven by activityTailLines in app-body as content rows
+   × the 18px row height); 36px is the bundled default used before the effect
+   runs. */
 :root {
+  --activity-tail-row-height: 18px;
   --activity-tail-content-min-height: 36px;
 }
 
@@ -669,8 +672,16 @@
   overflow: hidden;
 }
 
-/* Collapsed subagent cards share the same activity-tail row budget. */
-.subagent-live-preview .turn-activity-tail-content {
+/* Width determines whether collapsed source text occupies one visual row.
+   Once layout measurement confirms that it does, keep only that row rather
+   than leaving the rest of the user's preview-row budget visibly empty. */
+.turn-activity-tail-content-single-row {
+  height: var(--activity-tail-row-height);
+}
+
+/* Collapsed subagent cards share the same activity-tail row budget, except
+   when the shared renderer has measured a single visual row. */
+.subagent-live-preview .turn-activity-tail-content:not(.turn-activity-tail-content-single-row) {
   height: var(--activity-tail-content-min-height);
 }
 

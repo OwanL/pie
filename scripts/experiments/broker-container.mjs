@@ -6,7 +6,7 @@ const apiKey=(await readFile(required("PIE_BROKER_SECRET_FILE"),"utf8")).trim();
 const broker=await startBroker({
   apiKey,
   token:required("PIE_BROKER_TOKEN"),
-  upstream:process.env.PIE_BENCHMARK_UPSTREAM,
+  upstream:process.env.PIE_BROKER_UPSTREAM,
   timeoutMs:Number(required("PIE_BROKER_TIMEOUT_MS")),
   listenHost:"0.0.0.0",
   listenPort:8787,

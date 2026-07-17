@@ -49,10 +49,15 @@ ids to each bucket. The config is persisted in `ChatPrefs.subagentBuckets` and
 mirrored to the in-process subagent extension via the `PIE_SUBAGENT_BUCKETS_JSON`
 env var (set by the pie host on startup and on every change).
 
-- An **empty bucket** falls back to the caller's active model (safe default —
-  fresh installs start with all buckets empty).
+- When the requested bucket has no eligible model, selection walks down through
+  cheaper buckets (`frontier` → `medium` → `small`) and uses the highest one
+  available. If every bucket at or below the request is empty, it falls back to
+  the caller's active model (safe default — fresh installs start with all buckets
+  empty).
 - Models whose provider is toggled off in pie are filtered out of the pool at
-  selection time; a model that can't be resolved falls back to the active model.
+  selection time. A disabled provider is never reintroduced by the active-model
+  fallback; an unresolved model falls back only when that caller model remains
+  available under the current provider toggles.
 - **Route around busy providers** is an opt-in, default-off setting. When enabled,
   bucket selection softly excludes a model only when every enabled/configured
   provider offering it is paused or has no immediately claimable ProviderGate

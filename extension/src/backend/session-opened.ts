@@ -139,8 +139,34 @@ function emptySkipWindow(cache: ReturnType<typeof ensureDisplayTranscriptCache>)
   };
 }
 
-function getPromptOptions(session: unknown): SdkBuildSystemPromptOptions | undefined {
-  return (session as SessionPromptState)._baseSystemPromptOptions;
+export function deriveActiveExtensionIds(extensionPaths: string[]): string[] {
+  const ids = extensionPaths.flatMap((extensionPath) => {
+    const segments = extensionPath.replace(/\\/g, '/').split('/').filter(Boolean);
+    if (segments.length === 0 || extensionPath.startsWith('<')) return [];
+
+    const nodeModulesIndex = segments.lastIndexOf('node_modules');
+    if (nodeModulesIndex >= 0 && segments[nodeModulesIndex + 1]) {
+      const packageName = segments[nodeModulesIndex + 1];
+      return packageName.startsWith('@') && segments[nodeModulesIndex + 2]
+        ? [`${packageName}/${segments[nodeModulesIndex + 2]}`]
+        : [packageName];
+    }
+
+    const fileName = segments.at(-1)!;
+    const stem = fileName.replace(/\.(?:[cm]?[jt]s|[jt]sx)$/, '');
+    return [stem === 'index' && segments.length > 1 ? segments.at(-2)! : stem];
+  });
+  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort();
+}
+
+export function getPromptOptions(session: unknown): SdkBuildSystemPromptOptions | undefined {
+  const promptState = session as SessionPromptState;
+  const options = promptState._baseSystemPromptOptions;
+  if (!options) return undefined;
+
+  const loadedIds = deriveActiveExtensionIds(promptState._extensionRunner?.getExtensionPaths?.() ?? []);
+  const activeExtensions = [...new Set([...(options.activeExtensions ?? []), ...loadedIds])].sort();
+  return { ...options, activeExtensions };
 }
 
 function ensureDisplayTranscriptCache(context: SessionContext) {

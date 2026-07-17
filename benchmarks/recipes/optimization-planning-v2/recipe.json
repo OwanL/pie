@@ -10,7 +10,7 @@
   "apply": {
     "appendSystemPromptFile": "prompt.md"
   },
-  "contentHash": "a1697c53b69844d8a2508a5fa739f8b5c9032f735c9325e03cd9698a73d66cd0",
+  "contentHash": "51da1c3224762e6acf650e0cc78346d8058117d57d42d8b032ec9ad83ca0d93a",
   "validation": [
     "npm run experiment:test",
     "npm run experiment:calibrate"

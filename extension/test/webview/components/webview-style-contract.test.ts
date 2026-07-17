@@ -96,6 +96,10 @@ test('activity-tail preview-rows pref is wired to a CSS var with a :root default
     transcriptCss,
     /\.turn-activity-tail-content\s*\{[^}]*(?<!min-)height:\s*var\(--activity-tail-content-min-height\)/,
   );
+  assert.match(
+    transcriptCss,
+    /\.turn-activity-tail-content-single-row\s*\{[^}]*height:\s*var\(--activity-tail-row-height\)/,
+  );
 
   // The host emits the var from the pref (content rows × row-height constant),
   // and the pref is an effect dependency so updates propagate live.

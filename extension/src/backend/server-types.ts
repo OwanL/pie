@@ -142,6 +142,9 @@ export interface SessionContext {
 export interface SessionPromptState {
   _baseSystemPrompt?: string;
   _baseSystemPromptOptions?: SdkBuildSystemPromptOptions;
+  /** SDK extension runner. Used read-only to report the extensions that were
+   * actually loaded instead of inferring them from the prunable tool list. */
+  _extensionRunner?: { getExtensionPaths?: () => string[] };
   /** SDK-internal synchronous rebuild used after active tools or extension
    * resources change. Pie wraps it so picker exclusions survive rebuilds. */
   _rebuildSystemPrompt?: (toolNames: string[]) => string;

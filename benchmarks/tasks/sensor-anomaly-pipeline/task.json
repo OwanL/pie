@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "sensor-anomaly-pipeline",
-  "version": 6,
+  "version": 8,
   "promptFile": "prompt.md",
   "fixture": {
     "type": "directory",
@@ -32,7 +32,7 @@
   "checks": {
     "public": [
       "npm test",
-      "npm run benchmark -- --json"
+      "npm run evaluate -- --json"
     ],
     "privateScorer": "../../scorers/private/sensor-anomaly-pipeline.mjs"
   },

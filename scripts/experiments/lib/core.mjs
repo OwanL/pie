@@ -3,10 +3,11 @@ import { mkdir, readFile, rename, rm, stat, writeFile, appendFile, cp, readdir }
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
+import { ALLOWED_MODELS, redact } from "./runtime-support.mjs";
 
+export { ALLOWED_MODELS, redact };
 export const REPO = resolve(import.meta.dirname, "../../..");
 export const DATA = join(REPO, "data", "experiments");
-export const ALLOWED_MODELS = ["umans-glm-5.2", "umans-kimi-k2.7"];
 export const STATUSES = ["draft","materialized","baseline-ready","candidate-ready","smoke-running","full-running","analyzing","complete","blocked","cancelled"];
 export const TRANSITIONS = {
   draft: ["materialized","blocked","cancelled"], materialized: ["baseline-ready","blocked","cancelled"],
@@ -37,4 +38,3 @@ export async function acquireLock(id,purpose="run") { const p=join(experimentDir
 export async function copyDirectory(from,to) { await rm(to,{recursive:true,force:true}); await mkdir(dirname(to),{recursive:true}); await cp(from,to,{recursive:true,errorOnExist:true}); }
 export async function snapshotExperimentInputs(id){const root=join(experimentDir(id),"inputs"),benchmarks=join(root,"benchmarks"),runner=join(root,"runner");if(existsSync(root))throw new Error(`Experiment inputs already exist: ${root}`);await mkdir(root,{recursive:true});await cp(join(REPO,"benchmarks"),benchmarks,{recursive:true,errorOnExist:true});await cp(join(REPO,"scripts","experiments"),runner,{recursive:true,errorOnExist:true});const value={benchmarksHash:await hashPath(benchmarks),runnerHash:await hashPath(runner),createdAt:new Date().toISOString()};await atomicJson(join(root,"manifest.json"),value);return value;}
 export function seededOrder(seed,key) { const n=Number.parseInt(createHash("sha256").update(`${seed}:${key}`).digest("hex").slice(0,8),16); return n%2===0?["baseline","candidate"]:["candidate","baseline"]; }
-export function redact(value,secrets=[]) { let s=typeof value==="string"?value:JSON.stringify(value); for(const secret of secrets) if(secret) s=s.replaceAll(secret,"[REDACTED]"); return s.replace(/(authorization|api[-_]?key|token|secret)(["'\s:=]+)[^\s,"'}]+/gi,"$1$2[REDACTED]"); }

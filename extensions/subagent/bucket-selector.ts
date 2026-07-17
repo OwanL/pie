@@ -80,8 +80,9 @@ export function nearestSupportedThinking(
  * 3. Filter by provider allowlist + excludeModels
  * 4. Soft-filter providers with no immediate capacity, but only when another
  *    candidate remains (all busy/unknown preserves the original pool)
- * 5. Pick uniformly at random from remaining entries
- * 6. Fall back to active model if bucket is empty
+ * 5. If no eligible model remains, walk down through cheaper buckets
+ * 6. Pick uniformly at random from the highest eligible bucket
+ * 7. Fall back to the active model only if every bucket at or below the request is empty
  *
  * @param bucket - Bucket hint: "small", "medium", or "frontier"
  * @param thinkingLevel - Optional thinking level hint
@@ -103,90 +104,95 @@ export function selectModel(
   activeModelId: string,
   capacityAvailableModelIds?: Set<string>,
 ): BucketSelection {
-  const bucketKey = bucket as keyof BucketAssignments;
-  let pool = assignments[bucketKey] ?? [];
-
-  // Build thinking support lookup from model config
+  // Build thinking support lookup from model config.
   const thinkingSupport = new Map<string, ThinkingLevel[]>();
   for (const cfg of modelConfig) {
     thinkingSupport.set(cfg.id, cfg.thinking);
   }
 
-  // Filter by thinkingLevel if provided
-  if (thinkingLevel && pool.length > 0) {
-    const requestedLevel = thinkingLevel;
-    const thinkingFiltered = pool.filter((id) => {
-      const supported = thinkingSupport.get(id);
-      // Models not in config are treated as supporting all levels
-      if (!supported) return true;
-      return supported.includes(requestedLevel);
-    });
+  const filterBucket = (bucketPool: string[]): { pool: string[]; thinkingLevel: ThinkingLevel | undefined } => {
+    let pool = bucketPool;
+    let effectiveThinkingLevel = thinkingLevel;
 
-    if (thinkingFiltered.length === 0) {
-      // Relax to nearest supported thinking level
-      const allSupported = new Set<ThinkingLevel>();
-      for (const id of pool) {
+    // Thinking relaxation is bucket-local. A lower tier may support a different
+    // nearest level than the originally requested (but unavailable) tier.
+    if (thinkingLevel && pool.length > 0) {
+      const thinkingFiltered = pool.filter((id) => {
         const supported = thinkingSupport.get(id);
-        if (supported) for (const l of supported) allSupported.add(l);
-      }
-      const relaxed = nearestSupportedThinking(requestedLevel, [...allSupported]);
-      if (relaxed) {
-        thinkingLevel = relaxed;
-        // Re-filter with relaxed level
-        const relaxedPool = pool.filter((id) => {
+        // Models not in config are treated as supporting all levels.
+        return !supported || supported.includes(thinkingLevel);
+      });
+
+      if (thinkingFiltered.length > 0) {
+        pool = thinkingFiltered;
+      } else {
+        const allSupported = new Set<ThinkingLevel>();
+        for (const id of pool) {
           const supported = thinkingSupport.get(id);
-          if (!supported) return true;
-          return supported.includes(relaxed);
-        });
-        if (relaxedPool.length > 0) {
-          pool = relaxedPool;
+          if (supported) for (const level of supported) allSupported.add(level);
+        }
+        const relaxed = nearestSupportedThinking(thinkingLevel, [...allSupported]);
+        if (relaxed) {
+          const relaxedPool = pool.filter((id) => {
+            const supported = thinkingSupport.get(id);
+            return !supported || supported.includes(relaxed);
+          });
+          if (relaxedPool.length > 0) {
+            pool = relaxedPool;
+            effectiveThinkingLevel = relaxed;
+          }
         }
       }
-    } else {
-      pool = thinkingFiltered;
     }
-  }
 
-  // Filter by provider allowlist
-  if (allowedModelIds && pool.length > 0) {
-    pool = pool.filter((id) => allowedModelIds.has(id));
-  }
+    if (allowedModelIds && pool.length > 0) {
+      pool = pool.filter((id) => allowedModelIds.has(id));
+    }
+    if (excludeModels && pool.length > 0) {
+      pool = pool.filter((id) => !excludeModels.has(id));
+    }
 
-  // Filter by excludeModels
-  if (excludeModels && pool.length > 0) {
-    pool = pool.filter((id) => !excludeModels.has(id));
-  }
+    // Live capacity is a soft exclusion, distinct from disabled providers.
+    // Preserve the eligible pool when every candidate is busy so one can queue.
+    if (capacityAvailableModelIds && pool.length > 0) {
+      const capacityFiltered = pool.filter((id) => capacityAvailableModelIds.has(id));
+      if (capacityFiltered.length > 0) pool = capacityFiltered;
+    }
 
-  // Live capacity is a soft exclusion, distinct from disabled providers. Route
-  // around saturated candidates only when at least one candidate remains; if
-  // every otherwise-eligible model is busy (or no state is available), retain
-  // the old pool so the selected provider can queue normally.
-  if (capacityAvailableModelIds && pool.length > 0) {
-    const capacityFiltered = pool.filter((id) => capacityAvailableModelIds.has(id));
-    if (capacityFiltered.length > 0) pool = capacityFiltered;
-  }
+    return { pool, thinkingLevel: effectiveThinkingLevel };
+  };
 
-  // If pool is empty, fall back to active model
-  if (pool.length === 0) {
-    // If the active model itself has been excluded, return empty to signal exhaustion.
-    const fallbackId = activeModelId && !excludeModels?.has(activeModelId) ? activeModelId : "";
+  const tiersDescending = ["frontier", "medium", "small"] as const;
+  const requestedTierIndex = tiersDescending.indexOf(bucket as (typeof tiersDescending)[number]);
+  const candidateBuckets = requestedTierIndex >= 0
+    ? tiersDescending.slice(requestedTierIndex)
+    : [bucket];
+
+  for (const candidateBucket of candidateBuckets) {
+    const filtered = filterBucket(assignments[candidateBucket as keyof BucketAssignments] ?? []);
+    if (filtered.pool.length === 0) continue;
+
+    const pick = Math.floor(Math.random() * filtered.pool.length);
     return {
-      modelId: fallbackId,
-      thinkingLevel,
-      bucket,
-      pool: [],
-      fallback: true,
+      modelId: filtered.pool[pick],
+      thinkingLevel: filtered.thinkingLevel,
+      bucket: candidateBucket,
+      pool: filtered.pool,
+      fallback: false,
     };
   }
 
-  // Pick uniformly at random
-  const pick = Math.floor(Math.random() * pool.length);
-
+  // Never route back to an active model that is unavailable under the current
+  // provider toggles. An empty id signals model exhaustion to the runner.
+  const activeModelAllowed = !allowedModelIds || allowedModelIds.has(activeModelId);
+  const fallbackId = activeModelId && activeModelAllowed && !excludeModels?.has(activeModelId)
+    ? activeModelId
+    : "";
   return {
-    modelId: pool[pick],
+    modelId: fallbackId,
     thinkingLevel,
     bucket,
-    pool,
-    fallback: false,
+    pool: [],
+    fallback: true,
   };
 }
