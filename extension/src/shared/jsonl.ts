@@ -4,9 +4,10 @@ export function serializeJsonLine(value: unknown): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-/** Shared JSONL record limit. Twenty MiB of raw image data expands to about
- * 26.7 MiB after base64 encoding; 32 MiB leaves room for the RPC envelope. */
-export const JSONL_MAX_LINE_BYTES = 32 * 1024 * 1024;
+/** Shared JSONL record limit. This is a per-record transport safety bound, not
+ * a session-size limit. Keep enough headroom for long-running session
+ * snapshots and base64-encoded images while still bounding malformed peers. */
+export const JSONL_MAX_LINE_BYTES = 128 * 1024 * 1024;
 export const JSONL_OVERFLOW_PREVIEW_BYTES = 256;
 
 export interface JsonlLineReaderOptions {
