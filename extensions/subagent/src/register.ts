@@ -26,7 +26,7 @@ import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "../types.js";
 import { getMaxInflight } from "./concurrency-limit.js";
 
-const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, high, or xhigh.";
+const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, or high.";
 const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
 
 /** Root of the pi-config repo, resolved from this extension's known position.

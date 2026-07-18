@@ -25,7 +25,7 @@ test("SubagentParams enum and default metadata remain intact", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket.enum, ["small", "medium", "frontier"]);
 	assert.equal(props.bucket.default, "medium");
-	assert.deepEqual(props.thinkingLevel.enum, ["minimal", "low", "medium", "high", "xhigh"]);
+	assert.deepEqual(props.thinkingLevel.enum, ["minimal", "low", "medium", "high"]);
 	assert.equal(props.confirmProjectAgents.default, true);
 });
 

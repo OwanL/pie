@@ -15,14 +15,14 @@ import { StringEnum, Type, type Static } from "@mariozechner/pi-ai";
 
 export const BUCKET_GUIDANCE = "Model bucket: 'small' for trivial work, 'medium' for normal development (default), or 'frontier' only for exceptional difficulty.";
 
-const THINKING_LEVEL_GUIDANCE = "Optional thinking effort hint: 'minimal', 'low', 'medium', 'high', or 'xhigh'. When omitted, the model uses its default thinking behavior.";
+const THINKING_LEVEL_GUIDANCE = "Optional thinking effort hint: 'minimal', 'low', 'medium', or 'high'. When omitted, the model uses its default thinking behavior.";
 
 const BucketSchema = Type.Optional(StringEnum(["small", "medium", "frontier"] as const, {
 	description: BUCKET_GUIDANCE,
 	default: "medium",
 }));
 
-const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium", "high", "xhigh"] as const, {
+const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium", "high"] as const, {
 	description: THINKING_LEVEL_GUIDANCE,
 }));
 
