@@ -1,74 +1,121 @@
-import { state, getPiToolSeams, recordRecoveredTool } from "./state.js";
-import { getSessionId } from "./pruning.js";
-import { recordToolRecovery } from "../logger.js";
+import { readFileSync } from "node:fs";
+import {
+	state,
+	getPiToolSeams,
+	getHiddenSkills,
+	getLoadedSkills,
+	getPrunedTools,
+	recordLoadedSkill,
+} from "./state.js";
+import { getConfig, getSessionId } from "./pruning.js";
+import { recordSkillRecovery, recordToolRecovery } from "../logger.js";
 
-export const requestToolDefinition = {
-	name: "request_tool",
-	label: "Request Tool",
-	description: "List tools removed by the skill-pruner, or re-enable one for the rest of this session.",
-	promptSnippet: "List or re-enable tools removed by the skill-pruner.",
+function stripFrontmatter(content: string): string {
+	return content.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n/, "").trim();
+}
+
+function formatSkill(skill: { name: string; filePath: string; baseDir: string }): string {
+	const body = stripFrontmatter(readFileSync(skill.filePath, "utf8"));
+	return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+}
+
+function commaList(names: readonly string[]): string {
+	return names.length > 0 ? [...names].sort().join(", ") : "(none)";
+}
+
+export const requestCapabilityDefinition = {
+	name: "request_capability",
+	label: "Request Capability",
+	description: "List tools and skills hidden by the latest pruning decision, or activate/load one by exact type and name.",
+	promptSnippet: "Poll for hidden tools or skills, then activate or load one by exact type and name.",
 	promptGuidelines: [
-		"Use request_tool when a tool needed for the task is unavailable; omit toolName to list recoverable tools, then pass the exact name to enable one.",
+		"Use request_capability only after checking the active tools and skills and finding no suitable capability. Never poll to verify, supplement, or replace a suitable active capability. Omit both arguments once to list hidden names, then pass the exact type and name; do not repeat a poll already in context.",
 	],
 	parameters: {
 		type: "object",
 		properties: {
-			toolName: {
+			capabilityType: {
 				type: "string",
-				description: "Exact name of the pruned tool to re-enable. Omit to list recoverable tools.",
+				enum: ["tool", "skill"],
+				description: "Type of hidden capability to select. Omit when listing.",
+			},
+			capabilityName: {
+				type: "string",
+				description: "Exact hidden capability name from a previous listing. Omit when listing.",
 			},
 		},
+		additionalProperties: false,
 	},
 	async execute(_toolCallId: string, params: Record<string, unknown>, _signal: AbortSignal, _onUpdate: () => void, ctx: unknown) {
-		const toolName = typeof params.toolName === "string" ? params.toolName.trim() : "";
-		const allTools = state.getAllToolsOverride
-			? state.getAllToolsOverride()
-			: getPiToolSeams().getAllTools();
-		const activeTools = state.getActiveToolsOverride
-			? state.getActiveToolsOverride()
-			: getPiToolSeams().getActiveTools();
-
-		const knownNames = new Set(allTools.map((t) => t.name));
-		if (!toolName) {
-			const inactive = [...knownNames].filter((name) => !activeTools.includes(name)).sort();
-			const text = inactive.length > 0
-				? `Recoverable tools: ${inactive.join(", ")}`
-				: "No tools are currently pruned.";
-			return { content: [{ type: "text" as const, text }] };
-		}
-		if (!knownNames.has(toolName)) {
-			return { content: [{ type: "text" as const, text: `Unknown tool '${toolName}'. Available tools: ${[...knownNames].sort().join(", ")}` }], isError: true };
-		}
-		if (activeTools.includes(toolName)) {
-			return { content: [{ type: "text" as const, text: `Tool '${toolName}' is already active.` }] };
-		}
-
-		const newActiveTools = [...activeTools, toolName];
-		if (state.setActiveToolsOverride) {
-			state.setActiveToolsOverride(newActiveTools);
-		} else {
-			getPiToolSeams().setActiveTools(newActiveTools);
-		}
-
-		// Sticky recovery: record this tool so the next `before_agent_start`
-		// protects it from re-pruning. `pi.setActiveTools()` only takes effect on
-		// the NEXT turn (by SDK design), so without this the prepass would prune
-		// the tool again next turn and the recovery would never take hold.
+		const capabilityType = typeof params.capabilityType === "string" ? params.capabilityType.trim() : "";
+		const capabilityName = typeof params.capabilityName === "string" ? params.capabilityName.trim() : "";
 		const sessionId = getSessionId(ctx);
-		try {
-			recordRecoveredTool(sessionId, toolName);
-		} catch {
-			/* never let state tracking break recovery */
+		const allTools = state.getAllToolsOverride ? state.getAllToolsOverride() : getPiToolSeams().getAllTools();
+		const activeTools = state.getActiveToolsOverride ? state.getActiveToolsOverride() : getPiToolSeams().getActiveTools();
+		const knownToolNames = new Set(allTools.map((tool) => tool.name));
+		const hiddenToolNames = [...getPrunedTools(sessionId)]
+			.filter((name) => knownToolNames.has(name) && !activeTools.includes(name))
+			.sort();
+		const hiddenSkills = getHiddenSkills(sessionId);
+		const loadedSkills = getLoadedSkills(sessionId);
+		const hiddenSkillNames = [...hiddenSkills.keys()].filter((name) => !loadedSkills.has(name)).sort();
+
+		if (!capabilityType && !capabilityName) {
+			if (hiddenToolNames.length === 0 && hiddenSkillNames.length === 0) {
+				return { content: [{ type: "text" as const, text: "No capabilities are hidden by the latest pruning decision." }] };
+			}
+			return { content: [{ type: "text" as const, text: `tools\t${commaList(hiddenToolNames)}\nskills\t${commaList(hiddenSkillNames)}` }] };
+		}
+		if (!capabilityType || !capabilityName) {
+			return {
+				content: [{ type: "text" as const, text: "Provide both capabilityType and capabilityName, or omit both to list hidden capabilities." }],
+				isError: true,
+			};
+		}
+		if (capabilityType !== "tool" && capabilityType !== "skill") {
+			return { content: [{ type: "text" as const, text: "capabilityType must be 'tool' or 'skill'." }], isError: true };
 		}
 
-		// Record that the agent had to recover a pruned tool — the key over-pruning
-		// signal for analytics. Best-effort: never let logging break the recovery.
-		try {
-			recordToolRecovery(sessionId, toolName);
-		} catch {
-			/* ignore telemetry failures */
+		if (capabilityType === "skill") {
+			if (hiddenToolNames.includes(capabilityName)) {
+				return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden tool, not a skill. Use capabilityType='tool'.` }], isError: true };
+			}
+			const skill = hiddenSkills.get(capabilityName);
+			if (!skill || loadedSkills.has(capabilityName)) {
+				return { content: [{ type: "text" as const, text: `No hidden skill named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
+			}
+			try {
+				const text = formatSkill(skill);
+				recordLoadedSkill(sessionId, capabilityName);
+				recordSkillRecovery(sessionId, capabilityName);
+				return { content: [{ type: "text" as const, text }] };
+			} catch (error) {
+				return { content: [{ type: "text" as const, text: `Failed to load hidden skill '${capabilityName}': ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+			}
 		}
 
-		return { content: [{ type: "text" as const, text: `Enabled '${toolName}' for subsequent turns.` }] };
+		if (hiddenSkillNames.includes(capabilityName)) {
+			return { content: [{ type: "text" as const, text: `'${capabilityName}' is a hidden skill, not a tool. Use capabilityType='skill'.` }], isError: true };
+		}
+		if (!hiddenToolNames.includes(capabilityName)) {
+			return { content: [{ type: "text" as const, text: `No hidden tool named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
+		}
+
+		const pruned = getPrunedTools(sessionId);
+		const dependencies = getConfig().tools?.dependencies ?? {};
+		const enabled = new Set(activeTools);
+		const visited = new Set<string>();
+		const visit = (name: string) => {
+			if (visited.has(name) || !knownToolNames.has(name)) return;
+			visited.add(name);
+			if (name === capabilityName || pruned.has(name)) enabled.add(name);
+			for (const dependency of dependencies[name] ?? []) visit(dependency);
+		};
+		visit(capabilityName);
+		const newActiveTools = [...enabled];
+		if (state.setActiveToolsOverride) state.setActiveToolsOverride(newActiveTools);
+		else getPiToolSeams().setActiveTools(newActiveTools);
+		recordToolRecovery(sessionId, capabilityName);
+		return { content: [{ type: "text" as const, text: `Enabled tool '${capabilityName}'; it is available on the next model step.` }] };
 	},
 };

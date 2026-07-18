@@ -109,12 +109,9 @@ export function buildPruningPayload(
 	return { result };
 }
 
-/** HTML-comment hint that names which skills the pruner removed. */
-export function buildHint(excludedNames: string[]): string {
-	if (excludedNames.length === 0) {
-		return "";
-	}
-	return `<!-- Pruned skills (not shown to save attention): ${excludedNames.join(", ")}. Use /skill:name to load one. -->`;
+/** Hidden skill names are disclosed only through request_capability polling. */
+export function buildHint(_excludedNames: string[]): string {
+	return "";
 }
 
 /**

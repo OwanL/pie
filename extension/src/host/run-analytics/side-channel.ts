@@ -39,7 +39,7 @@ export interface PruningDecision {
   codeVersion?: string;
 }
 
-export type PruningEventKind = 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'tool_recovered';
+export type PruningEventKind = 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'skill_recovered' | 'tool_recovered';
 
 export interface PruningEvent {
   event: PruningEventKind;
@@ -133,6 +133,7 @@ const PRUNING_EVENT_KINDS = new Set<PruningEventKind>([
   'skill_read',
   'skill_miss',
   'shadow_miss_candidate',
+  'skill_recovered',
   'tool_recovered',
 ]);
 

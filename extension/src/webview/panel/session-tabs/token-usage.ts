@@ -522,13 +522,15 @@ function addCompletedUsageCost(
   usage: AssistantUsage,
   pricing: TokenPricing | undefined,
   modelId: string | undefined,
+  provider?: string,
 ): void {
   summary.inputTokens += usage.inputTokens;
   summary.outputTokens += usage.outputTokens;
   summary.cacheReadTokens += usage.cacheReadTokens;
   summary.cacheWriteTokens += usage.cacheWriteTokens;
   summary.totalTokens += usage.totalTokens;
-  if (modelId) summary.modelIds.add(modelId);
+  const billingModelId = modelId && provider ? `${provider}/${modelId}` : modelId;
+  if (billingModelId) summary.modelIds.add(billingModelId);
   if (!pricing) return;
 
   const costs = costBreakdownFromUsage(usage, pricing);
@@ -538,7 +540,7 @@ function addCompletedUsageCost(
   summary.cacheWriteCost += costs.cacheWrite;
   summary.totalCost += costs.total;
   summary.pricedTurnCount += 1;
-  addModelCost(summary.modelCosts, normalizeModelId(modelId, 'Selected model'), 'Main turns', usage, costs.total);
+  addModelCost(summary.modelCosts, normalizeModelId(billingModelId, 'Selected model'), 'Main turns', usage, costs.total);
 }
 
 export function buildCompletedCostSummary(
@@ -560,7 +562,7 @@ export function buildCompletedCostSummary(
     const messagePricing = message.modelId
       ? pricingForModel ? pricingForModel(message.modelId, message.provider) : fallbackPricing
       : fallbackPricing;
-    addCompletedUsageCost(completed, message.usage, messagePricing, message.modelId);
+    addCompletedUsageCost(completed, message.usage, messagePricing, message.modelId, message.provider);
   }
 
   if (sawTranscriptUsage || usageSummary.reportedTurnCount === 0) {
@@ -582,6 +584,7 @@ export function buildSessionCostIndicator(
   pricingForModel?: TokenPricingResolver,
   liveEstimate?: LiveSessionCostEstimate | null,
   selectedModelId?: string,
+  selectedProvider?: string,
 ): SessionCostIndicatorState | null {
   const labelModel = modelName ?? 'Selected model';
   // Key the in-flight live-turn estimate by the selected model's *id* (not its
@@ -604,7 +607,10 @@ export function buildSessionCostIndicator(
   mergeModelCosts(modelCosts, completed.modelCosts);
   mergeModelCosts(modelCosts, subagents.modelCosts);
   if (pricing && liveEstimate && liveCost > 0) {
-    addModelCost(modelCosts, normalizeModelId(selectedModelId, labelModel), 'Live estimate', liveEstimate, liveCost);
+    const liveBillingModelId = selectedModelId && selectedProvider
+      ? `${selectedProvider}/${selectedModelId}`
+      : selectedModelId;
+    addModelCost(modelCosts, normalizeModelId(liveBillingModelId, labelModel), 'Live estimate', liveEstimate, liveCost);
   }
   if (prepass.modelId && prepass.cost > 0) {
     addModelCost(modelCosts, prepass.modelId, 'Pruning prepass', prepass.usage, prepass.cost);

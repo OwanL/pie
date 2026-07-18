@@ -26,6 +26,7 @@ This folder contains active design contracts, implementation plans, and operatio
 - [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) and `AGENTS.md` for authoritative usage. Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
 - [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
+- [internal/experiments/capability-disclosure-screen-2026-07-17.md](internal/experiments/capability-disclosure-screen-2026-07-17.md) — controlled forced-hidden screening of unified vs separate tool/skill recovery and immediate vs metadata skill loading; promotes unified immediate disclosure to end-to-end testing.
 - [IDEAS.md](IDEAS.md) — unstructured brain-dump. Not a roadmap. Items here are candidates for evaluation, not commitments.
 
 ## Conventions

@@ -56,6 +56,7 @@ interface ComposerProps {
   draftText: string;
   draftRestore?: { text: string; nonce: number } | null;
   activeModelId?: string;
+  activeProvider?: string;
   activeThinkingLevel?: ThinkingLevel;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
@@ -113,6 +114,7 @@ function ComposerView({
   draftText,
   draftRestore,
   activeModelId,
+  activeProvider,
   activeThinkingLevel,
   modelSettings,
   availableModels,
@@ -161,6 +163,7 @@ function ComposerView({
     tokenRateIndicator,
   } = useComposerIndicators({
     activeModelId,
+    activeProvider,
     activeThinkingLevel,
     modelSettings,
     availableModels,

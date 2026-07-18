@@ -132,7 +132,7 @@ export function ComposerToolbar({
             width="reasoning"
             onChange={(e) => {
               const target = e.target as HTMLSelectElement;
-              onModelChange(selectedModel, undefined, target.value as ThinkingLevel);
+              onModelChange(selectedModel, selectedProvider, target.value as ThinkingLevel);
             }}
             ariaLabel="Reasoning level"
             title="Reasoning level"

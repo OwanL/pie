@@ -6,8 +6,9 @@ Controlled, offline-by-default benchmark definitions for `scripts/experiments/`.
 
 - `tasks/<id>/task.json` fixes policy, scoring, allowed changes, and limits.
 - `tasks/<id>/fixture/` is the realistic repository slice copied to the target.
+- Tasks may declare benchmark-owned `resources.extensions` and `resources.skills`; paths resolve from the task directory but must remain inside the frozen benchmark tree, and the controller copies only those resources into the isolated bundle for both treatments. Custom extension tool names must also appear in `policy.allowedTools`.
 - `scorers/private/` holds deterministic hidden-workload scorers resolved only by the controller.
-- `recipes/` contains replayable harness treatments.
+- `recipes/` contains replayable harness treatments. A recipe may declare `apply.sourcePaths` to freeze repo-local extension dependencies beside the benchmark snapshot, `apply.bundlePaths` to mount them into the isolated treatment bundle, and a benchmark-only `settingsFile`; all paths are copied before target execution.
 - `suites/` fixes task matrices and promotion constraints.
 - `schemas/` defines durable manifests and results.
 

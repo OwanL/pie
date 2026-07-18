@@ -36,7 +36,6 @@ export {
 	isTransportErrorMessage,
 	PREPASS_MAX_TRANSPORT_RETRIES,
 	resolvePrepassBudgets,
-	resolvePrepassTemperature,
 	runPruningPrepass,
 	LLM_TIMEOUT_MS_BY_THINKING_LEVEL,
 } from "./prepass.js";
@@ -161,19 +160,14 @@ export function applySkillSelection(
 	return { includedSkillNames, excludedSkillNames };
 }
 
-/** The pruner's own recovery tool. Hard-protected from pruning so the agent
- *  can always recover other pruned tools via `request_tool` — pruning it would
- *  strand every other pruned tool with no recovery path. */
-export const RECOVERY_TOOL_NAME = "request_tool";
+/** The pruner's own recovery tool. Hard-protected so hidden tools and skills
+ * always retain one minimal, model-visible recovery path. */
+export const RECOVERY_TOOL_NAME = "request_capability";
 
 export function applyToolSelection(
 	allTools: ToolInfo[],
 	prunedTools: string[] | null,
 	activeConfig: PruningConfig,
-	/** Extra tools to protect from pruning this turn — typically tools recovered
-	 *  via `request_tool` earlier in the session, so recovery is sticky across
-	 *  turns (the next prepass can't re-prune them). */
-	extraProtected: ReadonlySet<string> = new Set(),
 ): { includedToolNames: string[]; excludedToolNames: string[]; safeguardReason?: string } {
 	// No tools config (tool pruning disabled) or no tools present → keep everything.
 	if (!activeConfig.tools || allTools.length === 0) {
@@ -192,8 +186,10 @@ export function applyToolSelection(
 	}
 
 	const alwaysKeepTools = activeConfig.tools.alwaysKeep ?? [];
-	// alwaysKeep + recovered (sticky) tools + the recovery tool itself are never pruned.
-	const protectedBase = new Set<string>([...alwaysKeepTools, ...extraProtected, RECOVERY_TOOL_NAME]);
+	// Explicit always-keep tools and the recovery path itself are never pruned.
+	// A tool recovered during the preceding request is deliberately reconsidered
+	// by this new pruning decision rather than accumulating for the whole session.
+	const protectedBase = new Set<string>([...alwaysKeepTools, RECOVERY_TOOL_NAME]);
 	const allNames = new Set(allTools.map((t) => t.name));
 	const pruneSet = new Set(
 		prunedTools.filter((name) => allNames.has(name) && !protectedBase.has(name)),

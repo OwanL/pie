@@ -103,6 +103,7 @@ export const BottomSection = memo(function BottomSection({
         retryStatus={retryStatus}
         interrupting={interrupting}
         activeModelId={activeSession?.modelId}
+        activeProvider={activeSession?.provider}
         activeThinkingLevel={activeSession?.thinkingLevel}
         modelSettings={modelSettings}
         availableModels={availableModels}

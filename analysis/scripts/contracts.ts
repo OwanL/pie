@@ -548,11 +548,12 @@ export interface PruningSourceDecision {
 
 /** Raw pruning quality-signal event read from data/pruning.jsonl.
  *  These are the over-pruning signals: `skill_miss` / `shadow_miss_candidate`
- *  (agent read a skill the pruner had pruned — a wrong-prune) and
- *  `tool_recovered` (agent called `request_tool` to re-enable a pruned tool).
+ *  (agent read a skill the pruner had pruned — a wrong-prune),
+ *  `skill_recovered` (agent loaded a hidden skill through request_capability), and
+ *  `tool_recovered` (agent re-enabled a hidden tool through request_capability).
  *  `skill_read` is a non-miss baseline read, surfaced only as a denominator for the miss rate. */
 export interface PruningSourceEvent {
-  event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'tool_recovered';
+  event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'skill_recovered' | 'tool_recovered';
   skillName?: string;
   toolName?: string;
   sessionId: string;
@@ -609,7 +610,7 @@ export interface PreparedPruningSignalRow {
   sessionPathHash: string;
   timestamp: string;
   startedDay: string;
-  event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'tool_recovered';
+  event: 'skill_read' | 'skill_miss' | 'shadow_miss_candidate' | 'skill_recovered' | 'tool_recovered';
   skillName: string | null;
   toolName: string | null;
 }
@@ -1091,13 +1092,13 @@ export interface PruningSummary {
   skillMissCount: number;
   /** Agent read a shadow-pruned skill (shadow mode wrong-prune candidate). */
   shadowMissCandidateCount: number;
-  /** Agent called `request_tool` to re-enable a pruned tool — the most direct over-pruning metric. */
+  /** Agent used request_capability to re-enable a hidden tool — a direct over-pruning metric. */
   toolRecoveredCount: number;
   /** Denominator for `pruneRecoveredRate`: pruning decisions that pruned ≥1 tool (`toolCountPruned >= 1`). */
   decisionsThatPrunedTools: number;
   /** "Prunes that were recovered" rate = `toolRecoveredCount` / `decisionsThatPrunedTools`.
    *  Per-decision over-pruning signal: of the decisions that removed at least one tool, the fraction
-   *  that the agent subsequently undid by re-enabling a pruned tool via `request_tool`. `null` when no
+   *  that the agent subsequently undid by re-enabling a hidden tool via request_capability. `null` when no
    *  decision pruned a tool (denominator 0). Units differ across numerator/denominator (recovery
    *  *events* vs pruning *decisions*) — a single decision can yield multiple recoveries, so this is a
    *  rate-of-incidence signal, not a strict fraction; treat values >1 as "every tool-pruning decision

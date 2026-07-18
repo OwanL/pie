@@ -16,7 +16,7 @@ The scorer returns only the tiny JSON shape `{"keep":[]}` with no explanation. T
 
 The parser is **fail-open**: unreadable output keeps everything. It first recovers safe common formatting mistakes (including fenced/embedded JSON and trailing commas). If a non-empty response is still unreadable, the prepass retries once at the same thinking level with the invalid output plus an explicit JSON-only correction; only a second unreadable response falls back to keeping everything. A valid empty keep list means no optional candidate is probably needed. Pruning 100% of a category still triggers a **keep-all safeguard** when it would strand the agent. The tool safeguard always fires on a true 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune is allowed whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
 
-A `request_tool` recovery tool lets the agent re-enable a pruned tool mid-session; each recovery is logged to `data/pruning.jsonl` as the over-pruning quality signal.
+A single `request_capability` recovery tool progressively discloses both hidden tools and hidden skills. With no arguments it returns grouped names only. Selecting an exact tool activates it for the next model step in the same request; selecting an exact trusted skill returns its full `SKILL.md` body immediately. Recovered tools are reconsidered by the next pruning decision rather than remaining sticky for the whole session. Recoveries are logged to `data/pruning.jsonl` as over-pruning quality signals.
 
 ## Configuration
 
@@ -89,7 +89,7 @@ Tunable knobs for the LLM prepass call itself. Every field is optional — an ab
 
 | Option | Default | Description |
 |---|---|---|
-| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2. Ollama binary-classification experiments favored `.2`, so the override is forwarded on every initial, correction, retry, and thinking-downgrade call only when the resolved provider is Ollama. All non-Ollama providers use their own default and receive no temperature parameter |
+| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2, forwarded on every initial, correction, retry, and thinking-downgrade call. Local binary-classification experiments favored `.2`; omit it for providers/models that do not accept temperature overrides |
 | `maxOutputTokens` | _(disabled)_ | Optional scorer output cap, forwarded as pi-ai `maxTokens` on every initial, retry, and thinking-downgrade call. Use cautiously: some providers count hidden reasoning against this budget and may exhaust a low cap before emitting JSON |
 | `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
 | `maxTransportRetries` | `2` | Max extension-level classified transport retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables them. pi-ai `maxRetries` is always `0`, avoiding nested retry amplification |
@@ -127,5 +127,10 @@ A `pruning-result` custom message is rendered in the transcript showing what was
 
 ## Recovery
 
-- **Skills**: Use `/skill:name` on the next turn to explicitly include a skill
-- **Tools**: Call `request_tool({})` to list pruned tools, then `request_tool({ toolName: "<exact-tool-name>" })` to re-enable one for the remainder of the session; the recovery is logged to `data/pruning.jsonl`.
+Call `request_capability({})` only after checking the active tools and skills and finding no suitable capability. Never poll merely to verify, supplement, or replace a suitable active capability. The result lists hidden tool and skill names without descriptions or schemas. Then select exactly one listed capability:
+
+```json
+{ "capabilityType": "tool", "capabilityName": "web_search" }
+```
+
+A tool becomes formally available on the next model step within the same user request. For a skill, use `"capabilityType": "skill"`; the recovery result contains the trusted skill body and its relative-reference base directory. Do not repeat a poll whose result remains in context. A new top-level pruning decision may hide a previously recovered tool again.

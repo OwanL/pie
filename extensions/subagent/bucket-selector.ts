@@ -71,6 +71,26 @@ export function nearestSupportedThinking(
 
 // --- Selection ---
 
+// Keep a shuffled bag per eligible pool. Each model is selected exactly once per
+// cycle, while reshuffling each cycle avoids a fixed first-model/order bias.
+// This gives short-run balance that independent Math.random() draws cannot.
+const fairSelectionBags = new Map<string, string[]>();
+
+function selectFairly(pool: string[]): string {
+  const uniquePool = [...new Set(pool)];
+  const key = [...uniquePool].sort().join("\u0000");
+  let bag = fairSelectionBags.get(key);
+  if (!bag || bag.length === 0) {
+    bag = [...uniquePool];
+    for (let i = bag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [bag[i], bag[j]] = [bag[j], bag[i]];
+    }
+    fairSelectionBags.set(key, bag);
+  }
+  return bag.pop()!;
+}
+
 /**
  * Select a model from the user-configured bucket assignments.
  *
@@ -81,7 +101,7 @@ export function nearestSupportedThinking(
  * 4. Soft-filter providers with no immediate capacity, but only when another
  *    candidate remains (all busy/unknown preserves the original pool)
  * 5. If no eligible model remains, walk down through cheaper buckets
- * 6. Pick uniformly at random from the highest eligible bucket
+ * 6. Pick from a balanced shuffled cycle over the highest eligible bucket
  * 7. Fall back to the active model only if every bucket at or below the request is empty
  *
  * @param bucket - Bucket hint: "small", "medium", or "frontier"
@@ -172,9 +192,8 @@ export function selectModel(
     const filtered = filterBucket(assignments[candidateBucket as keyof BucketAssignments] ?? []);
     if (filtered.pool.length === 0) continue;
 
-    const pick = Math.floor(Math.random() * filtered.pool.length);
     return {
-      modelId: filtered.pool[pick],
+      modelId: selectFairly(filtered.pool),
       thinkingLevel: filtered.thinkingLevel,
       bucket: candidateBucket,
       pool: filtered.pool,

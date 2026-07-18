@@ -559,6 +559,7 @@ function createPruningImpact(prepared: PreparedAnalyticsData): PruningImpactData
         skillReadCount += 1;
         break;
       case 'skill_miss':
+      case 'skill_recovered':
         skillMissCount += 1;
         break;
       case 'shadow_miss_candidate':

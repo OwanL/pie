@@ -1141,6 +1141,7 @@ function coercePruningEvents(value: unknown): PruningSourceEvent[] {
       (entry.event === 'skill_read' ||
         entry.event === 'skill_miss' ||
         entry.event === 'shadow_miss_candidate' ||
+        entry.event === 'skill_recovered' ||
         entry.event === 'tool_recovered') &&
       typeof entry.sessionId === 'string' &&
       typeof entry.timestamp === 'string'
@@ -1420,7 +1421,7 @@ function readPruningLog(configRoot: string): { decisions: PruningSourceDecision[
   const lines = raw.trim().split('\n').filter((line) => line.trim().length > 0);
   const decisions: PruningSourceDecision[] = [];
   const events: PruningSourceEvent[] = [];
-  const EVENT_TYPES = new Set(['skill_read', 'skill_miss', 'shadow_miss_candidate', 'tool_recovered']);
+  const EVENT_TYPES = new Set(['skill_read', 'skill_miss', 'shadow_miss_candidate', 'skill_recovered', 'tool_recovered']);
   for (const line of lines) {
     try {
       const parsed = parseJsonOrThrow<any>(line, pruningPath);
@@ -1453,7 +1454,7 @@ function readPruningLog(configRoot: string): { decisions: PruningSourceDecision[
         continue;
       }
       // Event-shaped line: over-pruning quality signals (skill_miss / shadow_miss_candidate /
-      // tool_recovered) plus the skill_read baseline. Carries `event` + sessionId + timestamp.
+      // skill_recovered / tool_recovered) plus the skill_read baseline. Carries `event` + sessionId + timestamp.
       if (
         typeof parsed.event === 'string' &&
         EVENT_TYPES.has(parsed.event) &&

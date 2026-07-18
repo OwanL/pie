@@ -494,6 +494,14 @@ test('buildCompletedCostSummary resolves shared model ids by serving provider', 
 
   assert.deepEqual(seen, ['openai-codex/shared-model', 'github-copilot/shared-model']);
   assert.equal(completed.totalCost, 7);
+  assert.deepEqual(
+    Array.from(completed.modelCosts.keys()).sort(),
+    ['github-copilot/shared-model', 'openai-codex/shared-model'],
+  );
+  assert.deepEqual(
+    Array.from(completed.modelIds).sort(),
+    ['github-copilot/shared-model', 'openai-codex/shared-model'],
+  );
 });
 
 test('provider-less shared ids stay unpriced when the resolver reports ambiguity', () => {

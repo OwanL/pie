@@ -33,11 +33,13 @@ test('resolveComposerModelState prefers the active session model over the global
   assert.equal(state.supportsReasoning, true);
 });
 
-test('resolveComposerModelState uses provider identity when model ids collide', () => {
+test('resolveComposerModelState uses the active session provider when model ids collide', () => {
   const state = resolveComposerModelState({
+    activeModelId: 'gpt-shared',
+    activeProvider: 'openai-codex',
     modelSettings: {
       defaultModel: 'gpt-shared',
-      defaultProvider: 'openai-codex',
+      defaultProvider: 'github-copilot',
       defaultThinkingLevel: 'high',
     },
     availableModels: [
@@ -61,6 +63,24 @@ test('resolveComposerModelState uses provider identity when model ids collide', 
   assert.equal(state.selectedProvider, 'openai-codex');
   assert.equal(state.selectedModelInfo?.name, 'Codex GPT');
   assert.equal(state.supportsReasoning, true);
+});
+
+test('resolveComposerModelState does not guess a provider for an ambiguous active model', () => {
+  const state = resolveComposerModelState({
+    activeModelId: 'gpt-shared',
+    modelSettings: {
+      defaultModel: 'gpt-shared',
+      defaultProvider: 'github-copilot',
+      defaultThinkingLevel: 'high',
+    },
+    availableModels: [
+      { id: 'gpt-shared', name: 'Copilot GPT', provider: 'github-copilot', reasoning: false, inputKinds: ['text'] },
+      { id: 'gpt-shared', name: 'Codex GPT', provider: 'openai-codex', reasoning: true, inputKinds: ['text'] },
+    ],
+  });
+
+  assert.equal(state.selectedProvider, undefined);
+  assert.equal(state.selectedModelInfo, undefined);
 });
 
 test('resolveComposerModelState falls back to the default model when the session has no explicit model', () => {

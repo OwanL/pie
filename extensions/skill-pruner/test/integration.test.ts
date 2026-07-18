@@ -11,7 +11,7 @@ import type { PruningConfig } from "../types.js";
 
 installSdkResolverForTests();
 const require = createRequire(import.meta.url);
-const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting, getRecoveredTools, clearRecoveredToolsForTesting } = require("../index.ts") as typeof import("../index.js");
+const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting, getHiddenSkills, recordHiddenSkills, recordPrunedTools, clearCapabilityStateForTesting } = require("../index.ts") as typeof import("../index.js");
 
 function installSdkResolverForTests(): void {
 	// Isolate from host extension-toggle state. When tests run inside the
@@ -214,7 +214,8 @@ test("discretion mode: LLM prunes a subset → only those skills removed", async
 		assert.match(result.systemPrompt, /<name>code-simplification<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>duckdb-query-optimization<\/name>/);
 		assert.doesNotMatch(result.systemPrompt, /<name>frontend-design<\/name>/);
-		assert.match(result.systemPrompt, /Pruned skills .*duckdb-query-optimization/);
+		assert.doesNotMatch(result.systemPrompt, /Pruned skills|duckdb-query-optimization/);
+		assert.ok(getHiddenSkills("session-1").has("duckdb-query-optimization"));
 	} finally {
 		__setCompleteFn(null);
 	}
@@ -889,96 +890,79 @@ test("tool pruning without tools config does not call setActiveTools", async () 
 	}
 });
 
-test("request_tool recovery tool is registered", async () => {
+test("request_capability recovery tool is registered", async () => {
 	const { registeredTools } = register(config());
-	assert.ok(registeredTools.has("request_tool"));
+	assert.ok(registeredTools.has("request_capability"));
 });
 
-test("request_tool execute enables a pruned tool and logs the recovery", async () => {
+test("request_capability enables a hidden tool and logs recovery", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-"));
 	const logPath = path.join(dir, "pruning.jsonl");
 	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }), logPath);
-	const toolDef = registeredTools.get("request_tool");
+	const toolDef = registeredTools.get("request_capability");
 	assert.ok(toolDef);
-
-	__setToolSeams({
-		getAllTools: () => mockToolInfo as any[],
-		getActiveTools: () => ["read", "edit", "bash"],
-		setActiveTools: () => {},
-	});
-
+	let activated: string[] = [];
+	__setToolSeams({ getAllTools: () => mockToolInfo as any[], getActiveTools: () => ["read", "edit", "bash"], setActiveTools: (names) => { activated = names; } });
 	try {
-		const result = await toolDef.execute("call-1", { toolName: "web_search" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-1" } }) as any;
+		recordPrunedTools("session-1", ["web_search"]);
+		const result = await toolDef.execute("call-1", { capabilityType: "tool", capabilityName: "web_search" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-1" } }) as any;
 		assert.ok(result.content[0].text.includes("web_search"));
-
-		// The recovery is logged to the pruning log for analytics.
+		assert.ok(activated.includes("web_search"));
 		await flushLog();
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-		assert.ok(lines.some((line) => line.event === "tool_recovered" && line.toolName === "web_search"), "tool recovery should be logged");
-
-		// Sticky recovery: the recovered tool is recorded so the next turn's
-		// prepass won't re-prune it (setActiveTools is next-turn by SDK design).
-		assert.ok(getRecoveredTools("session-1").has("web_search"), "recovered tool should be recorded for the session");
+		assert.ok(lines.some((line) => line.event === "tool_recovered" && line.toolName === "web_search"));
 	} finally {
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 		setLogPathForTesting(null);
-		clearRecoveredToolsForTesting();
 	}
 });
 
-test("request_tool without a name lists recoverable tools", async () => {
+test("request_capability poll lists only names hidden by the latest decision", async () => {
 	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
-	const toolDef = registeredTools.get("request_tool");
+	const toolDef = registeredTools.get("request_capability");
 	assert.ok(toolDef);
-
-	__setToolSeams({
-		getAllTools: () => mockToolInfo as any[],
-		getActiveTools: () => ["read", "edit", "bash"],
-		setActiveTools: () => {},
-	});
-
+	__setToolSeams({ getAllTools: () => mockToolInfo as any[], getActiveTools: () => ["read", "edit", "bash"], setActiveTools: () => {} });
 	try {
-		const result = await toolDef.execute("call-list", {}, undefined, undefined, undefined) as any;
-		assert.match(result.content[0].text, /Recoverable tools:/);
-		assert.match(result.content[0].text, /web_search/);
+		recordPrunedTools("session-list", ["web_search"]);
+		const result = await toolDef.execute("call-list", {}, undefined, undefined, { sessionManager: { getSessionId: () => "session-list" } }) as any;
+		assert.equal(result.content[0].text, "tools\tweb_search\nskills\t(none)");
 	} finally {
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });
 
-test("request_tool execute returns error for unknown tool name", async () => {
-	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
-	const toolDef = registeredTools.get("request_tool");
+test("request_capability loads a hidden trusted skill immediately", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-recovery-"));
+	const filePath = path.join(dir, "SKILL.md");
+	writeFileSync(filePath, "---\nname: hidden-skill\ndescription: hidden\n---\n\n# Secret procedure\n\nFollow this exactly.\n");
+	const skill = { name: "hidden-skill", description: "hidden", filePath, baseDir: dir, source: "test" } as Skill;
+	const logPath = path.join(dir, "pruning.jsonl");
+	const { registeredTools } = register(config(), logPath);
+	const toolDef = registeredTools.get("request_capability");
 	assert.ok(toolDef);
-
-	__setToolSeams({
-		getAllTools: () => mockToolInfo as any[],
-		getActiveTools: () => ["read", "edit", "bash"],
-		setActiveTools: () => {},
-	});
-
 	try {
-		const result = await toolDef.execute("call-2", { toolName: "nonexistent_tool" }, undefined, undefined, undefined) as any;
+		recordHiddenSkills("session-skill", [skill]);
+		const result = await toolDef.execute("call-skill", { capabilityType: "skill", capabilityName: "hidden-skill" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-skill" } }) as any;
+		assert.match(result.content[0].text, /<skill name="hidden-skill"/);
+		assert.match(result.content[0].text, /Follow this exactly/);
+		assert.doesNotMatch(result.content[0].text, /description: hidden/);
+		await flushLog();
+		const lines = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.ok(lines.some((line) => line.event === "skill_recovered" && line.skillName === "hidden-skill"));
+	} finally {
+		setLogPathForTesting(null);
+		clearCapabilityStateForTesting();
+	}
+});
+
+test("request_capability rejects an unknown exact name", async () => {
+	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
+	const toolDef = registeredTools.get("request_capability");
+	assert.ok(toolDef);
+	__setToolSeams({ getAllTools: () => mockToolInfo as any[], getActiveTools: () => ["read", "edit", "bash"], setActiveTools: () => {} });
+	try {
+		const result = await toolDef.execute("call-2", { capabilityType: "tool", capabilityName: "nonexistent_tool" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-unknown" } }) as any;
 		assert.equal(result.isError, true);
-	} finally {
-		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
-	}
-});
-
-test("request_tool execute returns message when tool is already active", async () => {
-	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
-	const toolDef = registeredTools.get("request_tool");
-	assert.ok(toolDef);
-
-	__setToolSeams({
-		getAllTools: () => mockToolInfo as any[],
-		getActiveTools: () => ["read", "edit", "bash", "web_search"],
-		setActiveTools: () => {},
-	});
-
-	try {
-		const result = await toolDef.execute("call-3", { toolName: "web_search" }, undefined, undefined, undefined) as any;
-		assert.ok(result.content[0].text.includes("already active"));
 	} finally {
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}

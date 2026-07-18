@@ -1,0 +1,1 @@
+Write {"status":"ready"} to answer.json.

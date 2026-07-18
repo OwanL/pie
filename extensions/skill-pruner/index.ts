@@ -9,8 +9,10 @@ import {
 	setGetActiveToolsOverride,
 	setSetActiveToolsOverride,
 	setCompleteFnOverride,
-	getRecoveredTools,
-	clearRecoveredToolsForTesting,
+	getHiddenSkills,
+	recordHiddenSkills,
+	recordPrunedTools,
+	clearCapabilityStateForTesting,
 	clearPrunedToolsForTesting,
 } from "./src/state.js";
 import register from "./src/register.js";
@@ -25,7 +27,7 @@ import {
 
 export default register;
 export { SKILLS_BLOCK_RE, MIN_PROMPT_LENGTH };
-export { getRecoveredTools, clearRecoveredToolsForTesting, clearPrepassCacheForTesting, setPrepassCacheNowForTesting };
+export { getHiddenSkills, recordHiddenSkills, recordPrunedTools, clearCapabilityStateForTesting, clearPrepassCacheForTesting, setPrepassCacheNowForTesting };
 
 // Test seams: setters exported from state module
 export function setConfigForTesting(nextConfig: import("./types.js").PruningConfig | null): void {
@@ -39,7 +41,7 @@ export function resetForTesting(): void {
 	setAllToolsOverride(null);
 	setSetActiveToolsOverride(null);
 	setPiApi(null);
-	clearRecoveredToolsForTesting();
+	clearCapabilityStateForTesting();
 	clearPrunedToolsForTesting();
 	clearPrepassCacheForTesting();
 	setPrepassCacheNowForTesting(null);

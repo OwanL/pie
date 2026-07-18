@@ -47,6 +47,7 @@ test('coerceSourceAnalyticsPayload ingests and filters pruningEvents', async () 
       makeEvent('skill_read', 'sess-a', 'read-skill'),
       makeEvent('skill_miss', 'sess-a', 'missed-skill'),
       makeEvent('shadow_miss_candidate', 'sess-a', 'shadow-skill'),
+      makeEvent('skill_recovered', 'sess-a', 'recovered-skill'),
       makeEvent('tool_recovered', 'sess-a', 'recovered-tool'),
       // Malformed entries below must be dropped:
       { event: 'skill_read', sessionId: 'sess-a' } as PruningSourceEvent, // missing timestamp
@@ -57,12 +58,13 @@ test('coerceSourceAnalyticsPayload ingests and filters pruningEvents', async () 
   };
 
   const coerced = coerceSourceAnalyticsPayload(payload);
-  assert.equal(coerced.pruningEvents.length, 4, 'only the four well-formed events survive coercion');
+  assert.equal(coerced.pruningEvents.length, 5, 'only the five well-formed events survive coercion');
   assert.deepEqual(
     coerced.pruningEvents.map((e) => e.event),
-    ['skill_read', 'skill_miss', 'shadow_miss_candidate', 'tool_recovered'],
+    ['skill_read', 'skill_miss', 'shadow_miss_candidate', 'skill_recovered', 'tool_recovered'],
   );
-  assert.equal(coerced.pruningEvents[3].toolName, 'recovered-tool');
+  assert.equal(coerced.pruningEvents[4].toolName, 'recovered-tool');
+  assert.equal(coerced.pruningEvents[3].skillName, 'recovered-skill');
   assert.equal(coerced.pruningEvents[0].skillName, 'read-skill');
 });
 

@@ -4,14 +4,14 @@ import {
 	setPiApi,
 	getFormatSkillsForPromptImpl,
 	getPiToolSeams,
-	getRecoveredTools,
 	getPrunedTools,
+	recordHiddenSkills,
 	recordPrunedTools,
 	state,
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
-import { requestToolDefinition } from "./tools.js";
+import { requestCapabilityDefinition } from "./tools.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
 import { buildPruningSystemPrompt, buildPruningUserMessage } from "../llm-scorer.js";
 import {
@@ -69,8 +69,8 @@ export default function register(pi: ExtensionAPI) {
 		messages: event.messages.filter((message) => message.role !== "custom" || message.customType !== "pruning-result"),
 	}));
 
-	// --- request_tool: recovery tool for pruned tools ---
-	pi.registerTool(requestToolDefinition);
+	// One minimal recovery surface for both hidden tools and hidden skills.
+	pi.registerTool(requestCapabilityDefinition);
 
 	// Inputs submitted while an agent is running are steering/continuation
 	// messages, not independent task pivots. Remember them so their eventual
@@ -96,6 +96,9 @@ export default function register(pi: ExtensionAPI) {
 		const activeConfig = getConfig();
 		const skipInfo = shouldSkipPruning(event, activeConfig);
 		const sessionId = getSessionId(ctx);
+		// A new top-level pruning decision owns a fresh hidden-skill catalog.
+		// Queued continuations returned above intentionally retain the current one.
+		recordHiddenSkills(sessionId, []);
 		const allTools = state.getAllToolsOverride
 			? state.getAllToolsOverride()
 			: getPiToolSeams().getAllTools();
@@ -169,11 +172,10 @@ export default function register(pi: ExtensionAPI) {
 			// applySkillSelection / applyToolSelection. Telling the model about
 			// them only to re-protect them afterward is pure waste.
 			const forcedSkillNames = new Set(effectivePinned);
-			// Recovered (sticky) tools + the recovery tool itself are never prune
-			// candidates: exclude them from the prepass input entirely so the LLM
-			// never reasons about removing them.
-			const recoveredTools = getRecoveredTools(sessionId);
-			const forcedToolNames = new Set<string>([...(activeConfig.tools?.alwaysKeep ?? []), ...recoveredTools, RECOVERY_TOOL_NAME]);
+			// The recovery tool itself is never a prune candidate. Tools recovered
+			// under the previous decision are not protected here: this new decision
+			// may hide them again when the task changes.
+			const forcedToolNames = new Set<string>([...(activeConfig.tools?.alwaysKeep ?? []), RECOVERY_TOOL_NAME]);
 
 			const llmInput = {
 				userPrompt: event.prompt,
@@ -253,7 +255,7 @@ export default function register(pi: ExtensionAPI) {
 				// whether any tools survive: a legitimate full skill-prune is allowed
 				// through whenever tools remain (zero skills leaves the agent
 				// functional, unlike zero tools).
-				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig, recoveredTools);
+				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
 				const toolsRemain = toolSelection.includedToolNames.length > 0;
@@ -266,6 +268,7 @@ export default function register(pi: ExtensionAPI) {
 				let originalSkillBlock = "";
 				if (match) {
 					const includedSkills = visibleSkills.filter((s) => skillSelection.includedSkillNames.includes(s.name));
+					const excludedSkills = visibleSkills.filter((s) => skillSelection.excludedSkillNames.includes(s.name));
 					const replacement = buildReplacement(getFormatSkillsForPromptImpl()(includedSkills), buildHint(skillSelection.excludedSkillNames));
 					newSkillBlock = replacement;
 					originalSkillBlock = match[0];
@@ -281,6 +284,7 @@ export default function register(pi: ExtensionAPI) {
 						recordKnownSkills(sessionId, "shadow", allSkillPaths, [], excludedSkillPaths);
 					} else {
 						recordKnownSkills(sessionId, "auto", allSkillPaths, excludedSkillPaths, []);
+						recordHiddenSkills(sessionId, excludedSkills);
 						modifiedSystemPrompt = event.systemPrompt.replace(SKILLS_BLOCK_RE, replacement);
 						skillPruningRan = true;
 					}

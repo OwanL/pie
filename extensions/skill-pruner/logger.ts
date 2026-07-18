@@ -5,7 +5,9 @@ import { countTokens } from "./tokenize.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
-const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const CONFIG_ROOT = process.env.PI_CODING_AGENT_DIR
+	? path.resolve(process.env.PI_CODING_AGENT_DIR)
+	: path.resolve(import.meta.dirname, "..", "..");
 
 interface SessionTracking {
 	mode: PruningMode;
@@ -16,7 +18,7 @@ interface SessionTracking {
 }
 
 type JsonLineEvent = PruningDecision | {
-	event: "skill_read" | "skill_miss" | "shadow_miss_candidate" | "tool_recovered" | "skills_block_not_found";
+	event: "skill_read" | "skill_miss" | "shadow_miss_candidate" | "skill_recovered" | "tool_recovered" | "skills_block_not_found";
 	skillName?: string;
 	toolName?: string;
 	mode?: PruningMode;
@@ -168,6 +170,10 @@ export function recordSkillRead(sessionId: string, readPath: string): void {
 	} else {
 		appendJsonLine({ event: "skill_read", skillName, sessionId, timestamp });
 	}
+}
+
+export function recordSkillRecovery(sessionId: string, skillName: string): void {
+	appendJsonLine({ event: "skill_recovered", skillName, sessionId, timestamp: new Date().toISOString() });
 }
 
 export function recordToolRecovery(sessionId: string, toolName: string): void {

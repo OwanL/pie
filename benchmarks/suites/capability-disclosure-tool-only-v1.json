@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "id": "capability-disclosure-tool-only-v1",
+  "tasks": ["capability-hidden-tool"]
+}

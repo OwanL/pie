@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "capability-unified-immediate-v1",
+  "baseCommit": "6e896b6eecd9c61c4a6452abce7de87e511105ce",
+  "type": "extension-overlay",
+  "hypothesisDimension": "capability-disclosure",
+  "changedPaths": [
+    "benchmarks/capability-disclosure/recovery-extension"
+  ],
+  "apply": {
+    "extensions": [
+      "../../capability-disclosure/recovery-extension"
+    ],
+    "capabilityVariant": "unified-immediate"
+  },
+  "contentHash": "9f3799eea6ec35144b2da847ad462cda39101c71d9710c1b29339389fde59a5d",
+  "validation": [
+    "npm run experiment:calibrate -- capability-disclosure-screen-v1"
+  ]
+}

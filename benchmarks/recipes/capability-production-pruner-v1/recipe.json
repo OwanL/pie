@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "capability-production-pruner-v1",
+  "baseCommit": "6e896b6eecd9c61c4a6452abce7de87e511105ce",
+  "type": "extension-overlay",
+  "hypothesisDimension": "end-to-end-capability-disclosure",
+  "changedPaths": [
+    "extensions/skill-pruner",
+    "shared"
+  ],
+  "apply": {
+    "extensions": [
+      "../../../extensions/skill-pruner"
+    ],
+    "bundlePaths": [
+      {
+        "source": "../../../shared",
+        "destination": "shared"
+      }
+    ],
+    "settingsFile": "settings.json",
+    "sourcePaths": [
+      {
+        "source": "../../../extensions/skill-pruner",
+        "destination": "extensions/skill-pruner"
+      },
+      {
+        "source": "../../../shared",
+        "destination": "shared"
+      }
+    ]
+  },
+  "contentHash": "6f11e873345763330db936263259397375f2dc3c3a87c36097e60abf279eba62",
+  "validation": [
+    "npm run test:fast -- --package skill-pruner",
+    "npm run experiment:calibrate -- capability-disclosure-screen-v1"
+  ]
+}

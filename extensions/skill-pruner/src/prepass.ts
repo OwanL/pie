@@ -485,17 +485,6 @@ export function resolvePrepassBudgets(config: PruningConfig): PrepassBudgets {
 	};
 }
 
-/**
- * Apply the scorer temperature only when the resolved provider is Ollama.
- * Other provider APIs vary in whether they accept sampling overrides (Codex
- * rejects them), so they use provider defaults rather than a brittle deny-list.
- */
-export function resolvePrepassTemperature(model: unknown, configuredTemperature: number | undefined): number | undefined {
-	if (configuredTemperature === undefined) return undefined;
-	const provider = (model as { provider?: unknown } | null)?.provider;
-	return provider === "ollama" ? configuredTemperature : undefined;
-}
-
 export async function runPruningPrepass(
 	ctx: unknown,
 	llmInput: LlmPruningInput,
@@ -561,7 +550,7 @@ export async function runPruningPrepass(
 	// merged over the built-in defaults. Absent fields keep the calibrated
 	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
 	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs, maxOutputTokens } = resolvePrepassBudgets(activeConfig);
-	const temperature = resolvePrepassTemperature(model, activeConfig.prepass?.temperature);
+	const temperature = activeConfig.prepass?.temperature;
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
@@ -569,22 +558,17 @@ export async function runPruningPrepass(
 	for (let index = 0; index < attempts.length; index++) {
 		const thinkingLevel = attempts[index];
 		const timeoutMs = prepassTimeoutMs(thinkingLevel, index, timeoutOverrides);
-		// Every initial, correction, and transport-retry call must use the same
-		// provider-compatible controls. Centralizing their construction prevents
-		// one retry branch from adding temperature to a cloud call or dropping it
-		// from an Ollama-provider call.
-		const attemptOptions = (): Record<string, unknown> => ({
-			reasoning: thinkingLevel,
-			// Disable pi-ai retries so only the classified manual loop below
-			// controls retry count and backoff (avoids nested amplification).
-			maxRetries: 0,
-			...(temperature !== undefined ? { temperature } : {}),
-			...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-			signal: AbortSignal.timeout(timeoutMs),
-			...auth,
-		});
 		try {
-			const result = await runLlmPruningWithParseRecovery(llmInput, model, attemptOptions(), completeFn, timeoutMs);
+			const result = await runLlmPruningWithParseRecovery(llmInput, model, {
+				reasoning: thinkingLevel,
+				// Disable pi-ai retries so only the classified manual loop below
+				// controls retry count and backoff (avoids nested amplification).
+				maxRetries: 0,
+				...(temperature !== undefined ? { temperature } : {}),
+				...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+				signal: AbortSignal.timeout(timeoutMs),
+				...auth,
+			}, completeFn, timeoutMs);
 
 			latestResult = {
 				prunedSkills: result.prunedSkills,
@@ -615,7 +599,14 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] transport error (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms: ${result.errorMessage}`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, attemptOptions(), completeFn, timeoutMs);
+						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
+							reasoning: thinkingLevel,
+							maxRetries: 0,
+							...(temperature !== undefined ? { temperature } : {}),
+							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+							signal: AbortSignal.timeout(timeoutMs),
+							...auth,
+						}, completeFn, timeoutMs);
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,
@@ -674,7 +665,13 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] ${errorMessage} (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, attemptOptions(), completeFn, timeoutMs);
+						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
+							reasoning: thinkingLevel,
+							maxRetries: 0,
+							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+							signal: AbortSignal.timeout(timeoutMs),
+							...auth,
+						}, completeFn, timeoutMs);
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,

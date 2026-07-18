@@ -49,8 +49,10 @@ export function useAppBodyDerivedState(
   // Extract primitive values for memo deps to avoid re-computing on every host update
   // when objects like availableModels[] and modelSettings{} get new references.
   const activeModelId = activeSession?.modelId;
+  const activeProvider = activeSession?.provider;
   const activeThinkingLevel = activeSession?.thinkingLevel;
   const settingsDefaultModel = modelSettings?.defaultModel;
+  const settingsDefaultProvider = modelSettings?.defaultProvider;
   const settingsDefaultThinkingLevel = modelSettings?.defaultThinkingLevel;
   const modelCount = availableModels.length;
 
@@ -59,10 +61,11 @@ export function useAppBodyDerivedState(
     selectedLevel: pendingAssistantThinkingLevel,
   } = useMemo(() => resolveComposerModelState({
     activeModelId,
+    activeProvider,
     activeThinkingLevel,
     modelSettings,
     availableModels,
-  }), [activeModelId, activeThinkingLevel, settingsDefaultModel, settingsDefaultThinkingLevel, modelCount]);
+  }), [activeModelId, activeProvider, activeThinkingLevel, settingsDefaultModel, settingsDefaultProvider, settingsDefaultThinkingLevel, modelCount]);
 
   const askUserContextValue = useMemo(() => ({
     sessionPath: activeSessionPath,

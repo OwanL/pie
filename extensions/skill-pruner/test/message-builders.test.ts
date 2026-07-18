@@ -57,19 +57,9 @@ test("buildHint: empty excluded list -> empty string", () => {
 	assert.equal(buildHint([]), "");
 });
 
-test("buildHint: lists excluded skill names inside the HTML comment", () => {
-	const hint = buildHint(["duckdb-query-optimization", "frontend-design"]);
-	assert.equal(
-		hint,
-		"<!-- Pruned skills (not shown to save attention): duckdb-query-optimization, frontend-design. Use /skill:name to load one. -->",
-	);
-	assert.ok(hint.includes("duckdb-query-optimization"));
-	assert.ok(hint.includes("frontend-design"));
-});
-
-test("buildHint: single excluded name is still wrapped", () => {
-	assert.ok(buildHint(["solo"]).startsWith("<!-- Pruned skills"));
-	assert.ok(buildHint(["solo"]).includes("solo"));
+test("buildHint: hidden skill names are never passively disclosed", () => {
+	assert.equal(buildHint(["duckdb-query-optimization", "frontend-design"]), "");
+	assert.equal(buildHint(["solo"]), "");
 });
 
 // ---------------------------------------------------------------------------
@@ -85,9 +75,9 @@ test("buildReplacement: strips a single leading blank line then re-prefixes", ()
 	assert.equal(buildReplacement("\n\nSKILLS_BLOCK", ""), "\n\nSKILLS_BLOCK");
 });
 
-test("buildReplacement: appends hint on its own line when present", () => {
+test("buildReplacement: pruned skill names add no passive hint", () => {
 	const hint = buildHint(["x"]);
-	assert.equal(buildReplacement("SKILLS_BLOCK", hint), `\n\nSKILLS_BLOCK\n${hint}`);
+	assert.equal(buildReplacement("SKILLS_BLOCK", hint), "\n\nSKILLS_BLOCK");
 });
 
 test("buildReplacement: only the first leading \\n\\n is stripped", () => {

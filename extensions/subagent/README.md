@@ -40,8 +40,9 @@ Project agents require confirmation before running (security measure for untrust
 
 Each subagent call carries a `bucket` hint — `small` (Haiku-class busywork),
 `medium` (Sonnet-class main development), or `frontier` (Opus-class hardest
-problems), defaulting to `medium`. The subagent tool picks **one model uniformly
-at random** from the matching bucket's model list.
+problems), defaulting to `medium`. The subagent tool picks models through a **balanced shuffled cycle** over the
+matching bucket's eligible model list. Every eligible model is used once per
+cycle, and each new cycle is reshuffled to avoid a fixed ordering bias.
 
 The bucket contents are **user-configured** in the pie settings UI
 (Extensions → subagent → "Model buckets"), where you add any number of model

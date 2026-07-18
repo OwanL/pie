@@ -100,7 +100,7 @@ export const DEFAULT_TOOL_KEEP_CATALOG = [
   'grep',
   'ls',
   'read',
-  'request_tool',
+  'request_capability',
   'session_changes',
   'session_review',
   'web_search',

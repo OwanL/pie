@@ -35,6 +35,7 @@ import { useTokenRateIndicator } from './use-token-rate';
 
 export function useComposerIndicators({
   activeModelId,
+  activeProvider,
   activeThinkingLevel,
   modelSettings,
   availableModels,
@@ -48,6 +49,7 @@ export function useComposerIndicators({
   tokenRateBySession,
 }: {
   activeModelId?: string;
+  activeProvider?: string;
   activeThinkingLevel?: ThinkingLevel;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
@@ -68,10 +70,11 @@ export function useComposerIndicators({
     supportsReasoning,
   } = useMemo(() => resolveComposerModelState({
     activeModelId,
+    activeProvider,
     activeThinkingLevel,
     modelSettings,
     availableModels,
-  }), [activeModelId, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultProvider, modelSettings?.defaultThinkingLevel, availableModels]);
+  }), [activeModelId, activeProvider, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultProvider, modelSettings?.defaultThinkingLevel, availableModels]);
 
   const modelPricing = useMemo(() => {
     const byProviderAndId = new Map<string, TokenPricing>();
@@ -206,8 +209,9 @@ export function useComposerIndicators({
       resolvePricing,
       liveCostEstimate,
       selectedModel,
+      selectedProvider,
     ),
-    [sessionTokenUsage, fallbackPricing, selectedModelInfo?.name, completedCostSummary, subagentCostSummary, pruningResult, resolvePricing, liveCostEstimate, selectedModel],
+    [sessionTokenUsage, fallbackPricing, selectedModelInfo?.name, completedCostSummary, subagentCostSummary, pruningResult, resolvePricing, liveCostEstimate, selectedModel, selectedProvider],
   );
 
   const tokenRateIndicator = useTokenRateIndicator({ sessionPath, tokenRateBySession });

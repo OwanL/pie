@@ -143,6 +143,23 @@ describe("selectModel", () => {
     }
   });
 
+  it("distributes selections evenly without favoring a model", () => {
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: ["fair-a", "fair-b", "fair-c"],
+      frontier: [],
+    };
+    const config = makeConfig(assignments.medium.map((id) => ({ id })));
+    const counts = new Map(assignments.medium.map((id) => [id, 0]));
+
+    for (let i = 0; i < 30; i++) {
+      const result = selectModel("medium", undefined, assignments, config, undefined, undefined, ACTIVE_MODEL);
+      counts.set(result.modelId, counts.get(result.modelId)! + 1);
+    }
+
+    assert.deepEqual([...counts.values()], [10, 10, 10]);
+  });
+
   it("returns fallback (active model) when bucket is empty", () => {
     const result = selectModel("medium", undefined, EMPTY_ASSIGNMENTS, [], undefined, undefined, ACTIVE_MODEL);
     assert.equal(result.fallback, true);
