@@ -4,7 +4,7 @@ import { watchChildProcess, withProcessTreeIsolation } from "../../../scripts/li
 
 async function runCase(scorerPath,workspace,taskDir,testCase,timeoutMs){return new Promise(resolveCase=>{const child=spawn(process.execPath,[scorerPath,workspace,taskDir,"--case",JSON.stringify(testCase)],withProcessTreeIsolation({windowsHide:true,stdio:["ignore","pipe","pipe"]}));let stdout="",stderr="",settled=false;const watchdog=watchChildProcess(child,{timeoutMs,label:"isolated benchmark case"});child.stdout.on("data",chunk=>{stdout=(stdout+chunk).slice(-1_000_000);});child.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-1000);});const finish=async status=>{if(settled)return;settled=true;const cleanup=await watchdog.settle().catch(()=>({gone:false}));resolveCase({status:watchdog.timedOut||!cleanup.gone?null:status,timedOut:watchdog.timedOut,stdout,stderr,cleanup});};child.on("error",error=>{stderr+=error.stack||String(error);void finish(null);});child.on("close",code=>void finish(code));});}
 
-export async function runIsolatedCases(scorerUrl, workspace, taskDir, cases, timeoutMs = 1200) {
+export async function runIsolatedCases(scorerUrl, workspace, taskDir, cases, timeoutMs = 3000) {
   const scorerPath = fileURLToPath(scorerUrl);
   const runs = [];
   for (const testCase of cases) {

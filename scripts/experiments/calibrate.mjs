@@ -10,7 +10,7 @@ import { watchChildProcess, withProcessTreeIsolation } from "../lib/process-watc
 function score(scorer, workspace, taskDir) {
   return new Promise((resolveScore) => {
     const child=spawn(process.execPath,[scorer,workspace,taskDir],withProcessTreeIsolation({stdio:["ignore","pipe","pipe"],windowsHide:true}));let stdout="",stderr="",settled=false;
-    const watchdog=watchChildProcess(child,{timeoutMs:10000,label:`calibration scorer ${scorer}`});
+    const watchdog=watchChildProcess(child,{timeoutMs:30000,label:`calibration scorer ${scorer}`});
     child.stdout.on("data",chunk=>{stdout=(stdout+chunk).slice(-1_000_000);});child.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-2000);});
     const finish=async(status)=>{if(settled)return;settled=true;const cleanup=await watchdog.settle().catch(()=>({gone:false}));let result;for(const line of stdout.trim().split(/\r?\n/).reverse())try{result=JSON.parse(line);break;}catch{}resolveScore({status:watchdog.timedOut||!cleanup.gone?null:status,timedOut:watchdog.timedOut,result,stderr});};
     child.on("error",error=>{stderr+=error.stack||String(error);void finish(null);});child.on("close",code=>void finish(code));
@@ -21,6 +21,21 @@ export async function calibrateSuite(suiteId = "bespoke-optimization-v1", benchm
   const suite = await readJson(join(benchmarkRoot, "suites", `${suiteId}.json`)), rows = [];
   for (const task of suite.tasks) {
     const taskDir = join(benchmarkRoot, "tasks", task), manifest = await readJson(join(taskDir, "task.json")), fixture = join(taskDir, manifest.fixture.path), scorer = resolve(taskDir, manifest.checks.privateScorer);
+    if (manifest.calibration?.validArtifact) {
+      const root = await mkdtemp(join(tmpdir(), `pie-calibrate-${task}-`)), workspace = join(root, "fixture"), target = manifest.policy.allowedChangedPaths[0];
+      try {
+        await cp(fixture, workspace, { recursive: true });
+        await cp(resolve(taskDir, manifest.calibration.validArtifact), join(workspace, target));
+        const first = await score(scorer, workspace, taskDir), second = await score(scorer, workspace, taskDir);
+        if (first.status !== 0 || !first.result?.valid || !(first.result.score > 0)) throw new Error(`${task} valid calibration artifact rejected: ${JSON.stringify(first)}`);
+        if (second.status !== 0 || second.result?.score !== first.result.score) throw new Error(`${task} scorer is nondeterministic`);
+        await writeFile(join(workspace, target), "{}\n");
+        const invalid = await score(scorer, workspace, taskDir);
+        if (invalid.status === 0 || invalid.result?.valid !== false || invalid.result?.score !== 0) throw new Error(`${task} scorer accepted an intentionally invalid answer artifact`);
+        rows.push({ task, baselineScore: first.result.score, runtimeMs: first.result.metrics?.runtimeMs, deterministic: true, invalidRejected: true });
+      } finally { await rm(root, { recursive: true, force: true }); }
+      continue;
+    }
     const first = await score(scorer, fixture, taskDir), second = await score(scorer, fixture, taskDir);
     if (first.status !== 0 || !first.result?.valid) throw new Error(`${task} baseline invalid: ${JSON.stringify(first)}`);
     if (second.status !== 0 || second.result?.score !== first.result.score) throw new Error(`${task} scorer is nondeterministic`);

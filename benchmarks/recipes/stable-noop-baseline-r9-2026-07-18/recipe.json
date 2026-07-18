@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "stable-noop-baseline-r9-2026-07-18",
+  "baseCommit": "6e896b6eecd9c61c4a6452abce7de87e511105ce",
+  "type": "settings-overlay",
+  "hypothesisDimension": "matched-no-op-inferential-control",
+  "changedPaths": [],
+  "apply": {},
+  "contentHash": "13fe7ebb8decce25fac007893af400f72c94bba212138836c1c184f533808344",
+  "validation": [
+    "npm run experiment:test",
+    "npm run experiment:calibrate"
+  ]
+}

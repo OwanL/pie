@@ -1,1 +1,1 @@
-Improve the feature cache planner, it should save more compute without wasting freshness after the units migration, preserve the existing API and behaviour.
+Improve the feature cache planner so it saves more compute without wasting freshness after the units migration. Preserve the existing API and behaviour. Only modify `src/planner.mjs`, and use the existing tests and evaluation to verify the change.

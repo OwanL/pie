@@ -1,1 +1,1 @@
-Improve the inference batch scheduler, its performance has regressed since the cleanup, preserve the existing API and behaviour.
+Improve the inference batch scheduler; its performance has regressed since the cleanup. Preserve the existing API and behaviour. Only modify `src/scheduler.mjs`, and use the existing tests and evaluation to verify the change.
