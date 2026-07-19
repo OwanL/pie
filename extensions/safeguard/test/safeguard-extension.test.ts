@@ -10,6 +10,7 @@
 
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -113,6 +114,41 @@ describe('isSafe – rm -rf inside vs outside cwd', () => {
 	test('prompts (returns false) for rm -rf outside cwd', async () => {
 		const { isSafe } = await loadSafeguard();
 		assert.equal(isSafe('rm -rf /outside/project', { cwd: '/repo' }), false);
+	});
+});
+
+describe('isSafe – scoped temp-directory cleanup', () => {
+	test('allows concrete children of standard POSIX temp roots', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /tmp/godot-docs', { cwd: '/repo' }), true);
+		assert.equal(isSafe('rm -rf /var/tmp/pie-test-run', { cwd: '/repo' }), true);
+	});
+
+	test('allows the observed cleanup-before-clone command', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(
+			isSafe('rm -rf /tmp/godot-docs && git clone --depth 1 https://github.com/godotengine/godot-docs.git /tmp/godot-docs', { cwd: '/repo' }),
+			true,
+		);
+	});
+
+	test('allows a concrete child of the platform temp directory', async () => {
+		const { isSafe } = await loadSafeguard();
+		const target = path.join(tmpdir(), 'pie-safeguard-cleanup');
+		assert.equal(isSafe(`rm -rf "${target}"`, { cwd: '/repo' }), true);
+	});
+
+	test('still prompts for temp roots, broad globs, and traversal outside temp', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /tmp', { cwd: '/repo' }), false);
+		assert.equal(isSafe('rm -rf /var/tmp', { cwd: '/repo' }), false);
+		assert.equal(isSafe('rm -rf /tmp/*', { cwd: '/repo' }), false);
+		assert.equal(isSafe('rm -rf /tmp/build/../../home', { cwd: '/repo' }), false);
+	});
+
+	test('one temp target does not hide another outside-project target', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /tmp/pie-build /outside/project', { cwd: '/repo' }), false);
 	});
 });
 

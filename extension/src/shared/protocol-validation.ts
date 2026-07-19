@@ -219,6 +219,77 @@ function isNestedAllowedBucketsPatch(value: unknown): boolean {
   return true;
 }
 
+function isHistoryCompactionModelProfile(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const allowedKeys = ['softThreshold', 'hardThreshold', 'keepRecentTokens'];
+  if (Object.keys(value).some((key) => !allowedKeys.includes(key))) return false;
+  for (const key of allowedKeys) {
+    const n = value[key];
+    if (!isNonNegativeSafeInteger(n)) return false;
+  }
+  const soft = value.softThreshold as number;
+  const hard = value.hardThreshold as number;
+  const keep = value.keepRecentTokens as number;
+  return keep < soft && soft < hard && soft >= 1_000 && hard <= 10_000_000;
+}
+
+function isHistoryCompactionSettings(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const allowedKeys = [
+    'enabled',
+    'thresholdMode',
+    'softThreshold',
+    'hardThreshold',
+    'keepRecentTokens',
+    'summaryInstructions',
+    'summaryThinkingLevel',
+    'summaryModel',
+    'modelProfiles',
+  ];
+  if (Object.keys(value).some((key) => !allowedKeys.includes(key))) return false;
+  if (typeof value.enabled !== 'boolean') return false;
+  if (value.thresholdMode !== 'percentage' && value.thresholdMode !== 'tokens') return false;
+  if (!isFiniteNumber(value.softThreshold) || !isFiniteNumber(value.hardThreshold)) return false;
+  const minimum = value.thresholdMode === 'tokens' ? 1_000 : 1;
+  const maximum = value.thresholdMode === 'tokens' ? 10_000_000 : 99;
+  if (value.softThreshold < minimum
+    || value.hardThreshold > maximum
+    || value.softThreshold >= value.hardThreshold) {
+    return false;
+  }
+  if (value.keepRecentTokens !== undefined && !isNonNegativeSafeInteger(value.keepRecentTokens)) return false;
+  if (value.keepRecentTokens !== undefined && value.keepRecentTokens > 10_000_000) return false;
+  if (value.thresholdMode === 'tokens'
+    && value.keepRecentTokens !== undefined
+    && value.keepRecentTokens >= value.softThreshold) return false;
+  if (value.summaryInstructions !== undefined && (
+    typeof value.summaryInstructions !== 'string'
+    || value.summaryInstructions.length > 4_000
+  )) {
+    return false;
+  }
+  if (value.summaryThinkingLevel !== undefined
+    && value.summaryThinkingLevel !== 'inherit'
+    && !THINKING_LEVEL_SET.has(value.summaryThinkingLevel as ThinkingLevel)) {
+    return false;
+  }
+  if (value.summaryModel !== undefined && value.summaryModel !== null) {
+    if (!isObject(value.summaryModel)) return false;
+    const model = value.summaryModel as Record<string, unknown>;
+    if (Object.keys(model).some((key) => !['provider', 'id'].includes(key))) return false;
+    if (typeof model.provider !== 'string' || !model.provider) return false;
+    if (typeof model.id !== 'string' || !model.id) return false;
+  }
+  if (value.modelProfiles !== undefined) {
+    if (!isObject(value.modelProfiles)) return false;
+    const profiles = value.modelProfiles as Record<string, unknown>;
+    for (const entry of Object.values(profiles)) {
+      if (!isHistoryCompactionModelProfile(entry)) return false;
+    }
+  }
+  return true;
+}
+
 function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
   if (!isObject(value)) return false;
   const booleanKeys: Array<keyof ChatPrefs> = [
@@ -277,6 +348,10 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     const v = (value as Record<string, unknown>)[key];
     if (key === 'uiDensity') {
       if (v !== undefined && !validDensities.has(v as string)) return false;
+      continue;
+    }
+    if (key === 'historyCompaction') {
+      if (v !== undefined && !isHistoryCompactionSettings(v)) return false;
       continue;
     }
     if (key === 'subagentBuckets') {

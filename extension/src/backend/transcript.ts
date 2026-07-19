@@ -1,8 +1,10 @@
 import type {
   ChatMessage,
+  CompactionSummaryDetails,
   SessionSummary,
   ThinkingLevel,
 } from '../shared/protocol';
+import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
 import { NEW_SESSION_NAME } from '../shared/session-name';
 import { formatToolResult } from '../shared/tool-result-format';
 
@@ -44,6 +46,10 @@ export interface SessionEntryLike {
   display?: boolean;
   content?: unknown;
   details?: unknown;
+  /** Opaque `data` payload on a `custom` sidecar entry (appended via the SDK's
+   *  `appendCustomEntry`). Not rendered; scanned by `mapTranscript` to attach
+   *  typed details to the matching compaction-summary message. */
+  data?: unknown;
 }
 
 export function summarizeSession(info: SessionInfoLike, modelId?: string): SessionSummary {
@@ -147,6 +153,12 @@ interface MapLoopState {
   currentModelId: string | undefined;
   currentProvider: string | undefined;
   currentThinkingLevel: ThinkingLevel | undefined;
+  /** Compaction metrics scanned from `pie.compaction-metrics` sidecar entries,
+   *  keyed by the compaction entry id they link to. Populated by a pre-scan
+   *  in {@link mapTranscript}; consumed by {@link dispatchSummaryEntry} to
+   *  attach typed {@link CompactionSummaryDetails} to the matching
+   *  `compaction-summary` ChatMessage. Sidecars themselves never render. */
+  compactionMetricsByEntryId: Map<string, CompactionSummaryDetails>;
 }
 
 type MapResult =
@@ -390,6 +402,68 @@ function applyCustomMessage(message: ChatMessage | null, state: MapLoopState): M
   return { kind: 'push', resetAssistant: true, message };
 }
 
+/** Coerce a single sidecar `data` payload into a typed
+ *  {@link CompactionSummaryDetails} linked to its compaction entry. Returns
+ *  `undefined` for malformed/legacy payloads (missing `compactionEntryId`, or
+ *  no usable token metric) so the compaction-summary row renders without
+ *  metrics rather than with garbage. */
+function parseCompactionMetricsSidecar(
+  data: unknown,
+): { compactionEntryId: string; details: CompactionSummaryDetails } | undefined {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const raw = data as Record<string, unknown>;
+  const compactionEntryId =
+    typeof raw.compactionEntryId === 'string' && raw.compactionEntryId.length > 0
+      ? raw.compactionEntryId
+      : undefined;
+  if (!compactionEntryId) return undefined;
+
+  const reason = typeof raw.reason === 'string' ? raw.reason : '';
+  const tokensBefore =
+    typeof raw.tokensBefore === 'number' && Number.isFinite(raw.tokensBefore) && raw.tokensBefore >= 0
+      ? raw.tokensBefore
+      : undefined;
+  const estimatedTokensAfter =
+    typeof raw.estimatedTokensAfter === 'number' && Number.isFinite(raw.estimatedTokensAfter) && raw.estimatedTokensAfter >= 0
+      ? raw.estimatedTokensAfter
+      : undefined;
+  // Need at least one token metric for the details to be useful; a sidecar
+  // with neither is treated as malformed and dropped.
+  if (tokensBefore === undefined && estimatedTokensAfter === undefined) return undefined;
+
+  const details: CompactionSummaryDetails = { reason };
+  if (tokensBefore !== undefined) details.tokensBefore = tokensBefore;
+  if (estimatedTokensAfter !== undefined) details.estimatedTokensAfter = estimatedTokensAfter;
+  if (typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs) && raw.durationMs >= 0) {
+    details.durationMs = raw.durationMs;
+  }
+  if (typeof raw.modelId === 'string' && raw.modelId.length > 0) details.modelId = raw.modelId;
+  if (typeof raw.provider === 'string' && raw.provider.length > 0) details.provider = raw.provider;
+  if (typeof raw.thinkingLevel === 'string' && raw.thinkingLevel.length > 0) {
+    details.thinkingLevel = raw.thinkingLevel;
+  }
+  return { compactionEntryId, details };
+}
+
+/** Pre-scan the branch for `pie.compaction-metrics` sidecar entries and build
+ *  a map keyed by the compaction entry id each sidecar links to. Later
+ *  sidecars win (forward iteration overwrites), so a retry that appended a
+ *  fresh sidecar for the same compaction entry supersedes the earlier one.
+ *  Sidecars with no matching compaction entry are still collected (harmless if
+ *  the entry was branched away) and silently ignored at attach time. */
+function scanCompactionMetricsSidecars(
+  entries: SessionEntryLike[],
+): Map<string, CompactionSummaryDetails> {
+  const map = new Map<string, CompactionSummaryDetails>();
+  for (const entry of entries) {
+    if (entry.type !== 'custom' || entry.customType !== COMPACTION_METRICS_CUSTOM_TYPE) continue;
+    const parsed = parseCompactionMetricsSidecar(entry.data);
+    if (!parsed) continue;
+    map.set(parsed.compactionEntryId, parsed.details);
+  }
+  return map;
+}
+
 function dispatchSummaryEntry(
   entry: SessionEntryLike,
   heading: string,
@@ -399,6 +473,9 @@ function dispatchSummaryEntry(
     return { kind: 'skip' };
   }
   state.currentAssistant = undefined;
+  const metrics = entry.type === 'compaction'
+    ? state.compactionMetricsByEntryId.get(entry.id)
+    : undefined;
   return {
     kind: 'push',
     resetAssistant: true,
@@ -412,6 +489,11 @@ function dispatchSummaryEntry(
       // system instruction. Preserve that distinction so the webview can
       // render their potentially large summary as a collapsed transcript row.
       ...(entry.type === 'compaction' ? { customType: 'compaction-summary' } : {}),
+      // Attach the durable compaction metrics scanned from the
+      // `pie.compaction-metrics` sidecar (if present) so the webview can
+      // render reason / before→after tokens / reduction / model / duration
+      // without re-parsing the sidecar.
+      ...(metrics ? { customDetails: metrics } : {}),
     },
   };
 }
@@ -423,6 +505,7 @@ export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
     currentModelId: undefined,
     currentProvider: undefined,
     currentThinkingLevel: undefined,
+    compactionMetricsByEntryId: scanCompactionMetricsSidecars(entries),
   };
 
   for (const entry of entries) {
@@ -444,7 +527,18 @@ function dispatchEntry(entry: SessionEntryLike, state: MapLoopState): MapResult 
     case 'message':
       return entry.message ? dispatchMessageEntry(entry, entry.message, state) : { kind: 'skip' };
     case 'custom_message':
+      return dispatchCustomEntry(entry, state);
     case 'custom':
+      // The `pie.compaction-metrics` sidecar is a non-context `custom` entry
+      // appended after a successful compaction. It carries no `content` (its
+      // payload is in `data`), so it would already be skipped by
+      // `mapCustomMessage`, but short-circuit here to make the intent explicit
+      // and keep future data-only sidecar customTypes from accidentally
+      // rendering. The metrics were already captured by the pre-scan in
+      // `mapTranscript`.
+      if (entry.customType === COMPACTION_METRICS_CUSTOM_TYPE) {
+        return { kind: 'skip' };
+      }
       return dispatchCustomEntry(entry, state);
     case 'branch_summary':
       return dispatchSummaryEntry(entry, 'Branch summary', state);

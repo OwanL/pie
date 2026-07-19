@@ -181,6 +181,7 @@ test('setPrefs notifies the backend of toggle changes', async () => {
   assert.ok(runtimePrefsSet, 'expected runtimePrefs.set request');
   assert.deepEqual((runtimePrefsSet.params as any).providerToggles, { 'github-copilot': false });
   assert.deepEqual((runtimePrefsSet.params as any).extensionToggles, { 'some-extension': true });
+  assert.deepEqual((runtimePrefsSet.params as any).historyCompaction, getArchState().settings.prefs.historyCompaction);
 });
 
 test('setPrefs mirrors providerConcurrency and subagentDropTools to the backend (no startup-restore drift)', async () => {

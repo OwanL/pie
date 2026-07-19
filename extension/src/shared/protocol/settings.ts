@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from './models.js';
+import { isThinkingLevel } from '../thinking-level.js';
 import type { TranscriptWindow } from './sessions.js';
 
 /** Webview-local UI preferences. Owned by the host so they survive teardown. */
@@ -96,6 +97,214 @@ export interface PruningCatalog {
 }
 
 export type UiDensity = 'compact' | 'comfortable' | 'spacious';
+
+/** How proactive history-compaction thresholds are interpreted. */
+export type HistoryCompactionThresholdMode = 'percentage' | 'tokens';
+
+/** Per-model token-mode overrides keyed by `${provider}/${id}`. */
+export interface HistoryCompactionModelProfile {
+  softThreshold: number;
+  hardThreshold: number;
+  keepRecentTokens: number;
+}
+
+/** Explicit non-active model selected for summary generation. */
+export interface HistoryCompactionModelSelector {
+  provider: string;
+  id: string;
+}
+
+/** Summary thinking level: use the active model's level or a fixed override. */
+export type HistoryCompactionSummaryThinkingLevel = 'inherit' | ThinkingLevel;
+
+/**
+ * Proactive history-compaction policy. The soft threshold is checked after a
+ * run settles; the hard threshold is checked after each complete model/tool
+ * turn before another provider request. Pi's native overflow recovery remains
+ * available independently as the final safety net.
+ */
+export interface HistoryCompactionSettings {
+  enabled: boolean;
+  thresholdMode: HistoryCompactionThresholdMode;
+  softThreshold: number;
+  hardThreshold: number;
+  /** Minimum recent tokens to retain after compaction. */
+  keepRecentTokens: number;
+  /** Optional instructions sent to the summary model (max 4,000 chars). */
+  summaryInstructions: string;
+  /** Thinking level for summary generation. */
+  summaryThinkingLevel: HistoryCompactionSummaryThinkingLevel;
+  /** Summary model: `null` means "use the active model". */
+  summaryModel: null | HistoryCompactionModelSelector;
+  /** Per-model token-mode overrides. Profiles are only applied in token mode. */
+  modelProfiles: Record<string, HistoryCompactionModelProfile>;
+}
+
+export const DEFAULT_HISTORY_COMPACTION_SETTINGS: HistoryCompactionSettings = {
+  enabled: true,
+  thresholdMode: 'percentage',
+  softThreshold: 70,
+  hardThreshold: 85,
+  keepRecentTokens: 30_000,
+  summaryInstructions: '',
+  summaryThinkingLevel: 'inherit',
+  summaryModel: null,
+  modelProfiles: {},
+};
+
+/** Fallbacks used only when a malformed stored token-mode policy is restored. */
+export const DEFAULT_HISTORY_COMPACTION_TOKEN_THRESHOLDS = {
+  soft: 100_000,
+  hard: 120_000,
+} as const;
+
+/** Environment key mirrored to the backend for live SDK scheduling. */
+export const HISTORY_COMPACTION_ENV = 'PIE_HISTORY_COMPACTION_JSON';
+
+const MAX_HISTORY_COMPACTION_KEEP_RECENT_TOKENS = 10_000_000;
+const MAX_HISTORY_COMPACTION_SUMMARY_INSTRUCTIONS_LENGTH = 4_000;
+
+function isHistoryCompactionModelProfile(value: unknown): value is HistoryCompactionModelProfile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  for (const key of ['softThreshold', 'hardThreshold', 'keepRecentTokens']) {
+    const n = v[key];
+    if (typeof n !== 'number' || !Number.isFinite(n) || !Number.isInteger(n)) return false;
+  }
+  const soft = v.softThreshold as number;
+  const hard = v.hardThreshold as number;
+  const keep = v.keepRecentTokens as number;
+  return keep >= 0
+    && soft >= 1_000
+    && hard <= 10_000_000
+    && keep < soft
+    && soft < hard;
+}
+
+function normalizeHistoryCompactionModelProfiles(
+  value: unknown,
+): Record<string, HistoryCompactionModelProfile> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const src = value as Record<string, unknown>;
+  const out: Record<string, HistoryCompactionModelProfile> = {};
+  for (const [key, entry] of Object.entries(src)) {
+    if (!key || !isHistoryCompactionModelProfile(entry)) continue;
+    out[key] = {
+      softThreshold: entry.softThreshold,
+      hardThreshold: entry.hardThreshold,
+      keepRecentTokens: entry.keepRecentTokens,
+    };
+  }
+  return out;
+}
+
+function normalizeHistoryCompactionSummaryModel(
+  value: unknown,
+): null | HistoryCompactionModelSelector {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const provider = typeof v.provider === 'string' ? v.provider : '';
+  const id = typeof v.id === 'string' ? v.id : '';
+  if (!provider || !id) return null;
+  return { provider, id };
+}
+
+/**
+ * Coerce persisted or wire-provided history-compaction settings into a valid
+ * policy. Invalid ranges or soft >= hard fall back as one pair so the two
+ * thresholds can never silently invert.
+ */
+export function resolveHistoryCompactionSettings(value: unknown): HistoryCompactionSettings {
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const thresholdMode: HistoryCompactionThresholdMode = raw.thresholdMode === 'tokens'
+    ? 'tokens'
+    : 'percentage';
+  const fallbackSoft = thresholdMode === 'tokens'
+    ? DEFAULT_HISTORY_COMPACTION_TOKEN_THRESHOLDS.soft
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.softThreshold;
+  const fallbackHard = thresholdMode === 'tokens'
+    ? DEFAULT_HISTORY_COMPACTION_TOKEN_THRESHOLDS.hard
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.hardThreshold;
+  const minimum = thresholdMode === 'tokens' ? 1_000 : 1;
+  const maximum = thresholdMode === 'tokens' ? 10_000_000 : 99;
+  const candidateSoft = typeof raw.softThreshold === 'number' && Number.isFinite(raw.softThreshold)
+    ? raw.softThreshold
+    : fallbackSoft;
+  const candidateHard = typeof raw.hardThreshold === 'number' && Number.isFinite(raw.hardThreshold)
+    ? raw.hardThreshold
+    : fallbackHard;
+  const validPair = candidateSoft >= minimum
+    && candidateHard <= maximum
+    && candidateHard > minimum
+    && candidateSoft < candidateHard;
+
+  const rawKeep = raw.keepRecentTokens;
+  const candidateKeepRecentTokens = typeof rawKeep === 'number' && Number.isFinite(rawKeep) && Number.isInteger(rawKeep)
+    ? Math.max(0, Math.min(rawKeep, MAX_HISTORY_COMPACTION_KEEP_RECENT_TOKENS))
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.keepRecentTokens;
+  const effectiveSoftThreshold = validPair ? candidateSoft : fallbackSoft;
+  const keepRecentTokens = thresholdMode === 'tokens'
+    ? Math.min(candidateKeepRecentTokens, Math.max(0, Math.floor(effectiveSoftThreshold) - 1))
+    : candidateKeepRecentTokens;
+
+  const rawInstructions = raw.summaryInstructions;
+  const summaryInstructions = typeof rawInstructions === 'string'
+    ? rawInstructions.slice(0, MAX_HISTORY_COMPACTION_SUMMARY_INSTRUCTIONS_LENGTH)
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.summaryInstructions;
+
+  const rawThinking = raw.summaryThinkingLevel;
+  const summaryThinkingLevel: HistoryCompactionSummaryThinkingLevel = rawThinking === 'inherit' || isThinkingLevel(rawThinking)
+    ? (rawThinking as HistoryCompactionSummaryThinkingLevel)
+    : DEFAULT_HISTORY_COMPACTION_SETTINGS.summaryThinkingLevel;
+
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_HISTORY_COMPACTION_SETTINGS.enabled,
+    thresholdMode,
+    softThreshold: validPair ? candidateSoft : fallbackSoft,
+    hardThreshold: validPair ? candidateHard : fallbackHard,
+    keepRecentTokens,
+    summaryInstructions,
+    summaryThinkingLevel,
+    summaryModel: normalizeHistoryCompactionSummaryModel(raw.summaryModel),
+    modelProfiles: normalizeHistoryCompactionModelProfiles(raw.modelProfiles),
+  };
+}
+
+/** Resolve one configured threshold to tokens for the active model. */
+export function resolveHistoryCompactionThresholdTokens(
+  settings: HistoryCompactionSettings,
+  contextWindow: number,
+  trigger: 'soft' | 'hard',
+): number {
+  const value = trigger === 'soft' ? settings.softThreshold : settings.hardThreshold;
+  return settings.thresholdMode === 'percentage'
+    ? Math.floor(contextWindow * value / 100)
+    : Math.floor(value);
+}
+
+/** Resolve the effective thresholds and recent-token retention for a specific
+ *  model. Token-mode profiles override the global policy; in percentage mode
+ *  profiles are ignored so the global percentage thresholds apply. */
+export function resolveHistoryCompactionEffectiveSettings(
+  settings: HistoryCompactionSettings,
+  modelKey: string,
+): Pick<HistoryCompactionSettings, 'softThreshold' | 'hardThreshold' | 'keepRecentTokens'> {
+  const profile = settings.thresholdMode === 'tokens' ? settings.modelProfiles[modelKey] : undefined;
+  if (profile) {
+    return {
+      softThreshold: profile.softThreshold,
+      hardThreshold: profile.hardThreshold,
+      keepRecentTokens: profile.keepRecentTokens,
+    };
+  }
+  return {
+    softThreshold: settings.softThreshold,
+    hardThreshold: settings.hardThreshold,
+    keepRecentTokens: settings.keepRecentTokens,
+  };
+}
 
 /**
  * User-configured model buckets for subagent model selection. Each bucket is a
@@ -275,6 +484,8 @@ export interface ChatPrefs {
   /** Spacing density. Drives the --panel-gap-* scale. 'comfortable' reproduces
    *  the bundled defaults. */
   uiDensity: UiDensity;
+  /** Proactive soft/hard history-compaction policy. */
+  historyCompaction: HistoryCompactionSettings;
   /** Per-extension enabled/disabled toggles. Keys are extension IDs. */
   extensionToggles: Record<string, boolean>;
   /** Per-provider enabled/disabled toggles. Keys are provider names. */
@@ -412,6 +623,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   uiBorder: '',
   uiCornerRadius: 8,
   uiDensity: 'comfortable',
+  historyCompaction: { ...DEFAULT_HISTORY_COMPACTION_SETTINGS },
   extensionToggles: {},
   providerToggles: {},
   subagentProviderDefaults: {},
@@ -621,6 +833,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     subagentProviderDefaults: normalizeBooleanMap(prefs?.subagentProviderDefaults),
     subagentProviderTogglesBySession: normalizeNestedBooleanMap(prefs?.subagentProviderTogglesBySession),
     providerConcurrency: normalizeProviderConcurrency(prefs?.providerConcurrency),
+    historyCompaction: resolveHistoryCompactionSettings(prefs?.historyCompaction),
     subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
     subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
     subagentDropTools: normalizeStringArray(prefs?.subagentDropTools),
@@ -680,6 +893,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   subagentNestedAllowedBuckets?: NestedAllowedBuckets;
   subagentDropTools?: string[];
   providerConcurrency?: ProviderConcurrencyMap;
+  historyCompaction?: HistoryCompactionSettings;
 } {
   return {
     providerToggles: prefs.providerToggles,
@@ -702,6 +916,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
     subagentNestedAllowedBuckets: prefs.subagentNestedAllowedBuckets,
     subagentDropTools: prefs.subagentDropTools,
     providerConcurrency: prefs.providerConcurrency,
+    historyCompaction: prefs.historyCompaction,
   };
 }
 

@@ -2,6 +2,14 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import {
+  HISTORY_COMPACTION_ENV,
+  resolveHistoryCompactionEffectiveSettings,
+  resolveHistoryCompactionSettings,
+  resolveHistoryCompactionThresholdTokens,
+  type HistoryCompactionSettings,
+  type ThinkingLevel,
+} from '../shared/protocol';
 import type { SessionEntryLike } from './transcript';
 import type { MessageLike } from './transcript/types';
 
@@ -63,6 +71,8 @@ export interface SdkSessionEvent {
   success?: boolean;
   /** `auto_retry_end`: final error on a failed/exhausted/cancelled retry. */
   finalError?: string;
+  /** History-compaction lifecycle metadata. */
+  reason?: 'manual' | 'threshold' | 'overflow';
   /** Stable SDK session-entry ID, attached by Pie's persistence-order patch. */
   sessionEntryId?: string;
 }
@@ -216,6 +226,20 @@ export interface SdkSessionInfo {
 
 export interface SdkModule {
   VERSION: string;
+  AgentSession?: { prototype: Record<string, unknown> };
+  /** Pure SDK compaction functions used by Pie's supported before-compact customization. */
+  prepareCompaction?: (entries: unknown[], settings: SdkCompactionSettings) => SdkCompactionPreparation | undefined;
+  compact?: (
+    preparation: SdkCompactionPreparation,
+    model: PatchableModel,
+    apiKey: string | undefined,
+    headers: Record<string, string> | undefined,
+    customInstructions: string | undefined,
+    signal: AbortSignal | undefined,
+    thinkingLevel: ThinkingLevel | undefined,
+    streamFn: unknown,
+    env: Record<string, string> | undefined,
+  ) => Promise<SdkCompactionResult>;
   getAgentDir: () => string;
   formatSkillsForPrompt?: (skills: SdkSkill[]) => string;
   AuthStorage: {
@@ -453,6 +477,380 @@ export async function applySdkTerminalDurabilityPatch(
   return 'patched';
 }
 
+interface HistoryCompactionUsage {
+  tokens: number | null;
+  contextWindow: number;
+}
+
+interface PatchableModel {
+  id: string;
+  provider: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+}
+
+interface SdkCompactionSettings {
+  enabled: boolean;
+  reserveTokens: number;
+  keepRecentTokens: number;
+}
+
+interface SdkCompactionPreparation {
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  [key: string]: unknown;
+}
+
+interface SdkCompactionResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  estimatedTokensAfter?: number;
+  details?: unknown;
+}
+
+interface BeforeCompactEvent {
+  type: 'session_before_compact';
+  preparation: SdkCompactionPreparation;
+  branchEntries: unknown[];
+  customInstructions?: string;
+  reason: 'manual' | 'threshold' | 'overflow';
+  willRetry: boolean;
+  signal?: AbortSignal;
+}
+
+interface PatchableExtensionRunner {
+  __pieHistoryCompactionCustomizationInstalled?: boolean;
+  hasHandlers(eventType: string): boolean;
+  emit(event: unknown): Promise<unknown>;
+}
+
+interface PatchableModelRegistry {
+  find(provider: string, id: string): PatchableModel | undefined;
+}
+
+interface PatchableAgentSession {
+  agent: {
+    prepareNextTurnWithContext?: (turn: { context: Record<string, unknown> }, signal?: AbortSignal) => Promise<Record<string, unknown> | undefined>;
+    state: { messages: unknown[] };
+    streamFn?: unknown;
+  };
+  model?: PatchableModel;
+  thinkingLevel?: ThinkingLevel;
+  settingsManager?: { getCompactionSettings(): SdkCompactionSettings };
+  sessionManager: { getBranch(): Array<{ type?: string; id?: string }> };
+  _modelRegistry?: PatchableModelRegistry;
+  _extensionRunner?: PatchableExtensionRunner;
+  _getCompactionRequestAuth?: (model: PatchableModel) => Promise<{
+    apiKey?: string;
+    headers?: Record<string, string>;
+    env?: Record<string, string>;
+  }>;
+  _isAgentRunActive?: boolean;
+  _installAgentNextTurnRefresh(): void;
+  _buildRuntime?: (...args: unknown[]) => unknown;
+  _checkCompaction(assistantMessage: PatchableAssistantMessage, skipAbortedCheck?: boolean): Promise<boolean>;
+  _runAutoCompaction(reason: 'threshold', willRetry: boolean): Promise<boolean>;
+  getContextUsage(): HistoryCompactionUsage | undefined;
+}
+
+export type SdkHistoryCompactionPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
+
+function readLiveHistoryCompactionSettings(): HistoryCompactionSettings | undefined {
+  const raw = process.env[HISTORY_COMPACTION_ENV];
+  if (!raw) return undefined;
+  try {
+    return resolveHistoryCompactionSettings(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+function historyCompactionModelKey(model: Pick<PatchableModel, 'provider' | 'id'> | undefined): string | undefined {
+  return model?.provider && model.id ? `${model.provider}/${model.id}` : undefined;
+}
+
+function effectiveHistoryCompactionSettings(
+  settings: HistoryCompactionSettings,
+  model: Pick<PatchableModel, 'provider' | 'id'> | undefined,
+): HistoryCompactionSettings {
+  const key = historyCompactionModelKey(model);
+  if (!key) return settings;
+  const effective = resolveHistoryCompactionEffectiveSettings(settings, key);
+  return { ...settings, ...effective };
+}
+
+/** Pure threshold decision shared by the runtime patch and focused tests. */
+export function shouldRunHistoryCompaction(
+  settings: HistoryCompactionSettings | undefined,
+  usage: HistoryCompactionUsage | undefined,
+  trigger: 'soft' | 'hard',
+  model?: Pick<PatchableModel, 'provider' | 'id'>,
+): boolean {
+  if (!settings?.enabled || !usage || usage.tokens === null || usage.contextWindow <= 0) return false;
+  const effective = effectiveHistoryCompactionSettings(settings, model);
+  return usage.tokens >= resolveHistoryCompactionThresholdTokens(effective, usage.contextWindow, trigger);
+}
+
+function latestCompactionId(session: PatchableAgentSession): string | undefined {
+  const branch = session.sessionManager.getBranch();
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry?.type === 'compaction') return entry.id;
+  }
+  return undefined;
+}
+
+async function runPatchedHistoryCompaction(
+  session: PatchableAgentSession,
+  trigger: 'soft' | 'hard',
+  continueRun: boolean,
+): Promise<{ compacted: boolean; continueRequested: boolean }> {
+  const settings = readLiveHistoryCompactionSettings();
+  if (!shouldRunHistoryCompaction(settings, session.getContextUsage(), trigger, session.model)) {
+    return { compacted: false, continueRequested: false };
+  }
+  const before = latestCompactionId(session);
+  const continueRequested = await session._runAutoCompaction('threshold', continueRun);
+  return {
+    compacted: latestCompactionId(session) !== before,
+    continueRequested,
+  };
+}
+
+interface PatchableAssistantMessage {
+  stopReason?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+  };
+}
+
+function isSilentContextOverflow(
+  message: PatchableAssistantMessage,
+  contextWindow: number | undefined,
+): boolean {
+  if (!contextWindow || contextWindow <= 0 || !message.usage) return false;
+  const input = (message.usage.input ?? 0) + (message.usage.cacheRead ?? 0);
+  if (message.stopReason === 'stop') return input > contextWindow;
+  return message.stopReason === 'length'
+    && (message.usage.output ?? 0) === 0
+    && input >= contextWindow * 0.99;
+}
+
+function isBeforeCompactEvent(event: unknown): event is BeforeCompactEvent {
+  return !!event && typeof event === 'object'
+    && (event as { type?: unknown }).type === 'session_before_compact'
+    && Array.isArray((event as { branchEntries?: unknown }).branchEntries);
+}
+
+function mergeCompactionInstructions(persistent: string, oneTime: string | undefined): string | undefined {
+  const parts = [persistent.trim(), oneTime?.trim() ?? ''].filter(Boolean);
+  return parts.length > 0 ? parts.join('\n\nAdditional one-time focus:\n') : undefined;
+}
+
+function mergeCompactionDetails(
+  details: unknown,
+  pieDetails: Record<string, unknown>,
+): Record<string, unknown> {
+  const base = details && typeof details === 'object' && !Array.isArray(details)
+    ? details as Record<string, unknown>
+    : {};
+  return { ...base, pieCompaction: pieDetails };
+}
+
+async function createCustomizedCompaction(
+  sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
+  session: PatchableAgentSession,
+  event: BeforeCompactEvent,
+): Promise<SdkCompactionResult | undefined> {
+  const settings = readLiveHistoryCompactionSettings();
+  const prepareCompaction = sdk.prepareCompaction;
+  const compact = sdk.compact;
+  const activeModel = session.model;
+  const nativeSettings = session.settingsManager?.getCompactionSettings();
+  if (!settings || !prepareCompaction || !compact || !activeModel || !nativeSettings) return undefined;
+
+  const effective = effectiveHistoryCompactionSettings(settings, activeModel);
+  const preparation = prepareCompaction(event.branchEntries, {
+    ...nativeSettings,
+    keepRecentTokens: effective.keepRecentTokens,
+  });
+  if (!preparation) return undefined;
+
+  let summaryModel = activeModel;
+  if (settings.summaryModel) {
+    const selected = session._modelRegistry?.find(settings.summaryModel.provider, settings.summaryModel.id);
+    if (!selected) return undefined;
+    summaryModel = selected;
+  }
+  if (!session._getCompactionRequestAuth) return undefined;
+
+  try {
+    const auth = await session._getCompactionRequestAuth(summaryModel);
+    const thinkingLevel = settings.summaryThinkingLevel === 'inherit'
+      ? session.thinkingLevel
+      : settings.summaryThinkingLevel;
+    const instructions = mergeCompactionInstructions(settings.summaryInstructions, event.customInstructions);
+    const result = await compact(
+      preparation,
+      summaryModel,
+      auth.apiKey,
+      auth.headers,
+      instructions,
+      event.signal,
+      thinkingLevel,
+      session.agent.streamFn,
+      auth.env,
+    );
+    return {
+      ...result,
+      details: mergeCompactionDetails(result.details, {
+        version: 1,
+        reason: event.reason,
+        modelId: summaryModel.id,
+        provider: summaryModel.provider,
+        thinkingLevel: thinkingLevel ?? 'off',
+        keepRecentTokens: effective.keepRecentTokens,
+        instructionsApplied: !!instructions,
+      }),
+    };
+  } catch {
+    // Returning no override delegates to pi's native compactor. This is
+    // especially important for provider-overflow recovery: a missing override
+    // model or failed custom summary must never suppress the built-in fallback.
+    return undefined;
+  }
+}
+
+function installHistoryCompactionCustomization(
+  sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
+  session: PatchableAgentSession,
+): void {
+  const runner = session._extensionRunner;
+  if (!runner || runner.__pieHistoryCompactionCustomizationInstalled) return;
+  const originalEmit = runner.emit;
+  const originalHasHandlers = runner.hasHandlers;
+  if (typeof originalEmit !== 'function' || typeof originalHasHandlers !== 'function') return;
+
+  // The SDK avoids constructing before-compact events unless at least one
+  // extension handler exists. Advertise Pie's synthetic final handler so the
+  // supported event path is actually invoked; preserve all native answers for
+  // every other event type.
+  runner.hasHandlers = function pieHistoryCompactionHasHandlers(eventType: string): boolean {
+    return eventType === 'session_before_compact' || originalHasHandlers.call(this, eventType);
+  };
+  runner.emit = async function pieHistoryCompactionEmit(event: unknown): Promise<unknown> {
+    const existing = await originalEmit.call(this, event);
+    if (!isBeforeCompactEvent(event)) return existing;
+    if (existing && typeof existing === 'object') {
+      const prior = existing as { cancel?: unknown; compaction?: unknown };
+      if (prior.cancel || prior.compaction) return existing;
+    }
+    const compaction = await createCustomizedCompaction(sdk, session, event);
+    return compaction ? { compaction } : existing;
+  };
+  Object.defineProperty(runner, '__pieHistoryCompactionCustomizationInstalled', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+  });
+}
+
+/**
+ * Add Pie's proactive soft/hard scheduler and supported before-compact
+ * customization to the pinned SDK without changing its persisted session
+ * format. Hard checks run from the SDK's awaited prepare-next-turn barrier
+ * (after all tool results, before another provider request). While the
+ * proactive policy is enabled, its thresholds replace pi's native near-window
+ * threshold; provider overflow/error recovery remains delegated to pi.
+ */
+export function applySdkHistoryCompactionRuntimePatch(
+  sdk: Pick<SdkModule, 'AgentSession' | 'prepareCompaction' | 'compact'>,
+): SdkHistoryCompactionPatchResult {
+  const prototype = sdk.AgentSession?.prototype as (Record<string, unknown> & {
+    __pieHistoryCompactionPatched?: boolean;
+  }) | undefined;
+  if (!prototype) return 'missing-target';
+  if (prototype.__pieHistoryCompactionPatched) return 'already-present';
+  const originalInstall = prototype._installAgentNextTurnRefresh;
+  const originalBuildRuntime = prototype._buildRuntime;
+  const originalCheck = prototype._checkCompaction;
+  if (typeof originalInstall !== 'function' || typeof originalCheck !== 'function') return 'unsupported-shape';
+
+  if (typeof originalBuildRuntime === 'function' && sdk.prepareCompaction && sdk.compact) {
+    prototype._buildRuntime = function patchedBuildRuntime(
+      this: PatchableAgentSession,
+      ...args: unknown[]
+    ): unknown {
+      const result = (originalBuildRuntime as (...runtimeArgs: unknown[]) => unknown).apply(this, args);
+      installHistoryCompactionCustomization(sdk, this);
+      return result;
+    };
+  }
+
+  prototype._installAgentNextTurnRefresh = function patchedInstall(this: PatchableAgentSession): void {
+    (originalInstall as (this: PatchableAgentSession) => void).call(this);
+    const previousPrepare = this.agent.prepareNextTurnWithContext;
+    if (typeof previousPrepare !== 'function') return;
+    this.agent.prepareNextTurnWithContext = async (turn, signal) => {
+      const previousSnapshot = await previousPrepare.call(this.agent, turn, signal);
+      const result = await runPatchedHistoryCompaction(this, 'hard', true);
+      if (!result.compacted) return previousSnapshot;
+      const baseContext = (previousSnapshot?.context ?? turn.context) as Record<string, unknown>;
+      return {
+        ...(previousSnapshot ?? {}),
+        context: {
+          ...baseContext,
+          messages: this.agent.state.messages.slice(),
+        },
+      };
+    };
+  };
+
+  prototype._checkCompaction = async function patchedCheck(
+    this: PatchableAgentSession,
+    assistantMessage: PatchableAssistantMessage,
+    skipAbortedCheck = true,
+  ): Promise<boolean> {
+    // Provider errors and silent overflow signals must reach pi's native
+    // classifier first so overflow compacts, removes a truncated assistant
+    // where required, and performs its one bounded retry. Normal successful
+    // responses continue to use Pie's proactive soft/hard timing.
+    if (assistantMessage.stopReason === 'error'
+        || isSilentContextOverflow(assistantMessage, this.model?.contextWindow)
+        || (skipAbortedCheck && assistantMessage.stopReason === 'aborted')) {
+      return await (originalCheck as PatchableAgentSession['_checkCompaction']).call(
+        this,
+        assistantMessage,
+        skipAbortedCheck,
+      );
+    }
+    const trigger = this._isAgentRunActive ? 'soft' : 'hard';
+    const result = await runPatchedHistoryCompaction(this, trigger, false);
+    if (result.compacted) return result.continueRequested;
+    // A valid live proactive policy owns normal threshold timing completely.
+    // Native error/overflow handling was delegated above; returning here avoids
+    // pi's fixed `contextWindow - reserveTokens` check firing ahead of a user-
+    // configured hard limit.
+    if (readLiveHistoryCompactionSettings()?.enabled) return false;
+    return await (originalCheck as PatchableAgentSession['_checkCompaction']).call(
+      this,
+      assistantMessage,
+      skipAbortedCheck,
+    );
+  };
+
+  Object.defineProperty(prototype, '__pieHistoryCompactionPatched', {
+    value: true,
+    enumerable: false,
+    configurable: false,
+  });
+  return 'patched';
+}
+
 export async function loadSdk(sdkPath: string): Promise<SdkModule> {
   assertAllowedSdkPath(sdkPath);
   const durabilityPatchResult = await applySdkTerminalDurabilityPatch(sdkPath);
@@ -476,7 +874,12 @@ export async function loadSdk(sdkPath: string): Promise<SdkModule> {
     );
   }
 
-  return mod as SdkModule;
+  const typed = mod as SdkModule;
+  const historyCompactionPatch = applySdkHistoryCompactionRuntimePatch(typed);
+  if (historyCompactionPatch === 'missing-target' || historyCompactionPatch === 'unsupported-shape') {
+    throw new Error(`SDK history-compaction patch failed: ${historyCompactionPatch}.`);
+  }
+  return typed;
 }
 
 export async function loadSdkInternalModule<TModule>(

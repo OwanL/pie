@@ -194,6 +194,10 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
     'dist/core/agent-session.js': DURABILITY_PATCH_SOURCE,
     'dist/index.js': `
       export const VERSION = 'test-sdk';
+      export class AgentSession {
+        _installAgentNextTurnRefresh() {}
+        async _checkCompaction() { return false; }
+      }
       export const getAgentDir = () => '/agent';
       export const AuthStorage = { create: (filePath) => ({ filePath }) };
       export const SessionManager = {

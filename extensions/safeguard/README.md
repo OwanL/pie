@@ -16,7 +16,7 @@ The policy intentionally favors precision:
 
 - **Default bash timeout** — applies a 600s default to `bash` calls without a positive finite timeout. Explicit timeouts are preserved.
 - **Hard blocks** — disk/volume destruction, root recursive deletion, boot/recovery tampering, reverse shells, remote-content-to-shell pipelines, fork bombs, and writes to core system paths.
-- **Prompts** — privilege escalation, recursive force-deletes outside the cwd, destructive service/firewall/account changes, system package removal, and writes to credential-bearing files outside the cwd.
+- **Prompts** — privilege escalation, recursive force-deletes outside the cwd, destructive service/firewall/account changes, system package removal, and writes to credential-bearing files outside the cwd. Concrete children of `/tmp`, `/var/tmp`, or the platform temp directory are treated as routine cleanup; deleting a temp root or using a broad wildcard still prompts.
 
 ## API
 

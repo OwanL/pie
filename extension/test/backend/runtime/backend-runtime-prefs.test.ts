@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { handleBackendRequest } from '../../../src/backend/request-handler';
-import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
+import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
 import { validateRuntimePrefsSet } from '../../../src/backend/rpc';
 import { ProviderGate } from '../../../src/backend/provider-gate';
 
@@ -10,6 +10,50 @@ const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL';
 const SUBAGENT_MAX_DEPTH_ENV = 'PIE_SUBAGENT_MAX_DEPTH';
 const SUBAGENT_MAX_TREE_SESSIONS_ENV = 'PIE_SUBAGENT_MAX_TREE_SESSIONS';
 const SUBAGENT_MAX_INFLIGHT_ENV = 'PIE_SUBAGENT_MAX_INFLIGHT';
+
+test('runtimePrefs.set validates and mirrors proactive history compaction', async (t) => {
+  const previous = process.env[HISTORY_COMPACTION_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[HISTORY_COMPACTION_ENV];
+    else process.env[HISTORY_COMPACTION_ENV] = previous;
+  });
+  const historyCompaction = {
+    enabled: true,
+    thresholdMode: 'percentage',
+    softThreshold: 70,
+    hardThreshold: 85,
+    keepRecentTokens: 30_000,
+    summaryInstructions: '',
+    summaryThinkingLevel: 'inherit',
+    summaryModel: null,
+    modelProfiles: {},
+  };
+
+  const result = await handleBackendRequest({} as any, {
+    id: 'test-runtime-prefs-history-compaction',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, historyCompaction },
+  }) as { historyCompaction?: typeof historyCompaction };
+
+  assert.deepEqual(result.historyCompaction, historyCompaction);
+  assert.equal(process.env[HISTORY_COMPACTION_ENV], JSON.stringify(historyCompaction));
+  assert.throws(
+    () => validateRuntimePrefsSet({
+      providerToggles: {},
+      extensionToggles: {},
+      historyCompaction: { ...historyCompaction, softThreshold: 90, hardThreshold: 80 },
+    }),
+    /soft < hard/,
+  );
+  assert.throws(
+    () => validateRuntimePrefsSet({
+      providerToggles: {},
+      extensionToggles: {},
+      historyCompaction: { ...historyCompaction, modelProfiles: { 'p/m': { softThreshold: 500, hardThreshold: 100_000, keepRecentTokens: 100 } } },
+    }),
+    /0 <= keep < soft < hard/,
+  );
+});
 
 test('runtimePrefs.set mirrors provider and extension toggles into backend environment', async (t) => {
   const previousProvider = process.env[PROVIDER_TOGGLES_ENV];

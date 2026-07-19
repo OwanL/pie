@@ -3,9 +3,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ChatPrefs, ExtensionInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, ToolResultPruningSettings } from '../../../shared/protocol';
+import { resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
 import { Tooltip } from '../components/tooltip';
+import { HistoryCompactionSection } from './settings-menu-history-compaction';
 
 import {
   computeKeepCatalog,
@@ -49,17 +50,20 @@ export interface ComposerSettingsMenuProps {
   availableExtensions: ExtensionInfo[];
   availableModels: ModelInfo[];
   providerGateStats: ProviderGateStats;
+  activeContextWindow?: number;
+  activeModel?: { provider?: string; id: string };
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
 }
 
-/** The six settings categories, in tab-strip order. Each renders one at a time
+/** Settings categories, in tab-strip order. Each renders one at a time
  *  inside the menu body; search can jump to any of them. */
-type SettingsTab = 'chat' | 'appearance' | 'extensions' | 'providers';
+type SettingsTab = 'chat' | 'history' | 'appearance' | 'extensions' | 'providers';
 
 const TAB_DEFS: { id: SettingsTab; label: string }[] = [
   { id: 'chat', label: 'Chat' },
+  { id: 'history', label: 'History' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'extensions', label: 'Extensions' },
   { id: 'providers', label: 'Providers' },
@@ -67,6 +71,7 @@ const TAB_DEFS: { id: SettingsTab; label: string }[] = [
 
 const TAB_LABEL: Record<SettingsTab, string> = {
   chat: 'Chat',
+  history: 'History',
   appearance: 'Appearance',
   extensions: 'Extensions',
   providers: 'Providers',
@@ -98,6 +103,13 @@ function TabIcon({ id }: { id: SettingsTab }) {
       return (
         <svg {...common}>
           <path d="M2.5 4.5h11a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H6l-3.5 3V5.5a1 1 0 0 1 1-1z" />
+        </svg>
+      );
+    case 'history':
+      return (
+        <svg {...common}>
+          <path d="M3 3.5h10M4.5 7h7M6 10.5h4" />
+          <path d="m6.5 13 1.5 1.5L9.5 13" />
         </svg>
       );
     case 'appearance':
@@ -149,6 +161,11 @@ const APPEARANCE_SETTING_LABELS = [
   'Expanded section height', 'Activity preview rows', 'Message rail markers',
   'Base text size', 'Composer text size', 'Expanded section text size',
   'Sans-serif font', 'Monospace font',
+];
+const HISTORY_COMPACTION_SETTING_LABELS = [
+  'History compaction', 'Compaction threshold type', 'Soft compaction trigger', 'Hard compaction trigger',
+  'Recent retention', 'Summary instructions', 'Summary thinking level', 'Summary model',
+  'Custom thresholds for active model',
 ];
 const BASH_SETTING_LABELS = ['Warm pool size', 'Bash shell path', 'Warmup timeout', 'Fast path'];
 const PROVIDER_CONCURRENCY_LABELS = [
@@ -234,6 +251,7 @@ function buildSettingsSearchIndex(
       });
     }
   };
+  pushSettings(HISTORY_COMPACTION_SETTING_LABELS, 'history');
   if (visibleTabs.some((t) => t.id === 'appearance')) pushSettings(APPEARANCE_SETTING_LABELS, 'appearance');
   if (visibleTabs.some((t) => t.id === 'providers')) pushSettings(PROVIDER_CONCURRENCY_LABELS, 'providers');
   if (hasWarmBash) pushSettings(BASH_SETTING_LABELS, 'extensions', 'warm-bash');
@@ -255,6 +273,21 @@ function buildSettingsSearchIndex(
       });
     }
   }
+
+  const historyCompaction = resolveHistoryCompactionSettings(prefs.historyCompaction);
+  entries.push({
+    type: 'toggle',
+    id: 'history-compaction:enabled',
+    label: 'Proactive automatic compaction',
+    haystack: 'history compaction proactive automatic soft hard trigger',
+    checked: historyCompaction.enabled,
+    apply: () => onSetPrefs({
+      historyCompaction: {
+        ...historyCompaction,
+        enabled: !historyCompaction.enabled,
+      },
+    }),
+  });
 
   // Bash fast-path toggle (warm-bash extension).
   if (hasWarmBash) {
@@ -450,6 +483,8 @@ interface SettingsTabBodyProps {
   availableExtensions: ExtensionInfo[];
   skillCatalog: string[];
   toolCatalog: string[];
+  activeContextWindow?: number;
+  activeModel?: { provider?: string; id: string };
 }
 
 /** Renders the content of the active settings tab. */
@@ -471,6 +506,8 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
     providerGateStats,
     skillCatalog,
     toolCatalog,
+    activeContextWindow,
+    activeModel,
   } = props;
   return (
     <>
@@ -479,6 +516,9 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
           <ChatPrefSections prefs={prefs} onSetPrefs={onSetPrefs} />
           <SoundSection prefs={prefs} onSetPrefs={onSetPrefs} />
         </>
+      )}
+      {effectiveTab === 'history' && (
+        <HistoryCompactionSection settings={resolveHistoryCompactionSettings(prefs.historyCompaction)} contextWindow={activeContextWindow} availableModels={availableModels} modelEntries={modelEntries} activeModel={activeModel} onSetPrefs={onSetPrefs} />
       )}
       {effectiveTab === 'appearance' && (
         <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />
@@ -507,7 +547,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, onSetPrefs, onSetPruningSettings, onSetToolResultPruningSettings }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -805,6 +845,8 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
                 providerGateStats={providerGateStats}
                 skillCatalog={skillCatalog}
                 toolCatalog={toolCatalog}
+                activeContextWindow={activeContextWindow}
+                activeModel={activeModel}
               />
             )}
           </div>

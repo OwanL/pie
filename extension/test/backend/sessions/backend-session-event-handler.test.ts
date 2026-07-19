@@ -109,6 +109,253 @@ test('compaction_end publishes the SDK post-compaction estimate immediately', ()
   assert.deepEqual(sessionOpened, [context.sessionPath]);
 });
 
+test('compaction_end keeps busy asserted when the agent run continues', () => {
+  const { deps, busy } = createDeps();
+  const context = createContext();
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    willRetry: true,
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100_000,
+      estimatedTokensAfter: 12_000,
+    },
+  });
+
+  assert.deepEqual(busy, [true]);
+});
+
+test('compaction_start captures the start time and compaction_end appends a pie.compaction-metrics sidecar', () => {
+  const { deps } = createDeps();
+  const appendedSidecars: Array<{ customType: string; data: unknown }> = [];
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [{
+          id: 'compact-entry-1',
+          type: 'compaction',
+          timestamp: '2026-07-15T00:00:00.000Z',
+          summary: 'Condensed history',
+        }],
+        appendCustomEntry: (customType: string, data?: unknown) => {
+          appendedSidecars.push({ customType, data });
+          return 'sidecar-entry-1';
+        },
+      },
+      model: { id: 'claude-sonnet-4', provider: 'anthropic' },
+      thinkingLevel: 'medium',
+    } as unknown as SessionContext['session'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  assert.equal(typeof context.compactionStartedAt, 'number', 'compaction_start captures the start time');
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100_000,
+      estimatedTokensAfter: 12_345,
+      details: {},
+    },
+  });
+
+  assert.equal(context.compactionStartedAt, undefined, 'compaction_end clears the captured start time');
+  assert.equal(appendedSidecars.length, 1);
+  assert.equal(appendedSidecars[0].customType, 'pie.compaction-metrics');
+  assert.deepEqual(appendedSidecars[0].data, {
+    compactionEntryId: 'compact-entry-1',
+    reason: 'threshold',
+    tokensBefore: 100_000,
+    estimatedTokensAfter: 12_345,
+    durationMs: (appendedSidecars[0].data as { durationMs: number }).durationMs,
+    modelId: 'claude-sonnet-4',
+    provider: 'anthropic',
+    thinkingLevel: 'medium',
+  });
+  // durationMs is non-negative and finite (we can't assert the exact value
+  // because it depends on Date.now() elapsed between start and end).
+  assert.ok(Number.isFinite((appendedSidecars[0].data as { durationMs: number }).durationMs));
+  assert.ok((appendedSidecars[0].data as { durationMs: number }).durationMs >= 0);
+});
+
+test('compaction_end omits durationMs when compaction_start was not observed', () => {
+  const { deps } = createDeps();
+  const appendedSidecars: Array<{ customType: string; data: unknown }> = [];
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [{
+          id: 'compact-entry-1',
+          type: 'compaction',
+          timestamp: '2026-07-15T00:00:00.000Z',
+          summary: 'Condensed history',
+        }],
+        appendCustomEntry: (customType: string, data?: unknown) => {
+          appendedSidecars.push({ customType, data });
+          return 'sidecar-entry-1';
+        },
+      },
+      model: { id: 'gpt-5' },
+    } as unknown as SessionContext['session'],
+  });
+  // No compaction_start fired (e.g. backend restarted mid-compaction).
+  assert.equal(context.compactionStartedAt, undefined);
+
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'overflow',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 80_000,
+      estimatedTokensAfter: 20_000,
+    },
+  });
+
+  assert.equal(appendedSidecars.length, 1);
+  const data = appendedSidecars[0].data as Record<string, unknown>;
+  assert.equal(data.compactionEntryId, 'compact-entry-1');
+  assert.equal(data.reason, 'overflow');
+  assert.equal(data.tokensBefore, 80_000);
+  assert.equal(data.estimatedTokensAfter, 20_000);
+  assert.equal('durationMs' in data, false, 'durationMs omitted when start time was not observed');
+  assert.equal(data.modelId, 'gpt-5');
+  assert.equal('provider' in data, false, 'provider omitted when not on the session model');
+  assert.equal('thinkingLevel' in data, false, 'thinkingLevel omitted when not on the session');
+});
+
+test('compaction_end does not append a sidecar when no compaction entry exists in the branch', () => {
+  const { deps } = createDeps();
+  const appendedSidecars: Array<{ customType: string; data: unknown }> = [];
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [],
+        appendCustomEntry: (customType: string, data?: unknown) => {
+          appendedSidecars.push({ customType, data });
+          return 'sidecar-entry-1';
+        },
+      },
+    } as unknown as SessionContext['session'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'manual' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'manual',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100,
+      estimatedTokensAfter: 50,
+    },
+  });
+
+  assert.deepEqual(appendedSidecars, []);
+});
+
+test('compaction_end does not append a sidecar when the SDK exposes no appendCustomEntry', () => {
+  const { deps } = createDeps();
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [{
+          id: 'compact-entry-1',
+          type: 'compaction',
+          timestamp: '2026-07-15T00:00:00.000Z',
+          summary: 'Condensed history',
+        }],
+        // No appendCustomEntry method (older SDK).
+      },
+    } as unknown as SessionContext['session'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'threshold' });
+  // Should not throw.
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'threshold',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      tokensBefore: 100,
+      estimatedTokensAfter: 50,
+    },
+  });
+});
+
+test('compaction_end does not append a sidecar when result has no usable token metric', () => {
+  const { deps } = createDeps();
+  const appendedSidecars: Array<{ customType: string; data: unknown }> = [];
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [{
+          id: 'compact-entry-1',
+          type: 'compaction',
+          timestamp: '2026-07-15T00:00:00.000Z',
+          summary: 'Condensed history',
+        }],
+        appendCustomEntry: (customType: string, data?: unknown) => {
+          appendedSidecars.push({ customType, data });
+          return 'sidecar-entry-1';
+        },
+      },
+    } as unknown as SessionContext['session'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'manual' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'manual',
+    result: {
+      summary: 'Condensed history',
+      firstKeptEntryId: 'kept-entry',
+      // tokensBefore / estimatedTokensAfter both missing.
+    },
+  });
+
+  assert.deepEqual(appendedSidecars, []);
+});
+
+test('compaction_end does not append a sidecar when event.result is undefined (failed/aborted)', () => {
+  const { deps } = createDeps();
+  const appendedSidecars: Array<{ customType: string; data: unknown }> = [];
+  const context = createContext({
+    session: {
+      sessionManager: {
+        getBranch: () => [{
+          id: 'compact-entry-1',
+          type: 'compaction',
+          timestamp: '2026-07-15T00:00:00.000Z',
+          summary: 'Condensed history',
+        }],
+        appendCustomEntry: (customType: string, data?: unknown) => {
+          appendedSidecars.push({ customType, data });
+          return 'sidecar-entry-1';
+        },
+      },
+    } as unknown as SessionContext['session'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'compaction_start', reason: 'manual' });
+  handleSdkSessionEvent(deps, context, {
+    type: 'compaction_end',
+    reason: 'manual',
+    // result omitted (failed/aborted compaction appends nothing).
+  });
+
+  assert.deepEqual(appendedSidecars, []);
+  assert.equal(context.compactionStartedAt, undefined, 'start time is still cleared on a failed compaction');
+});
+
 test('handleSdkSessionEvent ignores unsupported or incomplete events', () => {
   const { deps, emitted, busy, getContextUsageChangedCount, getListChangedCount } = createDeps();
   const context = createContext();

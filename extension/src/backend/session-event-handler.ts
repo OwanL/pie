@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type {
+  CompactionSummaryDetails,
   CustomMessagePayload,
   MessageAbortedPayload,
   MessageDeltaPayload,
@@ -16,6 +17,7 @@ import type {
   ToolProgressPayload,
   ToolStartedPayload,
 } from '../shared/protocol';
+import { COMPACTION_METRICS_CUSTOM_TYPE } from '../shared/protocol';
 import type { SdkSessionEvent } from './sdk';
 import type { BackendSemanticCandidate } from './live-turn-accumulator';
 import type { TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
@@ -413,6 +415,108 @@ function readPostCompactionEstimatedTokens(result: unknown): number | undefined 
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? Math.trunc(value)
     : undefined;
+}
+
+/** Coerce a numeric token count from an untrusted `compaction_end` result
+ *  field. Returns `undefined` for non-finite / negative values so the sidecar
+ *  omits the field instead of persisting garbage. */
+function readTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : undefined;
+}
+
+/** Minimal slice of the SDK SessionManager's sidecar append surface. The runtime
+ *  manager is a fenced `MutableSdkSessionManager` (see `session-manager-fence.ts`)
+ *  that proxies `appendCustomEntry`; this local type captures only what
+ *  {@link appendCompactionMetricsSidecar} needs without widening
+ *  `SdkSessionManager`'s public contract in `sdk.ts`. */
+interface SessionManagerSidecarAppender {
+  appendCustomEntry(customType: string, data?: unknown): string;
+}
+
+/** Find the id of the most recent compaction entry in the session branch. The
+ *  SDK appends the compaction entry before emitting `compaction_end`, so this
+ *  scan always sees it on a successful compaction. Returns `undefined` when no
+ *  compaction entry exists (failed/aborted attempt, or an unexpected SDK shape). */
+function latestCompactionEntry(context: SessionContext): SessionEntryLike | undefined {
+  const branch = (context.session.sessionManager?.getBranch?.() ?? []) as SessionEntryLike[];
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry?.type === 'compaction') return entry;
+  }
+  return undefined;
+}
+
+function readPieCompactionDetails(entry: SessionEntryLike): Record<string, unknown> | undefined {
+  if (!entry.details || typeof entry.details !== 'object' || Array.isArray(entry.details)) return undefined;
+  const pie = (entry.details as Record<string, unknown>).pieCompaction;
+  return pie && typeof pie === 'object' && !Array.isArray(pie)
+    ? pie as Record<string, unknown>
+    : undefined;
+}
+
+/** Append a non-context `pie.compaction-metrics` sidecar entry after a
+ *  successful compaction so the metrics survive transcript reload. The sidecar
+ *  is a `custom` entry (via `appendCustomEntry`) — it never participates in LLM
+ *  context and never renders as its own transcript row; `mapTranscript` scans
+ *  it and attaches typed {@link CompactionSummaryDetails} to the matching
+ *  compaction-summary ChatMessage. No-ops when the SDK exposes no
+ *  `appendCustomEntry` (older SDK), the compaction entry can't be linked, or no
+ *  usable token metric is available. */
+function appendCompactionMetricsSidecar(context: SessionContext, event: SdkSessionEvent): void {
+  const result = event.result;
+  if (!result || typeof result !== 'object') return;
+  const compactionEntry = latestCompactionEntry(context);
+  const compactionEntryId = compactionEntry?.id;
+  if (!compactionEntryId || !compactionEntry) return;
+
+  const resultRecord = result as { tokensBefore?: unknown; estimatedTokensAfter?: unknown };
+  const tokensBefore = readTokenCount(resultRecord.tokensBefore);
+  const estimatedTokensAfter = readPostCompactionEstimatedTokens(result);
+  // Need at least one token metric for the sidecar to be useful.
+  if (tokensBefore === undefined && estimatedTokensAfter === undefined) return;
+
+  const manager = context.session.sessionManager as
+    (typeof context.session.sessionManager) & Partial<SessionManagerSidecarAppender>;
+  if (typeof manager.appendCustomEntry !== 'function') return;
+
+  const startedAt = context.compactionStartedAt;
+  const durationMs = typeof startedAt === 'number'
+    ? Math.max(0, Date.now() - startedAt)
+    : undefined;
+
+  const sidecar: CompactionSummaryDetails & { compactionEntryId: string } = {
+    compactionEntryId,
+    reason: typeof event.reason === 'string' ? event.reason : '',
+  };
+  if (tokensBefore !== undefined) sidecar.tokensBefore = tokensBefore;
+  if (estimatedTokensAfter !== undefined) sidecar.estimatedTokensAfter = estimatedTokensAfter;
+  if (durationMs !== undefined) sidecar.durationMs = durationMs;
+
+  const customDetails = readPieCompactionDetails(compactionEntry);
+  const modelId = typeof customDetails?.modelId === 'string'
+    ? customDetails.modelId
+    : context.session.model?.id;
+  const provider = typeof customDetails?.provider === 'string'
+    ? customDetails.provider
+    : context.session.model?.provider;
+  const thinkingLevel = typeof customDetails?.thinkingLevel === 'string'
+    ? customDetails.thinkingLevel
+    : context.session.thinkingLevel;
+  if (typeof modelId === 'string' && modelId.length > 0) sidecar.modelId = modelId;
+  if (typeof provider === 'string' && provider.length > 0) sidecar.provider = provider;
+  if (typeof thinkingLevel === 'string' && thinkingLevel.length > 0) sidecar.thinkingLevel = thinkingLevel;
+
+  try {
+    manager.appendCustomEntry(COMPACTION_METRICS_CUSTOM_TYPE, sidecar);
+  } catch (error) {
+    logBackendDiagnostic('warn', 'compaction.metricsSidecarAppendFailed', {
+      sessionPath: context.sessionPath,
+      compactionEntryId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function emitLatestPruningResult(
@@ -1280,21 +1384,33 @@ export function handleSdkSessionEvent(
       // `session_finished` deferred triggers are unaffected: they already
       // fired at `agent_end`'s busy=false; the `compaction_end` re-fire is a
       // no-op (`DeferredTriggerRegistry.fire` is idempotent once consumed).
+      //
+      // Capture the start time so `compaction_end` can compute `durationMs`
+      // for the `pie.compaction-metrics` sidecar. Cleared on `compaction_end`
+      // (whether successful or not).
+      context.compactionStartedAt = Date.now();
       deps.emitBusyChanged(context, true);
       return;
     }
     case 'compaction_end': {
-      // Compaction finished (normally, or aborted by an interrupt). If the SDK
-      // continues with another turn (overflow → retry), `agent_start` re-arms
-      // busy=true; otherwise the run is done and this leaves the session idle.
-      // Idempotent with the `agent_end` busy=false clear and the interrupt
-      // handler's `.finally`.
-      deps.emitBusyChanged(context, false);
+      // `willRetry` also marks Pie's hard-threshold between-turn continuation:
+      // the current agent loop resumes directly after this awaited compaction,
+      // without another `agent_start`. Keep busy asserted in that case. Native
+      // overflow recovery does emit another `agent_start`, so retaining busy
+      // also removes its transient idle flicker. A terminal/manual/soft
+      // compaction clears busy as before.
+      if (!event.willRetry) deps.emitBusyChanged(context, false);
       // A successful compaction has now appended the CompactionEntry. Refresh
       // both the context indicator and transcript so manual and automatic
       // compaction visibly surface the generated summary instead of only
       // appearing after reopen. Failed/aborted attempts append nothing.
       if (event.result) {
+        // Append the durable `pie.compaction-metrics` sidecar BEFORE
+        // `emitSessionOpened` so the refreshed transcript scan picks it up and
+        // attaches typed `CompactionSummaryDetails` to the compaction-summary
+        // row. No-op when the SDK exposes no `appendCustomEntry` or the
+        // compaction entry / token metrics can't be linked.
+        appendCompactionMetricsSidecar(context, event);
         // The new prompt has not produced assistant usage yet, but the SDK
         // supplies its post-compaction token estimate. Publish that immediately
         // instead of clearing the indicator until the next user message.
@@ -1302,6 +1418,9 @@ export function handleSdkSessionEvent(
         void deps.emitSessionOpened(context.sessionPath);
         void deps.emitSessionListChanged();
       }
+      // Clear the captured start time whether the compaction succeeded or not,
+      // so a later `compaction_start` (re-arm) does not inherit a stale mark.
+      context.compactionStartedAt = undefined;
       // Emit a host-facing signal so run-analytics can count this billable
       // compaction LLM call against the run.
       deps.emit('compaction.ended', { sessionPath: context.sessionPath });

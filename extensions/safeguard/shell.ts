@@ -1,4 +1,11 @@
-import { collapseLeadingSlashes, normalizeSlashes, isUnderCwd } from "./paths";
+import { tmpdir } from "node:os";
+import {
+	collapseLeadingSlashes,
+	isUnderCwd,
+	normalizeSlashes,
+	resolvePathForComparison,
+	trimTrailingPathSeparatorForComparison,
+} from "./paths";
 
 export interface ShellInvocation {
 	name: string;
@@ -192,6 +199,25 @@ function isRootDeleteTarget(target: string): boolean {
 	return trimmed === "/" || trimmed === "/*" || trimmed === "~" || trimmed === "~/" || /^[a-z]:\/$/.test(trimmed);
 }
 
+/**
+ * Temp cleanup is a routine development operation, even though the OS temp
+ * directory normally lives outside the project. Only exempt a concrete child:
+ * deleting the temp root itself, a wildcard spanning it, or a path that
+ * normalizes back out of it must still prompt.
+ *
+ * `/tmp` and `/var/tmp` are included explicitly because Windows-hosted Git Bash
+ * exposes those virtual paths while Node reports a native `%TEMP%` path.
+ */
+function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
+	if (/[*?\[]/.test(target)) return false;
+	const normalizedTarget = trimTrailingPathSeparatorForComparison(resolvePathForComparison(target, cwd));
+	const tempRoots = ["/tmp", "/var/tmp", tmpdir()];
+	return tempRoots.some((root) => {
+		const normalizedRoot = trimTrailingPathSeparatorForComparison(resolvePathForComparison(root, cwd));
+		return normalizedTarget.startsWith(`${normalizedRoot}/`);
+	});
+}
+
 export function analyzeRecursiveRm(command: string, cwd: string): { action: "allow" | "block" | "prompt"; reason?: string } | null {
 	for (const invocation of parseShellInvocations(command)) {
 		if (invocation.name !== "rm") continue;
@@ -216,7 +242,9 @@ export function analyzeRecursiveRm(command: string, cwd: string): { action: "all
 		if (!recursive || !force || targets.length === 0) continue;
 		for (const target of targets) {
 			if (isRootDeleteTarget(target)) return { action: "block", reason: "Recursive force-delete on root (/)" };
-			if (!isUnderCwd(target, cwd)) return { action: "prompt", reason: "Recursive force-delete outside project directory" };
+			if (!isUnderCwd(target, cwd) && !isTemporaryDirectoryChild(target, cwd)) {
+				return { action: "prompt", reason: "Recursive force-delete outside project directory" };
+			}
 		}
 		return { action: "allow" };
 	}

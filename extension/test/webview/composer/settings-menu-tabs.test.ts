@@ -67,18 +67,24 @@ test('the menu is tabbed and defaults to Chat; switching tabs swaps content', ()
   // Tab strip present with the always-on categories (Extensions/Providers are
   // hidden because no extensions/models were passed).
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance']);
+  assert.deepEqual(tabIds, ['chat', 'history', 'appearance']);
 
-  // Chat is active by default and renders its Transcript section.
+  // Chat is active by default and renders its Transcript section without
+  // absorbing the independently owned history-compaction controls.
   assert.ok(menu.querySelector('.toolbar-settings-tab[data-tab="chat"].active'), 'Chat tab should be active by default');
   assert.match(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Transcript/);
-  assert.doesNotMatch(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /Corner radius/);
+  assert.doesNotMatch(menu.querySelector('.toolbar-settings-menu-body')!.textContent!, /History compaction/);
 
-  // Switch to Appearance — its content renders, Chat's disappears.
-  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="appearance"]')); });
+  // History is a first-class settings category, not a subsection of Chat.
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="history"]')); });
   const body = menu.querySelector('.toolbar-settings-menu-body')!;
-  assert.match(body.textContent!, /Corner radius/);
+  assert.match(body.textContent!, /History compaction/);
   assert.doesNotMatch(body.textContent!, /Transcript/);
+
+  // Switch to Appearance — its content replaces History's.
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="appearance"]')); });
+  assert.match(body.textContent!, /Corner radius/);
+  assert.doesNotMatch(body.textContent!, /History compaction/);
 });
 
 test('Extensions and Providers tabs appear only when their content exists', () => {
@@ -90,7 +96,7 @@ test('Extensions and Providers tabs appear only when their content exists', () =
   const menu = openMenu();
 
   const tabIds = Array.from(menu.querySelectorAll('.toolbar-settings-tab')).map((t) => t.getAttribute('data-tab'));
-  assert.deepEqual(tabIds, ['chat', 'appearance', 'extensions', 'providers']);
+  assert.deepEqual(tabIds, ['chat', 'history', 'appearance', 'extensions', 'providers']);
 });
 
 // Bash settings now live under the Warm Bash extension in the Extensions tab

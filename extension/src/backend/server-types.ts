@@ -97,6 +97,12 @@ export interface SessionContext {
   /** SDK estimate of the compacted prompt footprint. Retained until the next
    * assistant usage provides an authoritative measured footprint. */
   postCompactionEstimatedTokens?: number;
+  /** Epoch ms when the current history-compaction LLM call began, captured at
+   *  `compaction_start` so `compaction_end` can compute `durationMs` for the
+   *  `pie.compaction-metrics` sidecar. Cleared on `compaction_end`. Absent
+   *  when the backend (re)started mid-compaction, in which case the sidecar is
+   *  still appended but omits `durationMs`. */
+  compactionStartedAt?: number;
   displayTranscriptCache?: DisplayTranscriptCache;
   /** UI bridge for extension UI requests within this session. */
   uiBridge?: ExtensionUIBridge;

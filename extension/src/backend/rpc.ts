@@ -1,5 +1,5 @@
 import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerInput, ImageBlobComposerInput, ModelSettings, NestedAllowedBuckets, SubagentBuckets, ThinkingLevel, TranscriptMode, TranscriptPageDirection, buildRuntimePrefsPayload } from '../shared/protocol';
-import { ALL_NESTED_BUCKETS_ALLOWED } from '../shared/protocol';
+import { ALL_NESTED_BUCKETS_ALLOWED, DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
 import { BackendError } from './server-io';
@@ -554,6 +554,118 @@ function validateOptionalProviderConcurrency(
   return out;
 }
 
+function validateHistoryCompactionModelProfile(
+  method: string,
+  key: string,
+  raw: unknown,
+): { softThreshold: number; hardThreshold: number; keepRecentTokens: number } {
+  if (!isObj(raw)) fail(method, `historyCompaction.modelProfiles['${key}'] must be an object`);
+  const allowedKeys = ['softThreshold', 'hardThreshold', 'keepRecentTokens'];
+  for (const k of Object.keys(raw)) {
+    if (!allowedKeys.includes(k)) {
+      fail(method, `historyCompaction.modelProfiles['${key}'] has unknown key ${k}`);
+    }
+  }
+  for (const field of allowedKeys) {
+    const n = raw[field];
+    if (typeof n !== 'number' || !Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+      fail(method, `historyCompaction.modelProfiles['${key}'].${field} must be a non-negative integer`);
+    }
+  }
+  const soft = raw.softThreshold as number;
+  const hard = raw.hardThreshold as number;
+  const keep = raw.keepRecentTokens as number;
+  if (soft < 1_000 || hard > 10_000_000 || keep >= soft || soft >= hard) {
+    fail(method, `historyCompaction.modelProfiles['${key}'] requires 0 <= keep < soft < hard`);
+  }
+  return { softThreshold: soft, hardThreshold: hard, keepRecentTokens: keep };
+}
+
+function validateOptionalHistoryCompaction(
+  raw: unknown,
+): RuntimePrefsSetParams['historyCompaction'] {
+  if (raw === undefined) return undefined;
+  if (!isObj(raw)) fail('runtimePrefs.set', 'historyCompaction must be an object when provided');
+  const enabled = raw.enabled;
+  const thresholdMode = raw.thresholdMode;
+  const softThreshold = raw.softThreshold;
+  const hardThreshold = raw.hardThreshold;
+  if (typeof enabled !== 'boolean') fail('runtimePrefs.set', 'historyCompaction.enabled must be a boolean');
+  if (thresholdMode !== 'percentage' && thresholdMode !== 'tokens') {
+    fail('runtimePrefs.set', 'historyCompaction.thresholdMode must be percentage or tokens');
+  }
+  if (typeof softThreshold !== 'number' || !Number.isFinite(softThreshold)
+      || typeof hardThreshold !== 'number' || !Number.isFinite(hardThreshold)) {
+    fail('runtimePrefs.set', 'historyCompaction thresholds must be finite numbers');
+  }
+  const minimum = thresholdMode === 'tokens' ? 1_000 : 1;
+  const maximum = thresholdMode === 'tokens' ? 10_000_000 : 99;
+  if (softThreshold < minimum || hardThreshold > maximum || softThreshold >= hardThreshold) {
+    fail('runtimePrefs.set', `historyCompaction requires ${minimum} <= soft < hard <= ${maximum}`);
+  }
+
+  const keepRecentTokensRaw = raw.keepRecentTokens;
+  const keepRecentTokens = keepRecentTokensRaw === undefined
+    ? undefined
+    : (typeof keepRecentTokensRaw === 'number' && Number.isFinite(keepRecentTokensRaw) && Number.isInteger(keepRecentTokensRaw) && keepRecentTokensRaw >= 0 && keepRecentTokensRaw <= 10_000_000
+      ? keepRecentTokensRaw
+      : fail('runtimePrefs.set', 'historyCompaction.keepRecentTokens must be an integer between 0 and 10,000,000'));
+  if (thresholdMode === 'tokens' && keepRecentTokens !== undefined && keepRecentTokens >= softThreshold) {
+    fail('runtimePrefs.set', 'historyCompaction token mode requires keepRecentTokens < softThreshold');
+  }
+
+  const summaryInstructionsRaw = raw.summaryInstructions;
+  const summaryInstructions = summaryInstructionsRaw === undefined
+    ? undefined
+    : (typeof summaryInstructionsRaw === 'string' && summaryInstructionsRaw.length <= 4_000
+      ? summaryInstructionsRaw
+      : fail('runtimePrefs.set', 'historyCompaction.summaryInstructions must be a string of at most 4,000 characters'));
+
+  const summaryThinkingLevelRaw = raw.summaryThinkingLevel;
+  const summaryThinkingLevel = summaryThinkingLevelRaw === undefined
+    ? undefined
+    : (summaryThinkingLevelRaw === 'inherit' || THINKING_LEVELS.includes(summaryThinkingLevelRaw as ThinkingLevel)
+      ? summaryThinkingLevelRaw as 'inherit' | ThinkingLevel
+      : fail('runtimePrefs.set', 'historyCompaction.summaryThinkingLevel must be inherit or a supported thinking level'));
+
+  const summaryModelRaw = raw.summaryModel;
+  const summaryModel = summaryModelRaw === undefined
+    ? undefined
+    : (summaryModelRaw === null
+      ? null
+      : (isObj(summaryModelRaw)
+        ? (typeof summaryModelRaw.provider === 'string' && summaryModelRaw.provider
+            && typeof summaryModelRaw.id === 'string' && summaryModelRaw.id
+          ? { provider: summaryModelRaw.provider, id: summaryModelRaw.id }
+          : fail('runtimePrefs.set', 'historyCompaction.summaryModel must contain non-empty provider and id'))
+        : fail('runtimePrefs.set', 'historyCompaction.summaryModel must be null or an object')));
+
+  const modelProfilesRaw = raw.modelProfiles;
+  const modelProfiles = modelProfilesRaw === undefined
+    ? undefined
+    : (isObj(modelProfilesRaw) && !Array.isArray(modelProfilesRaw)
+      ? (() => {
+        const out: Record<string, { softThreshold: number; hardThreshold: number; keepRecentTokens: number }> = {};
+        for (const [key, entry] of Object.entries(modelProfilesRaw)) {
+          out[key] = validateHistoryCompactionModelProfile('runtimePrefs.set', key, entry);
+        }
+        return out;
+      })()
+      : fail('runtimePrefs.set', 'historyCompaction.modelProfiles must be an object'));
+
+  return {
+    enabled,
+    thresholdMode,
+    softThreshold,
+    hardThreshold,
+    keepRecentTokens: keepRecentTokens ?? DEFAULT_HISTORY_COMPACTION_SETTINGS.keepRecentTokens,
+    summaryInstructions: summaryInstructions ?? DEFAULT_HISTORY_COMPACTION_SETTINGS.summaryInstructions,
+    summaryThinkingLevel: summaryThinkingLevel ?? DEFAULT_HISTORY_COMPACTION_SETTINGS.summaryThinkingLevel,
+    summaryModel: summaryModel ?? DEFAULT_HISTORY_COMPACTION_SETTINGS.summaryModel,
+    modelProfiles: modelProfiles ?? DEFAULT_HISTORY_COMPACTION_SETTINGS.modelProfiles,
+  };
+}
+
 export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams {
   if (!isObj(params)) fail('runtimePrefs.set', 'expected an object');
   const providerToggles = validateBooleanMap(
@@ -598,7 +710,8 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashWarmupTimeoutMs = validateOptionalInt('runtimePrefs.set', 'bashWarmupTimeoutMs', (params as Record<string, unknown>)['bashWarmupTimeoutMs'], 0, 60000);
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency };
+  const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface OpenTabsSetParams {

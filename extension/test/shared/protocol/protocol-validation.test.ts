@@ -471,3 +471,79 @@ test('readiness generation metadata is bounded when present', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'refreshState', viewGeneration: -1 }).ok, false);
   assert.equal(validateWebviewToHostMessage({ type: 'requestSnapshot', viewGeneration: 1.5 }).ok, false);
 });
+
+test('validateWebviewToHostMessage validates historyCompaction patches', () => {
+  const valid = {
+    type: 'setPrefs',
+    prefs: {
+      historyCompaction: {
+        enabled: true,
+        thresholdMode: 'tokens',
+        softThreshold: 80_000,
+        hardThreshold: 100_000,
+        keepRecentTokens: 30_000,
+        summaryInstructions: 'Brief.',
+        summaryThinkingLevel: 'low',
+        summaryModel: null,
+        modelProfiles: {
+          'openai/gpt-5': { softThreshold: 90_000, hardThreshold: 110_000, keepRecentTokens: 10_000 },
+        },
+      },
+    },
+  };
+  assert.equal(validateWebviewToHostMessage(valid).ok, true);
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'percentage', softThreshold: 70, hardThreshold: 85 } },
+    }).ok,
+    true,
+    'legacy four-field historyCompaction should still validate',
+  );
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'tokens', softThreshold: 80_000, hardThreshold: 100_000, keepRecentTokens: -1 } },
+    }).ok,
+    false,
+    'negative keepRecentTokens is rejected',
+  );
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'tokens', softThreshold: 80_000, hardThreshold: 100_000, summaryInstructions: 'x'.repeat(4_001) } },
+    }).ok,
+    false,
+    'summary instructions above 4000 chars are rejected',
+  );
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'tokens', softThreshold: 80_000, hardThreshold: 100_000, summaryThinkingLevel: 'unknown' } },
+    }).ok,
+    false,
+    'invalid summary thinking level is rejected',
+  );
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'tokens', softThreshold: 80_000, hardThreshold: 100_000, summaryModel: { provider: '', id: 'x' } } },
+    }).ok,
+    false,
+    'summary model with empty provider is rejected',
+  );
+
+  assert.equal(
+    validateWebviewToHostMessage({
+      type: 'setPrefs',
+      prefs: { historyCompaction: { enabled: true, thresholdMode: 'tokens', softThreshold: 80_000, hardThreshold: 100_000, modelProfiles: { 'p/m': { softThreshold: 500, hardThreshold: 100_000, keepRecentTokens: 100 } } } },
+    }).ok,
+    false,
+    'model profile with soft below minimum is rejected',
+  );
+});

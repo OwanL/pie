@@ -3,7 +3,7 @@
 
 import type { ComponentChildren, RefObject } from 'preact';
 
-import type { ChatMessage, ChatPrefs, ComposerInput } from '../../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput } from '../../../../shared/protocol';
 import { cx } from '../../utils/cx';
 import { InlineEditor } from '../inline-editor';
 import { CompactionSummary } from '../compaction-summary';
@@ -164,7 +164,7 @@ export function MessageItemInner({
   onCancelPrepass,
 }: MessageItemInnerProps) {
   if (message.customType === 'compaction-summary') {
-    return <CompactionSummary summary={message.markdown} />;
+    return <CompactionSummary summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
   }
 
   const showHeaderActions = pruningHeaderState || statusLabel;

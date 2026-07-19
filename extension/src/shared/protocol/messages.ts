@@ -191,9 +191,49 @@ export interface DeferredTriggerDetails {
   reason: string;
 }
 
+/** Custom-type tag for the durable compaction-metrics sidecar entry appended
+ *  to the SDK SessionManager branch after a successful compaction. The sidecar
+ *  is a non-context `custom` entry (produced by `appendCustomEntry`) — it never
+ *  participates in LLM context and never renders as its own transcript row.
+ *  On transcript reload, the backend scans sidecars with this tag and attaches
+ *  the typed {@link CompactionSummaryDetails} payload to the matching
+ *  `compaction-summary` ChatMessage so the metrics survive reload without
+ *  editing the SDK or node_modules. */
+export const COMPACTION_METRICS_CUSTOM_TYPE = 'pie.compaction-metrics';
+
+/** Durable metrics for a history-compaction LLM call, attached to a
+ *  `compaction-summary` ChatMessage via the {@link COMPACTION_METRICS_CUSTOM_TYPE}
+ *  SessionManager sidecar. All numeric fields are optional so malformed or
+ *  legacy sidecars (written before a field existed, or by a future version with
+ *  a different shape) degrade gracefully — the UI shows whichever metrics are
+ *  computable. */
+export interface CompactionSummaryDetails {
+  /** Why compaction ran: `'manual' | 'threshold' | 'overflow'`. May be empty
+   *  for a malformed/legacy sidecar. */
+  reason: string;
+  /** Token count of the prompt footprint just before compaction. */
+  tokensBefore?: number;
+  /** SDK estimate of the prompt footprint after compaction. */
+  estimatedTokensAfter?: number;
+  /** Wall-clock duration of the compaction LLM call, in milliseconds.
+   *  Absent when the start time was not observed (e.g. a backend restart
+   *  between `compaction_start` and `compaction_end`). */
+  durationMs?: number;
+  /** Model id used for the compaction LLM call, when available. */
+  modelId?: string;
+  /** Provider that served the compaction LLM call, when available. */
+  provider?: string;
+  /** Thinking level used for the compaction LLM call, when available. */
+  thinkingLevel?: string;
+}
+
 /**
  * Discriminated detail payloads keyed by `customType`.
  * Fallback `unknown` covers future extension types that haven't been typed yet.
  */
-export type CustomMessageDetails = PruningDetails | DeferredTriggerDetails | unknown;
+export type CustomMessageDetails =
+  | PruningDetails
+  | DeferredTriggerDetails
+  | CompactionSummaryDetails
+  | unknown;
 

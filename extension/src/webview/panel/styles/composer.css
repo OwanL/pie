@@ -651,6 +651,16 @@
   outline-offset: 2px;
 }
 
+.toolbar-settings-select:disabled {
+  opacity: 0.45;
+}
+
+.toolbar-settings-number-input {
+  width: 112px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .toolbar-settings-stepper {
   display: flex;
   align-items: center;
