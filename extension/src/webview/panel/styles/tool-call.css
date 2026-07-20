@@ -758,9 +758,8 @@
 /* ── Tool-call status glyph (header) ─────────────────────────────────────── */
 /* Compact running indicator in the header: a spinner (reuses the global
    panel-loading-wheel-spin keyframe) while the tool is executing. Completed
-   calls show no glyph — success is the expected/default state, so we only
-   alert on failure (the interactive "Failed" status chip rendered by the
-   header). Mirrors the subagent StatusIndicator's failure-only design. */
+   subagents show a "Finished" status chip; failures and interruption retain
+   their semantic treatments (the interactive "Failed" chip). */
 
 .tool-call-status-spinner {
   flex: 0 0 auto;
@@ -1017,6 +1016,19 @@
 
 .tool-call.tool-call-subagent.idle .subagent-activity {
   opacity: 0.65;
+}
+
+/* A finished child recedes behind active siblings: use a darker neutral
+   surface with no accent tint. The running sheen is status-scoped, so it also
+   disappears as soon as the child's explicit exit code settles. Apply this to
+   both isolated and grouped cards, expanded or collapsed. */
+.tool-call.tool-call-subagent.completed .subagent-header {
+  background: var(--panel-ink-3);
+  box-shadow: inset 0 0 0 1px var(--panel-border-subtle);
+}
+
+.tool-call.tool-call-subagent.completed:hover .subagent-header {
+  background: var(--panel-ink-4);
 }
 
 /* Terminal failures are not just a chip: tint the collapsed card edge so the

@@ -1,7 +1,7 @@
 {
-  "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "low",
-  "defaultProvider": "openai-codex",
+  "defaultModel": "glm-5.2:cloud",
+  "defaultThinkingLevel": "high",
+  "defaultProvider": "ollama",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -17,9 +17,9 @@
     "npm:pi-web-access@0.13.0"
   ],
   "pruning": {
-    "model": "umans-flash",
-    "provider": "umans",
-    "thinkingLevel": "minimal",
+    "model": "gpt-5-mini",
+    "provider": "github-copilot",
+    "thinkingLevel": "low",
     "prepass": {
       "temperature": 0.2
     },
@@ -43,7 +43,6 @@
     "enabled": true,
     "profile": "default"
   },
-  "lastChangelogVersion": "0.80.2",
   "subagent": {
     "confirmProjectAgents": false
   },

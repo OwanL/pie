@@ -234,6 +234,11 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     usage.completion_tokens_details?.reasoning_tokens,
   ));
   const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, output) : undefined;
+  const reportedCostRaw = usage.cost?.total;
+  const reportedCostUsd = typeof reportedCostRaw === 'number'
+    && Number.isFinite(reportedCostRaw) && reportedCostRaw >= 0
+    ? reportedCostRaw
+    : undefined;
 
   if (total === 0) {
     return undefined;
@@ -246,6 +251,7 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     cacheWriteTokens: cacheWrite,
     totalTokens: total,
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
 }
 
@@ -264,6 +270,9 @@ export function addAssistantUsage(
   const reasoningTokens = aReasoning !== undefined || bReasoning !== undefined
     ? Math.max(0, (aReasoning ?? 0) + (bReasoning ?? 0))
     : undefined;
+  const reportedCostUsd = a.reportedCostUsd !== undefined || b.reportedCostUsd !== undefined
+    ? Math.max(0, (a.reportedCostUsd ?? 0) + (b.reportedCostUsd ?? 0))
+    : undefined;
   return {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
@@ -271,6 +280,7 @@ export function addAssistantUsage(
     cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
     totalTokens: a.totalTokens + b.totalTokens,
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
 }
 

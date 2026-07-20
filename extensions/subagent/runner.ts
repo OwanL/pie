@@ -24,7 +24,7 @@ import { textContent } from "./src/text-content.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
-import type { OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails } from "./types.js";
+import type { OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -94,7 +94,9 @@ interface SubagentEventMessage {
 	content?: unknown;
 	stopReason?: string;
 	model?: string;
+	provider?: string;
 	errorMessage?: string;
+	timestamp?: number;
 	usage?: {
 		input?: number;
 		output?: number;
@@ -420,8 +422,20 @@ function createUpdateEmitter(
 	return emit;
 }
 
-/** Record a completed assistant message's usage and metadata into the result. */
-function recordAssistantMessage(result: SingleResult, msg: SubagentEventMessage): void {
+function assistantMessageStatus(msg: SubagentEventMessage): SubagentTurnThroughputSample["status"] {
+	if (msg.errorMessage) return "error";
+	if (msg.stopReason === "aborted") return "interrupted";
+	return "completed";
+}
+
+/** Record a completed assistant message's usage, runtime model/provider, and a
+ *  per-turn throughput sample into the result. */
+function recordAssistantMessage(
+	result: SingleResult,
+	msg: SubagentEventMessage,
+	turnStartMs: number | undefined,
+	providerForModel?: (modelId: string) => string | undefined,
+): void {
 	result.usage.turns++;
 	const usage = msg.usage;
 	if (usage) {
@@ -433,8 +447,33 @@ function recordAssistantMessage(result: SingleResult, msg: SubagentEventMessage)
 		result.usage.contextTokens = usage.totalTokens || 0;
 	}
 	if (msg.model) result.model = msg.model;
+	// Prefer the serving provider stamped by the runtime. Some adapters omit it;
+	// only infer from the registry when the model id has exactly one provider.
+	// Never use a first-match lookup: Codex and Copilot share model ids.
+	if (msg.provider) result.provider = msg.provider;
+	else if (msg.model) {
+		const inferredProvider = providerForModel?.(msg.model);
+		if (inferredProvider) result.provider = inferredProvider;
+	}
 	if (msg.stopReason) result.stopReason = msg.stopReason;
 	if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+
+	const endedMs = typeof msg.timestamp === "number" && msg.timestamp > (turnStartMs ?? 0)
+		? msg.timestamp
+		: Date.now();
+	const generationDurationMs =
+		typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs > 0
+			? Math.max(0, endedMs - turnStartMs)
+			: 0;
+	const sample: SubagentTurnThroughputSample = {
+		endedAt: new Date(endedMs).toISOString(),
+		outputTokens: usage?.output || 0,
+		generationDurationMs,
+		status: assistantMessageStatus(msg),
+		modelId: result.model,
+		provider: result.provider,
+	};
+	result.turnThroughputSamples = [...(result.turnThroughputSamples ?? []), sample];
 }
 
 /**
@@ -560,7 +599,9 @@ function subscribeToSession(
 	streamingReasoningRef: { value: string },
 	stageRef: { value: string },
 	eventFence: { accepting: boolean },
+	providerForModel?: (modelId: string) => string | undefined,
 ): () => void {
+	let assistantMessageStartMs: number | undefined;
 	const toolProgress = new Map<string, string>();
 	// The SDK can report a tool update before the assistant's toolCall message
 	// is committed. Keep only its latest partial, then attach it at message_end.
@@ -574,6 +615,10 @@ function subscribeToSession(
 		// ownership fence is authoritative: a completed attempt must never mutate
 		// its result or publish UI state after a retry has taken ownership.
 		if (!eventFence.accepting) return;
+		if (event.type === "message_start" && event.message?.role === "assistant") {
+			assistantMessageStartMs = event.message.timestamp ?? Date.now();
+			return;
+		}
 		if (event.type === "message_update") {
 			handleMessageUpdate(event, result, emitUpdate, streamingTextRef, streamingReasoningRef, stageRef);
 			return;
@@ -614,7 +659,8 @@ function subscribeToSession(
 			return;
 		}
 		if (event.type === "message_end" && event.message) {
-			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef, streamingReasoningRef);
+			handleMessageEnd(event.message, result, emitUpdate, streamingTextRef, streamingReasoningRef, assistantMessageStartMs, providerForModel);
+			assistantMessageStartMs = undefined;
 			for (const [toolCallId, partialResult] of pendingToolUpdates) {
 				if (endedToolCallIds.has(toolCallId)) {
 					pendingToolUpdates.delete(toolCallId);
@@ -685,13 +731,15 @@ function handleMessageEnd(
 	emitUpdate: () => void,
 	streamingTextRef: { value: string },
 	streamingReasoningRef: { value: string },
+	turnStartMs: number | undefined,
+	providerForModel?: (modelId: string) => string | undefined,
 ): void {
 	const msg = rawMessage as Message;
 	if (msg.role === "assistant" || msg.role === "toolResult") {
 		result.messages.push(msg);
 	}
 	if (msg.role === "assistant") {
-		recordAssistantMessage(result, rawMessage);
+		recordAssistantMessage(result, rawMessage, turnStartMs, providerForModel);
 		// Clear streaming text/reasoning once a complete assistant message is
 		// committed. (Only assistant messages produce text/thinking_delta events,
 		// so only reset on those.)
@@ -1433,6 +1481,10 @@ export async function runSingleAgent(
 			streamingReasoningRef,
 			stageRef,
 			sessionEventFence,
+			(modelId) => {
+				const matches = modelRegistry.getAvailable().filter((candidate) => candidate.id === modelId);
+				return matches.length === 1 ? matches[0]?.provider : undefined;
+			},
 		);
 
 		// The session exists and the next potentially long window is provider

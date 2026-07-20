@@ -327,7 +327,7 @@ test('getRenderableSubagentResultFromToolCall synthesizes fresh running chain-mo
   );
 });
 
-test('getRenderableSubagentResultFromToolCall keeps single-mode progress updates running until the top-level tool finishes', () => {
+test('getRenderableSubagentResultFromToolCall honors a child completion while the top-level tool is running', () => {
   const result = getRenderableSubagentResultFromToolCall({
     input: { agent: 'reviewer', task: 'Inspect regression' },
     result: {
@@ -346,11 +346,12 @@ test('getRenderableSubagentResultFromToolCall keeps single-mode progress updates
   } as any);
 
   assert.equal(result?.mode, 'single');
-  assert.equal(result?.results[0]?.exitCode, -1);
-  assert.deepEqual(result?.results[0]?.runningTools, ['bash']);
+  assert.equal(result?.results[0]?.exitCode, 0);
+  assert.equal(singleResultStatus(result!.results[0]!, 'running', false), 'completed');
+  assert.equal(subagentActivity(result!.results[0]!, 1_000), undefined);
 });
 
-test('getRenderableSubagentResultFromToolCall keeps empty multi-result progress updates running until the top-level tool finishes', () => {
+test('completed parallel and chain children settle independently of the top-level tool', () => {
   for (const mode of ['parallel', 'chain'] as const) {
     const result = getRenderableSubagentResultFromToolCall({
       input: mode === 'parallel'
@@ -371,12 +372,8 @@ test('getRenderableSubagentResultFromToolCall keeps empty multi-result progress 
       status: 'running',
     } as any);
 
-    assert.equal(result?.results[0]?.exitCode, -1, `${mode} child should stay running`);
-    assert.deepEqual(
-      subagentSingleResultToChatMessages(result!.results[0]!, mode).map((message) => message.markdown),
-      ['Step one'],
-      `${mode} child should not render a premature no-output fallback`,
-    );
+    assert.equal(result?.results[0]?.exitCode, 0, `${mode} child should stay completed`);
+    assert.equal(singleResultStatus(result!.results[0]!, 'running', true), 'completed');
   }
 });
 

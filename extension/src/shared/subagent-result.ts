@@ -124,7 +124,7 @@ export interface SubagentSingleResult {
   cumulativeOutputTokens?: number;
   /** Per-turn throughput observations from this subagent session, forwarded to
    *  the parent run snapshot for historical tok/s attribution. */
-  turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string }[];
+  turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string; provider?: string }[];
   /** Cumulative token usage consumed by this sub-agent session, surfaced from
    *  the raw `toolCall.result` so the parent run can attribute subagent cost.
    *  Absent when the subagent extension did not report usage (e.g. it failed
@@ -315,25 +315,13 @@ function normalizeRenderableSubagentResult(
     };
   }
 
-  return {
-    ...result,
-    results: result.results.map((current) => {
-      if (current.exitCode !== 0 || current.stopReason || current.errorMessage) {
-        return current;
-      }
-
-      const hasRunningTools = (current.runningTools?.length ?? 0) > 0;
-      const hasMessages = Array.isArray(current.messages) && current.messages.length > 0;
-      if (!hasRunningTools && hasMessages) {
-        return current;
-      }
-
-      return {
-        ...current,
-        exitCode: -1,
-      };
-    }),
-  };
+  // A child's explicit exitCode owns its lifecycle independently of the
+  // still-running parent tool. This matters for parallel/chain calls, where a
+  // completed child must settle visually while its siblings continue. Missing
+  // child progress is handled by synthesized placeholders above; do not turn a
+  // reported exitCode 0 back into a running result based on transcript shape or
+  // stale runningTools activity detail.
+  return result;
 }
 
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
@@ -438,56 +426,73 @@ export function getTerminalSubagentAttemptSamplesFromToolCall(
   const samples: SubagentAttemptSample[] = [];
   const seen = new Set<string>();
   let coverageComplete = direct.length > 0;
-  for (const [resultIndex, result] of direct.entries()) {
-    if (!isRecord(result) || !Array.isArray(result.attemptRecords) || result.attemptRecords.length === 0) {
-      coverageComplete = false;
-      continue;
-    }
-    for (const [retryIndex, record] of result.attemptRecords.entries()) {
-      if (!isRecord(record) || typeof record.attemptId !== 'string' || !record.attemptId.trim()
-        || (record.outcome !== 'success' && record.outcome !== 'failure' && record.outcome !== 'aborted')) {
+  const seenResults = new Set<object>();
+  const visitResults = (results: unknown[], path: string, depth: number): void => {
+    if (depth > 8) return;
+    for (const [resultIndex, result] of results.entries()) {
+      if (!isRecord(result)) {
         coverageComplete = false;
         continue;
       }
-      const attemptId = record.attemptId.trim();
-      const sourceId = `${toolCall.id}:${resultIndex}:${attemptId}`;
-      if (seen.has(sourceId)) continue;
-      seen.add(sourceId);
-      const startedAt = finiteNonNegative(record.startedAt);
-      const completedAt = finiteNonNegative(record.completedAt);
-      const measuredDuration = startedAt !== null && completedAt !== null && completedAt >= startedAt
-        ? completedAt - startedAt
-        : null;
-      // Reserved for a future extension producer. An estimate is accepted only
-      // when explicitly labelled; no parent/tool duration is used as a proxy.
-      const estimatedDuration = measuredDuration === null ? finiteNonNegative(record.estimatedDurationMs) : null;
-      const backoffMs = finiteNonNegative(record.backoffMs);
-      const phaseDurationsMs = parsePhaseDurations(record.phaseDurationsMs);
-      const attemptSettlementOutcome = nonEmptyUnknownString(record.attemptSettlementOutcome);
-      const cleanupOutcome = nonEmptyUnknownString(record.cleanupOutcome);
-      samples.push({
-        sourceId,
-        attemptId,
-        retryIndex,
-        provider: nonEmptyUnknownString(record.provider),
-        model: nonEmptyUnknownString(record.model),
-        outcome: record.outcome,
-        failureClass: nonEmptyUnknownString(record.failureClass),
-        replaySafety: nonEmptyUnknownString(record.replaySafety),
-        durationMs: measuredDuration ?? estimatedDuration,
-        durationSource: lifecycleSource(measuredDuration, estimatedDuration, 'measured'),
-        backoffMs,
-        backoffSource: backoffMs === null ? 'unknown' : 'reported',
-        phaseDurationsMs,
-        phaseDurationsSource: phaseDurationsMs === null ? 'unknown' : 'measured',
-        attemptSettlementOutcome: attemptSettlementOutcome ?? null,
-        attemptSettlementSource: attemptSettlementOutcome ? 'reported' : 'unknown',
-        parentSettlementSource: 'unknown',
-        cleanupOutcome: cleanupOutcome ?? null,
-        cleanupSource: cleanupOutcome ? 'reported' : 'unknown',
-      });
+      if (seenResults.has(result)) continue;
+      seenResults.add(result);
+      const resultPath = `${path}${resultIndex}`;
+      if (!Array.isArray(result.attemptRecords) || result.attemptRecords.length === 0) {
+        coverageComplete = false;
+      } else for (const [retryIndex, record] of result.attemptRecords.entries()) {
+        if (!isRecord(record) || typeof record.attemptId !== 'string' || !record.attemptId.trim()
+          || (record.outcome !== 'success' && record.outcome !== 'failure' && record.outcome !== 'aborted')) {
+          coverageComplete = false;
+          continue;
+        }
+        const attemptId = record.attemptId.trim();
+        const sourceId = `${toolCall.id}:${resultPath}:${attemptId}`;
+        if (seen.has(sourceId)) continue;
+        seen.add(sourceId);
+        const startedAt = finiteNonNegative(record.startedAt);
+        const completedAt = finiteNonNegative(record.completedAt);
+        const measuredDuration = startedAt !== null && completedAt !== null && completedAt >= startedAt
+          ? completedAt - startedAt
+          : null;
+        // Reserved for a future extension producer. An estimate is accepted only
+        // when explicitly labelled; no parent/tool duration is used as a proxy.
+        const estimatedDuration = measuredDuration === null ? finiteNonNegative(record.estimatedDurationMs) : null;
+        const backoffMs = finiteNonNegative(record.backoffMs);
+        const phaseDurationsMs = parsePhaseDurations(record.phaseDurationsMs);
+        const attemptSettlementOutcome = nonEmptyUnknownString(record.attemptSettlementOutcome);
+        const cleanupOutcome = nonEmptyUnknownString(record.cleanupOutcome);
+        samples.push({
+          sourceId,
+          attemptId,
+          retryIndex,
+          provider: nonEmptyUnknownString(record.provider),
+          model: nonEmptyUnknownString(record.model),
+          outcome: record.outcome,
+          failureClass: nonEmptyUnknownString(record.failureClass),
+          replaySafety: nonEmptyUnknownString(record.replaySafety),
+          durationMs: measuredDuration ?? estimatedDuration,
+          durationSource: lifecycleSource(measuredDuration, estimatedDuration, 'measured'),
+          backoffMs,
+          backoffSource: backoffMs === null ? 'unknown' : 'reported',
+          phaseDurationsMs,
+          phaseDurationsSource: phaseDurationsMs === null ? 'unknown' : 'measured',
+          attemptSettlementOutcome: attemptSettlementOutcome ?? null,
+          attemptSettlementSource: attemptSettlementOutcome ? 'reported' : 'unknown',
+          parentSettlementSource: 'unknown',
+          cleanupOutcome: cleanupOutcome ?? null,
+          cleanupSource: cleanupOutcome ? 'reported' : 'unknown',
+        });
+      }
+      if (!Array.isArray(result.messages)) continue;
+      for (const message of result.messages) {
+        if (!isRecord(message) || message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+        if (isRecord(message.details) && Array.isArray(message.details.results)) {
+          visitResults(message.details.results, `${resultPath}.`, depth + 1);
+        }
+      }
     }
-  }
+  };
+  visitResults(direct, '', 0);
   return { samples, coverageComplete };
 }
 

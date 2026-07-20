@@ -80,5 +80,6 @@ export interface MessageLike {
     completion_tokens_details?: {
       reasoning_tokens?: number;
     };
+    cost?: { total?: number };
   };
 }

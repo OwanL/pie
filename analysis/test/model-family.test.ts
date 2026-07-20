@@ -64,6 +64,22 @@ test('loadModelFamilyMap: collapses provider-specific ids that share a declared 
   });
 });
 
+test('loadModelFamilyMap: same-id providers remain qualified and have no ambiguous bare owner', async () => {
+  await withTempDir(async (dir) => {
+    const modelsJsonPath = path.join(dir, 'models.json');
+    await fs.writeFile(modelsJsonPath, JSON.stringify({ providers: {
+      'openai-codex': { models: [{ id: 'gpt-5.6-sol', family: 'codex-sol' }] },
+      'github-copilot': { models: [{ id: 'gpt-5.6-sol', family: 'copilot-sol' }] },
+    } }));
+    const map = loadModelFamilyMap(modelsJsonPath);
+
+    assert.equal(resolveModelFamily('openai-codex/gpt-5.6-sol', map), 'codex-sol');
+    assert.equal(resolveModelFamily('github-copilot/gpt-5.6-sol', map), 'copilot-sol');
+    assert.equal(resolveModelFamily('gpt-5.6-sol', map), 'gpt-5.6-sol');
+    assert.equal(resolveModelProvider('gpt-5.6-sol', map), null);
+  });
+});
+
 test('loadModelFamilyMap: returns an empty map (never throws) for a missing or malformed file', async () => {
   await withTempDir(async (dir) => {
     const missing = path.join(dir, 'does-not-exist.json');

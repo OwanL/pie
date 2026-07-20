@@ -76,6 +76,13 @@ export function nearestSupportedThinking(
 // This gives short-run balance that independent Math.random() draws cannot.
 const fairSelectionBags = new Map<string, string[]>();
 
+/** Reset the fair-selection shuffle bags. Tests use this to guarantee a
+ *  deterministic first draw across independent test cases; production code
+ *  should not call this. */
+export function resetFairSelectionBags(): void {
+  fairSelectionBags.clear();
+}
+
 function selectFairly(pool: string[]): string {
   const uniquePool = [...new Set(pool)];
   const key = [...uniquePool].sort().join("\u0000");

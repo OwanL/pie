@@ -357,6 +357,7 @@ export default function register(pi: ExtensionAPI) {
 
 		const feedbackMessage = buildFeedbackMessage(skillResult, toolResult, activeConfig.mode, {
 			model: activeConfig.model,
+			provider: activeConfig.provider,
 			thinkingLevel: prepassThinkingLevel,
 			response: rawResponse,
 			thinking: rawThinking,

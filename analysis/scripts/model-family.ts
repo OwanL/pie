@@ -45,6 +45,22 @@ function entryFor(id: string, model: Record<string, unknown> | null | undefined,
  */
 export function loadModelFamilyMap(modelsJsonPath?: string, historyPath?: string): Map<string, ModelFamilyEntry> {
   const map = new Map<string, ModelFamilyEntry>();
+  const bareOwners = new Map<string, string | null>();
+  const addEntry = (id: string, model: Record<string, unknown> | null | undefined, provider: string): void => {
+    const entry = entryFor(id, model, provider);
+    if (!entry) return;
+    map.set(`${provider}/${id}`, entry);
+    const owner = bareOwners.get(id);
+    if (owner === undefined) {
+      bareOwners.set(id, provider);
+      map.set(id, entry);
+    } else if (owner === provider) {
+      map.set(id, entry);
+    } else if (owner !== null) {
+      bareOwners.set(id, null);
+      map.delete(id);
+    }
+  };
   const providers = loadModelsJsonProviders(modelsJsonPath);
 
   for (const [providerName, providerData] of Object.entries(providers ?? {})) {
@@ -63,20 +79,14 @@ export function loadModelFamilyMap(modelsJsonPath?: string, historyPath?: string
         if (typeof m.id !== 'string') {
           continue;
         }
-        const entry = entryFor(m.id, m, providerName);
-        if (entry && !map.has(m.id)) {
-          map.set(m.id, entry);
-        }
+        addEntry(m.id, m, providerName);
       }
     }
 
     const modelOverrides = provider.modelOverrides;
     if (modelOverrides && typeof modelOverrides === 'object' && !Array.isArray(modelOverrides)) {
       for (const [id, model] of Object.entries(modelOverrides as Record<string, unknown>)) {
-        const entry = entryFor(id, model && typeof model === 'object' ? (model as Record<string, unknown>) : null, providerName);
-        if (entry && !map.has(id)) {
-          map.set(id, entry);
-        }
+        addEntry(id, model && typeof model === 'object' ? (model as Record<string, unknown>) : null, providerName);
       }
     }
   }
@@ -85,11 +95,8 @@ export function loadModelFamilyMap(modelsJsonPath?: string, historyPath?: string
     ? loadHistoricalModelRecords(historyPath)
     : [];
   for (const model of historical) {
-    if (!map.has(model.id)) {
-      map.set(model.id, {
-        family: typeof model.family === 'string' && model.family.trim() ? model.family.trim() : model.id,
-        provider: model.provider,
-      });
+    if (!map.has(`${model.provider}/${model.id}`)) {
+      addEntry(model.id, { family: model.family }, model.provider);
     }
   }
 

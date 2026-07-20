@@ -36,6 +36,13 @@ export interface ModelSubagentInfo {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    tiers?: Array<{
+      inputTokensAbove: number;
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }>;
   };
 }
 

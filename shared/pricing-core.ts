@@ -38,11 +38,21 @@
  * - `input` and `output` are required to be non-negative and finite.
  * - `cacheRead` and `cacheWrite` default to 0 when absent or not applicable.
  */
+export interface ModelTokenPricingTier {
+  /** Use these rates when the request prompt footprint exceeds this value. */
+  inputTokensAbove: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
 export interface ModelTokenPricing {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  tiers?: ModelTokenPricingTier[];
 }
 
 /**
@@ -113,7 +123,49 @@ export function parseModelPricing(raw: unknown): ModelTokenPricing | undefined {
   if (input === undefined || output === undefined) return undefined;
   if (cacheRead === undefined || cacheWrite === undefined) return undefined;
 
-  return { input, output, cacheRead, cacheWrite };
+  let tiers: ModelTokenPricingTier[] | undefined;
+  if (obj.tiers !== undefined) {
+    if (!Array.isArray(obj.tiers)) return undefined;
+    tiers = [];
+    for (const rawTier of obj.tiers) {
+      if (!rawTier || typeof rawTier !== 'object' || Array.isArray(rawTier)) return undefined;
+      const tier = rawTier as Record<string, unknown>;
+      if (typeof tier.inputTokensAbove !== 'number') return undefined;
+      const inputTokensAbove = maybeValidNumber(tier.inputTokensAbove);
+      const tierInput = maybeValidNumber(tier.input);
+      const tierOutput = maybeValidNumber(tier.output);
+      const tierCacheRead = maybeValidNumber(tier.cacheRead);
+      const tierCacheWrite = maybeValidNumber(tier.cacheWrite);
+      if (inputTokensAbove === undefined || tierInput === undefined || tierOutput === undefined
+        || tierCacheRead === undefined || tierCacheWrite === undefined) return undefined;
+      tiers.push({
+        inputTokensAbove,
+        input: tierInput,
+        output: tierOutput,
+        cacheRead: tierCacheRead,
+        cacheWrite: tierCacheWrite,
+      });
+    }
+    tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove);
+  }
+
+  return { input, output, cacheRead, cacheWrite, ...(tiers?.length ? { tiers } : {}) };
+}
+
+/** Resolve request-level long-context rates. Prompt footprint includes every
+ * input/cache channel because all of them occupy the provider request. */
+export function pricingForPromptTokens(
+  pricing: ModelTokenPricing,
+  inputTokens: number,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0,
+): ModelTokenPricing {
+  const promptTokens = Math.max(0, inputTokens) + Math.max(0, cacheReadTokens) + Math.max(0, cacheWriteTokens);
+  let selected: ModelTokenPricingTier | undefined;
+  for (const tier of pricing.tiers ?? []) {
+    if (promptTokens > tier.inputTokensAbove) selected = tier;
+  }
+  return selected ?? pricing;
 }
 
 /**

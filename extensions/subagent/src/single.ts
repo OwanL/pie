@@ -19,6 +19,7 @@ import {
 	type SubagentDetails,
 	type SubagentResult,
 	type SubagentAttemptRecord,
+	type UsageStats,
 } from "../types.js";
 import {
 	resolveModel,
@@ -40,6 +41,7 @@ import {
 	providerForModel,
 	excludeProviderModels,
 	buildAttemptRecord,
+	zeroUsage,
 	type RetryClock,
 	realRetryClock,
 } from "./retry.js";
@@ -54,6 +56,17 @@ function failureMessage(result: SingleResult): string {
 
 function isResultError(result: SingleResult): boolean {
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+function addUsage(target: UsageStats, source: UsageStats): void {
+	target.input += source.input || 0;
+	target.output += source.output || 0;
+	target.cacheRead += source.cacheRead || 0;
+	target.cacheWrite += source.cacheWrite || 0;
+	target.cost += source.cost || 0;
+	// Context occupancy is a latest-turn gauge, not a billable cumulative stream.
+	if (source.contextTokens > 0) target.contextTokens = source.contextTokens;
+	target.turns += source.turns || 0;
 }
 
 interface RunWithModelRetryArgs {
@@ -84,6 +97,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 	const excludeModels = new Set<string>(args.excludeModels);
 	const policy = readRetryPolicy();
 	const clock = args.clock;
+	const cumulativeUsage: UsageStats = zeroUsage();
 	let nextBackoffMs = 0;
 
 	for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt++) {
@@ -140,6 +154,7 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		attachSelectionMetadata(result, resolved);
 		result.attemptId = attemptId;
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
+		addUsage(cumulativeUsage, result.usage);
 
 		if (args.signal?.aborted) break;
 		const failure = args.selectionCtx.fallbackOnProviderFailure !== false
@@ -203,8 +218,9 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		result.failedModel = lastFailedModel;
 		result.retryCount = retryCount;
 	}
-	result.attemptRecords = attemptRecords;
-	return result;
+	// REM-03: the returned result must be billable for every dispatched attempt,
+	// including failed retries that were discarded before the final successful one.
+	return { ...result, usage: cumulativeUsage, attemptRecords };
 }
 
 /** Execute exactly one delegated task. Parallelism is provided exclusively by

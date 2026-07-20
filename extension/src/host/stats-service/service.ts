@@ -4,6 +4,7 @@ import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-
 import type { RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
 import type {
   AssistantUsage,
+  AuxiliaryLlmUsagePayload,
   ComposerInput,
   RunOutcome,
   ThinkingLevel,
@@ -126,6 +127,13 @@ export class StatsService implements RunObserver {
 
   onCompaction(sessionPath: string): void {
     this.tracker.onCompaction(sessionPath);
+  }
+
+  onAuxiliaryLlmUsage(
+    sessionPath: string,
+    sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
+  ): void {
+    this.tracker.onAuxiliaryLlmUsage(sessionPath, sample);
   }
 
   onAutoRetry(

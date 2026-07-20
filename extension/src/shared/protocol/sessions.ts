@@ -421,6 +421,22 @@ export interface CompactionPayload {
   sessionPath: string;
 }
 
+/** Exact usage from an SDK LLM request that bypasses assistant message events. */
+export interface AuxiliaryLlmUsagePayload {
+  sessionPath: string;
+  kind: 'history_compaction' | 'branch_summary';
+  sourceId: string;
+  occurredAt: string;
+  modelId?: string;
+  provider?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reportedCostUsd?: number;
+  durationMs?: number;
+}
+
 /** Operational (non-fatal) backend condition that the user should be made
  *  aware of without it being a hard request failure. Emitted by two backend
  *  watchdogs:

@@ -44,6 +44,8 @@ export interface PruningDetails {
   toolTokensSaved: number;
   /** Model used for the prepass LLM call. */
   prepassModel?: string;
+  /** Runtime provider that served the prepass model. */
+  prepassProvider?: string;
   /** Thinking level of the prepass call. */
   prepassThinkingLevel?: string;
   /** User prompt sent to the pruning prepass model. */
@@ -61,6 +63,8 @@ export interface PruningDetails {
   prepassOutputTokens?: number;
   prepassCacheReadTokens?: number;
   prepassCacheWriteTokens?: number;
+  /** Exact provider-reported prepass cost, when available. */
+  prepassReportedCostUsd?: number;
   /** Error message if pruning prepass failed. */
   prepassError?: string;
   /** Reason surfaced when a keep-all safeguard retained every item (prepass pruned 100% of a category, or a non-JSON parse failure). */

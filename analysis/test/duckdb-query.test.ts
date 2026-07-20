@@ -252,8 +252,10 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
   );
 
   // Spot-check the previously-dropped fields are present and correctly valued.
-  // total cost = parent + subagent; fixture runs have no subagent usage, so
-  // total == parent. The fixture includes one measured retry on run-001. This also guards
+  // run-001 has no subagents but does have an auxiliary pruning call whose
+  // provider-qualified model is intentionally unpriced in the fixture, so the
+  // complete total must remain unknown rather than silently equal parent-only cost.
+  // The fixture includes one measured retry on run-001. This also guards
   // against positional misalignment between the mapper and the schema.
   const priced = await runDuckDbQuery(
     sharedDbPath,
@@ -262,7 +264,7 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
   if (priced.length > 0) {
     const row = priced[0];
     assert.equal(row['subagent_estimated_cost_usd'], 0, 'fixture runs have no subagent usage → subagent cost is 0');
-    assert.equal(row['total_estimated_cost_usd'], row['estimated_cost_usd'], 'total cost = parent + subagent (0)');
+    assert.equal(row['total_estimated_cost_usd'], null, 'unpriced auxiliary usage must make the complete total unknown');
     assert.equal(row['compaction_count'], 0, 'legacy fixture runs coerce compaction_count to 0');
     assert.equal(row['auto_retry_count'], 1, 'run-001 includes one measured retry');
   }
@@ -494,12 +496,14 @@ test('core_runs exposes model attribution, outcome source, mixed config, and par
     assert.ok('subagent_estimated_cost_usd' in row, 'core_runs must expose subagent_estimated_cost_usd');
     assert.ok('total_estimated_cost_usd' in row, 'core_runs must expose total_estimated_cost_usd');
   }
-  // Headline total = parent + subagent; fixture runs have no subagent usage, so
-  // total == parent and subagent == 0 on priced rows.
+  // Fixture runs have no subagent usage. Complete totals may still be null when
+  // a tracked auxiliary call has no provider-qualified pricing.
   const priced = rows.filter((row) => row['estimated_cost_usd'] != null);
   assert.ok(priced.length > 0, 'at least one priced run');
   for (const row of priced) {
     assert.equal(row['subagent_estimated_cost_usd'], 0, 'fixture runs have no subagent usage → subagent cost is 0');
-    assert.equal(row['total_estimated_cost_usd'], row['estimated_cost_usd'], 'total cost = parent + subagent (0)');
+    if (row['total_estimated_cost_usd'] !== null) {
+      assert.ok(Number(row['total_estimated_cost_usd']) >= Number(row['estimated_cost_usd']));
+    }
   }
 });

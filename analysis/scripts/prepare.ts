@@ -89,6 +89,90 @@ function addKnownCosts(left: number, right: number): number {
  * remainder uses the parent model. This also makes duplicate/oversized samples unable to inflate
  * cost beyond the authoritative rollup.
  */
+function estimateParentCostUsd(
+  run: RunSnapshot,
+  parentModelId: string | null,
+  parentProvider: string | null,
+  canonicalUsage: TokenUsageForCost,
+  pricingMap: ReturnType<typeof loadModelPricingMap>,
+): number | null {
+  const remaining: TokenUsageForCost = { ...canonicalUsage };
+  let totalCost = 0;
+  for (const sample of run.turnThroughputSamples ?? []) {
+    const attributed: TokenUsageForCost = {
+      inputTokens: Math.min(remaining.inputTokens, normalizeTokenCount(sample.inputTokens)),
+      outputTokens: Math.min(remaining.outputTokens, normalizeTokenCount(sample.outputTokens)),
+      cacheReadTokens: Math.min(remaining.cacheReadTokens, normalizeTokenCount(sample.cacheReadTokens)),
+      cacheWriteTokens: Math.min(remaining.cacheWriteTokens, normalizeTokenCount(sample.cacheWriteTokens)),
+    };
+    if (!hasPositiveTokenUsage(attributed)) continue;
+    for (const key of TOKEN_USAGE_KEYS) remaining[key] = Math.max(0, remaining[key] - attributed[key]);
+    const sampleUsage: TokenUsageForCost = {
+      inputTokens: normalizeTokenCount(sample.inputTokens),
+      outputTokens: normalizeTokenCount(sample.outputTokens),
+      cacheReadTokens: normalizeTokenCount(sample.cacheReadTokens),
+      cacheWriteTokens: normalizeTokenCount(sample.cacheWriteTokens),
+    };
+    const exactSample = TOKEN_USAGE_KEYS.every((key) => attributed[key] === sampleUsage[key]);
+    if (exactSample && typeof sample.reportedCostUsd === 'number'
+      && Number.isFinite(sample.reportedCostUsd) && sample.reportedCostUsd >= 0) {
+      totalCost = addKnownCosts(totalCost, sample.reportedCostUsd);
+      continue;
+    }
+    const cost = estimateRunCostUsd(
+      normalizeNullableText(sample.modelId) ?? parentModelId,
+      attributed,
+      pricingMap,
+      normalizeNullableText(sample.provider) ?? parentProvider,
+    );
+    if (cost === null) return null;
+    totalCost = addKnownCosts(totalCost, cost);
+  }
+  if (hasPositiveTokenUsage(remaining)) {
+    const cost = estimateRunCostUsd(parentModelId, remaining, pricingMap, parentProvider);
+    if (cost === null) return null;
+    totalCost = addKnownCosts(totalCost, cost);
+  }
+  return totalCost;
+}
+
+function estimateAuxiliaryCostUsd(
+  run: RunSnapshot,
+  parentModelId: string | null,
+  parentProvider: string | null,
+  pricingMap: ReturnType<typeof loadModelPricingMap>,
+): number | null {
+  let totalCost = 0;
+  const seen = new Set<string>();
+  for (const sample of run.auxiliaryLlmUsage ?? []) {
+    if (sample.kind === 'subagent') continue;
+    const sourceKey = `${sample.kind}:${sample.sourceId}`;
+    if (seen.has(sourceKey)) continue;
+    seen.add(sourceKey);
+    if (typeof sample.reportedCostUsd === 'number'
+      && Number.isFinite(sample.reportedCostUsd) && sample.reportedCostUsd >= 0) {
+      totalCost = addKnownCosts(totalCost, sample.reportedCostUsd);
+      continue;
+    }
+    const usage: TokenUsageForCost = {
+      inputTokens: normalizeTokenCount(sample.inputTokens),
+      outputTokens: normalizeTokenCount(sample.outputTokens),
+      cacheReadTokens: normalizeTokenCount(sample.cacheReadTokens),
+      cacheWriteTokens: normalizeTokenCount(sample.cacheWriteTokens),
+    };
+    if (!hasPositiveTokenUsage(usage)) continue;
+    const cost = estimateRunCostUsd(
+      normalizeNullableText(sample.modelId) ?? parentModelId,
+      usage,
+      pricingMap,
+      normalizeNullableText(sample.provider) ?? parentProvider,
+    );
+    if (cost === null) return null;
+    totalCost = addKnownCosts(totalCost, cost);
+  }
+  return totalCost;
+}
+
 function estimateSubagentCostUsd(
   run: RunSnapshot,
   parentModelId: string | null,
@@ -127,12 +211,22 @@ function estimateSubagentCostUsd(
       continue;
     }
 
-    const sampleCost = estimateRunCostUsd(
-      normalizeNullableText(sample.modelId),
-      attributed,
-      pricingMap,
-      normalizeNullableText(sample.provider) ?? parentProvider,
-    );
+    const sampleUsage: TokenUsageForCost = {
+      inputTokens: normalizeTokenCount(sample.inputTokens),
+      outputTokens: normalizeTokenCount(sample.outputTokens),
+      cacheReadTokens: normalizeTokenCount(sample.cacheReadTokens),
+      cacheWriteTokens: normalizeTokenCount(sample.cacheWriteTokens),
+    };
+    const exactSample = TOKEN_USAGE_KEYS.every((key) => attributed[key] === sampleUsage[key]);
+    const sampleCost = exactSample && typeof sample.reportedCostUsd === 'number'
+      && Number.isFinite(sample.reportedCostUsd) && sample.reportedCostUsd >= 0
+      ? sample.reportedCostUsd
+      : estimateRunCostUsd(
+          normalizeNullableText(sample.modelId),
+          attributed,
+          pricingMap,
+          normalizeNullableText(sample.provider) ?? parentProvider,
+        );
     if (sampleCost === null) {
       return null;
     }
@@ -263,8 +357,14 @@ function prepareRun(
   const verificationFailureCount = run.verification.failureCount;
   const startedDay = toStartedDay(run.startedAt);
   const normalizedModelId = normalizeNullableText(run.modelId);
-  const modelFamily = resolveModelFamily(normalizedModelId, familyMap);
-  const provider = normalizeNullableText(run.provider) ?? resolveModelProvider(normalizedModelId, familyMap);
+  const runtimeProvider = normalizeNullableText(run.provider);
+  const provider = runtimeProvider ?? resolveModelProvider(normalizedModelId, familyMap);
+  const modelFamily = resolveModelFamily(
+    normalizedModelId && provider && !normalizedModelId.startsWith(`${provider}/`)
+      ? `${provider}/${normalizedModelId}`
+      : normalizedModelId,
+    familyMap,
+  );
 
   const dims = ['precision', 'creativity', 'reasoning', 'thoroughness'] as const;
   function meanForDim(dim: typeof dims[number]): number | null {
@@ -293,7 +393,7 @@ function prepareRun(
   };
   const parentUsageReported = (run.tokenReportedTurnCount ?? 0) > 0 || hasPositiveTokenUsage(parentUsage);
   const parentEstimatedCostUsd = parentUsageReported
-    ? estimateRunCostUsd(normalizedModelId, parentUsage, pricingMap, provider)
+    ? estimateParentCostUsd(run, normalizedModelId, provider, parentUsage, pricingMap)
     : null;
   const subagentEstimatedCostUsd = estimateSubagentCostUsd(run, normalizedModelId, provider, {
     inputTokens: subagentInputTokens,
@@ -301,8 +401,16 @@ function prepareRun(
     cacheReadTokens: subagentCacheReadTokens,
     cacheWriteTokens: subagentCacheWriteTokens,
   }, pricingMap);
-  const totalEstimatedCostUsd = parentEstimatedCostUsd !== null && subagentEstimatedCostUsd !== null
-    ? addKnownCosts(parentEstimatedCostUsd, subagentEstimatedCostUsd)
+  const auxiliaryEstimatedCostUsd = estimateAuxiliaryCostUsd(
+    run,
+    normalizedModelId,
+    provider,
+    pricingMap,
+  );
+  const totalEstimatedCostUsd = parentEstimatedCostUsd !== null
+    && subagentEstimatedCostUsd !== null
+    && auxiliaryEstimatedCostUsd !== null
+    ? addKnownCosts(addKnownCosts(parentEstimatedCostUsd, subagentEstimatedCostUsd), auxiliaryEstimatedCostUsd)
     : null;
 
   const prepassTokens = aggregateSkillPruningPrepassTokens(run);

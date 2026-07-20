@@ -108,6 +108,14 @@ test.before(() => {
 	process.env.PIE_SUBAGENT_TIMEOUT_MS = "0";
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 });
+test.beforeEach(() => {
+	// Restore the defaults that individual tests mutate so later tests do not
+	// inherit a previous test's environment (e.g. always-parent-model disabled
+	// or bucket assignments from the provider-failover scenario).
+	process.env.PIE_SUBAGENT_ALWAYS_PARENT_MODEL = "1";
+	delete process.env.PIE_SUBAGENT_BUCKETS_JSON;
+});
+
 test.after(() => {
 	for (const key of ENV_KEYS) {
 		if (snapshot[key] === undefined) delete process.env[key];

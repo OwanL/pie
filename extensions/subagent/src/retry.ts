@@ -256,6 +256,7 @@ export function buildAttemptRecord(result: SingleResult, backoffMs?: number): Su
 		failureClass: result.failureClass,
 		replaySafety: result.replaySafety,
 		backoffMs,
+		usage: result.usage,
 		...(phaseDurationsMs ? { phaseDurationsMs } : {}),
 		attemptSettlementOutcome: result.stopReason ?? result.activityPhase,
 		cleanupOutcome: undefined,

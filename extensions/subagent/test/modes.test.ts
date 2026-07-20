@@ -9,7 +9,7 @@
  * bootstrap needed. These helpers take already-built SingleResult[] / plain
  * step data, so they run sub-ms with no LLM or network.
  */
-import test, { afterEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isModelFailure } from "../src/selection.js";
+import { resetFairSelectionBags } from "../bucket-selector.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
 function usage(over: Partial<{ input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number; contextTokens: number }> = {}) {
@@ -125,6 +126,7 @@ function setMockBehavior(b: any): void {
 // behavior, but resetting here means a future test that forgets to call
 // setMockBehavior cannot inherit a previous test's SDK behavior. Also reset the
 // captured-proxy sink used by the subagentCallId-stamping regression tests.
+beforeEach(() => { resetFairSelectionBags(); });
 afterEach(() => { setMockBehavior(undefined); (globalThis as any).__MOCK_PROXIES__ = []; });
 
 function messageEnd(text: string, stopReason: string): any {

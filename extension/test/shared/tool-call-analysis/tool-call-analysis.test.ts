@@ -471,3 +471,28 @@ test('countTextLines counts newline-separated lines and ignores a trailing newli
   assert.equal(countTextLines('a\nb\nc\n'), 3);
   assert.equal(countTextLines('a\r\nb'), 2);
 });
+
+test('analyzeToolCall accounts nested subagent usage exactly once', () => {
+  const grandchild = {
+    usage: { input: 5, output: 2, cacheRead: 1, cacheWrite: 0 },
+    messages: [],
+  };
+  const child = {
+    usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 1 },
+    messages: [{
+      role: 'toolResult',
+      toolName: 'subagent',
+      details: { mode: 'single', results: [grandchild] },
+    }],
+  };
+  const analysis = analyzeToolCall(makeToolCall({
+    name: 'subagent',
+    input: { agent: 'worker', task: 'nested' },
+    result: { mode: 'single', results: [child] },
+  }));
+
+  assert.equal(analysis.subagentInputTokens, 15);
+  assert.equal(analysis.subagentOutputTokens, 6);
+  assert.equal(analysis.subagentCacheReadTokens, 3);
+  assert.equal(analysis.subagentCacheWriteTokens, 1);
+});

@@ -669,7 +669,12 @@ function coerceBooleanRecord(value: unknown): Record<string, boolean> {
 }
 
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
-const AUXILIARY_LLM_USAGE_KINDS = new Set(['skill_pruning_prepass', 'subagent']);
+const AUXILIARY_LLM_USAGE_KINDS = new Set([
+  'skill_pruning_prepass',
+  'subagent',
+  'history_compaction',
+  'branch_summary',
+]);
 
 function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
   if (!Array.isArray(value)) {
@@ -698,6 +703,9 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(typeof entry.reportedCostUsd === 'number' && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
+        ? { reportedCostUsd: entry.reportedCostUsd }
+        : {}),
       ...(typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) && entry.durationMs >= 0
         ? { durationMs: Math.trunc(entry.durationMs) }
         : {}),
@@ -735,6 +743,10 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
       provider: typeof entry.provider === 'string' ? entry.provider : undefined,
+      reportedCostUsd: typeof entry.reportedCostUsd === 'number'
+        && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
+        ? entry.reportedCostUsd
+        : undefined,
       providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
       ...(typeof entry.providerQueueAttemptCount === 'number' && Number.isFinite(entry.providerQueueAttemptCount) && entry.providerQueueAttemptCount >= 0
         ? { providerQueueAttemptCount: Math.trunc(entry.providerQueueAttemptCount) }
@@ -873,6 +885,10 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   }
   const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
   const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, outputTokens) : undefined;
+  const reportedCostUsd = typeof value.reportedCostUsd === 'number'
+    && Number.isFinite(value.reportedCostUsd) && value.reportedCostUsd >= 0
+    ? value.reportedCostUsd
+    : undefined;
   return {
     inputTokens,
     outputTokens,
@@ -880,6 +896,7 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
     cacheWriteTokens,
     totalTokens,
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
 }
 

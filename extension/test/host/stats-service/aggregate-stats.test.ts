@@ -440,7 +440,7 @@ test('computeAggregateStats: today throughput buckets by sample end-date', () =>
   assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 1);
 });
 
-test('providerForModel / pricingForModel: first priced provider wins', () => {
+test('providerForModel / pricingForModel: ambiguous bare ids require an explicit provider', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([
     ['m', [
       { id: 'm', provider: 'proxy' }, // no pricing
@@ -448,8 +448,8 @@ test('providerForModel / pricingForModel: first priced provider wins', () => {
       { id: 'm', provider: 'anthropic', pricing: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } },
     ]],
   ]);
-  assert.equal(providerForModel('m', pricingMap), 'openai');
-  assert.equal(pricingForModel('m', pricingMap)!.output, 6);
+  assert.equal(providerForModel('m', pricingMap), 'unknown');
+  assert.equal(pricingForModel('m', pricingMap), null);
   assert.equal(providerForModel('m', pricingMap, 'anthropic'), 'anthropic');
   assert.equal(pricingForModel('m', pricingMap, 'anthropic')!.output, 15);
   // Runtime provider identity is authoritative; never relabel an unpriced

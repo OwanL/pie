@@ -121,6 +121,7 @@ export interface TokenPricing {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  tiers?: Array<TokenPricing & { inputTokensAbove: number }>;
 }
 
 export type TokenPricingResolver = (modelId: string, provider?: string) => TokenPricing | undefined;
@@ -154,6 +155,7 @@ type PruningCostDetails = PruningDetails & {
   prepassOutputTokens?: number;
   prepassCacheReadTokens?: number;
   prepassCacheWriteTokens?: number;
+  prepassReportedCostUsd?: number;
 };
 
 interface ModelCostBreakdown extends CostUsage {
@@ -250,18 +252,29 @@ function formatCostTokens(tokens: number): string {
   return `${formatReadableTokens(tokens)} token${tokens === 1 ? '' : 's'}`;
 }
 
+function effectivePricing(usage: CostUsage, pricing: TokenPricing): TokenPricing {
+  const promptTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  let effective = pricing;
+  for (const tier of pricing.tiers ?? []) {
+    if (promptTokens > tier.inputTokensAbove) effective = tier;
+  }
+  return effective;
+}
+
 function costFromUsage(usage: CostUsage, pricing: TokenPricing): number {
-  return ((usage.inputTokens / 1_000_000) * pricing.input)
-    + ((usage.outputTokens / 1_000_000) * pricing.output)
-    + ((usage.cacheReadTokens / 1_000_000) * pricing.cacheRead)
-    + ((usage.cacheWriteTokens / 1_000_000) * pricing.cacheWrite);
+  const effective = effectivePricing(usage, pricing);
+  return ((usage.inputTokens / 1_000_000) * effective.input)
+    + ((usage.outputTokens / 1_000_000) * effective.output)
+    + ((usage.cacheReadTokens / 1_000_000) * effective.cacheRead)
+    + ((usage.cacheWriteTokens / 1_000_000) * effective.cacheWrite);
 }
 
 function costBreakdownFromUsage(usage: CostUsage, pricing: TokenPricing) {
-  const input = (usage.inputTokens / 1_000_000) * pricing.input;
-  const output = (usage.outputTokens / 1_000_000) * pricing.output;
-  const cacheRead = (usage.cacheReadTokens / 1_000_000) * pricing.cacheRead;
-  const cacheWrite = (usage.cacheWriteTokens / 1_000_000) * pricing.cacheWrite;
+  const effective = effectivePricing(usage, pricing);
+  const input = (usage.inputTokens / 1_000_000) * effective.input;
+  const output = (usage.outputTokens / 1_000_000) * effective.output;
+  const cacheRead = (usage.cacheReadTokens / 1_000_000) * effective.cacheRead;
+  const cacheWrite = (usage.cacheWriteTokens / 1_000_000) * effective.cacheWrite;
   return {
     input,
     output,
@@ -385,6 +398,7 @@ function addSubagentToolCallCost(
   summary: SubagentCostSummary,
   toolCall: Pick<ToolCall, 'input' | 'result' | 'status'>,
   depth: number,
+  pricingForModel?: TokenPricingResolver,
 ): void {
   if (toolCall.status === 'failed') return;
   const subagentResult = getRenderableSubagentResult(toolCall.result);
@@ -394,22 +408,51 @@ function addSubagentToolCallCost(
     const rawResult = result as unknown;
     if (!isRecord(rawResult)) continue;
 
-    const usage = usageFromSubagentUsage(rawResult.usage);
-    if (usage) {
+    const resultModelId = typeof rawResult.model === 'string'
+      ? rawResult.model
+      : (typeof rawResult.selectedModel === 'string' ? rawResult.selectedModel : undefined);
+    const resultProvider = typeof rawResult.provider === 'string' ? rawResult.provider : undefined;
+    const attemptUsages = Array.isArray(rawResult.attemptRecords)
+      ? rawResult.attemptRecords.flatMap((attempt) => {
+        if (!isRecord(attempt)) return [];
+        const usage = usageFromSubagentUsage(attempt.usage);
+        if (!usage) return [];
+        return [{
+          usage,
+          modelId: typeof attempt.model === 'string' ? attempt.model : resultModelId,
+          provider: typeof attempt.provider === 'string' ? attempt.provider : resultProvider,
+        }];
+      })
+      : [];
+    const resultUsage = usageFromSubagentUsage(rawResult.usage);
+    const attributedUsages = attemptUsages.length > 0
+      ? attemptUsages
+      : resultUsage ? [{ usage: resultUsage, modelId: resultModelId, provider: resultProvider }] : [];
+    if (attributedUsages.length > 0) {
       const source = depth <= 1 ? 'Sub-agents' : 'Nested sub-agents';
-      const modelId = normalizeModelId(
-        typeof rawResult.model === 'string' ? rawResult.model : (typeof rawResult.selectedModel === 'string' ? rawResult.selectedModel : undefined),
-        depth <= 1 ? 'Unknown subagent model' : 'Unknown nested subagent model',
-      );
-      summary.totalCost += usage.cost;
+      let resultCost = 0;
+      for (const item of attributedUsages) {
+        const modelId = normalizeModelId(
+          item.modelId && item.provider && !item.modelId.startsWith(`${item.provider}/`)
+            ? `${item.provider}/${item.modelId}`
+            : item.modelId,
+          depth <= 1 ? 'Unknown subagent model' : 'Unknown nested subagent model',
+        );
+        const estimatedPricing = item.modelId ? pricingForModel?.(item.modelId, item.provider) : undefined;
+        const attributedCost = item.usage.cost > 0
+          ? item.usage.cost
+          : estimatedPricing ? costFromUsage(item.usage, estimatedPricing) : 0;
+        resultCost += attributedCost;
+        addModelCost(summary.modelCosts, modelId, source, item.usage, attributedCost);
+      }
+      summary.totalCost += resultCost;
       if (depth <= 1) {
-        summary.directCost += usage.cost;
+        summary.directCost += resultCost;
         summary.directResultCount += 1;
       } else {
-        summary.nestedCost += usage.cost;
+        summary.nestedCost += resultCost;
         summary.nestedResultCount += 1;
       }
-      addModelCost(summary.modelCosts, modelId, source, usage, usage.cost);
     }
 
     if (!Array.isArray(result.messages) || depth >= 6) continue;
@@ -423,20 +466,23 @@ function addSubagentToolCallCost(
           input: part.arguments ?? {},
           result: toolResult?.result ?? part.result,
           status: toolResult?.status ?? 'running',
-        }, depth + 1);
+        }, depth + 1, pricingForModel);
       }
     }
   }
 }
 
-export function extractSubagentCostSummary(transcript: ChatMessage[]): SubagentCostSummary {
+export function extractSubagentCostSummary(
+  transcript: ChatMessage[],
+  pricingForModel?: TokenPricingResolver,
+): SubagentCostSummary {
   const summary = emptySubagentCostSummary();
   for (const message of transcript) {
     if (message.role !== 'assistant') continue;
     for (const toolCall of toolCallsFromMessage(message)) {
       if (typeof toolCall.name !== 'string') continue;
       if (toolCall.name.trim().toLowerCase() !== 'subagent') continue;
-      addSubagentToolCallCost(summary, toolCall, 1);
+      addSubagentToolCallCost(summary, toolCall, 1, pricingForModel);
     }
   }
   return summary;
@@ -453,12 +499,15 @@ function buildPruningPrepassSummary(
 ): { cost: number; usage: CostUsage; modelId?: string; lines: string[] } {
   const empty = { cost: 0, usage: emptyCostUsage(), lines: [] };
   if (!details?.prepassModel) return empty;
+  const billingModelId = details.prepassProvider
+    ? `${details.prepassProvider}/${details.prepassModel}`
+    : details.prepassModel;
   // Resolve the prepass model's OWN pricing — do NOT fall back to the
   // selected model's pricing. The prepass model is usually a different
   // (often cheaper/local) model; pricing it at the selected model's rate
   // would silently over-state the prepass cost. When no pricing is known for
   // the prepass model, fall through to the "unavailable" branch.
-  const prepassPricing = pricingForModel?.(details.prepassModel);
+  const prepassPricing = pricingForModel?.(details.prepassModel, details.prepassProvider);
   const usage = {
     inputTokens: numberValue(details.prepassInputTokens),
     outputTokens: numberValue(details.prepassOutputTokens),
@@ -469,21 +518,27 @@ function buildPruningPrepassSummary(
   usage.totalTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   const hasUsage = usage.totalTokens > 0;
   if (!hasUsage) {
-    return { cost: 0, usage, modelId: details.prepassModel, lines: ['Pruning prepass:', `  Model: ${details.prepassModel}`] };
+    return { cost: 0, usage, modelId: billingModelId, lines: ['Pruning prepass:', `  Model: ${billingModelId}`] };
   }
 
-  const cost = prepassPricing ? costFromUsage(usage, prepassPricing) : 0;
+  const reportedCost = typeof details.prepassReportedCostUsd === 'number'
+    && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
+    ? details.prepassReportedCostUsd
+    : undefined;
+  const cost = reportedCost ?? (prepassPricing ? costFromUsage(usage, prepassPricing) : 0);
 
   return {
     cost,
     usage,
-    modelId: details.prepassModel,
+    modelId: billingModelId,
     lines: [
       'Pruning prepass:',
-      `  Model: ${details.prepassModel}`,
+      `  Model: ${billingModelId}`,
       `  Tokens: \u2191 ${formatReadableTokens(usage.inputTokens)} \u2193 ${formatReadableTokens(usage.outputTokens)}`,
       ...(usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0 ? [`  Cache: read ${formatReadableTokens(usage.cacheReadTokens)} · write ${formatReadableTokens(usage.cacheWriteTokens)}`] : []),
-      ...(prepassPricing ? [`  Cost: ${formatCostDetail(cost)}`] : ['  Cost: unavailable (no pricing)']),
+      ...(reportedCost !== undefined || prepassPricing
+        ? [`  Cost: ${formatCostDetail(cost)}`]
+        : ['  Cost: unavailable (no pricing)']),
     ],
   };
 }
@@ -531,16 +586,21 @@ function addCompletedUsageCost(
   summary.totalTokens += usage.totalTokens;
   const billingModelId = modelId && provider ? `${provider}/${modelId}` : modelId;
   if (billingModelId) summary.modelIds.add(billingModelId);
-  if (!pricing) return;
+  const reportedCost = usage.reportedCostUsd;
+  if (!pricing && reportedCost === undefined) return;
 
-  const costs = costBreakdownFromUsage(usage, pricing);
-  summary.inputCost += costs.input;
-  summary.outputCost += costs.output;
-  summary.cacheReadCost += costs.cacheRead;
-  summary.cacheWriteCost += costs.cacheWrite;
-  summary.totalCost += costs.total;
+  const costs = pricing ? costBreakdownFromUsage(usage, pricing) : null;
+  const totalCost = reportedCost ?? costs?.total ?? 0;
+  if (costs) {
+    const scale = reportedCost !== undefined && costs.total > 0 ? reportedCost / costs.total : 1;
+    summary.inputCost += costs.input * scale;
+    summary.outputCost += costs.output * scale;
+    summary.cacheReadCost += costs.cacheRead * scale;
+    summary.cacheWriteCost += costs.cacheWrite * scale;
+  }
+  summary.totalCost += totalCost;
   summary.pricedTurnCount += 1;
-  addModelCost(summary.modelCosts, normalizeModelId(billingModelId, 'Selected model'), 'Main turns', usage, costs.total);
+  addModelCost(summary.modelCosts, normalizeModelId(billingModelId, 'Selected model'), 'Main turns', usage, totalCost);
 }
 
 export function buildCompletedCostSummary(

@@ -24,6 +24,7 @@ export interface PrepassUsage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	reportedCostUsd?: number;
 }
 
 export interface PrepassRunResult {

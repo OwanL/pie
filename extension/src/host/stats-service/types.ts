@@ -1,5 +1,6 @@
 import type {
   AssistantUsage,
+  AuxiliaryLlmUsagePayload,
   ComposerInput,
   ThinkingLevel,
   ToolCall,
@@ -51,6 +52,7 @@ export interface RunObserver {
   onToolFinished(sessionPath: string, toolCall: ToolCall): void;
   onInterrupted(sessionPath: string): void;
   onCompaction(sessionPath: string): void;
+  onAuxiliaryLlmUsage(sessionPath: string, sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>): void;
   onAutoRetry(
     sessionPath: string,
     timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
@@ -93,6 +95,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onToolFinished: () => undefined,
   onInterrupted: () => undefined,
   onCompaction: () => undefined,
+  onAuxiliaryLlmUsage: () => undefined,
   onAutoRetry: () => undefined,
   onAutoRetryMeasured: () => undefined,
   onMessageEdited: () => undefined,

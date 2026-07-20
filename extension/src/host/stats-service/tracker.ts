@@ -24,6 +24,7 @@ import {
   normalizeExperimentAssignment,
   type AgentReviewCompletion,
   type AgentReviewEntry,
+  type AuxiliaryLlmUsageSample,
   type OutcomeHistoryLogEntry,
   type RunSnapshot,
   type TreatmentChangeKind,
@@ -201,10 +202,17 @@ export class SessionRunTracker {
       sourceId: messageId,
       occurredAt: occurredAt || this.runState.isoNow(),
       modelId: typeof details.prepassModel === 'string' && details.prepassModel ? details.prepassModel : undefined,
+      ...(typeof details.prepassProvider === 'string' && details.prepassProvider
+        ? { provider: details.prepassProvider }
+        : {}),
       inputTokens,
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
+      ...(typeof details.prepassReportedCostUsd === 'number'
+        && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
+        ? { reportedCostUsd: details.prepassReportedCostUsd }
+        : {}),
       ...(durationMs === undefined ? {} : { durationMs }),
     }];
     run.updatedAt = this.runState.isoNow();
@@ -277,6 +285,7 @@ export class SessionRunTracker {
         status,
         modelId: run.modelId ?? undefined,
         provider: run.provider ?? undefined,
+        reportedCostUsd: usage?.reportedCostUsd,
         turnLatencyMs: finiteOrNull(latency?.turnLatencyMs),
         overheadMs: finiteOrNull(latency?.overheadMs),
         providerLatencyMs: finiteOrNull(latency?.providerLatencyMs),
@@ -486,36 +495,86 @@ export class SessionRunTracker {
       return;
     }
     const samples = run.auxiliaryLlmUsage ?? [];
-    const additions = renderable.results.flatMap((result, index) => {
-      const usage = result.usage;
-      if (!usage) {
-        return [];
-      }
-      const inputTokens = toNonNegativeInt(usage.input);
-      const outputTokens = toNonNegativeInt(usage.output);
-      const cacheReadTokens = toNonNegativeInt(usage.cacheRead);
-      const cacheWriteTokens = toNonNegativeInt(usage.cacheWrite);
-      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) {
-        return [];
-      }
-      const endedTimes = (result.turnThroughputSamples ?? [])
-        .map((sample) => Date.parse(sample.endedAt))
-        .filter((ms) => !Number.isNaN(ms));
-      const occurredAt = endedTimes.length > 0
-        ? new Date(Math.max(...endedTimes)).toISOString()
-        : this.runState.isoNow();
-      return [{
-        kind: 'subagent' as const,
-        sourceId: `${toolCall.id}:${index}`,
-        occurredAt,
-        modelId: result.model ?? result.selectedModel,
-        ...(result.provider ? { provider: result.provider } : {}),
-        inputTokens,
-        outputTokens,
-        cacheReadTokens,
-        cacheWriteTokens,
-      }];
-    });
+    const additions: AuxiliaryLlmUsageSample[] = [];
+    const seenResults = new Set<object>();
+    const visitResults = (results: typeof renderable.results, path: string, depth: number): void => {
+      if (depth > 8) return;
+      results.forEach((result, index) => {
+        if (seenResults.has(result)) return;
+        seenResults.add(result);
+        const sourceId = `${toolCall.id}:${path}${index}`;
+        const usage = result.usage;
+        if (usage) {
+          const endedTimes = (result.turnThroughputSamples ?? [])
+            .map((sample) => Date.parse(sample.endedAt))
+            .filter((ms) => !Number.isNaN(ms));
+          const occurredAt = endedTimes.length > 0
+            ? new Date(Math.max(...endedTimes)).toISOString()
+            : this.runState.isoNow();
+          const remaining = {
+            inputTokens: toNonNegativeInt(usage.input),
+            outputTokens: toNonNegativeInt(usage.output),
+            cacheReadTokens: toNonNegativeInt(usage.cacheRead),
+            cacheWriteTokens: toNonNegativeInt(usage.cacheWrite),
+          };
+          const rawResult = result as typeof result & { attemptRecords?: unknown[] };
+          for (const [attemptIndex, attempt] of (rawResult.attemptRecords ?? []).entries()) {
+            if (!isRecord(attempt) || !isRecord(attempt.usage)) continue;
+            const counts = {
+              inputTokens: Math.min(remaining.inputTokens, toNonNegativeInt(attempt.usage.input)),
+              outputTokens: Math.min(remaining.outputTokens, toNonNegativeInt(attempt.usage.output)),
+              cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
+              cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
+            };
+            if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0) continue;
+            const attemptId = typeof attempt.attemptId === 'string' && attempt.attemptId.trim()
+              ? attempt.attemptId.trim()
+              : String(attemptIndex);
+            additions.push({
+              kind: 'subagent',
+              sourceId: `${sourceId}:attempt:${attemptId}`,
+              occurredAt,
+              modelId: typeof attempt.model === 'string' ? attempt.model : (result.model ?? result.selectedModel),
+              ...(typeof attempt.provider === 'string'
+                ? { provider: attempt.provider }
+                : result.provider ? { provider: result.provider } : {}),
+              ...counts,
+              ...(typeof attempt.usage.cost === 'number' && Number.isFinite(attempt.usage.cost) && attempt.usage.cost > 0
+                ? { reportedCostUsd: attempt.usage.cost }
+                : {}),
+            });
+            remaining.inputTokens -= counts.inputTokens;
+            remaining.outputTokens -= counts.outputTokens;
+            remaining.cacheReadTokens -= counts.cacheReadTokens;
+            remaining.cacheWriteTokens -= counts.cacheWriteTokens;
+          }
+          if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0) {
+            additions.push({
+              kind: 'subagent',
+              sourceId,
+              occurredAt,
+              modelId: result.model ?? result.selectedModel,
+              ...(result.provider ? { provider: result.provider } : {}),
+              ...remaining,
+              // Subagent usage initializes cost to zero even when a provider
+              // omitted billing metadata. Preserve only positive exact costs so
+              // zero does not suppress provider-qualified catalog estimation.
+              ...(typeof usage.cost === 'number' && Number.isFinite(usage.cost) && usage.cost > 0
+                && (rawResult.attemptRecords?.length ?? 0) === 0
+                ? { reportedCostUsd: usage.cost }
+                : {}),
+            });
+          }
+        }
+        for (const message of result.messages ?? []) {
+          const toolResult = message as typeof message & { toolName?: string; details?: unknown };
+          if (toolResult.role !== 'toolResult' || toolResult.toolName !== 'subagent') continue;
+          const nested = getRenderableSubagentResult(toolResult.details);
+          if (nested) visitResults(nested.results, `${path}${index}.`, depth + 1);
+        }
+      });
+    };
+    visitResults(renderable.results, '', 0);
     run.auxiliaryLlmUsage = [...samples, ...additions];
   }
 
@@ -547,37 +606,46 @@ export class SessionRunTracker {
     if (!renderable) {
       return;
     }
-    for (const result of renderable.results) {
-      if (!Array.isArray(result.turnThroughputSamples) || result.turnThroughputSamples.length === 0) {
-        continue;
-      }
-      for (const sample of result.turnThroughputSamples) {
-        if (!sample || typeof sample !== 'object') {
-          continue;
+    const seenResults = new Set<object>();
+    const visitResults = (results: typeof renderable.results, depth: number): void => {
+      if (depth > 8) return;
+      for (const result of results) {
+        if (seenResults.has(result)) continue;
+        seenResults.add(result);
+        for (const sample of result.turnThroughputSamples ?? []) {
+          if (!sample || typeof sample !== 'object') continue;
+          const endedAt = typeof sample.endedAt === 'string' ? sample.endedAt : this.runState.isoNow();
+          const outputTokens = toNonNegativeInt(sample.outputTokens);
+          const generationDurationMs = toNonNegativeInt(sample.generationDurationMs);
+          const status = typeof sample.status === 'string' ? sample.status : 'completed';
+          const modelId = typeof sample.modelId === 'string' ? sample.modelId : result.model;
+          const provider = typeof sample.provider === 'string' ? sample.provider : result.provider;
+          run.turnThroughputSamples.push({
+            endedAt,
+            outputTokens,
+            inputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            contextTokens: null,
+            generationDurationMs,
+            concurrentBusySessions: this.busySessionPaths.size,
+            status: status as TurnThroughputStatus,
+            modelId: modelId ?? undefined,
+            ...(provider ? { provider } : {}),
+            turnLatencyMs: null,
+            overheadMs: null,
+            providerLatencyMs: null,
+          });
         }
-        const endedAt = typeof sample.endedAt === 'string' ? sample.endedAt : this.runState.isoNow();
-        const outputTokens = toNonNegativeInt(sample.outputTokens);
-        const generationDurationMs = toNonNegativeInt(sample.generationDurationMs);
-        const status = typeof sample.status === 'string' ? sample.status : 'completed';
-        const modelId = typeof result.model === 'string' ? result.model : sample.modelId;
-        run.turnThroughputSamples.push({
-          endedAt,
-          outputTokens,
-          inputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          contextTokens: null,
-          generationDurationMs,
-          concurrentBusySessions: this.busySessionPaths.size,
-          status: status as TurnThroughputStatus,
-          modelId: modelId ?? undefined,
-          ...(result.provider ? { provider: result.provider } : {}),
-          turnLatencyMs: null,
-          overheadMs: null,
-          providerLatencyMs: null,
-        });
+        for (const message of result.messages ?? []) {
+          const toolResult = message as typeof message & { toolName?: string; details?: unknown };
+          if (toolResult.role !== 'toolResult' || toolResult.toolName !== 'subagent') continue;
+          const nested = getRenderableSubagentResult(toolResult.details);
+          if (nested) visitResults(nested.results, depth + 1);
+        }
       }
-    }
+    };
+    visitResults(renderable.results, 0);
   }
 
   /** Roll up verification-command counts (and failures, when the call failed). */
@@ -613,6 +681,40 @@ export class SessionRunTracker {
     run.interruptedCount += 1;
     run.updatedAt = this.runState.isoNow();
     this.runState.persist();
+  }
+
+  /** Persist usage from a background summarization request that bypasses the
+   * parent assistant message stream (history compaction or branch summary). */
+  onAuxiliaryLlmUsage(
+    sessionPath: string,
+    sample: {
+      kind: 'history_compaction' | 'branch_summary';
+      sourceId: string;
+      occurredAt: string;
+      modelId?: string;
+      provider?: string;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheWriteTokens: number;
+      reportedCostUsd?: number;
+      durationMs?: number;
+    },
+  ): void {
+    const state = this.runState.sessions.get(sessionPath);
+    const run = state ? (state.currentRun ?? state.lastRun) : null;
+    if (!run || !state || !sample.sourceId) return;
+    const samples = run.auxiliaryLlmUsage ?? [];
+    if (samples.some((existing) => existing.kind === sample.kind && existing.sourceId === sample.sourceId)) return;
+    run.auxiliaryLlmUsage = [...samples, {
+      ...sample,
+      inputTokens: toNonNegativeInt(sample.inputTokens),
+      outputTokens: toNonNegativeInt(sample.outputTokens),
+      cacheReadTokens: toNonNegativeInt(sample.cacheReadTokens),
+      cacheWriteTokens: toNonNegativeInt(sample.cacheWriteTokens),
+    }];
+    run.updatedAt = this.runState.isoNow();
+    this.runState.persist(state.currentRun ? undefined : run);
   }
 
   /** Count a history-compaction (`/compact`) LLM call against the relevant run.

@@ -25,6 +25,7 @@ import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import type { SingleResult } from "../types.js";
 import { parseRetryAfterMs, computeBackoffMs, abortableDelay, buildAttemptRecord, readRetryPolicy } from "../src/retry.js";
+import { resetFairSelectionBags } from "../bucket-selector.js";
 
 // ---------------------------------------------------------------------------
 // Mock SDK + hook (same technique as modes.test.ts)
@@ -277,6 +278,9 @@ test.before(() => {
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "10";
 	process.env.PIE_SUBAGENT_MAX_TREE_SESSIONS = "10";
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+});
+test.beforeEach(() => {
+	resetFairSelectionBags();
 });
 test.after(() => {
 	Math.random = savedRandom;

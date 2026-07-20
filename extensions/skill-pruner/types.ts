@@ -85,6 +85,8 @@ export interface PruningResult {
 	toolTokensSaved: number;
 	/** Model used for the LLM prepass call. */
 	prepassModel?: string;
+	/** Provider paired with prepassModel; model ids alone are not billing identities. */
+	prepassProvider?: string;
 	/** Thinking level of the LLM prepass call. */
 	prepassThinkingLevel?: string;
 	/** Raw LLM response text. */
@@ -102,6 +104,8 @@ export interface PruningResult {
 	prepassOutputTokens?: number;
 	prepassCacheReadTokens?: number;
 	prepassCacheWriteTokens?: number;
+	/** Cost attached to the prepass provider responses, including retries. */
+	prepassReportedCostUsd?: number;
 	/** Error message if the prepass failed. */
 	prepassError?: string;
 	/** Human-readable explanation of why the pruner kept a category instead of trusting the model. */

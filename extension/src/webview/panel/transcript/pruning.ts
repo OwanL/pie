@@ -57,6 +57,7 @@ export function normalizePruningDetails(value: unknown): PruningDetails | null {
     skillTokensSaved: optionalNumber(value.skillTokensSaved) ?? 0,
     toolTokensSaved: optionalNumber(value.toolTokensSaved) ?? 0,
     prepassModel: optionalString(value.prepassModel),
+    prepassProvider: optionalString(value.prepassProvider),
     prepassThinkingLevel: optionalString(value.prepassThinkingLevel),
     prepassResponse: optionalString(value.prepassResponse),
     prepassSystemPrompt: optionalString(value.prepassSystemPrompt),
@@ -67,6 +68,7 @@ export function normalizePruningDetails(value: unknown): PruningDetails | null {
     prepassOutputTokens: optionalNumber(value.prepassOutputTokens),
     prepassCacheReadTokens: optionalNumber(value.prepassCacheReadTokens),
     prepassCacheWriteTokens: optionalNumber(value.prepassCacheWriteTokens),
+    prepassReportedCostUsd: optionalNumber(value.prepassReportedCostUsd),
     prepassError: optionalString(value.prepassError),
     prepassSafeguardReason: optionalString(value.prepassSafeguardReason),
   };

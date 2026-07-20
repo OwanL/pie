@@ -264,6 +264,9 @@ type SubagentVisualStatus = 'idle' | 'running' | 'interrupted' | 'failed' | 'com
 
 /** Status indicator chip at the right side of the header. */
 function StatusIndicator({ status, errorDetail }: { status: SubagentVisualStatus; errorDetail?: string }) {
+  if (status === 'completed') {
+    return <StatusChip tone="completed" label="Finished" className="status-chip-fixed" />;
+  }
   if (status !== 'failed' && status !== 'interrupted') return null;
   const interrupted = status === 'interrupted';
 
@@ -305,7 +308,9 @@ export function singleResultStatus(
     if (isIdle(result)) return 'idle';
     return 'running';
   }
-  return multipleResults ? 'completed' : 'running';
+  // An explicit terminal child result settles independently of the parent tool.
+  // This applies equally to isolated, parallel, and sequential delegations.
+  return 'completed';
 }
 
 interface SubagentSingleBlockProps {

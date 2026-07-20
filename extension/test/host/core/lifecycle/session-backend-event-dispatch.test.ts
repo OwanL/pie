@@ -28,6 +28,7 @@ function createHandlers() {
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
     onRetryMeasured: (payload) => calls.push({ name: 'retry.measured', payload }),
     onCompaction: (payload) => calls.push({ name: 'compaction.ended', payload }),
+    onAuxiliaryLlmUsage: (payload) => calls.push({ name: 'auxiliary-llm.usage', payload }),
     onOperationalError: (payload) => calls.push({ name: 'operational-error', payload }),
     onRetryStuck: (payload) => calls.push({ name: 'retry.stuck', payload }),
     onBusyChanged: (payload) => calls.push({ name: 'busy.changed', payload }),

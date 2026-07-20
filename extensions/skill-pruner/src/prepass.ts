@@ -12,7 +12,7 @@ import {
 	withCopilotOptions,
 	COPILOT_IDE_HEADERS,
 } from "./copilot-headers.js";
-import type { PrepassRunResult } from "./pruning-types.js";
+import type { PrepassRunResult, PrepassUsage } from "./pruning-types.js";
 import { toErrorMessage, enrichConnectionError } from "../../../shared/error-message.js";
 import { PROVIDER_GATE_REQUEST_CLASS_HEADER, PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER } from "../../../shared/provider-gate-request-class.js";
 
@@ -404,6 +404,7 @@ async function runLlmPruningWithParseRecovery(
 			output: (initial.usage?.output ?? 0) + (recovered.usage?.output ?? 0),
 			cacheRead: (initial.usage?.cacheRead ?? 0) + (recovered.usage?.cacheRead ?? 0),
 			cacheWrite: (initial.usage?.cacheWrite ?? 0) + (recovered.usage?.cacheWrite ?? 0),
+			reportedCostUsd: (initial.usage?.reportedCostUsd ?? 0) + (recovered.usage?.reportedCostUsd ?? 0),
 		} : undefined,
 	};
 }
@@ -554,6 +555,19 @@ export async function runPruningPrepass(
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
+	let cumulativeUsage: PrepassUsage | undefined;
+	let cumulativeLatencyMs = 0;
+	const accountResult = (result: Awaited<ReturnType<typeof runLlmPruning>>): void => {
+		cumulativeLatencyMs += result.latencyMs;
+		if (!result.usage) return;
+		cumulativeUsage = {
+			input: (cumulativeUsage?.input ?? 0) + result.usage.input,
+			output: (cumulativeUsage?.output ?? 0) + result.usage.output,
+			cacheRead: (cumulativeUsage?.cacheRead ?? 0) + result.usage.cacheRead,
+			cacheWrite: (cumulativeUsage?.cacheWrite ?? 0) + result.usage.cacheWrite,
+			reportedCostUsd: (cumulativeUsage?.reportedCostUsd ?? 0) + (result.usage.reportedCostUsd ?? 0),
+		};
+	};
 
 	for (let index = 0; index < attempts.length; index++) {
 		const thinkingLevel = attempts[index];
@@ -569,6 +583,7 @@ export async function runPruningPrepass(
 				signal: AbortSignal.timeout(timeoutMs),
 				...auth,
 			}, completeFn, timeoutMs);
+			accountResult(result);
 
 			latestResult = {
 				prunedSkills: result.prunedSkills,
@@ -578,9 +593,9 @@ export async function runPruningPrepass(
 				rawThinking: result.rawThinking,
 				rawSystemPrompt: result.systemPrompt,
 				rawUserMessage: result.userMessage,
-				latencyMs: result.latencyMs,
+				latencyMs: cumulativeLatencyMs,
 				thinkingLevel,
-				usage: result.usage,
+				usage: cumulativeUsage,
 				keptAllDueToParseFailure: result.keptAllDueToParseFailure,
 			};
 
@@ -607,6 +622,8 @@ export async function runPruningPrepass(
 							signal: AbortSignal.timeout(timeoutMs),
 							...auth,
 						}, completeFn, timeoutMs);
+						accountResult(retryResult);
+						latestResult = { ...latestResult, latencyMs: cumulativeLatencyMs, usage: cumulativeUsage };
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,
@@ -616,9 +633,9 @@ export async function runPruningPrepass(
 								rawThinking: retryResult.rawThinking,
 								rawSystemPrompt: retryResult.systemPrompt,
 								rawUserMessage: retryResult.userMessage,
-								latencyMs: retryResult.latencyMs,
+								latencyMs: cumulativeLatencyMs,
 								thinkingLevel,
-								usage: retryResult.usage,
+								usage: cumulativeUsage,
 								keptAllDueToParseFailure: retryResult.keptAllDueToParseFailure,
 							};
 							recovered = true;
@@ -672,6 +689,8 @@ export async function runPruningPrepass(
 							signal: AbortSignal.timeout(timeoutMs),
 							...auth,
 						}, completeFn, timeoutMs);
+						accountResult(retryResult);
+						latestResult = { ...latestResult, latencyMs: cumulativeLatencyMs, usage: cumulativeUsage };
 						if (hasUsablePrepassResponse(retryResult)) {
 							latestResult = {
 								prunedSkills: retryResult.prunedSkills,
@@ -681,9 +700,9 @@ export async function runPruningPrepass(
 								rawThinking: retryResult.rawThinking,
 								rawSystemPrompt: retryResult.systemPrompt,
 								rawUserMessage: retryResult.userMessage,
-								latencyMs: retryResult.latencyMs,
+								latencyMs: cumulativeLatencyMs,
 								thinkingLevel,
-								usage: retryResult.usage,
+								usage: cumulativeUsage,
 								keptAllDueToParseFailure: retryResult.keptAllDueToParseFailure,
 							};
 							recovered = true;

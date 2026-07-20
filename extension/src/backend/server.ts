@@ -73,6 +73,7 @@ import {
 import type { SessionEntryLike } from './transcript';
 import { createRuntimeFactory } from './runtime-factory.js';
 import { createSessionManagerFence } from './session-manager-fence';
+import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
 
@@ -500,6 +501,11 @@ export class BackendServer {
         extensionRunner.setUIContext(uiBridge);
       }
 
+      installAuxiliaryLlmMeter(
+        session,
+        sessionPath,
+        (event, payload) => this.emit(event, payload),
+      );
       context.unsubscribe = session.subscribe((event: SdkSessionEvent) => {
         this.handleSessionEvent(context, event);
       });

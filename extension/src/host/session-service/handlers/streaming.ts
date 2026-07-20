@@ -4,6 +4,7 @@ import { recordStreamEvent } from '../../util/stream-telemetry';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../core/events';
 import type {
+  AuxiliaryLlmUsagePayload,
   CompactionPayload,
   MessageAbortedPayload,
   MessageDeltaPayload,
@@ -107,6 +108,15 @@ export function onMessageStarted(payload: MessageStartedPayload, deps: HandlerDe
   });
 
   deps.state.bindRequestSessionPath(payload.requestId, sessionPath);
+  // Backend-reported provider/model is the billing identity for this exact
+  // turn. Update the run before it starts so per-turn usage cannot inherit a
+  // stale selection (notably same-id Codex vs Copilot models).
+  deps.runObserver.onModelConfigChanged(
+    sessionPath,
+    payload.modelId,
+    payload.thinkingLevel,
+    payload.provider,
+  );
   deps.runObserver.onAssistantTurnStarted(sessionPath, payload.messageId);
 
   if (payload.modelId) {
@@ -344,6 +354,13 @@ export function onCompaction(payload: CompactionPayload, deps: HandlerDeps): voi
     return;
   }
   deps.runObserver.onCompaction(sessionPath);
+}
+
+export function onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload, deps: HandlerDeps): void {
+  const sessionPath = deps.requireEventSessionPath('auxiliary-llm.usage', payload.sessionPath);
+  if (!sessionPath) return;
+  const { sessionPath: _sessionPath, ...sample } = payload;
+  deps.runObserver.onAuxiliaryLlmUsage(sessionPath, sample);
 }
 
 /** Retry-stuck is already surfaced by the companion operational-error event. */

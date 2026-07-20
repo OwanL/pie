@@ -104,6 +104,20 @@ test('computeTokenCostUsd: weighted sum across all four token streams', () => {
   approx(computeTokenCostUsd(usage, PRICED), 37.95);
 });
 
+test('computeTokenCostUsd selects long-context tiers from the full prompt footprint', () => {
+  const pricing: ModelTokenPricing = {
+    input: 1,
+    output: 2,
+    cacheRead: 0.1,
+    cacheWrite: 1,
+    tiers: [{ inputTokensAbove: 200_000, input: 2, output: 3, cacheRead: 0.2, cacheWrite: 2 }],
+  };
+  const below = { inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 100_000, cacheWriteTokens: 0 };
+  const above = { ...below, cacheReadTokens: 100_001 };
+  approx(computeTokenCostUsd(below, pricing), 0.13);
+  approx(computeTokenCostUsd(above, pricing), 0.25);
+});
+
 test('computeTokenCostUsd: zero tokens = $0 even with positive rates', () => {
   const usage: TokenUsageForCost = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   assert.equal(computeTokenCostUsd(usage, PRICED), 0);
@@ -173,13 +187,12 @@ test('estimateRunCostUsd computes the known cost for a priced model', () => {
 
 test('default pricing includes retired models without restoring them to the active catalog', () => {
   const map = loadModelPricingMap();
-  assert.deepEqual(map.get('github-copilot/gpt-5.4'), {
-    input: 2.5,
-    output: 15,
-    cacheRead: 0.25,
-    cacheWrite: 0,
-  });
-  assert.deepEqual(map.get('gpt-5.4'), map.get('github-copilot/gpt-5.4'));
+  const retired = map.get('github-copilot/gpt-5.4');
+  assert.equal(retired?.input, 2.5);
+  assert.equal(retired?.output, 15);
+  assert.equal(retired?.cacheRead, 0.25);
+  assert.equal(retired?.cacheWrite, 0);
+  assert.equal(map.get('gpt-5.4'), undefined, 'same-id provider collisions must not create a bare fallback');
 });
 
 test('active pricing takes precedence over an explicit historical collision', () => {
@@ -269,7 +282,7 @@ test('loadModelPricingMap also accumulates provider.modelOverrides entries', () 
   });
 });
 
-test('loadModelPricingMap keeps provider-specific entries plus a legacy bare-id fallback', () => {
+test('loadModelPricingMap removes the bare fallback for same-id provider collisions', () => {
   // 'dupe' appears in two providers; provider/model keys retain both prices.
   const json = JSON.stringify({
     providers: {
@@ -279,8 +292,8 @@ test('loadModelPricingMap keeps provider-specific entries plus a legacy bare-id 
   });
   withTempModelsJson(json, (filePath) => {
     const map = loadModelPricingMap(filePath);
-    assert.equal(map.size, 3);
-    assert.deepEqual(map.get('dupe'), { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+    assert.equal(map.size, 2);
+    assert.equal(map.get('dupe'), undefined);
     assert.deepEqual(map.get('anthropic/dupe'), { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
     assert.deepEqual(map.get('openai/dupe'), { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
   });

@@ -13,6 +13,7 @@
  */
 
 import type { ModelPricingRecord, ModelTokenPricing } from '../../backend/pricing';
+import { pricingForPromptTokens } from '../../../../shared/pricing-core.js';
 import type {
   AggregateDailyCost,
   AggregateDailyModelCost,
@@ -314,8 +315,9 @@ export function providerForModel(
   const records = pricingMap.get(modelId);
   if (preferredProvider) return preferredProvider;
   if (!records || records.length === 0) return 'unknown';
-  const priced = records.find((r) => r.pricing !== undefined);
-  return priced?.provider ?? records[0]!.provider;
+  const providers = new Set(records.map((record) => record.provider));
+  if (providers.size !== 1) return 'unknown';
+  return records[0]!.provider;
 }
 
 /** Resolve the token pricing for a model id (first priced record), or `null`. */
@@ -330,8 +332,9 @@ export function pricingForModel(
   if (preferredProvider) {
     return records.find((record) => record.provider === preferredProvider)?.pricing ?? null;
   }
-  const priced = records.find((r) => r.pricing !== undefined);
-  return priced?.pricing ?? null;
+  const providers = new Set(records.map((record) => record.provider));
+  if (providers.size !== 1) return null;
+  return records.find((record) => record.pricing !== undefined)?.pricing ?? null;
 }
 
 /** Cost (USD) from cumulative token counts and per-1M-token pricing. */
@@ -343,16 +346,24 @@ function costFromTokens(
   pricing: ModelTokenPricing | null,
 ): number {
   if (!pricing) return 0;
+  const effective = pricingForPromptTokens(pricing, inputTokens, cacheReadTokens, cacheWriteTokens);
   return (
-    (inputTokens / 1_000_000) * pricing.input
-    + (outputTokens / 1_000_000) * pricing.output
-    + (cacheReadTokens / 1_000_000) * pricing.cacheRead
-    + (cacheWriteTokens / 1_000_000) * pricing.cacheWrite
+    (inputTokens / 1_000_000) * effective.input
+    + (outputTokens / 1_000_000) * effective.output
+    + (cacheReadTokens / 1_000_000) * effective.cacheRead
+    + (cacheWriteTokens / 1_000_000) * effective.cacheWrite
   );
 }
 
 function usageTotal(usage: TokenCounts): number {
   return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
+
+function equalUsage(left: TokenCounts, right: TokenCounts): boolean {
+  return left.inputTokens === right.inputTokens
+    && left.outputTokens === right.outputTokens
+    && left.cacheReadTokens === right.cacheReadTokens
+    && left.cacheWriteTokens === right.cacheWriteTokens;
 }
 
 function subtractUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
@@ -370,6 +381,7 @@ function usageForModel(
   counts: TokenCounts,
   pricingMap: Map<string, ModelPricingRecord[]>,
   preferredProvider?: string,
+  reportedCostUsd?: number,
 ): AttributedUsage {
   // Unknown/stale model IDs are folded into one stable bucket. This keeps every
   // model/provider breakdown bounded by the current pricing catalog plus one,
@@ -381,13 +393,15 @@ function usageForModel(
     model: attributedModel,
     provider: providerForModel(attributedModel === 'unknown' ? undefined : attributedModel, pricingMap, preferredProvider),
     occurredAtMs,
-    cost: costFromTokens(
-      counts.inputTokens,
-      counts.outputTokens,
-      counts.cacheReadTokens,
-      counts.cacheWriteTokens,
-      pricing,
-    ),
+    cost: typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
+      ? reportedCostUsd
+      : costFromTokens(
+          counts.inputTokens,
+          counts.outputTokens,
+          counts.cacheReadTokens,
+          counts.cacheWriteTokens,
+          pricing,
+        ),
   };
 }
 
@@ -403,17 +417,44 @@ function attributedRunUsage(
   fallbackMs: number,
 ): AttributedUsage[] {
   const runModel = run.modelId ?? 'unknown';
-  const usage: AttributedUsage[] = [usageForModel(runModel, fallbackMs, {
+  const usage: AttributedUsage[] = [];
+  let parentRemaining: TokenCounts = {
     inputTokens: run.inputTokens,
     outputTokens: run.outputTokens,
     cacheReadTokens: run.cacheReadTokens,
     cacheWriteTokens: run.cacheWriteTokens,
-  }, pricingMap, run.provider)];
+  };
+  // Per-turn samples carry the provider/model that actually served that turn.
+  // Reconcile them against canonical run totals so mixed-model runs remain
+  // discrete without allowing duplicate/malformed samples to inflate usage.
+  for (const sample of run.turnThroughputSamples) {
+    if (usageTotal(parentRemaining) === 0) break;
+    const counts: TokenCounts = {
+      inputTokens: Math.min(parentRemaining.inputTokens, sample.inputTokens ?? 0),
+      outputTokens: Math.min(parentRemaining.outputTokens, sample.outputTokens),
+      cacheReadTokens: Math.min(parentRemaining.cacheReadTokens, sample.cacheReadTokens ?? 0),
+      cacheWriteTokens: Math.min(parentRemaining.cacheWriteTokens, sample.cacheWriteTokens ?? 0),
+    };
+    if (usageTotal(counts) === 0) continue;
+    const occurredAtMs = Date.parse(sample.endedAt);
+    usage.push(usageForModel(
+      sample.modelId ?? runModel,
+      Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
+      counts,
+      pricingMap,
+      sample.provider ?? run.provider,
+      sample.reportedCostUsd,
+    ));
+    parentRemaining = subtractUsage(parentRemaining, counts);
+  }
+  if (usageTotal(parentRemaining) > 0) {
+    usage.push(usageForModel(runModel, fallbackMs, parentRemaining, pricingMap, run.provider));
+  }
   const auxiliary = run.auxiliaryLlmUsage ?? [];
   const seen = new Set<string>();
 
   for (const sample of auxiliary) {
-    if (sample.kind !== 'skill_pruning_prepass') continue;
+    if (sample.kind === 'subagent') continue;
     const dedupKey = `${sample.kind}:${sample.sourceId}`;
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
@@ -423,7 +464,7 @@ function attributedRunUsage(
       cacheReadTokens: sample.cacheReadTokens,
       cacheWriteTokens: sample.cacheWriteTokens,
     };
-    if (usageTotal(counts) === 0) continue;
+    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) continue;
     const occurredAtMs = Date.parse(sample.occurredAt);
     usage.push(usageForModel(
       sample.modelId ?? runModel,
@@ -431,6 +472,7 @@ function attributedRunUsage(
       counts,
       pricingMap,
       sample.provider ?? run.provider,
+      sample.reportedCostUsd,
     ));
   }
 
@@ -453,12 +495,19 @@ function attributedRunUsage(
     };
     if (usageTotal(counts) === 0) continue;
     const occurredAtMs = Date.parse(sample.occurredAt);
+    const sampleCounts: TokenCounts = {
+      inputTokens: sample.inputTokens,
+      outputTokens: sample.outputTokens,
+      cacheReadTokens: sample.cacheReadTokens,
+      cacheWriteTokens: sample.cacheWriteTokens,
+    };
     usage.push(usageForModel(
       sample.modelId ?? runModel,
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
       sample.provider ?? run.provider,
+      equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
     ));
     remaining = subtractUsage(remaining, counts);
   }
@@ -488,9 +537,10 @@ function distributeUsageForSeries(
 ): { cost: TodayCostSample[]; tokens: TodayTokenSample[] } {
   const groups = new Map<string, AttributedUsage>();
   for (const item of usage) {
-    const current = groups.get(item.model);
+    const billingKey = `${item.provider}\u0000${item.model}`;
+    const current = groups.get(billingKey);
     if (!current) {
-      groups.set(item.model, { ...item });
+      groups.set(billingKey, { ...item });
       continue;
     }
     current.inputTokens += item.inputTokens;
@@ -508,7 +558,12 @@ function distributeUsageForSeries(
       .map((sample) => ({ sample, ms: Date.parse(sample.endedAt) }))
       .filter(({ sample, ms }) => !Number.isNaN(ms)
         && includeSample(ms)
-        && canonicalModel(sample.modelId ?? run.modelId, pricingMap) === group.model);
+        && canonicalModel(sample.modelId ?? run.modelId, pricingMap) === group.model
+        && providerForModel(
+          sample.modelId ?? run.modelId,
+          pricingMap,
+          sample.provider ?? run.provider,
+        ) === group.provider);
     const sampleOutput = samples.reduce((sum, entry) => sum + entry.sample.outputTokens, 0);
     if (samples.length === 0) {
       const ms = includeSample(group.occurredAtMs) ? group.occurredAtMs : fallbackMs;

@@ -336,19 +336,29 @@ function extractResultUsage(result: unknown): {
   let outputTokens = 0;
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
-  for (const entry of results) {
-    if (!isRecord(entry)) {
-      continue;
+  const seen = new Set<object>();
+  const visit = (entries: unknown[], depth: number): void => {
+    if (depth > 8) return;
+    for (const entry of entries) {
+      if (!isRecord(entry) || seen.has(entry)) continue;
+      seen.add(entry);
+      const usage = entry.usage;
+      if (isRecord(usage)) {
+        inputTokens += toNonNegativeInt(usage.input);
+        outputTokens += toNonNegativeInt(usage.output);
+        cacheReadTokens += toNonNegativeInt(usage.cacheRead);
+        cacheWriteTokens += toNonNegativeInt(usage.cacheWrite);
+      }
+      if (!Array.isArray(entry.messages)) continue;
+      for (const message of entry.messages) {
+        if (!isRecord(message) || message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+        if (isRecord(message.details) && Array.isArray(message.details.results)) {
+          visit(message.details.results, depth + 1);
+        }
+      }
     }
-    const usage = entry.usage;
-    if (!isRecord(usage)) {
-      continue;
-    }
-    inputTokens += toNonNegativeInt(usage.input);
-    outputTokens += toNonNegativeInt(usage.output);
-    cacheReadTokens += toNonNegativeInt(usage.cacheRead);
-    cacheWriteTokens += toNonNegativeInt(usage.cacheWrite);
-  }
+  };
+  visit(results, 0);
   return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 }
 

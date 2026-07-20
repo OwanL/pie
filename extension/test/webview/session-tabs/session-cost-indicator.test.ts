@@ -242,6 +242,28 @@ test('buildSessionCostIndicator breaks down direct and nested sub-agent costs by
   assert.match(result.tooltip, /Selected model:\s+\$0\.0600/);
 });
 
+test('subagent retry costs remain provider-scoped when model ids collide', () => {
+  const transcript = [{
+    id: 'm1', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    toolCalls: [{
+      id: 'tc1', name: 'subagent', input: {}, status: 'completed' as const,
+      result: { details: { mode: 'single', results: [{
+        model: 'shared-model', provider: 'github-copilot', messages: [],
+        usage: { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 2 },
+        attemptRecords: [
+          { model: 'shared-model', provider: 'openai-codex', usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01 } },
+          { model: 'shared-model', provider: 'github-copilot', usage: { input: 20, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0.02 } },
+        ],
+      }] } },
+    }],
+  }];
+
+  const summary = extractSubagentCostSummary(transcript as never);
+  assert.equal(summary.totalCost, 0.03);
+  assert.equal(summary.modelCosts.get('openai-codex/shared-model')?.cost, 0.01);
+  assert.equal(summary.modelCosts.get('github-copilot/shared-model')?.cost, 0.02);
+});
+
 test('buildSessionCostIndicator merges the live estimate into the selected model\'s by-model row', () => {
   // Regression: the in-flight live-turn estimate used to be keyed by the
   // selected model's DISPLAY NAME while completed turns are keyed by the

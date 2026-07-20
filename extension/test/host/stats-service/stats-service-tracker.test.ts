@@ -622,6 +622,39 @@ test('subagent tool call forwards turnThroughputSamples into the parent run', ()
   }]);
 });
 
+test('subagent retry usage remains attributed to each attempt provider', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  const toolCall: ToolCall = {
+    id: 'subagent-retry',
+    name: 'subagent',
+    input: { agent: 'worker', task: 'retry' },
+    status: 'completed',
+    result: { details: { mode: 'single', results: [{
+      agent: 'worker', task: 'retry', exitCode: 0, messages: [],
+      model: 'shared-model', provider: 'github-copilot',
+      usage: { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0.03 },
+      attemptRecords: [
+        { attemptId: 'a', provider: 'openai-codex', model: 'shared-model', usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.01 } },
+        { attemptId: 'b', provider: 'github-copilot', model: 'shared-model', usage: { input: 20, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0.02 } },
+      ],
+    }] } },
+  };
+
+  harness.tracker.onToolStarted(harness.sessionPath, toolCall);
+  harness.tracker.onToolFinished(harness.sessionPath, toolCall);
+  const samples = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage ?? [];
+  assert.deepEqual(samples.map((sample) => ({
+    provider: sample.provider,
+    modelId: sample.modelId,
+    inputTokens: sample.inputTokens,
+    reportedCostUsd: sample.reportedCostUsd,
+  })), [
+    { provider: 'openai-codex', modelId: 'shared-model', inputTokens: 10, reportedCostUsd: 0.01 },
+    { provider: 'github-copilot', modelId: 'shared-model', inputTokens: 20, reportedCostUsd: 0.02 },
+  ]);
+});
+
 test('skill-pruning usage records the actual model and ignores duplicate CustomMessage delivery', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);

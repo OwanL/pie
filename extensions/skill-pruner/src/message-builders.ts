@@ -19,6 +19,7 @@ import type { PrepassUsage, SkillPruningResult, ToolPruningResult } from "./prun
 
 export interface PrepassDiagnostics {
 	model: string;
+	provider?: string;
 	thinkingLevel: string;
 	response: string;
 	thinking: string;
@@ -37,6 +38,7 @@ function applyPrepassUsage(details: PruningResult, usage: PrepassUsage | undefin
 	details.prepassOutputTokens = usage.output;
 	details.prepassCacheReadTokens = usage.cacheRead;
 	details.prepassCacheWriteTokens = usage.cacheWrite;
+	if (usage.reportedCostUsd !== undefined) details.prepassReportedCostUsd = usage.reportedCostUsd;
 }
 
 /**
@@ -248,6 +250,7 @@ export function buildFeedbackMessage(
 			skillTokensSaved: 0,
 			toolTokensSaved: 0,
 			prepassModel: prepass.model,
+			...(prepass.provider ? { prepassProvider: prepass.provider } : {}),
 			prepassThinkingLevel: prepass.thinkingLevel,
 			prepassError: prepass.error,
 		};
@@ -289,6 +292,7 @@ export function buildFeedbackMessage(
 
 	if (prepass) {
 		details.prepassModel = prepass.model;
+		if (prepass.provider) details.prepassProvider = prepass.provider;
 		details.prepassThinkingLevel = prepass.thinkingLevel;
 		if (prepass.response) details.prepassResponse = prepass.response;
 		if (prepass.thinking) details.prepassThinking = prepass.thinking;

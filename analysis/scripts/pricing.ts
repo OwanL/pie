@@ -6,7 +6,7 @@
  * module and is re-exported here. The package-local pieces that differ by
  * consumer policy remain here:
  *
- * - `loadModelPricingMap` — provider/model keys plus legacy first-provider bare-id
+ * - `loadModelPricingMap` — provider/model keys plus unambiguous legacy bare-id
  *   keys in a `Map<string, ModelTokenPricing>`, env-aware (delegates file IO to
  *   `./load-models.ts`).
  * - `computeTokenCostUsd` / `estimateRunCostUsd` — analysis-only token-math
@@ -24,14 +24,14 @@
  */
 import { loadHistoricalModelRecords, loadModelsJsonProviders } from './load-models.ts';
 
-import { parseModelPricing } from '../../shared/pricing-core.js';
+import { parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
 import type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-export the shared core under the original public names so existing
 // consumers (analysis/scripts/prepare.ts, analysis/test/pricing.test.ts) keep
 // working unchanged. estimateNormalizedCost is the shared normalization helper,
 // re-exported for downstream reuse within the analysis package.
-export { estimateNormalizedCost, parseModelPricing } from '../../shared/pricing-core.js';
+export { estimateNormalizedCost, parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
 export type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-exported so existing imports of `resolveModelsJsonPath` from `./pricing.ts`
@@ -49,6 +49,7 @@ export interface TokenUsageForCost {
 
 function addRecord(
   map: Map<string, ModelTokenPricing>,
+  bareOwners: Map<string, string | null>,
   provider: string,
   id: string,
   model: Record<string, unknown>,
@@ -57,8 +58,19 @@ function addRecord(
   const pricing = parseModelPricing(model.cost);
   if (!pricing) return;
   map.set(`${provider}/${id}`, pricing);
-  // Retain the historical bare-id fallback for snapshots without provider.
-  if (!map.has(id)) map.set(id, pricing);
+  // Legacy provider-less snapshots may use a bare id only while it identifies
+  // exactly one provider. On the first collision delete the fallback forever;
+  // insertion order must never decide whether Codex or Copilot owns the cost.
+  const owner = bareOwners.get(id);
+  if (owner === undefined) {
+    bareOwners.set(id, provider);
+    map.set(id, pricing);
+  } else if (owner === provider) {
+    map.set(id, pricing);
+  } else if (owner !== null) {
+    bareOwners.set(id, null);
+    map.delete(id);
+  }
 }
 
 /**
@@ -70,6 +82,7 @@ function addRecord(
  */
 export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: string): Map<string, ModelTokenPricing> {
   const map = new Map<string, ModelTokenPricing>();
+  const bareOwners = new Map<string, string | null>();
   const providers = loadModelsJsonProviders(modelsJsonPath);
 
   for (const [providerName, providerData] of Object.entries(providers ?? {})) {
@@ -88,7 +101,7 @@ export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: strin
         if (typeof m.id !== 'string') {
           continue;
         }
-        addRecord(map, providerName, m.id, m);
+        addRecord(map, bareOwners, providerName, m.id, m);
       }
     }
 
@@ -98,7 +111,7 @@ export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: strin
         if (!model || typeof model !== 'object') {
           continue;
         }
-        addRecord(map, providerName, id, model as Record<string, unknown>);
+        addRecord(map, bareOwners, providerName, id, model as Record<string, unknown>);
       }
     }
   }
@@ -112,8 +125,9 @@ export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: strin
     const pricing = parseModelPricing(model.cost);
     if (!pricing) continue;
     const providerKey = `${model.provider}/${model.id}`;
-    if (!map.has(providerKey)) map.set(providerKey, pricing);
-    if (!map.has(model.id)) map.set(model.id, pricing);
+    if (!map.has(providerKey)) {
+      addRecord(map, bareOwners, model.provider, model.id, { cost: model.cost });
+    }
   }
 
   return map;
@@ -121,11 +135,17 @@ export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: strin
 
 /** Compute USD cost for a token usage given a pricing record. */
 export function computeTokenCostUsd(usage: TokenUsageForCost, pricing: ModelTokenPricing): number {
+  const effective = pricingForPromptTokens(
+    pricing,
+    usage.inputTokens,
+    usage.cacheReadTokens,
+    usage.cacheWriteTokens,
+  );
   const cost =
-    (usage.inputTokens / TOKENS_PER_MILLION) * pricing.input +
-    (usage.outputTokens / TOKENS_PER_MILLION) * pricing.output +
-    (usage.cacheReadTokens / TOKENS_PER_MILLION) * pricing.cacheRead +
-    (usage.cacheWriteTokens / TOKENS_PER_MILLION) * pricing.cacheWrite;
+    (usage.inputTokens / TOKENS_PER_MILLION) * effective.input +
+    (usage.outputTokens / TOKENS_PER_MILLION) * effective.output +
+    (usage.cacheReadTokens / TOKENS_PER_MILLION) * effective.cacheRead +
+    (usage.cacheWriteTokens / TOKENS_PER_MILLION) * effective.cacheWrite;
   return Math.round(cost * 1_000_000) / 1_000_000; // round to 1 micro-dollar
 }
 

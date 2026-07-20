@@ -595,8 +595,8 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   assert.doesNotMatch(runningParentHtml, /status-chip-label">Running/);
   assert.doesNotMatch(runningParentHtml, /subagent-model-tag/);
   assert.match(runningParentHtml, /gpt-4\.1/);  // model now shown in header
-  assert.match(runningParentHtml, /Starting/);
-  assert.match(runningParentHtml, /waiting for first status update/);
+  assert.match(runningParentHtml, /status-chip-completed[^>]*>.*Finished/);
+  assert.doesNotMatch(runningParentHtml, /Starting|waiting for first status update/);
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
   assert.match(runningParentHtml, /ctx 51k \/ 200k/);
   assert.match(runningParentHtml, /26%/);
@@ -906,7 +906,40 @@ test('subagent card shows preview rows only while collapsed', async () => {
   }));
   assert.match(completedCollapsedHtml, /subagent-live-preview/);
   assert.match(completedCollapsedHtml, /Inspect regression/);
+  assert.match(completedCollapsedHtml, /status-chip-completed[^>]*>.*Finished/);
   assert.doesNotMatch(completedCollapsedHtml, /subagent-messages/);
+});
+
+test('a completed parallel child shows the same finished UI while its sibling keeps running', async () => {
+  const { ToolCallItem } = await loadWebviewModules();
+
+  const html = renderToString(h(ToolCallItem, {
+    toolCall: toolCall({
+      id: 'sub-parallel-partial-completion',
+      name: 'subagent',
+      status: 'running',
+      input: { tasks: [{ agent: 'scout', task: 'A' }, { agent: 'reviewer', task: 'B' }] },
+      result: {
+        details: {
+          mode: 'parallel',
+          results: [
+            { agent: 'scout', task: 'A', exitCode: 0, messages: [], runningTools: ['read'] },
+            { agent: 'reviewer', task: 'B', exitCode: -1, messages: [], streaming: true },
+          ],
+        },
+      },
+    }),
+    prefs: DEFAULT_CHAT_PREFS,
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+
+  assert.equal((html.match(/tool-call-subagent[^"]* completed/g) ?? []).length, 1);
+  assert.equal((html.match(/status-chip-completed/g) ?? []).length, 1);
+  assert.match(html, /Finished/);
+  assert.match(html, /Waiting for output/);
 });
 
 test('parallel subagent children each get a connector-strip wrapper tying them to the call', async () => {

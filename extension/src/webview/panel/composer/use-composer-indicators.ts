@@ -195,8 +195,8 @@ export function useComposerIndicators({
     [sessionTokenUsage, fallbackPricing, resolvePricing],
   );
   const subagentCostSummary = useMemo(
-    () => extractSubagentCostSummary(transcript),
-    [sessionPath, subagentSig],
+    () => extractSubagentCostSummary(transcript, resolvePricing),
+    [sessionPath, subagentSig, resolvePricing],
   );
   const sessionCostIndicator = useMemo(
     () => buildSessionCostIndicator(

@@ -8,7 +8,7 @@ import type { ToolCall } from '../../../../shared/protocol';
  *  interactive "Failed" status chip (with copy-error affordance) rendered by
  *  the header, so it is intentionally absent here. Follows an "alert on
  *  failure, not on success" philosophy — completion is the expected/default
- *  state and gets no glyph, mirroring the subagent StatusIndicator. */
+ *  state and gets no glyph. */
 export function ToolCallStatusGlyph({ status }: { status: ToolCall['status'] }) {
   if (status === 'running') {
     return (

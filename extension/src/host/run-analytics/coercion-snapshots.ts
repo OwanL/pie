@@ -38,6 +38,10 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   // outputTokens defensively so persisted/malformed data can't exceed it.
   const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
   const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, outputTokens) : undefined;
+  const reportedCostUsd = typeof value.reportedCostUsd === 'number'
+    && Number.isFinite(value.reportedCostUsd) && value.reportedCostUsd >= 0
+    ? value.reportedCostUsd
+    : undefined;
   return {
     inputTokens,
     outputTokens,
@@ -45,11 +49,17 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
     cacheWriteTokens,
     totalTokens,
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
 }
 
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
-const AUXILIARY_LLM_USAGE_KINDS = new Set(['skill_pruning_prepass', 'subagent']);
+const AUXILIARY_LLM_USAGE_KINDS = new Set([
+  'skill_pruning_prepass',
+  'subagent',
+  'history_compaction',
+  'branch_summary',
+]);
 
 function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
   if (!Array.isArray(value)) {
@@ -72,6 +82,10 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
     const durationMs = typeof entry.durationMs === 'number' && Number.isFinite(entry.durationMs) && entry.durationMs >= 0
       ? Math.trunc(entry.durationMs)
       : undefined;
+    const reportedCostUsd = typeof entry.reportedCostUsd === 'number'
+      && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
+      ? entry.reportedCostUsd
+      : undefined;
     samples.push({
       kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
       sourceId: entry.sourceId,
@@ -82,6 +96,7 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(reportedCostUsd === undefined ? {} : { reportedCostUsd }),
       ...(durationMs === undefined ? {} : { durationMs }),
     });
   }
@@ -226,6 +241,10 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       status,
       modelId: typeof entry.modelId === 'string' ? entry.modelId : undefined,
       provider: typeof entry.provider === 'string' ? entry.provider : undefined,
+      reportedCostUsd: typeof entry.reportedCostUsd === 'number'
+        && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
+        ? entry.reportedCostUsd
+        : undefined,
       providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
       providerQueueAttemptCount: toNonNegativeInteger(entry.providerQueueAttemptCount),
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),

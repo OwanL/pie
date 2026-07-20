@@ -262,14 +262,14 @@ test('synthesized placeholder trims whitespace from agent and task and rejects b
 
 // --- getRenderableSubagentResultFromToolCall: normalizeRenderableSubagentResult (running) ---
 
-test('normalize: running result with exitCode 0 and no messages/runningTools is inferred running (exitCode -> -1)', () => {
+test('normalize: running result with exitCode 0 and no messages/runningTools keeps the reported exitCode 0', () => {
   const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
     input: {},
     status: 'running',
     result: resultWith(single({ exitCode: 0, messages: [] })),
   };
   const out = getRenderableSubagentResultFromToolCall(toolCall)!;
-  assert.equal(out.results[0]!.exitCode, -1);
+  assert.equal(out.results[0]!.exitCode, 0);
 });
 
 test('normalize: running result with messages and no runningTools keeps exitCode 0 (already produced output)', () => {
@@ -282,14 +282,14 @@ test('normalize: running result with messages and no runningTools keeps exitCode
   assert.equal(out.results[0]!.exitCode, 0);
 });
 
-test('normalize: running result with runningTools is inferred running even with messages present', () => {
+test('normalize: running result with runningTools keeps the reported exitCode 0', () => {
   const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
     input: {},
     status: 'running',
     result: resultWith(single({ exitCode: 0, messages: [{ role: 'assistant', content: 'hi' }], runningTools: ['bash'] })),
   };
   const out = getRenderableSubagentResultFromToolCall(toolCall)!;
-  assert.equal(out.results[0]!.exitCode, -1);
+  assert.equal(out.results[0]!.exitCode, 0);
 });
 
 test('normalize: running result with a non-zero exitCode is left unchanged', () => {

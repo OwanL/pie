@@ -37,6 +37,8 @@ export interface SubagentTurnThroughputSample {
 	status: 'completed' | 'error' | 'interrupted';
 	/** The model this turn ran on. */
 	modelId?: string;
+	/** The provider that served this turn. */
+	provider?: string;
 }
 
 /** Attempt phases with producer-owned elapsed-time evidence. `retry_wait` is
@@ -169,6 +171,8 @@ export interface SubagentAttemptRecord {
 	provider?: string;
 	/** Model id used for this attempt. */
 	model?: string;
+	/** Usage attributed to this individual attempt (not tree-cumulative). */
+	usage?: UsageStats;
 	/** Epoch milliseconds when the attempt started. */
 	startedAt?: number;
 	/** Epoch milliseconds when the attempt ended. */

@@ -47,6 +47,7 @@ export interface PrepassUsage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	reportedCostUsd?: number;
 }
 
 export interface CompleteSimpleResult {
@@ -54,7 +55,7 @@ export interface CompleteSimpleResult {
 	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	usage?: Partial<PrepassUsage>;
+	usage?: Partial<PrepassUsage> & { cost?: { total?: number } };
 }
 
 const DEFAULT_PROMPT_TEMPLATE = loadPromptTemplate();
@@ -359,6 +360,10 @@ export async function runLlmPruning(
 			output: response.usage.output ?? 0,
 			cacheRead: response.usage.cacheRead ?? 0,
 			cacheWrite: response.usage.cacheWrite ?? 0,
+			...(typeof response.usage.cost?.total === "number"
+				&& Number.isFinite(response.usage.cost.total) && response.usage.cost.total >= 0
+				? { reportedCostUsd: response.usage.cost.total }
+				: {}),
 		} : undefined,
 		keptAllDueToParseFailure: parsed.keptAllDueToParseFailure,
 	};

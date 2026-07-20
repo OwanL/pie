@@ -1,4 +1,5 @@
 import type {
+  AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
   ContextUsageChangedPayload,
@@ -26,6 +27,7 @@ import type {
   ToolStartedPayload,
 } from '../../shared/protocol';
 import {
+  isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
   isCompactionPayload,
   isContextUsageChangedPayload,
@@ -76,6 +78,7 @@ export interface SessionBackendEventHandlers {
   onRetryEnded(payload: RetryEndedPayload): void;
   onRetryMeasured(payload: RetryMeasuredPayload): void;
   onCompaction(payload: CompactionPayload): void;
+  onAuxiliaryLlmUsage(payload: AuxiliaryLlmUsagePayload): void;
   onOperationalError(payload: OperationalErrorPayload): void;
   onRetryStuck(payload: RetryStuckPayload): void;
   onBusyChanged(payload: BusyChangedPayload): void;
@@ -173,6 +176,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'compaction.ended':
       dispatch(event, isCompactionPayload, handlers.onCompaction);
+      return;
+    case 'auxiliary-llm.usage':
+      dispatch(event, isAuxiliaryLlmUsagePayload, handlers.onAuxiliaryLlmUsage);
       return;
     case 'operational-error':
       dispatch(event, isOperationalErrorPayload, handlers.onOperationalError);

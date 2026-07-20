@@ -21,6 +21,7 @@
  */
 
 import type {
+  AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
   ContextUsageChangedPayload,
@@ -384,6 +385,24 @@ export function isCompactionPayload(value: unknown): value is CompactionPayload 
   return (
     isObject(value)
     && isString(value.sessionPath)
+  );
+}
+
+export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLlmUsagePayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && (value.kind === 'history_compaction' || value.kind === 'branch_summary')
+    && isString(value.sourceId)
+    && isString(value.occurredAt)
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
+    && isFiniteNumber(value.inputTokens)
+    && isFiniteNumber(value.outputTokens)
+    && isFiniteNumber(value.cacheReadTokens)
+    && isFiniteNumber(value.cacheWriteTokens)
+    && isOptionalFiniteNumber(value.reportedCostUsd)
+    && isOptionalFiniteNumber(value.durationMs)
   );
 }
 

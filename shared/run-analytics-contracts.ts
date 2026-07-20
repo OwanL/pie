@@ -51,6 +51,9 @@ export interface AssistantUsage {
    * at extraction so it can never exceed it.
    */
   reasoningTokens?: number;
+  /** Cost attached to this exact provider response by pi-ai/model metadata.
+   * Consumers prefer it over catalog re-pricing when present. */
+  reportedCostUsd?: number;
 }
 
 export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
@@ -192,6 +195,8 @@ export interface TurnThroughputSample {
   modelId?: string;
   /** Provider paired with modelId when known. */
   provider?: string;
+  /** Cost attached to this exact provider response, when reported. */
+  reportedCostUsd?: number;
   /**
    * Time spent waiting for provider-gate concurrency permits across the HTTP
    * attempts belonging to this turn. Zero is an explicit immediate grant;
@@ -241,7 +246,11 @@ export interface TurnThroughputSample {
   contextTokens?: number | null;
 }
 
-export type AuxiliaryLlmUsageKind = 'skill_pruning_prepass' | 'subagent';
+export type AuxiliaryLlmUsageKind =
+  | 'skill_pruning_prepass'
+  | 'subagent'
+  | 'history_compaction'
+  | 'branch_summary';
 
 /**
  * Timestamped usage from an LLM call that is not one of the parent session's
@@ -262,6 +271,8 @@ export interface AuxiliaryLlmUsageSample {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Cost attached to this exact provider response, when reported. */
+  reportedCostUsd?: number;
   /** Wall-clock duration of the auxiliary call when measured. Undefined for
    * historical samples and sources that expose usage but no timing. */
   durationMs?: number;
