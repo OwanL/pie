@@ -411,6 +411,7 @@ export function isOperationalErrorPayload(value: unknown): value is OperationalE
     isObject(value)
     && isString(value.code)
     && isString(value.message)
+    && isOptionalString(value.detail)
     && isString(value.sessionPath)
     && isOptionalString(value.requestId)
   );

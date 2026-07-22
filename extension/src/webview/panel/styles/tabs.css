@@ -100,7 +100,7 @@
   background: color-mix(in srgb, var(--panel-danger-surface) 72%, var(--panel-control-surface));
 }
 
-/* Credential-redacted backend error detail revealed by "Show raw". Monospaced,
+/* Credential-redacted backend error detail revealed by "More". Monospaced,
  * scrollable, and dimmer than the summary so the short summary stays primary. */
 .notice-raw-detail {
   margin: 6px 0 0;

@@ -5,7 +5,7 @@ import type { ChatMessage } from '../../../shared/protocol/messages.js';
 import { LIVE_PIPELINE_LIMITS, type LivePipelineState } from '../../../shared/live-pipeline-protocol.js';
 import type { Event } from '../events.js';
 import type { Effect } from '../effects.js';
-import type { ReducerResult } from './helpers.js';
+import { findPendingTurnOwner, type ReducerResult } from './helpers.js';
 import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
 import { interruptLivePipelineForRestart } from '../live-pipeline/cleanup.js';
 import { applyLiveSemanticEnvelope } from '../live-pipeline/transitions.js';
@@ -207,18 +207,13 @@ function commitPromotedSend(
   canonicalMessageId: string,
 ): ReducerResult {
   const effects: Effect[] = [];
-  let promotedCorrId: string | undefined;
-  for (const [corrId, operation] of Object.entries(state.pending.promoted)) {
-    if (operation.requestId === requestId) {
-      promotedCorrId = corrId;
-      effects.push({ kind: 'ClearSendTimer', corrId });
-      break;
-    }
-  }
+  const turnOwner = findPendingTurnOwner(state, sessionPath, requestId);
+  if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
   const next = produce(state, (draft) => {
     draft.pending.currentTurnBySession[sessionPath] = { requestId, firstMessageId: canonicalMessageId };
     delete draft.pending.requestIdToLocalId[requestId];
-    if (promotedCorrId) delete draft.pending.promoted[promotedCorrId];
+    if (turnOwner?.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
+    else if (turnOwner) delete draft.pending.ops[turnOwner.corrId];
     delete draft.pending.prepassBySession[sessionPath];
   });
   return { state: next, effects };

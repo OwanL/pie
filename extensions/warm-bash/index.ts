@@ -25,7 +25,8 @@
  *   PIE_BASH_WARMUP_TIMEOUT_MS — warmup wait ms (default 10000; 0 = default)
  */
 
-import { createBashTool, createLocalBashOperations, getShellConfig, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createLocalBashOperations, getAgentDir, getShellConfig, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { createWarmBashOperations, createWarmBashMetrics } from "./src/operations.js";
 import { probeGnuGrep } from "./src/auto-prune.js";
 import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./src/logger.js";
@@ -34,6 +35,7 @@ import { registerWarmBashStats, type WarmBashStats } from "./src/stats.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
 import type { BashOperations } from "./src/types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./src/shared-state.js";
+import { prependManagedBinDir } from "./src/managed-env.js";
 
 function idleTarget(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_WARM_POOL ?? "", 10);
@@ -146,6 +148,14 @@ export default function (pi: ExtensionAPI) {
    *  process-wide generation; every extension instance then replaces its own
    *  stale cached tools lazily on their next use. */
   function reconcilePool(cfg: PoolCfg): void {
+    // pi prepends getAgentDir()/bin to PATH (getShellEnv) so its managed SDK
+    // binaries (rg, fd) resolve ahead of the inherited PATH. Warm workers are
+    // spawned ONCE with a fixed env and reuse it for every command, so derive
+    // the SAME authoritative managed env here and pass it to the pool —
+    // otherwise workers inherit a PATH missing <agentDir>/bin and rg/fd ENOENT
+    // inside warm-bash even though the built-in fresh-spawn path finds them.
+    const managedEnv = prependManagedBinDir(process.env, join(getAgentDir(), "bin"));
+
     if (cfg.target <= 0) {
       if (shared.pool) {
         shared.pool.dispose();
@@ -159,7 +169,7 @@ export default function (pi: ExtensionAPI) {
     if (!shared.pool) {
       shared.pool = new WarmBashPool({
         size: cfg.target,
-        env: process.env,
+        env: managedEnv,
         shellPath: cfg.shell,
         warmupTimeoutMs: cfg.warmup,
       });
@@ -174,7 +184,7 @@ export default function (pi: ExtensionAPI) {
       shared.pool.dispose();
       shared.pool = new WarmBashPool({
         size: cfg.target,
-        env: process.env,
+        env: managedEnv,
         shellPath: cfg.shell,
         warmupTimeoutMs: cfg.warmup,
       });

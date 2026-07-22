@@ -32,7 +32,10 @@ export async function execFastPath(opts: FastPathOpts): Promise<{ exitCode: numb
     return { exitCode: 0 };
   }
 
-  const binary = resolveBinary(opts.program);
+  // Resolve against the execution env's PATH (not process.env.PATH) so pi's
+  // managed-bin directory — prepended to PATH by the host for this call — is
+  // honoured and rg/fd fast-path instead of falling back to a shell.
+  const binary = resolveBinary(opts.program, opts.env);
   if (!binary) throw new FastPathError(`ENOENT: ${opts.program}`);
 
   const cwd = opts.cwd ? resolve(opts.baseCwd, opts.cwd) : opts.baseCwd;

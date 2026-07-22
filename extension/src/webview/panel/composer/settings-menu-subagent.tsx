@@ -407,7 +407,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
           onInput={(e) => onSetPrefs({ subagentMaxInflight: Number((e.target as HTMLInputElement).value) })}
           aria-label="Max concurrent root subagent trees"
         />
-        <div class="toolbar-settings-item-hint">Global cap on independent root subagent trees across all sessions and on sibling subagent calls emitted in one turn. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle.</div>
+        <div class="toolbar-settings-item-hint">Global concurrency cap on independent root subagent trees across all sessions. Sibling calls have no per-turn count cap; calls beyond this limit wait for a permit. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle.</div>
       </div>
     </div>
   );

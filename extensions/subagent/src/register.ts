@@ -24,7 +24,6 @@ import { SubagentParams, prepareSubagentArguments, BUCKET_GUIDANCE as BUCKET_GUI
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";
 import type { OnUpdateCallback } from "../types.js";
-import { getMaxInflight } from "./concurrency-limit.js";
 
 const THINKING_LEVEL_HINT = "Optional thinkingLevel: minimal, low, medium, high, or xhigh.";
 const BUCKET_GUIDANCE = `${BUCKET_GUIDANCE_BASE} ${THINKING_LEVEL_HINT}`;
@@ -96,21 +95,6 @@ export default function (pi: ExtensionAPI) {
 
 	const isDisabledFn = isDisabled(pi);
 	const disabled = isDisabledFn();
-	let callsThisAgentTurn = 0;
-
-	pi.on("before_agent_start", async () => {
-		callsThisAgentTurn = 0;
-	});
-	pi.on("tool_call", async (event) => {
-		if (event.toolName !== "subagent") return undefined;
-		callsThisAgentTurn++;
-		const max = getMaxInflight();
-		if (callsThisAgentTurn <= max) return undefined;
-		return {
-			block: true,
-			reason: `At most ${max} subagent calls may be emitted in one agent turn. Keep only independent tasks as sibling calls; delegate remaining work in a later turn.`,
-		};
-	});
 
 	pi.registerTool({
 		name: "subagent",

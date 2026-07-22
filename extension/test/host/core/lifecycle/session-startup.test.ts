@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { publishBackendReady } from '../../../../src/host/session-service/backend-ready';
+import { seedHistoryCompactionEnvironment } from '../../../../src/host/session-service/runtime-prefs-bootstrap';
+import { DEFAULT_HISTORY_COMPACTION_SETTINGS, HISTORY_COMPACTION_ENV } from '../../../../src/shared/protocol';
 import { buildRestoredSessionSummaries } from '../../../../src/host/core/restored-session-summaries';
 import { createInitialArchState } from '../../../../src/host/core/arch-state';
 import { reducer } from '../../../../src/host/core/reducer';
@@ -35,6 +37,22 @@ test('buildRestoredSessionSummaries preserves persisted tab names', () => {
 
   assert.equal(summaries[0]?.name, 'Fix startup');
   assert.equal(summaries[0]?.isPlaceholder, false);
+});
+
+test('startup seeds persisted history-compaction settings before the backend is spawned', () => {
+  const env: NodeJS.ProcessEnv = {};
+  const historyCompaction = {
+    ...DEFAULT_HISTORY_COMPACTION_SETTINGS,
+    enabled: false,
+    thresholdMode: 'tokens' as const,
+    softThreshold: 250_000,
+    hardThreshold: 300_000,
+    keepRecentTokens: 80_000,
+  };
+
+  seedHistoryCompactionEnvironment({ historyCompaction }, env);
+
+  assert.deepEqual(JSON.parse(env[HISTORY_COMPACTION_ENV] ?? ''), historyCompaction);
 });
 
 test('publishBackendReady sets backendReady before restore open and keeps it true on restore failure', () => {

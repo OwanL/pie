@@ -21,6 +21,7 @@ import type {
 
 import type { AgentConfig } from "./agents.js";
 import { textContent } from "./src/text-content.js";
+import { formatSubagentPrompt } from "./src/user-context.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
@@ -1159,6 +1160,8 @@ export async function runSingleAgent(
 	},
 	/** Stable identity for this attempt; used by orphan registry and analytics. */
 	attemptId?: string,
+	/** Optional lean user-role context extracted from the parent session. */
+	parentUserContext?: string,
 ): Promise<SingleResult> {
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
@@ -1459,7 +1462,7 @@ export async function runSingleAgent(
 	// under parallel subagent runs (unlike a process.env flag, which would race).
 	const subagentDepth = readRuntimeContext().depth;
 	const runPrompt = (): Promise<void> =>
-		subagentContext.run({ depth: subagentDepth }, () => session.prompt(`Task: ${task}`));
+		subagentContext.run({ depth: subagentDepth }, () => session.prompt(formatSubagentPrompt(task, parentUserContext)));
 	try {
 		// Capture the model the session actually selected (in case our hint was overridden).
 		if (session.agent?.state?.model) {

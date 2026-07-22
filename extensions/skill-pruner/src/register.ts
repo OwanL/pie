@@ -99,16 +99,28 @@ export default function register(pi: ExtensionAPI) {
 		// A new top-level pruning decision owns a fresh hidden-skill catalog.
 		// Queued continuations returned above intentionally retain the current one.
 		recordHiddenSkills(sessionId, []);
-		const allTools = state.getAllToolsOverride
+		const configuredTools = state.getAllToolsOverride
 			? state.getAllToolsOverride()
 			: getPiToolSeams().getAllTools();
+		const activeToolNames = state.getActiveToolsOverride
+			? state.getActiveToolsOverride()
+			: getPiToolSeams().getActiveTools();
+		// An explicit empty selected-tools list is the backend's authoritative
+		// signal that the user switched off the Tools system-prompt entry. Do not
+		// let this extension's restoration/selection calls re-expose those schemas.
+		const toolsManuallyDisabled = Array.isArray(event.systemPromptOptions.selectedTools)
+			&& event.systemPromptOptions.selectedTools.length === 0;
+		const previouslyPruned = getPrunedTools(sessionId);
+		const consideredToolNames = toolsManuallyDisabled
+			? new Set<string>()
+			: new Set([...activeToolNames, ...previouslyPruned]);
+		// Reconsider tools hidden by the preceding pruning decision, but never
+		// pull in every configured tool: tools made inactive by the user or another
+		// extension are outside skill-pruner's ownership.
+		const availableTools = configuredTools.filter((tool) => consideredToolNames.has(tool.name));
 		const restorePrunerOwnedTools = () => {
-			const previouslyPruned = getPrunedTools(sessionId);
-			if (previouslyPruned.size === 0) return;
-			const activeNames = state.getActiveToolsOverride
-				? state.getActiveToolsOverride()
-				: getPiToolSeams().getActiveTools();
-			const restored = [...new Set([...activeNames, ...previouslyPruned])];
+			if (previouslyPruned.size === 0 || toolsManuallyDisabled) return;
+			const restored = [...new Set([...activeToolNames, ...previouslyPruned])];
 			if (state.setActiveToolsOverride) state.setActiveToolsOverride(restored);
 			else getPiToolSeams().setActiveTools(restored);
 			recordPrunedTools(sessionId, []);
@@ -159,7 +171,7 @@ export default function register(pi: ExtensionAPI) {
 		let keptAllDueToParseFailure = false;
 		let cacheHit = false;
 
-		const hasToolsConfig = activeConfig.tools && allTools.length > 0;
+		const hasToolsConfig = activeConfig.tools && availableTools.length > 0;
 
 		if (skills.length > 0 || hasToolsConfig) {
 			const { visibleSkills, effectivePinned } = resolveVisibleSkills(skills, activeConfig);
@@ -183,7 +195,7 @@ export default function register(pi: ExtensionAPI) {
 				skills: visibleSkills
 					.filter((s) => !forcedSkillNames.has(s.name))
 					.map((s) => ({ name: s.name, description: s.description })),
-				tools: allTools
+				tools: availableTools
 					.filter((t) => !forcedToolNames.has(t.name))
 					.map((t) => ({ name: t.name, description: t.description ?? "" })),
 				config: activeConfig,
@@ -255,7 +267,7 @@ export default function register(pi: ExtensionAPI) {
 				// whether any tools survive: a legitimate full skill-prune is allowed
 				// through whenever tools remain (zero skills leaves the agent
 				// functional, unlike zero tools).
-				const toolSelection = applyToolSelection(allTools, prunedTools, activeConfig);
+				const toolSelection = applyToolSelection(availableTools, prunedTools, activeConfig);
 				toolSafeguardReason = toolSelection.safeguardReason ?? toolSafeguardReason;
 
 				const toolsRemain = toolSelection.includedToolNames.length > 0;
@@ -295,7 +307,7 @@ export default function register(pi: ExtensionAPI) {
 				}
 
 				// --- Tool pruning: disable pruned tools (auto mode only) ---
-				if (activeConfig.tools && allTools.length > 0) {
+				if (activeConfig.tools && availableTools.length > 0) {
 					// Always apply the resolved auto-mode set, including keep-all and
 					// fail-open outcomes, so tools pruned on a previous turn are restored.
 					if (activeConfig.mode === "auto") {
@@ -312,7 +324,7 @@ export default function register(pi: ExtensionAPI) {
 					toolResult = {
 						included: toolSelection.includedToolNames,
 						excluded: toolSelection.excludedToolNames,
-						tokensSaved: estimateToolTokens(allTools, toolSelection.excludedToolNames),
+						tokensSaved: estimateToolTokens(availableTools, toolSelection.excludedToolNames),
 					};
 				}
 
@@ -320,7 +332,7 @@ export default function register(pi: ExtensionAPI) {
 				// (Previously only skill data was logged, so tool pruning was invisible to the
 				// dashboard. Tool token estimates mirror the skill-block accounting.)
 				const skillsBlockFound = !!match;
-				const toolsConsidered = !!(activeConfig.tools && allTools.length > 0);
+				const toolsConsidered = !!(activeConfig.tools && availableTools.length > 0);
 				if (skillsBlockFound || toolsConsidered) {
 					appendDecision(buildDecision({
 						sessionId, sessionPath, mode: activeConfig.mode, query: event.prompt,
@@ -333,8 +345,8 @@ export default function register(pi: ExtensionAPI) {
 						pinned: effectivePinned, newBlock: newSkillBlock, originalBlock: originalSkillBlock,
 						toolIncluded: toolsConsidered ? toolSelection.includedToolNames : undefined,
 						toolExcluded: toolsConsidered ? toolSelection.excludedToolNames : undefined,
-						toolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, toolSelection.includedToolNames) : undefined,
-						originalToolBlockTokens: toolsConsidered ? estimateToolTokens(allTools, allTools.map((t) => t.name)) : undefined,
+						toolBlockTokens: toolsConsidered ? estimateToolTokens(availableTools, toolSelection.includedToolNames) : undefined,
+						originalToolBlockTokens: toolsConsidered ? estimateToolTokens(availableTools, availableTools.map((t) => t.name)) : undefined,
 						keptAllDueToParseFailure,
 						cacheHit,
 						prepassUsage,

@@ -211,10 +211,22 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
       export const createAgentSessionRuntime = async () => ({ session: { isStreaming: false }, services: { modelRegistry: { getAvailable: () => [], find: () => undefined } }, dispose: async () => {} });
     `,
     'dist/core/system-prompt.js': `export const buildSystemPrompt = (options) => JSON.stringify(options);`,
+    'dist/core/compaction/index.js': `
+      globalThis.__pieInternalCompactionModuleLoaded = true;
+      export const prepareCompaction = () => undefined;
+      export const compact = async () => ({ summary: '', firstKeptEntryId: '', tokensBefore: 0 });
+    `,
   }, async (sdkDir) => {
+    delete (globalThis as { __pieInternalCompactionModuleLoaded?: boolean }).__pieInternalCompactionModuleLoaded;
     const sdk = await loadSdk(sdkDir);
     const systemPromptModule = await loadSdkInternalModule<{ buildSystemPrompt: (options: unknown) => string }>(sdkDir, path.join('core', 'system-prompt.js'));
 
+    assert.equal(
+      (globalThis as { __pieInternalCompactionModuleLoaded?: boolean }).__pieInternalCompactionModuleLoaded,
+      true,
+      'loadSdk must import the SDK internal compaction module when the package root does not export it',
+    );
+    delete (globalThis as { __pieInternalCompactionModuleLoaded?: boolean }).__pieInternalCompactionModuleLoaded;
     assert.equal(sdk.VERSION, 'test-sdk');
     assert.equal(sdk.getAgentDir(), '/agent');
     assert.deepEqual(await sdk.SessionManager.listAll(), []);

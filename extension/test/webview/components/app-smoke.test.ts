@@ -311,8 +311,12 @@ test('App suppresses the session-tab connecting wheel while the transcript surfa
   });
 
   const html = container.innerHTML;
-  // The main transcript area shows the loading wheel + status indicator.
-  assert.ok(html.includes('transcript-loading'), 'main transcript area should show a loading wheel');
+  // The main transcript area shows the loading wheel + status indicator. The lazy
+  // transcript chunk may already be cached or may still be on its Suspense surface.
+  assert.ok(
+    html.includes('transcript-loading') || html.includes('transcript-suspense'),
+    'main transcript area should show a loading wheel',
+  );
   assert.ok(html.includes('loading-ellipsis'), 'a status indicator should accompany the wheel');
   // The session-tab connecting wheel is suppressed to avoid two wheels at once.
   assert.ok(!html.includes('session-tabs-connecting'), 'tabs should not show a competing connecting wheel while the main area is loading');
@@ -702,6 +706,32 @@ test('Brief H: NoticeBanner renders [retry, show-logs] for a model-start-timeout
   assert.equal(findNoticeAction(container, 'Retry without pruning'), null);
   assert.equal(findNoticeAction(container, 'Open settings'), null);
   assert.equal(findNoticeAction(container, 'Restart backend'), null);
+});
+
+test('operational error More reveals the exact backend diagnostic', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState({
+    notice: 'The provider stopped producing semantic response events.',
+    noticeKind: 'operational-error',
+    noticeRaw: [
+      'Code: PROVIDER_SEMANTIC_TIMEOUT',
+      'Provider: umans',
+      'Last provider error: upstream header phase stalled for 30000ms',
+      'Request: req-provider-1',
+    ].join('\n'),
+  });
+  act(() => { render(h(App, { adapter }), container); });
+
+  const more = container.querySelector<HTMLButtonElement>('button.notice-detail');
+  assert.equal(more?.textContent?.trim(), 'More');
+  assert.equal(container.querySelector('.notice-raw-detail'), null);
+
+  act(() => { more!.click(); });
+
+  const detail = container.querySelector('.notice-raw-detail');
+  assert.match(detail?.textContent ?? '', /PROVIDER_SEMANTIC_TIMEOUT/);
+  assert.match(detail?.textContent ?? '', /upstream header phase stalled/);
+  assert.equal(more?.textContent?.trim(), 'Less');
 });
 
 test('Brief H: Show logs posts showLogs WITHOUT dismissing (the error still stands)', () => {

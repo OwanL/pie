@@ -28,8 +28,8 @@ export interface ToolPruningConfig {
  * whole map.
  */
 export interface PrepassConfig {
-	/** Sampling temperature forwarded to the scorer provider. Keep low for the
-	 * binary relevance task; omit for provider/model defaults. */
+	/** Sampling temperature for local Ollama scorers. Non-local models always
+	 * use their provider default because some remote APIs reject this option. */
 	temperature?: number;
 	/** Optional maximum scorer output tokens. Disabled by default because
 	 * reasoning tokens count against this budget on some providers. */

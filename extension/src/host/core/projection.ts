@@ -129,15 +129,15 @@ export function derivePruningResult(transcript: ChatMessage[]): PruningResult | 
 
 // ─── Prepass status derivation (Brief F) ──────────────────────────────────────
 
-/** Find the promoted (early-acked, pre-commit) op for a session, if any.
- *  At most one can exist per session — session mutations are serialized per
- *  `sessionPath` (STATE_CONTRACT § Execution Ordering). */
-function findPromotedForSession(
-  promoted: Record<string, PendingOp>,
+/** Find the pre-commit op for a session in one pending table, if any.
+ *  At most one non-queued op can execute per session because session mutations
+ *  are serialized (STATE_CONTRACT § Execution Ordering). */
+function findPreflightOpForSession(
+  entries: Record<string, PendingOp>,
   sessionPath: string,
 ): PendingOp | undefined {
-  for (const op of Object.values(promoted)) {
-    if (op.sessionPath === sessionPath) return op;
+  for (const op of Object.values(entries)) {
+    if (op.sessionPath === sessionPath && !op.queued) return op;
   }
   return undefined;
 }
@@ -150,23 +150,24 @@ interface PrepassViewState {
 
 /** Derive the live prepass status for the active session. Host-side (the
  *  webview stays passive per STATE_CONTRACT § Webview-Local State) and pure:
- *  `startedAt` comes from the promoted op's `startedAt` (captured from the
- *  Send command timestamp — not a reducer wall-clock read).
+ *  `startedAt` comes from the owning op's `startedAt` (captured from the Send
+ *  command timestamp — not a reducer wall-clock read).
  *
  *  Phase logic:
- *  - A promoted op exists (post-ack, pre-commit) → `running`, or `succeeded`
- *    once the pruning-result `CustomMessage` landed (tracked.phase).
- *  - No promoted op + tracked.phase === `failed` → `failed` (a post-ack
- *    `PreflightFailed` dropped the promoted op but remembers the failure).
+ *  - A pending or promoted preflight op exists → `running`, or `succeeded`
+ *    once the explicit phase boundary landed. Including `pending.ops` covers
+ *    synchronous hooks whose boundary crosses stdio before the RPC ack.
+ *  - No owning op + tracked.phase === `failed` → `failed`.
  *  - Otherwise → `idle` (commit point `MessageStarted` cleared the entry). */
 function derivePrepassStatus(state: ArchState, activePath: string | null): PrepassViewState {
   if (!activePath) return { phase: 'idle', startedAt: null, latencyMs: undefined };
-  const promotedOp = findPromotedForSession(state.pending.promoted, activePath);
+  const ownerOp = findPreflightOpForSession(state.pending.promoted, activePath)
+    ?? findPreflightOpForSession(state.pending.ops, activePath);
   const tracked = state.pending.prepassBySession[activePath];
-  if (promotedOp) {
+  if (ownerOp) {
     return {
       phase: tracked?.phase === 'succeeded' ? 'succeeded' : 'running',
-      startedAt: promotedOp.startedAt,
+      startedAt: ownerOp.startedAt,
       latencyMs: tracked?.latencyMs ?? undefined,
     };
   }
@@ -214,12 +215,13 @@ interface ProjectionSignature {
   activeLiveRevision: number;
   // ── Brief F ───────────────────────────────────────────────────────────────
   // `prepassPhase` / `prepassStartedAt` / `prepassLatencyMs` are derived from
-  // the active session's promoted op (`pending.promoted`, startedAt) and its
-  // prepass phase entry (`pending.prepassBySession`, phase + latencyMs). The
+  // the active session's pending/promoted op (`pending.ops` / `promoted`,
+  // startedAt) and its prepass phase entry. The
   // backing references below bust the memoized cache iff the phase changes —
   // a missing entry would let a stale phase leak (G's seam comment warned of
   // exactly this), so the inputs are wired in explicitly.
   activePromotedOp: PendingOp | null;
+  activePendingPreflightOp: PendingOp | null;
   activePrepassPhase: PrepassPhaseState | null;
 }
 
@@ -249,7 +251,10 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
       : null,
     activeLiveRevision: activePath ? state.livePipeline.revisionBySession[activePath] ?? 0 : 0,
     activePromotedOp: activePath
-      ? findPromotedForSession(state.pending.promoted, activePath) ?? null
+      ? findPreflightOpForSession(state.pending.promoted, activePath) ?? null
+      : null,
+    activePendingPreflightOp: activePath
+      ? findPreflightOpForSession(state.pending.ops, activePath) ?? null
       : null,
     activePrepassPhase: activePath
       ? state.pending.prepassBySession[activePath] ?? null
@@ -271,6 +276,7 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
     a.activeEditingMessageId === b.activeEditingMessageId &&
     a.activeLiveRevision === b.activeLiveRevision &&
     a.activePromotedOp === b.activePromotedOp &&
+    a.activePendingPreflightOp === b.activePendingPreflightOp &&
     a.activePrepassPhase === b.activePrepassPhase
   );
 }

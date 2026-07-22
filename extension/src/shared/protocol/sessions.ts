@@ -450,13 +450,17 @@ export interface AuxiliaryLlmUsagePayload {
  *    `retry.stuck` event carrying the structured timing detail.
  *
  *  The host surfaces this as a non-blocking `operational-error` notice
- *  (recovery action: show-logs). It does NOT roll back optimistic state or
- *  abort a turn — the watchdogs already performed their side effects. */
+ *  (recovery action: show-logs). When `detail` is present, the short message
+ *  remains readable while the credential-redacted diagnostic is available
+ *  behind the notice's More control. It does NOT roll back optimistic state
+ *  or abort a turn — the watchdogs already performed their side effects. */
 export interface OperationalErrorPayload {
   /** Stable machine code (e.g. `INTERRUPT_ABORT_STUCK`, `RETRY_STUCK`). */
   code: string;
   /** Plain-language message safe to surface to the user. */
   message: string;
+  /** Actionable backend diagnostic; may include the last provider error. */
+  detail?: string;
   sessionPath: string;
   requestId?: string;
 }

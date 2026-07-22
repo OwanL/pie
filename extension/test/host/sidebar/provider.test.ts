@@ -186,6 +186,18 @@ test('provider delegates state posts to one serialized lazy controller operation
   assert.equal(stateMessages(view).length, 1);
   first.resolve(true);
   await settle();
+  const firstMessage = stateMessages(view)[0]!;
+  view.send({
+    type: 'transcriptCommitted',
+    payload: {
+      revision: firstMessage.revision,
+      viewGeneration: firstMessage.viewGeneration,
+      identity: firstMessage.expectedTranscriptIdentity,
+      mountGeneration: 1,
+      evidence: 'displayed',
+    },
+  });
+  await settle();
 
   const messages = stateMessages(view);
   assert.equal(messages.length, 2);
@@ -243,7 +255,7 @@ test('provider consumes receipt/app/transcript/paint evidence and advances commi
   provider.dispose();
 });
 
-test('continuous accepted posts without transcript commit resnapshot then escalate through provider recovery', async () => {
+test('repeated transcript-commit timeouts resnapshot then escalate through provider recovery', async () => {
   const clock = new FakeClock();
   const routed: WebviewToHostMessage[] = [];
   const { provider, getAssetCount } = createProvider(clock, routed, ['initial', 'commit-timeout-reload']);
@@ -383,6 +395,17 @@ test('hidden provider retains dirty state and posts a fresh full snapshot on rev
   const { provider } = createProvider(clock, routed);
   const view = new FakeView();
   await resolveReady(provider, view);
+  const baselineMessage = stateMessages(view).at(-1)!;
+  view.send({
+    type: 'transcriptCommitted',
+    payload: {
+      revision: baselineMessage.revision,
+      viewGeneration: baselineMessage.viewGeneration,
+      identity: baselineMessage.expectedTranscriptIdentity,
+      mountGeneration: 1,
+      evidence: 'displayed',
+    },
+  });
   const baselinePosts = stateMessages(view).length;
   view.setVisible(false);
   provider.scheduleState();
@@ -402,6 +425,17 @@ test('an unaccepted sendRejected post enters readiness recovery and retries afte
   const { provider } = createProvider(clock, routed);
   const view = new FakeView();
   await resolveReady(provider, view);
+  const baselineMessage = stateMessages(view).at(-1)!;
+  view.send({
+    type: 'transcriptCommitted',
+    payload: {
+      revision: baselineMessage.revision,
+      viewGeneration: baselineMessage.viewGeneration,
+      identity: baselineMessage.expectedTranscriptIdentity,
+      mountGeneration: 1,
+      evidence: 'displayed',
+    },
+  });
   view.imperativeOutcomes.push(false, true);
 
   provider.postImperative({

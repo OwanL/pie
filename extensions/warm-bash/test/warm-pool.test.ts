@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { findTestBash } from './test-shell.js';
 import { MarkerStripper } from '../src/warm-pool.js';
+import { prependManagedBinDir } from '../src/managed-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const poolUrl = pathToFileURL(path.resolve(__dirname, '../src/warm-pool.ts')).href;
@@ -179,6 +180,38 @@ describe('warm-bash pool (real bash round-trip)', {
       assert.ok(text().includes(path.basename(tmp)), `pwd=${text()} tmp=${tmp}`);
     } finally {
       pool.dispose();
+    }
+  });
+
+  test('warm worker inherits the pool env PATH (managed-bin directory visible)', async () => {
+    // Reproduces the root-cause scenario: a managed bin dir (like pi's
+    // <agentDir>/bin holding rg/fd), prepended to PATH, must reach the warm
+    // worker. The warm worker uses its SPAWN-TIME env (the pool constructor
+    // env); per-call env is ignored by runOnWorker — so passing process.env
+    // (no managedBin) to exec while passing managedEnv to the constructor
+    // isolates the assertion: managedBin can appear in `echo $PATH` only if the
+    // pool was spawned with the managed env.
+    const managedBin = mkdtempSync(path.join(tmpdir(), 'warm-bash-managed-'));
+    try {
+      const env = prependManagedBinDir(process.env, managedBin);
+      const pool = new Pool({ size: 1, shellPath: BASH, env });
+      try {
+        await pool.ready();
+        const { onData, text } = sink();
+        await pool.exec({ command: 'echo $PATH', cwd: tmp, env: process.env, onData });
+        // Git Bash rewrites Windows paths to /c/... form, so compare by basename
+        // (stable across path formats). Its presence proves the worker was
+        // spawned with the managed env: managedBin is a fresh temp dir that is
+        // NOT on process.env.PATH, so it can only have come from the pool env.
+        assert.ok(
+          text().includes(path.basename(managedBin)),
+          `worker PATH should include the managed bin dir; got: ${text()}`,
+        );
+      } finally {
+        pool.dispose();
+      }
+    } finally {
+      rmSync(managedBin, { recursive: true, force: true });
     }
   });
 

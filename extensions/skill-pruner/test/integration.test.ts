@@ -1069,14 +1069,18 @@ test("cross-session cache: a continuation prompt in a second session does NOT re
 test("autoSkipBelowTokens restores tools pruned by the prior turn without an LLM call or error feedback", async () => {
 	let calls = 0;
 	const setActiveToolsCalls: string[][] = [];
+	let activeTools = mockToolInfo.map((tool) => tool.name);
 	__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":[],"pruneTools":["web_search"]}' }; });
 	try {
 		const cfg = config({}, "auto", { ceiling: 10 });
 		const { handlers } = register(cfg);
 		__setToolSeams({
 			getAllTools: () => mockToolInfo as any[],
-			getActiveTools: () => ["read"],
-			setActiveTools: (names: string[]) => { setActiveToolsCalls.push(names); },
+			getActiveTools: () => activeTools,
+			setActiveTools: (names: string[]) => {
+				activeTools = names;
+				setActiveToolsCalls.push(names);
+			},
 		});
 		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
 		assert.equal(calls, 1);
@@ -1094,6 +1098,70 @@ test("autoSkipBelowTokens restores tools pruned by the prior turn without an LLM
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 		clearKeptSkills("session-1");
+	}
+});
+
+test("all skill and tool prompt entries disabled skips the LLM prepass", async () => {
+	let calls = 0;
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":[],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => [],
+			setActiveTools: () => { throw new Error("must not re-enable manually disabled tools"); },
+		});
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler);
+		recordPrunedTools("session-empty", ["web_search"]);
+		const result = await handler({
+			type: "before_agent_start",
+			prompt: "Refactor this code",
+			systemPrompt: "",
+			systemPromptOptions: { cwd: "/repo", skills: [], selectedTools: [], contextFiles: [] },
+		}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-empty" } });
+		assert.equal(result, undefined);
+		assert.equal(calls, 0);
+		assert.equal(readKeptSkills("session-empty"), "keep-all");
+	} finally {
+		clearKeptSkills("session-empty");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("disabled Tools prompt still permits skill-only pruning without re-enabling tools", async () => {
+	let calls = 0;
+	__setCompleteFn(async (_model, context) => {
+		calls++;
+		assert.doesNotMatch(JSON.stringify(context), /web_search/);
+		return { text: '{"pruneSkills":["frontend-design"],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => [],
+			setActiveTools: () => { throw new Error("must not re-enable manually disabled tools"); },
+		});
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler);
+		const result = await handler({
+			type: "before_agent_start",
+			prompt: "Refactor this frontend",
+			systemPrompt: systemPrompt(realisticSkills),
+			systemPromptOptions: { cwd: "/repo", skills: realisticSkills, selectedTools: [], contextFiles: [] },
+		}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-skills-only" } }) as BeforeAgentStartReturn;
+		assert.equal(calls, 1);
+		assert.ok(result?.systemPrompt);
+		assert.doesNotMatch(result!.systemPrompt!, /<name>frontend-design<\/name>/);
+	} finally {
+		clearKeptSkills("session-skills-only");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });
 

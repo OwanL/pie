@@ -586,8 +586,8 @@ test("PREPASS_MAX_TRANSPORT_RETRIES: is a positive number", () => {
 // ---------------------------------------------------------------------------
 
 /** A modelRegistry stub that resolves a model (so prepass reaches runLlmPruning). */
-function modelRegistryStub() {
-	return { find: () => ({ id: "gpt-5-mini", provider: "github-copilot" }) };
+function modelRegistryStub(model: Record<string, unknown> = { id: "gpt-5-mini", provider: "github-copilot" }) {
+	return { find: () => model };
 }
 
 test("runPruningPrepass: 500 then recovery on retry -> returns parsed pruned skills", async () => {
@@ -776,7 +776,7 @@ test("completeOllamaNative surfaces HTTP status for transport retry classificati
 	);
 });
 
-test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutputTokens", async () => {
+test("runPruningPrepass: forwards output controls but omits temperature for non-local models", async () => {
 	const cfg = config({ prepass: { maxTransportRetries: 7, maxOutputTokens: 333, temperature: 0.2 } });
 	const seenOptions: Array<{ maxRetries?: number; maxTokens?: number; temperature?: number }> = [];
 	const completeFn = async (_m: unknown, _c: unknown, options: { maxRetries?: number; maxTokens?: number; temperature?: number }) => {
@@ -793,7 +793,55 @@ test("runPruningPrepass: disables pi-ai retries and forwards configured maxOutpu
 	for (const options of seenOptions) {
 		assert.equal(options.maxRetries, 0);
 		assert.equal(options.maxTokens, 333);
+		assert.equal(options.temperature, undefined);
+	}
+});
+
+test("runPruningPrepass: forwards configured temperature to local Ollama models", async () => {
+	const cfg = config({
+		provider: "ollama",
+		model: "qwen3.5:9b",
+		prepass: { temperature: 0.2 },
+	});
+	const seenOptions: Array<{ temperature?: number }> = [];
+	const completeFn = async (_m: unknown, _c: unknown, options: { temperature?: number }) => {
+		seenOptions.push(options);
+		return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+	};
+	await runPruningPrepass(
+		{ modelRegistry: modelRegistryStub({ id: "qwen3.5:9b", provider: "ollama", baseUrl: "http://localhost:11434/v1" }) },
+		{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+		cfg,
+		completeFn as any,
+	);
+	assert.ok(seenOptions.length >= 1, "prepass must have run at least once");
+	for (const options of seenOptions) {
 		assert.equal(options.temperature, 0.2);
+	}
+});
+
+test("runPruningPrepass: omits configured temperature for Ollama Cloud models", async () => {
+	for (const modelId of ["deepseek-v4-flash:cloud", "gemma4:31b-cloud"]) {
+		const cfg = config({
+			provider: "ollama",
+			model: modelId,
+			prepass: { temperature: 0.2 },
+		});
+		const seenOptions: Array<{ temperature?: number }> = [];
+		const completeFn = async (_m: unknown, _c: unknown, options: { temperature?: number }) => {
+			seenOptions.push(options);
+			return { text: '{"pruneSkills":[],"pruneTools":[]}', stopReason: "stop" };
+		};
+		await runPruningPrepass(
+			{ modelRegistry: modelRegistryStub({ id: modelId, provider: "ollama", baseUrl: "http://localhost:11434/v1" }) },
+			{ userPrompt: "do something", skills: visibleSkills, tools: allTools, config: cfg },
+			cfg,
+			completeFn as any,
+		);
+		assert.ok(seenOptions.length >= 1, `prepass must have run for ${modelId}`);
+		for (const options of seenOptions) {
+			assert.equal(options.temperature, undefined, modelId);
+		}
 	}
 });
 

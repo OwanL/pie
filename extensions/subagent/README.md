@@ -27,6 +27,22 @@ Use pi's native orchestration rather than a batch mode:
 
 This keeps scheduling, interruption, and error handling on pi's normal tool-call path instead of duplicating those mechanisms inside this extension.
 
+### Optional lean user context
+
+Subagents remain task-only by default. The optional `userContext` argument can
+add a bounded, user-role-only context packet from the parent's active session
+branch:
+
+- `"latest"` — the latest user-role prompt plus successful `ask_user`
+  question/answer pairs recorded after it.
+- `"all"` — every user-role prompt and successful `ask_user` question/answer
+  pair on the active branch.
+
+Assistant prose, reasoning, and other tool output are never copied. The packet
+is capped at 12,000 characters with its beginning and end preserved. There is
+intentionally no full-history mode: delegated work should retain an isolated,
+lean context, and the explicit `task` remains its scope.
+
 ## Agent Discovery
 
 Agents are discovered automatically from both locations:
@@ -111,7 +127,7 @@ parent model", which takes precedence (and skips bucket selection) when enabled.
 
 ## Removed parameters and routes
 
-The public schema is `{ agent, task, cwd?, bucket?, thinkingLevel?, confirmProjectAgents? }`.
+The public schema is `{ agent, task, userContext?, cwd?, bucket?, thinkingLevel?, confirmProjectAgents? }`.
 
 - `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.
 - `tasks` and `chain` batch routes were removed. Old one-item batches are migrated by `prepareArguments`; multi-item batches fail schema validation with guidance to use sibling calls or later turns.
@@ -141,10 +157,10 @@ that sub agents are unavailable. Any call returns:
 
 - Max depth: 3 (nested subagent calls) — configurable via `PIE_SUBAGENT_MAX_DEPTH`
   (set by the pie host from the settings menu; default 3).
-- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. The same value limits sibling subagent calls emitted in one agent turn. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
+- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Sibling subagent calls emitted in one agent turn have no separate count cap; calls beyond the active-tree limit wait for a process permit. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
 - Tree-wide session budget: 10 — caps the total number of subagent sessions spawned
-  across an *entire* nested tree (independent of the per-reply counter), so increased
-  nesting can't run away on cost. Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
+  across an *entire* nested tree, so increased nesting can't run away on cost.
+  Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
   (default 10).
 
 ### `canSpawn` allowlist

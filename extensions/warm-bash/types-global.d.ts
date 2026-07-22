@@ -11,4 +11,5 @@ declare module "@earendil-works/pi-coding-agent" {
   export const createBashTool: any;
   export const createLocalBashOperations: any;
   export const getShellConfig: any;
+  export const getAgentDir: any;
 }

@@ -18,8 +18,16 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
   const isPruningResult = event.message.customType === 'pruning-result';
   const isPrepassSucceeded = isPruningResult || event.message.customType === 'preflight-succeeded';
   const prepass = state.pending.prepassBySession[event.sessionPath];
+  // A no-op/disabled pruner can finish synchronously. In that case the backend
+  // may publish preflight-succeeded before the message.send RPC acknowledgement
+  // promotes pending.ops -> pending.promoted. Treat the oldest non-queued op
+  // for this session as the owner; session RPC execution is FIFO, so later ops
+  // cannot have entered preflight yet.
+  const pendingCorrId = Object.entries(state.pending.ops).find(([, op]) =>
+    op.sessionPath === event.sessionPath && !op.queued,
+  )?.[0];
   const transitionToSucceeded =
-    isPrepassSucceeded && prepass?.phase === 'running';
+    isPrepassSucceeded && (prepass?.phase === 'running' || (!!pendingCorrId && prepass?.phase !== 'succeeded'));
   const refreshSucceededDetails = isPruningResult && prepass?.phase === 'succeeded';
   const latencyMs =
     transitionToSucceeded || refreshSucceededDetails
@@ -41,11 +49,12 @@ export function handleCustomMessage(state: ArchState, event: Extract<Event, { ki
   const promotedCorrId = transitionToSucceeded
     ? Object.entries(state.pending.promoted).find(([, op]) => op.sessionPath === event.sessionPath)?.[0]
     : undefined;
+  const ownerCorrId = promotedCorrId ?? pendingCorrId;
 
   return {
     state: nextState,
-    effects: promotedCorrId
-      ? [{ kind: 'MarkPrepassSucceeded', corrId: promotedCorrId }]
+    effects: transitionToSucceeded && ownerCorrId
+      ? [{ kind: 'MarkPrepassSucceeded', corrId: ownerCorrId }]
       : [],
   };
 }
@@ -93,7 +102,7 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
         // Brief H: strip any internal req-NN before surfacing (transcript-paging
         // RPC timeouts carry req-NN). The full host-side error is retained as
         // `noticeRaw`; projection redacts credentials before the webview can
-        // reveal it via 'show more'.
+        // reveal it via More.
         notice: stripReqIds(event.error),
         // Brief H: classify the generic backend error so the webview renders a
         // fitting recovery action (`operational-error` → show-logs) instead of
@@ -102,7 +111,7 @@ export function handleError(state: ArchState, event: Extract<Event, { kind: 'Err
         // host-handlers). STATE_CONTRACT § Notice Surfacing: `noticeRaw` is
         // non-null only when `notice` is an error notice.
         noticeKind: event.error ? 'operational-error' : null,
-        noticeRaw: event.error ?? null,
+        noticeRaw: event.error ? (event.detail ?? event.error) : null,
       },
     },
     effects: [],

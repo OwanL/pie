@@ -15,6 +15,7 @@ import type {
 } from '../../../shared/protocol';
 import { requestWindowAttention } from '../../sidebar/completion-notification';
 import { auditLog } from '../../util/audit.js';
+import { formatOperationalErrorDetail } from '../../../shared/operational-error-detail';
 
 interface HandlerDeps {
   context: vscode.ExtensionContext;
@@ -168,15 +169,16 @@ export function onError(payload: ErrorPayload, deps: HandlerDeps): void {
  *  may still be running (retry-stuck case: `activeRequest` is still set), so
  *  marking the assistant message errored would be wrong. No rollback, no
  *  abort: purely a notice. STATE_CONTRACT § Notice Surfacing: `handleError`
- *  strips any req-NN from the short `notice` and retains the verbatim message
- *  as `noticeRaw`. */
+ *  keeps the short message readable and retains the code, request correlation,
+ *  and backend diagnostic as credential-redacted `noticeRaw`. */
 export function onOperationalError(payload: OperationalErrorPayload, deps: HandlerDeps): void {
   const sessionPath = deps.requireEventSessionPath('operational-error', payload.sessionPath);
   if (!sessionPath) {
     return;
   }
+  const detail = formatOperationalErrorDetail(payload);
   deps.runObserver.onBackendError(sessionPath, payload.code);
-  deps.dispatchArch({ kind: 'Error', sessionPath, error: payload.message });
+  deps.dispatchArch({ kind: 'Error', sessionPath, error: payload.message, detail });
   deps.scheduleRender();
 }
 

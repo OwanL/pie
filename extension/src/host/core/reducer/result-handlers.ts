@@ -136,7 +136,7 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
 
   if (event.ok) {
     // Early-ack success: the prompt was queued. The rollback snapshot MOVES
-    // to `pending.promoted` (it is NOT deleted) so a post-ack prepass failure
+    // to `pending.promoted` (it is NOT deleted) so a post-ack setup failure
     // (`PreflightFailed`) can still roll back via `promoted[corrId]`. The
     // snapshot is dropped at the commit point (first `MessageStarted` for the
     // requestId) — see STATE_CONTRACT § Optimistic Reconciliation "Two failure
@@ -166,7 +166,12 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
         // Normal ack: the pruning prepass now runs. Surface a live, cancelable
         // status chip. `startedAt` is read from the promoted op by the
         // projection (pure, from the Send command timestamp).
-        draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
+        // preflight-succeeded may beat this RPC acknowledgement when every
+        // hook returns synchronously (notably disabled/empty pruning). Preserve
+        // that early phase boundary instead of regressing it to "running".
+        if (draft.pending.prepassBySession[pending.sessionPath]?.phase !== 'succeeded') {
+          draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
+        }
         if (event.requestId) {
           draft.pending.requestIdToLocalId[event.requestId] = {
             sessionPath: pending.sessionPath,
@@ -258,70 +263,75 @@ export function handleSendResult(state: ArchState, event: Extract<Event, { kind:
 }
 
 /**
- * Post-ack, pre-commit prepass failure (the `message.send` RPC succeeded but
- * the pruning prepass then failed). Reverts the promoted send via
- * `pending.promoted[corrId]`: removes the optimistic transcript entry, restores
- * the session summary, restores `pendingComposerInputsBySession` from the
- * promoted `inputs` snapshot, clears `requestIdToLocalId`, fires a
- * `sendRejected` imperative, and surfaces a plain-language error. A later
- * failure (after the commit point) is an in-turn error, never a rollback.
+ * Pre-commit setup failure. Normally `message.send` has already acknowledged
+ * and the rollback snapshot lives in `pending.promoted`. A synchronous
+ * preflight (common when pruning is disabled/empty) can publish failure before
+ * that acknowledgement crosses stdio, so this handler also accepts the oldest
+ * non-queued `pending.ops` entry for the session. Session RPC execution is FIFO,
+ * therefore later ops cannot have entered preflight yet.
  *
- * `corrId` resolution: the backend prepass-failure bridge dispatches WITHOUT
- * `corrId` (the backend mints `requestId` but never sees the host corrId), so
- * the reducer scans `pending.promoted` for the matching `requestId`. Brief B's
- * send-timer dispatches WITH `corrId`. See STATE_CONTRACT § Optimistic
- * Reconciliation "Two failure windows for send".
+ * `corrId` resolution: the backend bridge dispatches WITHOUT `corrId`, so the
+ * reducer first scans promoted entries by `requestId`, then falls back to the
+ * currently executing pending op for the session. Brief B's send-timer
+ * dispatches WITH `corrId`. See STATE_CONTRACT § Optimistic Reconciliation.
  */
 export function handlePreflightFailed(state: ArchState, event: Extract<Event, { kind: 'PreflightFailed' }>): ReducerResult {
   let corrId = event.corrId;
-  let promoted = corrId ? state.pending.promoted[corrId] : undefined;
-  if (!promoted) {
+  let snapshot = corrId ? state.pending.promoted[corrId] ?? state.pending.ops[corrId] : undefined;
+  let source: 'promoted' | 'ops' | undefined = snapshot
+    ? (state.pending.promoted[corrId!] ? 'promoted' : 'ops')
+    : undefined;
+  if (!snapshot) {
     for (const [cid, op] of Object.entries(state.pending.promoted)) {
       if (op.requestId === event.requestId) {
         corrId = cid;
-        promoted = op;
+        snapshot = op;
+        source = 'promoted';
         break;
       }
     }
   }
-  // Stale/unknown: the send already committed (promoted dropped at the commit
-  // point) or was never promoted — a later failure is an in-turn error, not a
-  // rollback. No-op (the in-turn error path surfaces its own notice).
-  if (!corrId || !promoted) return { state, effects: [] };
+  if (!snapshot) {
+    const pendingEntry = Object.entries(state.pending.ops).find(([, op]) =>
+      op.sessionPath === event.sessionPath && !op.queued,
+    );
+    if (pendingEntry) {
+      [corrId, snapshot] = pendingEntry;
+      source = 'ops';
+    }
+  }
+  // Stale/unknown: the send already committed, or no operation for this
+  // session is still in preflight. A later failure is an in-turn error.
+  if (!corrId || !snapshot || !source) return { state, effects: [] };
 
-  const { [corrId]: _removed, ...restPromoted } = state.pending.promoted;
-  const snapshot = promoted;
+  const { [corrId]: _removedPromoted, ...restPromoted } = state.pending.promoted;
+  const { [corrId]: _removedOp, ...restOps } = state.pending.ops;
 
-  // Fire sendRejected (send ops only) so the webview removes its optimistic
-  // overlay entry and restores the draft text. Edits do NOT fire sendRejected
-  // — matching the legacy pre-ack `EditResult{ok:false}` path (the inline
-  // editor is already closed by the Edit command; restoring the edited text
-  // to the composer draft would be a UX change Brief E owns). The `inputs`
-  // payload on sendRejected (Brief C) lets the webview restore the composer
-  // attachments immediately; the host-side composer-input restore below
-  // (Brief A) is the source of truth the next snapshot confirms.
-  const effects: Effect[] =
-    snapshot.kind === 'send'
-      ? [
-          {
-            kind: 'PostImperative',
-            corrId,
-            imperativeMessage: {
-              type: 'sendRejected',
-              sessionPath: snapshot.sessionPath,
-              text: snapshot.text ?? '',
-              localId: snapshot.localId,
-              inputs: snapshot.inputs ?? [],
-            },
-          },
-        ]
-      : [];
+  // Backend-originated failures have no corrId and must clear the runner's
+  // timer even when they beat the RPC ack. A timer-originated failure already
+  // carries corrId and is deliberately left in the runner so a genuinely late
+  // commit can emit PreflightSuperseded.
+  const effects: Effect[] = event.corrId ? [] : [{ kind: 'ClearSendTimer', corrId }];
+  if (snapshot.kind === 'send') {
+    effects.push({
+      kind: 'PostImperative',
+      corrId,
+      imperativeMessage: {
+        type: 'sendRejected',
+        sessionPath: snapshot.sessionPath,
+        text: snapshot.text ?? '',
+        localId: snapshot.localId,
+        inputs: snapshot.inputs ?? [],
+      },
+    });
+  }
 
   const nextState = produce(state, (draft) => {
-    draft.pending.promoted = restPromoted;
+    if (source === 'promoted') draft.pending.promoted = restPromoted;
+    else draft.pending.ops = restOps;
     // Remove optimistic user message from transcript
     removeMessage(draft, snapshot.sessionPath, snapshot.localId);
-    // Edit rollback (post-ack prepass failure): restore the messages truncated
+    // Edit rollback (post-ack setup failure): restore the messages truncated
     // by the optimistic Edit command. Send ops have no removedTail.
     if (snapshot.kind === 'edit' && snapshot.removedTail && snapshot.removedTail.length > 0) {
       restoreRemovedTail(draft, snapshot.sessionPath, snapshot.removedTail);
@@ -345,11 +355,10 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     // plain-language error. The promoted op is dropped above so startedAt is
     // null (no elapsed timer for a failed chip).
     draft.pending.prepassBySession[snapshot.sessionPath] = { phase: 'failed', latencyMs: null };
-    // Brief H: map the prepass failure to a plain-language notice + kind (no
-    // `req-NN`). The send-timer fire error carries the budget; a backend-
-    // reported failure carries a sanitized detail. Kind-aware so an edit
-    // failure reads as an edit failure (prose action, no retry button —
-    // re-editing is a separate affordance Brief E owns).
+    // Brief H: map the pre-commit setup failure to a plain-language notice.
+    // The send-timer's phase-specific strings distinguish pruning from model
+    // start; a generic backend rejection is not attributed to pruning because
+    // SDK preflight also owns auth/model checks, compaction, and other hooks.
     const preflightMapped = mapPreflightError(event.error, snapshot.kind);
     draft.settings.notice = preflightMapped.message;
     draft.settings.noticeKind = preflightMapped.kind;
@@ -413,7 +422,7 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
   if (event.ok) {
     // Early-ack success (mirrors handleSendResult): the prompt was queued.
     // The rollback snapshot MOVES to `pending.promoted` (not deleted) so a
-    // post-ack prepass failure (`PreflightFailed`) can still roll back the
+    // post-ack setup failure (`PreflightFailed`) can still roll back the
     // edit. Dropped at the commit point (first `MessageStarted` for the
     // requestId). See STATE_CONTRACT § Optimistic Reconciliation "Two failure
     // windows for send" — edit follows the same phase-scoped shape.
@@ -425,7 +434,11 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
       };
       // Brief F: an edit also runs the prepass (before_agent_start), so
       // surface a live chip on promote, mirroring send.
-      draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
+      // Same early-boundary race as SendResult: a synchronous no-op preflight
+      // can publish success while this edit is still awaiting its RPC ack.
+      if (draft.pending.prepassBySession[pending.sessionPath]?.phase !== 'succeeded') {
+        draft.pending.prepassBySession[pending.sessionPath] = { phase: 'running', latencyMs: null };
+      }
     });
     return { state: nextState, effects: [] };
   }

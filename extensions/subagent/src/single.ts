@@ -32,6 +32,7 @@ import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import type { ThinkingLevel } from "../bucket-selector.js";
 import { compactSingleResult } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
+import { buildParentUserContext } from "./user-context.js";
 import {
 	readRetryPolicy,
 	parseRetryAfterMs,
@@ -253,6 +254,9 @@ export async function executeSingleTask(args: {
 	if (!agent) throw new Error(`Unknown subagent: ${params.agent}`);
 
 	const injectedRunAttempt = _internal?.runAttempt;
+	// Snapshot optional parent context once so provider retries receive the same
+	// lean handoff even if the parent transcript advances while an attempt runs.
+	const parentUserContext = buildParentUserContext(params.userContext, ctx.sessionManager);
 	const result = await runWithModelRetry({
 		agent,
 		excludeModels: new Set<string>(),
@@ -306,6 +310,7 @@ export async function executeSingleTask(args: {
 					args.allToolNames,
 					{ clock: _internal?.clock ?? realRetryClock },
 					attemptId,
+					parentUserContext,
 				);
 			},
 	});

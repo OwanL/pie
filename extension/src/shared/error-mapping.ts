@@ -209,9 +209,10 @@ export function mapSendOrEditError(
 }
 
 /**
- * Map a post-ack, pre-commit prepass failure (`PreflightFailed`) to a
- * plain-language notice. The `message.send` RPC already succeeded (the prompt
- * was queued); the pruning prepass then failed.
+ * Map a post-ack, pre-commit setup failure (`PreflightFailed`) to a
+ * plain-language notice. SDK preflight covers model/auth checks, compaction,
+ * input hooks, and every `before_agent_start` extension; it is not synonymous
+ * with skill pruning.
  *
  * Four sub-categories:
  *  - **model-start timeout** (send-timer fire AFTER pruning succeeded):
@@ -229,12 +230,12 @@ export function mapSendOrEditError(
  *    prepass is incidental — the real cause is concurrency saturation, NOT
  *    pruning. Reuses `model-start-timeout` (same remedy: retry — the gate
  *    re-queues) so no new kind is needed.
- *  - **backend-reported failure**: any other error → `prepass-failed` (send) /
- *    `edit-failed` (edit). The backend's error detail is included SANITIZED
- *    (any `req-NN` stripped) since it is not an internal id the host minted —
- *    it can name the real cause (e.g. a model error).
+ *  - **backend-reported setup failure**: any other error → `send-failed` /
+ *    `edit-failed`. The backend's error detail is included SANITIZED. Do not
+ *    label this as pruning: pruning may be disabled or may have had no
+ *    candidates, and other preflight stages can reject independently.
  *
- * Never returns `null` (a prepass failure is always a real error worth
+ * Never returns `null` (a setup failure is always a real error worth
  * surfacing — the user did not initiate it).
  */
 export function mapPreflightError(
@@ -299,17 +300,19 @@ export function mapPreflightError(
     };
   }
 
-  // Backend-reported prepass failure: include the sanitized detail (no req-NN).
+  // Generic SDK preflight failure: include the sanitized detail (no req-NN),
+  // but do not attribute it to skill pruning. This path also covers auth/model,
+  // compaction, input-hook, and unrelated before_agent_start failures.
   const detail = err.trim() ? stripReqIds(err).trim() : '';
   if (opKind === 'edit') {
     return {
       kind: 'edit-failed',
-      message: `Couldn't edit the message: the pruning step failed${detail ? `: ${detail}` : ''}. Try editing it again, or disable pruning in settings.`,
+      message: `Couldn't edit the message: turn setup failed${detail ? `: ${detail}` : ''}. Try editing it again.`,
     };
   }
   return {
-    kind: 'prepass-failed',
-    message: `The pruning step failed to start this turn${detail ? `: ${detail}` : ''}. You can retry, or retry without pruning.`,
+    kind: 'send-failed',
+    message: `Turn setup failed${detail ? `: ${detail}` : ''}. You can retry.`,
   };
 }
 

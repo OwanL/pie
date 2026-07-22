@@ -26,12 +26,17 @@ const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium"
 	description: THINKING_LEVEL_GUIDANCE,
 }));
 
+const UserContextSchema = Type.Optional(StringEnum(["latest", "all"] as const, {
+	description: "Parent prompts and ask_user clarifications only: omit for self-contained tasks; 'latest' for the current request and its clarifications; 'all' only when requirements span multiple user turns.",
+}));
+
 export const SubagentParams = Type.Object(
 	{
 		agent: Type.String({
 			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
 		}),
 		task: Type.String({ description: "One concrete task to delegate to the agent" }),
+		userContext: UserContextSchema,
 		confirmProjectAgents: Type.Optional(
 			Type.Boolean({
 				description:

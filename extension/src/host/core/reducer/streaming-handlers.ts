@@ -15,7 +15,7 @@ import {
   withIncrementedWindowCounts,
 } from '../transcript-window.js';
 import type { ReducerResult } from './helpers.js';
-import { resolveAlias, enforceLoadedWindowBudget } from './helpers.js';
+import { findPendingTurnOwner, resolveAlias, enforceLoadedWindowBudget } from './helpers.js';
 import type { Event, BackendEvent } from '../events.js';
 import type { Effect } from '../effects.js';
 
@@ -40,16 +40,10 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
   // existing turn — already had their promoted entry dropped at the first
   // MessageStarted, so the scan is skipped for them.)
   const effects: Effect[] = [];
-  let promotedCorrId: string | undefined;
-  if (!isAlias && requestId) {
-    for (const [cid, op] of Object.entries(state.pending.promoted)) {
-      if (op.requestId === requestId) {
-        promotedCorrId = cid;
-        effects.push({ kind: 'ClearSendTimer', corrId: cid });
-        break;
-      }
-    }
-  }
+  const turnOwner = !isAlias && requestId
+    ? findPendingTurnOwner(state, sessionPath, requestId)
+    : undefined;
+  if (turnOwner) effects.push({ kind: 'ClearSendTimer', corrId: turnOwner.corrId });
 
   const nextState = produce(state, (draft) => {
     // Update alias map or currentTurnBySession
@@ -62,12 +56,14 @@ export function handleMessageStarted(state: ArchState, event: Extract<Event, { k
       // assistant message ID, not the user message ID. Reconciliation will be
       // handled when the backend echoes localId back in a future event.
       delete draft.pending.requestIdToLocalId[requestId];
-      if (promotedCorrId) {
-        delete draft.pending.promoted[promotedCorrId];
+      if (turnOwner) {
+        if (turnOwner.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
+        else delete draft.pending.ops[turnOwner.corrId];
         // Brief F: commit point — the turn started streaming, so the prepass
         // window is over. Drop the live chip (→ idle). Aligned with the
-        // promoted-op drop above so phase + startedAt clear together; a later
-        // in-turn failure is surfaced by the error mapper, never a rollback.
+        // optimistic-operation drop above so phase + startedAt clear together;
+        // a later in-turn failure is surfaced by the error mapper, never a
+        // rollback.
         delete draft.pending.prepassBySession[sessionPath];
       }
     }
@@ -218,8 +214,24 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
   const messageId = resolveAlias(state, event.message.id);
   const isAlias = messageId !== event.message.id;
   const normalizedMessage = withAssistantParts(event.message);
+  // A terminal can be the first observable boundary when a provider rejects
+  // before emitting message_start. Settle the optimistic operation so its
+  // model-start timer cannot report a second, stale timeout later.
+  const requestId = event.requestId;
+  const turnOwner = requestId
+    ? findPendingTurnOwner(state, event.sessionPath, requestId)
+    : undefined;
+  const effects: Effect[] = turnOwner
+    ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
+    : [];
 
   const nextState = produce(state, (draft) => {
+    if (turnOwner) {
+      if (turnOwner.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
+      else delete draft.pending.ops[turnOwner.corrId];
+      if (requestId) delete draft.pending.requestIdToLocalId[requestId];
+      delete draft.pending.prepassBySession[event.sessionPath];
+    }
     const list = draft.transcript.bySession[event.sessionPath] ??= [];
 
     if (isAlias) {
@@ -272,17 +284,27 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
     }
   });
 
-  return { state: nextState, effects: [] };
+  return { state: nextState, effects };
 }
 
 export function handleMessageAborted(state: ArchState, event: Extract<Event, { kind: 'MessageAborted' }>): ReducerResult {
-  const { sessionPath, messageId } = event;
-  if (!messageId) {
-    return { state, effects: [] };
-  }
+  const { sessionPath, messageId, requestId } = event;
+  const turnOwner = requestId
+    ? findPendingTurnOwner(state, sessionPath, requestId)
+    : undefined;
+  const effects: Effect[] = turnOwner
+    ? [{ kind: 'ClearSendTimer', corrId: turnOwner.corrId }]
+    : [];
 
-  const canonicalId = resolveAlias(state, messageId);
+  const canonicalId = messageId ? resolveAlias(state, messageId) : undefined;
   const nextState = produce(state, (draft) => {
+    if (turnOwner) {
+      if (turnOwner.source === 'promoted') delete draft.pending.promoted[turnOwner.corrId];
+      else delete draft.pending.ops[turnOwner.corrId];
+      if (requestId) delete draft.pending.requestIdToLocalId[requestId];
+      delete draft.pending.prepassBySession[sessionPath];
+    }
+    if (!canonicalId) return;
     const message = draft.transcript.bySession[sessionPath]?.find(
       (m: ChatMessage) => m.id === canonicalId,
     );
@@ -295,7 +317,7 @@ export function handleMessageAborted(state: ArchState, event: Extract<Event, { k
     }
   });
 
-  return { state: nextState, effects: [] };
+  return { state: nextState, effects };
 }
 
 export function handleStreamingEvent(state: ArchState, event: Extract<BackendEvent, { kind: 'MessageStarted' } | { kind: 'MessageDelta' } | { kind: 'MessageThinking' } | { kind: 'ToolCall' } | { kind: 'MessageFinished' } | { kind: 'MessageAborted' }>): ReducerResult {

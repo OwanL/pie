@@ -36,6 +36,39 @@ export function resolveAlias(state: ArchState, id: string): string {
   return alias ? alias.canonicalId : id;
 }
 
+export interface PendingTurnOwner {
+  corrId: string;
+  source: 'ops' | 'promoted';
+}
+
+/**
+ * Resolve the optimistic send/edit owned by a turn boundary.
+ *
+ * The backend control lane can deliver `turn.started` / `message.started`
+ * before the correlated RPC acknowledgement promotes `pending.ops`. Prefer an
+ * exact promoted request-id match, then fall back to the oldest currently
+ * executing non-queued operation for the session. Session mutation FIFO makes
+ * that fallback unambiguous: a later operation cannot have entered preflight.
+ */
+export function findPendingTurnOwner(
+  state: ArchState,
+  sessionPath: string,
+  requestId: string,
+): PendingTurnOwner | undefined {
+  for (const [corrId, operation] of Object.entries(state.pending.promoted)) {
+    if (operation.requestId === requestId) return { corrId, source: 'promoted' };
+  }
+  // A terminal duplicate for an already-started turn must not consume a newer
+  // operation that happens to be pending on the same session.
+  if (state.pending.currentTurnBySession[sessionPath]?.requestId === requestId) return undefined;
+  for (const [corrId, operation] of Object.entries(state.pending.ops)) {
+    if (operation.sessionPath === sessionPath && !operation.queued) {
+      return { corrId, source: 'ops' };
+    }
+  }
+  return undefined;
+}
+
 /** Upsert a ChatMessage in a session's transcript array. */
 export function upsertTranscriptMessage(messages: readonly ChatMessage[], message: ChatMessage): ChatMessage[] {
   const idx = messages.findIndex((m) => m.id === message.id);

@@ -67,6 +67,7 @@ type Harness = {
 function harness(
   post: (context: StateDeliveryPostContext) => boolean | Promise<boolean>,
   overrides: Partial<Omit<StateDeliveryControllerOptions<string>, 'clock' | 'buildSnapshot' | 'isEligible' | 'post' | 'onRecovery' | 'onProtocolDefect'>> = {},
+  onRecoveryHook?: (recovery: StateDeliveryRecovery, controller: StateDeliveryController<string>) => void,
 ): Harness {
   const clock = new FakeClock();
   const builds: StateDeliveryBuildContext[] = [];
@@ -86,7 +87,10 @@ function harness(
     },
     isEligible: () => eligible,
     post: (_snapshot, context) => { posts.push(context); return post(context); },
-    onRecovery: (recovery) => recoveries.push(recovery),
+    onRecovery: (recovery) => {
+      recoveries.push(recovery);
+      onRecoveryHook?.(recovery, controller);
+    },
     onProtocolDefect: (defect) => defects.push(defect),
     onTelemetry: (event) => telemetry.push(event),
     onAccepted: (context) => accepted.push(context),
@@ -109,7 +113,7 @@ function transcriptCommit(revision: number, viewGeneration: number, identity = `
   return { revision, viewGeneration, identity, mountGeneration: 1, evidence: 'displayed' as const };
 }
 
-test('one unsettled post lazily coalesces many host changes to the latest snapshot', async () => {
+test('one unsettled or uncommitted post coalesces many host changes to the latest snapshot', async () => {
   const first = deferred<boolean>();
   const second = deferred<boolean>();
   let calls = 0;
@@ -122,13 +126,17 @@ test('one unsettled post lazily coalesces many host changes to the latest snapsh
 
   first.resolve(true);
   await settle();
-  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 3]);
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1]);
   assert.equal(h.controller.getDebugState().dirty, true);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+
+  h.controller.transcriptCommitted(transcriptCommit(1, h.controller.getDebugState().viewGeneration));
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 3]);
 
   second.resolve(true);
   await settle();
   assert.equal(h.controller.getDebugState().dirty, false);
-  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1, 2]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
 });
 
 test('false, reject, never-settling timeout, and late true retry autonomously without raw error telemetry', async () => {
@@ -189,6 +197,7 @@ test('readiness probes use the same post slot and can adopt one lazy accepted sn
   assert.equal(h.posts.length, 1);
   active.resolve(true);
   await settle();
+  h.controller.transcriptCommitted(transcriptCommit(1, h.controller.getDebugState().viewGeneration));
 
   h.setEligible(false);
   h.controller.markDirty();
@@ -231,8 +240,10 @@ test('disposal invalidates a pending post and prevents every late callback mutat
 test('transcript commits advance a monotonic high-water and old delayed evidence is telemetry-only', async () => {
   const h = harness(() => true);
   h.controller.markDirty(); await settle();
-  h.controller.markDirty(); await settle();
   const generation = h.controller.getDebugState().viewGeneration;
+  h.controller.markDirty();
+  h.controller.transcriptCommitted(transcriptCommit(1, generation));
+  await settle();
 
   h.controller.transcriptCommitted(transcriptCommit(2, generation));
   assert.equal(h.controller.getDebugState().lastTranscriptCommittedRevision, 2);
@@ -240,7 +251,7 @@ test('transcript commits advance a monotonic high-water and old delayed evidence
   h.controller.transcriptCommitted(transcriptCommit(1, generation, 'wrong-old'));
 
   assert.equal(h.defects.length, 0);
-  assert.deepEqual(h.commits, [2]);
+  assert.deepEqual(h.commits, [1, 2]);
   assert.ok(h.telemetry.some((event) => event.kind === 'commit-stale'));
 });
 
@@ -292,30 +303,46 @@ test('commit evidence arriving before post settlement is deferred until acceptan
   assert.deepEqual(h.controller.getDebugState().acceptedRevisions, []);
 });
 
-test('continuous accepted posts never reset the oldest transcript-commit deadline', async () => {
+test('host updates cannot reset the accepted revision commit deadline', async () => {
   const h = harness(() => true, { commitTimeoutMs: 100 });
   h.controller.markDirty(); await settle();
   h.clock.advance(50);
   h.controller.markDirty(); await settle();
+  assert.equal(h.posts.length, 1, 'the accepted revision applies backpressure until transcript commit');
   h.clock.advance(49);
   assert.equal(h.recoveries.length, 0);
   h.clock.advance(1);
 
   assert.equal(h.recoveries[0].reason, 'commit-timeout');
   assert.equal(h.recoveries[0].revision, 1);
-  assert.equal(h.builds.at(-1)?.desiredGeneration, 3, 'timeout resnapshots latest host state');
+  assert.equal(h.builds.at(-1)?.desiredGeneration, 3, 'timeout retires the old acceptance and resnapshots latest host state');
+  const generation = h.controller.getDebugState().viewGeneration;
+  h.controller.stateReceived({ revision: 1, viewGeneration: generation, snapshotBytes: 10 });
+  h.controller.appCommitted({ revision: 1, viewGeneration: generation, surface: 'app' });
+  h.controller.transcriptCommitted(transcriptCommit(1, generation));
+  h.controller.paintObserved({ ...transcriptCommit(1, generation), latencyMs: 1 });
+  h.controller.renderFailure({ viewGeneration: generation, revision: 1, surface: 'transcript', classification: 'component_error' });
+  assert.equal(h.defects.length, 0, 'late evidence for a timed-out accepted revision is stale, not defective');
+  assert.equal(h.recoveries.filter((r) => r.reason === 'render-failure').length, 0, 'late render-failure for a retired revision is not a recovery trigger');
+  assert.ok(h.telemetry.some((event) => event.kind === 'evidence-stale' && event.detail === 'paint-observed'), 'late paint-observed for a retired revision is stale telemetry');
+  assert.ok(h.telemetry.some((event) => event.kind === 'evidence-stale' && event.detail === 'render-failure'), 'late render-failure for a retired revision is stale telemetry');
 });
 
-test('ledger capacity is bounded and overflow suspends delivery pending recovery', async () => {
+test('commit gating bounds accepted delivery and coalesces newer host state', async () => {
   const h = harness(() => true, { acceptedLedgerCapacity: 2 });
   h.controller.markDirty(); await settle();
-  h.controller.markDirty(); await settle();
-  h.controller.markDirty(); await settle();
+  h.controller.markDirty();
+  h.controller.markDirty();
 
-  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1, 2]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+  assert.equal(h.posts.length, 1);
+  assert.deepEqual(h.recoveries, []);
+
+  h.controller.transcriptCommitted(transcriptCommit(1, h.controller.getDebugState().viewGeneration));
+  await settle();
   assert.equal(h.posts.length, 2);
-  assert.equal(h.clock.pendingCount(), 0, 'overflow recovery owns the episode; no redundant commit timer remains');
-  assert.deepEqual(h.recoveries.map((recovery) => recovery.reason), ['ledger-overflow']);
+  assert.equal(h.builds[1]?.desiredGeneration, 3);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
 });
 
 test('hidden views pause retry and commit clocks, then resume retained dirty intent', async () => {
@@ -371,4 +398,47 @@ test('typed current render failure requests immediate classified recovery withou
     surface: 'transcript',
     classification: 'component_error',
   });
+});
+
+test('probe cannot bypass an accepted-but-uncommitted revision', async () => {
+  const h = harness(() => true);
+  h.controller.markDirty(); await settle();
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+  h.controller.markDirty();
+  const postsBefore = h.posts.length;
+  assert.equal(await h.controller.probe(), false, 'probe cannot bypass the accepted-but-uncommitted revision');
+  assert.equal(h.posts.length, postsBefore, 'no probe post is started while an acceptance is uncommitted');
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1], 'the accepted revision is retained');
+  h.controller.flush();
+  assert.equal(h.posts.length, postsBefore, 'flush also stays gated behind the uncommitted acceptance');
+});
+
+test('a synchronous commit-timeout recovery that invalidates the view still classifies late evidence as stale', async () => {
+  const h = harness(
+    () => true,
+    { commitTimeoutMs: 100 },
+    (recovery, controller) => {
+      if (recovery.reason === 'commit-timeout') controller.invalidateView();
+    },
+  );
+  h.controller.markDirty(); await settle();
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+  h.clock.advance(100);
+  assert.equal(h.recoveries[0].reason, 'commit-timeout');
+  assert.equal(h.recoveries[0].revision, 1);
+  await settle();
+  assert.equal(
+    h.recoveries.filter((r) => r.reason === 'commit-timeout').length,
+    1,
+    'no duplicate commit-timeout recovery from the synchronous invalidateView',
+  );
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2], 'the invalidated view resnapshotted and posted a fresh acceptance');
+  const generation = h.controller.getDebugState().viewGeneration;
+  assert.ok(generation > 1, 'the synchronous recovery invalidated the view');
+  h.controller.stateReceived({ revision: 1, viewGeneration: generation, snapshotBytes: 10 });
+  h.controller.appCommitted({ revision: 1, viewGeneration: generation, surface: 'app' });
+  h.controller.transcriptCommitted(transcriptCommit(1, generation));
+  assert.equal(h.defects.length, 0, 'late evidence for the timed-out revision is stale, not defective');
+  assert.ok(h.telemetry.some((event) => event.kind === 'evidence-stale'));
+  assert.ok(h.telemetry.some((event) => event.kind === 'commit-stale'));
 });

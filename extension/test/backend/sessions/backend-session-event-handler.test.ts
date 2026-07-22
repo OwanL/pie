@@ -454,12 +454,18 @@ test('message_start and message_update emit assistant events and update request 
       modelId: 'claude-test',
       provider: 'github-copilot',
       thinkingLevel: 'high',
+      lastProviderErrorForDiagnostics: 'previous retry failed',
       aborted: false,
     },
   });
 
   handleSdkSessionEvent(deps, context, { type: 'agent_start' });
   handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } });
+  assert.equal(
+    context.activeRequest?.lastProviderErrorForDiagnostics,
+    'previous retry failed',
+    'message_start retains the failed attempt until real semantic output arrives',
+  );
   handleSdkSessionEvent(deps, context, {
     type: 'message_update',
     message: { role: 'assistant' },
@@ -477,6 +483,7 @@ test('message_start and message_update emit assistant events and update request 
   });
 
   assert.equal(context.activeRequest?.messageIndex, 1);
+  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, undefined);
   assert.equal(context.activeRequest?.currentMessageId, 'req-1:1');
   assert.equal(context.activeRequest?.lastAssistantMessageId, 'req-1:1');
   assert.equal(typeof context.activeRequest?.currentMessageStartedAt, 'number');
@@ -519,6 +526,7 @@ test('toolcall_start and toolcall_delta expose the live tool draft', () => {
       messageIndex: 0,
       modelId: 'claude-test',
       thinkingLevel: 'medium',
+      lastProviderErrorForDiagnostics: 'previous retry failed',
       aborted: false,
     },
   });
@@ -538,6 +546,7 @@ test('toolcall_start and toolcall_delta expose the live tool draft', () => {
     assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 0, delta: '{"command":', partial },
   });
 
+  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, undefined);
   assert.deepEqual(emitted.slice(1), [
     {
       event: 'message.toolCallDelta',
@@ -1034,6 +1043,7 @@ test('retry timing correlates scheduled delay with measured provider delay and d
   });
   const started = context.activeRequest?.retryTiming?.startedAt;
   assert.equal(typeof started, 'number');
+  assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, '429');
   context.activeRequest!.retryTiming!.providerAttemptStartedAt = started!;
   handleSdkSessionEvent(deps, context, {
     type: 'auto_retry_end', success: true, attempt: 2,
@@ -1419,6 +1429,8 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
       } as unknown as SessionContext['session'],
       activeRequest: {
         id: 'req-semantic-timeout', messageIndex: 0, aborted: false,
+        provider: 'umans', modelId: 'umans-test',
+        lastProviderErrorForDiagnostics: 'upstream header phase stalled for 30000ms',
         liveTurnAccumulator: new BackendLiveTurnAccumulator({
           protocolVersion: 5, sessionPath: '/workspace/session.jsonl', requestId: 'req-semantic-timeout',
           turnId: 'turn-timeout', attemptId: 'attempt-timeout', canonicalMessageId: 'req-semantic-timeout:1', startedAt: Date.now(),
@@ -1430,6 +1442,20 @@ test('pre-first-semantic inactivity retires and replaces a runtime even when abo
     assert.equal(recoveries.length, 1);
     assert.equal(recoveries[0]?.context, context);
     assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
+    const operationalError = emitted.find((entry) => entry.event === 'operational-error');
+    assert.deepEqual(operationalError?.payload, {
+      code: 'PROVIDER_SEMANTIC_TIMEOUT',
+      message: 'The provider stopped producing semantic response events.',
+      detail: [
+        'Provider: umans',
+        'Model: umans-test',
+        'Inactivity threshold: 5 ms',
+        'Observed: no text, reasoning, or tool-call event arrived before the threshold expired.',
+        'Last provider error: upstream header phase stalled for 30000ms',
+      ].join('\n'),
+      sessionPath: '/workspace/session.jsonl',
+      requestId: 'req-semantic-timeout',
+    });
     assert.equal(abortCalls, 0, 'the shared recovery owner must own remote teardown');
     assert.deepEqual(busy, [], 'the old runtime must not be advertised idle before replacement');
     assert.equal(emitted.some((entry) => entry.event === 'message.aborted'), false, 'the shared recovery owner emits the terminal exactly once');

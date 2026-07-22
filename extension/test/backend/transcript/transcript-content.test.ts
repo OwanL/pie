@@ -274,6 +274,54 @@ test('assistantStatus, usage helpers, and systemMessage normalize edge cases', (
   });
 });
 
+test('assistant transcript mapping surfaces WebSocket phase and automatic SSE recovery', () => {
+  const mapped = mapAssistantMessage('assistant-ws', {
+    role: 'assistant',
+    provider: 'openai-codex',
+    model: 'gpt-test',
+    stopReason: 'error',
+    errorMessage: 'WebSocket closed 1000',
+    content: [],
+    diagnostics: [{
+      type: 'provider_transport_failure',
+      timestamp: 1,
+      error: { name: 'WebSocketCloseError', message: 'WebSocket closed 1000', code: 1000 },
+      details: {
+        configuredTransport: 'auto',
+        eventsEmitted: true,
+        phase: 'after_message_stream_start',
+        requestBytes: 525_643,
+      },
+    }],
+  });
+
+  assert.equal(
+    mapped.errorDetail,
+    'WebSocket closed 1000. WebSocket transport failed after output began (configured: auto; request: 513.3 KiB; close code: 1000). If this turn is retried, it and later requests for this session will use SSE.',
+  );
+
+  const beforeStart = mapAssistantMessage('assistant-ws-before-start', {
+    role: 'assistant',
+    stopReason: 'error',
+    errorMessage: 'SSE fallback also failed',
+    content: [],
+    diagnostics: [{
+      type: 'provider_transport_failure',
+      details: {
+        configuredTransport: 'auto',
+        fallbackTransport: 'sse',
+        eventsEmitted: false,
+        phase: 'before_message_stream_start',
+        requestBytes: 512,
+      },
+    }],
+  });
+  assert.equal(
+    beforeStart.errorDetail,
+    'SSE fallback also failed. WebSocket transport failed before output began (configured: auto; request: 512 B). SSE fallback was attempted.',
+  );
+});
+
 test('assistant transcript mapping preserves the serving provider', () => {
   const mapped = mapAssistantMessage('assistant-1', {
     role: 'assistant',

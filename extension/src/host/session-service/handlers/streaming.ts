@@ -166,6 +166,7 @@ export function onMessageFinished(
     deps.dispatchArch({
       kind: 'MessageFinished',
       sessionPath,
+      requestId: payload.requestId,
       message,
     });
   }
@@ -212,6 +213,7 @@ export function onMessageAborted(
     deps.dispatchArch({
       kind: 'MessageAborted',
       sessionPath,
+      requestId: payload.requestId,
       messageId: payload.messageId,
       userInitiated,
       reason,

@@ -93,7 +93,7 @@ test('mapSendOrEditError returns null for a user-initiated cancel (suppress the 
   assert.equal(mapSendOrEditError('Request req-12 was cancelled.', 'edit'), null);
 });
 
-// ─── mapPreflightError (post-ack, pre-commit prepass failure) ────────────────
+// ─── mapPreflightError (post-ack, pre-commit setup failure) ─────────────────
 
 test('mapPreflightError classifies send-timer fires and surfaces the budget (whole seconds)', () => {
   const send = mapPreflightError('Timed out waiting for the turn to start streaming (120s)', 'send');
@@ -109,8 +109,7 @@ test('mapPreflightError accepts DECIMAL-second budgets (Brief H follow-up — wa
   // The send-timer budget derives from prepassTimeoutSec + first-token headroom
   // and may be fractional. The capture group must accept an optional decimal,
   // else a `12.5s` budget fails to match and the error misclassifies as a
-  // generic backend-reported prepass-failed (losing the retry-without-pruning
-  // recovery action).
+  // generic backend-reported setup failure.
   const send = mapPreflightError('Timed out waiting for the turn to start streaming (12.5s)', 'send');
   assert.equal(send.kind, 'prepass-timeout', 'decimal budget classified as prepass-timeout, not prepass-failed');
   assert.ok(send.message.includes('12.5s'), 'decimal budget surfaced in the message');
@@ -165,21 +164,23 @@ test('mapPreflightError classifies a ProviderGate saturation (queued for a concu
   assert.ok(!edit.message.includes('req-'));
 });
 
-test('mapPreflightError classifies backend-reported prepass failures (detail sanitized of req-NN)', () => {
-  // A backend-reported failure names the real cause (e.g. a model error); the
-  // detail is included SANITIZED (any req-NN stripped) since it is not an
-  // internal id the host minted.
+test('mapPreflightError classifies generic setup failures without blaming pruning', () => {
+  // SDK preflight includes auth/model checks, compaction, input hooks, and all
+  // before_agent_start extensions. Surface the sanitized cause without
+  // claiming skill pruning ran.
   const send = mapPreflightError('model rate limit exceeded for req-3', 'send');
-  assert.equal(send.kind, 'prepass-failed');
+  assert.equal(send.kind, 'send-failed');
   assert.ok(send.message.includes('model rate limit exceeded'), 'sanitized detail surfaced');
   assert.ok(!send.message.includes('req-3'), 'req-NN stripped from the detail');
+  assert.ok(!send.message.toLowerCase().includes('pruning'));
 
-  const edit = mapPreflightError('some prepass failure req-8', 'edit');
+  const edit = mapPreflightError('some setup failure req-8', 'edit');
   assert.equal(edit.kind, 'edit-failed');
   assert.ok(!edit.message.includes('req-8'));
+  assert.ok(!edit.message.toLowerCase().includes('pruning'));
 });
 
-test('mapPreflightError never returns null (a prepass failure is always a real error)', () => {
+test('mapPreflightError never returns null (a setup failure is always a real error)', () => {
   assert.ok(mapPreflightError(undefined, 'send') !== null);
   assert.ok(mapPreflightError('', 'send') !== null);
   assert.ok(mapPreflightError(undefined, 'edit') !== null);

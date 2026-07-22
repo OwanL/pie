@@ -25,6 +25,22 @@ truncation, "Took Xs") is inherited, so the UI is identical.
 Any protocol failure (no marker, `exec`/`exit` replaced the shell, watchdog) falls
 through to the fallback. Worst case = today's behaviour.
 
+## Managed-bin PATH semantics
+
+pi prepends its managed SDK binary directory (`<agentDir>/bin`, holding `rg`/`fd`)
+to `PATH` via `getShellEnv()` so those binaries resolve ahead of the inherited
+PATH. warm-bash preserves this at every layer:
+
+- **Warm pool** — the shared `WarmBashPool` is spawned with that authoritative
+  managed env (derived by prepending `join(getAgentDir(), "bin")` to the
+  platform PATH key), so warm workers resolve `rg`/`fd`.
+- **Fast path** — the resolver scans the per-call execution env's `PATH` (not
+  `process.env.PATH`) and caches per (program, PATH), so managed binaries
+  fast-path too.
+- **Fallback** — already uses pi's `getShellEnv()`.
+
+No layer is worse than the built-in fresh-spawn path for managed binaries.
+
 ## Edge cases handled
 
 | Case | Behaviour |

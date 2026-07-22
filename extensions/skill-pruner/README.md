@@ -7,7 +7,7 @@ Uses an LLM to score and prune skills/tools based on relevance to the current ta
 Before each agent turn, `skill-pruner` sends the user prompt + available skill/tool descriptions to an LLM (via `@earendil-works/pi-ai`). To keep the prepass itself cheap, the input context is kept lean: each candidate description is compacted to its leading relevance summary (whitespace collapsed; tools cut at the first sentence boundary within ~180 chars since their later text is usage caveats, skills capped more generously so their "Use when …" triggers survive), and only the last few user/assistant exchanges (capped per message) are included. When prior turns exist, it also includes the most recent user/assistant exchanges (read from the session tree, stopping at any compaction boundary) so follow-up prompts like "fix this" or "do that again" are judged in context rather than as standalone two-word requests. The LLM returns one flat **keep list** — candidates with a greater-than-50% chance of actual use before the request is complete — and `skill-pruner` derives the internal skill/tool prune lists by complement. The flat list avoids small models putting a tool name in a skill array (or vice versa). It then:
 
 1. Keeps every skill the LLM did **not** prune. `pinned` / `alwaysKeep` skills are protected and can never be pruned — they're excluded from the prepass entirely so the model never sees them or spends tokens reasoning about them, then re-added unconditionally afterward.
-2. Keeps every tool the LLM did not prune, additionally protecting any dependency of a kept tool (so pruning a tool never strands a tool that needs it).
+2. Keeps every currently available tool the LLM did not prune, additionally protecting any dependency of a kept tool (so pruning a tool never strands a tool that needs it). Tools hidden by the preceding pruning decision are reconsidered, but tools disabled by the user, the Tools prompt toggle, or another extension are outside the candidate set and are never re-enabled by the pruner. If both the Skills and Tools prompt entries are empty/disabled, the LLM prepass is skipped entirely.
 3. Rewrites the system prompt to drop the pruned skills.
 4. Disables pruned tools via `pi.setActiveTools()` (auto mode only).
 5. Logs the decision — including tool pruning — to `data/pruning.jsonl`.
@@ -30,7 +30,6 @@ Add a `pruning` block to `settings.json`:
     "provider": "github-copilot",
     "thinkingLevel": "minimal",
     "prepass": {
-      "temperature": 0.2,
       "timeoutMs": { "minimal": 30000, "low": 45000 },
       "maxTransportRetries": 2,
       "transportBackoffBaseMs": 1000,
@@ -89,7 +88,7 @@ Tunable knobs for the LLM prepass call itself. Every field is optional — an ab
 
 | Option | Default | Description |
 |---|---|---|
-| `temperature` | _(provider default)_ | Sampling temperature from 0 to 2, forwarded on every initial, correction, retry, and thinking-downgrade call. Local binary-classification experiments favored `.2`; omit it for providers/models that do not accept temperature overrides |
+| `temperature` | _(provider default)_ | Optional sampling temperature from 0 to 2 for local Ollama prepasses, forwarded on every initial, correction, retry, and thinking-downgrade call. Non-local models always use their provider default because remote APIs vary in whether they accept this parameter |
 | `maxOutputTokens` | _(disabled)_ | Optional scorer output cap, forwarded as pi-ai `maxTokens` on every initial, retry, and thinking-downgrade call. Use cautiously: some providers count hidden reasoning against this budget and may exhaust a low cap before emitting JSON |
 | `timeoutMs` | _(see below)_ | Per-thinking-level timeout ceiling (ms) for ONE prepass model call. Ceilings, not waits: a call that completes early returns immediately. A partial map overrides only the levels it lists; any level not enumerated keeps its built-in default. Unknown thinking levels fall back to the effective `minimal` |
 | `maxTransportRetries` | `2` | Max extension-level classified transport retries (5xx / 429 / network) per thinking-level attempt, with exponential backoff. `0` disables them. pi-ai `maxRetries` is always `0`, avoiding nested retry amplification |

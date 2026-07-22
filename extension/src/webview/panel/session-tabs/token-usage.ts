@@ -159,9 +159,12 @@ type PruningCostDetails = PruningDetails & {
 };
 
 interface ModelCostBreakdown extends CostUsage {
+  /** Provider-qualified billing identity when known (`provider/model`). */
   modelId: string;
   cost: number;
-  sources: Map<string, number>;
+  hasKnownCost: boolean;
+  /** Usage whose cost cannot yet be included (missing pricing/billing split). */
+  unpricedTokens: number;
 }
 
 function emptyCostUsage(): CostUsage {
@@ -182,15 +185,17 @@ function normalizeModelId(modelId: string | undefined, fallback: string): string
 function addModelCost(
   models: Map<string, ModelCostBreakdown>,
   modelId: string,
-  source: string,
   usage: CostUsage,
   cost: number,
+  hasKnownCost: boolean,
+  unpricedTokens = 0,
 ): void {
   const existing = models.get(modelId) ?? {
     modelId,
     ...emptyCostUsage(),
     cost: 0,
-    sources: new Map<string, number>(),
+    hasKnownCost: false,
+    unpricedTokens: 0,
   };
 
   existing.inputTokens += usage.inputTokens;
@@ -199,7 +204,8 @@ function addModelCost(
   existing.cacheWriteTokens += usage.cacheWriteTokens;
   existing.totalTokens += usage.totalTokens;
   existing.cost += cost;
-  existing.sources.set(source, (existing.sources.get(source) ?? 0) + cost);
+  existing.hasKnownCost ||= hasKnownCost;
+  existing.unpricedTokens += unpricedTokens;
   models.set(modelId, existing);
 }
 
@@ -209,7 +215,8 @@ function mergeModelCosts(target: Map<string, ModelCostBreakdown>, source: Map<st
       modelId: entry.modelId,
       ...emptyCostUsage(),
       cost: 0,
-      sources: new Map<string, number>(),
+      hasKnownCost: false,
+      unpricedTokens: 0,
     };
     existing.inputTokens += entry.inputTokens;
     existing.outputTokens += entry.outputTokens;
@@ -217,29 +224,31 @@ function mergeModelCosts(target: Map<string, ModelCostBreakdown>, source: Map<st
     existing.cacheWriteTokens += entry.cacheWriteTokens;
     existing.totalTokens += entry.totalTokens;
     existing.cost += entry.cost;
-    for (const [sourceName, sourceCost] of entry.sources) {
-      existing.sources.set(sourceName, (existing.sources.get(sourceName) ?? 0) + sourceCost);
-    }
+    existing.hasKnownCost ||= entry.hasKnownCost;
+    existing.unpricedTokens += entry.unpricedTokens;
     target.set(entry.modelId, existing);
   }
 }
 
-function formatModelCostBreakdown(models: Map<string, ModelCostBreakdown>): string[] {
+function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): string[] {
   const entries = Array.from(models.values())
-    .filter((entry) => entry.cost > 0)
-    .sort((a, b) => b.cost - a.cost || a.modelId.localeCompare(b.modelId));
+    .filter((entry) => entry.hasKnownCost || entry.unpricedTokens > 0)
+    .sort((a, b) => a.modelId.localeCompare(b.modelId));
 
   if (entries.length === 0) return [];
 
-  const lines = ['Cost by model:'];
+  const lines = ['Session cost by provider / model:'];
   for (const entry of entries) {
-    lines.push(`  ${entry.modelId}: ${formatCostDetail(entry.cost)} (↑ ${formatReadableTokens(entry.inputTokens)} ↓ ${formatReadableTokens(entry.outputTokens)})`);
-    const sources = Array.from(entry.sources.entries())
-      .filter(([, cost]) => cost > 0)
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    if (sources.length > 1) {
-      lines.push(`    ${sources.map(([name, cost]) => `${name} ${formatCostDetail(cost)}`).join(' · ')}`);
-    }
+    const separator = entry.modelId.indexOf('/');
+    const billingIdentity = separator > 0
+      ? `${entry.modelId.slice(0, separator)} / ${entry.modelId.slice(separator + 1)}`
+      : `Unknown provider / ${entry.modelId}`;
+    const cost = entry.hasKnownCost ? formatCostDetail(entry.cost) : 'unavailable';
+    const partial = entry.unpricedTokens > 0 ? '*' : '';
+    const unavailableUsage = !entry.hasKnownCost && entry.unpricedTokens > 0
+      ? ` (${formatCostTokens(entry.unpricedTokens)})`
+      : '';
+    lines.push(`  ${billingIdentity}: ${cost}${partial}${unavailableUsage}`);
   }
   return lines;
 }
@@ -429,7 +438,6 @@ function addSubagentToolCallCost(
       ? attemptUsages
       : resultUsage ? [{ usage: resultUsage, modelId: resultModelId, provider: resultProvider }] : [];
     if (attributedUsages.length > 0) {
-      const source = depth <= 1 ? 'Sub-agents' : 'Nested sub-agents';
       let resultCost = 0;
       for (const item of attributedUsages) {
         const modelId = normalizeModelId(
@@ -443,7 +451,15 @@ function addSubagentToolCallCost(
           ? item.usage.cost
           : estimatedPricing ? costFromUsage(item.usage, estimatedPricing) : 0;
         resultCost += attributedCost;
-        addModelCost(summary.modelCosts, modelId, source, item.usage, attributedCost);
+        const hasKnownCost = item.usage.cost > 0 || estimatedPricing !== undefined;
+        addModelCost(
+          summary.modelCosts,
+          modelId,
+          item.usage,
+          attributedCost,
+          hasKnownCost,
+          hasKnownCost ? 0 : item.usage.totalTokens,
+        );
       }
       summary.totalCost += resultCost;
       if (depth <= 1) {
@@ -494,10 +510,9 @@ export function extractSubagentDirectCost(transcript: ChatMessage[]): number {
 
 function buildPruningPrepassSummary(
   details: PruningCostDetails | undefined,
-  pricing: TokenPricing | undefined,
   pricingForModel?: TokenPricingResolver,
-): { cost: number; usage: CostUsage; modelId?: string; lines: string[] } {
-  const empty = { cost: 0, usage: emptyCostUsage(), lines: [] };
+): { cost: number; usage: CostUsage; modelId?: string; hasUsage: boolean; hasKnownCost: boolean } {
+  const empty = { cost: 0, usage: emptyCostUsage(), hasUsage: false, hasKnownCost: false };
   if (!details?.prepassModel) return empty;
   const billingModelId = details.prepassProvider
     ? `${details.prepassProvider}/${details.prepassModel}`
@@ -505,8 +520,7 @@ function buildPruningPrepassSummary(
   // Resolve the prepass model's OWN pricing — do NOT fall back to the
   // selected model's pricing. The prepass model is usually a different
   // (often cheaper/local) model; pricing it at the selected model's rate
-  // would silently over-state the prepass cost. When no pricing is known for
-  // the prepass model, fall through to the "unavailable" branch.
+  // would silently over-state the prepass cost.
   const prepassPricing = pricingForModel?.(details.prepassModel, details.prepassProvider);
   const usage = {
     inputTokens: numberValue(details.prepassInputTokens),
@@ -517,30 +531,14 @@ function buildPruningPrepassSummary(
   };
   usage.totalTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   const hasUsage = usage.totalTokens > 0;
-  if (!hasUsage) {
-    return { cost: 0, usage, modelId: billingModelId, lines: ['Pruning prepass:', `  Model: ${billingModelId}`] };
-  }
-
   const reportedCost = typeof details.prepassReportedCostUsd === 'number'
     && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
     ? details.prepassReportedCostUsd
     : undefined;
-  const cost = reportedCost ?? (prepassPricing ? costFromUsage(usage, prepassPricing) : 0);
+  const hasKnownCost = reportedCost !== undefined || (hasUsage && prepassPricing !== undefined);
+  const cost = reportedCost ?? (prepassPricing && hasUsage ? costFromUsage(usage, prepassPricing) : 0);
 
-  return {
-    cost,
-    usage,
-    modelId: billingModelId,
-    lines: [
-      'Pruning prepass:',
-      `  Model: ${billingModelId}`,
-      `  Tokens: \u2191 ${formatReadableTokens(usage.inputTokens)} \u2193 ${formatReadableTokens(usage.outputTokens)}`,
-      ...(usage.cacheReadTokens > 0 || usage.cacheWriteTokens > 0 ? [`  Cache: read ${formatReadableTokens(usage.cacheReadTokens)} · write ${formatReadableTokens(usage.cacheWriteTokens)}`] : []),
-      ...(reportedCost !== undefined || prepassPricing
-        ? [`  Cost: ${formatCostDetail(cost)}`]
-        : ['  Cost: unavailable (no pricing)']),
-    ],
-  };
+  return { cost, usage, modelId: billingModelId, hasUsage, hasKnownCost };
 }
 
 export interface CompletedCostSummary extends CostUsage {
@@ -587,8 +585,7 @@ function addCompletedUsageCost(
   const billingModelId = modelId && provider ? `${provider}/${modelId}` : modelId;
   if (billingModelId) summary.modelIds.add(billingModelId);
   const reportedCost = usage.reportedCostUsd;
-  if (!pricing && reportedCost === undefined) return;
-
+  const hasKnownCost = pricing !== undefined || reportedCost !== undefined;
   const costs = pricing ? costBreakdownFromUsage(usage, pricing) : null;
   const totalCost = reportedCost ?? costs?.total ?? 0;
   if (costs) {
@@ -598,9 +595,18 @@ function addCompletedUsageCost(
     summary.cacheReadCost += costs.cacheRead * scale;
     summary.cacheWriteCost += costs.cacheWrite * scale;
   }
-  summary.totalCost += totalCost;
-  summary.pricedTurnCount += 1;
-  addModelCost(summary.modelCosts, normalizeModelId(billingModelId, 'Selected model'), 'Main turns', usage, totalCost);
+  if (hasKnownCost) {
+    summary.totalCost += totalCost;
+    summary.pricedTurnCount += 1;
+  }
+  addModelCost(
+    summary.modelCosts,
+    normalizeModelId(billingModelId, 'Selected model'),
+    usage,
+    totalCost,
+    hasKnownCost,
+    hasKnownCost ? 0 : usage.totalTokens,
+  );
 }
 
 export function buildCompletedCostSummary(
@@ -648,106 +654,83 @@ export function buildSessionCostIndicator(
 ): SessionCostIndicatorState | null {
   const labelModel = modelName ?? 'Selected model';
   // Key the in-flight live-turn estimate by the selected model's *id* (not its
-  // display name) so it merges with that model's completed turns in the
-  // "Cost by model" rollup instead of spawning a duplicate display-name row
-  // every time a turn streams.
-  const subagents = typeof subagentCostOrSummary === 'number'
+  // display name) so it merges with completed turns for the same provider/model.
+  const numericSubagentCost = typeof subagentCostOrSummary === 'number';
+  const subagents = numericSubagentCost
     ? { ...emptySubagentCostSummary(), totalCost: subagentCostOrSummary, directCost: subagentCostOrSummary }
     : subagentCostOrSummary;
-  const prepass = buildPruningPrepassSummary(pruningDetails, pricing, pricingForModel);
+  const prepass = buildPruningPrepassSummary(pruningDetails, pricingForModel);
   const liveCost = pricing && liveEstimate ? costFromUsage(liveEstimate, pricing) : 0;
-  const hasUnclassifiedLiveContext = (liveEstimate?.unclassifiedContextTokens ?? 0) > 0;
-  const hasUnpricedLiveUsage = !pricing && !!liveEstimate && liveEstimate.totalTokens > 0;
   const mainCost = completed.totalCost;
   const totalCost = mainCost + liveCost + subagents.totalCost + prepass.cost;
 
-  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && prepass.lines.length === 0) return null;
+  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepass.hasUsage && !prepass.hasKnownCost) return null;
 
   const modelCosts = new Map<string, ModelCostBreakdown>();
   mergeModelCosts(modelCosts, completed.modelCosts);
   mergeModelCosts(modelCosts, subagents.modelCosts);
-  if (pricing && liveEstimate && liveCost > 0) {
+  if (numericSubagentCost && subagents.totalCost > 0) {
+    addModelCost(
+      modelCosts,
+      'Unknown provider/Unknown subagent model',
+      emptyCostUsage(),
+      subagents.totalCost,
+      true,
+    );
+  }
+  if (liveEstimate) {
     const liveBillingModelId = selectedModelId && selectedProvider
       ? `${selectedProvider}/${selectedModelId}`
       : selectedModelId;
-    addModelCost(modelCosts, normalizeModelId(liveBillingModelId, labelModel), 'Live estimate', liveEstimate, liveCost);
+    const hasKnownLiveCost = pricing !== undefined;
+    addModelCost(
+      modelCosts,
+      normalizeModelId(liveBillingModelId, labelModel),
+      liveEstimate,
+      liveCost,
+      hasKnownLiveCost,
+      hasKnownLiveCost ? liveEstimate.unclassifiedContextTokens : liveEstimate.totalTokens,
+    );
   }
-  if (prepass.modelId && prepass.cost > 0) {
-    addModelCost(modelCosts, prepass.modelId, 'Pruning prepass', prepass.usage, prepass.cost);
-  }
-
-  const tooltipLines = [
-    `${labelModel}`,
-    pricing
-      ? `Completed subtotal: ${formatCostDetail(mainCost)}`
-      : `Completed subtotal: unavailable (${formatReadableTokens(summary.totalTokens)} tokens (no pricing))`,
-    `  Input:  ${pricing ? formatCostDetail(completed.inputCost) : 'unpriced'} (${formatCostTokens(completed.inputTokens)})`,
-    `  Output: ${pricing ? formatCostDetail(completed.outputCost) : 'unpriced'} (${formatCostTokens(completed.outputTokens)})`,
-  ];
-
-  if (completed.modelIds.size > 1) {
-    tooltipLines.push(`  Models: ${Array.from(completed.modelIds).join(', ')}`);
-  } else if (completed.modelIds.size === 1) {
-    tooltipLines.push(`  Model id: ${Array.from(completed.modelIds)[0]}`);
-  }
-
-  if (completed.cacheReadTokens > 0 || completed.cacheWriteTokens > 0) {
-    tooltipLines.push(
-      `  Cache read:  ${pricing ? formatCostDetail(completed.cacheReadCost) : 'unpriced'} (${formatCostTokens(completed.cacheReadTokens)})`,
-      `  Cache write: ${pricing ? formatCostDetail(completed.cacheWriteCost) : 'unpriced'} (${formatCostTokens(completed.cacheWriteTokens)})`,
+  if (prepass.modelId && (prepass.hasUsage || prepass.hasKnownCost)) {
+    addModelCost(
+      modelCosts,
+      prepass.modelId,
+      prepass.usage,
+      prepass.cost,
+      prepass.hasKnownCost,
+      prepass.hasKnownCost ? 0 : prepass.usage.totalTokens,
     );
   }
 
-  if (liveEstimate) {
-    const liveCosts = pricing ? costBreakdownFromUsage(liveEstimate, pricing) : null;
-    tooltipLines.push(
-      '',
-      `Live turn ${hasUnclassifiedLiveContext ? 'partial ' : ''}estimate: ${pricing ? formatCostDetail(liveCost) : 'unavailable (no pricing)'}`,
-      ...(hasUnclassifiedLiveContext
-        ? [`  Context footprint: cost pending provider cache split (${formatCostTokens(liveEstimate.unclassifiedContextTokens)})`]
-        : []),
-      `  Output estimate: ${liveCosts ? formatCostDetail(liveCosts.output) : 'unpriced'} (${formatCostTokens(liveEstimate.outputTokens)})`,
-    );
-  }
+  const tooltipLines = formatProviderModelCosts(modelCosts);
+  const unpricedTokens = Array.from(modelCosts.values())
+    .reduce((total, entry) => total + entry.unpricedTokens, 0);
+  const hasIncompleteCost = unpricedTokens > 0;
+  const hasAnyKnownCost = Array.from(modelCosts.values()).some((entry) => entry.hasKnownCost);
 
-  if (subagents.totalCost > 0) {
-    const directCount = subagents.directResultCount > 0 ? ` (${subagents.directResultCount} result${subagents.directResultCount === 1 ? '' : 's'})` : '';
-    tooltipLines.push('', 'Sub-agents:', `  Direct cost: ${formatCostDetail(subagents.directCost)}${directCount}`);
-    if (subagents.nestedCost > 0) {
-      tooltipLines.push(`  Nested cost: ${formatCostDetail(subagents.nestedCost)} (${subagents.nestedResultCount} result${subagents.nestedResultCount === 1 ? '' : 's'})`);
-    }
+  if (tooltipLines.length === 0) {
+    tooltipLines.push('Session cost by provider / model:', '  No priced usage');
   }
-
-  if (prepass.lines.length > 0) {
-    tooltipLines.push('', ...prepass.lines);
+  if (hasIncompleteCost) {
+    tooltipLines.push('', `* Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing.`);
   }
+  tooltipLines.push(
+    hasIncompleteCost
+      ? hasAnyKnownCost
+        ? `Known subtotal: ${formatCostDetail(totalCost)}`
+        : 'Total: unavailable'
+      : `Total: ${formatCostDetail(totalCost)}`,
+  );
 
-  const modelCostLines = formatModelCostBreakdown(modelCosts);
-  if (modelCostLines.length > 0) {
-    tooltipLines.push('', ...modelCostLines);
-  }
-
-  if (hasUnpricedLiveUsage) {
-    tooltipLines.push(totalCost > 0
-      ? `Known subtotal: ${formatCostDetail(totalCost)} (live turn cost excluded; no pricing)`
-      : 'Total: unavailable (live model pricing unavailable)');
-  } else {
-    tooltipLines.push(hasUnclassifiedLiveContext
-      ? `Known subtotal: ${formatCostDetail(totalCost)} (live context cost excluded)`
-      : `Total: ${formatCostDetail(totalCost)}`);
-  }
-
-  const hasIncompleteLiveCost = hasUnclassifiedLiveContext || hasUnpricedLiveUsage;
-  const label = hasUnpricedLiveUsage && totalCost <= 0
-    ? '—*'
-    : hasIncompleteLiveCost ? `${formatCostUsd(totalCost)}*` : formatCostUsd(totalCost);
-  const ariaLabel = hasUnpricedLiveUsage
-    ? totalCost > 0
-      ? `Known estimated session cost ${formatCostUsd(totalCost)}; live turn cost is unavailable because model pricing is unavailable.`
-      : 'Estimated session cost unavailable because live model pricing is unavailable.'
-    : hasUnclassifiedLiveContext
-      ? `Known estimated session cost ${formatCostUsd(totalCost)}; live context cost is pending the provider cache split.`
-      : `Estimated session cost ${formatCostUsd(totalCost)}.`;
+  const label = hasIncompleteCost
+    ? hasAnyKnownCost ? `${formatCostUsd(totalCost)}*` : '—*'
+    : formatCostUsd(totalCost);
+  const ariaLabel = hasIncompleteCost
+    ? hasAnyKnownCost
+      ? `Known estimated session cost ${formatCostUsd(totalCost)}; some provider/model usage is not yet priced.`
+      : 'Estimated session cost unavailable because provider/model usage is not yet priced.'
+    : `Estimated session cost ${formatCostUsd(totalCost)}.`;
 
   return {
     label,

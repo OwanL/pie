@@ -57,6 +57,7 @@ test('onMessageAborted shows a notice for unexpected interruptions and sanitizes
     {
       kind: 'MessageAborted',
       sessionPath: '/s',
+      requestId: 'req-1',
       messageId: 'assistant-1',
       userInitiated: false,
       reason: 'Backend dropped request before completion.',
@@ -84,6 +85,7 @@ test('onMessageAborted suppresses the notice for user-initiated interruptions', 
     {
       kind: 'MessageAborted',
       sessionPath: '/s',
+      requestId: 'req-2',
       messageId: 'assistant-2',
       userInitiated: true,
       reason: undefined,
@@ -111,6 +113,7 @@ test('onMessageAborted appends to an active unrelated error notice instead of su
     {
       kind: 'MessageAborted',
       sessionPath: '/s',
+      requestId: 'req-3',
       messageId: 'assistant-3',
       userInitiated: false,
       reason: 'The session stopped unexpectedly before the assistant finished responding.',
@@ -140,6 +143,7 @@ test('onMessageAborted does not re-show an identical notice when the reason matc
     {
       kind: 'MessageAborted',
       sessionPath: '/s',
+      requestId: 'req-4',
       messageId: 'assistant-4',
       userInitiated: false,
       reason: 'The session stopped unexpectedly before the assistant finished responding.',

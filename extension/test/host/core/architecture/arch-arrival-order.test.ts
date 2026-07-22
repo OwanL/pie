@@ -156,6 +156,141 @@ test('arrival-order: send → multiple interleaved events → success — pendin
   assert.equal(final.state.pending.ops['c4'], undefined);
 });
 
+test('arrival-order: legacy stream start before send acknowledgement commits the pending operation', () => {
+  const sent = reducer(readyState, sendCommand('c-early-legacy', '/s'));
+
+  const started = reducer(sent.state, {
+    kind: 'MessageStarted',
+    sessionPath: '/s',
+    messageId: 'assistant-early',
+    requestId: 'request-early',
+    timestamp: 2,
+  });
+
+  assert.equal(started.state.pending.ops['c-early-legacy'], undefined);
+  assert.deepEqual(started.effects, [{ kind: 'ClearSendTimer', corrId: 'c-early-legacy' }]);
+  assert.ok(started.state.transcript.bySession['/s']?.some((message) => message.id === 'local:c-early-legacy'));
+  const lateAck = reducer(started.state, {
+    kind: 'SendResult', corrId: 'c-early-legacy', sessionPath: '/s', ok: true, requestId: 'request-early',
+  });
+  assert.equal(lateAck.state, started.state, 'late acknowledgement is a no-op after the commit point');
+});
+
+test('arrival-order: live turn start before send acknowledgement commits the pending operation', () => {
+  const sent = reducer(readyState, sendCommand('c-early-live', '/s'));
+
+  const started = reducer(sent.state, {
+    kind: 'TurnSemanticEventReceived',
+    envelope: {
+      protocolVersion: 5,
+      kind: 'turn.started',
+      sessionPath: '/s',
+      requestId: 'request-live',
+      turnId: 'turn-live',
+      attemptId: 'attempt-live',
+      seq: 1,
+      occurredAt: 2,
+      canonicalMessageId: 'assistant-live',
+      startedAt: 2,
+    },
+  });
+
+  assert.equal(started.state.pending.ops['c-early-live'], undefined);
+  assert.deepEqual(started.effects, [{ kind: 'ClearSendTimer', corrId: 'c-early-live' }]);
+  const lateAck = reducer(started.state, {
+    kind: 'SendResult', corrId: 'c-early-live', sessionPath: '/s', ok: true, requestId: 'request-live',
+  });
+  assert.equal(lateAck.state, started.state, 'late acknowledgement is a no-op after the live commit point');
+});
+
+test('arrival-order: message finished before acknowledgement settles the pending operation timer', () => {
+  const sent = reducer(readyState, sendCommand('c-finished-early', '/s'));
+
+  const finished = reducer(sent.state, {
+    kind: 'MessageFinished',
+    sessionPath: '/s',
+    requestId: 'request-finished-early',
+    message: {
+      id: 'assistant-finished-early',
+      role: 'assistant',
+      createdAt: new Date(2).toISOString(),
+      markdown: 'provider rejected the request',
+      status: 'error',
+    },
+  });
+
+  assert.equal(finished.state.pending.ops['c-finished-early'], undefined);
+  assert.deepEqual(finished.effects, [{ kind: 'ClearSendTimer', corrId: 'c-finished-early' }]);
+  const lateAck = reducer(finished.state, {
+    kind: 'SendResult', corrId: 'c-finished-early', sessionPath: '/s', ok: true,
+    requestId: 'request-finished-early',
+  });
+  assert.equal(lateAck.state, finished.state);
+});
+
+test('arrival-order: message abort before acknowledgement settles the pending operation timer', () => {
+  const sent = reducer(readyState, sendCommand('c-aborted-early', '/s'));
+
+  const aborted = reducer(sent.state, {
+    kind: 'MessageAborted',
+    sessionPath: '/s',
+    requestId: 'request-aborted-early',
+    userInitiated: false,
+    reason: 'provider rejected the request',
+  });
+
+  assert.equal(aborted.state.pending.ops['c-aborted-early'], undefined);
+  assert.deepEqual(aborted.effects, [{ kind: 'ClearSendTimer', corrId: 'c-aborted-early' }]);
+  const lateAck = reducer(aborted.state, {
+    kind: 'SendResult', corrId: 'c-aborted-early', sessionPath: '/s', ok: true,
+    requestId: 'request-aborted-early',
+  });
+  assert.equal(lateAck.state, aborted.state);
+});
+
+test('arrival-order: terminal abort before message start settles the promoted operation timer', () => {
+  const sent = reducer(readyState, sendCommand('c-terminal', '/s'));
+  const acknowledged = reducer(sent.state, {
+    kind: 'SendResult', corrId: 'c-terminal', sessionPath: '/s', ok: true, requestId: 'request-terminal',
+  });
+  assert.ok(acknowledged.state.pending.promoted['c-terminal']);
+
+  const aborted = reducer(acknowledged.state, {
+    kind: 'MessageAborted',
+    sessionPath: '/s',
+    requestId: 'request-terminal',
+    userInitiated: false,
+    reason: 'provider rejected the request',
+  });
+
+  assert.equal(aborted.state.pending.promoted['c-terminal'], undefined);
+  assert.deepEqual(aborted.effects, [{ kind: 'ClearSendTimer', corrId: 'c-terminal' }]);
+  assert.ok(aborted.state.transcript.bySession['/s']?.some((message) => message.id === 'local:c-terminal'));
+});
+
+test('arrival-order: duplicate terminal from the current turn cannot consume a newer pending operation', () => {
+  const oldTurn = reducer(readyState, {
+    kind: 'MessageStarted',
+    sessionPath: '/s',
+    messageId: 'assistant-old',
+    requestId: 'request-old',
+    timestamp: 1,
+  });
+  const newSend = reducer(oldTurn.state, sendCommand('c-new', '/s'));
+
+  const duplicate = reducer(newSend.state, {
+    kind: 'MessageAborted',
+    sessionPath: '/s',
+    requestId: 'request-old',
+    messageId: 'assistant-old',
+    userInitiated: false,
+    reason: 'duplicate terminal',
+  });
+
+  assert.ok(duplicate.state.pending.ops['c-new']);
+  assert.deepEqual(duplicate.effects, []);
+});
+
 // ─── send-then-delta-after-ack ──────────────────────────────────────────────
 
 test('arrival-order: send → success → unhandled event — clean state post-ack', () => {

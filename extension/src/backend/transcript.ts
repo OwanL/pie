@@ -23,7 +23,63 @@ import {
   usageFromMessage,
   userPartsFromContent,
 } from './transcript/content';
-import type { ContentPart, MessageLike } from './transcript/types';
+import type { AssistantMessageDiagnosticLike, ContentPart, MessageLike } from './transcript/types';
+
+const PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC = 'provider_transport_failure';
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function formatRequestBytes(value: unknown): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${Math.trunc(value)} B`;
+}
+
+export function providerTransportFailureDiagnostic(
+  message: Pick<MessageLike, 'diagnostics'>,
+): AssistantMessageDiagnosticLike | undefined {
+  return [...(message.diagnostics ?? [])]
+    .reverse()
+    .find((diagnostic) => diagnostic?.type === PROVIDER_TRANSPORT_FAILURE_DIAGNOSTIC);
+}
+
+/** Enrich terse provider errors with the phase/recovery data carried by pi-ai.
+ * The structured diagnostic remains in the persisted SDK message; this compact
+ * rendering makes it visible in Pie's existing per-message error surface. */
+export function assistantErrorDetail(
+  message: Pick<MessageLike, 'errorMessage' | 'diagnostics'>,
+): string | undefined {
+  const diagnostic = providerTransportFailureDiagnostic(message);
+  const base = nonEmptyString(message.errorMessage) ?? nonEmptyString(diagnostic?.error?.message);
+  if (!diagnostic) return base;
+
+  const details = diagnostic.details ?? {};
+  const phase = details.phase === 'after_message_stream_start'
+    ? 'after output began'
+    : details.phase === 'before_message_stream_start'
+      ? 'before output began'
+      : undefined;
+  const configuredTransport = nonEmptyString(details.configuredTransport);
+  const requestSize = formatRequestBytes(details.requestBytes);
+  const closeCode = diagnostic.error?.code;
+  const facts = [
+    configuredTransport ? `configured: ${configuredTransport}` : undefined,
+    requestSize ? `request: ${requestSize}` : undefined,
+    typeof closeCode === 'string' || typeof closeCode === 'number' ? `close code: ${closeCode}` : undefined,
+  ].filter((value): value is string => !!value);
+  const factText = facts.length > 0 ? ` (${facts.join('; ')})` : '';
+  const recovery = details.phase === 'after_message_stream_start'
+    ? 'If this turn is retried, it and later requests for this session will use SSE.'
+    : details.fallbackTransport === 'sse'
+      ? 'SSE fallback was attempted.'
+      : undefined;
+  const transportDetail = `WebSocket transport failed${phase ? ` ${phase}` : ''}${factText}.`;
+  const baseSentence = base ? (/[.!?]$/.test(base) ? base : `${base}.`) : undefined;
+  return [baseSentence, transportDetail, recovery].filter(Boolean).join(' ');
+}
 
 interface SessionInfoLike {
   path: string;
@@ -93,7 +149,7 @@ export function mapAssistantMessage(
     provider: message.provider ?? metadata?.provider,
     thinkingLevel: metadata?.thinkingLevel,
     status: assistantStatus(message),
-    errorDetail: message.errorMessage,
+    errorDetail: assistantErrorDetail(message),
     toolCalls: toolCallsFromMessageParts(messageParts),
     durationMs,
     turnLatencyMs: metadata?.turnLatencyMs,
@@ -264,7 +320,7 @@ function mapAssistantTurn(
       thinkingLevel: assistantThinkingLevel,
       durationMs,
       turnUsage,
-      errorMessage: message.errorMessage,
+      errorDetail: assistantErrorDetail(message),
       status: assistantStatus(message),
       durableEntryId: entry.id,
     });
@@ -282,7 +338,7 @@ function mapAssistantTurn(
     provider: assistantProvider,
     thinkingLevel: assistantThinkingLevel,
     status: assistantStatus(message),
-    errorDetail: message.errorMessage,
+    errorDetail: assistantErrorDetail(message),
     toolCalls: toolCallsFromMessageParts(messageParts),
     durationMs,
     usage: turnUsage,
@@ -302,7 +358,7 @@ function mergeAssistantTurn(
     thinkingLevel: ThinkingLevel | undefined;
     durationMs: number | undefined;
     turnUsage: ReturnType<typeof usageFromMessage>;
-    errorMessage: string | undefined;
+    errorDetail: string | undefined;
     status: ChatMessage['status'];
     durableEntryId: string;
   },
@@ -324,8 +380,8 @@ function mergeAssistantTurn(
   current.toolCalls = toolCallsFromMessageParts(current.parts);
   current.status = update.status;
   current.durableEntryId = update.durableEntryId;
-  if (update.errorMessage) {
-    current.errorDetail = update.errorMessage;
+  if (update.errorDetail) {
+    current.errorDetail = update.errorDetail;
   }
   if (update.modelId) {
     current.modelId = update.modelId;

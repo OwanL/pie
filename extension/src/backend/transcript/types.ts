@@ -20,6 +20,17 @@ export interface ContentPart {
   height?: number;
 }
 
+export interface AssistantMessageDiagnosticLike {
+  type?: string;
+  timestamp?: number;
+  error?: {
+    name?: string;
+    message?: string;
+    code?: string | number;
+  };
+  details?: Record<string, unknown>;
+}
+
 export interface MessageLike {
   role: MessageRole;
   content?: string | ContentPart[];
@@ -40,6 +51,8 @@ export interface MessageLike {
   summary?: string;
   stopReason?: string;
   errorMessage?: string;
+  /** Structured provider diagnostics attached by pi-ai. */
+  diagnostics?: AssistantMessageDiagnosticLike[];
   /** Raw provider usage block on assistant messages, when reported. */
   usage?: {
     input?: number;

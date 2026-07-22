@@ -1890,16 +1890,17 @@ test('reducer: post-ack PreflightFailed rolls back via promoted, restores inputs
   // Composer inputs RESTORED from the promoted snapshot (no data loss).
   assert.deepEqual(result.state.composer.pendingComposerInputsBySession['/s'], [imgInput]);
   // Plain-language error surfaced (Brief H refines the copy).
-  assert.match(result.state.settings.notice!, /pruning step failed/);
+  assert.match(result.state.settings.notice!, /turn setup failed/i);
   assert.match(result.state.settings.notice!, /prepass blew up/);
+  assert.doesNotMatch(result.state.settings.notice!, /pruning/i);
   // Fires a sendRejected imperative so the webview drops its overlay + restores draft.
   // Brief C: the imperative carries `inputs` so the webview can restore the
   // composer attachments immediately (the host-side restore above is the
   // source of truth the next snapshot confirms).
-  assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0]?.kind, 'PostImperative');
-  if (result.effects[0]?.kind === 'PostImperative') {
-    assert.deepEqual(result.effects[0].imperativeMessage, {
+  assert.deepEqual(result.effects.map((effect) => effect.kind), ['ClearSendTimer', 'PostImperative']);
+  const imperative = result.effects.find((effect) => effect.kind === 'PostImperative');
+  if (imperative?.kind === 'PostImperative') {
+    assert.deepEqual(imperative.imperativeMessage, {
       type: 'sendRejected',
       sessionPath: '/s',
       text: 'hey',
@@ -2109,8 +2110,9 @@ test('reducer: post-ack PreflightFailed rolls back an EDIT via promoted (no send
   // Kind-aware notice (Brief H refines the copy).
   assert.match(result.state.settings.notice!, /Couldn't edit/);
   assert.match(result.state.settings.notice!, /prepass blew up/);
-  // Edits do NOT fire sendRejected (matches legacy EditResult{ok:false}).
-  assert.deepEqual(result.effects, []);
+  // Edits do NOT fire sendRejected; the backend-originated failure only clears
+  // the in-flight timer so it cannot later manufacture a timeout.
+  assert.deepEqual(result.effects, [{ kind: 'ClearSendTimer', corrId: 'c-edit-fl' }]);
 });
 
 test('reducer: prepass phase tracks running→failed (Brief F host-side) + projects prepassPhase/startedAt for the active session', () => {
@@ -2169,6 +2171,112 @@ test('reducer: internal preflight-succeeded signal re-arms model start without e
   assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
   assert.deepEqual(result.effects, [{ kind: 'MarkPrepassSucceeded', corrId: 'c-boundary' }]);
   assert.deepEqual(result.state.transcript.bySession['/s'], []);
+});
+
+test('reducer: synchronous preflight success before SendResult is retained across acknowledgement', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, activeSessionPath: '/s', runningSessionPaths: ['/s'] },
+    pending: {
+      ...initialArchState.pending,
+      ops: { 'c-early': { kind: 'send', sessionPath: '/s', localId: 'loc', previousSummary: null, startedAt: 1 } },
+    },
+    transcript: { ...initialArchState.transcript, bySession: { '/s': [] }, windowBySession: { '/s': userWindow } },
+  };
+
+  let result = reducer(state, {
+    kind: 'CustomMessage',
+    sessionPath: '/s',
+    message: { id: 'internal-early', role: 'system', createdAt: '', markdown: '', status: 'completed', customType: 'preflight-succeeded' } as ChatMessage,
+  });
+  assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
+  assert.deepEqual(result.effects, [{ kind: 'MarkPrepassSucceeded', corrId: 'c-early' }]);
+  const beforeAckView = selectViewState(result.state);
+  assert.equal(beforeAckView.prepassPhase, 'succeeded');
+  assert.equal(beforeAckView.prepassStartedAt, 1);
+
+  result = reducer(result.state, {
+    kind: 'SendResult', corrId: 'c-early', sessionPath: '/s', ok: true, requestId: 'req-early',
+  });
+  assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
+  assert.equal(result.state.pending.promoted['c-early']?.requestId, 'req-early');
+});
+
+test('reducer: synchronous preflight success before EditResult is retained across acknowledgement', () => {
+  const state: ArchState = {
+    ...initialArchState,
+    pending: {
+      ...initialArchState.pending,
+      ops: { 'c-edit-early': { kind: 'edit', sessionPath: '/s', localId: 'loc-edit', previousSummary: null, startedAt: 1 } },
+    },
+    transcript: { ...initialArchState.transcript, bySession: { '/s': [] } },
+  };
+
+  let result = reducer(state, {
+    kind: 'CustomMessage',
+    sessionPath: '/s',
+    message: { id: 'internal-edit-early', role: 'system', createdAt: '', markdown: '', status: 'completed', customType: 'preflight-succeeded' } as ChatMessage,
+  });
+  assert.deepEqual(result.effects, [{ kind: 'MarkPrepassSucceeded', corrId: 'c-edit-early' }]);
+
+  result = reducer(result.state, {
+    kind: 'EditResult', corrId: 'c-edit-early', sessionPath: '/s', ok: true, requestId: 'req-edit-early',
+  });
+  assert.equal(result.state.pending.prepassBySession['/s']?.phase, 'succeeded');
+  assert.equal(result.state.pending.promoted['c-edit-early']?.requestId, 'req-edit-early');
+});
+
+test('reducer: synchronous preflight failure before SendResult rolls back the pending op', () => {
+  const user = { id: 'loc-fail', role: 'user' as const, createdAt: '', markdown: 'hello', status: 'completed' as const };
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, runningSessionPaths: ['/s'] },
+    transcript: { ...initialArchState.transcript, bySession: { '/s': [user] } },
+    pending: {
+      ...initialArchState.pending,
+      ops: { 'c-fail': { kind: 'send', sessionPath: '/s', localId: 'loc-fail', previousSummary: null, text: 'hello', inputs: [], startedAt: 1 } },
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'PreflightFailed', sessionPath: '/s', requestId: 'req-fail', error: 'Prompt rejected before PI accepted the request.',
+  });
+  assert.equal(result.state.pending.ops['c-fail'], undefined);
+  assert.deepEqual(result.state.transcript.bySession['/s'], []);
+  assert.deepEqual(result.effects.map((effect) => effect.kind), ['ClearSendTimer', 'PostImperative']);
+
+  const lateAck = reducer(result.state, {
+    kind: 'SendResult', corrId: 'c-fail', sessionPath: '/s', ok: true, requestId: 'req-fail',
+  });
+  assert.equal(lateAck.state, result.state);
+});
+
+test('reducer: synchronous preflight failure before EditResult restores the removed tail', () => {
+  const prefix = { id: 'prefix', role: 'assistant' as const, createdAt: '', markdown: 'before', status: 'completed' as const };
+  const original = { id: 'edited-user', role: 'user' as const, createdAt: '', markdown: 'old', status: 'completed' as const };
+  const reply = { id: 'old-reply', role: 'assistant' as const, createdAt: '', markdown: 'reply', status: 'completed' as const };
+  const optimistic = { id: 'loc-edit-fail', role: 'user' as const, createdAt: '', markdown: 'new', status: 'completed' as const };
+  const state: ArchState = {
+    ...initialArchState,
+    sessions: { ...initialArchState.sessions, runningSessionPaths: ['/s'] },
+    transcript: { ...initialArchState.transcript, bySession: { '/s': [prefix, optimistic] } },
+    pending: {
+      ...initialArchState.pending,
+      ops: {
+        'c-edit-fail': {
+          kind: 'edit', sessionPath: '/s', localId: 'loc-edit-fail', previousSummary: null,
+          startedAt: 1, removedTail: [original, reply],
+        },
+      },
+    },
+  };
+
+  const result = reducer(state, {
+    kind: 'PreflightFailed', sessionPath: '/s', requestId: 'req-edit-fail', error: 'Prompt rejected before PI accepted the request.',
+  });
+  assert.equal(result.state.pending.ops['c-edit-fail'], undefined);
+  assert.deepEqual(result.state.transcript.bySession['/s']?.map((message) => message.id), ['prefix', 'edited-user', 'old-reply']);
+  assert.deepEqual(result.effects, [{ kind: 'ClearSendTimer', corrId: 'c-edit-fail' }]);
 });
 
 test('reducer: prepass phase running→succeeded on a pruning-result CustomMessage (Brief F host-side) + projects prepassPhase/latencyMs', () => {
@@ -2269,6 +2377,25 @@ test('reducer: handleError strips internal req-NN ids from the notice (Brief H c
   // applies credential redaction before the webview's 'show more' boundary.
   assert.equal(result.state.settings.noticeRaw, error, 'noticeRaw carries the full host-side error');
   assert.ok(result.state.settings.noticeRaw!.includes('req-99'), 'the raw detail keeps the req-NN id');
+});
+
+test('reducer: handleError keeps an actionable diagnostic behind the short notice', () => {
+  const result = reducer(initialArchState, {
+    kind: 'Error',
+    sessionPath: '/s',
+    error: 'The provider stopped producing semantic response events.',
+    detail: [
+      'Code: PROVIDER_SEMANTIC_TIMEOUT',
+      'Provider: umans',
+      'Last provider error: upstream header phase stalled for 30000ms',
+      'Request: req-provider-1',
+    ].join('\n'),
+  });
+
+  assert.equal(result.state.settings.notice, 'The provider stopped producing semantic response events.');
+  assert.match(result.state.settings.noticeRaw ?? '', /PROVIDER_SEMANTIC_TIMEOUT/);
+  assert.match(result.state.settings.noticeRaw ?? '', /upstream header phase stalled/);
+  assert.notEqual(result.state.settings.noticeRaw, result.state.settings.notice);
 });
 
 test('reducer: handleDismissNotice clears notice, noticeKind, and noticeRaw together', () => {

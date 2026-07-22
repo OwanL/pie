@@ -68,6 +68,10 @@ export interface ActiveRequest {
    * symptom.
    */
   lastRetryErrorMessage?: string;
+  /** Last provider error retained until actual semantic output arrives. Unlike
+   * `lastRetryErrorMessage`, this survives a retry's next `message_start` so a
+   * subsequent silent timeout can still explain the failed attempt. */
+  lastProviderErrorForDiagnostics?: string;
   aborted: boolean;
   /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
    *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared

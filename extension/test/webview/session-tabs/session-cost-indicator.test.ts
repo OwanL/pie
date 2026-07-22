@@ -86,9 +86,9 @@ test('buildSessionCostIndicator computes cost across all channels', () => {
   assert.ok(result);
   // 3 + 15 + 0.3 + 3.75 = 22.05
   assert.equal(result.label, '$22.05');
-  assert.match(result.tooltip, /Copilot: Claude Sonnet 4\.6/);
-  assert.match(result.tooltip, /Completed subtotal:\s+\$22\.0500/);
-  assert.match(result.tooltip, /Cache read:\s+\$0\.3000/);
+  assert.match(result.tooltip, /Session cost by provider \/ model/);
+  assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$22\.0500/);
+  assert.doesNotMatch(result.tooltip, /Input:|Output:|Cache read:|Cache write:/);
   assert.match(result.tooltip, /Total: \$22\.0500/);
 });
 
@@ -157,12 +157,12 @@ test('buildSessionCostIndicator shows sub-agent costs from transcript', () => {
   // Sub: $0.05
   // Total: $0.11
   assert.equal(result.label, '$0.11');
-  assert.match(result.tooltip, /Sub-agents/);
-  assert.match(result.tooltip, /Direct cost:\s+\$0\.0500/);
+  assert.match(result.tooltip, /Unknown provider \/ Unknown subagent model:\s+\$0\.0500/);
+  assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$0\.0600/);
   assert.match(result.tooltip, /Total: \$0\.1100/);
 });
 
-test('buildSessionCostIndicator breaks down direct and nested sub-agent costs by model', () => {
+test('buildSessionCostIndicator rolls direct and nested sub-agent costs into model totals', () => {
   const summary = makeSummary({
     inputTokens: 10_000,
     outputTokens: 2_000,
@@ -234,12 +234,10 @@ test('buildSessionCostIndicator breaks down direct and nested sub-agent costs by
 
   assert.ok(result);
   assert.equal(result.label, '$0.13');
-  assert.match(result.tooltip, /Direct cost:\s+\$0\.0500/);
-  assert.match(result.tooltip, /Nested cost:\s+\$0\.0200/);
-  assert.match(result.tooltip, /Cost by model/);
-  assert.match(result.tooltip, /claude-sonnet:\s+\$0\.0500/);
-  assert.match(result.tooltip, /claude-haiku:\s+\$0\.0200/);
-  assert.match(result.tooltip, /Selected model:\s+\$0\.0600/);
+  assert.match(result.tooltip, /Unknown provider \/ claude-sonnet:\s+\$0\.0500/);
+  assert.match(result.tooltip, /Unknown provider \/ claude-haiku:\s+\$0\.0200/);
+  assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$0\.0600/);
+  assert.doesNotMatch(result.tooltip, /Direct cost:|Nested cost:/);
 });
 
 test('subagent retry costs remain provider-scoped when model ids collide', () => {
@@ -267,9 +265,8 @@ test('subagent retry costs remain provider-scoped when model ids collide', () =>
 test('buildSessionCostIndicator merges the live estimate into the selected model\'s by-model row', () => {
   // Regression: the in-flight live-turn estimate used to be keyed by the
   // selected model's DISPLAY NAME while completed turns are keyed by the
-  // model's ID, so the "Cost by model" rollup showed two rows for the same
-  // model while a turn streamed. Passing `selectedModelId` keys the live
-  // estimate by the model id so it merges with the completed turns.
+  // provider/model billing identity, so one model appeared twice while a turn
+  // streamed. The selected provider and model must merge into one live total.
   const summary = makeSummary({
     inputTokens: 100_000,
     outputTokens: 10_000,
@@ -285,6 +282,7 @@ test('buildSessionCostIndicator merges the live estimate into the selected model
       markdown: '',
       status: 'completed' as const,
       modelId: 'gpt-5.4-mini',
+      provider: 'openai-codex',
       usage: { inputTokens: 100_000, outputTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 110_000 },
     },
   ];
@@ -308,15 +306,14 @@ test('buildSessionCostIndicator merges the live estimate into the selected model
     (id) => (id === 'gpt-5.4-mini' ? pricing : undefined),
     liveEstimate,
     'gpt-5.4-mini',
+    'openai-codex',
   );
 
   assert.ok(result);
   // Main: 0.1M*0.25 + 0.01M*2 = 0.025 + 0.02 = 0.045. Live: 0.05M*0.25 = 0.0125. Total: 0.0575.
   assert.equal(result.label, '$0.06');
-  assert.match(result.tooltip, /gpt-5\.4-mini:\s+\$0\.0575/);
-  // Merged sources line — only present when the live estimate keyed onto the
-  // same model id as the completed turns (two sources > 1).
-  assert.match(result.tooltip, /Main turns \$0\.0450 · Live estimate \$0\.0125/);
+  assert.match(result.tooltip, /openai-codex \/ gpt-5\.4-mini:\s+\$0\.0575/);
+  assert.equal(result.tooltip.match(/gpt-5\.4-mini/g)?.length, 1);
 });
 
 test('buildSessionCostIndicator shows tokens when no pricing (Ollama)', () => {
@@ -329,8 +326,9 @@ test('buildSessionCostIndicator shows tokens when no pricing (Ollama)', () => {
 
   const result = buildSessionCostIndicator(summary, undefined, 'Ollama: llama3.1', buildCompletedCostSummary(summary, [], undefined, undefined), extractSubagentDirectCost([]), undefined);
   assert.ok(result);
-  assert.equal(result.label, '$0.00');
-  assert.match(result.tooltip, /150,000 tokens \(no pricing\)/);
+  assert.equal(result.label, '—*');
+  assert.match(result.tooltip, /Unknown provider \/ Selected model: unavailable\* \(150,000 tokens\)/);
+  assert.match(result.tooltip, /Total: unavailable/);
 });
 
 test('buildSessionCostIndicator shows prepass cost from pruning details', () => {
@@ -357,8 +355,36 @@ test('buildSessionCostIndicator shows prepass cost from pruning details', () => 
 
   const result = buildSessionCostIndicator(summary, pricing, 'Test', buildCompletedCostSummary(summary, [], pricing, undefined), extractSubagentDirectCost([]), pruningDetails);
   assert.ok(result);
-  assert.match(result.tooltip, /Pruning prepass/);
-  assert.match(result.tooltip, /gemma3:4b/);
+  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable\*/);
+  assert.match(result.tooltip, /Known subtotal:/);
+});
+
+test('buildSessionCostIndicator attributes a reported prepass cost without token details', () => {
+  const summary = makeSummary();
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected Model',
+    buildCompletedCostSummary(summary, [], undefined, undefined),
+    extractSubagentDirectCost([]),
+    {
+      mode: 'auto' as const,
+      skillTokensSaved: 0,
+      toolTokensSaved: 0,
+      includedSkills: [],
+      excludedSkills: [],
+      includedTools: [],
+      excludedTools: [],
+      prepassModel: 'priced-prepass',
+      prepassProvider: 'openai',
+      prepassReportedCostUsd: 0.0123,
+    },
+  );
+
+  assert.ok(result);
+  assert.match(result.tooltip, /openai \/ priced-prepass:\s+\$0\.0123/);
+  assert.doesNotMatch(result.tooltip, /No priced usage/);
+  assert.match(result.tooltip, /Total: \$0\.0123/);
 });
 
 test('buildSessionCostIndicator uses prepass model pricing when available', () => {
@@ -393,8 +419,8 @@ test('buildSessionCostIndicator uses prepass model pricing when available', () =
   );
 
   assert.ok(result);
-  assert.match(result.tooltip, /Pruning prepass/);
-  assert.match(result.tooltip, /Cost:\s+\$2\.5000/);
+  assert.match(result.tooltip, /Unknown provider \/ prepass-model:\s+\$2\.5000/);
+  assert.match(result.tooltip, /Unknown provider \/ Selected model:\s+\$10\.0000/);
   assert.match(result.tooltip, /Total: \$12\.5000/);
 });
 
@@ -445,8 +471,9 @@ test('buildSessionCostIndicator does not price the prepass at the selected model
 
   assert.ok(result);
   // Main: 0.1M * 10 = 1.0. Prepass: unavailable → $0. Total: $1.00 (NOT $11).
-  assert.equal(result.label, '$1.00');
-  assert.match(result.tooltip, /Cost: unavailable \(no pricing\)/);
+  assert.equal(result.label, '$1.00*');
+  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable\* \(1,000,000 tokens\)/);
+  assert.match(result.tooltip, /Known subtotal: \$1\.0000/);
   assert.doesNotMatch(result.tooltip, /gemma3:4b:[^\n]*\$10/);
 });
 
@@ -488,10 +515,8 @@ test('buildSessionCostIndicator uses assistant message model pricing when availa
   );
 
   assert.ok(result);
-  assert.match(result.tooltip, /Completed subtotal:\s+\$0\.3000/);
-  assert.match(result.tooltip, /Model id: actual-model/);
-  assert.match(result.tooltip, /Input:\s+\$0\.1000 \(100,000 tokens\)/);
-  assert.match(result.tooltip, /Output:\s+\$0\.2000 \(10,000 tokens\)/);
+  assert.match(result.tooltip, /Unknown provider \/ actual-model:\s+\$0\.3000/);
+  assert.doesNotMatch(result.tooltip, /Input:|Output:/);
 });
 
 test('buildCompletedCostSummary resolves shared model ids by serving provider', () => {
@@ -524,6 +549,19 @@ test('buildCompletedCostSummary resolves shared model ids by serving provider', 
     Array.from(completed.modelIds).sort(),
     ['github-copilot/shared-model', 'openai-codex/shared-model'],
   );
+
+  const indicator = buildSessionCostIndicator(
+    makeSummary(),
+    undefined,
+    'Shared model',
+    completed,
+    extractSubagentDirectCost([]),
+    undefined,
+  );
+  assert.ok(indicator);
+  assert.match(indicator.tooltip, /github-copilot \/ shared-model:\s+\$5\.0000/);
+  assert.match(indicator.tooltip, /openai-codex \/ shared-model:\s+\$2\.0000/);
+  assert.match(indicator.tooltip, /Total: \$7\.0000/);
 });
 
 test('provider-less shared ids stay unpriced when the resolver reports ambiguity', () => {
@@ -582,10 +620,9 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
   assert.ok(liveEstimate);
   assert.ok(result);
   assert.equal(result.label, '<$0.01*');
-  assert.match(result.tooltip, /Live turn partial estimate/);
-  assert.match(result.tooltip, /126,500 tokens/);
-  assert.match(result.tooltip, /cost pending provider cache split/);
-  assert.match(result.ariaLabel, /live context cost is pending the provider cache split/);
+  assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000\*/);
+  assert.match(result.tooltip, /Excludes 126,500 tokens pending billing details or pricing/);
+  assert.match(result.ariaLabel, /some provider\/model usage is not yet priced/);
 });
 
 test('buildSessionCostIndicator does not present unpriced live usage as zero cost', () => {
@@ -614,8 +651,8 @@ test('buildSessionCostIndicator does not present unpriced live usage as zero cos
 
   assert.ok(result);
   assert.equal(result.label, '—*');
-  assert.match(result.ariaLabel, /cost unavailable.*pricing is unavailable/i);
-  assert.match(result.tooltip, /Total: unavailable \(live model pricing unavailable\)/);
+  assert.match(result.ariaLabel, /cost unavailable.*not yet priced/i);
+  assert.match(result.tooltip, /Total: unavailable/);
   assert.doesNotMatch(result.tooltip, /Known (?:estimated )?(?:subtotal|session cost) \$0/);
 });
 
@@ -656,8 +693,8 @@ test('buildSessionCostIndicator does not price unclassified live context as unca
   assert.equal(liveEstimate.unclassifiedContextTokens, 1_000_000);
   assert.ok(result);
   assert.equal(result.label, '$0.00*');
-  assert.match(result.tooltip, /Context footprint: cost pending provider cache split \(1,000,000 tokens\)/);
-  assert.match(result.tooltip, /Known subtotal: \$0\.0000 \(live context cost excluded\)/);
+  assert.match(result.tooltip, /Excludes 1,000,000 tokens pending billing details or pricing/);
+  assert.match(result.tooltip, /Known subtotal: \$0\.0000/);
   assert.doesNotMatch(result.tooltip, /\$30\.0000|\$0\.0300|\$37\.5000/);
 });
 

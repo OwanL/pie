@@ -191,6 +191,7 @@ test('dispatchSessionBackendEvent routes operational-error payloads', () => {
   const payload = {
     code: 'INTERRUPT_ABORT_STUCK',
     message: 'message.interrupt: session.abort() did not settle within 30000ms — activeRequest force-cleared.',
+    detail: 'Abort remained pending after the recovery grace period.',
     sessionPath: '/workspace/session.jsonl',
     requestId: 'req-1',
   };

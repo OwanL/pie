@@ -34,6 +34,7 @@ export interface SdkSessionEvent {
     content?: unknown;
     stopReason?: string;
     errorMessage?: string;
+    diagnostics?: MessageLike['diagnostics'];
     usage?: MessageLike['usage'];
     toolCallId?: string;
   };
@@ -831,11 +832,12 @@ export function applySdkHistoryCompactionRuntimePatch(
     const trigger = this._isAgentRunActive ? 'soft' : 'hard';
     const result = await runPatchedHistoryCompaction(this, trigger, false);
     if (result.compacted) return result.continueRequested;
-    // A valid live proactive policy owns normal threshold timing completely.
-    // Native error/overflow handling was delegated above; returning here avoids
-    // pi's fixed `contextWindow - reserveTokens` check firing ahead of a user-
-    // configured hard limit.
-    if (readLiveHistoryCompactionSettings()?.enabled) return false;
+    // Any valid live Pie policy owns normal threshold timing completely,
+    // including enabled=false. Native error/overflow handling was delegated
+    // above; falling through while disabled would silently re-enable pi's
+    // default `contextWindow - reserveTokens` threshold and ignore the user's
+    // toggle. Only an absent/unreadable policy delegates normal timing.
+    if (readLiveHistoryCompactionSettings()) return false;
     return await (originalCheck as PatchableAgentSession['_checkCompaction']).call(
       this,
       assistantMessage,
@@ -875,7 +877,25 @@ export async function loadSdk(sdkPath: string): Promise<SdkModule> {
   }
 
   const typed = mod as SdkModule;
-  const historyCompactionPatch = applySdkHistoryCompactionRuntimePatch(typed);
+  // The pinned SDK documents and ships compaction as an internal module, but
+  // does not re-export prepareCompaction from dist/index.js. Loading only the
+  // package root leaves that value undefined, so the model-override hook is
+  // never installed and pi silently compacts with the active chat model.
+  const compactionModule = typed.prepareCompaction && typed.compact
+    ? typed
+    : await loadSdkInternalModule<Pick<SdkModule, 'prepareCompaction' | 'compact'>>(
+        sdkPath,
+        path.join('core', 'compaction', 'index.js'),
+      );
+  if (typeof compactionModule.prepareCompaction !== 'function'
+      || typeof compactionModule.compact !== 'function') {
+    throw new Error('SDK history-compaction patch failed: compaction functions are unavailable.');
+  }
+  const historyCompactionPatch = applySdkHistoryCompactionRuntimePatch({
+    AgentSession: typed.AgentSession,
+    prepareCompaction: compactionModule.prepareCompaction,
+    compact: compactionModule.compact,
+  });
   if (historyCompactionPatch === 'missing-target' || historyCompactionPatch === 'unsupported-shape') {
     throw new Error(`SDK history-compaction patch failed: ${historyCompactionPatch}.`);
   }

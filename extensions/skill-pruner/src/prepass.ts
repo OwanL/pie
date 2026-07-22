@@ -551,7 +551,27 @@ export async function runPruningPrepass(
 	// merged over the built-in defaults. Absent fields keep the calibrated
 	// defaults — see LLM_TIMEOUT_MS_BY_THINKING_LEVEL / PREPASS_MAX_TRANSPORT_RETRIES.
 	const { timeoutOverrides, maxTransportRetries, transportBackoffBaseMs, maxOutputTokens } = resolvePrepassBudgets(activeConfig);
-	const temperature = activeConfig.prepass?.temperature;
+	// Remote APIs vary in whether they accept sampling overrides (notably the
+	// Codex backend rejects `temperature`). Keep this experiment-only knob on
+	// the native local Ollama path, where its support is known and controlled.
+	const modelDescriptor = model as { id?: unknown; name?: unknown; provider?: unknown };
+	const isOllamaCloudModel = (typeof modelDescriptor.id === "string"
+		&& /(?:-|:)cloud$/i.test(modelDescriptor.id))
+		|| (typeof modelDescriptor.name === "string" && /^Ollama Cloud:/i.test(modelDescriptor.name));
+	const isLocalOllamaModel = modelDescriptor.provider === "ollama"
+		&& typeof modelDescriptor.id === "string"
+		&& !isOllamaCloudModel;
+	const temperature = isLocalOllamaModel ? activeConfig.prepass?.temperature : undefined;
+	const buildAttemptOptions = (thinkingLevel: string, timeoutMs: number): Record<string, unknown> => ({
+		reasoning: thinkingLevel,
+		// Disable pi-ai retries so only the classified manual loop below
+		// controls retry count and backoff (avoids nested amplification).
+		maxRetries: 0,
+		...(temperature !== undefined ? { temperature } : {}),
+		...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+		signal: AbortSignal.timeout(timeoutMs),
+		...auth,
+	});
 
 	const attempts = buildPrepassThinkingAttempts(activeConfig.thinkingLevel);
 	let latestResult = emptyResult(activeConfig.thinkingLevel, null);
@@ -573,16 +593,13 @@ export async function runPruningPrepass(
 		const thinkingLevel = attempts[index];
 		const timeoutMs = prepassTimeoutMs(thinkingLevel, index, timeoutOverrides);
 		try {
-			const result = await runLlmPruningWithParseRecovery(llmInput, model, {
-				reasoning: thinkingLevel,
-				// Disable pi-ai retries so only the classified manual loop below
-				// controls retry count and backoff (avoids nested amplification).
-				maxRetries: 0,
-				...(temperature !== undefined ? { temperature } : {}),
-				...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-				signal: AbortSignal.timeout(timeoutMs),
-				...auth,
-			}, completeFn, timeoutMs);
+			const result = await runLlmPruningWithParseRecovery(
+				llmInput,
+				model,
+				buildAttemptOptions(thinkingLevel, timeoutMs),
+				completeFn,
+				timeoutMs,
+			);
 			accountResult(result);
 
 			latestResult = {
@@ -614,14 +631,13 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] transport error (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms: ${result.errorMessage}`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
-							reasoning: thinkingLevel,
-							maxRetries: 0,
-							...(temperature !== undefined ? { temperature } : {}),
-							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-							signal: AbortSignal.timeout(timeoutMs),
-							...auth,
-						}, completeFn, timeoutMs);
+						const retryResult = await runLlmPruningWithParseRecovery(
+							llmInput,
+							model,
+							buildAttemptOptions(thinkingLevel, timeoutMs),
+							completeFn,
+							timeoutMs,
+						);
 						accountResult(retryResult);
 						latestResult = { ...latestResult, latencyMs: cumulativeLatencyMs, usage: cumulativeUsage };
 						if (hasUsablePrepassResponse(retryResult)) {
@@ -682,13 +698,13 @@ export async function runPruningPrepass(
 					console.warn(`[skill-pruner] ${errorMessage} (attempt ${r}/${maxTransportRetries}); retrying in ${backoff}ms`);
 					await sleep(backoff);
 					try {
-						const retryResult = await runLlmPruningWithParseRecovery(llmInput, model, {
-							reasoning: thinkingLevel,
-							maxRetries: 0,
-							...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
-							signal: AbortSignal.timeout(timeoutMs),
-							...auth,
-						}, completeFn, timeoutMs);
+						const retryResult = await runLlmPruningWithParseRecovery(
+							llmInput,
+							model,
+							buildAttemptOptions(thinkingLevel, timeoutMs),
+							completeFn,
+							timeoutMs,
+						);
 						accountResult(retryResult);
 						latestResult = { ...latestResult, latencyMs: cumulativeLatencyMs, usage: cumulativeUsage };
 						if (hasUsablePrepassResponse(retryResult)) {

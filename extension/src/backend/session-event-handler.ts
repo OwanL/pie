@@ -22,7 +22,13 @@ import type { SdkSessionEvent } from './sdk';
 import type { BackendSemanticCandidate } from './live-turn-accumulator';
 import type { TurnSemanticEnvelope } from '../shared/live-pipeline-protocol';
 import { estimateCumulativeSubagentTokens, normalizeToolProgress } from './tool-progress-normalizer';
-import { mapAssistantMessage, mapCustomMessage, mapTranscript, type SessionEntryLike } from './transcript';
+import {
+  mapAssistantMessage,
+  mapCustomMessage,
+  mapTranscript,
+  providerTransportFailureDiagnostic,
+  type SessionEntryLike,
+} from './transcript';
 import type { SessionContext } from './server-types';
 import { backendLog, type BackendLogLevel } from './log';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
@@ -602,9 +608,29 @@ function renewSemanticLease(
     const reason = leaseKind === 'tool'
       ? 'The running tool stopped producing progress.'
       : 'The provider stopped producing semantic response events.';
+    const lastProviderError = nonEmptyTrimmed(
+      current.lastProviderErrorForDiagnostics ?? current.lastRetryErrorMessage,
+    );
+    const detail = leaseKind === 'tool'
+      ? [
+          `Inactivity threshold: ${budgetMs} ms`,
+          'Observed: the running tool emitted no progress update before the threshold expired.',
+        ].join('\n')
+      : [
+          `Provider: ${current.provider ?? 'unknown'}`,
+          `Model: ${current.modelId ?? 'unknown'}`,
+          `Inactivity threshold: ${budgetMs} ms`,
+          'Observed: no text, reasoning, or tool-call event arrived before the threshold expired.',
+          lastProviderError
+            ? `Last provider error: ${lastProviderError.slice(0, 4_096)}`
+            : 'Last provider error: none was emitted before the response went silent.',
+        ].join('\n');
     deps.emit('operational-error', {
-      code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT', message: reason,
-      sessionPath: context.sessionPath, requestId,
+      code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT',
+      message: reason,
+      detail,
+      sessionPath: context.sessionPath,
+      requestId,
     });
     deps.recoverStuckSession(context, reason);
   }, budgetMs);
@@ -810,6 +836,7 @@ export function handleSdkSessionEvent(
       }
 
       if (event.assistantMessageEvent?.type === 'text_delta') {
+        context.activeRequest.lastProviderErrorForDiagnostics = undefined;
         renewSemanticLease(deps, context);
         emitSemanticCandidate(deps, context, {
           kind: 'turn.text', delta: event.assistantMessageEvent.delta ?? '',
@@ -826,6 +853,7 @@ export function handleSdkSessionEvent(
         const thinkingContent: string =
           event.assistantMessageEvent.thinking ?? event.assistantMessageEvent.delta ?? '';
         if (thinkingContent) {
+          context.activeRequest.lastProviderErrorForDiagnostics = undefined;
           renewSemanticLease(deps, context);
           emitSemanticCandidate(deps, context, {
             kind: 'turn.reasoning',
@@ -847,6 +875,7 @@ export function handleSdkSessionEvent(
           ? undefined
           : toolCallEvent.partial?.content?.[contentIndex];
         if (content?.type === 'toolCall' && content.id && content.name) {
+          context.activeRequest.lastProviderErrorForDiagnostics = undefined;
           renewSemanticLease(deps, context);
           emitSemanticCandidate(deps, context, {
             kind: 'turn.toolDraft',
@@ -1182,6 +1211,23 @@ export function handleSdkSessionEvent(
       const assistantEventMessage = mergedErrorMessage === event.message.errorMessage
         ? event.message
         : { ...event.message, errorMessage: mergedErrorMessage };
+      const transportFailure = providerTransportFailureDiagnostic(assistantEventMessage);
+      if (transportFailure) {
+        const transportDetails = transportFailure.details ?? {};
+        logBackendDiagnostic('warn', 'provider.transportFailure', {
+          requestId: context.activeRequest.id,
+          sessionPath: context.sessionPath,
+          modelId: context.activeRequest.modelId,
+          provider: context.activeRequest.provider,
+          error: transportFailure.error?.message ?? mergedErrorMessage ?? 'provider transport failure',
+          ...(transportFailure.error?.code !== undefined ? { closeCode: transportFailure.error.code } : {}),
+          configuredTransport: transportDetails.configuredTransport,
+          fallbackTransport: transportDetails.fallbackTransport,
+          eventsEmitted: transportDetails.eventsEmitted,
+          phase: transportDetails.phase,
+          requestBytes: transportDetails.requestBytes,
+        });
+      }
 
       // A persisted assistant message may represent several provider turns when
       // intermediate tool-use messages are folded into the final durable turn.
@@ -1431,8 +1477,11 @@ export function handleSdkSessionEvent(
       const startedAt = Date.now();
       finishRetryTiming(deps, context, startedAt);
       if (context.activeRequest) {
-        context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.errorMessage)
+        const errorMessage = nonEmptyTrimmed(event.errorMessage);
+        context.activeRequest.lastRetryErrorMessage = errorMessage
           ?? context.activeRequest.lastRetryErrorMessage;
+        context.activeRequest.lastProviderErrorForDiagnostics = errorMessage
+          ?? context.activeRequest.lastProviderErrorForDiagnostics;
       }
       // Bug 6 watchdog: re-arm with the SDK's reported backoff delayMs so the
       // window matches the real retry cadence (not the conservative 0 from
@@ -1473,8 +1522,11 @@ export function handleSdkSessionEvent(
         if (event.success === true) {
           context.activeRequest.lastRetryErrorMessage = undefined;
         } else {
-          context.activeRequest.lastRetryErrorMessage = nonEmptyTrimmed(event.finalError)
+          const finalError = nonEmptyTrimmed(event.finalError);
+          context.activeRequest.lastRetryErrorMessage = finalError
             ?? context.activeRequest.lastRetryErrorMessage;
+          context.activeRequest.lastProviderErrorForDiagnostics = finalError
+            ?? context.activeRequest.lastProviderErrorForDiagnostics;
         }
       }
       // Bug 6 watchdog: clear on retry completion (success or final failure).

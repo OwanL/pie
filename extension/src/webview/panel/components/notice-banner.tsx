@@ -19,9 +19,9 @@ export interface NoticeBannerProps {
    *  Restart backend) alongside the message. `null`/`undefined` for plain
    *  info/warning notices — no action buttons. */
   kind?: NoticeKind | null;
-  /** Credential-redacted full error string behind the short `notice` summary, or
-   *  null. When present, the banner renders a "Show raw error" toggle that
-   *  reveals this verbatim (including internal req-NN ids) for debugging.
+  /** Credential-redacted full diagnostic behind the short `notice` summary, or
+   *  null. When present, the banner renders a More toggle that reveals the
+   *  backend code, correlation, and available root-cause detail.
    *  Absent for plain info/warning notices. */
   rawDetail?: string | null;
   /** Invoked when the user clicks a recovery action. The parent decides whether
@@ -38,7 +38,7 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
   const isError = notice.toLowerCase().includes('error') || notice.toLowerCase().includes('fail');
   const isLong = notice.length > TRUNCATE_LENGTH;
   const [expanded, setExpanded] = useState(false);
-  const [rawExpanded, setRawExpanded] = useState(false);
+  const [detailExpanded, setDetailExpanded] = useState(false);
   const [dismissing, setDismissing] = useState(false);
   const actions = kind ? noticeActionsFor(kind) : [];
   const hasRaw = !!rawDetail && rawDetail !== notice;
@@ -47,7 +47,8 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
   // so it isn't auto-dismissed and the entrance animation replays.
   useEffect(() => {
     setDismissing(false);
-    setRawExpanded(false);
+    setExpanded(false);
+    setDetailExpanded(false);
   }, [notice]);
 
   return (
@@ -58,11 +59,11 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
       }}
     >
       <div class="notice-content">
-        <span class={`notice-text${isLong && !expanded ? ' notice-text-truncated' : ''}`}>
-          {isLong && !expanded ? notice.slice(0, TRUNCATE_LENGTH) + '…' : notice}
+        <span class={`notice-text${isLong && !expanded && !detailExpanded ? ' notice-text-truncated' : ''}`}>
+          {isLong && !expanded && !detailExpanded ? notice.slice(0, TRUNCATE_LENGTH) + '…' : notice}
         </span>
-        {hasRaw && rawExpanded && (
-          <pre class="notice-raw-detail" title="Raw backend error detail">{rawDetail}</pre>
+        {hasRaw && detailExpanded && (
+          <pre class="notice-raw-detail" title="Backend error details">{rawDetail}</pre>
         )}
       </div>
       <div class="notice-actions">
@@ -76,7 +77,7 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
             {noticeActionLabel(action)}
           </button>
         ))}
-        {isLong && (
+        {isLong && !hasRaw && (
           <button
             class="notice-btn"
             onClick={() => setExpanded(v => !v)}
@@ -87,11 +88,11 @@ export function NoticeBanner({ notice, kind, rawDetail, onAction, onDismiss }: N
         )}
         {hasRaw && (
           <button
-            class="notice-btn"
-            onClick={() => setRawExpanded(v => !v)}
-            title={rawExpanded ? 'Hide raw error' : 'Show raw error'}
+            class="notice-btn notice-detail"
+            onClick={() => setDetailExpanded(v => !v)}
+            title={detailExpanded ? 'Hide error details' : 'Show error details'}
           >
-            {rawExpanded ? 'Hide raw' : 'Show raw'}
+            {detailExpanded ? 'Less' : 'More'}
           </button>
         )}
         <button class="notice-btn notice-dismiss" onClick={() => setDismissing(true)} title="Dismiss" aria-label="Dismiss notice">✕</button>

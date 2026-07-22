@@ -361,6 +361,7 @@ export interface MessageThinkingEvent {
 export interface MessageAbortedEvent {
   kind: 'MessageAborted';
   sessionPath: string;
+  requestId?: string;
   messageId?: string;
   userInitiated?: boolean;
   reason?: string;
@@ -376,6 +377,7 @@ export interface ToolCallEvent {
 export interface MessageFinishedEvent {
   kind: 'MessageFinished';
   sessionPath: string;
+  requestId?: string;
   message: ChatMessage;
 }
 
@@ -432,6 +434,8 @@ export interface ErrorEvent {
   kind: 'Error';
   sessionPath: string;
   error: string;
+  /** Full diagnostic retained host-side and redacted at projection. */
+  detail?: string;
 }
 
 /** Emitted when a session is opened and its data is loaded. */

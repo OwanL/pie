@@ -19,9 +19,12 @@ const config = {
   modelProfiles: {},
 };
 
-function withConfig<T>(fn: () => Promise<T> | T): Promise<T> {
+function withConfig<T>(
+  fn: () => Promise<T> | T,
+  settings: typeof config = config,
+): Promise<T> {
   const previous = process.env[HISTORY_COMPACTION_ENV];
-  process.env[HISTORY_COMPACTION_ENV] = JSON.stringify(config);
+  process.env[HISTORY_COMPACTION_ENV] = JSON.stringify(settings);
   return Promise.resolve(fn()).finally(() => {
     if (previous === undefined) delete process.env[HISTORY_COMPACTION_ENV];
     else process.env[HISTORY_COMPACTION_ENV] = previous;
@@ -125,6 +128,20 @@ test('soft trigger runs only after an active run and idle preflight uses the har
     assert.deepEqual(idle.compactions, []);
     assert.equal(idle.originalChecks, 0, 'the configured hard limit replaces pi native threshold timing');
   });
+});
+
+test('disabled proactive compaction does not fall through to pi native thresholds', async () => {
+  await withConfig(async () => {
+    const FakeAgentSession = createFakeSessionClass();
+    applySdkHistoryCompactionRuntimePatch({ AgentSession: FakeAgentSession as never });
+    const session = new FakeAgentSession();
+    session.usage.tokens = 9_000;
+
+    await session._checkCompaction({ stopReason: 'stop' });
+
+    assert.deepEqual(session.compactions, []);
+    assert.equal(session.originalChecks, 0, 'enabled=false must suppress native threshold compaction');
+  }, { ...config, enabled: false });
 });
 
 test('provider errors always delegate to pi overflow recovery', async () => {

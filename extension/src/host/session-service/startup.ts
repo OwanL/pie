@@ -20,6 +20,7 @@ import { bootLog } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
 import { publishBackendReady } from './backend-ready';
+import { seedHistoryCompactionEnvironment } from './runtime-prefs-bootstrap';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 
@@ -359,7 +360,15 @@ async function sendRuntimePrefsWithLogging(
       backendReady: archState.settings.backendReady,
       restoredStartupPath,
     });
-    await options.backend.request('runtimePrefs.set', buildRuntimePrefsPayload(archState.settings.prefs));
+    // Cold SDK/session restoration can keep the backend event loop busy well
+    // beyond the normal 5s live-settings budget. Wait for the authoritative
+    // startup snapshot instead of proceeding with runtime defaults after a
+    // false timeout; the payload is idempotent and must precede session open.
+    await options.backend.request(
+      'runtimePrefs.set',
+      buildRuntimePrefsPayload(archState.settings.prefs),
+      { timeoutMs: 60_000 },
+    );
     bootLog('session-startup', 'runtimePrefs.set.completed', {
       backendReady: options.getArchState().settings.backendReady,
       restoredStartupPath,
@@ -454,6 +463,10 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   const backendPath = path.join(options.context.extensionPath, 'out', 'backend.js');
   setupAgentDirEnv(options);
   setupInTreeAuthEnv();
+  // The child inherits this before SDK load, closing the startup window where
+  // automatic compaction could otherwise use pi's native defaults while the
+  // runtimePrefs.set snapshot waits behind cold session restoration.
+  seedHistoryCompactionEnvironment(options.getArchState().settings.prefs);
 
   // Attach the backend event handlers BEFORE spawning so that events emitted
   // immediately after backend.ready (e.g. session.opened) are not lost. This

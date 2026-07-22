@@ -167,8 +167,13 @@ type PostOperation<T> = {
 
 /**
  * Sole owner of authoritative snapshot delivery and transcript-commit progress.
- * It permits multiple accepted revisions but exactly one unsettled state post
- * and exactly one lack-of-commit timer.
+ * It permits exactly one unsettled post and one accepted-but-uncommitted
+ * revision. Host changes that arrive while the renderer is committing are
+ * coalesced into the next full snapshot. This commit gate is intentional
+ * backpressure: `webview.postMessage()` settles when VS Code accepts a message,
+ * not when Chromium has rendered it, so posting every streaming revision can
+ * build an arbitrarily stale renderer queue whose transcript catches up only
+ * after the agent stops producing updates.
  */
 export class StateDeliveryController<T> {
   private desiredGeneration = 0;
@@ -178,6 +183,9 @@ export class StateDeliveryController<T> {
   private nextRevision = 1;
   private activeOperation: PostOperation<T> | undefined;
   private accepted: AcceptedRevision[] = [];
+  /** Highest accepted revision retired by commit-timeout resnapshot recovery.
+   * Late evidence for one of these revisions is stale, not a protocol defect. */
+  private retiredAcceptedRevisionHighWater = 0;
   private lastTranscriptCommittedRevision = 0;
   private lastTranscriptCommittedIdentity: string | undefined;
   private commitTimer: unknown;
@@ -225,7 +233,14 @@ export class StateDeliveryController<T> {
    * eligibility before invoking this method.
    */
   probe(): Promise<boolean> {
-    if (this.disposed || !this.visible || !this.dirty || this.deliverySuspended || this.activeOperation) {
+    if (
+      this.disposed
+      || !this.visible
+      || !this.dirty
+      || this.deliverySuspended
+      || this.activeOperation
+      || this.accepted.length > 0
+    ) {
       return Promise.resolve(false);
     }
     return new Promise<boolean>((resolve) => {
@@ -272,6 +287,7 @@ export class StateDeliveryController<T> {
       this.disposed
       || !this.dirty
       || this.activeOperation
+      || this.accepted.length > 0
       || this.retryTimer !== undefined
       || !this.visible
       || this.deliverySuspended
@@ -325,6 +341,10 @@ export class StateDeliveryController<T> {
       this.telemetry('paint-observed', { revision: payload.revision, viewGeneration: payload.viewGeneration });
       return;
     }
+    if (payload.revision <= this.retiredAcceptedRevisionHighWater) {
+      this.telemetry('evidence-stale', { revision: payload.revision, viewGeneration: payload.viewGeneration }, 'paint-observed');
+      return;
+    }
     const entry = this.accepted.find((candidate) => candidate.revision === payload.revision);
     const activeEntry = this.activeOperation?.revision === payload.revision ? this.activeOperation : undefined;
     if (!entry && !activeEntry) {
@@ -350,6 +370,11 @@ export class StateDeliveryController<T> {
     if (!this.validateEvidenceGeneration('render-failure', payload.viewGeneration, payload.revision)) return;
     if (payload.revision !== null) {
       if (payload.revision < this.lastTranscriptCommittedRevision) {
+        this.telemetry('evidence-stale', { revision: payload.revision, viewGeneration: payload.viewGeneration }, 'render-failure');
+        return;
+      }
+      if (payload.revision > this.lastTranscriptCommittedRevision
+        && payload.revision <= this.retiredAcceptedRevisionHighWater) {
         this.telemetry('evidence-stale', { revision: payload.revision, viewGeneration: payload.viewGeneration }, 'render-failure');
         return;
       }
@@ -401,7 +426,14 @@ export class StateDeliveryController<T> {
   }
 
   private startPost(readinessProbe: boolean, resolveProbe?: (accepted: boolean) => void): boolean {
-    if (this.disposed || !this.dirty || this.activeOperation || !this.visible || this.deliverySuspended) return false;
+    if (
+      this.disposed
+      || !this.dirty
+      || this.activeOperation
+      || this.accepted.length > 0
+      || !this.visible
+      || this.deliverySuspended
+    ) return false;
 
     const context: StateDeliveryBuildContext = {
       revision: this.nextRevision++,
@@ -483,7 +515,7 @@ export class StateDeliveryController<T> {
       this.recordTranscriptCommit(deferredCommit.revision, deferredCommit.identity, deferredCommit.viewGeneration);
     }
 
-    if (this.accepted.length >= this.options.acceptedLedgerCapacity && !this.overflowReported) {
+    if (this.accepted.length > this.options.acceptedLedgerCapacity && !this.overflowReported) {
       this.overflowReported = true;
       this.deliverySuspended = true;
       this.clearCommitTimer();
@@ -567,7 +599,10 @@ export class StateDeliveryController<T> {
     revision: number,
   ): void {
     if (!this.validateEvidenceGeneration(stage, evidenceViewGeneration, revision)) return;
-    if (revision <= this.lastTranscriptCommittedRevision) {
+    if (
+      revision <= this.lastTranscriptCommittedRevision
+      || revision <= this.retiredAcceptedRevisionHighWater
+    ) {
       this.telemetry('evidence-stale', { revision, viewGeneration: evidenceViewGeneration }, stage);
       return;
     }
@@ -582,6 +617,10 @@ export class StateDeliveryController<T> {
     if (!this.validateEvidenceGeneration('transcript-committed', evidenceViewGeneration, revision)) return;
     if (revision <= this.lastTranscriptCommittedRevision) {
       this.telemetry('commit-stale', { revision, viewGeneration: evidenceViewGeneration }, 'below-high-water');
+      return;
+    }
+    if (revision <= this.retiredAcceptedRevisionHighWater) {
+      this.telemetry('commit-stale', { revision, viewGeneration: evidenceViewGeneration }, 'retired-after-timeout');
       return;
     }
 
@@ -678,12 +717,30 @@ export class StateDeliveryController<T> {
       ) return;
       const oldest = this.accepted[0];
       this.telemetry('commit-timeout', { revision: oldest.revision });
+      // Retire the timed-out acceptance before invoking the synchronous
+      // recovery callback. A callback that invalidates the view (e.g. a host
+      // reload) would otherwise clear `accepted` first, so the high-water
+      // computed here would miss the retired revision and later evidence for
+      // it would be misclassified as a protocol defect instead of stale. The
+      // commit gate would also block a new post forever while waiting for the
+      // very evidence this timeout says did not arrive.
+      this.retiredAcceptedRevisionHighWater = Math.max(
+        this.retiredAcceptedRevisionHighWater,
+        ...this.accepted.map((entry) => entry.revision),
+      );
+      this.accepted = [];
       this.options.onRecovery({
         reason: 'commit-timeout',
         viewGeneration: this.viewGeneration,
         desiredGeneration: this.desiredGeneration,
         revision: oldest.revision,
       });
+      // A synchronous recovery callback may have invalidated the view (or
+      // disposed the controller), which already resnapshots and reflushes.
+      // Skip the resnapshot here to avoid a duplicate dirty cycle and post;
+      // the invalidateView path re-arms its own commit deadline once its post
+      // is accepted.
+      if (viewGeneration !== this.viewGeneration || this.disposed) return;
       // Always resnapshot current host state, never an obsolete envelope.
       this.desiredGeneration += 1;
       this.flush();
