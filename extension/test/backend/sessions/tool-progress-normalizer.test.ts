@@ -40,6 +40,8 @@ test('subagent previews understand the real details.results progress shape', () 
       mode: 'single',
       results: [{
         agent: 'worker', task: 'inspect the queue', exitCode: -1,
+        parentUserContextMode: 'latest',
+        parentUserContext: '[User prompt]\nKeep the queue fair.\n\n[Recorded clarification]\nQuestion: Preserve order?\nAnswer: Yes',
         model: 'provider/model', provider: 'provider', thinkingLevel: 'high',
         contextWindow: 200000, usage: { input: 1200, output: 300, cacheRead: 50, cacheWrite: 0, contextTokens: 1550, cost: 0.02, turns: 2 },
         startedAt: 1000, activitySince: 1100,
@@ -56,6 +58,8 @@ test('subagent previews understand the real details.results progress shape', () 
     assert.equal(preview.children[0]?.agent, 'worker');
     assert.equal(preview.children[0]?.model, 'provider/model');
     assert.equal(preview.children[0]?.thinkingLevel, 'high');
+    assert.equal(preview.children[0]?.parentUserContextMode, 'latest');
+    assert.match(preview.children[0]?.parentUserContext ?? '', /Keep the queue fair/);
     assert.equal(preview.children[0]?.streamingText, 'The child reply is visible while running.');
     assert.equal(preview.children[0]?.usage?.input, 1200);
     assert.equal(preview.children[0]?.contextWindow, 200000);

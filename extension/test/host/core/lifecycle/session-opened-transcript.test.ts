@@ -353,3 +353,52 @@ test('idle session.opened prefers the incoming transcript', () => {
   assert.deepEqual(result.transcript, incomingTranscript);
   assert.equal(result.transcriptWindow.loadedEnd, 2);
 });
+
+test('session.opened restores deduplicated tool result mirrors from complete ordered parts', () => {
+  const fullSubagentResult = {
+    content: [{ type: 'text', text: 'child answer' }],
+    details: {
+      mode: 'single',
+      results: [{
+        messages: [
+          { role: 'assistant', content: [{ type: 'thinking', thinking: 'child reasoning' }] },
+          { role: 'assistant', content: [{ type: 'text', text: 'child answer' }] },
+        ],
+      }],
+    },
+  };
+  const incoming: ChatMessage = {
+    ...assistantMessage('assistant-with-subagent', '', 'completed'),
+    parts: [{
+      kind: 'toolCall',
+      toolCall: {
+        id: 'subagent-1',
+        name: 'subagent',
+        input: { task: 'inspect everything' },
+        result: fullSubagentResult,
+        status: 'completed',
+      },
+    }],
+    toolCalls: [{
+      id: 'subagent-1',
+      name: 'subagent',
+      input: { task: 'inspect everything' },
+      status: 'completed',
+    }],
+  };
+
+  const result = resolveSessionOpenedTranscript({
+    busy: false,
+    localTranscript: [],
+    incomingTranscript: [incoming],
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+  });
+
+  assert.strictEqual(result.transcript[0]?.toolCalls?.[0]?.result, fullSubagentResult);
+  const orderedPart = result.transcript[0]?.parts?.[0];
+  assert.strictEqual(
+    orderedPart?.kind === 'toolCall' ? orderedPart.toolCall.result : undefined,
+    fullSubagentResult,
+  );
+  assert.match(JSON.stringify(result.transcript), /child reasoning/);
+});

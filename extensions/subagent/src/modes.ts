@@ -32,7 +32,11 @@ export function executeSingleMode(
 	/** Internal test seam for retry/backoff/analytics. */
 	internalSeam?: {
 		clock?: RetryClock;
-		runAttempt?: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
+		runAttempt?: (
+			resolved: Awaited<ReturnType<typeof resolveModel>>,
+			attemptId: string,
+			onAttemptUpdate?: OnUpdateCallback,
+		) => Promise<SingleResult>;
 	},
 ) {
 	return executeSingleTask({

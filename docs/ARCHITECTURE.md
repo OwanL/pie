@@ -127,6 +127,11 @@ See git history (commit `d581d83`) for historical context on the migration from 
 ### Host ↔ PI backend
 
 - JSON-RPC over stdio. Request/response plus streaming event lines.
+- Transcript snapshots serialize complete tool results once in ordered
+  `ChatMessage.parts`. The legacy flat `toolCalls` mirror omits a result on the
+  wire when the matching part already carries it; the host restores that mirror
+  immediately after receipt. This is lossless and prevents nested subagent
+  transcripts from being doubled by JSON serialization.
 - Backend events carry `sessionPath` — missing `sessionPath` is a protocol defect.
 - The host serializes all RPCs per session to prevent races.
 - The host normalizes one absolute agent/session storage authority and supplies

@@ -163,6 +163,28 @@ function prefsWith(overrides: Partial<ChatPrefs>): ChatPrefs {
   return { ...DEFAULT_CHAT_PREFS, ...overrides };
 }
 
+test('subagent header labels inherited context and its tooltip shows the exact inserted packet', async () => {
+  const toolCall = nestedSubagentToolCall();
+  const details = (toolCall.result as any).details;
+  details.results[0].parentUserContextMode = 'latest';
+  details.results[0].parentUserContext = '[User prompt]\nKeep the public API.\n\n[Recorded clarification]\nQuestion: Add tests?\nAnswer: Yes';
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+
+  const label = container.querySelector<HTMLElement>('.subagent-context-label');
+  assert.equal(label?.textContent, 'context latest');
+  const trigger = label?.closest<HTMLElement>('.pie-tooltip-trigger');
+  assert.ok(trigger);
+  await act(async () => {
+    trigger.dispatchEvent(new MouseEvent('mouseenter'));
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  });
+  const tooltip = Array.from(document.querySelectorAll<HTMLElement>('.pie-tooltip-host'))
+    .find((host) => host.textContent?.includes('Keep the public API.'));
+  assert.ok(tooltip, 'context tooltip should render the exact inherited packet');
+  assert.match(tooltip.textContent ?? '', /Delegated taskdo the thing/);
+  assert.match(tooltip.textContent ?? '', /Recorded clarification.*Add tests\?.*Yes/s);
+});
+
 test('nested subagent: with autoExpand, both outer and inner subagent headers render', () => {
   mount(nestedSubagentToolCall(), prefsWith({ autoExpandSubagentCalls: true }));
   const headers = container.querySelectorAll('.subagent-header');

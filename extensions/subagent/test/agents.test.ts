@@ -41,10 +41,10 @@ test("parseBucketAndThinking: parses valid bucket and thinkingLevel", () => {
 	assert.equal(result.thinkingLevel, "high");
 });
 
-test("parseBucketAndThinking: handles whitespace around values", () => {
+test("parseBucketAndThinking: handles whitespace and caps legacy xhigh", () => {
 	const result = parseBucketAndThinking("  small  ", "  xhigh  ");
 	assert.equal(result.bucket, "small");
-	assert.equal(result.thinkingLevel, "xhigh");
+	assert.equal(result.thinkingLevel, "high");
 });
 
 test("parseBucketAndThinking: rejects invalid bucket names", () => {
@@ -53,10 +53,10 @@ test("parseBucketAndThinking: rejects invalid bucket names", () => {
 	assert.equal(parseBucketAndThinking("frontier ", undefined).bucket, "frontier");
 });
 
-test("parseBucketAndThinking: rejects invalid thinking levels", () => {
-	assert.equal(parseBucketAndThinking(undefined, "max").thinkingLevel, undefined);
+test("parseBucketAndThinking: rejects invalid thinking levels and caps levels above high", () => {
+	assert.equal(parseBucketAndThinking(undefined, "max").thinkingLevel, "high");
 	assert.equal(parseBucketAndThinking(undefined, "off").thinkingLevel, undefined);
-	assert.equal(parseBucketAndThinking(undefined, "xhigh").thinkingLevel, "xhigh");
+	assert.equal(parseBucketAndThinking(undefined, "xhigh").thinkingLevel, "high");
 });
 
 test("parseBucketAndThinking: parses only bucket when thinkingLevel omitted", () => {

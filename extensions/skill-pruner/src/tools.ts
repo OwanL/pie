@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
-	state,
-	getPiToolSeams,
 	getHiddenSkills,
 	getLoadedSkills,
 	getPrunedTools,
@@ -23,7 +22,14 @@ function commaList(names: readonly string[]): string {
 	return names.length > 0 ? [...names].sort().join(", ") : "(none)";
 }
 
-export const requestCapabilityDefinition = {
+export interface PiToolSeams {
+	getAllTools(): ToolInfo[];
+	getActiveTools(): string[];
+	setActiveTools(names: string[]): void;
+}
+
+export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
+	return {
 	name: "request_capability",
 	label: "Request Capability",
 	description: "List tools and skills hidden by the latest pruning decision, or activate/load one by exact type and name.",
@@ -50,8 +56,8 @@ export const requestCapabilityDefinition = {
 		const capabilityType = typeof params.capabilityType === "string" ? params.capabilityType.trim() : "";
 		const capabilityName = typeof params.capabilityName === "string" ? params.capabilityName.trim() : "";
 		const sessionId = getSessionId(ctx);
-		const allTools = state.getAllToolsOverride ? state.getAllToolsOverride() : getPiToolSeams().getAllTools();
-		const activeTools = state.getActiveToolsOverride ? state.getActiveToolsOverride() : getPiToolSeams().getActiveTools();
+		const allTools = toolSeams.getAllTools();
+		const activeTools = toolSeams.getActiveTools();
 		const knownToolNames = new Set(allTools.map((tool) => tool.name));
 		const hiddenToolNames = [...getPrunedTools(sessionId)]
 			.filter((name) => knownToolNames.has(name) && !activeTools.includes(name))
@@ -113,9 +119,9 @@ export const requestCapabilityDefinition = {
 		};
 		visit(capabilityName);
 		const newActiveTools = [...enabled];
-		if (state.setActiveToolsOverride) state.setActiveToolsOverride(newActiveTools);
-		else getPiToolSeams().setActiveTools(newActiveTools);
+		toolSeams.setActiveTools(newActiveTools);
 		recordToolRecovery(sessionId, capabilityName);
 		return { content: [{ type: "text" as const, text: `Enabled tool '${capabilityName}'; it is available on the next model step.` }] };
 	},
-};
+	};
+}

@@ -26,6 +26,7 @@ import {
 import { selectModel } from "../bucket-selector.js";
 import { getCapacityAvailableModelIds } from "./provider-capacity.js";
 import type { ModelProviderRef } from "./provider-toggles.js";
+import { capSubagentThinkingLevel } from "./thinking-level.js";
 
 /** Context for model selection settings and restrictions. */
 export interface SelectionContext {
@@ -66,7 +67,9 @@ export async function resolveModel(
 	childDepth?: number,
 ) {
 	const requestedBucket = perCallBucket ?? agent.bucket ?? "medium";
-	const thinkingLevel = perCallThinkingLevel ?? agent.thinkingLevel;
+	// Subagents default to high and never exceed it, even when an old tool call
+	// or agent frontmatter still carries the formerly-supported xhigh value.
+	const thinkingLevel = capSubagentThinkingLevel(perCallThinkingLevel ?? agent.thinkingLevel);
 
 	// When the user has enabled "always use parent model", skip bucket
 	// selection entirely and use the caller's active model (the same path as
@@ -134,7 +137,7 @@ export async function resolveModel(
 			selectionCtx.disabledProviders,
 		)
 		: undefined;
-	const selection = selectModel(
+	const selected = selectModel(
 		bucket,
 		thinkingLevel,
 		assignments,
@@ -144,6 +147,12 @@ export async function resolveModel(
 		activeModelId,
 		capacityAvailableModelIds,
 	);
+	// Model-profile relaxation may return xhigh for unusual profiles that omit
+	// high. Keep the execution metadata and SDK request under the same ceiling.
+	const selection = {
+		...selected,
+		thinkingLevel: capSubagentThinkingLevel(selected.thinkingLevel),
+	};
 
 	return {
 		modelOverride: selection.modelId,

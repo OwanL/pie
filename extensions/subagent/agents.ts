@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ThinkingLevel } from "./bucket-selector.js";
+import { MAX_SUBAGENT_THINKING_LEVEL, SUBAGENT_THINKING_LEVELS } from "./src/thinking-level.js";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -71,7 +72,7 @@ function parseFrontmatter<T extends Record<string, string>>(content: string): { 
 }
 
 const VALID_BUCKETS = new Set(["small", "medium", "frontier"]);
-const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["minimal", "low", "medium", "high", "xhigh"]);
+const VALID_THINKING_LEVELS = new Set<string>(SUBAGENT_THINKING_LEVELS);
 
 /**
  * Parse a frontmatter `tools` value into a list of tool names. Accepts both a
@@ -90,10 +91,15 @@ function parseToolsList(rawTools: string | undefined): string[] | undefined {
 
 export function parseBucketAndThinking(rawBucket: string | undefined, rawThinking: string | undefined): { bucket?: string; thinkingLevel?: ThinkingLevel } {
 	const bucket = rawBucket?.trim();
-	const thinking = rawThinking?.trim() as ThinkingLevel | undefined;
+	const thinking = rawThinking?.trim();
+	const thinkingLevel = thinking === "xhigh" || thinking === "max"
+		? MAX_SUBAGENT_THINKING_LEVEL
+		: thinking && VALID_THINKING_LEVELS.has(thinking)
+			? thinking as ThinkingLevel
+			: undefined;
 	return {
 		bucket: bucket && VALID_BUCKETS.has(bucket) ? bucket : undefined,
-		thinkingLevel: thinking && VALID_THINKING_LEVELS.has(thinking) ? thinking : undefined,
+		thinkingLevel,
 	};
 }
 

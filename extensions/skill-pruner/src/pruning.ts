@@ -4,7 +4,6 @@ import { loadConfig } from "../config.js";
 import type { PruningConfig } from "../types.js";
 import {
 	getConfigOverrideForTesting,
-	getPiToolSeams as getPiToolSeamsFromState,
 	CONFIG_ROOT,
 	PROCESS_SESSION_ID,
 } from "./state.js";
@@ -55,11 +54,6 @@ export { subagentContext } from "../../../shared/subagent-context.js";
  */
 export const SKILLS_BLOCK_RE = /\n\s*The following skills provide specialized instructions for specific tasks\.[\s\S]*?<\/available_skills>/;
 export const MIN_PROMPT_LENGTH = 8;
-
-/** Returns the pi API facade, falling back to no-ops when pi hasn't been initialized. */
-export function getPiToolSeams(): { getAllTools: () => ToolInfo[]; getActiveTools: () => string[]; setActiveTools: (names: string[]) => void } {
-	return getPiToolSeamsFromState();
-}
 
 export function shouldSkipPruning(
 	event: BeforeAgentStartEvent,

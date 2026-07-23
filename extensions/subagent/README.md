@@ -39,9 +39,12 @@ branch:
   pair on the active branch.
 
 Assistant prose, reasoning, and other tool output are never copied. The packet
-is capped at 12,000 characters with its beginning and end preserved. There is
-intentionally no full-history mode: delegated work should retain an isolated,
-lean context, and the explicit `task` remains its scope.
+is capped at 12,000 characters with its beginning and end preserved. The chosen
+mode and exact bounded packet are retained on the subagent result so pie can
+show the handoff in the subagent header and its context tooltip; task-only
+calls are identified explicitly. There is intentionally no full-history mode:
+delegated work should retain an isolated, lean context, and the explicit `task`
+remains its scope.
 
 ## Agent Discovery
 

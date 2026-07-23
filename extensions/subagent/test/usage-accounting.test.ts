@@ -393,6 +393,7 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 	];
 	const clock = new ImmediateClock();
 	const attempts: string[] = [];
+	const liveUsages: Array<{ input: number; output: number; cacheRead: number; cacheWrite: number }> = [];
 	const response: any = await execSingle(
 		{ agent: "worker", task: "do work", bucket: "medium" },
 		makeCtx(models),
@@ -400,7 +401,15 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 		() => undefined,
 		{ depth: 0, trail: [] },
 		noOpDetails,
-		undefined,
+		(partial: any) => {
+			const usage = partial.details?.results?.[0]?.usage;
+			if (usage) liveUsages.push({
+				input: usage.input,
+				output: usage.output,
+				cacheRead: usage.cacheRead,
+				cacheWrite: usage.cacheWrite,
+			});
+		},
 		noSignal(),
 		selCtx({
 			alwaysParentModel: false,
@@ -414,27 +423,30 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 		undefined,
 		{
 			clock,
-			runAttempt: (resolved: any, _attemptId: string) => {
+			runAttempt: (resolved: any, _attemptId: string, onAttemptUpdate?: (partial: any) => void) => {
 				const model = resolved.modelOverride;
 				attempts.push(model);
 				// Fail every dispatched model so the bucket order (which depends on the
 				// global Math.random state of other concurrent tests) does not matter.
 				// The retry loop will exhaust the bucket and stop after two attempts.
-				return Promise.resolve(
-					syntheticResult({
-						exitCode: 1,
-						stopReason: "error",
-						selectedModel: model,
-						model,
-						provider: model === "model-a" ? "provider-a" : "provider-b",
-						usage: model === "model-a"
-							? { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 150, turns: 1 }
-							: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.001, contextTokens: 15, turns: 1 },
-						retryable: true,
-						replaySafety: "safe",
-						failureClass: "timeout",
-					}),
-				);
+				const attemptResult = syntheticResult({
+					exitCode: 1,
+					stopReason: "error",
+					selectedModel: model,
+					model,
+					provider: model === "model-a" ? "provider-a" : "provider-b",
+					usage: model === "model-a"
+						? { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 150, turns: 1 }
+						: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.001, contextTokens: 15, turns: 1 },
+					retryable: true,
+					replaySafety: "safe",
+					failureClass: "timeout",
+				});
+				onAttemptUpdate?.({
+					content: [{ type: "text", text: "attempt running" }],
+					details: noOpDetails("single", [attemptResult]),
+				});
+				return Promise.resolve(attemptResult);
 			},
 		},
 	);
@@ -447,6 +459,10 @@ test("executeSingleMode accumulates usage from two retry attempts into the final
 	assert.equal(result.usage.cost, 0.011, "cost must sum both attempts");
 	assert.equal(result.usage.turns, 2, "turns must include both attempts");
 	assert.equal(result.retryCount, 1);
+	assert.ok(
+		liveUsages.some((usage) => usage.input === 110 && usage.output === 55),
+		"live retry telemetry must include usage from both attempts instead of resetting",
+	);
 
 	const records = result.attemptRecords;
 	assert.equal(records?.length, 2);

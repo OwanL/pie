@@ -8,6 +8,7 @@ import type { ExtensionAPI, Skill, ToolInfo } from "@earendil-works/pi-coding-ag
 import { clearPruningTrackingForTesting, flushLog, setLogPathForTesting } from "../logger.js";
 import { readKeptSkills, clearKeptSkills } from "../../../shared/pruned-skills.js";
 import type { PruningConfig } from "../types.js";
+import { runAsk } from "../../ask-user/src/ask.js";
 
 installSdkResolverForTests();
 const require = createRequire(import.meta.url);
@@ -132,6 +133,83 @@ type RegisterResult = {
 	registeredTools: Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>;
 	registeredRenderers: Map<string, (...args: any[]) => any>;
 };
+
+type LifecycleTool = {
+	name: string;
+	description?: string;
+	parameters?: unknown;
+	promptGuidelines?: string[];
+	execute?: (...args: any[]) => Promise<any>;
+};
+
+function registerLifecycleAskUser(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "ask_user",
+		label: "Ask user",
+		description: "Ask one clarifying question with preset answers and an optional free-form reply.",
+		parameters: { type: "object", properties: {} },
+		async execute(
+			toolCallId: string,
+			params: Parameters<typeof runAsk>[0],
+			signal: AbortSignal,
+			_onUpdate: unknown,
+			ctx: { ui: Parameters<typeof runAsk>[1]["ui"] },
+		) {
+			return runAsk(params, { ui: ctx.ui, signal, toolCallId });
+		},
+	});
+}
+
+function createLifecycleRuntime() {
+	const handlers = new Map<string, Handler>();
+	const tools = new Map<string, LifecycleTool>();
+	const activeTools = new Set<string>();
+	let stale = false;
+	const assertActive = () => {
+		if (stale) {
+			throw new Error("This extension ctx is stale after session replacement or reload.");
+		}
+	};
+	const pi = {
+		on(eventName: string, handler: Handler) {
+			assertActive();
+			handlers.set(eventName, handler);
+		},
+		registerMessageRenderer() {
+			assertActive();
+		},
+		registerTool(tool: LifecycleTool) {
+			assertActive();
+			tools.set(tool.name, tool);
+			activeTools.add(tool.name);
+		},
+		getAllTools() {
+			assertActive();
+			return [...tools.values()].map((tool) => ({
+				name: tool.name,
+				description: tool.description ?? "",
+				parameters: tool.parameters ?? { type: "object", properties: {} },
+				promptGuidelines: tool.promptGuidelines,
+			})) as ToolInfo[];
+		},
+		getActiveTools() {
+			assertActive();
+			return [...activeTools];
+		},
+		setActiveTools(names: string[]) {
+			assertActive();
+			activeTools.clear();
+			for (const name of names) activeTools.add(name);
+		},
+	} as unknown as ExtensionAPI;
+	return {
+		pi,
+		handlers,
+		tools,
+		activeToolNames: () => [...activeTools],
+		dispose: () => { stale = true; },
+	};
+}
 
 function register(configOverride: PruningConfig, logPath = path.join(mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-")), "pruning.jsonl")): RegisterResult {
 	resetForTesting();
@@ -890,9 +968,113 @@ test("tool pruning without tools config does not call setActiveTools", async () 
 	}
 });
 
-test("request_capability recovery tool is registered", async () => {
-	const { registeredTools } = register(config());
-	assert.ok(registeredTools.has("request_capability"));
+test("request_capability keeps its owning session context after a subagent runtime is disposed", async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-lifecycle-"));
+	const logPath = path.join(dir, "pruning.jsonl");
+	resetForTesting();
+	clearPruningTrackingForTesting();
+	setLogPathForTesting(logPath);
+	setConfigForTesting(config({}, "auto", { ceiling: 3 }));
+	__setFormatter(testFormatSkillsForPrompt);
+	__setCompleteFn(async () => ({ text: '{"keep":[]}' }));
+
+	try {
+		// The main runtime starts with ask_user available, then the pruning turn
+		// hides it while retaining the hard-protected recovery tool.
+		const main = createLifecycleRuntime();
+		registerLifecycleAskUser(main.pi);
+		skillPruner(main.pi);
+		assert.ok(main.activeToolNames().includes("ask_user"), "ask_user starts active");
+
+		const beforeAgentStart = main.handlers.get("before_agent_start");
+		assert.ok(beforeAgentStart);
+		await beforeAgentStart({
+			type: "before_agent_start",
+			prompt: "Delegate a review, then ask the user which fix to apply",
+			systemPrompt: "Base prompt.",
+			systemPromptOptions: {
+				cwd: "/repo",
+				skills: [],
+				contextFiles: [],
+				selectedTools: main.activeToolNames(),
+			},
+		}, {
+			cwd: "/repo",
+			sessionManager: { getSessionId: () => "main-session", getSessionFile: () => "/sessions/main.jsonl" },
+		});
+		assert.ok(!main.activeToolNames().includes("ask_user"), "ask_user is pruned from the main runtime");
+		assert.ok(main.activeToolNames().includes("request_capability"));
+
+		// In-process subagents load the same cached extension module with their own
+		// pi API. Their teardown invalidates that API. This is the lifecycle that
+		// used to overwrite the process-global skill-pruner facade and strand the
+		// still-live main session on the disposed child's stale context.
+		const child = createLifecycleRuntime();
+		registerLifecycleAskUser(child.pi);
+		skillPruner(child.pi);
+		const childRecovery = child.tools.get("request_capability");
+		assert.ok(childRecovery?.execute);
+		const childList = await childRecovery.execute(
+			"child-list",
+			{},
+			undefined,
+			undefined,
+			{ sessionManager: { getSessionId: () => "child-session" } },
+		);
+		assert.equal(childList.content[0].text, "No capabilities are hidden by the latest pruning decision.",
+			"capability state remains isolated between unrelated sessions");
+		child.dispose();
+
+		const mainRecovery = main.tools.get("request_capability");
+		assert.ok(mainRecovery?.execute);
+		const listed = await mainRecovery.execute(
+			"main-list",
+			{},
+			undefined,
+			undefined,
+			{ sessionManager: { getSessionId: () => "main-session" } },
+		);
+		assert.equal(listed.content[0].text, "tools\task_user\nskills\t(none)");
+
+		const activated = await mainRecovery.execute(
+			"main-activate",
+			{ capabilityType: "tool", capabilityName: "ask_user" },
+			undefined,
+			undefined,
+			{ sessionManager: { getSessionId: () => "main-session" } },
+		);
+		assert.match(activated.content[0].text, /Enabled tool 'ask_user'/);
+		assert.ok(main.activeToolNames().includes("ask_user"), "activation mutates the current main runtime");
+
+		// Invoke the recovered ask_user fixture through the production runAsk
+		// implementation and the main execution context. A stale child UI would
+		// throw; the current UI answers.
+		const ask = main.tools.get("ask_user");
+		assert.ok(ask?.execute);
+		const uiCalls: Array<{ title: string; toolCallId?: string }> = [];
+		const answer = await ask.execute(
+			"ask-current",
+			{ question: "Which fix?", options: ["Root cause", "Workaround"], allowCustom: false },
+			new AbortController().signal,
+			undefined,
+			{
+				ui: {
+					select: async (title: string, _options: string[], options?: { toolCallId?: string }) => {
+						uiCalls.push({ title, toolCallId: options?.toolCallId });
+						return "Root cause";
+					},
+					input: async () => { throw new Error("custom input should not open"); },
+				},
+			},
+		);
+		assert.equal(answer.content[0].text, "Root cause");
+		assert.deepEqual(uiCalls, [{ title: "Which fix?", toolCallId: "ask-current" }]);
+	} finally {
+		__setCompleteFn(null);
+		setLogPathForTesting(null);
+		clearPruningTrackingForTesting();
+		resetForTesting();
+	}
 });
 
 test("request_capability enables a hidden tool and logs recovery", async () => {

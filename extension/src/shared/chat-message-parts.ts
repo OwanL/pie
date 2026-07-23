@@ -197,3 +197,71 @@ export function toolCallsFromMessageParts(parts: ChatMessagePart[] | undefined):
 
   return toolCalls.length > 0 ? toolCalls : undefined;
 }
+
+/**
+ * Remove tool results from the legacy flat mirror when the ordered `parts`
+ * representation already carries the authoritative result for the same call.
+ *
+ * Backend transcript snapshots cross a JSON transport, so shared object
+ * references are serialized twice. Large, recursively nested subagent results
+ * can otherwise make one snapshot more than twice as large as its actual
+ * content. Only the redundant mirror field is removed; `parts` retains the
+ * complete result without truncation.
+ */
+export function deduplicateToolCallResultsForTransport(message: ChatMessage): ChatMessage {
+  if (message.role !== 'assistant' || !message.parts || !message.toolCalls) {
+    return message;
+  }
+
+  const canonicalResultIds = new Set(
+    message.parts.flatMap((part) => (
+      part.kind === 'toolCall' && part.toolCall.result !== undefined
+        ? [part.toolCall.id]
+        : []
+    )),
+  );
+  if (canonicalResultIds.size === 0) {
+    return message;
+  }
+
+  let changed = false;
+  const toolCalls = message.toolCalls.map((toolCall) => {
+    if (toolCall.result === undefined || !canonicalResultIds.has(toolCall.id)) {
+      return toolCall;
+    }
+    const { result: _duplicateResult, ...transportMirror } = toolCall;
+    changed = true;
+    return transportMirror;
+  });
+
+  return changed ? { ...message, toolCalls } : message;
+}
+
+/**
+ * Rehydrate the in-memory compatibility mirror after a deduplicated transcript
+ * crosses the backend/host transport. Consumers that still read
+ * `message.toolCalls` retain their existing behavior, while renderers continue
+ * to use the full ordered `parts` representation.
+ */
+export function restoreToolCallResultsFromParts(message: ChatMessage): ChatMessage {
+  if (message.role !== 'assistant' || !message.parts || !message.toolCalls) {
+    return message;
+  }
+
+  const canonicalById = new Map(
+    message.parts.flatMap((part) => (
+      part.kind === 'toolCall' ? [[part.toolCall.id, part.toolCall] as const] : []
+    )),
+  );
+  let changed = false;
+  const toolCalls = message.toolCalls.map((toolCall) => {
+    const canonical = canonicalById.get(toolCall.id);
+    if (!canonical || canonical.result === undefined || toolCall.result === canonical.result) {
+      return toolCall;
+    }
+    changed = true;
+    return { ...toolCall, result: canonical.result };
+  });
+
+  return changed ? { ...message, toolCalls } : message;
+}

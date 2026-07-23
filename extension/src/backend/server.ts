@@ -76,6 +76,7 @@ import { createSessionManagerFence } from './session-manager-fence';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
+import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts.js';
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -626,9 +627,10 @@ export class BackendServer {
     });
 
     const busy = context.session.isStreaming || !!context.activeRequest;
+    const transcript = busy ? page.transcript : normalizeDanglingTranscript(page.transcript);
     return {
       sessionPath: context.sessionPath,
-      transcript: busy ? page.transcript : normalizeDanglingTranscript(page.transcript),
+      transcript: transcript.map(deduplicateToolCallResultsForTransport),
       transcriptWindow: page.transcriptWindow,
       busy,
     };

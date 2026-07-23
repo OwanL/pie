@@ -21,7 +21,7 @@ import type {
 
 import type { AgentConfig } from "./agents.js";
 import { textContent } from "./src/text-content.js";
-import { formatSubagentPrompt } from "./src/user-context.js";
+import { formatSubagentPrompt, type UserContextMode } from "./src/user-context.js";
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
@@ -1160,8 +1160,10 @@ export async function runSingleAgent(
 	},
 	/** Stable identity for this attempt; used by orphan registry and analytics. */
 	attemptId?: string,
-	/** Optional lean user-role context extracted from the parent session. */
-	parentUserContext?: string,
+	/** Optional lean user-role context handoff extracted from the parent session.
+	 * The mode and exact inserted packet are retained as result metadata so the
+	 * parent UI can explain precisely what the child received. */
+	parentUserContext?: { mode: UserContextMode; content?: string },
 ): Promise<SingleResult> {
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
@@ -1201,6 +1203,10 @@ export async function runSingleAgent(
 		thinkingLevel,
 		modelResolutionDiagnostic,
 	);
+	if (parentUserContext) {
+		currentResult.parentUserContextMode = parentUserContext.mode;
+		if (parentUserContext.content) currentResult.parentUserContext = parentUserContext.content;
+	}
 	const streamingTextRef = { value: "" };
 	const streamingReasoningRef = { value: "" };
 	const emitUpdate = createUpdateEmitter(currentResult, onUpdate, makeDetails, streamingTextRef);
@@ -1462,7 +1468,7 @@ export async function runSingleAgent(
 	// under parallel subagent runs (unlike a process.env flag, which would race).
 	const subagentDepth = readRuntimeContext().depth;
 	const runPrompt = (): Promise<void> =>
-		subagentContext.run({ depth: subagentDepth }, () => session.prompt(formatSubagentPrompt(task, parentUserContext)));
+		subagentContext.run({ depth: subagentDepth }, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content)));
 	try {
 		// Capture the model the session actually selected (in case our hint was overridden).
 		if (session.agent?.state?.model) {

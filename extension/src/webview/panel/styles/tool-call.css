@@ -324,6 +324,57 @@
   background: color-mix(in srgb, var(--panel-code-surface) 68%, transparent);
 }
 
+.subagent-context-label {
+  color: var(--panel-foreground-soft);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  line-height: 1.35;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.subagent-context-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(390px, calc(100vw - 40px));
+  max-height: min(60vh, 480px);
+  overflow: auto;
+  user-select: text;
+}
+
+.subagent-context-tooltip-title {
+  color: var(--panel-foreground);
+  font-weight: 600;
+}
+
+.subagent-context-tooltip-summary {
+  color: var(--panel-muted);
+}
+
+.subagent-context-tooltip-section {
+  margin-top: 2px;
+  color: var(--panel-foreground-soft);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.subagent-context-tooltip-content {
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 72%, transparent);
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-code-surface);
+  color: var(--panel-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .subagent-telemetry-context {
   color: var(--panel-foreground-soft);
 }

@@ -85,10 +85,24 @@ interface RunWithModelRetryArgs {
 	clock: RetryClock;
 	makeDetails: MakeDetails;
 	onUpdate?: OnUpdateCallback;
-	runAttempt: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
+	runAttempt: (
+		resolved: Awaited<ReturnType<typeof resolveModel>>,
+		attemptId: string,
+		onAttemptUpdate?: OnUpdateCallback,
+	) => Promise<SingleResult>;
 }
 
-
+function usageWithPriorAttempts(current: UsageStats, prior: UsageStats): UsageStats {
+	return {
+		...current,
+		input: prior.input + (current.input || 0),
+		output: prior.output + (current.output || 0),
+		cacheRead: prior.cacheRead + (current.cacheRead || 0),
+		cacheWrite: prior.cacheWrite + (current.cacheWrite || 0),
+		cost: prior.cost + (current.cost || 0),
+		turns: prior.turns + (current.turns || 0),
+	};
+}
 
 async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleResult> {
 	let result: SingleResult | undefined;
@@ -151,7 +165,23 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 		}
 
 		const attemptId = nextAttemptIdentity(args.agent.name, args.toolCallId);
-		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId));
+		const onAttemptUpdate: OnUpdateCallback | undefined = args.onUpdate
+			? (partial) => {
+				const results = partial.details?.results;
+				if (!results) {
+					args.onUpdate?.(partial);
+					return;
+				}
+				args.onUpdate?.({
+					...partial,
+					details: args.makeDetails(results.map((current) => ({
+						...current,
+						usage: usageWithPriorAttempts(current.usage, cumulativeUsage),
+					}))),
+				});
+			}
+			: undefined;
+		result = await subagentRuntime.run(runtimeCtx, () => args.runAttempt(resolved, attemptId, onAttemptUpdate));
 		attachSelectionMetadata(result, resolved);
 		result.attemptId = attemptId;
 		attemptRecords.push(buildAttemptRecord(result, nextBackoffMs));
@@ -195,6 +225,8 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			// bounded inactivity lease instead of its generic fallback.
 			const retryWaitSnapshot: SingleResult = {
 				...result,
+				usage: { ...cumulativeUsage },
+				retryCount,
 				exitCode: -1,
 				stopReason: undefined,
 				completedAt: undefined,
@@ -242,7 +274,11 @@ export async function executeSingleTask(args: {
 	/** Internal test seam for retry/backoff/analytics. */
 	_internal?: {
 		clock?: RetryClock;
-		runAttempt?: (resolved: Awaited<ReturnType<typeof resolveModel>>, attemptId: string) => Promise<SingleResult>;
+		runAttempt?: (
+			resolved: Awaited<ReturnType<typeof resolveModel>>,
+			attemptId: string,
+			onAttemptUpdate?: OnUpdateCallback,
+		) => Promise<SingleResult>;
 	};
 }): Promise<SingleResultEnvelope> {
 	const { params, ctx, agents, runtimeCtx, makeDetails, onUpdate, signal, selectionCtx, _internal } = args;
@@ -281,8 +317,8 @@ export async function executeSingleTask(args: {
 			processPermitScope: runtimeCtx.processPermitScope,
 		}),
 		runAttempt: injectedRunAttempt
-			? (resolved, attemptId) => injectedRunAttempt(resolved, attemptId)
-			: (resolved, attemptId) => {
+			? (resolved, attemptId, onAttemptUpdate) => injectedRunAttempt(resolved, attemptId, onAttemptUpdate)
+			: (resolved, attemptId, onAttemptUpdate) => {
 				const selection = resolved.selection ?? {
 					modelId: resolved.modelOverride ?? ctx.model?.id ?? "",
 					thinkingLevel: resolved.thinkingLevel,
@@ -298,7 +334,7 @@ export async function executeSingleTask(args: {
 					params.cwd,
 					undefined,
 					signal,
-					onUpdate,
+					onAttemptUpdate,
 					(results) => makeDetails(results),
 					ctx.modelRegistry,
 					ctx.model,
@@ -310,10 +346,16 @@ export async function executeSingleTask(args: {
 					args.allToolNames,
 					{ clock: _internal?.clock ?? realRetryClock },
 					attemptId,
-					parentUserContext,
+					params.userContext ? { mode: params.userContext, content: parentUserContext } : undefined,
 				);
 			},
 	});
+
+	// Test-injected attempts bypass runSingleAgent, and terminal provider retries
+	// replace the attempt accumulator. Stamp the immutable handoff again here so
+	// every terminal result tells the same truth as live progress snapshots.
+	if (params.userContext) result.parentUserContextMode = params.userContext;
+	if (parentUserContext) result.parentUserContext = parentUserContext;
 
 	const compact = compactSingleResult(result);
 	const details = makeDetails([compact]);

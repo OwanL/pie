@@ -1,9 +1,7 @@
 import type { ExtensionAPI, BeforeAgentStartEvent, InputEvent, ToolCallEvent, Skill } from "@earendil-works/pi-coding-agent";
 import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "../logger.js";
 import {
-	setPiApi,
 	getFormatSkillsForPromptImpl,
-	getPiToolSeams,
 	getPrunedTools,
 	recordHiddenSkills,
 	recordPrunedTools,
@@ -11,7 +9,7 @@ import {
 } from "./state.js";
 import { toErrorMessage } from "../../../shared/error-message.js";
 import { recordKeptSkills } from "../../../shared/pruned-skills.js";
-import { requestCapabilityDefinition } from "./tools.js";
+import { createRequestCapabilityDefinition, type PiToolSeams } from "./tools.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
 import { buildPruningSystemPrompt, buildPruningUserMessage } from "../llm-scorer.js";
 import {
@@ -52,12 +50,19 @@ export default function register(pi: ExtensionAPI) {
 	// started (a single bounded `exec`), and registration is not blocked.
 	prewarmCodeVersion();
 
-	// Capture pi API methods for tool introspection (available throughout the session).
-	setPiApi({
-		getAllTools: () => pi.getAllTools(),
-		getActiveTools: () => pi.getActiveTools(),
-		setActiveTools: (names) => pi.setActiveTools(names),
-	});
+	// Keep tool ownership local to this extension registration. Extension modules
+	// are cached across main and in-process subagent sessions, so process-global
+	// pi closures can be overwritten by a child and become stale when it is
+	// disposed. Test overrides remain late-bound, but production calls always use
+	// the pi instance that owns this registration's handlers and tools.
+	const toolSeams: PiToolSeams = {
+		getAllTools: () => state.getAllToolsOverride ? state.getAllToolsOverride() : pi.getAllTools(),
+		getActiveTools: () => state.getActiveToolsOverride ? state.getActiveToolsOverride() : pi.getActiveTools(),
+		setActiveTools: (names) => {
+			if (state.setActiveToolsOverride) state.setActiveToolsOverride(names);
+			else pi.setActiveTools(names);
+		},
+	};
 
 	// Keep pruning telemetry as a custom message so the host can track prepass
 	// completion and usage, but remove it from every provider request below.
@@ -70,7 +75,7 @@ export default function register(pi: ExtensionAPI) {
 	}));
 
 	// One minimal recovery surface for both hidden tools and hidden skills.
-	pi.registerTool(requestCapabilityDefinition);
+	pi.registerTool(createRequestCapabilityDefinition(toolSeams));
 
 	// Inputs submitted while an agent is running are steering/continuation
 	// messages, not independent task pivots. Remember them so their eventual
@@ -99,12 +104,8 @@ export default function register(pi: ExtensionAPI) {
 		// A new top-level pruning decision owns a fresh hidden-skill catalog.
 		// Queued continuations returned above intentionally retain the current one.
 		recordHiddenSkills(sessionId, []);
-		const configuredTools = state.getAllToolsOverride
-			? state.getAllToolsOverride()
-			: getPiToolSeams().getAllTools();
-		const activeToolNames = state.getActiveToolsOverride
-			? state.getActiveToolsOverride()
-			: getPiToolSeams().getActiveTools();
+		const configuredTools = toolSeams.getAllTools();
+		const activeToolNames = toolSeams.getActiveTools();
 		// An explicit empty selected-tools list is the backend's authoritative
 		// signal that the user switched off the Tools system-prompt entry. Do not
 		// let this extension's restoration/selection calls re-expose those schemas.
@@ -121,8 +122,7 @@ export default function register(pi: ExtensionAPI) {
 		const restorePrunerOwnedTools = () => {
 			if (previouslyPruned.size === 0 || toolsManuallyDisabled) return;
 			const restored = [...new Set([...activeToolNames, ...previouslyPruned])];
-			if (state.setActiveToolsOverride) state.setActiveToolsOverride(restored);
-			else getPiToolSeams().setActiveTools(restored);
+			toolSeams.setActiveTools(restored);
 			recordPrunedTools(sessionId, []);
 		};
 
@@ -313,11 +313,7 @@ export default function register(pi: ExtensionAPI) {
 					if (activeConfig.mode === "auto") {
 						const hadPrunedTools = getPrunedTools(sessionId).size > 0;
 						if (toolSelection.excludedToolNames.length > 0 || hadPrunedTools) {
-							if (state.setActiveToolsOverride) {
-								state.setActiveToolsOverride(toolSelection.includedToolNames);
-							} else {
-								getPiToolSeams().setActiveTools(toolSelection.includedToolNames);
-							}
+							toolSeams.setActiveTools(toolSelection.includedToolNames);
 						}
 						recordPrunedTools(sessionId, toolSelection.excludedToolNames);
 					}

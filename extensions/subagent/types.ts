@@ -49,6 +49,13 @@ export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
+	/** Parent-context mode requested for this delegation. Kept on the result so
+	 * the parent UI can make the handoff visible instead of hiding it in the
+	 * isolated child prompt. */
+	parentUserContextMode?: "latest" | "all";
+	/** Exact bounded parent-context packet inserted into the child prompt,
+	 * including its [User prompt] / [Recorded clarification] source markers. */
+	parentUserContext?: string;
 	exitCode: number;
 	messages: Message[];
 	/** Bounded terminal answer kept separately so durable transcript compaction

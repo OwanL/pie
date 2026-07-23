@@ -25,7 +25,8 @@ test("SubagentParams enum and default metadata remain intact", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket.enum, ["small", "medium", "frontier"]);
 	assert.equal(props.bucket.default, "medium");
-	assert.deepEqual(props.thinkingLevel.enum, ["minimal", "low", "medium", "high", "xhigh"]);
+	assert.deepEqual(props.thinkingLevel.enum, ["minimal", "low", "medium", "high"]);
+	assert.equal(props.thinkingLevel.default, "high");
 	assert.deepEqual(props.userContext.enum, ["latest", "all"]);
 	assert.equal(props.userContext.default, undefined);
 	assert.equal(props.confirmProjectAgents.default, true);
@@ -68,12 +69,23 @@ test("prepareSubagentArguments migrates only one-item legacy batches", () => {
 	);
 });
 
+test("prepareSubagentArguments caps legacy reasoning levels above high", () => {
+	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", thinkingLevel: "xhigh" }), {
+		agent: "worker", task: "a", thinkingLevel: "high",
+	});
+	assert.deepEqual(prepareSubagentArguments({ chain: [{ agent: "worker", task: "a", thinkingLevel: "max" }] }), {
+		agent: "worker", task: "a", thinkingLevel: "high",
+	});
+});
+
 test("SubagentParams rejects removed routes and malformed values", () => {
 	assert.equal(Value.Check(SubagentParams, { tasks: [{ agent: "worker", task: "a" }] }), false);
 	assert.equal(Value.Check(SubagentParams, { chain: [{ agent: "worker", task: "a" }] }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", tasks: [] }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", bucket: "huge" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", userContext: "full" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "xhigh" }), false);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "max" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);
 	assert.equal(Value.Check(SubagentParams, { task: "a" }), false);
 });

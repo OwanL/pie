@@ -55,6 +55,7 @@ function createFakeSdk(options?: {
 		disposeCalls: 0,
 		unsubscribeCalls: 0,
 		promptCalls: 0,
+		promptInputs: [] as string[],
 		createSessionArgs: [] as Array<Record<string, unknown>>,
 		createResourceLoaderArgs: [] as Array<Record<string, unknown>>,
 	};
@@ -79,8 +80,9 @@ function createFakeSdk(options?: {
 				state.unsubscribeCalls++;
 			};
 		},
-		prompt: async (_prompt: string) => {
+		prompt: async (prompt: string) => {
 			state.promptCalls++;
+			state.promptInputs.push(prompt);
 			if (options?.onPrompt) {
 				await options.onPrompt(emit);
 				return;
@@ -160,6 +162,8 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 		undefined,
 		undefined,
 		{ sdk: sdk as any, timeoutMs: 50 },
+		undefined,
+		{ mode: "latest", content: "[User prompt]\nPlease preserve the public API." },
 	);
 
 	assert.equal(result.exitCode, 0);
@@ -167,6 +171,9 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(result.usage.input, 11);
 	assert.equal(result.usage.output, 5);
 	assert.equal(result.usage.cost, 0.42);
+	assert.equal(result.parentUserContextMode, "latest");
+	assert.equal(result.parentUserContext, "[User prompt]\nPlease preserve the public API.");
+	assert.match(state.promptInputs[0] ?? "", /<parent_user_context>\n\[User prompt\]\nPlease preserve the public API\.\n<\/parent_user_context>$/);
 	assert.ok(result.phaseDurationsMs && "preparing" in result.phaseDurationsMs, "terminal attempts retain producer-owned phase timing evidence");
 	assert.ok(result.phaseDurationsMs && "waiting_provider" in result.phaseDurationsMs);
 	assert.ok(result.phaseDurationsMs && "running_tool" in result.phaseDurationsMs);

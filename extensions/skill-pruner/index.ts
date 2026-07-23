@@ -2,7 +2,6 @@ import { __setPromptTemplate as __setPruningPromptTemplate } from "./llm-scorer.
 import type { CompleteSimpleFn } from "./llm-scorer.js";
 import type { Skill, ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
-	setPiApi,
 	setConfigOverrideForTesting,
 	setFormatSkillsForPromptImpl,
 	setAllToolsOverride,
@@ -40,7 +39,6 @@ export function resetForTesting(): void {
 	setFormatSkillsForPromptImpl(null);
 	setAllToolsOverride(null);
 	setSetActiveToolsOverride(null);
-	setPiApi(null);
 	clearCapabilityStateForTesting();
 	clearPrunedToolsForTesting();
 	clearPrepassCacheForTesting();

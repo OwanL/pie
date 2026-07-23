@@ -139,6 +139,12 @@ export interface ChatMessage {
   status: 'streaming' | 'completed' | 'interrupted' | 'error' | 'queued';
   /** Human-readable error detail when status is 'error'. */
   errorDetail?: string;
+  /**
+   * Flat compatibility mirror of tool-call parts. Backend transcript transport
+   * may omit `result` here when the matching ordered `parts` entry already
+   * carries it; the host restores the mirror after receipt without losing any
+   * transcript detail.
+   */
   toolCalls?: ToolCall[];
   /**
    * Host-owned monotonic revision for live tool-call state on this message.

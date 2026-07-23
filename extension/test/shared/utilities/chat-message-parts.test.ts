@@ -6,9 +6,11 @@ import {
   assistantPartsFromMessage,
   cloneMessagePart,
   cloneToolCall,
+  deduplicateToolCallResultsForTransport,
   legacyAssistantParts,
   mergeAssistantParts,
   reasoningFromMessageParts,
+  restoreToolCallResultsFromParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
@@ -190,4 +192,46 @@ test('message-part extractors return text, reasoning, and cloned tool calls', ()
   assert.equal(textFromMessageParts(undefined), '');
   assert.equal(reasoningFromMessageParts(undefined), undefined);
   assert.equal(toolCallsFromMessageParts(undefined), undefined);
+});
+
+test('transport deduplication keeps complete tool detail once and restores the compatibility mirror', () => {
+  const nestedResult = {
+    content: [{ type: 'text', text: 'full child output' }],
+    details: {
+      mode: 'single',
+      results: [{
+        messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'full child reasoning' }] }],
+      }],
+    },
+  };
+  const canonical = makeToolCall({ status: 'completed', result: nestedResult });
+  const message = makeAssistantMessage({
+    parts: [{ kind: 'toolCall', toolCall: canonical }],
+    toolCalls: [cloneToolCall(canonical)],
+  });
+
+  const transported = deduplicateToolCallResultsForTransport(message);
+  const transportedPart = transported.parts?.[0];
+  assert.strictEqual(
+    transportedPart?.kind === 'toolCall' ? transportedPart.toolCall.result : undefined,
+    nestedResult,
+    'canonical ordered parts retain the complete nested result',
+  );
+  assert.equal(transported.toolCalls?.[0]?.result, undefined, 'only the redundant mirror result is omitted');
+  assert.match(JSON.stringify(transported), /full child reasoning/);
+
+  const restored = restoreToolCallResultsFromParts(transported);
+  assert.strictEqual(restored.toolCalls?.[0]?.result, nestedResult);
+  assert.deepEqual(restored, message);
+});
+
+test('transport deduplication preserves legacy-only tool results', () => {
+  const legacy = makeAssistantMessage({
+    toolCalls: [makeToolCall({ status: 'completed', result: { output: 'legacy detail' } })],
+  });
+
+  assert.strictEqual(deduplicateToolCallResultsForTransport(legacy), legacy);
+  assert.deepEqual(deduplicateToolCallResultsForTransport(legacy).toolCalls?.[0]?.result, {
+    output: 'legacy detail',
+  });
 });

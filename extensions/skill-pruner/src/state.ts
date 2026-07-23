@@ -17,13 +17,6 @@ export const state = {
 	/** Lazily-resolved reference to @earendil-works/pi-ai's completeSimple. */
 	_piCompleteSimple: undefined as ((model: unknown, context: unknown, options: unknown) => Promise<unknown>) | null | undefined,
 
-	/** Facade for pi API methods used for tool introspection. */
-	piApi: null as {
-		getAllTools: () => ToolInfo[];
-		getActiveTools: () => string[];
-		setActiveTools: (names: string[]) => void;
-	} | null,
-
 	configOverrideForTesting: null as PruningConfig | null,
 	formatSkillsForPromptImpl: formatSkillsForPrompt as (skills: Skill[]) => string,
 
@@ -55,19 +48,6 @@ export const CONFIG_ROOT = process.env.PI_CODING_AGENT_DIR
 
 export const PROCESS_SESSION_ID = randomUUID();
 
-/** Returns the pi API facade, falling back to no-ops when pi hasn't been initialized. */
-export function getPiToolSeams(): {
-	getAllTools: () => ToolInfo[];
-	getActiveTools: () => string[];
-	setActiveTools: (names: string[]) => void;
-} {
-	return state.piApi ?? {
-		getAllTools: () => [],
-		getActiveTools: () => [],
-		setActiveTools: () => {},
-	};
-}
-
 // Read-only accessors (use getter functions to work through esbuild CJS)
 export function getConfigOverrideForTesting(): PruningConfig | null { return state.configOverrideForTesting; }
 export function getFormatSkillsForPromptImpl(): (skills: Skill[]) => string { return state.formatSkillsForPromptImpl; }
@@ -82,7 +62,6 @@ export function setAllToolsOverride(value: (() => ToolInfo[]) | null): void { st
 export function setGetActiveToolsOverride(value: (() => string[]) | null): void { state.getActiveToolsOverride = value; }
 export function setSetActiveToolsOverride(value: ((names: string[]) => void) | null): void { state.setActiveToolsOverride = value; }
 export function setCompleteFnOverride(value: CompleteSimpleFn | null | false): void { state.completeFnOverride = value; }
-export function setPiApi(value: typeof state.piApi): void { state.piApi = value; }
 export function set_piCompleteSimple(value: typeof state._piCompleteSimple): void { state._piCompleteSimple = value; }
 
 export function recordHiddenSkills(sessionId: string, skills: readonly Skill[]): void {

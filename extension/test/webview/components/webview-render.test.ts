@@ -455,8 +455,8 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.match(html, /subagent-model-label/);
   assert.match(html, />1m 5s</);
   assert.match(html, />ctx 1\.6k \/ 200k/);
-  assert.match(html, />in 1\.2k</);
-  assert.match(html, />out 345</);
+  assert.match(html, />tok 1\.6k</);
+  assert.doesNotMatch(html, />in 1\.2k<|>out 345<|>cache 50<|>2t</);
   assert.match(html, />\$0\.012</);
   assert.doesNotMatch(html, /subagent-model-tag/);
 });
@@ -600,7 +600,8 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
   assert.match(runningParentHtml, /ctx 51k \/ 200k/);
   assert.match(runningParentHtml, /26%/);
-  assert.match(runningParentHtml, /out 2\.4k/);
+  assert.match(runningParentHtml, /tok 92k/);
+  assert.doesNotMatch(runningParentHtml, />in 51k<|>out 2\.4k<|>cache 38\.6k<|>2t</);
   assert.match(runningParentHtml, /last 12\.0 tok\/s/);
   assert.match(runningParentHtml, /retry 1/);
 

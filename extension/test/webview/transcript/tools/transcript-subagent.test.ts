@@ -8,7 +8,12 @@ import {
   rawMessagesToChatMessages,
   subagentSingleResultToChatMessages,
 } from '../../../../src/webview/panel/transcript';
-import { singleResultStatus, subagentActivity } from '../../../../src/webview/panel/transcript/tool-call-item';
+import {
+  aggregateSubagentUsageTokens,
+  singleResultStatus,
+  subagentActivity,
+  subagentContextHandoffSummary,
+} from '../../../../src/webview/panel/transcript/tool-call-item';
 
 test('rawMessagesToChatMessages resolves subagent toolResult messages by toolCallId', () => {
   const messages = rawMessagesToChatMessages([
@@ -146,6 +151,50 @@ test('getRenderableSubagentResult falls back when a failed parallel dispatch has
   } as any), undefined);
 });
 
+test('subagent header telemetry aggregates all disjoint token classes', () => {
+  assert.equal(aggregateSubagentUsageTokens({
+    input: 1_000,
+    output: 250,
+    cacheRead: 2_000,
+    cacheWrite: 500,
+  }), 3_750);
+});
+
+test('subagent context handoff summary distinguishes exact inherited context from task-only calls', () => {
+  const inherited = subagentContextHandoffSummary({
+    agent: 'worker',
+    task: 'Implement it',
+    exitCode: -1,
+    messages: [],
+    parentUserContextMode: 'all',
+    parentUserContext: '[User prompt]\nFirst requirement\n\n[User prompt]\nSecond requirement\n\n[Recorded clarification]\nQuestion: Which?\nAnswer: Both',
+  });
+  assert.deepEqual(inherited, {
+    label: 'context all',
+    mode: 'all',
+    content: '[User prompt]\nFirst requirement\n\n[User prompt]\nSecond requirement\n\n[Recorded clarification]\nQuestion: Which?\nAnswer: Both',
+    state: 'inherited',
+    promptCount: 2,
+    clarificationCount: 1,
+  });
+
+  assert.equal(subagentContextHandoffSummary({
+    agent: 'scout', task: 'Inspect it', exitCode: 0, messages: [],
+  }).label, 'context task only');
+});
+
+test('subagent context handoff summary surfaces requested mode before exact live metadata arrives', () => {
+  assert.deepEqual(subagentContextHandoffSummary({
+    agent: 'worker', task: 'Implement it', exitCode: -1, messages: [],
+  }, 'latest'), {
+    label: 'context latest',
+    mode: 'latest',
+    state: 'unavailable',
+    promptCount: 0,
+    clarificationCount: 0,
+  });
+});
+
 test('running subagent placeholders stay visibly active before the first progress update', () => {
   const result = {
     agent: 'reviewer',
@@ -259,6 +308,25 @@ test('getRenderableSubagentResultFromToolCall synthesizes running single-mode st
       }],
     },
   );
+});
+
+test('getRenderableSubagentResult preserves inherited context metadata from live previews', () => {
+  const result = getRenderableSubagentResult({
+    kind: 'subagent',
+    mode: 'single',
+    omittedChildren: 0,
+    children: [{
+      id: 'worker-1',
+      agent: 'worker',
+      task: 'Implement it',
+      phase: 'running',
+      parentUserContextMode: 'latest',
+      parentUserContext: '[User prompt]\nKeep the API stable.',
+    }],
+  });
+
+  assert.equal(result?.results[0]?.parentUserContextMode, 'latest');
+  assert.equal(result?.results[0]?.parentUserContext, '[User prompt]\nKeep the API stable.');
 });
 
 test('getRenderableSubagentResult prefers top-level results when both top-level and nested details exist', () => {

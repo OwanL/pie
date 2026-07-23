@@ -1,4 +1,5 @@
 import type { ChatMessage, TranscriptWindow } from '../../shared/protocol';
+import { restoreToolCallResultsFromParts } from '../../shared/chat-message-parts';
 import { normalizeTranscriptWindow } from './transcript-window';
 
 export interface SessionOpenedTranscriptResolution {
@@ -243,18 +244,22 @@ export function resolveSessionOpenedTranscript({
   incomingTranscriptWindow: TranscriptWindow;
   localTranscript: ChatMessage[];
 }): SessionOpenedTranscriptResolution {
+  // Backend transcript snapshots carry complete tool results once in ordered
+  // `parts`; restore the legacy flat mirror only after the JSON transport has
+  // been crossed so host consumers keep their existing full-detail view.
+  const hydratedIncomingTranscript = incomingTranscript.map(restoreToolCallResultsFromParts);
   const preserveLocal = busy && hasEphemeralLocalTranscript(localTranscript);
 
   if (!preserveLocal) {
     return {
       preserveLocal,
-      transcript: incomingTranscript,
-      transcriptWindow: normalizeTranscriptWindow(incomingTranscript, incomingTranscriptWindow),
+      transcript: hydratedIncomingTranscript,
+      transcriptWindow: normalizeTranscriptWindow(hydratedIncomingTranscript, incomingTranscriptWindow),
       aliases: [],
     };
   }
 
-  const merged = mergeIncomingWithEphemeralLocal(incomingTranscript, localTranscript);
+  const merged = mergeIncomingWithEphemeralLocal(hydratedIncomingTranscript, localTranscript);
   const mergedWindow: TranscriptWindow = {
     ...incomingTranscriptWindow,
     totalCount: incomingTranscriptWindow.totalCount + merged.appendedCount,

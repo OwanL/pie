@@ -59,6 +59,10 @@ export interface SubagentUsageSummary {
 export interface SubagentSingleResult {
   agent: string;
   task: string;
+  /** Parent-context mode requested for this delegation. */
+  parentUserContextMode?: 'latest' | 'all';
+  /** Exact bounded parent-context packet inserted into the child prompt. */
+  parentUserContext?: string;
   /** `-1` while the subagent is still running. */
   exitCode: number;
   messages: RawMessage[];
@@ -352,6 +356,10 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         task,
         exitCode,
         messages,
+        ...(candidate.parentUserContextMode === 'latest' || candidate.parentUserContextMode === 'all'
+          ? { parentUserContextMode: candidate.parentUserContextMode }
+          : {}),
+        ...(typeof candidate.parentUserContext === 'string' ? { parentUserContext: candidate.parentUserContext } : {}),
         ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
         ...(typeof candidate.selectedModel === 'string' ? { selectedModel: candidate.selectedModel } : {}),
         ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),

@@ -49,6 +49,22 @@ test("resolveModel short-circuits to parent model when alwaysParentModel is true
 	assert.deepEqual(resolved.selection.pool, []);
 });
 
+test("resolveModel defaults subagents to high reasoning", async () => {
+	const resolved = await resolveModel(makeAgent(), makeSelectionCtx(), "parent-model", "medium");
+	assert.equal(resolved.thinkingLevel, "high");
+	assert.equal(resolved.selection.thinkingLevel, "high");
+});
+
+test("resolveModel caps per-call and agent reasoning above high", async () => {
+	const perCall = await resolveModel(makeAgent(), makeSelectionCtx(), "parent-model", "medium", "xhigh");
+	assert.equal(perCall.thinkingLevel, "high");
+	assert.equal(perCall.selection.thinkingLevel, "high");
+
+	const fromAgent = await resolveModel(makeAgent({ thinkingLevel: "xhigh" }), makeSelectionCtx(), "parent-model", "medium");
+	assert.equal(fromAgent.thinkingLevel, "high");
+	assert.equal(fromAgent.selection.thinkingLevel, "high");
+});
+
 test("resolveModel routes around saturated providers when enabled", async (t) => {
 	const uninstall = installProviderCapacityBridge(() => ({
 		busy: { immediatelyClaimable: false },

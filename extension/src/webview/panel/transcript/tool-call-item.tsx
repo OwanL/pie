@@ -15,6 +15,7 @@ import { CollapsibleChevron } from '../components/chevron';
 import { CollapsibleCloseFooter } from '../components/collapsible-close-footer';
 import { CollapsibleGutter } from '../components/collapsible-gutter';
 import { ResizeHandle } from '../components/resize-handle';
+import { Tooltip } from '../components/tooltip';
 import { useResizableHeight } from '../components/use-resizable-height';
 import {
   getRenderableSubagentResultFromToolCall,
@@ -69,6 +70,18 @@ function compactTelemetryNumber(value: number): string {
   if (value < 1_000) return String(Math.round(value));
   if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
   return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+function normalizedUsageTokens(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+/** All provider-reported token classes are disjoint in pi's normalized usage
+ * shape, so their sum is the truthful aggregate consumed by the child. */
+export function aggregateSubagentUsageTokens(usage: SubagentSingleResult['usage']): number {
+  if (!usage) return 0;
+  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
+    .reduce((total, value) => total + normalizedUsageTokens(value), 0);
 }
 
 function formatContextPercent(tokens: number, contextWindow: number): string {
@@ -186,6 +199,85 @@ function ModelLabel({ result }: { result: SubagentSingleResult }) {
   );
 }
 
+type ParentUserContextMode = 'latest' | 'all';
+
+interface ContextHandoffSummary {
+  label: string;
+  mode?: ParentUserContextMode;
+  content?: string;
+  state: 'inherited' | 'empty' | 'unavailable' | 'task-only';
+  promptCount: number;
+  clarificationCount: number;
+}
+
+function requestedParentUserContextMode(input: unknown): ParentUserContextMode | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const mode = (input as Record<string, unknown>).userContext;
+  return mode === 'latest' || mode === 'all' ? mode : undefined;
+}
+
+/** Describe the actual handoff separately from the requested tool argument.
+ * New results carry the exact packet; the request is only a legacy/live-start
+ * fallback when that producer metadata is not available yet. */
+export function subagentContextHandoffSummary(
+  result: SubagentSingleResult,
+  requestedMode?: ParentUserContextMode,
+): ContextHandoffSummary {
+  const mode = result.parentUserContextMode ?? requestedMode;
+  const rawContent = result.parentUserContext;
+  const content = rawContent?.trim() ? rawContent : undefined;
+  const promptCount = content?.match(/^\[User prompt\]$/gm)?.length ?? 0;
+  const clarificationCount = content?.match(/^\[Recorded clarification\]$/gm)?.length ?? 0;
+  if (content) {
+    return { label: `context ${mode ?? 'inherited'}`, mode, content, state: 'inherited', promptCount, clarificationCount };
+  }
+  if (result.parentUserContextMode) {
+    return { label: `context ${result.parentUserContextMode} · empty`, mode: result.parentUserContextMode, state: 'empty', promptCount: 0, clarificationCount: 0 };
+  }
+  if (requestedMode) {
+    return { label: `context ${requestedMode}`, mode: requestedMode, state: 'unavailable', promptCount: 0, clarificationCount: 0 };
+  }
+  return { label: 'context task only', state: 'task-only', promptCount: 0, clarificationCount: 0 };
+}
+
+function ContextHandoffLabel({ result, requestedMode }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode }) {
+  const summary = subagentContextHandoffSummary(result, requestedMode);
+  const sourceSummary = [
+    summary.promptCount > 0 ? `${summary.promptCount} user ${summary.promptCount === 1 ? 'prompt' : 'prompts'}` : undefined,
+    summary.clarificationCount > 0 ? `${summary.clarificationCount} recorded ${summary.clarificationCount === 1 ? 'clarification' : 'clarifications'}` : undefined,
+  ].filter(Boolean).join(' · ');
+  const explanation = summary.state === 'inherited'
+    ? `${sourceSummary || 'Parent user context'} inserted into the isolated child prompt.`
+    : summary.state === 'empty'
+      ? `The ${summary.mode} mode was requested, but no eligible parent prompt or completed clarification was available; only the task was sent.`
+      : summary.state === 'unavailable'
+        ? `The tool requested ${summary.mode} context. The exact inherited packet is not available in this live-start or older saved result.`
+        : 'No parent user context was requested; the child received only the delegated task.';
+
+  return (
+    <Tooltip
+      placement="bottom"
+      freezeWhileVisible
+      contentNode={(
+        <div class="subagent-context-tooltip">
+          <div class="subagent-context-tooltip-title">{summary.label}</div>
+          <div class="subagent-context-tooltip-summary">{explanation}</div>
+          <div class="subagent-context-tooltip-section">Delegated task</div>
+          <pre class="subagent-context-tooltip-content">{result.task}</pre>
+          {summary.content && (
+            <>
+              <div class="subagent-context-tooltip-section">Exact inherited parent context</div>
+              <pre class="subagent-context-tooltip-content">{summary.content}</pre>
+            </>
+          )}
+        </div>
+      )}
+    >
+      <span class="subagent-context-label subagent-telemetry-item">{summary.label}</span>
+    </Tooltip>
+  );
+}
+
 /** High-priority metadata that should remain visible before summary text. */
 function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
   const hasScores = !!normalizeTaskScoresForDisplay(result.taskScores);
@@ -223,21 +315,23 @@ function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
   const tokensPerSecond = latestThroughput
     ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)
     : undefined;
-  const hasInput = typeof usage?.input === 'number' && usage.input > 0;
-  const hasOutput = typeof usage?.output === 'number' && usage.output > 0;
-  const cacheTokens = (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0);
-  const hasCache = cacheTokens > 0;
-  const hasTurns = typeof usage?.turns === 'number' && usage.turns > 0;
+  const totalTokens = aggregateSubagentUsageTokens(usage);
+  const hasTokens = totalTokens > 0;
+  const usageBreakdown = usage ? {
+    input: normalizedUsageTokens(usage.input),
+    output: normalizedUsageTokens(usage.output),
+    cacheRead: normalizedUsageTokens(usage.cacheRead),
+    cacheWrite: normalizedUsageTokens(usage.cacheWrite),
+  } : undefined;
   const hasCost = typeof usage?.cost === 'number' && usage.cost > 0;
   const hasRetries = typeof result.retryCount === 'number' && result.retryCount > 0;
-  if (!hasContext && !hasInput && !hasOutput && !hasCache && !hasTurns && !hasCost && tokensPerSecond == null && !hasRetries) return null;
+  if (!hasContext && !hasTokens && !hasCost && tokensPerSecond == null && !hasRetries) return null;
 
   const title = [
     hasContext ? `Context: ${contextTokens!.toLocaleString()} / ${contextWindow!.toLocaleString()} tokens (${formatContextPercent(contextTokens!, contextWindow!)})` : undefined,
-    usage ? `Usage: ${usage.input.toLocaleString()} input, ${usage.output.toLocaleString()} output, ${cacheTokens.toLocaleString()} cached` : undefined,
+    hasTokens && usageBreakdown ? `Usage: ${totalTokens.toLocaleString()} total tokens (${usageBreakdown.input.toLocaleString()} input, ${usageBreakdown.output.toLocaleString()} output, ${usageBreakdown.cacheRead.toLocaleString()} cache read, ${usageBreakdown.cacheWrite.toLocaleString()} cache write)` : undefined,
     tokensPerSecond != null ? `Latest completed generation: ${tokensPerSecond.toFixed(1)} tokens/s` : undefined,
     usage?.cost ? `Cost: $${usage.cost.toFixed(4)}` : undefined,
-    usage?.turns ? `${usage.turns} completed ${usage.turns === 1 ? 'turn' : 'turns'}` : undefined,
     hasRetries ? `${result.retryCount} provider ${result.retryCount === 1 ? 'retry' : 'retries'}` : undefined,
   ].filter(Boolean).join(' · ');
 
@@ -249,10 +343,7 @@ function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
           <span class="subagent-telemetry-percent"> {formatContextPercent(contextTokens!, contextWindow!)}</span>
         </span>
       )}
-      {hasInput && <span class="subagent-telemetry-item subagent-telemetry-input">in {compactTelemetryNumber(usage!.input)}</span>}
-      {hasOutput && <span class="subagent-telemetry-item subagent-telemetry-output">out {compactTelemetryNumber(usage!.output)}</span>}
-      {hasCache && <span class="subagent-telemetry-item subagent-telemetry-cache">cache {compactTelemetryNumber(cacheTokens)}</span>}
-      {hasTurns && <span class="subagent-telemetry-item subagent-telemetry-turns">{usage!.turns}t</span>}
+      {hasTokens && <span class="subagent-telemetry-item subagent-telemetry-tokens">tok {compactTelemetryNumber(totalTokens)}</span>}
       {tokensPerSecond != null && <span class="subagent-telemetry-item subagent-telemetry-rate">last {tokensPerSecond.toFixed(1)} tok/s</span>}
       {hasCost && <span class="subagent-telemetry-item subagent-telemetry-cost">${usage!.cost!.toFixed(3)}</span>}
       {hasRetries && <span class="subagent-telemetry-item subagent-telemetry-retries">retry {result.retryCount}</span>}
@@ -608,6 +699,10 @@ function SubagentSingleBlock({
             <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
           )}
           <PrimaryMeta result={singleResult} />
+          <ContextHandoffLabel
+            result={singleResult}
+            requestedMode={requestedParentUserContextMode(toolCall.input)}
+          />
           <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
             <ElapsedTelemetry result={singleResult} now={activityNow} />
           </span>

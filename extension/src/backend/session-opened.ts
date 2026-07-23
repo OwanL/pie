@@ -6,6 +6,7 @@
 import { buildSessionAnalyticsFactors } from './session-analytics';
 import { buildCurrentSummary, listAvailableModels } from './session-metadata';
 import { buildTailTranscriptWindow, buildDisplayTranscriptCache, isDisplayTranscriptCacheStale } from './transcript-window';
+import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
 import type { SessionOpenedPayload, SystemPromptEntry, TranscriptMode } from '../shared/protocol';
 import type { SessionContext, SessionPromptState } from './server-types';
 import type { SdkBuildSystemPromptOptions } from './sdk';
@@ -71,10 +72,11 @@ export async function buildSessionOpenedPayload(
       ? stripActiveAssistantTail(rawTranscriptSlice.transcript)
       : normalizeDanglingTranscript(rawTranscriptSlice.transcript),
   };
+  const transportTranscript = transcriptSlice.transcript.map(deduplicateToolCallResultsForTransport);
 
   return {
     session: buildCurrentSummary(context, deps.startupCwd),
-    transcript: transcriptSlice.transcript,
+    transcript: transportTranscript,
     transcriptWindow: transcriptSlice.transcriptWindow,
     busy: context.session.isStreaming || !!context.activeRequest,
     selectionToken,

@@ -12,18 +12,23 @@
 // source both from the same pi-ai entrypoint. This also keeps the schema on
 // the exact TypeBox instance pi-ai's tool-parameter API expects.
 import { StringEnum, Type, type Static } from "@mariozechner/pi-ai";
+import {
+	MAX_SUBAGENT_THINKING_LEVEL,
+	SUBAGENT_THINKING_LEVELS,
+} from "./src/thinking-level.js";
 
 export const BUCKET_GUIDANCE = "Model bucket: 'small' for trivial work, 'medium' for normal development (default), or 'frontier' only for exceptional difficulty.";
 
-const THINKING_LEVEL_GUIDANCE = "Optional thinking effort hint: 'minimal', 'low', 'medium', 'high', or 'xhigh'. When omitted, the model uses its default thinking behavior.";
+const THINKING_LEVEL_GUIDANCE = `Optional thinking effort hint, capped at '${MAX_SUBAGENT_THINKING_LEVEL}' for subagents. Defaults to '${MAX_SUBAGENT_THINKING_LEVEL}'.`;
 
 const BucketSchema = Type.Optional(StringEnum(["small", "medium", "frontier"] as const, {
 	description: BUCKET_GUIDANCE,
 	default: "medium",
 }));
 
-const ThinkingLevelSchema = Type.Optional(StringEnum(["minimal", "low", "medium", "high", "xhigh"] as const, {
+const ThinkingLevelSchema = Type.Optional(StringEnum(SUBAGENT_THINKING_LEVELS, {
 	description: THINKING_LEVEL_GUIDANCE,
+	default: MAX_SUBAGENT_THINKING_LEVEL,
 }));
 
 const UserContextSchema = Type.Optional(StringEnum(["latest", "all"] as const, {
@@ -59,8 +64,12 @@ export function prepareSubagentArguments(raw: unknown): Static<typeof SubagentPa
 		return raw as Static<typeof SubagentParams>;
 	}
 	const { agentScope: _ignored, tasks, chain, ...rest } = raw as Record<string, unknown>;
+	const capLegacyThinkingLevel = (value: Record<string, unknown>): Record<string, unknown> =>
+		value.thinkingLevel === "xhigh" || value.thinkingLevel === "max"
+			? { ...value, thinkingLevel: MAX_SUBAGENT_THINKING_LEVEL }
+			: value;
 	if (typeof rest.agent === "string" && typeof rest.task === "string") {
-		return rest as Static<typeof SubagentParams>;
+		return capLegacyThinkingLevel(rest) as Static<typeof SubagentParams>;
 	}
 	const legacyItems = Array.isArray(tasks) && tasks.length === 1
 		? tasks
@@ -69,7 +78,7 @@ export function prepareSubagentArguments(raw: unknown): Static<typeof SubagentPa
 			: undefined;
 	const item = legacyItems?.[0];
 	if (item && typeof item === "object" && !Array.isArray(item)) {
-		return { ...rest, ...(item as Record<string, unknown>) } as Static<typeof SubagentParams>;
+		return capLegacyThinkingLevel({ ...rest, ...(item as Record<string, unknown>) }) as Static<typeof SubagentParams>;
 	}
 	if ((Array.isArray(tasks) && tasks.length > 0) || (Array.isArray(chain) && chain.length > 0)) {
 		throw new Error("Subagent batch/chain calls were removed. Emit independent tasks as sibling subagent calls, or delegate dependent tasks in later turns.");

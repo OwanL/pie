@@ -63,6 +63,10 @@ export interface SubagentChildPreview {
   phase: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   agent?: string;
   task?: string;
+  /** Parent-context mode requested for this child handoff. */
+  parentUserContextMode?: 'latest' | 'all';
+  /** Exact bounded parent-context packet inserted into the child prompt. */
+  parentUserContext?: string;
   summary?: string;
   exitCode?: number;
   model?: string;

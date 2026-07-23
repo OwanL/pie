@@ -4,6 +4,7 @@ import { estimateTextTokens } from '../shared/tokenize.js';
 const MAX_TAIL_CHARS = 8_192;
 const MAX_SUMMARY_CHARS = 1_024;
 const MAX_TASK_CHARS = 4_096;
+const MAX_PARENT_USER_CONTEXT_CHARS = 12_000;
 const SUBAGENT_NORMALIZATION_CACHE_MAX = 64;
 const subagentNormalizationCache = new Map<string, ToolPreview>();
 
@@ -86,6 +87,8 @@ function normalizeSubagent(value: unknown): ToolPreview {
       phase,
       agent,
       task: boundedOptional(stringField(child, ['task']), MAX_TASK_CHARS),
+      parentUserContextMode: normalizeParentUserContextMode(child.parentUserContextMode),
+      parentUserContext: boundedOptional(stringField(child, ['parentUserContext']), MAX_PARENT_USER_CONTEXT_CHARS),
       summary,
       exitCode: numberField(child, 'exitCode'),
       model: boundedOptional(stringField(child, ['model']), 256),
@@ -192,6 +195,10 @@ function estimatePossiblyLongTextTokens(text: string): number {
 
 function normalizeSubagentMode(value: unknown): 'single' | 'parallel' | 'chain' {
   return value === 'parallel' || value === 'chain' ? value : 'single';
+}
+
+function normalizeParentUserContextMode(value: unknown): 'latest' | 'all' | undefined {
+  return value === 'latest' || value === 'all' ? value : undefined;
 }
 
 function normalizeQuestion(value: unknown): ToolPreview {
