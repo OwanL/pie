@@ -33,6 +33,7 @@ import type { ThinkingLevel } from "../bucket-selector.js";
 import { compactSingleResult } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
 import { buildParentUserContext } from "./user-context.js";
+import { hashDelegatedPrompt, withRuntimeProvenance } from "./runtime-provenance.js";
 import {
 	readRetryPolicy,
 	parseRetryAfterMs,
@@ -174,10 +175,17 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 				}
 				args.onUpdate?.({
 					...partial,
-					details: args.makeDetails(results.map((current) => ({
-						...current,
-						usage: usageWithPriorAttempts(current.usage, cumulativeUsage),
-					}))),
+					details: args.makeDetails(results.map((current) => {
+						const enriched = {
+							...current,
+							usage: usageWithPriorAttempts(current.usage, cumulativeUsage),
+						};
+						// Selection is known before dispatch, so expose its effective
+						// bucket on progress snapshots too. This keeps a force-settled
+						// result as auditable as an ordinarily returned attempt.
+						attachSelectionMetadata(enriched, resolved);
+						return enriched;
+					})),
 				});
 			}
 			: undefined;
@@ -289,6 +297,16 @@ export async function executeSingleTask(args: {
 	const agent = agents.find((candidate) => candidate.name === params.agent);
 	if (!agent) throw new Error(`Unknown subagent: ${params.agent}`);
 
+	const provenanceSeed = {
+		promptHash: hashDelegatedPrompt(params.task),
+		requestedBucket: params.bucket ?? agent.bucket ?? "medium",
+		parentToolCallId: args.toolCallId,
+		modelFamilies: selectionCtx.modelFamilies,
+		registryModels: selectionCtx.registryModels,
+	};
+	const makeDetailsWithProvenance: MakeDetails = (results) => makeDetails(
+		results.map((current) => withRuntimeProvenance(current, provenanceSeed)),
+	);
 	const injectedRunAttempt = _internal?.runAttempt;
 	// Snapshot optional parent context once so provider retries receive the same
 	// lean handoff even if the parent transcript advances while an attempt runs.
@@ -305,7 +323,7 @@ export async function executeSingleTask(args: {
 		toolCallId: args.toolCallId,
 		task: params.task,
 		clock: _internal?.clock ?? realRetryClock,
-		makeDetails,
+		makeDetails: makeDetailsWithProvenance,
 		onUpdate,
 		buildRuntime: () => ({
 			depth: runtimeCtx.depth + 1,
@@ -335,7 +353,7 @@ export async function executeSingleTask(args: {
 					undefined,
 					signal,
 					onAttemptUpdate,
-					(results) => makeDetails(results),
+					(results) => makeDetailsWithProvenance(results),
 					ctx.modelRegistry,
 					ctx.model,
 					selection,
@@ -358,7 +376,7 @@ export async function executeSingleTask(args: {
 	if (parentUserContext) result.parentUserContext = parentUserContext;
 
 	const compact = compactSingleResult(result);
-	const details = makeDetails([compact]);
+	const details = makeDetailsWithProvenance([compact]);
 	if (isResultError(result)) {
 		return {
 			content: [textContent(`Agent ${result.stopReason || "failed"}: ${failureMessage(compact)}`)],

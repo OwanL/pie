@@ -345,6 +345,30 @@ describe("nested proxy chain (depth >= 2)", () => {
     assert.equal(opts.toolCallId, DEPTH2_ID);
   });
 
+  it("preserves reviewMeta unchanged through nested select and input proxies without changing routing", async () => {
+    const { host, depth2 } = chain();
+    const reviewMeta = {
+      purpose: "review_human_verification",
+      targetSessionId: "reviewed-session",
+      targetSessionPath: "/sessions/reviewed.jsonl",
+      criterionId: "criterion-1",
+      domain: "interaction",
+      expectedObservation: "The interaction succeeds.",
+    };
+
+    await depth2.select("Check", ["Yes"], { reviewMeta } as any);
+    await depth2.input("Describe", undefined, { reviewMeta } as any);
+
+    const selectOpts = host.calls.select[0].args[2] as { subagentCallId?: string; toolCallId?: string; reviewMeta?: unknown };
+    const inputOpts = host.calls.input[0].args[2] as { subagentCallId?: string; toolCallId?: string; reviewMeta?: unknown };
+    assert.deepEqual(selectOpts.reviewMeta, reviewMeta);
+    assert.deepEqual(inputOpts.reviewMeta, reviewMeta);
+    assert.equal(selectOpts.subagentCallId, DEPTH2_ID);
+    assert.equal(selectOpts.toolCallId, DEPTH2_ID);
+    assert.equal(inputOpts.subagentCallId, DEPTH2_ID);
+    assert.equal(inputOpts.toolCallId, DEPTH2_ID);
+  });
+
   it("depth-1 (no inner identity) still stamps its own id (regression guard)", async () => {
     // When the ask_user extension calls the depth-1 proxy directly (no inner
     // proxy above it), opts carries no subagentCallId/toolCallId, so the proxy

@@ -16,16 +16,23 @@ import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@mariozechner
 /**
  * Dialog options that have already been stamped by an inner (nested) proxy.
  */
-type ForwardedDialogOptions = ExtensionUIDialogOptions & { subagentCallId?: string; toolCallId?: string; allowCustom?: boolean };
+type ForwardedDialogOptions = ExtensionUIDialogOptions & {
+  subagentCallId?: string;
+  toolCallId?: string;
+  allowCustom?: boolean;
+  /** Opaque review display/audit metadata. It is forwarded unchanged and never
+   * participates in the subagent/session routing fields above. */
+  reviewMeta?: unknown;
+};
 
 /**
  * Minimal interface for the parent bridge — we only need the dialog methods
  * that the ask_user extension (and safeguard) actually call.
  */
 export interface ParentBridge {
-  select(title: string, options: string[], opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string; allowCustom?: boolean }): Promise<string | undefined>;
-  confirm(title: string, message: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<boolean>;
-  input(title: string, placeholder?: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string }): Promise<string | undefined>;
+  select(title: string, options: string[], opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string; allowCustom?: boolean; reviewMeta?: unknown }): Promise<string | undefined>;
+  confirm(title: string, message: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string; reviewMeta?: unknown }): Promise<boolean>;
+  input(title: string, placeholder?: string, opts?: { signal?: AbortSignal; subagentCallId?: string; toolCallId?: string; reviewMeta?: unknown }): Promise<string | undefined>;
   notify(message: string, type?: "info" | "warning" | "error", subagentCallId?: string): void;
   cancelAll(): void;
   cancelSubagent?(subagentCallId: string): void;
@@ -55,6 +62,7 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
     subagentCallId?: string;
     toolCallId?: string;
     allowCustom?: boolean;
+    reviewMeta?: unknown;
   } {
     const inner = opts as ForwardedDialogOptions | undefined;
     const subagentCallId = inner?.subagentCallId ?? this.subagentCallId;
@@ -64,6 +72,7 @@ export class ParentExtensionUIBridgeProxy implements ExtensionUIContext {
       subagentCallId,
       toolCallId,
       ...(inner?.allowCustom !== undefined ? { allowCustom: inner.allowCustom } : {}),
+      ...(inner?.reviewMeta !== undefined ? { reviewMeta: inner.reviewMeta } : {}),
     };
   }
 

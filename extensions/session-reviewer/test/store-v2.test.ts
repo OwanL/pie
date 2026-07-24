@@ -1,0 +1,99 @@
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import test, { afterEach, beforeEach } from 'node:test';
+
+import { appendReview, enqueueClosure, readClosureActions, readReviewStore, recordReviewOnce } from '../src/store.js';
+import { validReview } from './fixtures.js';
+
+let dir: string;
+let previous: string | undefined;
+beforeEach(() => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-store-v2-'));
+  previous = process.env.PIE_REVIEWS_DIR;
+  process.env.PIE_REVIEWS_DIR = dir;
+});
+afterEach(() => {
+  if (previous === undefined) delete process.env.PIE_REVIEWS_DIR;
+  else process.env.PIE_REVIEWS_DIR = previous;
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('concurrent production writes are once-only after lock-time re-read', async () => {
+  const a = validReview({ reviewId: 'review-a' });
+  const b = validReview({ reviewId: 'review-b' });
+  const [first, second] = await Promise.all([recordReviewOnce(a), recordReviewOnce(b)]);
+  assert.equal(Number(first.written) + Number(second.written), 1);
+  const snapshot = readReviewStore();
+  assert.equal(snapshot.v2.length, 1);
+  assert.equal(snapshot.canonicalBySessionId.size, 1);
+  const duplicate = first.written ? second : first;
+  assert.equal(duplicate.written, false);
+  if (!duplicate.written) assert.ok(duplicate.reviewId === 'review-a' || duplicate.reviewId === 'review-b');
+});
+
+test('calibration records do not collide with canonical production uniqueness', async () => {
+  await recordReviewOnce(validReview({ kind: 'calibration', reviewId: 'cal-1' }));
+  await recordReviewOnce(validReview({ kind: 'calibration', reviewId: 'cal-2' }));
+  const production = await recordReviewOnce(validReview({ reviewId: 'prod-1' }));
+  assert.equal(production.written, true);
+  assert.equal(readReviewStore().v2.length, 3);
+});
+
+test('mixed V1/V2 storage stays readable and malformed lines are isolated', async () => {
+  appendReview({ sessionPath: '/legacy.jsonl', done: true, rating: 4, completion: 'fully', reason: 'legacy', evaluatedAt: '2026-01-01T00:00:00Z' });
+  fs.appendFileSync(path.join(dir, 'reviews.jsonl'), 'not-json\n');
+  await recordReviewOnce(validReview());
+  const snapshot = readReviewStore();
+  assert.equal(snapshot.legacy.length, 1);
+  assert.equal(snapshot.v2.length, 1);
+  assert.equal(snapshot.legacy[0]!.rating, 4);
+  assert.equal(snapshot.unresolvedLegacy.length, 1);
+});
+
+test('resolved V1 path reserves its stable session ID from V2 cutover', async () => {
+  const sessionPath = path.join(dir, 'legacy-session.jsonl');
+  fs.writeFileSync(sessionPath, `${JSON.stringify({ type: 'session', id: 'legacy-stable' })}\n`);
+  appendReview({ sessionPath, done: true, rating: 5, completion: 'fully', reason: 'legacy', evaluatedAt: '2026-01-01T00:00:00Z' });
+  const result = await recordReviewOnce(validReview({ sessionId: 'legacy-stable', sessionPathAtReview: sessionPath }));
+  assert.deepEqual(result.written, false);
+  if (!result.written) assert.equal(result.legacy, true);
+  assert.equal(readReviewStore().v2.length, 0);
+});
+
+test('closure actions are separate, idempotent while active, and never append a review', async () => {
+  await recordReviewOnce(validReview());
+  const reviewFile = path.join(dir, 'reviews.jsonl');
+  const before = fs.readFileSync(reviewFile, 'utf8');
+  const first = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: 'session-1', reviewId: 'review-1', targetSessionPath: '/sessions/session-1.jsonl' });
+  const second = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: 'session-1', reviewId: 'review-1' });
+  assert.equal(first.existing, false);
+  assert.equal(second.existing, true);
+  assert.equal(second.action.actionId, first.action.actionId);
+  assert.equal(readClosureActions().length, 1);
+  assert.equal(fs.readFileSync(reviewFile, 'utf8'), before);
+  assert.ok(fs.existsSync(path.join(dir, 'closure-actions.jsonl')));
+});
+
+test('initial closure append is fsynced before enqueue resolves', async () => {
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const original = mutableFs.fsyncSync;
+  let calls = 0;
+  mutableFs.fsyncSync = ((descriptor: number) => { calls += 1; return original(descriptor); }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  try {
+    await enqueueClosure({ kind: 'closeSelf', targetSessionId: 'durable-reviewer' });
+  } finally {
+    mutableFs.fsyncSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(calls, 1);
+});
+
+test('closeSelf action carries no reviewId and creates no reviews file', async () => {
+  const result = await enqueueClosure({ kind: 'closeSelf', targetSessionId: 'reviewer-session', targetSessionPath: '/reviewer.jsonl' });
+  assert.equal(result.action.reviewId, undefined);
+  assert.equal(fs.existsSync(path.join(dir, 'reviews.jsonl')), false);
+});

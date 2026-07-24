@@ -102,6 +102,25 @@ Model selection still reads `<pi-config>/model-profiles.yaml` (`.json`
 fallback) for thinking-level support lookups — the shared registry, also
 consumed by pie's model picker.
 
+### Runtime provenance
+
+Every dispatched child result exposes audit metadata directly on its
+`details.results[]` entry, including retry and nested-call results:
+
+- `promptHash` is lowercase SHA-256 of the exact `task` string supplied to the
+  subagent tool (no trimming, prompt formatting, or parent-context concatenation).
+- `requestedBucket`, `bucket`, and `bucketDowngraded` distinguish the requested
+  tier from the effective selection tier.
+- `model`, `provider`, `family`, and `thinkingLevel` describe the effective
+  runtime. `family` is resolved from the provider-qualified generated catalog,
+  then a provider-qualified runtime registry declaration; its deterministic
+  fallback is the effective model id, or `unknown` if no model was observable.
+- `parentToolCallId` is the immediate parent session's subagent tool-call id.
+
+The immutable call fields are reattached to progress, terminal, retried, and
+force-settled details. Effective model/provider/family track the final serving
+attempt rather than the initially requested model.
+
 ## Nested Bucket Allowlist
 
 You can restrict which tiers **nested** subagents (depth ≥ 1 — every subagent

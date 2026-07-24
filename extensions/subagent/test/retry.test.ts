@@ -296,8 +296,8 @@ test.after(() => {
 
 test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", async () => {
 	const models = [
-		{ id: "model-a", provider: "provider-a" },
-		{ id: "model-b", provider: "provider-b" },
+		{ id: "model-a", provider: "provider-a", family: "family-a" },
+		{ id: "model-b", provider: "provider-b", family: "family-b" },
 	];
 	const attempts: Array<{ model: string; attemptId: string; error?: Error }> = [];
 	const clock = new ImmediateClock();
@@ -368,6 +368,14 @@ test("Retry-After hint is parsed, clamped, and recorded in attempt analytics", a
 	const records = response.details.results[0].attemptRecords;
 	assert.equal(records?.length, 2);
 	assert.equal(records?.[1]?.backoffMs, 120_000, "Retry-After is clamped to policy max");
+	const runtime = response.details.results[0];
+	assert.equal(runtime.promptHash, "64d6f071c16a0984c4d1331002dd6f6a2ec7a503d23b38648fa52069af7330e7");
+	assert.equal(runtime.requestedBucket, "medium");
+	assert.equal(runtime.bucketDowngraded, false);
+	assert.equal(runtime.parentToolCallId, "t-retry-after");
+	assert.equal(runtime.model, "model-b");
+	assert.equal(runtime.provider, "provider-b");
+	assert.equal(runtime.family, "family-b", "final provenance follows the effective retry model/provider");
 });
 
 test("bounded exponential backoff is used when no Retry-After hint is present", async () => {

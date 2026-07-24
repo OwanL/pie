@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isModelFailure } from "../src/selection.js";
+import { hashDelegatedPrompt } from "../src/runtime-provenance.js";
 import { resetFairSelectionBags } from "../bucket-selector.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
@@ -171,6 +172,12 @@ test("executeSingleMode: success returns the final assistant output", async () =
 	assert.equal(r.details.results.length, 1);
 	assert.equal(r.details.results[0].exitCode, 0);
 	assert.equal(r.details.results[0].model, "m");
+	assert.equal(r.details.results[0].family, "m", "unregistered effective model falls back to its model id");
+	assert.equal(r.details.results[0].promptHash, hashDelegatedPrompt("do work"));
+	assert.equal(r.details.results[0].requestedBucket, "medium");
+	assert.equal(r.details.results[0].bucket, "medium");
+	assert.equal(r.details.results[0].bucketDowngraded, false);
+	assert.equal(r.details.results[0].parentToolCallId, "t1");
 });
 
 test("executeSingleMode: error result returns isError with 'Agent <stopReason>: <message>'", async () => {

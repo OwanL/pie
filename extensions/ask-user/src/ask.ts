@@ -1,10 +1,10 @@
-import type { AskUserInput } from './types.js';
+import type { AskUserInput, ReviewHumanVerificationMetadata } from './types.js';
 import { CUSTOM_SENTINEL } from './types.js';
 
 export interface AskPort {
   ui: {
-    select(title: string, options: string[], opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string; allowCustom?: boolean }): Promise<string | undefined>;
-    input(title: string, placeholder?: string, opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string }): Promise<string | undefined>;
+    select(title: string, options: string[], opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string; allowCustom?: boolean; reviewMeta?: ReviewHumanVerificationMetadata }): Promise<string | undefined>;
+    input(title: string, placeholder?: string, opts?: { timeout?: number; signal?: AbortSignal; toolCallId?: string; reviewMeta?: ReviewHumanVerificationMetadata }): Promise<string | undefined>;
   };
   signal?: AbortSignal;
   toolCallId?: string;
@@ -28,36 +28,43 @@ export async function runAsk(input: AskUserInput, port: AskPort): Promise<AskRes
     signal: port.signal,
     allowCustom,
     ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
+    ...(input.reviewMeta ? { reviewMeta: input.reviewMeta } : {}),
   });
   if (picked === undefined) {
-    return cancelled();
+    return cancelled(input.reviewMeta);
   }
 
   if (picked !== CUSTOM_SENTINEL) {
     const source = presetOptions.includes(picked) ? 'option' : 'custom';
-    return answered(picked, source);
+    return answered(picked, source, input.reviewMeta);
   }
 
-  const custom = await port.ui.input('Your answer', undefined, { signal: port.signal, ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}) });
+  // Metadata follows the custom-input fallback too, while the bridge still
+  // routes both requests through the caller's reviewer session.
+  const custom = await port.ui.input('Your answer', undefined, {
+    signal: port.signal,
+    ...(port.toolCallId ? { toolCallId: port.toolCallId } : {}),
+    ...(input.reviewMeta ? { reviewMeta: input.reviewMeta } : {}),
+  });
   if (!custom?.trim()) {
-    return cancelled();
+    return cancelled(input.reviewMeta);
   }
 
-  return answered(custom.trim(), 'custom');
+  return answered(custom.trim(), 'custom', input.reviewMeta);
 }
 
-function answered(answer: string, source: 'option' | 'custom') {
+function answered(answer: string, source: 'option' | 'custom', reviewMeta?: ReviewHumanVerificationMetadata) {
   return {
     content: [{ type: 'text' as const, text: answer }],
-    details: { answer, source, cancelled: false },
+    details: { answer, source, cancelled: false, ...(reviewMeta ? { targetSessionId: reviewMeta.targetSessionId } : {}) },
     isError: false as const,
   };
 }
 
-function cancelled() {
+function cancelled(reviewMeta?: ReviewHumanVerificationMetadata) {
   return {
     content: [{ type: 'text' as const, text: '[user cancelled the question]' }],
-    details: { answer: '', source: 'cancelled' as const, cancelled: true },
+    details: { answer: '', source: 'cancelled' as const, cancelled: true, ...(reviewMeta ? { targetSessionId: reviewMeta.targetSessionId } : {}) },
     isError: false as const,
   };
 }

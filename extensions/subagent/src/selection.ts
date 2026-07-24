@@ -25,7 +25,7 @@ import {
 } from "./bucket-config.js";
 import { selectModel } from "../bucket-selector.js";
 import { getCapacityAvailableModelIds } from "./provider-capacity.js";
-import type { ModelProviderRef } from "./provider-toggles.js";
+import type { RuntimeModelRef } from "./runtime-provenance.js";
 import { capSubagentThinkingLevel } from "./thinking-level.js";
 
 /** Context for model selection settings and restrictions. */
@@ -41,8 +41,11 @@ export interface SelectionContext {
 	routeAroundSaturatedProviders?: boolean;
 	/** Retry a replay-safe transient provider failure on another model in the same bucket. */
 	fallbackOnProviderFailure?: boolean;
-	/** Enabled/configured registry models used to map duplicate ids to providers. */
-	registryModels?: ModelProviderRef[];
+	/** Enabled/configured registry models used to map duplicate ids to providers
+	 * and capture an optional runtime-declared family. */
+	registryModels?: RuntimeModelRef[];
+	/** Provider-qualified family declarations loaded from the generated catalog. */
+	modelFamilies?: ReadonlyMap<string, string>;
 	/** Per-tier allowlist restricting which buckets *nested* subagents (depth ≥ 1)
 	 *  may use. Read once from the env mirror (PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON).
 	 *  All-true (the default) leaves behaviour unchanged. */

@@ -79,6 +79,20 @@ export interface SingleResult {
 	/** Provider that owns the selected model. Kept separate from `model` because
 	 * model ids are not guaranteed to include a provider prefix. */
 	provider?: string;
+	/** Provider-agnostic family of the effective runtime model. Declared catalog
+	 * metadata wins; the effective model id is the deterministic fallback, then
+	 * `unknown` when no runtime model is observable. */
+	family?: string;
+	/** SHA-256 (lowercase hex) of the exact delegated `task` input. */
+	promptHash?: string;
+	/** Bucket requested by the tool call (or agent/default resolution), before
+	 * availability and nested-policy downgrades. */
+	requestedBucket?: string;
+	/** Whether the effective bucket differs from the requested bucket, including
+	 * a nested-policy fallback with no allowed bucket. */
+	bucketDowngraded?: boolean;
+	/** Tool-call id in the immediate parent session that dispatched this child. */
+	parentToolCallId?: string;
 	/** Maximum context window of the selected model. Paired with
 	 * `usage.contextTokens` for per-child context telemetry in the parent UI. */
 	contextWindow?: number;

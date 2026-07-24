@@ -1,5 +1,15 @@
 export { CUSTOM_SENTINEL } from '../../../extension/src/shared/ask-user-sentinel.js';
 
+export interface ReviewHumanVerificationMetadata {
+  purpose: 'review_human_verification';
+  /** Identifies the reviewed session for display/audit only; never a routing key. */
+  targetSessionId: string;
+  targetSessionPath: string;
+  criterionId: string;
+  domain: string;
+  expectedObservation: string;
+}
+
 export const askUserSchema = {
   type: 'object',
   properties: {
@@ -26,6 +36,20 @@ export const askUserSchema = {
       type: 'string',
       description: 'Optional one-paragraph rationale shown under the question.',
     },
+    reviewMeta: {
+      type: 'object',
+      description: 'Optional review-only label for the reviewed session. It does not change prompt routing.',
+      properties: {
+        purpose: { enum: ['review_human_verification'] },
+        targetSessionId: { type: 'string' },
+        targetSessionPath: { type: 'string' },
+        criterionId: { type: 'string' },
+        domain: { type: 'string' },
+        expectedObservation: { type: 'string' },
+      },
+      required: ['purpose', 'targetSessionId', 'targetSessionPath', 'criterionId', 'domain', 'expectedObservation'],
+      additionalProperties: false,
+    },
   },
   required: ['question', 'options'],
   additionalProperties: false,
@@ -36,4 +60,6 @@ export interface AskUserInput {
   options: string[];
   allowCustom?: boolean;
   context?: string;
+  /** Review display/audit metadata; prompt routing remains with the caller. */
+  reviewMeta?: ReviewHumanVerificationMetadata;
 }

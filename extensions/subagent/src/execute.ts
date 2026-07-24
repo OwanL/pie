@@ -55,6 +55,7 @@ import {
 } from "./provider-capacity.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
 import { readFallbackOnProviderFailure } from "./provider-failure.js";
+import { hashDelegatedPrompt, loadModelFamilies, withRuntimeProvenance } from "./runtime-provenance.js";
 // Model-selection primitives live in ./selection.ts and remain re-exported
 // here for compatibility with existing focused tests and integrations.
 import {
@@ -487,6 +488,7 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 		routeAroundSaturatedProviders: readRouteAroundSaturatedProviders(),
 		fallbackOnProviderFailure: readFallbackOnProviderFailure(),
 		registryModels: availableModels,
+		modelFamilies: loadModelFamilies(path.join(CONFIG_ROOT, "models.json")),
 		nestedAllowedBuckets: readNestedAllowedBuckets(),
 	};
 }
@@ -573,9 +575,6 @@ export async function execute(
 	const approvalError = await maybeApproveProjectAgents(params, agents, discovery, mode, ctx);
 	if (approvalError) return approvalError;
 
-	const makeDetailsBound = (results: SingleResult[]) =>
-		makeDetails("single", results, DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir);
-
 	// Enforce the caller's canSpawn allowlist. The root caller (main agent) has
 	// no canSpawn → unrestricted. An agent with a canSpawn list may only spawn the
 	// named agents, preserving invariants such as read-only-only delegation.
@@ -587,12 +586,27 @@ export async function execute(
 		const listing = disallowed.map((n) => `"${n}"`).join(", ");
 		return {
 			content: [textContent(`Not permitted to spawn ${listing}: blocked by the caller's canSpawn allowlist. Choose an agent the caller is allowed to delegate to.`)],
-			details: makeDetailsBound([]),
+			details: makeDetails("single", [], DEFAULT_AGENT_SCOPE, discovery.projectAgentsDir),
 			isError: true,
 		};
 	}
 
 	const selectionCtx = setupModelSelection(ctx);
+	const requestedAgent = agents.find((candidate) => candidate.name === params.agent);
+	const provenanceSeed = {
+		promptHash: hashDelegatedPrompt(params.task),
+		requestedBucket: params.bucket ?? requestedAgent?.bucket ?? "medium",
+		parentToolCallId: _toolCallId,
+		modelFamilies: selectionCtx.modelFamilies,
+		registryModels: selectionCtx.registryModels,
+	};
+	const makeDetailsBound = (results: SingleResult[]) =>
+		makeDetails(
+			"single",
+			results.map((result) => withRuntimeProvenance(result, provenanceSeed)),
+			DEFAULT_AGENT_SCOPE,
+			discovery.projectAgentsDir,
+		);
 
 	// Resolve the parent (main) session id and the full tool-name set once per
 	// subagent tool call, so subagents can (a) inherit the main turn's pruned
