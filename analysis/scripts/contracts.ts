@@ -18,7 +18,7 @@ import type {
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
-  VerificationRollup, RunSnapshot, TaskBoundaryIntent,
+  VerificationRollup, RunSnapshot as BaseRunSnapshot, TaskBoundaryIntent,
 } from '../../shared/run-analytics-contracts.js';
 
 export type {
@@ -27,14 +27,17 @@ export type {
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
-  VerificationRollup, RunSnapshot, TaskBoundaryIntent,
+  VerificationRollup, TaskBoundaryIntent,
 };
+
+/** Analysis accepts the stable session-header identity when present in newer exports. */
+export type RunSnapshot = BaseRunSnapshot & { sessionId?: string };
 
 export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
 
-export const SITE_DATA_SCHEMA_VERSION = 5;
+export const SITE_DATA_SCHEMA_VERSION = 6;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
-export const GENERATOR_VERSION = 'analysis-v1';
+export const GENERATOR_VERSION = 'analysis-v2';
 
 export const SITE_DATA_FILE_NAMES = [
   'manifest.json',
@@ -50,6 +53,7 @@ export const SITE_DATA_FILE_NAMES = [
   'tool-result-pruning-impact.json',
   'tool-result-pruning-outcomes.json',
   'agent-review-comparison.json',
+  'session-review-analytics.json',
   'backend-errors.json',
   'file-types.json',
   'token-throughput.json',
@@ -95,6 +99,105 @@ export interface AgentReviewSourceEvent {
   reviewerBuckets: string[];
   /** Number of sub-agent reviewers that fed the rating. */
   reviewerCount: number;
+}
+
+export type CriterionOrigin = 'explicit' | 'necessary_implied';
+export type CriterionImportance = 'core' | 'supporting' | 'optional';
+export type CriterionStatus = 'met' | 'partly_met' | 'unmet' | 'blocked' | 'not_assessable' | 'superseded';
+export type CriterionReason = 'none' | 'omitted' | 'attempt_failed' | 'incorrect_result' | 'regression' | 'external_blocker' | 'user_dependency' | 'human_evidence_missing' | 'insufficient_artifact_evidence' | 'unknown';
+export type OverallAttainment = 'achieved' | 'mostly_achieved' | 'partly_achieved' | 'not_achieved' | 'not_assessable';
+export type ReviewConfidence = 'high' | 'medium' | 'low';
+
+export interface ClassifiedCriterion {
+  criterionId: string;
+  statement: string;
+  origin: CriterionOrigin;
+  importance: CriterionImportance;
+  taxonomy: { activity: string; surface: string[]; evidenceMode: string[] };
+  status: CriterionStatus;
+  reason: CriterionReason;
+  evidenceRefs: string[];
+  findingRefs: string[];
+}
+
+export interface CriterionAttainmentSummary {
+  total: number;
+  assessable: number;
+  controllableDenominator: number;
+  met: number;
+  partlyMet: number;
+  unmet: number;
+  blocked: number;
+  externalBlocked: number;
+  notAssessable: number;
+  superseded: number;
+  deliveredRate: number;
+  controllableRate: number;
+}
+
+export interface ReviewProcessVector {
+  requirementDiscipline: string;
+  verificationDiscipline: string;
+  scopeControl: string;
+  recovery: string;
+  finalClaimAccuracy: string;
+}
+export interface ReviewEvidenceVector {
+  requirements: string;
+  artifacts: string;
+  execution: string;
+  human: string;
+  limitations: string[];
+}
+export interface ReviewFinding {
+  findingId: string;
+  severity: 'critical' | 'major' | 'minor' | 'nit';
+  category: string;
+  statement: string;
+  evidenceRefs: string[];
+  criterionId?: string;
+  ledgerEffect: 'downgrade' | 'add' | 'none';
+  remediation: string;
+}
+export interface ReviewerRuntimeReference {
+  role: 'proposal' | 'consolidation' | 'component' | 'adjudication';
+  reviewerId: string;
+  requestedBucket: 'small' | 'medium';
+  bucket: 'small' | 'medium' | 'frontier';
+  bucketDowngraded: boolean;
+  modelId: string;
+  provider: string;
+  family: string;
+  thinkingLevel: string | null;
+}
+export interface SessionReviewV2Source {
+  schemaVersion: number;
+  kind: 'production';
+  reviewId: string;
+  sessionId: string;
+  sessionPathAtReview: string;
+  identityFallback: boolean;
+  rubricVersion: string;
+  indexVersion: string | null;
+  reviewedAt: string;
+  ledger: ClassifiedCriterion[];
+  process: ReviewProcessVector;
+  evidence: ReviewEvidenceVector;
+  findings: ReviewFinding[];
+  humanCheckStatus: string | null;
+  confidence: ReviewConfidence;
+  disagreement: { material: boolean; adjudicated: boolean; disputedFields: { field: string; resolution: string }[] };
+  reviewers: ReviewerRuntimeReference[];
+  diversityAchieved: boolean;
+  blindingApplied: boolean;
+}
+
+/** Explicitly separate V1 sidecar cohort; never coerced into a V2 ledger. */
+export interface LegacySessionReviewSource extends HistoricalSessionReview {
+  cohort: 'legacy_v1';
+  sessionId: string;
+  normalizedSessionPath: string;
+  identityFallback: boolean;
 }
 
 export type TranscriptSourceProvenance = 'legacy' | 'configured' | 'portable-export';
@@ -150,8 +253,12 @@ export interface SourceAnalyticsPayload {
   completedRuns: RunSnapshot[];
   openRuns: RunSnapshot[];
   outcomes: OutcomeHistoryLogEntry[];
-  /** Raw agent-authored session reviews read from <store>/agent-reviews.jsonl. */
+  /** V1 agent-authored 1–5 reviews. This is an explicitly legacy cohort. */
   agentReviews: AgentReviewSourceEvent[];
+  /** Canonical V2 production reviews keyed by stable session-header ID. */
+  sessionReviewsV2?: SessionReviewV2Source[];
+  /** V1 sidecar reviews, including unresolved path-hash fallback identities. */
+  legacySessionReviews?: LegacySessionReviewSource[];
   /** Optional content-free evidence reconstructed from historical session transcripts. */
   historicalSessions?: HistoricalSessionSourceSummary[];
   /** Raw pruning decisions read from data/pruning.jsonl. */
@@ -187,6 +294,9 @@ export interface PreparedSkillEntry {
 export interface PreparedRunRow {
   runId: string;
   taskGroupId: string;
+  /** Stable session-header identity; path hash only when identityFallback is true. */
+  sessionId: string;
+  identityFallback: boolean;
   sessionPathHash: string;
   status: ActiveRunStatus;
   scored: boolean;
@@ -661,6 +771,10 @@ export interface PreparedToolResultPruningRow {
  *  Carries the matched run's model family + user satisfaction so the comparison builder is
  *  self-contained (no re-join to runs needed). */
 export interface PreparedAgentReviewRow {
+  /** Explicit legacy cohort label: V1 ratings are never blended into V2 quality. */
+  cohort: 'legacy_v1';
+  sessionId: string;
+  identityFallback: boolean;
   runId: string;
   sessionPathHash: string;
   taskGroupId: string;
@@ -726,6 +840,56 @@ export interface PreparedHistoricalSessionSummary extends Omit<HistoricalSession
   transcriptOnly: boolean;
 }
 
+export interface PreparedSessionReviewCriterionRow {
+  criterionId: string;
+  importance: CriterionImportance;
+  origin: CriterionOrigin;
+  activity: string;
+  surfaces: string[];
+  evidenceModes: string[];
+  status: CriterionStatus;
+  reason: CriterionReason;
+}
+
+export interface PreparedSessionReviewV2Row {
+  cohort: 'v2_production';
+  schemaVersion: number;
+  reviewId: string;
+  sessionId: string;
+  identityFallback: boolean;
+  rubricVersion: string;
+  indexVersion: 'v1';
+  reviewedAt: string;
+  startedDay: string;
+  joinKey: 'session_id' | 'path_fallback' | 'unmatched';
+  runIds: string[];
+  modelFamilies: string[];
+  criteria: PreparedSessionReviewCriterionRow[];
+  attainment: {
+    deliveredOverall: OverallAttainment;
+    controllableOverall: OverallAttainment;
+    core: CriterionAttainmentSummary;
+    supporting: CriterionAttainmentSummary;
+    optional: CriterionAttainmentSummary;
+    qualityIndexV1: number | null;
+  };
+  criterionCoverage: number | null;
+  externalBlockerRate: number | null;
+  process: ReviewProcessVector;
+  evidence: ReviewEvidenceVector;
+  findings: Array<Pick<ReviewFinding, 'findingId' | 'severity' | 'category' | 'criterionId' | 'ledgerEffect'>>;
+  humanCheckStatus: string | null;
+  confidence: ReviewConfidence;
+  disagreement: SessionReviewV2Source['disagreement'];
+  reviewers: ReviewerRuntimeReference[];
+  diversityAchieved: boolean;
+  blindingApplied: boolean;
+}
+
+export interface PreparedLegacySessionReviewRow extends Omit<LegacySessionReviewSource, 'normalizedSessionPath'> {
+  sessionPathHash: string;
+}
+
 export interface PreparedAnalyticsData {
   sourceSchemaVersion: number;
   sourceExportedAt: string;
@@ -745,6 +909,8 @@ export interface PreparedAnalyticsData {
   warmBashRewrites: PreparedWarmBashRewriteRow[];
   warmBashSummaries: PreparedWarmBashSummaryRow[];
   agentReviews: PreparedAgentReviewRow[];
+  sessionReviewsV2: PreparedSessionReviewV2Row[];
+  legacySessionReviews: PreparedLegacySessionReviewRow[];
   /** Privacy-safe historical transcript evidence used by the family-level leaderboard. */
   historicalSessions: PreparedHistoricalSessionSummary[];
 }
@@ -825,6 +991,7 @@ export interface ModelQualityAggregateRow {
 
 export interface ModelQualityData {
   schemaVersion: number;
+  cohortLabels: { userOutcomes: 'Legacy V1 user satisfaction/resolution'; agentOutcomes: 'Legacy V1 agent ratings'; v2Reviews: 'V2 canonical production reviews (separate artifact)' };
   rows: ModelQualityAggregateRow[];
   notes: string[];
 }
@@ -977,8 +1144,12 @@ export interface ModelLeaderboardRow {
   mixedTreatmentExcludedCount: number;
   /** Canonical stable user outcomes, after task/family retry collapse. */
   userOutcomeCount: number;
-  /** Deduplicated done agent-review effective mass. */
+  /** Deduplicated V2 production-review effective mass. */
   agentOutcomeCount: number;
+  /** V1 1–5 reviews retained for a separately labelled legacy cohort only. */
+  legacyAgentReviewCount: number;
+  /** Mean unmodified per-session qualityIndexV1 (0–100); no process/coverage multiplier. */
+  meanQualityIndexV1: number | null;
   userEvidenceCount: number;
   userEvidenceMass: number;
   agentEvidenceCount: number;
@@ -1058,8 +1229,9 @@ export interface ModelLeaderboardCaseMixAdjustment {
 
 export interface ModelLeaderboardData {
   schemaVersion: number;
+  sourceLabels: { user: 'Legacy V1 user outcomes'; agent: 'V2 qualityIndexV1'; process: 'Objective runtime process telemetry' };
   rows: ModelLeaderboardRow[];
-  sourceWeights: { user: 0.6; agent: 0.25; process: 0.15 };
+  sourceWeights: { user: 0; agent: 1; process: 0 };
   sourcePriors: { user: number; agent: number; process: number };
   sourceLogitSpreads: { user: number; agent: number; process: number };
   shrinkage: { user: 4; agent: 8; process: 20 };
@@ -1228,6 +1400,8 @@ export interface AgentReviewReviewerBucketRow {
 /** Site-data payload comparing agent-authored reviews against user outcomes. */
 export interface AgentReviewComparisonData {
   schemaVersion: number;
+  cohort: 'legacy_v1';
+  cohortLabel: 'Legacy V1 agent ratings (1–5)';
   perModel: AgentReviewPerModelRow[];
   reviewerBucketCoverage: AgentReviewReviewerBucketRow[];
   overall: {
@@ -1235,6 +1409,45 @@ export interface AgentReviewComparisonData {
     totalRunsScoredByUser: number;
     totalScoredByBoth: number;
   };
+  notes: string[];
+}
+
+export interface CountByValueRow { value: string; count: number }
+export interface SessionReviewAnalyticsData {
+  schemaVersion: number;
+  cohort: 'v2_production';
+  cohortLabel: 'V2 canonical production reviews';
+  indexVersion: 'v1';
+  rows: PreparedSessionReviewV2Row[];
+  summary: {
+    reviewCount: number;
+    stableIdentityCount: number;
+    identityFallbackCount: number;
+    joinedReviewCount: number;
+    qualityIndexCount: number;
+    meanQualityIndexV1: number | null;
+    criterionCoverage: number | null;
+    externalBlockerRate: number | null;
+    deliveredOverall: CountByValueRow[];
+    controllableOverall: CountByValueRow[];
+    confidence: CountByValueRow[];
+  };
+  criteria: {
+    total: number;
+    assessable: number;
+    byImportance: CountByValueRow[];
+    byStatus: CountByValueRow[];
+    byReason: CountByValueRow[];
+    byActivity: CountByValueRow[];
+    bySurface: CountByValueRow[];
+    byEvidenceMode: CountByValueRow[];
+  };
+  process: Record<keyof ReviewProcessVector, CountByValueRow[]>;
+  evidence: Record<'requirements' | 'artifacts' | 'execution' | 'human', CountByValueRow[]> & { limitationCount: number };
+  findings: { total: number; bySeverity: CountByValueRow[]; byCategory: CountByValueRow[] };
+  disagreement: { materialCount: number; adjudicatedCount: number; disputedFieldCount: number; byResolution: CountByValueRow[] };
+  reviewers: { callCount: number; bucketDowngradeCount: number; diversityAchievedCount: number; byRole: CountByValueRow[]; byRequestedBucket: CountByValueRow[]; byEffectiveBucket: CountByValueRow[]; byModel: CountByValueRow[]; byProvider: CountByValueRow[]; byFamily: CountByValueRow[] };
+  legacy: { cohort: 'legacy_v1'; cohortLabel: 'Legacy V1 agent/user outcome records'; runReviewCount: number; sidecarReviewCount: number; identityFallbackCount: number; excludedFromV2: true };
   notes: string[];
 }
 
@@ -1297,6 +1510,7 @@ export interface SiteDataBundle {
   toolResultPruningImpact: ToolResultPruningImpactData;
   toolResultPruningOutcomes: ToolResultPruningOutcomeData;
   agentReviewComparison: AgentReviewComparisonData;
+  sessionReviewAnalytics: SessionReviewAnalyticsData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;

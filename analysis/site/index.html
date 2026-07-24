@@ -80,8 +80,8 @@
       <div class="charts">
         <header class="dashboard-section span-2">
           <p class="section-kicker">Outcomes &amp; model choice</p>
-          <h2>Choose models from attributable outcome evidence</h2>
-          <p>The leaderboard estimates observed user-rated outcome strength, not causal capability. It ranks only models with at least 10 rated tasks, at least 40% task-level rating coverage, and sufficient per-band evidence when case-mix adjustment is active. Gate-excluded models remain visible after ranked rows with a provisional status and reason. Process metrics and post-treatment workload remain diagnostic.</p>
+          <h2>Choose models from attributable V2 outcome evidence</h2>
+          <p>The leaderboard estimates criterion-attainment quality from canonical V2 reviews, not causal capability. Only models with stable-ID V2 review mass are ranked. Legacy user satisfaction, V1 agent ratings, process/runtime metrics, coverage, confidence, blockers, and post-treatment workload remain diagnostics with zero ranking weight.</p>
         </header>
 
         <section class="chart span-2">
@@ -90,9 +90,14 @@
         </section>
 
         <section class="chart span-2">
-          <h3>Bias-aware model strength leaderboard <span class="note" id="leaderboard-note">—</span></h3>
+          <h3>V2 outcome-quality model leaderboard <span class="note" id="leaderboard-note">—</span></h3>
           <div id="chart-leaderboard" class="chart-slot"></div>
           <div id="leaderboard-table" class="leaderboard-table-shell" aria-live="polite"></div>
+        </section>
+
+        <section class="chart span-2">
+          <h3>V2 session review diagnostics <span class="note">cohort-level; independent of run filters</span></h3>
+          <div id="session-review-analytics" aria-live="polite"></div>
         </section>
 
         <section class="chart span-2">

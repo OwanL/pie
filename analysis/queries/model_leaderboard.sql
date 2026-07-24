@@ -51,6 +51,39 @@ provenance AS (
   FROM attributed
   GROUP BY 1, 2
 ),
+v2_review_author_cells AS (
+  SELECT DISTINCT
+    review.review_id,
+    COALESCE(r.model_family, r.model_id, '(unknown)') AS group_model_family,
+    COALESCE(r.thinking_level, '(unspecified)') AS group_thinking_level,
+    review.quality_index_v1,
+    review.criterion_coverage,
+    review.external_blocker_rate
+  FROM session_reviews_v2 review
+  JOIN runs r ON r.session_id = review.session_id
+  WHERE review.identity_fallback = FALSE
+    AND review.blinding_applied = TRUE
+    AND r.mixed_model_config = FALSE
+    AND r.mixed_treatment_config = FALSE
+),
+v2_review_weighted AS (
+  SELECT *, 1.0 / COUNT(*) OVER (PARTITION BY review_id) AS attribution_weight
+  FROM v2_review_author_cells
+),
+v2_review_attribution AS (
+  SELECT
+    group_model_family,
+    group_thinking_level,
+    ROUND(SUM(attribution_weight), 3) AS v2_review_count,
+    ROUND(SUM(quality_index_v1 * attribution_weight) FILTER (WHERE quality_index_v1 IS NOT NULL)
+      / NULLIF(SUM(attribution_weight) FILTER (WHERE quality_index_v1 IS NOT NULL), 0), 1) AS mean_quality_index_v1,
+    ROUND(SUM(criterion_coverage * attribution_weight) FILTER (WHERE criterion_coverage IS NOT NULL)
+      / NULLIF(SUM(attribution_weight) FILTER (WHERE criterion_coverage IS NOT NULL), 0), 3) AS criterion_coverage,
+    ROUND(SUM(external_blocker_rate * attribution_weight) FILTER (WHERE external_blocker_rate IS NOT NULL)
+      / NULLIF(SUM(attribution_weight) FILTER (WHERE external_blocker_rate IS NOT NULL), 0), 3) AS external_blocker_rate
+  FROM v2_review_weighted
+  GROUP BY 1, 2
+),
 task_outcomes AS (
   SELECT
     group_model_family,
@@ -87,7 +120,11 @@ SELECT
   provenance.attributable_run_count,
   provenance.attributable_task_count,
   provenance.user_outcome_count,
-  provenance.agent_outcome_count,
+  provenance.agent_outcome_count AS legacy_v1_agent_outcome_count,
+  COALESCE(v2_review_attribution.v2_review_count, 0) AS v2_review_count,
+  v2_review_attribution.mean_quality_index_v1,
+  v2_review_attribution.criterion_coverage AS v2_criterion_coverage,
+  v2_review_attribution.external_blocker_rate AS v2_external_blocker_rate,
   ROUND(
     COALESCE(task_outcomes.effective_task_count, 0)::DOUBLE
       / NULLIF(provenance.attributable_task_count, 0),
@@ -109,4 +146,5 @@ SELECT
   COALESCE(task_outcomes.unresolved_count, 0) AS unresolved_count
 FROM provenance
 LEFT JOIN task_outcomes USING (group_model_family, group_thinking_level)
+LEFT JOIN v2_review_attribution USING (group_model_family, group_thinking_level)
 ORDER BY scored_run_count DESC, model_family, thinking_level;

@@ -21,7 +21,7 @@ import {
 
 const BANDS: TaskComplexityBand[] = ['low', 'medium', 'high'];
 const K = { user: 4, agent: 8, process: 20 } as const;
-const SOURCE_WEIGHTS = { user: 0.6, agent: 0.25, process: 0.15 } as const;
+const SOURCE_WEIGHTS = { user: 0, agent: 1, process: 0 } as const;
 const NEUTRAL = 0.5;
 
 type Source = keyof typeof K;
@@ -86,12 +86,6 @@ function resolutionValue(resolution: PreparedRunRow['resolution']): number {
 function userValue(run: PreparedRunRow): number {
   return (8 / 15) * clamp(((run.satisfaction ?? 3) - 1) / 4) + (7 / 15) * resolutionValue(run.resolution);
 }
-function completionValue(value: 'fully' | 'partial' | 'setback'): number {
-  return value === 'fully' ? 1 : value === 'partial' ? 0.5 : 0;
-}
-function agentValue(rating: number, completion: 'fully' | 'partial' | 'setback'): number {
-  return 0.35 * clamp((rating - 1) / 4) + 0.65 * completionValue(completion);
-}
 function weightedAvailable(parts: Array<{ value: number | null; weight: number }>): number | null {
   const available = parts.filter((part): part is { value: number; weight: number } => part.value !== null);
   const weight = available.reduce((sum, part) => sum + part.weight, 0);
@@ -135,14 +129,14 @@ function nativeDimension(values: number[], native: (value: number) => number): L
 
 /** Browser-compatible fallback. Historical transcripts and sidecar reviews are available through createModelLeaderboard. */
 export function createModelLeaderboardFromRuns(runs: PreparedRunRow[]): ModelLeaderboardData {
-  return buildLeaderboard({ runs, agentReviews: [], historicalSessions: [] });
+  return buildLeaderboard({ runs, agentReviews: [], sessionReviewsV2: [], historicalSessions: [] });
 }
 
 export function createModelLeaderboard(prepared: PreparedAnalyticsData): ModelLeaderboardData {
   return buildLeaderboard(prepared);
 }
 
-function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentReviews' | 'historicalSessions'>): ModelLeaderboardData {
+function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentReviews' | 'sessionReviewsV2' | 'historicalSessions'>): ModelLeaderboardData {
   const completed = prepared.runs.filter((run) => run.status !== 'open');
   const stable = completed.filter((run) => !run.mixedModelConfig && !run.mixedTreatmentConfig);
   const canonicalRepresentatives = latestByTaskAndFamily(stable);
@@ -180,58 +174,48 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
     if (process !== null) observations.push({ family, source: 'process', value: process, share: 1, taskId: taskOf(run), band, transcriptOnly: false, mixed: false });
   }
 
-  // A session contributes at most one latest done review across the sidecar and transcript summary.
-  type ReviewCandidate = { hash: string; evaluatedAt: string; done: boolean; rating: number; completion: 'fully' | 'partial' | 'setback'; attributions: Array<{ family: string; share: number }> };
-  const reviews = new Map<string, ReviewCandidate>();
-  const acceptReview = (candidate: ReviewCandidate): void => {
-    const current = reviews.get(candidate.hash);
-    if (!current || timestamp(candidate.evaluatedAt) > timestamp(current.evaluatedAt)
-      || (timestamp(candidate.evaluatedAt) === timestamp(current.evaluatedAt) && candidate.attributions.map((a) => a.family).join().localeCompare(current.attributions.map((a) => a.family).join()) > 0)) {
-      reviews.set(candidate.hash, candidate);
-    }
-  };
-  const runByHash = new Map(stable.map((run) => [run.sessionPathHash, run]));
-  const historicalAttributionByHash = new Map(prepared.historicalSessions.map((session) => [
-    session.sessionPathHash,
-    session.attributions.filter((a) => a.modelFamily !== '(unknown)' && a.share > 0)
-      .map((a) => ({ family: a.modelFamily, share: a.share })),
-  ]));
-  for (const review of prepared.agentReviews) {
-    const matchedRun = runByHash.get(review.sessionPathHash);
-    const enrichedAttributions = review.modelFamily
-      ? [{ family: review.modelFamily, share: 1 }]
-      : historicalAttributionByHash.get(review.sessionPathHash)?.length
-        ? historicalAttributionByHash.get(review.sessionPathHash)!
-        : matchedRun ? [{ family: familyOf(matchedRun), share: 1 }] : [];
-    acceptReview({
-      hash: review.sessionPathHash,
-      evaluatedAt: review.evaluatedAt,
-      done: review.agentDone,
-      rating: review.agentRating,
-      completion: review.agentCompletion,
-      attributions: enrichedAttributions,
-    });
+  // V2 production reviews form a clean criterion-ledger cohort. Legacy 1–5 reviews
+  // remain readable below as diagnostics but never enter this channel.
+  const stableRunsBySessionId = new Map<string, PreparedRunRow[]>();
+  for (const run of stable) {
+    const sessionRuns = stableRunsBySessionId.get(run.sessionId) ?? [];
+    sessionRuns.push(run);
+    stableRunsBySessionId.set(run.sessionId, sessionRuns);
   }
+  const historicalAttributionBySessionId = new Map(prepared.historicalSessions.map((session) => [
+    session.sessionId,
+    session.attributions.filter((attribution) => attribution.modelFamily !== '(unknown)' && attribution.share > 0)
+      .map((attribution) => ({ family: attribution.modelFamily, share: attribution.share })),
+  ]));
+  for (const review of prepared.sessionReviewsV2) {
+    const quality = review.attainment.qualityIndexV1;
+    if (quality === null || review.identityFallback || !review.blindingApplied) continue;
+    const matchedRuns = stableRunsBySessionId.get(review.sessionId) ?? [];
+    let attributions = historicalAttributionBySessionId.get(review.sessionId) ?? [];
+    if (!attributions.length) {
+      const families = [...new Set(matchedRuns.map(familyOf).filter((family) => family !== '(unknown)'))];
+      attributions = families.map((family) => ({ family, share: 1 / families.length }));
+    }
+    const total = attributions.reduce((sum, attribution) => sum + attribution.share, 0);
+    if (!total) continue;
+    const representative = matchedRuns.reduce<PreparedRunRow | undefined>((latest, run) => latest ? laterRun(run, latest) : run, undefined);
+    const band = representative ? complexity.bands.get(`canonical:${taskOf(representative)}`) ?? 'medium' : 'medium';
+    for (const attribution of attributions) {
+      observations.push({ family: attribution.family, source: 'agent', value: quality / 100, share: attribution.share / total, taskId: review.sessionId, band, transcriptOnly: false, mixed: attributions.length > 1 });
+    }
+  }
+
+  const legacyReviewKeysByFamily = new Map<string, Set<string>>();
+  const addLegacyReview = (family: string, sessionId: string): void => {
+    const keys = legacyReviewKeysByFamily.get(family) ?? new Set<string>();
+    keys.add(sessionId);
+    legacyReviewKeysByFamily.set(family, keys);
+  };
+  for (const review of prepared.agentReviews) addLegacyReview(review.modelFamily ?? '(unknown)', review.sessionId);
   for (const session of prepared.historicalSessions) {
     if (!session.review) continue;
-    let attributions = session.attributions
-      .filter((a) => a.modelFamily !== '(unknown)' && a.share > 0)
-      .map((a) => ({ family: a.modelFamily, share: a.share }));
-    if (!attributions.length && session.matchedCanonical) {
-      const run = runByHash.get(session.sessionPathHash);
-      if (run) attributions = [{ family: familyOf(run), share: 1 }];
-    }
-    acceptReview({ hash: session.sessionPathHash, evaluatedAt: session.review.evaluatedAt, done: session.review.done, rating: session.review.rating, completion: session.review.completion, attributions });
-  }
-  for (const review of reviews.values()) {
-    if (!review.done) continue;
-    const total = review.attributions.reduce((sum, a) => sum + a.share, 0);
-    if (!total) continue;
-    const band = complexity.bands.get(`transcript:${review.hash}`)
-      ?? complexity.bands.get(`canonical:${taskOf(runByHash.get(review.hash) ?? ({ taskGroupId: review.hash, runId: review.hash } as PreparedRunRow))}`)
-      ?? 'medium';
-    for (const attribution of review.attributions) {
-      observations.push({ family: attribution.family, source: 'agent', value: agentValue(review.rating, review.completion), share: attribution.share / total, taskId: review.hash, band, transcriptOnly: false, mixed: review.attributions.length > 1 });
+    for (const family of new Set(session.attributions.map((attribution) => attribution.modelFamily).filter((family) => family !== '(unknown)'))) {
+      addLegacyReview(family, session.sessionId);
     }
   }
 
@@ -316,6 +300,14 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
     for (const source of ['user', 'agent', 'process'] as Source[]) {
       const directObs = stats.observations.filter((o) => o.source === source);
       const directMass = directObs.reduce((sum, o) => sum + o.share, 0);
+      const direct = directMass ? directObs.reduce((sum, o) => sum + o.share * o.value, 0) / directMass : null;
+      if (source === 'agent') {
+        const outcomeSum = directObs.reduce((sum, observation) => sum + observation.share * observation.value, 0);
+        const theta = (outcomeSum + K.agent * sourceOverall.agent) / (directMass + K.agent);
+        const variance = theta * (1 - theta) / (directMass + K.agent + 1);
+        bySource[source] = { theta: clamp(theta), direct, mass: directMass, variance };
+        continue;
+      }
       let theta = 0;
       let variance = 0;
       for (const band of BANDS) {
@@ -328,7 +320,6 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
         theta += weight * posterior;
         variance += weight * weight * posterior * (1 - posterior) / (mass + K[source] + 1);
       }
-      const direct = directMass ? directObs.reduce((sum, o) => sum + o.share * o.value, 0) / directMass : null;
       bySource[source] = { theta: clamp(theta), direct, mass: directMass, variance };
     }
     estimates.set(stats.family, bySource);
@@ -337,8 +328,8 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
   const pooled = {} as Record<Source, number>;
   const spread = {} as Record<Source, number>;
   for (const source of ['user', 'agent', 'process'] as Source[]) {
-    let pooledTheta = 0;
-    for (const band of BANDS) pooledTheta += targetWeights[band] * sourceBandPrior[source][band];
+    let pooledTheta = source === 'agent' ? sourceOverall.agent : 0;
+    if (source !== 'agent') for (const band of BANDS) pooledTheta += targetWeights[band] * sourceBandPrior[source][band];
     pooled[source] = clamp(pooledTheta || NEUTRAL);
     const logits = [...estimates.values()].map((value) => logit(value[source].theta));
     const center = logit(pooled[source]);
@@ -364,8 +355,8 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
     const sd = Math.sqrt(Math.max(0, latentVariance));
     const userMass = source.user.mass;
     const agentMass = source.agent.mass;
-    const outcomeMass = userMass + agentMass;
-    const evidenceTier: EvidenceTier = outcomeMass >= 3 ? 'outcome-backed' : outcomeMass > 0 ? 'thin-outcome' : 'telemetry-only';
+    const outcomeMass = agentMass;
+    const evidenceTier: EvidenceTier = agentMass >= 3 ? 'outcome-backed' : agentMass > 0 ? 'thin-outcome' : 'telemetry-only';
     const userRuns = canonicalRepresentatives.filter((run) => familyOf(run) === stats.family && run.scored && run.satisfaction !== null && run.outcomeSource === 'user');
     const canonicalTasks = new Set(canonicalRepresentatives.filter((run) => familyOf(run) === stats.family).map(taskOf));
     const processValues = stats.canonicalRuns.map(canonicalProcessValue).filter((v): v is number => v !== null);
@@ -393,7 +384,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
     dimensions.toolReliability.shrunk = toolValues.length ? round(mean(toolValues)!) : null;
     dimensions.verificationPassRate.shrunk = verificationValues.length ? round(mean(verificationValues)!) : null;
     dimensions.tokenEfficiency.shrunk = dimensions.tokenEfficiency.value === null ? null : round(1 - Math.min(1, dimensions.tokenEfficiency.value / 50));
-    const evidenceWeight = outcomeMass / (outcomeMass + K.user);
+    const evidenceWeight = outcomeMass / (outcomeMass + K.agent);
     rows.push({
       modelId: stats.family, thinkingLevel: '(all)',
       thinkingLevels: [...stats.thinking.entries()].map(([thinkingLevel, value]) => ({ thinkingLevel, runCount: value.runCount, attributionMass: round(value.attributionMass) })).sort((a, b) => b.attributionMass - a.attributionMass || a.thinkingLevel.localeCompare(b.thinkingLevel)),
@@ -407,6 +398,8 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
       mixedModelExcludedCount: stats.canonicalRuns.filter((run) => run.scored && run.mixedModelConfig).length,
       mixedTreatmentExcludedCount: stats.canonicalRuns.filter((run) => run.scored && !run.mixedModelConfig && run.mixedTreatmentConfig).length,
       userOutcomeCount: round(userMass), agentOutcomeCount: round(agentMass),
+      legacyAgentReviewCount: legacyReviewKeysByFamily.get(stats.family)?.size ?? 0,
+      meanQualityIndexV1: source.agent.direct === null ? null : round(source.agent.direct * 100, 1),
       userEvidenceCount: sourceCount(stats.observations, 'user'), userEvidenceMass: round(userMass),
       agentEvidenceCount: sourceCount(stats.observations, 'agent'), agentEvidenceMass: round(agentMass),
       processEvidenceCount: sourceCount(stats.observations, 'process'), processEvidenceMass: round(source.process.mass),
@@ -415,9 +408,9 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
       userChannelScore: source.user.direct === null ? null : round(source.user.theta),
       agentChannelScore: source.agent.direct === null ? null : round(source.agent.theta),
       processChannelScore: source.process.direct === null ? null : round(source.process.theta),
-      compositeScore: stats.family === '(unknown)' ? null : round(score),
-      scoreInterval80: stats.family === '(unknown)' ? null : { lower: round(logistic(latent - 1.282 * sd)), upper: round(logistic(latent + 1.282 * sd)), level: 0.8, bestRank: 0, worstRank: 0 },
-      unadjustedCompositeScore: round(score), caseMixAdjustment: 0, caseMixAdjusted: true, caseMixBandOverlapGateFailed: false,
+      compositeScore: stats.family === '(unknown)' || agentMass === 0 ? null : round(score),
+      scoreInterval80: stats.family === '(unknown)' || agentMass === 0 ? null : { lower: round(logistic(latent - 1.282 * sd)), upper: round(logistic(latent + 1.282 * sd)), level: 0.8, bestRank: 0, worstRank: 0 },
+      unadjustedCompositeScore: agentMass === 0 ? null : round(score), caseMixAdjustment: null, caseMixAdjusted: false, caseMixBandOverlapGateFailed: false,
       rank: null, evidenceWeight: round(evidenceWeight), reliabilityFactor: round(evidenceWeight), dimensions,
       medianCostUsd: median(costs, 4), meanPreTaskComplexity: complexityValues.length ? round(mean(complexityValues)!) : null,
       taskComplexityBandCounts: bandCounts, caseMixOverlap: 1,
@@ -453,6 +446,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
 
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    sourceLabels: { user: 'Legacy V1 user outcomes', agent: 'V2 qualityIndexV1', process: 'Objective runtime process telemetry' },
     rows,
     sourceWeights: SOURCE_WEIGHTS,
     sourcePriors: { user: round(pooled.user), agent: round(pooled.agent), process: round(pooled.process) },
@@ -463,19 +457,19 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'agentR
     minimumEffectiveTasks: 0,
     minimumTaskScoringCoverage: 0,
     caseMix: {
-      method: 'direct_standardization', applied: true,
+      method: 'direct_standardization', applied: false,
       minimumRatedTasksPerBand: 0, minimumModelRatedTasksPerBand: 0, minimumTargetBandWeight: 0,
       targetBandWeights: { low: round(targetWeights.low), medium: round(targetWeights.medium), high: round(targetWeights.high) },
       scoredBandCounts: targetCounts, activeSignals: complexity.activeSignals,
       initialUserMessageCoverage: round(complexity.initialUserMessageCoverage),
-      notes: ['The target mix is the whole privacy-safe ex-ante canonical-task and transcript-only population. Missing family-band cells receive source-band empirical-Bayes priors; no band is a rank gate.'],
+      notes: ['Ex-ante task bands remain diagnostic. V2 quality rank is not case-mix adjusted and cannot inherit runtime or legacy-outcome population weights.'],
     },
     notes: [
-      'Rows are canonical model families across all thinking levels. Every observed non-unknown family is ranked; sparse evidence shrinks toward cohort source priors.',
-      'User, done agent-review, and process evidence remain separate scales. Standardized source logits combine at 60% / 25% / 15%; missing direct source evidence contributes neutral z=0.',
-      'Canonical retries collapse deterministically to the latest stable run per task and family. Matched transcripts enrich review attribution but never add a second process observation; transcript-only sessions add fractional process mass by prepared token attribution share.',
-      'Complexity uses only initial prompt characters, attachment count, and context-file count. Tokens, duration, cost, tool volume, and other post-treatment values never define case mix or directly improve strength.',
-      'The 80% interval is an approximation: beta-style posterior variance per source/band is propagated through standardized logits and the 60/25/15 latent weights, then through the logistic transform with z=1.282. Rank ranges are interval-overlap ranges.',
+      'Rows are canonical model families across all thinking levels. Only families with attributable canonical V2 review mass are ranked; other observed families remain visible as diagnostics.',
+      'The model/harness rank is outcome-only: it uses only deterministically derived V2 qualityIndexV1 criterion attainment. Legacy user satisfaction, V1 agent ratings, runtime process, coverage, confidence, blockers, findings, cost, and latency have zero ranking weight.',
+      'V2 reviews join by stable sessionId; identityFallback or unblinded reviews are excluded from ranking. Mixed-model sessions use successful transcript token share when available and otherwise equal fractional family attribution; attribution shares sum to one review. Canonical retries collapse deterministically to the latest stable run per task and family.',
+      'Ex-ante complexity bands remain diagnostic only. The V2 rank is not case-mix adjusted, so runtime population composition and legacy outcomes cannot change V2 quality strength.',
+      'The 80% interval is an approximation: beta-style posterior variance for the V2 outcome channel is propagated through its standardized logit, then through the logistic transform with z=1.282. Rank ranges come from interval overlap.',
       'Ranks reflect point-estimate order within the observed cohort. Models whose 80% score intervals overlap have unresolved relative order — the rank range column shows the possible positions each model could occupy.',
       'Ranks are observational and relative to the currently observed family cohort and ex-ante task mix, not universal benchmark capability.',
     ],

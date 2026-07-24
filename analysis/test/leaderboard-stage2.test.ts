@@ -25,14 +25,15 @@ test('stage-2 family leaderboard includes transcript-only families but does not 
   fixture.historicalSessions = [matched, opus];
 
   const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
-  assert.equal(leaderboard.schemaVersion, 5);
+  assert.equal(leaderboard.schemaVersion, 6);
   const opusRow = leaderboard.rows.find((row) => row.modelId === 'claude-opus-4.8');
   assert.ok(opusRow, 'transcript-only Opus family appears');
   assert.equal(opusRow.thinkingLevel, '(all)');
   assert.equal(opusRow.transcriptOnlySessionCount, 1);
   assert.equal(opusRow.processEvidenceMass, 1);
   assert.equal(opusRow.evidenceTier, 'telemetry-only');
-  assert.ok(opusRow.rank !== null && opusRow.scoreInterval80 !== null, 'sparse telemetry is ranked with uncertainty');
+  assert.equal(opusRow.rank, null, 'transcript runtime telemetry cannot create a V2 quality rank');
+  assert.equal(opusRow.scoreInterval80, null);
 
   const canonicalFamily = prepareSourceAnalytics(fixture).runs[0]!.modelFamily!;
   const canonicalRow = leaderboard.rows.find((row) => row.modelId === canonicalFamily)!;
@@ -87,7 +88,7 @@ test('provider breakdown includes transcriptOnlySessionCount and transcriptEvide
   assert.equal(provider.transcriptEvidenceMass, 1, '0.6 + 0.4 = 1.0 fractional mass');
 });
 
-test('run-linked vs transcript review dedup: a review from both sources counts once', async () => {
+test('run-linked vs transcript V1 review dedup remains in the labelled legacy cohort', async () => {
   const fixture = deepClone(await loadFixture());
   const baseRun = fixture.completedRuns[0]!;
   // Create a transcript that matches the canonical run's session path, with its own review.
@@ -105,8 +106,7 @@ test('run-linked vs transcript review dedup: a review from both sources counts o
   const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
   const family = prepareSourceAnalytics(fixture).runs[0]!.modelFamily!;
   const row = leaderboard.rows.find((row) => row.modelId === family)!;
-  // The agent review (evaluatedAt=12:00) is later than the transcript review (10:00),
-  // so it wins the dedup. Only one agent observation should be counted.
-  assert.equal(row.agentEvidenceCount, 1, 'deduplicated review counts as one observation');
-  assert.equal(row.agentEvidenceMass, 1);
+  assert.equal(row.agentEvidenceCount, 0, 'V1 reviews are excluded from the V2 quality channel');
+  assert.equal(row.agentEvidenceMass, 0);
+  assert.equal(row.legacyAgentReviewCount, 1, 'duplicate V1 sources count once in the legacy cohort');
 });

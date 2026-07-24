@@ -7,6 +7,7 @@ import {
   type PreparedBackendErrorRow,
   type PreparedFileExtensionRow,
   type PreparedHistoricalSessionSummary,
+  type PreparedLegacySessionReviewRow,
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
   type PreparedRetryTimingRow,
@@ -14,6 +15,7 @@ import {
   type PreparedWarmBashRewriteRow,
   type PreparedWarmBashSummaryRow,
   type PreparedRunRow,
+  type PreparedSessionReviewV2Row,
   type PreparedToolFailureRow,
   type PreparedToolResultIssueRow,
   type PreparedToolUsageRow,
@@ -29,10 +31,11 @@ import {
   type ToolResultIssueKind,
   type VerificationCommandKind,
 } from './contracts.ts';
-import { existingHashPrefix, hashToPrefix } from './hash.ts';
+import { existingHashPrefix, sessionPathHash } from './hash.ts';
 import { loadModelPricingMap, estimateRunCostUsd, type TokenUsageForCost } from './pricing.ts';
 import { loadModelFamilyMap, resolveModelFamily, resolveModelProvider } from './model-family.ts';
 import { normalizeSessionPath } from './transcript-source.ts';
+import { deriveReviewAttainment } from './review-analytics.ts';
 
 function round3(value: number): number {
   return Math.round(value * 1000) / 1000;
@@ -351,6 +354,7 @@ function prepareRun(
   outcomesByRunId: Map<string, RunOutcome>,
   pricingMap: ReturnType<typeof loadModelPricingMap>,
   familyMap: ReturnType<typeof loadModelFamilyMap>,
+  identity: { sessionId: string; identityFallback: boolean },
 ): PreparedRunRow {
   const outcome = getRunOutcome(run, outcomesByRunId);
   const verificationTotalCount = run.verification.totalCount;
@@ -419,7 +423,9 @@ function prepareRun(
   return {
     runId: run.runId,
     taskGroupId: run.taskGroupId,
-    sessionPathHash: hashToPrefix(run.sessionPath, 16),
+    sessionId: identity.sessionId,
+    identityFallback: identity.identityFallback,
+    sessionPathHash: sessionPathHash(run.sessionPath),
     status: outcome ? 'scored' : run.status,
     scored,
     startedAt: run.startedAt,
@@ -878,15 +884,14 @@ function preparePruningEvents(
   pruningDecisions: PruningSourceDecision[],
   runs: PreparedRunRow[],
 ): PreparedPruningEventRow[] {
-  const runBySessionHash = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runBySessionHash.set(run.sessionPathHash, run);
-  }
+  const runBySessionHash = new Map(runs.map((run) => [run.sessionPathHash, run]));
+  const runBySessionId = new Map(runs.map((run) => [run.sessionId, run]));
 
   return pruningDecisions.map((d) => {
-    const sessionPathHash = hashToPrefix(d.sessionPath || d.sessionId, 16);
-    const matchedRun = runBySessionHash.get(sessionPathHash);
-    const runId = matchedRun?.runId ?? `pruning-${sessionPathHash}`;
+    const pathHash = sessionPathHash(d.sessionPath || d.sessionId);
+    const matchedRun = runBySessionId.get(d.sessionId) ?? runBySessionHash.get(pathHash);
+    const joinedPathHash = matchedRun?.sessionPathHash ?? pathHash;
+    const runId = matchedRun?.runId ?? `pruning-${joinedPathHash}`;
 
     const skillKept = d.included.length;
     const skillPruned = d.excluded.length;
@@ -897,7 +902,7 @@ function preparePruningEvents(
 
     return {
       runId,
-      sessionPathHash,
+      sessionPathHash: joinedPathHash,
       timestamp: d.timestamp,
       startedDay: d.timestamp.slice(0, 10),
       pruningMode: d.mode,
@@ -933,18 +938,17 @@ function preparePruningSignals(
   pruningEvents: PruningSourceEvent[],
   runs: PreparedRunRow[],
 ): PreparedPruningSignalRow[] {
-  const runBySessionHash = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runBySessionHash.set(run.sessionPathHash, run);
-  }
+  const runBySessionHash = new Map(runs.map((run) => [run.sessionPathHash, run]));
+  const runBySessionId = new Map(runs.map((run) => [run.sessionId, run]));
 
   return pruningEvents.map((e) => {
-    const sessionPathHash = hashToPrefix(e.sessionId, 16);
-    const matchedRun = runBySessionHash.get(sessionPathHash);
-    const runId = matchedRun?.runId ?? `pruning-${sessionPathHash}`;
+    const fallbackHash = sessionPathHash(e.sessionId);
+    const matchedRun = runBySessionId.get(e.sessionId) ?? runBySessionHash.get(fallbackHash);
+    const joinedPathHash = matchedRun?.sessionPathHash ?? fallbackHash;
+    const runId = matchedRun?.runId ?? `pruning-${joinedPathHash}`;
     return {
       runId,
-      sessionPathHash,
+      sessionPathHash: joinedPathHash,
       timestamp: e.timestamp,
       startedDay: e.timestamp.slice(0, 10),
       event: e.event,
@@ -958,17 +962,16 @@ function prepareToolResultPruning(
   events: ToolResultPruningSourceEvent[],
   runs: PreparedRunRow[],
 ): PreparedToolResultPruningRow[] {
-  const runBySessionHash = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runBySessionHash.set(run.sessionPathHash, run);
-  }
+  const runBySessionHash = new Map(runs.map((run) => [run.sessionPathHash, run]));
+  const runBySessionId = new Map(runs.map((run) => [run.sessionId, run]));
   return events.map((e) => {
-    const sessionPathHash = hashToPrefix(e.sessionId, 16);
-    const matchedRun = runBySessionHash.get(sessionPathHash);
-    const runId = matchedRun?.runId ?? `pruning-${sessionPathHash}`;
+    const fallbackHash = sessionPathHash(e.sessionId);
+    const matchedRun = runBySessionId.get(e.sessionId) ?? runBySessionHash.get(fallbackHash);
+    const joinedPathHash = matchedRun?.sessionPathHash ?? fallbackHash;
+    const runId = matchedRun?.runId ?? `pruning-${joinedPathHash}`;
     return {
       runId,
-      sessionPathHash,
+      sessionPathHash: joinedPathHash,
       timestamp: e.timestamp,
       startedDay: e.timestamp.slice(0, 10),
       toolName: e.toolName,
@@ -987,17 +990,16 @@ function prepareWarmBashRewrites(
   events: WarmBashRewriteSourceEvent[],
   runs: PreparedRunRow[],
 ): PreparedWarmBashRewriteRow[] {
-  const runBySessionHash = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runBySessionHash.set(run.sessionPathHash, run);
-  }
+  const runBySessionHash = new Map(runs.map((run) => [run.sessionPathHash, run]));
+  const runBySessionId = new Map(runs.map((run) => [run.sessionId, run]));
   return events.map((e) => {
-    const sessionPathHash = hashToPrefix(e.sessionId, 16);
-    const matchedRun = runBySessionHash.get(sessionPathHash);
-    const runId = matchedRun?.runId ?? `warm-bash-${sessionPathHash}`;
+    const fallbackHash = sessionPathHash(e.sessionId);
+    const matchedRun = runBySessionId.get(e.sessionId) ?? runBySessionHash.get(fallbackHash);
+    const joinedPathHash = matchedRun?.sessionPathHash ?? fallbackHash;
+    const runId = matchedRun?.runId ?? `warm-bash-${joinedPathHash}`;
     return {
       runId,
-      sessionPathHash,
+      sessionPathHash: joinedPathHash,
       timestamp: e.timestamp,
       startedDay: e.timestamp.slice(0, 10),
       before: e.before,
@@ -1012,17 +1014,16 @@ function prepareWarmBashSummaries(
   events: WarmBashSessionSummarySourceEvent[],
   runs: PreparedRunRow[],
 ): PreparedWarmBashSummaryRow[] {
-  const runBySessionHash = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runBySessionHash.set(run.sessionPathHash, run);
-  }
+  const runBySessionHash = new Map(runs.map((run) => [run.sessionPathHash, run]));
+  const runBySessionId = new Map(runs.map((run) => [run.sessionId, run]));
   return events.map((e) => {
-    const sessionPathHash = hashToPrefix(e.sessionId, 16);
-    const matchedRun = runBySessionHash.get(sessionPathHash);
-    const runId = matchedRun?.runId ?? `warm-bash-${sessionPathHash}`;
+    const fallbackHash = sessionPathHash(e.sessionId);
+    const matchedRun = runBySessionId.get(e.sessionId) ?? runBySessionHash.get(fallbackHash);
+    const joinedPathHash = matchedRun?.sessionPathHash ?? fallbackHash;
+    const runId = matchedRun?.runId ?? `warm-bash-${joinedPathHash}`;
     return {
       runId,
-      sessionPathHash,
+      sessionPathHash: joinedPathHash,
       timestamp: e.timestamp,
       startedDay: e.timestamp.slice(0, 10),
       fastPath: e.fastPath,
@@ -1051,11 +1052,14 @@ function prepareAgentReviews(
     runByKey.set(`${run.sessionPathHash}::${run.runId}`, run);
   }
   return events.map((e) => {
-    const sessionPathHash = hashToPrefix(e.sessionPath, 16);
-    const matchedRun = runByKey.get(`${sessionPathHash}::${e.runId}`);
+    const pathHash = sessionPathHash(e.sessionPath);
+    const matchedRun = runByKey.get(`${pathHash}::${e.runId}`);
     return {
+      cohort: 'legacy_v1',
+      sessionId: matchedRun?.sessionId ?? pathHash,
+      identityFallback: matchedRun?.identityFallback ?? true,
       runId: e.runId,
-      sessionPathHash,
+      sessionPathHash: pathHash,
       taskGroupId: e.taskGroupId,
       recordedAt: e.recordedAt,
       evaluatedAt: e.evaluatedAt,
@@ -1174,13 +1178,30 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const dedupedRuns = dedupeRunsById([...source.completedRuns, ...source.openRuns]);
   const pricingMap = loadModelPricingMap();
   const familyMap = loadModelFamilyMap();
-  const runs = dedupedRuns.map((run) => prepareRun(run, outcomesByRunId, pricingMap, familyMap));
+  const stableIdByPath = new Map((source.historicalSessions ?? []).map((summary) => [normalizeSessionPath(summary.normalizedSessionPath), summary.sessionId]));
+  for (const review of source.sessionReviewsV2 ?? []) {
+    if (!review.identityFallback) stableIdByPath.set(normalizeSessionPath(review.sessionPathAtReview), review.sessionId);
+  }
+  for (const review of source.legacySessionReviews ?? []) {
+    if (!review.identityFallback) stableIdByPath.set(normalizeSessionPath(review.normalizedSessionPath), review.sessionId);
+  }
+  const runs = dedupedRuns.map((run) => {
+    const headerSessionId = run.sessionId?.trim();
+    const stableId = headerSessionId || stableIdByPath.get(normalizeSessionPath(run.sessionPath));
+    return prepareRun(run, outcomesByRunId, pricingMap, familyMap, stableId
+      ? { sessionId: stableId, identityFallback: false }
+      : { sessionId: sessionPathHash(run.sessionPath), identityFallback: true });
+  });
   const canonicalRunBySessionPath = new Map<string, PreparedRunRow>();
-  dedupedRuns.forEach((run, index) => canonicalRunBySessionPath.set(normalizeSessionPath(run.sessionPath), runs[index]!));
-  const historicalByPath = new Map<string, PreparedHistoricalSessionSummary>();
+  const canonicalRunBySessionId = new Map<string, PreparedRunRow>();
+  dedupedRuns.forEach((run, index) => {
+    canonicalRunBySessionPath.set(normalizeSessionPath(run.sessionPath), runs[index]!);
+    if (!runs[index]!.identityFallback) canonicalRunBySessionId.set(runs[index]!.sessionId, runs[index]!);
+  });
+  const historicalBySessionId = new Map<string, PreparedHistoricalSessionSummary>();
   for (const summary of source.historicalSessions ?? []) {
     const normalizedPath = normalizeSessionPath(summary.normalizedSessionPath);
-    const canonicalRun = canonicalRunBySessionPath.get(normalizedPath);
+    const canonicalRun = canonicalRunBySessionId.get(summary.sessionId) ?? canonicalRunBySessionPath.get(normalizedPath);
     const { normalizedSessionPath: _privatePath, ...safeSummary } = summary;
     const prepared: PreparedHistoricalSessionSummary = {
       ...safeSummary,
@@ -1188,18 +1209,18 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
         ...attribution,
         modelFamily: resolveModelFamily(attribution.modelId, familyMap) ?? '(unknown)',
       })),
-      sessionPathHash: canonicalRun?.sessionPathHash ?? hashToPrefix(normalizedPath, 16),
+      sessionPathHash: canonicalRun?.sessionPathHash ?? sessionPathHash(normalizedPath),
       matchedCanonical: canonicalRun !== undefined,
       transcriptOnly: canonicalRun === undefined,
     };
-    const existing = historicalByPath.get(normalizedPath);
+    const existing = historicalBySessionId.get(summary.sessionId);
     if (existing) {
       prepared.sourceProvenance = [...new Set([...existing.sourceProvenance, ...prepared.sourceProvenance])].sort();
       if (!prepared.review) prepared.review = existing.review;
     }
-    historicalByPath.set(normalizedPath, prepared);
+    historicalBySessionId.set(summary.sessionId, prepared);
   }
-  const historicalSessions = [...historicalByPath.values()];
+  const historicalSessions = [...historicalBySessionId.values()];
   const toolUsage: PreparedToolUsageRow[] = [];
   const toolFailures: PreparedToolFailureRow[] = [];
   const toolResultIssues: PreparedToolResultIssueRow[] = [];
@@ -1227,6 +1248,44 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const warmBashRewrites = prepareWarmBashRewrites(source.warmBashRewrites ?? [], runs);
   const warmBashSummaries = prepareWarmBashSummaries(source.warmBashSummaries ?? [], runs);
   const agentReviews = prepareAgentReviews(source.agentReviews ?? [], runs);
+  const runsBySessionId = new Map<string, PreparedRunRow[]>();
+  for (const run of runs) {
+    const matches = runsBySessionId.get(run.sessionId) ?? [];
+    matches.push(run);
+    runsBySessionId.set(run.sessionId, matches);
+  }
+  const sessionReviewsV2: PreparedSessionReviewV2Row[] = (source.sessionReviewsV2 ?? []).map((review) => {
+    const matchedRuns = runsBySessionId.get(review.sessionId) ?? [];
+    const attainment = deriveReviewAttainment(review.ledger);
+    const activeCriteria = review.ledger.filter((criterion) => criterion.status !== 'superseded');
+    const assessable = activeCriteria.filter((criterion) => criterion.status !== 'not_assessable').length;
+    const externalBlocked = activeCriteria.filter((criterion) => criterion.status === 'blocked' && criterion.reason === 'external_blocker').length;
+    return {
+      cohort: 'v2_production', schemaVersion: review.schemaVersion, reviewId: review.reviewId,
+      sessionId: review.sessionId, identityFallback: review.identityFallback, rubricVersion: review.rubricVersion,
+      indexVersion: 'v1', reviewedAt: review.reviewedAt, startedDay: review.reviewedAt.slice(0, 10),
+      joinKey: matchedRuns.length ? (review.identityFallback ? 'path_fallback' : 'session_id') : 'unmatched',
+      runIds: matchedRuns.map((run) => run.runId).sort(),
+      modelFamilies: [...new Set(matchedRuns.map((run) => run.modelFamily).filter((family): family is string => family !== null))].sort(),
+      criteria: review.ledger.map((criterion) => ({
+        criterionId: criterion.criterionId, importance: criterion.importance, origin: criterion.origin,
+        activity: criterion.taxonomy.activity, surfaces: criterion.taxonomy.surface,
+        evidenceModes: criterion.taxonomy.evidenceMode, status: criterion.status, reason: criterion.reason,
+      })),
+      attainment,
+      criterionCoverage: activeCriteria.length ? assessable / activeCriteria.length : null,
+      externalBlockerRate: activeCriteria.length ? externalBlocked / activeCriteria.length : null,
+      process: review.process, evidence: review.evidence,
+      findings: review.findings.map(({ findingId, severity, category, criterionId, ledgerEffect }) => ({ findingId, severity, category, ...(criterionId ? { criterionId } : {}), ledgerEffect })),
+      humanCheckStatus: review.humanCheckStatus, confidence: review.confidence,
+      disagreement: review.disagreement, reviewers: review.reviewers,
+      diversityAchieved: review.diversityAchieved, blindingApplied: review.blindingApplied,
+    };
+  });
+  const legacySessionReviews: PreparedLegacySessionReviewRow[] = (source.legacySessionReviews ?? []).map(({ normalizedSessionPath, ...review }) => ({
+    ...review,
+    sessionPathHash: sessionPathHash(normalizedSessionPath),
+  }));
 
   return {
     sourceSchemaVersion: source.schemaVersion,
@@ -1247,6 +1306,8 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     warmBashRewrites,
     warmBashSummaries,
     agentReviews,
+    sessionReviewsV2,
+    legacySessionReviews,
     historicalSessions,
   };
 }

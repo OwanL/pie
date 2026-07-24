@@ -17,8 +17,9 @@ test('site data generation writes the expected files and passes validation', asy
     await writeSiteData(dir, bundle);
 
     const roundTrip = await readSiteDataBundle(dir);
-    assert.equal(roundTrip.manifest.schemaVersion, 5);
-    assert.equal(roundTrip.modelLeaderboard.schemaVersion, 5);
+    assert.equal(roundTrip.manifest.schemaVersion, 6);
+    assert.equal(roundTrip.modelLeaderboard.schemaVersion, 6);
+    assert.equal(roundTrip.sessionReviewAnalytics.cohort, 'v2_production');
     assert.equal(roundTrip.manifest.completedRunCount, 7);
     assert.equal(roundTrip.runSummary.rows.length, 8);
     assert.ok(roundTrip.verificationImpact.summaryRows.length > 0);
@@ -324,6 +325,15 @@ test('site data validation rejects malformed tool usage payloads', async () => {
   );
 });
 
+function markLeaderboardRowRanked(row: any, rank: number): void {
+  row.rank = rank;
+  row.compositeScore = 0.5;
+  row.unadjustedCompositeScore = 0.5;
+  row.caseMixAdjustment = null;
+  row.caseMixAdjusted = false;
+  row.scoreInterval80 = { lower: 0.4, upper: 0.6, level: 0.8, bestRank: rank, worstRank: rank };
+}
+
 test('model leaderboard validation requires current evidence and interval fields', async () => {
   const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
   const missingEvidence = deepClone(bundle) as any;
@@ -335,7 +345,8 @@ test('model leaderboard validation requires current evidence and interval fields
   assert.throws(() => validateSiteDataBundle(missingSourceWeights), /missing sourceWeights/);
 
   const invalidInterval = deepClone(bundle) as any;
-  invalidInterval.modelLeaderboard.rows.find((row: any) => row.compositeScore !== null).scoreInterval80.lower = -1;
+  markLeaderboardRowRanked(invalidInterval.modelLeaderboard.rows[0], 1);
+  invalidInterval.modelLeaderboard.rows[0].scoreInterval80.lower = -1;
   assert.throws(() => validateSiteDataBundle(invalidInterval), /invalid scoreInterval80/);
 });
 
@@ -372,8 +383,8 @@ test('model leaderboard validation catches missing dimensions', async () => {
 test('model leaderboard validation catches non-contiguous rank', async () => {
   const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
   const mutated = deepClone(bundle) as any;
-  const firstRanked = mutated.modelLeaderboard.rows.find((row: any) => row.compositeScore !== null);
-  firstRanked.rank = 5;
+  const firstRanked = mutated.modelLeaderboard.rows[0];
+  markLeaderboardRowRanked(firstRanked, 5);
   assert.throws(
     () => validateSiteDataBundle(mutated),
     /non-contiguous rank/,
@@ -381,18 +392,12 @@ test('model leaderboard validation catches non-contiguous rank', async () => {
 });
 
 test('model leaderboard validation catches ranked row after unranked', async () => {
-  const fixture = deepClone(await loadFixture());
-  // Ensure an unknown family exists (compositeScore === null, unranked).
-  delete (fixture.completedRuns[0] as Partial<typeof fixture.completedRuns[0]>).modelId;
-  const bundle = buildSiteDataBundle(prepareSourceAnalytics(fixture));
+  const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
   const mutated = deepClone(bundle) as any;
   const rows = mutated.modelLeaderboard.rows as any[];
-  const unrankedIndex = rows.findIndex((row) => row.compositeScore === null);
-  assert.ok(unrankedIndex >= 0, 'fixture produces an unranked (unknown) family');
-  assert.ok(unrankedIndex > 0, 'unranked row is not first (ranked rows precede it)');
-  // Move the unranked row to the front so a ranked row follows it.
-  const [unranked] = rows.splice(unrankedIndex, 1);
-  rows.unshift(unranked);
+  assert.ok(rows.length >= 2);
+  markLeaderboardRowRanked(rows[1], 1);
+  // The untouched first row is unranked, so the ranked second row is invalid.
   assert.throws(
     () => validateSiteDataBundle(mutated),
     /ranked after unranked rows/,

@@ -45,6 +45,13 @@ function assistant(
   };
 }
 
+test('stable session identity requires the first non-empty line to be a valid session header', () => {
+  const valid = summarizeTranscriptJsonl(`\n${line(header('stable-id'))}\n`, 'C:/repo/stable.jsonl');
+  assert.equal(valid?.sessionId, 'stable-id');
+  assert.equal(summarizeTranscriptJsonl(`${line(user('before', null, 'not a header'))}\n${line(header('too-late'))}`, 'C:/repo/malformed.jsonl'), null);
+  assert.equal(summarizeTranscriptJsonl(`not-json\n${line(header('too-late'))}`, 'C:/repo/malformed.jsonl'), null);
+});
+
 test('reconstructs only the active parentId branch', () => {
   const raw = transcript([
     header(),

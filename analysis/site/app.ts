@@ -1,6 +1,5 @@
 import embed from 'vega-embed';
 
-import { LEADERBOARD_WEIGHTS } from '../scripts/leaderboard-scoring.ts';
 import { createModelLeaderboardFromRuns } from '../scripts/leaderboard.ts';
 import { meanDifferenceInterval, meanInterval, wilsonInterval } from './chart-stats.ts';
 import { renderChartEntries, type ChartContext } from './lib.ts';
@@ -17,6 +16,7 @@ import type {
   PruningImpactData,
   RetryTimingData,
   RunSummaryData,
+  SessionReviewAnalyticsData,
   PreparedRunRow,
   PreparedToolUsageRow,
   SiteManifest,
@@ -42,6 +42,7 @@ interface DashboardData {
   tokenThroughput: TokenThroughputData;
   retryTiming: RetryTimingData;
   modelLeaderboard: ModelLeaderboardData;
+  sessionReviewAnalytics: SessionReviewAnalyticsData | null;
 }
 
 export interface FilterState {
@@ -120,6 +121,27 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
+function countRowsLabel(rows: Array<{ value: string; count: number }>): string {
+  return rows.length ? rows.map((row) => `${escapeHtml(row.value)}: ${row.count}`).join(' · ') : 'none';
+}
+
+/** Static V2 review diagnostics; review artifacts are cohort-level and do not follow run filters. */
+export function sessionReviewAnalyticsHtml(data: SessionReviewAnalyticsData | null): string {
+  if (!data) return '<p class="empty-state">session-review-analytics.json is unavailable.</p>';
+  const summary = data.summary;
+  const process = Object.entries(data.process)
+    .map(([field, rows]) => `<li><strong>${escapeHtml(field)}</strong>: ${countRowsLabel(rows)}</li>`).join('');
+  return `
+    <div class="review-diagnostic-grid">
+      <article><h4>Outcome attainment</h4><p><strong>Delivered:</strong> ${countRowsLabel(summary.deliveredOverall)}</p><p><strong>Controllable:</strong> ${countRowsLabel(summary.controllableOverall)}</p><p><strong>Outcome-only qualityIndexV1:</strong> ${summary.meanQualityIndexV1 ?? '—'} (${summary.qualityIndexCount} reviews)</p></article>
+      <article><h4>Coverage, confidence &amp; blockers</h4><p><strong>Criterion coverage:</strong> ${percentage(summary.criterionCoverage)}</p><p><strong>External blocker rate:</strong> ${percentage(summary.externalBlockerRate)}</p><p><strong>Confidence:</strong> ${countRowsLabel(summary.confidence)}</p><p>${summary.joinedReviewCount}/${summary.reviewCount} joined · ${summary.identityFallbackCount} fallback identities</p></article>
+      <article><h4>Process diagnostics</h4><ul>${process}</ul></article>
+      <article><h4>Evidence &amp; findings</h4><p><strong>Requirements:</strong> ${countRowsLabel(data.evidence.requirements)}</p><p><strong>Artifacts:</strong> ${countRowsLabel(data.evidence.artifacts)}</p><p><strong>Execution:</strong> ${countRowsLabel(data.evidence.execution)}</p><p><strong>Human:</strong> ${countRowsLabel(data.evidence.human)}</p><p><strong>Findings:</strong> ${data.findings.total} (${countRowsLabel(data.findings.bySeverity)}) · limitations: ${data.evidence.limitationCount}</p></article>
+      <article><h4>Disagreement &amp; reviewers</h4><p>${data.disagreement.materialCount} material · ${data.disagreement.adjudicatedCount} adjudicated · ${data.disagreement.disputedFieldCount} disputed fields</p><p>${data.reviewers.callCount} reviewer calls · ${data.reviewers.bucketDowngradeCount} bucket downgrades · ${data.reviewers.diversityAchievedCount} diverse reviews</p><p><strong>Roles:</strong> ${countRowsLabel(data.reviewers.byRole)}</p><p><strong>Families:</strong> ${countRowsLabel(data.reviewers.byFamily)}</p></article>
+      <article><h4>Legacy exclusion</h4><p>${data.legacy.runReviewCount} run reviews · ${data.legacy.sidecarReviewCount} sidecar reviews · ${data.legacy.identityFallbackCount} fallback identities</p><p>Legacy V1 agent records and self-close placeholders are excluded from V2 quality and user-satisfaction aggregates.</p></article>
+    </div>`;
+}
+
 function formatDateTime(value: string): string {
   return new Date(value).toLocaleString();
 }
@@ -196,7 +218,7 @@ function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
 }
 
 function scoredRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
-  return runs.filter((run) => run.scored && run.satisfaction !== null);
+  return runs.filter((run) => run.scored && run.satisfaction !== null && run.outcomeSource === 'user');
 }
 
 /**
@@ -239,7 +261,7 @@ export function applyFilters(runs: PreparedRunRow[], filters: FilterState): Prep
     if (filters.pruningMode && run.fsPruningMode !== filters.pruningMode) {
       return false;
     }
-    if (filters.scoredOnly && (!run.scored || run.satisfaction === null)) {
+    if (filters.scoredOnly && (!run.scored || run.satisfaction === null || run.outcomeSource !== 'user')) {
       return false;
     }
     if (filters.pureOnly && run.mixedTreatmentConfig) {
@@ -290,7 +312,7 @@ export function coverageSummary(runs: PreparedRunRow[]): CoverageSummary {
     selectedRunCount: runs.length,
     completed: metric(completedCount, runs.length),
     outcomeScored: metric(
-      completed.filter((run) => run.scored && run.satisfaction !== null).length,
+      completed.filter((run) => run.scored && run.satisfaction !== null && run.outcomeSource === 'user').length,
       completedCount,
     ),
     priced: metric(completed.filter((run) => estimatedRunCostUsd(run) !== null).length, completedCount),
@@ -2004,7 +2026,7 @@ function taskSizeTimeRows(runs: PreparedRunRow[]): OutcomeTimeBucketRow[] {
 // ─── Leaderboard data preparation ────────────────────────────────────────────
 
 const DIMENSION_COLORS = ['#8de3ff', '#c0ff72', '#ffd479', '#ff8578', '#c084fc', '#f7b267'];
-const DIMENSION_NAMES = ['Satisfaction', 'Resolution', 'File churn', 'Tool reliability', 'Verification', 'Token efficiency'];
+const DIMENSION_NAMES = ['Legacy user satisfaction', 'Legacy user resolution', 'File churn', 'Tool reliability', 'Verification', 'Token efficiency'];
 
 interface LeaderboardCompositeRow {
   label: string;
@@ -2139,7 +2161,7 @@ function leaderboardRows(runs: PreparedRunRow[], precomputed?: ModelLeaderboardD
       mixedModelExcludedCount: row.mixedModelExcludedCount,
       mixedTreatmentExcludedCount: row.mixedTreatmentExcludedCount,
       nLabel: `${row.scoredRunCount} outcomes / ${row.effectiveTaskCount} rated tasks / ${row.attributableTaskCount} attributable tasks / ${row.runCount} runs`,
-      outcomeSourceLabel: `${row.userOutcomeCount} ranked user / ${row.agentOutcomeCount} supplemental agent`,
+      outcomeSourceLabel: `${row.userOutcomeCount} legacy user / ${row.agentOutcomeCount} V2 reviews / ${row.legacyAgentReviewCount} legacy V1 agent`,
       avgSatisfaction: row.dimensions.satisfaction.value?.toFixed(2) ?? '—',
       resolutionRate: fmtPct(row.dimensions.resolutionRate.value),
       fileChurnRate: row.dimensions.fileChurn.value !== null
@@ -2197,8 +2219,8 @@ function leaderboardRows(runs: PreparedRunRow[], precomputed?: ModelLeaderboardD
           : rawLabel(metric.value),
       });
     };
-    add('Satisfaction', row.dimensions.satisfaction, (value) => `${value.toFixed(2)} avg`);
-    add('Resolution', row.dimensions.resolutionRate, (value) => `${fmtPct(value)} rate`);
+    add('Legacy user satisfaction', row.dimensions.satisfaction, (value) => `${value.toFixed(2)} avg`);
+    add('Legacy user resolution', row.dimensions.resolutionRate, (value) => `${fmtPct(value)} rate`);
     add('File churn', row.dimensions.fileChurn, (value) => `${(value * 100).toFixed(0)}% re-edit`);
     add('Tool reliability', row.dimensions.toolReliability, (value) => `${fmtPct(value)} clean`);
     add('Verification', row.dimensions.verificationPassRate, (value) => `${fmtPct(value)} pass`);
@@ -2242,9 +2264,9 @@ function renderLeaderboardTable(
           <th scope="col">Evidence tier</th>
           <th scope="col">Composite</th>
           <th scope="col">80% score / rank interval</th>
-          <th scope="col">U score / evidence</th>
-          <th scope="col">A score / evidence</th>
-          <th scope="col">P score / evidence</th>
+          <th scope="col">Legacy user score / evidence</th>
+          <th scope="col">V2 quality score / evidence</th>
+          <th scope="col">Process score / evidence</th>
           <th scope="col">Canonical / transcript-only</th>
           <th scope="col">Raw score</th>
           <th scope="col">Case-mix Δ</th>
@@ -2252,10 +2274,10 @@ function renderLeaderboardTable(
           <th scope="col">Evidence weight</th>
           <th scope="col">Outcomes / rated tasks / attributable tasks / runs</th>
           <th scope="col">Task rating coverage</th>
-          <th scope="col">Ranked / supplemental</th>
+          <th scope="col">Legacy user / V2 / legacy agent</th>
           <th scope="col">Mixed model / treatment excluded</th>
-          <th scope="col">Sat.</th>
-          <th scope="col">Resolved</th>
+          <th scope="col">Legacy user sat.</th>
+          <th scope="col">Legacy user resolved</th>
           <th scope="col">File churn</th>
           <th scope="col">Tool clean</th>
           <th scope="col">Ver. pass</th>
@@ -2608,12 +2630,12 @@ async function renderCharts(
     attachmentCount: 'attachments',
     contextFileCount: 'context files',
   })[signal]);
-  const caseMixSummary = `Standardized to the full privacy-safe ex-ante task distribution (L ${(targetMix.low * 100).toFixed(0)}% / M ${(targetMix.medium * 100).toFixed(0)}% / H ${(targetMix.high * 100).toFixed(0)}%)${caseMixSignalLabels.length ? ` using ${caseMixSignalLabels.join(', ')}` : ''}; missing family-band cells use source-band priors.`;
+  const caseMixSummary = `V2 rank is not case-mix adjusted. Diagnostic ex-ante task mix: L ${(targetMix.low * 100).toFixed(0)}% / M ${(targetMix.medium * 100).toFixed(0)}% / H ${(targetMix.high * 100).toFixed(0)}%${caseMixSignalLabels.length ? ` using ${caseMixSignalLabels.join(', ')}` : ''}.`;
   setNote(
     'leaderboard-note',
     lb.composite.length === 0
       ? `No attributable model families are available. ${caseMixSummary}`
-      : `${lb.composite.length} observed families ranked relative to this cohort and task mix; sparse rows shrink toward pooled source priors. ${caseMixSummary} Evidence: ${leaderboardUserOutcomes} canonical user mass; ${leaderboardAgentOutcomes} deduplicated agent-review mass; ${leaderboardMixedModelExcluded} mixed-model and ${leaderboardMixedTreatmentExcluded} mixed-treatment canonical outcomes omitted from user attribution. This is observational, not universal benchmark capability.`,
+      : `${lb.composite.length} families ranked from stable-ID V2 outcome-quality reviews; sparse rows shrink toward the V2 outcome prior. ${caseMixSummary} Evidence: ${leaderboardAgentOutcomes} V2 review mass. ${leaderboardUserOutcomes} legacy user-outcome mass and all runtime/process diagnostics have zero ranking weight. Mixed-model V2 reviews are fractionally attributed; V1 agent ratings are excluded. This is observational, not universal benchmark capability.`,
     renderToken,
   );
   renderLeaderboardTable(
@@ -2633,7 +2655,7 @@ async function renderCharts(
         mark: { type: 'bar', cornerRadiusEnd: 3, opacity: 0.82 },
         encoding: {
           y: { field: 'axisLabel', type: 'nominal', sort: leaderboardOrder, title: null, axis: { labelLimit: 320, labelPadding: 8 } },
-          x: { field: 'compositeScore', type: 'quantitative', title: 'Regularized cohort-relative composite', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
+          x: { field: 'compositeScore', type: 'quantitative', title: 'Regularized V2 outcome quality', scale: { domain: [0, 1] }, axis: { format: '.0%', tickCount: 6 } },
           color: {
             field: 'thinkingLevel', type: 'nominal', title: 'Reasoning',
             scale: { domain: THINKING_LEVEL_DOMAIN, range: THINKING_LEVEL_RANGE },
@@ -2648,12 +2670,12 @@ async function renderCharts(
             { field: 'caseMixOverlapLabel', type: 'nominal', title: 'Case-mix overlap' },
             { field: 'evidenceWeightLabel', type: 'nominal', title: 'Evidence weight' },
             { field: 'nLabel', type: 'nominal', title: 'Outcomes / rated / attributable tasks / runs' },
-            { field: 'scoringCoverageLabel', type: 'nominal', title: 'Task-level user-rating coverage' },
-            { field: 'outcomeSourceLabel', type: 'nominal', title: 'Ranked / supplemental outcomes' },
+            { field: 'scoringCoverageLabel', type: 'nominal', title: 'Legacy user-rating coverage' },
+            { field: 'outcomeSourceLabel', type: 'nominal', title: 'Legacy user / V2 / legacy agent' },
             { field: 'mixedModelExcludedCount', type: 'quantitative', title: 'Mixed-model outcomes excluded' },
             { field: 'mixedTreatmentExcludedCount', type: 'quantitative', title: 'Mixed-treatment outcomes excluded' },
-            { field: 'avgSatisfaction', type: 'nominal', title: 'Avg satisfaction' },
-            { field: 'resolutionRate', type: 'nominal', title: 'Resolution rate' },
+            { field: 'avgSatisfaction', type: 'nominal', title: 'Legacy user avg satisfaction' },
+            { field: 'resolutionRate', type: 'nominal', title: 'Legacy user resolution rate' },
             { field: 'fileChurnRate', type: 'nominal', title: 'File churn' },
             { field: 'toolReliabilityRate', type: 'nominal', title: 'Tool reliability' },
             { field: 'verificationPassRate', type: 'nominal', title: 'Verification pass' },
@@ -2684,7 +2706,7 @@ async function renderCharts(
     'leaderboard-dimension-note',
     lb.dimensions.length === 0
       ? 'No ranked models to show.'
-      : `Diagnostic dimensions are shown alongside the separately calibrated channels. User evidence combines satisfaction ${(LEADERBOARD_WEIGHTS.satisfaction * 100).toFixed(1)}% and resolution ${(LEADERBOARD_WEIGHTS.resolutionRate * 100).toFixed(1)}%; standardized user, agent, and process evidence combine at 60% / 25% / 15%. Cost, tokens, duration, file churn, and tool volume are diagnostic only.`,
+      : `Diagnostic dimensions are shown separately from ranking. The V2 model/harness rank uses only qualityIndexV1 criterion attainment. Legacy user satisfaction/resolution, V1 agent ratings, process telemetry, coverage, confidence, blockers, findings, cost, tokens, duration, file churn, and tool volume all have zero ranking weight.`,
     renderToken,
   );
 
@@ -4443,7 +4465,15 @@ function emptyOverviewData(schemaVersion: number): OverviewData {
 }
 
 function emptyModelQualityData(schemaVersion: number): ModelQualityData {
-  return { schemaVersion, rows: [], notes: [] };
+  return {
+    schemaVersion,
+    cohortLabels: {
+      userOutcomes: 'Legacy V1 user satisfaction/resolution',
+      agentOutcomes: 'Legacy V1 agent ratings',
+      v2Reviews: 'V2 canonical production reviews (separate artifact)',
+    },
+    rows: [], notes: [],
+  };
 }
 
 function emptyVerificationImpactData(schemaVersion: number): VerificationImpactData {
@@ -4512,7 +4542,7 @@ async function main(): Promise<void> {
     fetchJson<RunSummaryData>('./data/run-summary.json'),
   ]);
 
-  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard] = await Promise.all([
+  const [overview, modelQuality, verificationImpact, toolUsage, treatmentComparison, timeline, pruningImpact, backendErrors, fileExtensions, tokenThroughput, retryTiming, modelLeaderboard, sessionReviewAnalytics] = await Promise.all([
     fetchOptionalJson<OverviewData>('./data/overview.json'),
     fetchOptionalJson<ModelQualityData>('./data/model-quality.json'),
     fetchOptionalJson<VerificationImpactData>('./data/verification-impact.json'),
@@ -4525,6 +4555,7 @@ async function main(): Promise<void> {
     fetchOptionalJson<TokenThroughputData>('./data/token-throughput.json'),
     fetchOptionalJson<RetryTimingData>('./data/retry-timing.json'),
     fetchOptionalJson<ModelLeaderboardData>('./data/model-leaderboard.json'),
+    fetchOptionalJson<SessionReviewAnalyticsData>('./data/session-review-analytics.json'),
   ]);
 
   const precomputedAvailable = Boolean(
@@ -4550,8 +4581,10 @@ async function main(): Promise<void> {
     tokenThroughput: tokenThroughput ?? emptyTokenThroughputData(manifest.schemaVersion),
     retryTiming: retryTiming ?? emptyRetryTimingData(manifest.schemaVersion),
     modelLeaderboard: modelLeaderboard ?? createModelLeaderboardFromRuns(runSummary.rows),
+    sessionReviewAnalytics,
   };
 
+  byId('session-review-analytics').innerHTML = sessionReviewAnalyticsHtml(data.sessionReviewAnalytics);
   setText('generated-at', formatDateTime(data.manifest.generatedAt));
   setText('workspace-key', data.manifest.sourceWorkspaceKey);
   setText('source-exported-at', formatDateTime(data.manifest.sourceExportedAt));

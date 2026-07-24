@@ -6,9 +6,13 @@ import type {
   HistoricalSessionAttribution,
   HistoricalSessionReview,
   HistoricalSessionSourceSummary,
+  LegacySessionReviewSource,
+  SessionReviewV2Source,
   ThinkingLevel,
   TranscriptSourceProvenance,
 } from './contracts.ts';
+import { sessionPathHash } from './hash.ts';
+import { coerceSessionReviewV2 } from './review-analytics.ts';
 
 interface JsonRecord { [key: string]: unknown }
 
@@ -124,19 +128,23 @@ export function summarizeTranscriptJsonl(
 ): HistoricalSessionSourceSummary | null {
   let header: JsonRecord | null = null;
   const nodes: TranscriptNode[] = [];
+  let firstNonEmptySeen = false;
   for (const [order, line] of raw.split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     let value: unknown;
     try {
       value = JSON.parse(line);
     } catch {
+      if (!firstNonEmptySeen) return null;
       continue;
     }
-    if (!isRecord(value)) continue;
-    if (!header && value.type === 'session' && typeof value.id === 'string') {
+    if (!firstNonEmptySeen) {
+      firstNonEmptySeen = true;
+      if (!isRecord(value) || value.type !== 'session' || typeof value.id !== 'string' || !value.id.trim()) return null;
       header = value;
       continue;
     }
+    if (!isRecord(value)) continue;
     if (typeof value.id === 'string' && (typeof value.parentId === 'string' || value.parentId === null)) {
       nodes.push({ id: value.id, parentId: value.parentId as string | null, order, value });
     }
@@ -269,7 +277,7 @@ async function listJsonlFiles(root: string): Promise<string[]> {
 }
 
 function coerceReview(value: unknown): { path: string; review: HistoricalSessionReview; orderAt: number } | null {
-  if (!isRecord(value) || typeof value.sessionPath !== 'string') return null;
+  if (!isRecord(value) || value.selfClose === true || typeof value.sessionPath !== 'string') return null;
   if (typeof value.done !== 'boolean' || typeof value.rating !== 'number' || !Number.isFinite(value.rating)) return null;
   if (value.completion !== 'fully' && value.completion !== 'partial' && value.completion !== 'setback') return null;
   const evaluatedAt = optionalTimestamp(value.evaluatedAt);
@@ -295,19 +303,34 @@ function coerceReview(value: unknown): { path: string; review: HistoricalSession
   };
 }
 
-export async function readLatestSessionReviews(sidecarPath?: string): Promise<Map<string, HistoricalSessionReview>> {
+export interface MixedSessionReviewSidecar {
+  legacy: LegacySessionReviewSource[];
+  productionV2: SessionReviewV2Source[];
+}
+
+/** Read mixed V1/V2 storage without coercing either cohort into the other. */
+export async function readMixedSessionReviews(sidecarPath?: string): Promise<MixedSessionReviewSidecar> {
   const latest = new Map<string, { review: HistoricalSessionReview; orderAt: number; line: number }>();
-  if (!sidecarPath) return new Map();
+  const production = new Map<string, SessionReviewV2Source>();
+  if (!sidecarPath) return { legacy: [], productionV2: [] };
   let raw: string;
   try {
     raw = await fs.readFile(sidecarPath, 'utf8');
   } catch {
-    return new Map();
+    return { legacy: [], productionV2: [] };
   }
   raw.split(/\r?\n/).forEach((line, index) => {
     if (!line.trim()) return;
     try {
-      const coerced = coerceReview(JSON.parse(line));
+      const parsed: unknown = JSON.parse(line);
+      const v2 = coerceSessionReviewV2(parsed);
+      if (v2) {
+        const previous = production.get(v2.sessionId);
+        if (!previous || v2.reviewedAt > previous.reviewedAt
+          || (v2.reviewedAt === previous.reviewedAt && v2.reviewId > previous.reviewId)) production.set(v2.sessionId, v2);
+        return;
+      }
+      const coerced = coerceReview(parsed);
       if (!coerced) return;
       const previous = latest.get(coerced.path);
       if (!previous || coerced.orderAt > previous.orderAt || (coerced.orderAt === previous.orderAt && index > previous.line)) {
@@ -317,7 +340,28 @@ export async function readLatestSessionReviews(sidecarPath?: string): Promise<Ma
       // Malformed sidecar lines do not invalidate other reviews.
     }
   });
-  return new Map([...latest].map(([key, value]) => [key, value.review]));
+  return {
+    legacy: [...latest].map(([normalizedSessionPath, value]) => ({
+      ...value.review,
+      cohort: 'legacy_v1',
+      sessionId: sessionPathHash(normalizedSessionPath),
+      normalizedSessionPath,
+      identityFallback: true,
+    })),
+    productionV2: [...production.values()],
+  };
+}
+
+export async function readLatestSessionReviews(sidecarPath?: string): Promise<Map<string, HistoricalSessionReview>> {
+  const mixed = await readMixedSessionReviews(sidecarPath);
+  return new Map(mixed.legacy.map((review) => [review.normalizedSessionPath, {
+    rating: review.rating,
+    completion: review.completion,
+    done: review.done,
+    evaluatedAt: review.evaluatedAt,
+    reviewerBuckets: review.reviewerBuckets,
+    reviewerCount: review.reviewerCount,
+  }]));
 }
 
 /** Discover legacy + configured local transcripts, deduplicating overlapping roots. */

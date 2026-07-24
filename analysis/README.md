@@ -16,20 +16,20 @@ analytics source export or analytics store
   -> static localhost dashboard
 ```
 
-> **Model ranking:** `analysis/scripts/leaderboard.ts` is the canonical dashboard leaderboard. It produces one provider-agnostic row per model family across all thinking levels and uses canonical runs, agent reviews, and transcript-only historical sessions without double counting. `analysis/scripts/stratified-ranker.ts` remains an offline experiment.
+> **V2 model/harness ranking:** `analysis/scripts/leaderboard.ts` is the canonical dashboard leaderboard. It produces one provider-agnostic row per model family and ranks only families with attributable canonical V2 outcome-quality reviews. Legacy user/agent outcomes and runtime/process telemetry remain diagnostic and have zero ranking weight. `analysis/scripts/stratified-ranker.ts` remains an offline experiment.
 
 ## Bias-aware model strength
 
 The leaderboard is an observational, cohort-relative estimate—not a universal or causal capability benchmark:
 
-- **Three source scales:** user evidence is `8/15` normalized satisfaction plus `7/15` resolution; done agent reviews are 35% normalized rating plus 65% completion; process quality is an available-component mean of verification (50%), terminal status (30%), and tool reliability (20%). Source-standardized logits combine at 60% user, 25% agent, and 15% process.
-- **No hard evidence gate:** every observed non-unknown family is ranked. User and agent shrinkage strengths are `k=4` and `k=8`; noisier process telemetry uses `k=20`. Rows are labelled `outcome-backed`, `thin-outcome`, or `telemetry-only`.
-- **No double counting:** canonical retries collapse to the deterministic latest stable run per task and family. Reviews from sidecars and transcript summaries deduplicate by session hash, latest evaluation wins, and mixed-session reviews split by attribution share. Only `transcriptOnly=true` sessions add process observations; a transcript matched to a canonical run only enriches review attribution.
-- **Common case mix:** distinct canonical tasks and transcript-only sessions form one privacy-safe ex-ante population using initial prompt characters, attachment count, and context-file count. Every source/family/band cell shrinks toward its source-band prior and is standardized to this common low/medium/high mix. Tokens, duration, cost, tool volume, mutations, and verification activity never define complexity.
-- **Relative combination:** each source is centered on its standardized pooled mean and scaled by empirical between-family logit spread (floor 0.5). Missing direct source evidence contributes neutral `z=0`, rather than borrowing a raw score from a different source scale.
-- **Uncertainty:** the displayed 80% score interval approximately propagates beta-posterior source/band variance through logit standardization and the 60/25/15 latent weights (`z=1.282`). Rank ranges come from interval overlap. This approximation is intentionally conservative for sparse and missing channels.
+- **Outcome-only ranking:** the rank uses only canonical V2 `qualityIndexV1 / 100`, deterministically derived from criterion attainment. Legacy V1 user satisfaction/resolution, V1 agent ratings, process/runtime telemetry, coverage, confidence, blockers, findings, cost, and latency have zero ranking weight.
+- **Evidence eligibility:** only model families with attributable stable-ID V2 review mass are ranked. Other observed families remain visible as unranked diagnostics. V2 outcome shrinkage uses `k=8`; rows are labelled `outcome-backed`, `thin-outcome`, or `telemetry-only`.
+- **Stable identity and no double counting:** canonical retries collapse deterministically. V2 reviews join by stable session-header `sessionId`, including moved/renamed sessions when run exports carry that header ID. Path fallback is flagged and excluded.
+- **Mixed-model attribution:** transcript successful-token shares are used when available; otherwise each distinct stable model family receives an equal fraction. Shares sum to one review. DuckDB model/thinking cells use the disclosed equal-fraction fallback after retry deduplication.
+- **Common case mix:** ex-ante initial prompt characters, attachment count, and context-file count define low/medium/high bands. Tokens, duration, cost, tool volume, mutations, verification activity, and legacy outcomes never define or improve V2 quality.
+- **Uncertainty:** the 80% interval propagates V2 outcome-channel posterior variance through its standardized logit (`z=1.282`). Rank ranges come from interval overlap.
 
-Thinking-level and provider mixes remain inspectable, while cost, usage, tokens, duration, and other process-style diagnostics do not directly improve strength beyond the explicitly 15%-weighted process-quality channel.
+Thinking-level, provider, legacy outcome, process, cost, usage, token, and duration diagnostics remain inspectable but do not affect V2 rank.
 
 ## Feedback loop
 
@@ -199,7 +199,8 @@ Site-data files:
 - `pruning-impact.json`
 - `tool-result-pruning-impact.json`
 - `tool-result-pruning-outcomes.json`
-- `agent-review-comparison.json`
+- `agent-review-comparison.json` — explicitly labelled legacy V1 1–5 agent/user comparison
+- `session-review-analytics.json` — V2 delivered/controllable attainment, pure `qualityIndexV1`, criterion/process/evidence/finding/disagreement/reviewer diagnostics, and legacy cohort coverage
 - `backend-errors.json`
 - `file-types.json`
 - `token-throughput.json`
@@ -210,6 +211,7 @@ Site-data files:
 ```text
 core_runs
 model_quality
+session_review_quality
 verification_impact
 tool_usage
 tool_failures
@@ -256,7 +258,8 @@ Do not rely on `file://` loading.
 
 - **Tool failure classification**: Runs recorded before per-tool failure classification was added lack `failureCountsByNameAndKind`. For these runs, the pipeline falls back to `failureCountsByKind` (aggregate-level classification) and emits failures under a sentinel tool name `(unattributed)`.
 - **Tool timing attribution**: Run rows retain `toolDurationMs` and `timedToolCallCount` independently of per-tool attribution. Historical terminal events that lost their tool metadata are surfaced as `(unknown)` tool-usage rows rather than dropped; their mean duration is null because no reliable terminal call count exists. New events repeat start metadata on `tool.finished`, so future duration, failure, verification, and file-mutation attribution remains named even when the owner transcript message is unavailable.
-- **Scoring gap**: Most runs are `closed_unscored` (no satisfaction/resolution data). Model quality and treatment comparison metrics are only meaningful for the scored subset.
+- **Review cohorts**: V1 user satisfaction/resolution and V1 1–5 agent reviews are historical, explicitly labelled legacy metrics. V2 production reviews are a separate stable-session-ID cohort. V1 rows are never coerced into missing V2 dimensions, and fallback/unresolved identities remain flagged.
+- **Scoring gap**: Most runs are `closed_unscored` (no legacy satisfaction/resolution data). Legacy model-quality and treatment-comparison metrics are only meaningful for that scored subset; V2 review coverage is reported separately.
 - **Open runs excluded**: Verification impact and timeline metrics exclude open (in-progress) runs since they have no finalized outcome.
 - **Token usage**: `inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens` are available when the provider reports them. Many older runs have zero token data.
 - **Cost**: `estimatedCostUsd` is the **parent-run** cost derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). `subagentEstimatedCostUsd` is the cost of spawned sub-agent sessions (which bill separately and were historically excluded from run cost), and `totalEstimatedCostUsd` = parent + subagent (the headline spend the overview card and cost-trend now use, falling back to parent-only for legacy runs). The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`. The "Subagent cost attribution" chart stacks parent vs subagent spend by model to expose the hidden sub-agent portion.

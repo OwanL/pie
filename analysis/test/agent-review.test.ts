@@ -142,16 +142,24 @@ test('completed agent reviews backfill supplemental outcomes without entering us
   assert.equal(prepared.runs[2]!.resolution, 'partially_resolved');
 
   const bundle = buildSiteDataBundle(prepared);
-  assert.equal(bundle.manifest.scoredRunCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  assert.equal(bundle.manifest.scoredRunCount, 0, 'V1 agent outcomes are not counted as user-scored runs');
+  assert.equal(bundle.overview.totalScoredRuns, 0);
+  assert.equal(bundle.overview.averageSatisfaction, null);
+  assert.ok(bundle.timeline.rows.every((row) => row.scoredRunCount === 0 && row.averageSatisfaction === null));
+  assert.ok(bundle.verificationImpact.rows.every((row) => row.scoredRunCount === 0 && row.averageSatisfaction === null));
+  assert.ok(bundle.treatmentComparison.rows.every((row) => row.scoredRunCount === 0 && row.averageSatisfaction === null));
+  assert.ok(bundle.toolUsage.summaryRows.every((row) => row.averageSatisfactionWhenUsed === null && row.averageSatisfactionWhenUnused === null));
+  assert.ok(bundle.toolResultPruningOutcomes.buckets.every((row) => row.scoredRunCount === 0 && row.meanSatisfaction === null));
   const modelId = prepared.runs[0]!.modelFamily!;
   const leaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === modelId)!;
   assert.ok(leaderboard, 'agent-scored model remains visible in the leaderboard');
   assert.equal(leaderboard.scoredRunCount, 0);
   assert.equal(leaderboard.userOutcomeCount, 0);
-  assert.equal(leaderboard.agentOutcomeCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
-  assert.ok(leaderboard.rank !== null, 'done sidecar reviews contribute their own calibrated agent channel');
+  assert.equal(leaderboard.agentOutcomeCount, 0, 'legacy V1 ratings never enter the V2 review channel');
+  assert.equal(leaderboard.legacyAgentReviewCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
+  assert.equal(leaderboard.rank, null, 'runtime telemetry and legacy reviews cannot create a V2 quality rank');
   assert.equal(leaderboard.userChannelScore, null);
-  assert.ok(leaderboard.agentChannelScore !== null);
+  assert.equal(leaderboard.agentChannelScore, null);
 
   const quality = bundle.modelQuality.rows.find((row) => row.modelId === modelId)!;
   assert.equal(quality.scoredRunCount, 0);

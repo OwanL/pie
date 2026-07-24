@@ -15,6 +15,7 @@ import type {
   PreparedWarmBashRewriteRow,
   PreparedWarmBashSummaryRow,
   PreparedRunRow,
+  PreparedSessionReviewV2Row,
   PreparedToolFailureRow,
   PreparedToolUsageRow,
   PreparedTurnThroughputRow,
@@ -28,6 +29,7 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const QUERY_FILE_BY_NAME = {
   core_runs: path.resolve(SCRIPT_DIR, '../queries/001_core_runs.sql'),
   model_quality: path.resolve(SCRIPT_DIR, '../queries/model_quality.sql'),
+  session_review_quality: path.resolve(SCRIPT_DIR, '../queries/session_review_quality.sql'),
   verification_impact: path.resolve(SCRIPT_DIR, '../queries/verification_impact.sql'),
   tool_usage: path.resolve(SCRIPT_DIR, '../queries/tool_usage.sql'),
   tool_failures: path.resolve(SCRIPT_DIR, '../queries/tool_failures.sql'),
@@ -165,6 +167,8 @@ interface DuckDbRunRow {
   treatment_change_kinds: string[];
   critical_path_duration_ms: number | null;
   skill_pruning_prepass_duration_ms: number | null;
+  session_id: string;
+  identity_fallback: boolean;
 }
 
 interface DuckDbToolUsageRow {
@@ -355,6 +359,9 @@ interface DuckDbWarmBashSummaryRow {
 }
 
 interface DuckDbAgentReviewRow {
+  cohort: 'legacy_v1';
+  session_id: string;
+  identity_fallback: boolean;
   run_id: string;
   session_path_hash: string;
   task_group_id: string;
@@ -398,6 +405,41 @@ interface DuckDbTurnThroughputRow {
   provider: string | null;
   provider_queue_ms: number | null;
   provider_queue_attempt_count: number;
+}
+
+interface DuckDbSessionReviewV2Row {
+  review_id: string;
+  session_id: string;
+  identity_fallback: boolean;
+  reviewed_at: string;
+  started_day: string;
+  rubric_version: string;
+  index_version: string;
+  join_key: string;
+  run_ids: string[];
+  model_families: string[];
+  delivered_overall: string;
+  controllable_overall: string;
+  quality_index_v1: number | null;
+  criterion_coverage: number | null;
+  external_blocker_rate: number | null;
+  confidence: string;
+  requirement_discipline: string;
+  verification_discipline: string;
+  scope_control: string;
+  recovery: string;
+  final_claim_accuracy: string;
+  evidence_requirements: string;
+  evidence_artifacts: string;
+  evidence_execution: string;
+  evidence_human: string;
+  evidence_limitation_count: number;
+  finding_count: number;
+  material_disagreement: boolean;
+  adjudicated: boolean;
+  disputed_field_count: number;
+  diversity_achieved: boolean;
+  blinding_applied: boolean;
 }
 
 interface DuckDbRetryTimingRow {
@@ -536,6 +578,8 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     treatment_change_kinds: row.treatmentChangeKinds,
     critical_path_duration_ms: row.criticalPathDurationMs,
     skill_pruning_prepass_duration_ms: row.skillPruningPrepassDurationMs,
+    session_id: row.sessionId,
+    identity_fallback: row.identityFallback,
   };
 }
 
@@ -750,6 +794,9 @@ function toDuckDbWarmBashSummaryRow(row: PreparedWarmBashSummaryRow): DuckDbWarm
 
 function toDuckDbAgentReviewRow(row: PreparedAgentReviewRow): DuckDbAgentReviewRow {
   return {
+    cohort: row.cohort,
+    session_id: row.sessionId,
+    identity_fallback: row.identityFallback,
     run_id: row.runId,
     session_path_hash: row.sessionPathHash,
     task_group_id: row.taskGroupId,
@@ -793,6 +840,25 @@ function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnTh
   };
 }
 
+function toDuckDbSessionReviewV2Row(row: PreparedSessionReviewV2Row): DuckDbSessionReviewV2Row {
+  return {
+    review_id: row.reviewId, session_id: row.sessionId, identity_fallback: row.identityFallback,
+    reviewed_at: row.reviewedAt, started_day: row.startedDay, rubric_version: row.rubricVersion,
+    index_version: row.indexVersion, join_key: row.joinKey, run_ids: row.runIds, model_families: row.modelFamilies,
+    delivered_overall: row.attainment.deliveredOverall, controllable_overall: row.attainment.controllableOverall,
+    quality_index_v1: row.attainment.qualityIndexV1, criterion_coverage: row.criterionCoverage,
+    external_blocker_rate: row.externalBlockerRate, confidence: row.confidence,
+    requirement_discipline: row.process.requirementDiscipline, verification_discipline: row.process.verificationDiscipline,
+    scope_control: row.process.scopeControl, recovery: row.process.recovery, final_claim_accuracy: row.process.finalClaimAccuracy,
+    evidence_requirements: row.evidence.requirements, evidence_artifacts: row.evidence.artifacts,
+    evidence_execution: row.evidence.execution, evidence_human: row.evidence.human,
+    evidence_limitation_count: row.evidence.limitations.length, finding_count: row.findings.length,
+    material_disagreement: row.disagreement.material, adjudicated: row.disagreement.adjudicated,
+    disputed_field_count: row.disagreement.disputedFields.length, diversity_achieved: row.diversityAchieved,
+    blinding_applied: row.blindingApplied,
+  };
+}
+
 function toDuckDbRetryTimingRow(row: PreparedRetryTimingRow): DuckDbRetryTimingRow {
   return {
     run_id: row.runId,
@@ -825,6 +891,10 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   warmBashRewritesPath: string;
   warmBashSummariesPath: string;
   agentReviewsPath: string;
+  sessionReviewsV2Path: string;
+  reviewCriteriaV2Path: string;
+  reviewFindingsV2Path: string;
+  reviewReviewersV2Path: string;
   turnThroughputPath: string;
   retryTimingPath: string;
 }> {
@@ -842,6 +912,10 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const warmBashRewritesPath = path.join(exportsDir, 'warm-bash-rewrites.json');
   const warmBashSummariesPath = path.join(exportsDir, 'warm-bash-summaries.json');
   const agentReviewsPath = path.join(exportsDir, 'agent-reviews.json');
+  const sessionReviewsV2Path = path.join(exportsDir, 'session-reviews-v2.json');
+  const reviewCriteriaV2Path = path.join(exportsDir, 'review-criteria-v2.json');
+  const reviewFindingsV2Path = path.join(exportsDir, 'review-findings-v2.json');
+  const reviewReviewersV2Path = path.join(exportsDir, 'review-reviewers-v2.json');
   const turnThroughputPath = path.join(exportsDir, 'turn-throughput.json');
   const retryTimingPath = path.join(exportsDir, 'retry-timing.json');
 
@@ -859,11 +933,26 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(warmBashRewritesPath, prepared.warmBashRewrites.map(toDuckDbWarmBashRewriteRow)),
     writeJsonFile(warmBashSummariesPath, prepared.warmBashSummaries.map(toDuckDbWarmBashSummaryRow)),
     writeJsonFile(agentReviewsPath, prepared.agentReviews.map(toDuckDbAgentReviewRow)),
+    writeJsonFile(sessionReviewsV2Path, prepared.sessionReviewsV2.map(toDuckDbSessionReviewV2Row)),
+    writeJsonFile(reviewCriteriaV2Path, prepared.sessionReviewsV2.flatMap((review) => review.criteria.map((criterion) => ({
+      review_id: review.reviewId, session_id: review.sessionId, criterion_id: criterion.criterionId,
+      importance: criterion.importance, origin: criterion.origin, activity: criterion.activity,
+      surfaces: criterion.surfaces, evidence_modes: criterion.evidenceModes, status: criterion.status, reason: criterion.reason,
+    })))),
+    writeJsonFile(reviewFindingsV2Path, prepared.sessionReviewsV2.flatMap((review) => review.findings.map((finding) => ({
+      review_id: review.reviewId, session_id: review.sessionId, finding_id: finding.findingId,
+      severity: finding.severity, category: finding.category, criterion_id: finding.criterionId ?? null, ledger_effect: finding.ledgerEffect,
+    })))),
+    writeJsonFile(reviewReviewersV2Path, prepared.sessionReviewsV2.flatMap((review) => review.reviewers.map((reviewer) => ({
+      review_id: review.reviewId, session_id: review.sessionId, role: reviewer.role, reviewer_id: reviewer.reviewerId,
+      requested_bucket: reviewer.requestedBucket, effective_bucket: reviewer.bucket, bucket_downgraded: reviewer.bucketDowngraded,
+      model_id: reviewer.modelId, provider: reviewer.provider, family: reviewer.family, thinking_level: reviewer.thinkingLevel,
+    })))),
     writeJsonFile(turnThroughputPath, prepared.turnThroughput.map(toDuckDbTurnThroughputRow)),
     writeJsonFile(retryTimingPath, prepared.retryTiming.map(toDuckDbRetryTimingRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, turnThroughputPath, retryTimingPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, sessionReviewsV2Path, reviewCriteriaV2Path, reviewFindingsV2Path, reviewReviewersV2Path, turnThroughputPath, retryTimingPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -1006,7 +1095,9 @@ CREATE TABLE runs (
   last_turn_reasoning_tokens BIGINT,
   treatment_change_kinds VARCHAR[],
   critical_path_duration_ms BIGINT,
-  skill_pruning_prepass_duration_ms BIGINT
+  skill_pruning_prepass_duration_ms BIGINT,
+  session_id VARCHAR,
+  identity_fallback BOOLEAN
 );
 `.trim();
 }
@@ -1245,6 +1336,9 @@ CREATE TABLE warm_bash_summaries (
 function agentReviewTableSchema(): string {
   return `
 CREATE TABLE agent_reviews (
+  cohort VARCHAR,
+  session_id VARCHAR,
+  identity_fallback BOOLEAN,
   run_id VARCHAR,
   session_path_hash VARCHAR,
   task_group_id VARCHAR,
@@ -1260,6 +1354,30 @@ CREATE TABLE agent_reviews (
   user_satisfaction DOUBLE
 );
 `.trim();
+}
+
+function sessionReviewV2TableSchema(): string {
+  return `
+CREATE TABLE session_reviews_v2 (
+  review_id VARCHAR, session_id VARCHAR, identity_fallback BOOLEAN, reviewed_at TIMESTAMP, started_day DATE,
+  rubric_version VARCHAR, index_version VARCHAR, join_key VARCHAR, run_ids VARCHAR[], model_families VARCHAR[],
+  delivered_overall VARCHAR, controllable_overall VARCHAR, quality_index_v1 DOUBLE,
+  criterion_coverage DOUBLE, external_blocker_rate DOUBLE, confidence VARCHAR,
+  requirement_discipline VARCHAR, verification_discipline VARCHAR, scope_control VARCHAR, recovery VARCHAR, final_claim_accuracy VARCHAR,
+  evidence_requirements VARCHAR, evidence_artifacts VARCHAR, evidence_execution VARCHAR, evidence_human VARCHAR,
+  evidence_limitation_count INTEGER, finding_count INTEGER, material_disagreement BOOLEAN, adjudicated BOOLEAN,
+  disputed_field_count INTEGER, diversity_achieved BOOLEAN, blinding_applied BOOLEAN
+);
+`.trim();
+}
+function reviewCriteriaV2TableSchema(): string {
+  return 'CREATE TABLE review_criteria_v2 (review_id VARCHAR, session_id VARCHAR, criterion_id VARCHAR, importance VARCHAR, origin VARCHAR, activity VARCHAR, surfaces VARCHAR[], evidence_modes VARCHAR[], status VARCHAR, reason VARCHAR);';
+}
+function reviewFindingsV2TableSchema(): string {
+  return 'CREATE TABLE review_findings_v2 (review_id VARCHAR, session_id VARCHAR, finding_id VARCHAR, severity VARCHAR, category VARCHAR, criterion_id VARCHAR, ledger_effect VARCHAR);';
+}
+function reviewReviewersV2TableSchema(): string {
+  return 'CREATE TABLE review_reviewers_v2 (review_id VARCHAR, session_id VARCHAR, role VARCHAR, reviewer_id VARCHAR, requested_bucket VARCHAR, effective_bucket VARCHAR, bucket_downgraded BOOLEAN, model_id VARCHAR, provider VARCHAR, family VARCHAR, thinking_level VARCHAR);';
 }
 
 function turnThroughputTableSchema(): string {
@@ -1408,6 +1526,10 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'warm_bash_rewrites', warmBashRewritesTableSchema(), stagingPaths.warmBashRewritesPath);
     await populateTableFromJson(connection, 'warm_bash_summaries', warmBashSummariesTableSchema(), stagingPaths.warmBashSummariesPath);
     await populateTableFromJson(connection, 'agent_reviews', agentReviewTableSchema(), stagingPaths.agentReviewsPath);
+    await populateTableFromJson(connection, 'session_reviews_v2', sessionReviewV2TableSchema(), stagingPaths.sessionReviewsV2Path);
+    await populateTableFromJson(connection, 'review_criteria_v2', reviewCriteriaV2TableSchema(), stagingPaths.reviewCriteriaV2Path);
+    await populateTableFromJson(connection, 'review_findings_v2', reviewFindingsV2TableSchema(), stagingPaths.reviewFindingsV2Path);
+    await populateTableFromJson(connection, 'review_reviewers_v2', reviewReviewersV2TableSchema(), stagingPaths.reviewReviewersV2Path);
     await populateTableFromJson(connection, 'turn_throughput', turnThroughputTableSchema(), stagingPaths.turnThroughputPath);
     await populateTableFromJson(connection, 'retry_timing', retryTimingTableSchema(), stagingPaths.retryTimingPath);
     await createDerivedViews(connection);

@@ -170,18 +170,18 @@ test('validateSiteDataBundleNumericFields rejects invalid bias-aware leaderboard
   );
 });
 
-test('leaderboard validator enforces schema 5 and semantic constraints', async () => {
+test('leaderboard validator enforces schema 6 and semantic constraints', async () => {
   const bundle = buildSiteDataBundle(prepareSourceAnalytics(await loadFixture()));
-  assert.equal(bundle.manifest.schemaVersion, 5);
-  assert.equal(bundle.modelLeaderboard.schemaVersion, 5);
+  assert.equal(bundle.manifest.schemaVersion, 6);
+  assert.equal(bundle.modelLeaderboard.schemaVersion, 6);
 
   const stale = deepClone(bundle) as any;
   stale.manifest.schemaVersion = 2;
   delete stale.modelLeaderboard.rows[0].attributableTaskCount;
   assert.throws(
     () => validateSiteDataBundle(stale),
-    /manifest\.json schemaVersion mismatch: expected 5, got 2\. Regenerate site data/,
-    'schema mismatch must be reported before v5 field errors',
+    /manifest\.json schemaVersion mismatch: expected 6, got 2\. Regenerate site data/,
+    'schema mismatch must be reported before v6 field errors',
   );
 
   const threshold = deepClone(bundle);

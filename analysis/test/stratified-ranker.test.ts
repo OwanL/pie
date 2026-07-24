@@ -39,6 +39,8 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string }): Prepar
   const defaults: PreparedRunRow = {
     runId: '',
     taskGroupId: 'tg-default',
+    sessionId: 'session-default',
+    identityFallback: false,
     sessionPathHash: 'hash000000000000',
     status: 'scored',
     scored: true,

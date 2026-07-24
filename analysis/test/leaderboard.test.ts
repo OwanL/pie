@@ -6,21 +6,15 @@ import { createModelLeaderboard, createModelLeaderboardFromRuns } from '../scrip
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
-test('family leaderboard ranks every observed non-unknown family with regularized source channels', async () => {
+test('V2 model leaderboard is outcome-only and leaves legacy/runtime-only families unranked', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
-  assert.equal(leaderboard.schemaVersion, 5);
-  assert.deepEqual(leaderboard.sourceWeights, { user: 0.6, agent: 0.25, process: 0.15 });
+  assert.equal(leaderboard.schemaVersion, 6);
+  assert.deepEqual(leaderboard.sourceWeights, { user: 0, agent: 1, process: 0 });
   assert.deepEqual(leaderboard.shrinkage, { user: 4, agent: 8, process: 20 });
-  const ranked = leaderboard.rows.filter((row) => row.modelId !== '(unknown)');
-  assert.ok(ranked.length > 0);
-  assert.deepEqual(ranked.map((row) => row.rank), ranked.map((_, index) => index + 1));
-  for (const row of ranked) {
-    assert.equal(row.thinkingLevel, '(all)');
-    assert.ok(row.compositeScore !== null && row.compositeScore >= 0 && row.compositeScore <= 1);
-    assert.ok(row.scoreInterval80 && row.scoreInterval80.lower <= row.compositeScore && row.scoreInterval80.upper >= row.compositeScore);
-    assert.ok(['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(row.evidenceTier));
-  }
+  assert.ok(leaderboard.rows.some((row) => row.modelId !== '(unknown)'));
+  assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
+  assert.match(leaderboard.notes.join(' '), /outcome-only/i);
 });
 
 test('run-only compatibility path collapses thinking levels to one family row', async () => {
@@ -38,6 +32,8 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
   return {
     runId: overrides.runId,
     taskGroupId: overrides.taskGroupId ?? `${overrides.runId}-task`,
+    sessionId: overrides.sessionId ?? `session-${overrides.runId}`,
+    identityFallback: overrides.identityFallback ?? false,
     sessionPathHash: overrides.sessionPathHash ?? `hash-${overrides.runId}`,
     status: overrides.status ?? 'scored',
     scored: overrides.scored ?? true,
@@ -201,19 +197,11 @@ test('subagent context fields: subagentRunCount, usageRate, and avgTasks are pop
   assert.equal(row.avgSubagentTasksPerRun, 4);
 });
 
-test('stronger equal-evidence synthetic model ranks above weaker', () => {
-  const strong: PreparedRunRow[] = [];
-  const weak: PreparedRunRow[] = [];
-  for (let i = 0; i < 6; i++) {
-    strong.push(makeRun({ runId: `strong-${i}`, modelId: 'strong-model', satisfaction: 5, resolution: 'resolved' }));
-    weak.push(makeRun({ runId: `weak-${i}`, modelId: 'weak-model', satisfaction: 1, resolution: 'unresolved' }));
-  }
-  const leaderboard = createModelLeaderboardFromRuns([...strong, ...weak]);
-  const strongRow = leaderboard.rows.find((row) => row.modelId === 'strong-model')!;
-  const weakRow = leaderboard.rows.find((row) => row.modelId === 'weak-model')!;
-  assert.ok(strongRow.rank !== null && weakRow.rank !== null);
-  assert.ok(strongRow.rank! < weakRow.rank!, `strong (${strongRow.rank}) should rank above weak (${weakRow.rank})`);
-  assert.ok(strongRow.compositeScore! > weakRow.compositeScore!, 'strong composite should exceed weak');
+test('legacy user outcome differences do not create a V2 rank', () => {
+  const strong = makeRun({ runId: 'strong', modelId: 'strong-model', satisfaction: 5, resolution: 'resolved' });
+  const weak = makeRun({ runId: 'weak', modelId: 'weak-model', satisfaction: 1, resolution: 'unresolved' });
+  const leaderboard = createModelLeaderboardFromRuns([strong, weak]);
+  assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
 });
 
 test('fileChurn diagnostic direction: value is re-edit rate, shrunk inverts for display', () => {
@@ -227,29 +215,11 @@ test('fileChurn diagnostic direction: value is re-edit rate, shrunk inverts for 
   assert.equal(dim.shrunk, 0.1, 'fileChurn shrunk inverts (1 - value) so higher churn = lower score');
 });
 
-test('EB shrinkage: sparse extreme shrinks toward pool, dense stays closer to observed', () => {
-  // A pool model with low satisfaction creates a prior below the extreme, so EB shrinkage
-  // pulls sparse evidence more strongly toward the pool than dense evidence.
-  const pool: PreparedRunRow[] = [];
-  for (let i = 0; i < 10; i++) {
-    pool.push(makeRun({ runId: `pool-${i}`, modelId: 'pool-model', satisfaction: 1, resolution: 'unresolved' }));
-  }
-  const sparse: PreparedRunRow[] = [
-    makeRun({ runId: 'sparse-0', modelId: 'sparse-model', satisfaction: 5, resolution: 'resolved' }),
-  ];
-  const dense: PreparedRunRow[] = [];
-  for (let i = 0; i < 8; i++) {
-    dense.push(makeRun({ runId: `dense-${i}`, modelId: 'dense-model', satisfaction: 5, resolution: 'resolved' }));
-  }
-  const leaderboard = createModelLeaderboardFromRuns([...pool, ...sparse, ...dense]);
-  const sparseRow = leaderboard.rows.find((row) => row.modelId === 'sparse-model')!;
-  const denseRow = leaderboard.rows.find((row) => row.modelId === 'dense-model')!;
-  // Both have the same observed mean (satisfaction=5), but the sparse model has lower
-  // evidenceWeight (n/(n+K) is smaller), so its estimate shrinks more toward the pool.
-  assert.ok(sparseRow.evidenceWeight! < denseRow.evidenceWeight!, 'sparse model has lower evidence weight');
-  // The dense model's user channel score should be closer to the observed extreme (higher)
-  // than the sparse model's, which shrinks more toward the pooled prior.
-  assert.ok(denseRow.userChannelScore! > sparseRow.userChannelScore!, 'dense model stays closer to observed extreme');
+test('runtime process differences do not create a V2 rank', () => {
+  const reliable = makeRun({ runId: 'reliable', modelId: 'reliable-model', toolCallCount: 10, toolFailureCount: 0, verificationTotalCount: 2, verificationState: 'passing' });
+  const unreliable = makeRun({ runId: 'unreliable', modelId: 'unreliable-model', toolCallCount: 10, toolFailureCount: 10, verificationTotalCount: 2, verificationState: 'failing' });
+  const leaderboard = createModelLeaderboardFromRuns([reliable, unreliable]);
+  assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
 });
 
 test('open runs excluded from leaderboard run counts', () => {

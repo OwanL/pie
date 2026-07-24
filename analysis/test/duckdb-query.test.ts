@@ -30,20 +30,25 @@ after(async () => {
 
 test('DuckDB build and named queries work against the fixture', async () => {
   const modelQualityRows = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
+  const sessionReviewRows = await runNamedDuckDbQuery(sharedDbPath, 'session_review_quality');
   const toolUsageRows = await runNamedDuckDbQuery(sharedDbPath, 'tool_usage');
   const toolFailureRows = await runNamedDuckDbQuery(sharedDbPath, 'tool_failures');
   const timelineRows = await runNamedDuckDbQuery(sharedDbPath, 'timeline');
 
   assert.ok(modelQualityRows.length >= 3);
+  assert.ok(Array.isArray(sessionReviewRows));
   assert.ok(toolUsageRows.some((row) => row['tool_name'] === 'bash'));
   assert.ok(Array.isArray(toolFailureRows));
   assert.ok(timelineRows.some((row) => row['bucket_start'] === '2026-05-10'));
 });
 
-test('model quality and leaderboard SQL use user-primary outcome attribution', async () => {
+test('model quality and leaderboard SQL label legacy outcomes and expose V2 joins', async () => {
   const rows = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
   assert.ok(rows.every((row) => (
-    'agent_outcome_count' in row
+    'legacy_v1_agent_outcome_count' in row
+      && 'legacy_user_outcome_count' in row
+      && 'v2_review_count' in row
+      && 'mean_quality_index_v1' in row
       && 'mixed_model_excluded_outcome_count' in row
       && 'mixed_treatment_excluded_outcome_count' in row
   )));
@@ -63,8 +68,9 @@ test('model quality and leaderboard SQL use user-primary outcome attribution', a
   )).length;
   const sum = (field: string): number => rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
 
-  assert.equal(sum('scored_run_count'), expectedStableUser);
-  assert.equal(sum('agent_outcome_count'), expectedStableAgent);
+  assert.equal(sum('legacy_user_outcome_count'), expectedStableUser);
+  assert.equal(sum('legacy_v1_agent_outcome_count'), expectedStableAgent);
+  assert.equal(sum('v2_review_count'), 0);
   assert.equal(sum('mixed_model_excluded_outcome_count'), expectedMixed);
   assert.equal(sum('mixed_treatment_excluded_outcome_count'), expectedMixedTreatment);
 
@@ -76,7 +82,8 @@ test('model quality and leaderboard SQL use user-primary outcome attribution', a
   );
   assert.equal(leaderboardSum('scored_run_count'), expectedStableUser);
   assert.equal(leaderboardSum('user_outcome_count'), expectedStableUser);
-  assert.equal(leaderboardSum('agent_outcome_count'), expectedStableAgent);
+  assert.equal(leaderboardSum('legacy_v1_agent_outcome_count'), expectedStableAgent);
+  assert.equal(leaderboardSum('v2_review_count'), 0);
   assert.equal(leaderboardSum('mixed_model_excluded_count'), expectedMixed);
   assert.equal(leaderboardSum('mixed_treatment_excluded_count'), expectedMixedTreatment);
 });

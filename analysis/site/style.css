@@ -583,6 +583,24 @@ button:hover {
   }
 }
 
+.review-diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.review-diagnostic-grid article {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.review-diagnostic-grid h4 { margin: 0 0 8px; }
+.review-diagnostic-grid p,
+.review-diagnostic-grid ul { margin: 5px 0; color: var(--text-muted); }
+.review-diagnostic-grid ul { padding-left: 18px; }
+
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 18px, 1480px);

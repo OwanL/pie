@@ -234,6 +234,25 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     }
   }
 
+  const reviewData = bundle.sessionReviewAnalytics;
+  assertCountField(reviewData.summary.reviewCount, 'session-review-analytics.json summary.reviewCount');
+  assertCountField(reviewData.summary.stableIdentityCount, 'session-review-analytics.json summary.stableIdentityCount');
+  assertCountField(reviewData.summary.identityFallbackCount, 'session-review-analytics.json summary.identityFallbackCount');
+  assertNullableUnitInterval(reviewData.summary.criterionCoverage, 'session-review-analytics.json summary.criterionCoverage');
+  assertNullableUnitInterval(reviewData.summary.externalBlockerRate, 'session-review-analytics.json summary.externalBlockerRate');
+  if (reviewData.summary.meanQualityIndexV1 !== null && (!isFiniteNumber(reviewData.summary.meanQualityIndexV1) || reviewData.summary.meanQualityIndexV1 < 0 || reviewData.summary.meanQualityIndexV1 > 100)) {
+    throw new Error('session-review-analytics.json summary.meanQualityIndexV1 must be null or a finite number in [0, 100].');
+  }
+  for (const [index, row] of reviewData.rows.entries()) {
+    const prefix = `session-review-analytics.json row ${index}`;
+    assertNullableUnitInterval(row.criterionCoverage, `${prefix}.criterionCoverage`);
+    assertNullableUnitInterval(row.externalBlockerRate, `${prefix}.externalBlockerRate`);
+    const qualityIndex = row.attainment.qualityIndexV1;
+    if (qualityIndex !== null && (!isFiniteNumber(qualityIndex) || qualityIndex < 0 || qualityIndex > 100)) {
+      throw new Error(`${prefix}.attainment.qualityIndexV1 must be null or a finite number in [0, 100].`);
+    }
+  }
+
   for (const [index, row] of bundle.modelLeaderboard.rows.entries()) {
     const prefix = `model-leaderboard.json row ${index}`;
     assertCountField(row.runCount, `${prefix}.runCount`);
@@ -243,6 +262,10 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
     assertNonNegativeInteger(row.attributableTaskCount, `${prefix}.attributableTaskCount`);
     assertFiniteNonNegative(row.userOutcomeCount, `${prefix}.userOutcomeCount`);
     assertFiniteNonNegative(row.agentOutcomeCount, `${prefix}.agentOutcomeCount`);
+    assertCountField(row.legacyAgentReviewCount, `${prefix}.legacyAgentReviewCount`);
+    if (row.meanQualityIndexV1 !== null && (!isFiniteNumber(row.meanQualityIndexV1) || row.meanQualityIndexV1 < 0 || row.meanQualityIndexV1 > 100)) {
+      throw new Error(`${prefix}.meanQualityIndexV1 must be null or a finite number in [0, 100].`);
+    }
     assertCountField(row.userEvidenceCount, `${prefix}.userEvidenceCount`);
     assertFiniteNonNegative(row.userEvidenceMass, `${prefix}.userEvidenceMass`);
     assertCountField(row.agentEvidenceCount, `${prefix}.agentEvidenceCount`);
@@ -305,8 +328,11 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
   for (const [source, weight] of Object.entries(bundle.modelLeaderboard.sourceWeights)) {
     assertUnitInterval(weight, `model-leaderboard.json sourceWeights.${source}`);
   }
-  if (Math.abs(Object.values(bundle.modelLeaderboard.sourceWeights).reduce((sum, value) => sum + value, 0) - 1) > 1e-9) {
+  if (Math.abs(Object.values(bundle.modelLeaderboard.sourceWeights).reduce<number>((sum, value) => sum + value, 0) - 1) > 1e-9) {
     throw new Error('model-leaderboard.json sourceWeights must sum to 1.');
+  }
+  if (bundle.modelLeaderboard.sourceWeights.user !== 0 || bundle.modelLeaderboard.sourceWeights.agent !== 1 || bundle.modelLeaderboard.sourceWeights.process !== 0) {
+    throw new Error('model-leaderboard.json V2 ranking must be outcome-only (user=0, agent=1, process=0).');
   }
   if (weights.fileChurn !== 0 || weights.toolReliability !== 0 || weights.verificationPassRate !== 0 || weights.tokenEfficiency !== 0) {
     throw new Error('model-leaderboard.json process weights must be zero.');

@@ -57,33 +57,34 @@ test('dashboard leaderboardRows is provider-agnostic: collapses provider-specifi
   for (let index = 0; index < 10; index += 1) addScoredRun(`gpt-${index}`, 'gpt-5.2');
 
   const prepared = prepareSourceAnalytics(fixture);
-  const { composite } = leaderboardRows(prepared.runs);
+  const dashboard = leaderboardRows(prepared.runs);
 
-  const glmRow = composite.find((row) => row.modelId === 'glm-5.2');
+  const glmRow = dashboard.rows.find((row) => row.modelId === 'glm-5.2');
   assert.ok(glmRow, 'GLM 5.2 should appear as a single provider-agnostic row');
   assert.equal(glmRow!.runCount, 10, 'both providers collapsed into one row');
   assert.equal(glmRow!.scoredRunCount, 10);
   // The collapse is surfaced so provider differences stay investigable.
+  const glmDisplayed = dashboard.tableRows.find((row) => row.modelId === 'glm-5.2')!;
   assert.equal(
-    glmRow!.providersLabel,
+    glmDisplayed.providersLabel,
     '2 providers · glm-5.2:cloud, umans-glm-5.2',
     'providersLabel lists the collapsed provider-specific ids',
   );
 
   // Distinct family stays a separate row (no over-collapsing).
-  const gptRow = composite.find((row) => row.modelId === 'gpt-5.2');
+  const gptRow = dashboard.rows.find((row) => row.modelId === 'gpt-5.2');
   assert.ok(gptRow, 'GPT-5.2 should appear as its own row');
   assert.equal(gptRow!.runCount, 10);
   // Single provider whose id equals the family → nothing to surface.
-  assert.equal(gptRow!.providersLabel, '');
+  assert.equal(dashboard.tableRows.find((row) => row.modelId === 'gpt-5.2')!.providersLabel, '');
 
   // No provider-specific id leaks as its own row.
   assert.ok(
-    !composite.some((row) => row.modelId === 'umans-glm-5.2'),
+    !dashboard.rows.some((row) => row.modelId === 'umans-glm-5.2'),
     'umans-glm-5.2 must not appear as its own row',
   );
   assert.ok(
-    !composite.some((row) => row.modelId === 'glm-5.2:cloud'),
+    !dashboard.rows.some((row) => row.modelId === 'glm-5.2:cloud'),
     'glm-5.2:cloud must not appear as its own row',
   );
 });
@@ -173,17 +174,17 @@ test('dashboard leaderboardRows has exact generated parity with missing telemetr
   assert.equal(missing.dimensions.verificationPassRate.n, 0);
   assert.equal(missing.medianCostUsd, null, 'explicitly unknown totals must not fall back to partial parent cost');
 
-  const displayed = browser.composite.find((row) => row.modelId === missing.modelId)!;
+  const displayed = browser.tableRows.find((row) => row.modelId === missing.modelId)!;
   assert.equal(displayed.compositeScore, missing.compositeScore);
   assert.equal(displayed.mixedModelExcludedCount, missing.mixedModelExcludedCount);
-  assert.equal(displayed.outcomeSourceLabel, `${missing.userOutcomeCount} ranked user / ${missing.agentOutcomeCount} supplemental agent`);
+  assert.equal(displayed.outcomeSourceLabel, `${missing.userOutcomeCount} legacy user / ${missing.agentOutcomeCount} V2 reviews / ${missing.legacyAgentReviewCount} legacy V1 agent`);
   assert.equal(
-    browser.composite.find((row) => row.modelId === observed.modelId)!.outcomeSourceLabel,
-    '10 ranked user / 0 supplemental agent',
+    browser.tableRows.find((row) => row.modelId === observed.modelId)!.outcomeSourceLabel,
+    '10 legacy user / 0 V2 reviews / 0 legacy V1 agent',
   );
 });
 
-test('dashboard ranks every observed family without hard gates and shows intervals', async () => {
+test('dashboard leaves families without V2 review evidence visible but unranked', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const base = prepared.runs.find((run) => run.outcomeSource === 'user' && !run.mixedModelConfig && !run.mixedTreatmentConfig)!;
   const runs: typeof prepared.runs = [];
@@ -239,11 +240,11 @@ test('dashboard ranks every observed family without hard gates and shows interva
   addTasks('evidence-gated-model', 4, 5);
 
   const dashboard = leaderboardRows(runs);
-  assert.equal(dashboard.composite.length, 4, 'every observed family is ranked without hard gates');
+  assert.equal(dashboard.composite.length, 0, 'legacy user outcomes cannot create a V2 rank');
   assert.equal(dashboard.tableRows.length, 4);
-  assert.ok(dashboard.tableRows.every((row) => row.rank !== null));
-  assert.ok(dashboard.tableRows.every((row) => ['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(row.eligibilityLabel)));
-  assert.ok(dashboard.tableRows.every((row) => row.intervalLabel !== '—' && row.rankRangeLabel !== '—'));
+  assert.ok(dashboard.tableRows.every((row) => row.rank === null));
+  assert.ok(dashboard.tableRows.every((row) => row.eligibilityLabel === 'telemetry-only'));
+  assert.ok(dashboard.tableRows.every((row) => row.intervalLabel === '—' && row.rankRangeLabel === '—'));
 });
 
 test('dashboard model-quality mappings use stable-model stable-treatment user outcomes only', () => {
@@ -286,9 +287,9 @@ test('default filters preserve the all-run base cohort', async () => {
 test('coverageSummary reports filtered-cohort completion and telemetry coverage', () => {
   const runs = [
     { status: 'open', scored: false, satisfaction: null, totalEstimatedCostUsd: 1, estimatedCostUsd: 1, tokenReportedTurnCount: 1, mixedModelConfig: false },
-    { status: 'scored', scored: true, satisfaction: 5, totalEstimatedCostUsd: 2, estimatedCostUsd: 99, tokenReportedTurnCount: 1, mixedModelConfig: false },
+    { status: 'scored', scored: true, satisfaction: 5, outcomeSource: 'user', totalEstimatedCostUsd: 2, estimatedCostUsd: 99, tokenReportedTurnCount: 1, mixedModelConfig: false },
     { status: 'closed', scored: false, satisfaction: null, totalEstimatedCostUsd: null, estimatedCostUsd: 3, tokenReportedTurnCount: 0, mixedModelConfig: true },
-    { status: 'scored', scored: true, satisfaction: 4, totalEstimatedCostUsd: Number.NaN, estimatedCostUsd: null, tokenReportedTurnCount: 2, mixedModelConfig: false },
+    { status: 'scored', scored: true, satisfaction: 4, outcomeSource: 'user', totalEstimatedCostUsd: Number.NaN, estimatedCostUsd: null, tokenReportedTurnCount: 2, mixedModelConfig: false },
   ] as any[];
 
   assert.deepEqual(coverageSummary(runs), {

@@ -18,7 +18,9 @@ import { listStorageDirCandidates } from './source-auto.ts';
 import {
   coerceHistoricalSessionSummaries,
   discoverHistoricalSessions,
+  readMixedSessionReviews,
 } from './transcript-source.ts';
+import { coerceSessionReviewV2 } from './review-analytics.ts';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
@@ -30,6 +32,7 @@ import {
   type FunctionalSettingsSnapshot,
   type InputKind,
   type LoadedSourceAnalytics,
+  type LegacySessionReviewSource,
   type OutcomeHistoryLogEntry,
   type PruningMode,
   type PruningSourceDecision,
@@ -42,6 +45,7 @@ import {
   type RetryTimingSample,
   type RunSnapshot,
   type SessionAnalyticsFactors,
+  type SessionReviewV2Source,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
   type ToolFailureKind,
@@ -930,6 +934,7 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
 
   return {
     sessionPath: value.sessionPath,
+    ...(typeof value.sessionId === 'string' && value.sessionId.trim() ? { sessionId: value.sessionId.trim() } : {}),
     runId: value.runId,
     taskGroupId: value.taskGroupId,
     status,
@@ -1048,6 +1053,38 @@ function coerceOutcomeArray(value: unknown): OutcomeHistoryLogEntry[] {
   });
 }
 
+function coerceSessionReviewsV2(value: unknown): SessionReviewV2Source[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const latest = new Map<string, SessionReviewV2Source>();
+  for (const entry of value) {
+    const review = coerceSessionReviewV2(entry);
+    if (!review) continue;
+    const previous = latest.get(review.sessionId);
+    if (!previous || review.reviewedAt > previous.reviewedAt
+      || (review.reviewedAt === previous.reviewedAt && review.reviewId > previous.reviewId)) latest.set(review.sessionId, review);
+  }
+  return latest.size ? [...latest.values()] : undefined;
+}
+
+function coerceLegacySessionReviews(value: unknown): LegacySessionReviewSource[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const reviews: LegacySessionReviewSource[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || entry.selfClose === true || entry.cohort !== 'legacy_v1' || typeof entry.sessionId !== 'string'
+      || typeof entry.normalizedSessionPath !== 'string' || typeof entry.identityFallback !== 'boolean'
+      || typeof entry.rating !== 'number' || typeof entry.done !== 'boolean'
+      || !['fully', 'partial', 'setback'].includes(String(entry.completion)) || typeof entry.evaluatedAt !== 'string') continue;
+    reviews.push({
+      cohort: 'legacy_v1', sessionId: entry.sessionId, normalizedSessionPath: entry.normalizedSessionPath,
+      identityFallback: entry.identityFallback, rating: entry.rating, done: entry.done,
+      completion: entry.completion as LegacySessionReviewSource['completion'], evaluatedAt: entry.evaluatedAt,
+      reviewerBuckets: Array.isArray(entry.reviewerBuckets) ? entry.reviewerBuckets.filter((item): item is string => typeof item === 'string') : [],
+      reviewerCount: typeof entry.reviewerCount === 'number' ? Math.max(0, Math.trunc(entry.reviewerCount)) : 0,
+    });
+  }
+  return reviews.length ? reviews : undefined;
+}
+
 function coerceWarmBashRewrites(value: unknown): WarmBashRewriteSourceEvent[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -1138,6 +1175,8 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     pruningEvents: coercePruningEvents(value.pruningEvents),
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
     agentReviews: coerceAgentReviews(value.agentReviews),
+    sessionReviewsV2: coerceSessionReviewsV2(value.sessionReviewsV2),
+    legacySessionReviews: coerceLegacySessionReviews(value.legacySessionReviews),
     historicalSessions: coerceHistoricalSessionSummaries(value.historicalSessions),
     warmBashRewrites: coerceWarmBashRewrites(value.warmBashRewrites),
     warmBashSummaries: coerceWarmBashSummaries(value.warmBashSummaries),
@@ -1588,13 +1627,29 @@ async function configuredSessionsDir(selection: SourceSelection): Promise<string
   return undefined;
 }
 
+export function backfillLegacySessionReviewIds(
+  reviews: LegacySessionReviewSource[],
+  historicalSessions: NonNullable<SourceAnalyticsPayload['historicalSessions']>,
+): LegacySessionReviewSource[] {
+  const stableIdByPath = new Map(historicalSessions.map((summary) => [summary.normalizedSessionPath, summary.sessionId]));
+  return reviews.map((review) => {
+    if (!review.identityFallback) return review;
+    const sessionId = stableIdByPath.get(review.normalizedSessionPath);
+    return sessionId ? { ...review, sessionId, identityFallback: false } : review;
+  });
+}
+
 async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, selection: SourceSelection): Promise<void> {
+  const reviewSidecarPath = selection.reviewSidecarPath
+    ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl');
   source.historicalSessions = await discoverHistoricalSessions({
     legacySessionsDir: selection.legacySessionsDir ?? path.join(CONFIG_ROOT, 'sessions'),
     configuredSessionsDir: await configuredSessionsDir(selection),
-    reviewSidecarPath: selection.reviewSidecarPath
-      ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl'),
+    reviewSidecarPath,
   });
+  const mixed = await readMixedSessionReviews(reviewSidecarPath);
+  source.legacySessionReviews = backfillLegacySessionReviewIds(mixed.legacy, source.historicalSessions);
+  source.sessionReviewsV2 = mixed.productionV2;
 }
 
 export async function loadSourceAnalytics(selection: SourceSelection = {}): Promise<LoadedSourceAnalytics> {

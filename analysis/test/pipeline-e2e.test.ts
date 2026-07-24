@@ -872,15 +872,17 @@ test('synthetic: multi-model payload with known values produces expected calcula
   assert.equal(bashUsage!.failureCount, 7);
   assert.equal(bashUsage!.affectedRunCount, 6);
 
-  // Both models appear; sparse evidence is ranked without a minimum gate.
+  // Both models appear, but legacy user outcomes cannot create a V2 quality rank.
   const modelALeaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === 'model-a');
   const modelBLeaderboard = bundle.modelLeaderboard.rows.find((row) => row.modelId === 'model-b');
 
   assert.ok(modelALeaderboard, 'model-a should appear in leaderboard');
   assert.ok(modelBLeaderboard, 'model-b should appear in leaderboard');
-  assert.ok(modelALeaderboard!.rank !== null && modelBLeaderboard!.rank !== null, 'sparse families remain ranked');
-  assert.ok(modelALeaderboard!.compositeScore !== null && modelBLeaderboard!.compositeScore !== null);
-  assert.equal(modelALeaderboard!.evidenceTier, 'thin-outcome');
+  assert.equal(modelALeaderboard!.rank, null);
+  assert.equal(modelBLeaderboard!.rank, null);
+  assert.equal(modelALeaderboard!.compositeScore, null);
+  assert.equal(modelBLeaderboard!.compositeScore, null);
+  assert.equal(modelALeaderboard!.evidenceTier, 'telemetry-only');
 });
 
 // ============================================================================
@@ -954,7 +956,7 @@ test('edge: payload where every run has max satisfaction produces averageSatisfa
   assert.equal(bundle.overview.averageSatisfaction, 5);
 });
 
-test('edge: payload with single scored run produces valid ranked leaderboard', async () => {
+test('edge: payload with single legacy user-scored run remains unranked in V2 leaderboard', async () => {
   const run = createMinimalRunSnapshot({ 
     outcome: { resolution: 'resolved', satisfaction: 4 },
   });
@@ -965,12 +967,12 @@ test('edge: payload with single scored run produces valid ranked leaderboard', a
 
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
-  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, 1, 'single sparse family is regularized and ranked');
-  assert.equal(bundle.modelLeaderboard.rows[0]!.evidenceTier, 'thin-outcome');
-  assert.ok(bundle.modelLeaderboard.rows[0]!.scoreInterval80 !== null);
+  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, null);
+  assert.equal(bundle.modelLeaderboard.rows[0]!.evidenceTier, 'telemetry-only');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.scoreInterval80, null);
 });
 
-test('edge: payload with two scored runs (sparse evidence) produces ranked leaderboard', async () => {
+test('edge: payload with two legacy user-scored runs remains unranked in V2 leaderboard', async () => {
   const runs = [
     createMinimalRunSnapshot({ 
       modelId: 'test-model',
@@ -989,10 +991,10 @@ test('edge: payload with two scored runs (sparse evidence) produces ranked leade
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
   assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, 1, 'canonical retries collapse to the latest task observation');
-  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, 1, 'thin evidence is ranked rather than hard-excluded');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, null, 'legacy user evidence has zero V2 ranking weight');
 });
 
-test('edge: payload with sparse scored runs produces ranked leaderboard', async () => {
+test('edge: payload with sparse legacy scored runs stays visible but unranked', async () => {
   const satisfactionValues = [4, 5, 3];
   const runs = Array.from({ length: LEADERBOARD_MINIMUM_SCORED_RUNS }, (_, index) =>
     createMinimalRunSnapshot({
@@ -1008,6 +1010,6 @@ test('edge: payload with sparse scored runs produces ranked leaderboard', async 
   validateSiteDataBundle(bundle);
   assert.equal(bundle.modelLeaderboard.rows.length, 1);
   assert.equal(bundle.modelLeaderboard.rows[0]!.scoredRunCount, LEADERBOARD_MINIMUM_SCORED_RUNS);
-  assert.notEqual(bundle.modelLeaderboard.rows[0]!.rank, null, 'sparse scored runs are ranked without a minimum gate');
-  assert.notEqual(bundle.modelLeaderboard.rows[0]!.compositeScore, null, 'sparse scored runs produce a composite score');
+  assert.equal(bundle.modelLeaderboard.rows[0]!.rank, null);
+  assert.equal(bundle.modelLeaderboard.rows[0]!.compositeScore, null);
 });
