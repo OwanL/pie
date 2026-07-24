@@ -17,11 +17,42 @@ import type { TranscriptContextMenuHandler } from '../types';
 
 // ─── Input type ──────────────────────────────────────────────────────────────
 
+interface AskUserReviewMeta {
+  purpose: 'review_human_verification';
+  targetSessionId: string;
+  targetSessionPath: string;
+  criterionId: string;
+  domain: string;
+  expectedObservation: string;
+}
+
 interface AskUserInput {
   question: string;
   options: string[];
   allowCustom?: boolean;
   context?: string;
+  reviewMeta?: AskUserReviewMeta;
+}
+
+function parseAskUserReviewMeta(value: unknown): AskUserReviewMeta | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const meta = value as Record<string, unknown>;
+  if (
+    meta.purpose !== 'review_human_verification'
+    || typeof meta.targetSessionId !== 'string'
+    || typeof meta.targetSessionPath !== 'string'
+    || typeof meta.criterionId !== 'string'
+    || typeof meta.domain !== 'string'
+    || typeof meta.expectedObservation !== 'string'
+  ) return undefined;
+  return {
+    purpose: 'review_human_verification',
+    targetSessionId: meta.targetSessionId,
+    targetSessionPath: meta.targetSessionPath,
+    criterionId: meta.criterionId,
+    domain: meta.domain,
+    expectedObservation: meta.expectedObservation,
+  };
 }
 
 function parseAskUserInput(input: unknown): AskUserInput | null {
@@ -35,6 +66,7 @@ function parseAskUserInput(input: unknown): AskUserInput | null {
     options: obj.options as string[],
     allowCustom: typeof obj.allowCustom === 'boolean' ? obj.allowCustom : undefined,
     context: typeof obj.context === 'string' ? obj.context : undefined,
+    reviewMeta: parseAskUserReviewMeta(obj.reviewMeta),
   };
 }
 
@@ -100,6 +132,9 @@ function AskUserCompleted({ toolCall, parsedInput, parsedResult, onContextMenu }
         <span class="ask-user-icon ask-user-icon-completed" aria-hidden="true"><QuestionIcon /></span>
         <div class="ask-user-question ask-user-question-completed ask-prose" dangerouslySetInnerHTML={{ __html: questionHtml }} />
       </div>
+      {parsedInput.reviewMeta && (
+        <div class="ask-user-review-target">Review · {parsedInput.reviewMeta.targetSessionPath}</div>
+      )}
       {parsedInput.context && (
         <div class="ask-user-context ask-prose" dangerouslySetInnerHTML={{ __html: contextHtml }} />
       )}
@@ -169,11 +204,13 @@ function renderAskUserTool({
   // Source label for the prompt eyebrow. Subagent questions show the agent
   // name (and nesting depth when > 1, i.e. a subagent-of-subagent) so the user
   // can tell who is asking and how deep. Main-agent questions get no label.
-  const sourceLabel = subagentCtx
-    ? subagentCtx.depth > 1
-      ? `${subagentCtx.agent} · depth ${subagentCtx.depth}`
-      : subagentCtx.agent
-    : undefined;
+  const sourceLabel = parsedInput?.reviewMeta
+    ? `Review · ${parsedInput.reviewMeta.targetSessionPath}`
+    : subagentCtx
+      ? subagentCtx.depth > 1
+        ? `${subagentCtx.agent} · depth ${subagentCtx.depth}`
+        : subagentCtx.agent
+      : undefined;
 
   // Running ask_user: show interactive prompt if we have a matching request
   if (toolCall.status === 'running') {
@@ -204,6 +241,7 @@ function renderAskUserTool({
             <span class="ask-user-icon" aria-hidden="true"><QuestionIcon /></span>
             <div class="ask-user-question ask-prose" dangerouslySetInnerHTML={{ __html: questionHtml }} />
           </div>
+          {parsedInput.reviewMeta && <div class="ask-user-review-target">Review · {parsedInput.reviewMeta.targetSessionPath}</div>}
           {parsedInput.context && <div class="ask-user-context ask-prose" dangerouslySetInnerHTML={{ __html: contextHtml }} />}
           <div class="ask-user-pending">Loading response options…</div>
         </div>

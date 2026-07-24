@@ -13,9 +13,17 @@ import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload } from '../.
 const pendingRequest: ExtensionUIRequestPayload = {
   id: 'req-1',
   sessionPath: '/session/a',
-  method: 'confirm',
-  title: 'Proceed?',
-  message: 'Allow the extension to continue?',
+  method: 'select',
+  title: 'Can you verify this?',
+  options: ['Yes', 'No'],
+  reviewMeta: {
+    purpose: 'review_human_verification',
+    targetSessionId: 'reviewed-id',
+    targetSessionPath: '/session/reviewed.jsonl',
+    criterionId: 'criterion-1',
+    domain: 'accessibility',
+    expectedObservation: 'Keyboard interaction works.',
+  },
 };
 
 /** State with a single pending extension UI request for `/session/a`. */

@@ -1,86 +1,207 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
-import type { SessionReview, SessionSummary } from '../shared/protocol';
+import {
+  REVIEW_CLOSURE_ACTIONS_FILE,
+  type ClosureAction,
+  type SessionReview,
+  type SessionSummary,
+} from '../shared/protocol';
 
 /**
- * Session-review sidecar persistence.
+ * Mixed V1/V2 session-review sidecar reader.
  *
- * The SDK owns the session JSONL files and exposes no append path to pie, so
- * agent session reviews (`done` / `rating` / `completion` / `reason`) live in a
- * separate append-only JSONL sidecar: `<PIE_REVIEWS_DIR>/reviews.jsonl`. One
- * JSON object per line; the latest record per `sessionPath` wins.
- *
- * Single-writer / single-reader contract:
- *  - The `session_review` tool (the sole writer) appends a record per review.
- *  - The backend (the sole reader) reads here and merges the latest record per
- *    path back into `SessionSummary` for the host.
- *
- * `PIE_REVIEWS_DIR` is set by the host at backend spawn
- * (`extension/src/host/backend/client.ts`) as a sibling of the sessions dir,
- * so both the backend and the tool (same process) agree on the location.
+ * V1 reviews retain latest-record-per-path semantics. Canonical V2 production
+ * reviews are read once-only by stable session-header ID. Explicit closure
+ * actions are read from a separate append-only outbox and never interpreted as
+ * reviews.
  */
 
-/** Env var holding the reviews directory. Set by the host at spawn. */
 export const REVIEWS_DIR_ENV = 'PIE_REVIEWS_DIR';
-/** The sidecar filename inside the reviews directory. */
 export const REVIEWS_FILE = 'reviews.jsonl';
 
-/** Resolve the reviews directory from the env var, or undefined when unset. */
+interface SessionReviewV2Reference {
+  schemaVersion: number;
+  kind: 'production';
+  reviewId: string;
+  sessionId: string;
+  sessionPathAtReview: string;
+  reviewedAt: string;
+  identityFallback?: boolean;
+}
+
+export interface SessionReviewSidecar {
+  legacyByPath: Map<string, SessionReview>;
+  /** First production review wins: later duplicates cannot replace canonical. */
+  productionBySessionId: Map<string, SessionReviewV2Reference>;
+  /** V1 paths whose current JSONL header could be resolved at cutover/read time. */
+  reservedLegacyBySessionId: Map<string, SessionReview>;
+  closureActionsBySessionId: Map<string, ClosureAction[]>;
+}
+
+export interface SessionIdentity {
+  sessionId: string;
+  identityFallback: boolean;
+}
+
 export function getReviewsDir(): string | undefined {
   const dir = process.env[REVIEWS_DIR_ENV]?.trim();
   return dir || undefined;
 }
 
-/** Resolve the reviews file path, or undefined when the dir env is unset. */
-function getReviewsFilePath(): string | undefined {
+function getSidecarFilePath(fileName: string): string | undefined {
   const dir = getReviewsDir();
-  return dir ? path.join(dir, REVIEWS_FILE) : undefined;
+  return dir ? path.join(dir, fileName) : undefined;
 }
 
-/**
- * Read the review sidecar and return the latest record per `sessionPath`.
- *
- * The file is small (one line per review; sessions are few), so this is read
- * fresh on every `listSessions`/`buildCurrentSummary` call rather than cached
- * — that keeps the merge correct after the tool appends a record without
- * requiring the backend to maintain a cache synchronized with the writer.
- *
- * Returns an empty map when the dir is unset, the file is missing, or every
- * line fails to parse (a corrupt file never breaks session listing).
- */
-export function readReviews(): Map<string, SessionReview> {
-  const file = getReviewsFilePath();
-  if (!file) return new Map();
-
+function readJsonLines(file: string | undefined): unknown[] {
+  if (!file) return [];
   let content: string;
   try {
     content = fs.readFileSync(file, 'utf8');
   } catch {
-    // Missing file (no reviews yet) or unreadable — treat as empty.
-    return new Map();
+    return [];
   }
 
-  const latest = new Map<string, SessionReview>();
+  const values: unknown[] = [];
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(trimmed);
+      values.push(JSON.parse(trimmed));
     } catch {
-      continue; // skip malformed lines
-    }
-    const record = normalizeReview(parsed);
-    if (record) {
-      latest.set(record.sessionPath, record);
+      // A malformed line must not break session listing or outbox draining.
     }
   }
-  return latest;
+  return values;
 }
 
-/** Coerce a parsed JSONL line into a `SessionReview`, or undefined if invalid. */
-function normalizeReview(value: unknown): SessionReview | undefined {
+/** V1 normalized path-hash fallback from plan §14.5. */
+export function sessionPathHash(sessionPath: string): string {
+  let normalized = sessionPath.trim().replace(/\\/g, '/');
+  const wasUnc = normalized.startsWith('//');
+  normalized = normalized.replace(/\/{2,}/g, '/');
+  if (wasUnc) normalized = `/${normalized}`;
+  if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')) {
+    normalized = normalized.toLowerCase();
+  }
+  return createHash('sha256').update(normalized, 'utf8').digest('hex').slice(0, 16);
+}
+
+function readFirstNonEmptyLine(filePath: string): string | undefined {
+  const fd = fs.openSync(filePath, 'r');
+  const decoder = new StringDecoder('utf8');
+  const chunk = Buffer.allocUnsafe(4096);
+  let buffered = '';
+  let totalBytes = 0;
+  try {
+    // Session headers are small. Bound malformed files so identity lookup never
+    // reads a multi-megabyte transcript merely because its first newline is bad.
+    while (totalBytes < 1024 * 1024) {
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) {
+        buffered += decoder.end();
+        const finalLine = buffered.trim();
+        return finalLine || undefined;
+      }
+      totalBytes += bytesRead;
+      buffered += decoder.write(chunk.subarray(0, bytesRead));
+      let newlineIndex: number;
+      while ((newlineIndex = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, newlineIndex).trim();
+        buffered = buffered.slice(newlineIndex + 1);
+        if (line) return line;
+      }
+    }
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Resolve the stable ID from the first non-empty session JSONL line. */
+export function resolveSessionIdentity(sessionPath: string): SessionIdentity {
+  try {
+    const firstLine = readFirstNonEmptyLine(sessionPath);
+    if (firstLine) {
+      const header = JSON.parse(firstLine) as Record<string, unknown>;
+      if (header.type === 'session' && typeof header.id === 'string' && header.id.trim()) {
+        return { sessionId: header.id.trim(), identityFallback: false };
+      }
+    }
+  } catch {
+    // Missing, unreadable, or malformed headers use the explicit legacy fallback.
+  }
+  return { sessionId: sessionPathHash(sessionPath), identityFallback: true };
+}
+
+/** Read mixed reviews plus the separate closure-action outbox. */
+export function readReviews(): SessionReviewSidecar {
+  const legacyByPath = new Map<string, SessionReview>();
+  const productionBySessionId = new Map<string, SessionReviewV2Reference>();
+
+  for (const value of readJsonLines(getSidecarFilePath(REVIEWS_FILE))) {
+    const v2 = normalizeV2Review(value);
+    if (v2) {
+      if (!productionBySessionId.has(v2.sessionId)) {
+        productionBySessionId.set(v2.sessionId, v2);
+      }
+      continue;
+    }
+    const legacy = normalizeLegacyReview(value);
+    if (legacy) legacyByPath.set(legacy.sessionPath, legacy);
+  }
+
+  const reservedLegacyBySessionId = new Map<string, SessionReview>();
+  for (const legacy of legacyByPath.values()) {
+    const identity = resolveSessionIdentity(legacy.sessionPath);
+    if (!identity.identityFallback) {
+      reservedLegacyBySessionId.set(identity.sessionId, legacy);
+    }
+  }
+
+  const latestActions = new Map<string, ClosureAction>();
+  for (const value of readJsonLines(getSidecarFilePath(REVIEW_CLOSURE_ACTIONS_FILE))) {
+    const action = normalizeClosureAction(value);
+    if (action) latestActions.set(action.actionId, action);
+  }
+  const closureActionsBySessionId = new Map<string, ClosureAction[]>();
+  for (const action of latestActions.values()) {
+    if (action.kind === 'closeReviewed') {
+      const review = productionBySessionId.get(action.targetSessionId);
+      if (!review || review.reviewId !== action.reviewId) continue;
+    }
+    const actions = closureActionsBySessionId.get(action.targetSessionId) ?? [];
+    actions.push(action);
+    closureActionsBySessionId.set(action.targetSessionId, actions);
+  }
+
+  return { legacyByPath, productionBySessionId, reservedLegacyBySessionId, closureActionsBySessionId };
+}
+
+function normalizeV2Review(value: unknown): SessionReviewV2Reference | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.schemaVersion !== 'number' || v.schemaVersion < 2) return undefined;
+  if (v.kind !== 'production') return undefined; // calibration is non-canonical
+  if (typeof v.reviewId !== 'string' || !v.reviewId.trim()) return undefined;
+  if (typeof v.sessionId !== 'string' || !v.sessionId.trim()) return undefined;
+  if (typeof v.sessionPathAtReview !== 'string') return undefined;
+  if (typeof v.reviewedAt !== 'string') return undefined;
+  return {
+    schemaVersion: v.schemaVersion,
+    kind: 'production',
+    reviewId: v.reviewId,
+    sessionId: v.sessionId,
+    sessionPathAtReview: v.sessionPathAtReview,
+    reviewedAt: v.reviewedAt,
+    ...(typeof v.identityFallback === 'boolean' ? { identityFallback: v.identityFallback } : {}),
+  };
+}
+
+function normalizeLegacyReview(value: unknown): SessionReview | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
   if (typeof v.sessionPath !== 'string') return undefined;
@@ -88,21 +209,15 @@ function normalizeReview(value: unknown): SessionReview | undefined {
   if (typeof v.rating !== 'number' || !Number.isFinite(v.rating)) return undefined;
   const completion = v.completion;
   if (completion !== 'fully' && completion !== 'partial' && completion !== 'setback') return undefined;
-  // Multi-reviewer provenance (optional): validate shape and drop malformed
-  // values so a corrupt sidecar line never breaks session listing/review.
   const rawBuckets = v.reviewerBuckets;
-  const reviewerBuckets = Array.isArray(rawBuckets) && rawBuckets.every((b) => typeof b === 'string')
-    ? (rawBuckets as string[])
+  const reviewerBuckets = Array.isArray(rawBuckets) && rawBuckets.every((bucket) => typeof bucket === 'string')
+    ? rawBuckets as string[]
     : undefined;
   const rawCount = v.reviewerCount;
   const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
     ? rawCount
     : undefined;
-  // selfClose marker (optional): a self-close review written by the tool's
-  // `closeSelf` action. Validated as a boolean so a corrupt sidecar line never
-  // breaks session listing/review; dropped (undefined) when malformed.
-  const rawSelfClose = v.selfClose;
-  const selfClose = typeof rawSelfClose === 'boolean' ? rawSelfClose : undefined;
+  const selfClose = typeof v.selfClose === 'boolean' ? v.selfClose : undefined;
   return {
     sessionPath: v.sessionPath,
     done: v.done,
@@ -116,48 +231,103 @@ function normalizeReview(value: unknown): SessionReview | undefined {
   };
 }
 
-/**
- * Merge a session's latest review record into a `SessionSummary` (immutable).
- * Returns the original summary unchanged when no review exists for its path.
- */
-export function mergeReviewIntoSummary(summary: SessionSummary, reviews: Map<string, SessionReview>): SessionSummary {
-  const review = reviews.get(summary.path);
-  if (!review) return summary;
+function normalizeClosureAction(value: unknown): ClosureAction | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.actionId !== 'string' || !v.actionId.trim()) return undefined;
+  if (v.kind !== 'closeReviewed' && v.kind !== 'closeSelf') return undefined;
+  if (typeof v.targetSessionId !== 'string' || !v.targetSessionId.trim()) return undefined;
+  if (v.status !== 'pending' && v.status !== 'succeeded' && v.status !== 'failed' && v.status !== 'retrying') return undefined;
+  if (typeof v.attempts !== 'number' || !Number.isInteger(v.attempts) || v.attempts < 0) return undefined;
+  if (typeof v.requestedAt !== 'string') return undefined;
+  if (v.kind === 'closeReviewed' && (typeof v.reviewId !== 'string' || !v.reviewId.trim())) return undefined;
   return {
-    ...summary,
-    done: review.done,
-    rating: review.rating,
-    completion: review.completion,
-    reviewReason: review.reason,
-    evaluatedAt: review.evaluatedAt,
-    ...(review.reviewerBuckets !== undefined ? { reviewerBuckets: review.reviewerBuckets } : {}),
-    ...(review.reviewerCount !== undefined ? { reviewerCount: review.reviewerCount } : {}),
-    ...(review.selfClose !== undefined ? { selfClose: review.selfClose } : {}),
+    actionId: v.actionId,
+    kind: v.kind,
+    targetSessionId: v.targetSessionId,
+    ...(typeof v.targetSessionPath === 'string' ? { targetSessionPath: v.targetSessionPath } : {}),
+    ...(typeof v.reviewId === 'string' ? { reviewId: v.reviewId } : {}),
+    status: v.status,
+    attempts: v.attempts,
+    ...(typeof v.lastError === 'string' ? { lastError: v.lastError } : {}),
+    requestedAt: v.requestedAt,
+    ...(typeof v.settledAt === 'string' ? { settledAt: v.settledAt } : {}),
   };
 }
 
-/** Ensure the reviews directory exists (best-effort; failures are swallowed). */
+/** Merge V1/V2 review status and outbox actions into a session summary. */
+export function mergeReviewIntoSummary(summary: SessionSummary, reviews: SessionReviewSidecar): SessionSummary {
+  const identity = resolveSessionIdentity(summary.path);
+  const v2 = reviews.productionBySessionId.get(identity.sessionId);
+  const exactLegacy = reviews.legacyByPath.get(summary.path);
+  const reservedLegacy = reviews.reservedLegacyBySessionId.get(identity.sessionId);
+  const legacy = v2 ? undefined : (reservedLegacy ?? exactLegacy);
+  const closureActions = reviews.closureActionsBySessionId.get(identity.sessionId);
+
+  return {
+    ...summary,
+    sessionId: identity.sessionId,
+    ...(identity.identityFallback ? { identityFallback: true } : {}),
+    ...(v2 ? {
+      reviewed: true,
+      reviewId: v2.reviewId,
+      reviewedAt: v2.reviewedAt,
+      ...(v2.identityFallback === true ? { identityFallback: true } : {}),
+    } : {}),
+    ...(legacy ? {
+      reviewed: true,
+      legacyReview: true,
+      done: legacy.done,
+      rating: legacy.rating,
+      completion: legacy.completion,
+      reviewReason: legacy.reason,
+      evaluatedAt: legacy.evaluatedAt,
+      ...(legacy.reviewerBuckets !== undefined ? { reviewerBuckets: legacy.reviewerBuckets } : {}),
+      ...(legacy.reviewerCount !== undefined ? { reviewerCount: legacy.reviewerCount } : {}),
+      ...(legacy.selfClose !== undefined ? { selfClose: legacy.selfClose } : {}),
+    } : {}),
+    ...(closureActions && closureActions.length > 0 ? { closureActions } : {}),
+  };
+}
+
 export function ensureReviewsDir(): void {
   const dir = getReviewsDir();
   if (!dir) return;
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {
-    // Non-fatal: the tool will also attempt to create it on first write.
+    // Non-fatal; the writer also creates it on first write.
   }
 }
 
-/**
- * Watch the review sidecar for changes and invoke `onChange` (debounced) so
- * the backend can re-emit `session.list.changed` and the host UI reflects the
- * new `done`/`rating` promptly after the tool appends a record.
+/** Append closure-action state and fsync it before reporting success.
  *
- * Robustness: `fs.watch` is platform-flaky and can fire on the same-process
- * write that the tool performs; a 200ms debounce coalesces bursts. If watching
- * fails (unsupported FS / missing dir), the change is still picked up on the
- * next any-cause `session.list.changed`, so freshness degrades only to
- * "next session event" rather than breaking. Returns a disposer.
- */
+ * The host calls this only after the correlated CloseSession/PersistTabs
+ * effects complete. A crash or write failure before fsync leaves the prior
+ * pending/retrying record authoritative, so the action remains retryable.
+ * This function never opens or writes reviews.jsonl. */
+export function appendClosureActionRecords(
+  reviewsDir: string,
+  actions: readonly ClosureAction[],
+): void {
+  if (actions.length === 0) return;
+
+  fs.mkdirSync(reviewsDir, { recursive: true });
+  const filePath = path.join(reviewsDir, REVIEW_CLOSURE_ACTIONS_FILE);
+  const bytes = Buffer.from(`${actions.map((action) => JSON.stringify(action)).join('\n')}\n`, 'utf8');
+  const fd = fs.openSync(filePath, 'a');
+  try {
+    let offset = 0;
+    while (offset < bytes.length) {
+      offset += fs.writeSync(fd, bytes, offset, bytes.length - offset);
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Watch both review records and explicit closure actions. */
 export function startReviewWatcher(onChange: () => void): () => void {
   const dir = getReviewsDir();
   if (!dir) return () => {};
@@ -167,7 +337,7 @@ export function startReviewWatcher(onChange: () => void): () => void {
   let watcher: fs.FSWatcher | undefined;
   try {
     watcher = fs.watch(dir, (_, filename) => {
-      if (filename !== REVIEWS_FILE) return;
+      if (filename !== REVIEWS_FILE && filename !== REVIEW_CLOSURE_ACTIONS_FILE) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(onChange, 200);
     });

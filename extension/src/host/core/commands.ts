@@ -386,6 +386,9 @@ export interface RevertFileCommand extends CommandBase {
 export interface CloseSessionCommand extends CommandBase {
   kind: 'CloseSession';
   sessionPath: string;
+  /** Outbox closure retries must re-run idempotent cleanup/persistence even
+   *  when an earlier optimistic command already hid the tab. */
+  ensureClosed?: boolean;
 }
 
 /** Duplicate an existing session into a new pending tab. Mirrors

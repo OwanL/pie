@@ -19,7 +19,7 @@ import { reducer } from '../../../src/host/core/reducer';
 import type { Event } from '../../../src/host/core/events';
 import { SessionServiceState } from '../../../src/host/session-service/state';
 import { onSessionListChanged } from '../../../src/host/session-service/handlers/session';
-import type { ModelSettings, SessionListChangedPayload, SessionSummary } from '../../../src/shared/protocol';
+import type { ClosureAction, ModelSettings, SessionListChangedPayload, SessionSummary } from '../../../src/shared/protocol';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-agent-review-test-'));
@@ -312,7 +312,7 @@ test('StatsService recordAgentReview re-record updates: latest per runId wins', 
   });
 });
 
-test('onSessionListChanged records agent-review analytics on a fresh done transition', () => {
+test('onSessionListChanged does not couple a legacy done transition to analytics or closure', () => {
   const A = '/workspace/session-done-transition.jsonl';
   const baseSummary: SessionSummary = {
     path: A,
@@ -390,19 +390,11 @@ test('onSessionListChanged records agent-review analytics on a fresh done transi
   };
   onSessionListChanged(donePayload, deps);
 
-  assert.equal(recordAgentReviewCalls.length, 1);
-  assert.equal(recordAgentReviewCalls[0]!.sessionPath, A);
-  const review = recordAgentReviewCalls[0]!.review;
-  assert.equal(review.done, true);
-  assert.equal(review.rating, 4);
-  assert.equal(review.completion, 'fully');
-  assert.equal(review.reason, 'shipped it');
-  assert.equal(review.evaluatedAt, evaluatedAt);
-  assert.deepEqual(review.reviewerBuckets, ['medium']);
-  assert.equal(review.reviewerCount, 1);
+  assert.equal(recordAgentReviewCalls.length, 0, 'V1 done is review metadata, not a lifecycle action');
+  assert.equal(archState.sessions.openTabPaths.includes(A), true);
 });
 
-test('onSessionListChanged skips agent-review analytics for a selfClose review but still closes the tab', () => {
+test('onSessionListChanged ignores legacy selfClose review markers for closure', () => {
   const A = '/workspace/session-self-close.jsonl';
   const baseSummary: SessionSummary = {
     path: A,
@@ -471,10 +463,10 @@ test('onSessionListChanged skips agent-review analytics for a selfClose review b
   const closeCommands = dispatchedEvents.filter(
     (e) => e.kind === 'Command' && (e as any).cmd?.kind === 'CloseSession',
   );
-  assert.equal(closeCommands.length, 1, 'selfClose must still dispatch a CloseSession to close the tab');
+  assert.equal(closeCommands.length, 0, 'only an explicit closeSelf outbox action closes the tab');
 });
 
-test('onSessionListChanged applies defaults for missing review fields on a done transition', () => {
+test('onSessionListChanged does not synthesize analytics from an incomplete done marker', () => {
   const A = '/workspace/session-done-defaults.jsonl';
   const baseSummary: SessionSummary = {
     path: A,
@@ -536,14 +528,104 @@ test('onSessionListChanged applies defaults for missing review fields on a done 
     deps,
   );
 
-  assert.equal(recordAgentReviewCalls.length, 1);
-  const review = recordAgentReviewCalls[0]!.review;
-  assert.equal(review.done, true);
-  assert.equal(review.rating, 0);
-  assert.equal(review.completion, 'partial');
-  assert.equal(review.reason, '');
-  assert.equal(typeof review.evaluatedAt, 'string');
-  assert.equal((review.evaluatedAt as string).length > 0, true);
-  assert.deepEqual(review.reviewerBuckets, []);
-  assert.equal(review.reviewerCount, 0);
+  assert.equal(recordAgentReviewCalls.length, 0);
+});
+
+test('onSessionListChanged settles an explicit closure action only after close and tab persistence succeed', async () => {
+  await withTempDir(async (tempDir) => {
+    const previousReviewsDir = process.env.PIE_REVIEWS_DIR;
+    process.env.PIE_REVIEWS_DIR = tempDir;
+    try {
+      const sessionPath = '/workspace/session-explicit-close.jsonl';
+      const closeAction: ClosureAction = {
+        actionId: 'close-action-1',
+        kind: 'closeReviewed',
+        targetSessionId: 'session-1',
+        targetSessionPath: sessionPath,
+        reviewId: 'review-1',
+        status: 'pending',
+        attempts: 0,
+        requestedAt: '2026-07-24T00:00:00.000Z',
+      };
+      const summary: SessionSummary = {
+        path: sessionPath,
+        name: 'Reviewed',
+        cwd: '/workspace',
+        modifiedAt: '2026-07-24T00:00:00.000Z',
+        messageCount: 3,
+        sessionId: 'session-1',
+        reviewed: true,
+        reviewId: 'review-1',
+        closureActions: [closeAction],
+      };
+      let archState: ArchState = {
+        ...createInitialArchState(),
+        sessions: {
+          ...createInitialArchState().sessions,
+          sessions: [summary],
+          openTabPaths: [sessionPath],
+          activeSessionPath: sessionPath,
+        },
+      };
+      const getArchState = () => archState;
+      const dispatchedEvents: Event[] = [];
+      const dispatchArch = (event: Event) => {
+        dispatchedEvents.push(event);
+        archState = reducer(archState, event).state;
+      };
+      const context = {
+        globalState: { update: async () => undefined },
+        workspaceState: { update: async () => undefined },
+      } as any;
+      const state = new SessionServiceState(
+        context,
+        { request: async () => ({}) } as any,
+        () => undefined,
+        getArchState,
+        dispatchArch,
+        0,
+      );
+      const recordAgentReviewCalls: unknown[] = [];
+      const deps = {
+        context,
+        getArchState,
+        dispatchArch,
+        runObserver: {
+          ...NOOP_RUN_OBSERVER,
+          recordAgentReview: (...args: unknown[]) => { recordAgentReviewCalls.push(args); },
+        } as RunObserver,
+        state,
+        scheduleRender: () => undefined,
+        requireEventSessionPath: (_eventName: string, value: string | undefined) => value ?? null,
+      };
+
+      onSessionListChanged({ sessions: [summary], activeSessionPath: sessionPath }, deps);
+      onSessionListChanged({ sessions: [summary] }, deps);
+
+      assert.deepEqual(archState.sessions.openTabPaths, []);
+      assert.equal(recordAgentReviewCalls.length, 0);
+      await assertFileMissing(path.join(tempDir, 'closure-actions.jsonl'));
+
+      const closeCommand = dispatchedEvents.find(
+        (event) => event.kind === 'Command' && event.cmd.kind === 'CloseSession',
+      );
+      assert.ok(closeCommand?.kind === 'Command' && closeCommand.cmd.kind === 'CloseSession');
+      const corrId = closeCommand.cmd.corrId;
+
+      state.handleReviewClosureEffectResult({
+        kind: 'CloseSessionResult', corrId, sessionPath, ok: true,
+      });
+      await assertFileMissing(path.join(tempDir, 'closure-actions.jsonl'));
+      state.handleReviewClosureEffectResult({ kind: 'PersistTabsResult', corrId, ok: true });
+
+      const outbox = await readJsonl(path.join(tempDir, 'closure-actions.jsonl')) as ClosureAction[];
+      assert.equal(outbox.length, 1, 'claimed pending action must not append duplicate terminal states');
+      assert.equal(outbox[0]?.status, 'succeeded');
+      assert.equal(outbox[0]?.attempts, 1);
+      await assertFileMissing(path.join(tempDir, 'reviews.jsonl'));
+    } finally {
+      if (previousReviewsDir === undefined) delete process.env.PIE_REVIEWS_DIR;
+      else process.env.PIE_REVIEWS_DIR = previousReviewsDir;
+    }
+  });
 });

@@ -111,3 +111,32 @@ test('completed ask_user keeps proposed options when the answer is custom', () =
   assert.doesNotMatch(html, /ask-user-option-selected/);
   assert.match(html, /ask-user-answer-text">Next Monday<\/span>/);
 });
+
+test('completed ask_user retains the reviewed-session label from durable input metadata', () => {
+  const html = renderAskUser({
+    id: 'ask-review',
+    name: 'ask_user',
+    status: 'completed',
+    input: {
+      question: 'Can the form be completed with a keyboard?',
+      options: ['Yes', 'No'],
+      reviewMeta: {
+        purpose: 'review_human_verification',
+        targetSessionId: 'reviewed-id',
+        targetSessionPath: '/sessions/reviewed.jsonl',
+        criterionId: 'criterion-accessibility',
+        domain: 'accessibility',
+        expectedObservation: 'Keyboard interaction works.',
+      },
+    },
+    result: {
+      answer: 'Yes',
+      source: 'option',
+      cancelled: false,
+      targetSessionId: 'reviewed-id',
+    },
+  });
+
+  assert.match(html, /ask-user-review-target">Review · \/sessions\/reviewed.jsonl<\/div>/);
+  assert.match(html, /ask-user-answer-text">Yes<\/span>/);
+});

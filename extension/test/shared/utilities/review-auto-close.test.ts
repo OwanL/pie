@@ -6,166 +6,139 @@ import {
   computeReviewAutoCloseClosures,
 } from '../../../src/shared/review-auto-close';
 import { PENDING_SESSION_PREFIX } from '../../../src/shared/tab-behavior';
+import type { ClosureAction } from '../../../src/shared/protocol';
 
-function summary(path: string, done?: boolean) {
-  return { path, done };
+function action(
+  actionId: string,
+  overrides: Partial<ClosureAction> = {},
+): ClosureAction {
+  return {
+    actionId,
+    kind: 'closeReviewed',
+    targetSessionId: `session-${actionId}`,
+    reviewId: `review-${actionId}`,
+    status: 'pending',
+    attempts: 0,
+    requestedAt: '2026-07-24T00:00:00.000Z',
+    ...overrides,
+  };
 }
 
-test('review-auto-close: first call seeds known-done open tabs and closes nothing (no startup mass-close)', () => {
+function summary(path: string, closureActions?: ClosureAction[]) {
+  return { path, closureActions };
+}
+
+test('review-auto-close: explicit pending action is claimed on the first refresh', () => {
+  const close = action('a');
   const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/a', true), summary('/b', true), summary('/c', false)],
-    openTabPaths: ['/a', '/b', '/c'],
+    incoming: [summary('/a', [close])],
+    openTabPaths: ['/a'],
     runningPaths: [],
   });
-  assert.deepEqual(result.closures, []);
-  assert.equal(result.next.initialized, true);
-  assert.ok(result.next.knownDonePaths.has('/a'));
-  assert.ok(result.next.knownDonePaths.has('/b'));
-  assert.ok(!result.next.knownDonePaths.has('/c'));
+  assert.deepEqual(result.attempts, [{
+    sessionPath: '/a',
+    actions: [close],
+    requiresCloseCompletion: true,
+  }]);
+  assert.ok(result.next.claimedActionIds.has('a'));
 });
 
-test('review-auto-close: a fresh done transition on an open tab is closed once', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/a', false)],
-    openTabPaths: ['/a'],
-    runningPaths: [],
-  }).next;
-  // /a flips to done -> one closure, then remembered.
-  const r1 = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/a', true)],
-    openTabPaths: ['/a'],
+test('review-auto-close: review done status without an explicit action never closes', () => {
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [{ path: '/legacy', done: true } as never],
+    openTabPaths: ['/legacy'],
     runningPaths: [],
   });
-  assert.deepEqual(r1.closures, ['/a']);
-  state = r1.next;
-  // A second list with /a still done and still open closes nothing again.
-  const r2 = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/a', true)],
-    openTabPaths: ['/a'],
-    runningPaths: [],
-  });
-  assert.deepEqual(r2.closures, []);
+  assert.deepEqual(result.attempts, []);
 });
 
-test('review-auto-close: a done session that is not an open tab is not closed, but is remembered', () => {
-  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [],
+test('review-auto-close: claimed action is not attempted twice', () => {
+  const close = action('a');
+  const first = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/a', [close])],
+    openTabPaths: ['/a'],
+    runningPaths: [],
+  });
+  const second = computeReviewAutoCloseClosures(first.next, {
+    incoming: [summary('/a', [close])],
+    openTabPaths: ['/a'],
+    runningPaths: [],
+  });
+  assert.deepEqual(second.attempts, []);
+});
+
+test('review-auto-close: already-hidden idle target still requires cleanup and persistence confirmation', () => {
+  const close = action('a');
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/a', [close])],
     openTabPaths: [],
     runningPaths: [],
-  }).next;
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/x', true)],
-    openTabPaths: [], // not open
-    runningPaths: [],
   });
-  assert.deepEqual(r.closures, []);
-  // Remembered so a later reopen from the picker doesn't auto-close it.
-  assert.ok(r.next.knownDonePaths.has('/x'));
+  assert.equal(result.attempts[0]?.requiresCloseCompletion, true);
 });
 
-test('review-auto-close: a running session is not closed while running, but closes once it stops', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/r', false)],
-    openTabPaths: ['/r'],
-    runningPaths: [],
-  }).next;
-  // done arrives while still running -> not closed, not remembered yet.
-  const r1 = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/r', true)],
-    openTabPaths: ['/r'],
-    runningPaths: ['/r'],
+test('review-auto-close: running target is attempted as a persist-confirmed tab hide', () => {
+  const close = action('a');
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/a', [close])],
+    openTabPaths: ['/a'],
+    runningPaths: ['/a'],
   });
-  assert.deepEqual(r1.closures, []);
-  assert.ok(!r1.next.knownDonePaths.has('/r'));
-  state = r1.next;
-  // session stops running, still done and open -> closes now.
-  const r2 = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/r', true)],
-    openTabPaths: ['/r'],
-    runningPaths: [],
-  });
-  assert.deepEqual(r2.closures, ['/r']);
+  assert.deepEqual(result.attempts, [{
+    sessionPath: '/a',
+    actions: [close],
+    requiresCloseCompletion: false,
+  }]);
 });
 
-test('review-auto-close: a pending tab is never closed', () => {
+test('review-auto-close: pending tab is never claimed', () => {
   const pending = `${PENDING_SESSION_PREFIX}1-abc`;
-  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary(pending, false)],
-    openTabPaths: [pending],
-    runningPaths: [],
-  }).next;
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [summary(pending, true)],
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary(pending, [action('pending')])],
     openTabPaths: [pending],
     runningPaths: [],
   });
-  assert.deepEqual(r.closures, []);
+  assert.deepEqual(result.attempts, []);
+  assert.ok(!result.next.claimedActionIds.has('pending'));
 });
 
-test('review-auto-close: flip back to not-done forgets, so a later done re-closes', () => {
-  let state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/a', true)],
-    openTabPaths: ['/a'],
+test('review-auto-close: retrying closeSelf is drained like closeReviewed', () => {
+  const closeSelf = action('self', {
+    kind: 'closeSelf',
+    reviewId: undefined,
+    status: 'retrying',
+    attempts: 1,
+  });
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/reviewer', [closeSelf])],
+    openTabPaths: ['/reviewer'],
     runningPaths: [],
-  }).next; // seeded, /a known-done
-  // Reopen scenario: review flips to not-done -> forgotten.
-  state = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/a', false)],
-    openTabPaths: ['/a'],
-    runningPaths: [],
-  }).next;
-  assert.ok(!state.knownDonePaths.has('/a'));
-  // Now done again -> closes once more.
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/a', true)],
+  });
+  assert.deepEqual(result.attempts[0]?.actions, [closeSelf]);
+});
+
+test('review-auto-close: succeeded and failed terminal actions are not retried', () => {
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/a', [
+      action('done', { status: 'succeeded' }),
+      action('failed', { status: 'failed' }),
+    ])],
     openTabPaths: ['/a'],
     runningPaths: [],
   });
-  assert.deepEqual(r.closures, ['/a']);
+  assert.deepEqual(result.attempts, []);
+  assert.ok(result.next.claimedActionIds.has('done'));
+  assert.ok(result.next.claimedActionIds.has('failed'));
 });
 
-test('review-auto-close: multiple fresh done transitions close together', () => {
-  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/a', false), summary('/b', false)],
-    openTabPaths: ['/a', '/b'],
-    runningPaths: [],
-  }).next;
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/a', true), summary('/b', true)],
-    openTabPaths: ['/a', '/b'],
-    runningPaths: [],
-  });
-  assert.deepEqual(r.closures.sort(), ['/a', '/b']);
-});
-
-test('review-auto-close: a pinned tab with a fresh done transition is closed (pinned tabs are cleaned up too)', () => {
-  // The helper treats pinned tabs as ordinary open tabs — it does not see
-  // `pinnedTabPaths`. The host's `CloseSession` command drops them from
-  // `pinnedTabPaths` via `evictSession`, so a done review on a pinned tab
-  // unpins + closes it, matching the user's cleanup intent.
-  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/p', false)],
-    openTabPaths: ['/p'],
-    runningPaths: [],
-  }).next;
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [summary('/p', true)],
-    openTabPaths: ['/p'],
-    runningPaths: [],
-  });
-  assert.deepEqual(r.closures, ['/p']);
-});
-
-test('review-auto-close: a session missing from the incoming list is left alone', () => {
-  const state = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [summary('/a', false)],
-    openTabPaths: ['/a'],
-    runningPaths: [],
-  }).next;
-  const r = computeReviewAutoCloseClosures(state, {
-    incoming: [], // /a not in the backend list this refresh
+test('review-auto-close: duplicate actions for one path share one correlated attempt', () => {
+  const first = action('a');
+  const second = action('b', { targetSessionId: first.targetSessionId });
+  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
+    incoming: [summary('/a', [first, second])],
     openTabPaths: ['/a'],
     runningPaths: [],
   });
-  assert.deepEqual(r.closures, []);
+  assert.equal(result.attempts.length, 1);
+  assert.deepEqual(result.attempts[0]?.actions, [first, second]);
 });

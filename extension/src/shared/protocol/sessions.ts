@@ -22,14 +22,9 @@ export type {
  *    failed approach that should be revisited). */
 export type SessionCompletion = 'fully' | 'partial' | 'setback';
 
-/** An agent review record persisted in the session-review sidecar
- *  (`<data>/session-reviews/reviews.jsonl`). Append-only JSONL keyed by
- *  `sessionPath`; the latest record per path wins. Owned by the
- *  `session_review` tool (the sole writer); the backend reads + watches it to
- *  merge `done`/`rating`/`completion`/`reviewReason`/`evaluatedAt`/
- *  `reviewerBuckets`/`reviewerCount` back into `SessionSummary` (the SDK owns
- *  the session JSONL and exposes no append path to pie, so the review lives in
- *  a sidecar). */
+/** V1 agent review record. Kept readable as a separate legacy view; V2
+ *  production reviews are keyed by stable session-header ID and are never
+ *  coerced into this 1–5 shape. */
 export interface SessionReview {
   sessionPath: string;
   done: boolean;
@@ -45,13 +40,30 @@ export interface SessionReview {
   /** Number of sub-agent reviewers that fed the rating. Optional for backward
    *  compat; older records have no field. */
   reviewerCount?: number;
-  /** True when this review is a self-close marker written by the tool's
-   *  `closeSelf` action (the reviewer session closing its own tab once its
-   *  work is done). Carries `done: true` so the host's auto-close still closes
-   *  the tab, but the host skips recording it as a scored agent-review
-   *  outcome, since a session rating itself is not an objective performance
-   *  signal. Optional for backward compat. */
+  /** Legacy V1 self-close marker. Retained for read compatibility only; V2
+   *  hosts do not interpret it as a closure command. */
   selfClose?: boolean;
+}
+
+/** Filename of the append-only closure-action outbox beside reviews.jsonl. */
+export const REVIEW_CLOSURE_ACTIONS_FILE = 'closure-actions.jsonl';
+
+export type ClosureActionKind = 'closeReviewed' | 'closeSelf';
+export type ClosureActionStatus = 'pending' | 'succeeded' | 'failed' | 'retrying';
+
+/** Explicit tab-closure action. Latest record per actionId is its current
+ *  outbox state; closure actions never live in reviews.jsonl. */
+export interface ClosureAction {
+  actionId: string;
+  kind: ClosureActionKind;
+  targetSessionId: string;
+  targetSessionPath?: string;
+  reviewId?: string;
+  status: ClosureActionStatus;
+  attempts: number;
+  lastError?: string;
+  requestedAt: string;
+  settledAt?: string;
 }
 
 export interface SessionSummary {
@@ -70,27 +82,40 @@ export interface SessionSummary {
    * refreshes without resorting to string-content heuristics.
    */
   isPlaceholder?: boolean;
-  /** Agent review: whether the session's task is marked done. Merged from the
+  /** Stable ID from the session JSONL header. Falls back to the normalized
+   *  path hash only for legacy/malformed sessions. */
+  sessionId?: string;
+  identityFallback?: boolean;
+  /** True when a canonical V2 production review exists, or when a resolved V1
+   *  review reserves this session at cutover. */
+  reviewed?: boolean;
+  /** Canonical V2 production review identity. Absent for reserved V1 reviews. */
+  reviewId?: string;
+  reviewedAt?: string;
+  /** The reviewed status came from a V1 record, which remains in legacy form. */
+  legacyReview?: boolean;
+  /** Current explicit closure-action outbox records targeting this session.
+   *  The host drains only pending/retrying actions. */
+  closureActions?: ClosureAction[];
+  /** Legacy V1 agent review: whether the session's task is marked done. Merged from the
    *  session-review sidecar by the backend; preserved across backend list
    *  refreshes by `mergeSessionSummaryPreservingLocalName`. */
   done?: boolean;
-  /** Agent review: 1–5 quality rating. */
+  /** Legacy V1 agent review: 1–5 quality rating. */
   rating?: number;
-  /** Agent review: task-completion classification. */
+  /** Legacy V1 agent review: task-completion classification. */
   completion?: SessionCompletion;
-  /** Agent review: free-text reason for the rating/completion. */
+  /** Legacy V1 agent review: free-text reason for the rating/completion. */
   reviewReason?: string;
-  /** ISO timestamp of the most recent review. */
+  /** Legacy V1 review timestamp. */
   evaluatedAt?: string;
-  /** Agent review: sub-agent buckets whose judgments fed the rating (e.g.
+  /** Legacy V1 agent review: sub-agent buckets whose judgments fed the rating (e.g.
    *  ['medium','small']) — captures the multi-reviewer process so agent
    *  reviews can be distinguished from single-shot/user outcomes in analytics. */
   reviewerBuckets?: string[];
-  /** Agent review: number of sub-agent reviewers that fed the rating. */
+  /** Legacy V1 agent review: number of sub-agent reviewers that fed the rating. */
   reviewerCount?: number;
-  /** Agent review: true when this is a `closeSelf` self-close marker (the
-   *  reviewer session closing its own tab). The host skips scored
-   *  agent-review analytics for these. */
+  /** Legacy V1 self-close marker; metadata only in V2 hosts. */
   selfClose?: boolean;
   /** True when this tab is pinned (browser-style pinned tab). Populated by
    *  the host when pushing open-tab summaries so the `session_review` tool's

@@ -42,3 +42,32 @@ test('generic select prompt does not gain a custom answer control', () => {
 
   assert.doesNotMatch(html, /ext-prompt-option custom/);
 });
+
+test('review metadata labels fixed and inline prompts without replacing reviewer routing', () => {
+  const request = {
+    id: 'review-request',
+    method: 'input' as const,
+    title: 'Describe what you observed',
+    sessionPath: '/sessions/reviewer.jsonl',
+    reviewMeta: {
+      purpose: 'review_human_verification' as const,
+      targetSessionId: 'reviewed-id',
+      targetSessionPath: '/sessions/reviewed.jsonl',
+      criterionId: 'criterion-1',
+      domain: 'accessibility',
+      expectedObservation: 'Keyboard interaction works.',
+    },
+  };
+
+  for (const variant of ['strip', 'card'] as const) {
+    const html = renderToString(h(ExtensionUIPrompt, {
+      sessionPath: '/sessions/reviewer.jsonl',
+      request,
+      postMessage: () => undefined,
+      variant,
+      sourceLabel: 'Reviewer agent',
+    }));
+    assert.match(html, /Review · \/sessions\/reviewed.jsonl/);
+    assert.doesNotMatch(html, /Reviewer agent/);
+  }
+});

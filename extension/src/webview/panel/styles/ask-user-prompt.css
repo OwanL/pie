@@ -55,6 +55,17 @@
   opacity: 0.8;
 }
 
+/* Review metadata labels the session being evaluated; the prompt itself still
+   belongs to and responds through the reviewer session. */
+.ask-user-review-target {
+  margin-inline-start: calc(22px + var(--panel-gap-sm));
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--panel-accent);
+}
+
 .ask-user-icon-completed {
   background: color-mix(in srgb, var(--panel-success) 14%, transparent);
   color: var(--panel-success);

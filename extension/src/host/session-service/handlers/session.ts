@@ -11,7 +11,6 @@ import type {
   ExtensionUIRequestPayload,
   OperationalErrorPayload,
   SessionListChangedPayload,
-  SessionSummary,
 } from '../../../shared/protocol';
 import { requestWindowAttention } from '../../sidebar/completion-notification';
 import { auditLog } from '../../util/audit.js';
@@ -33,61 +32,26 @@ let reviewAutoCloseCorrIdCounter = 0;
 export function onSessionListChanged(payload: SessionListChangedPayload, deps: HandlerDeps): void {
   deps.dispatchArch({ kind: 'SessionListChanged', sessionSummaries: payload.sessions });
 
-  // Auto-close tabs for sessions the agent just reviewed as `done: true` —
-  // the same `CloseSession` command a user-initiated tab close dispatches
-  // (handles pinned tabs too: `evictSession` drops them from
-  // `pinnedTabPaths`). Only fresh done transitions close; the first list
-  // seeds the known-done set so pre-existing done tabs aren't mass-closed.
+  // Review persistence is not a lifecycle command. Drain only explicit V2
+  // closeReviewed/closeSelf outbox actions through the normal CQRS close path.
+  // The state observer terminalizes each action only after its correlated
+  // cleanup (when applicable) and PersistTabs results both report success.
   const archState = deps.getArchState();
-  const closures = deps.state.consumeReviewAutoCloseClosures(
+  const closeResult = deps.state.consumeReviewAutoCloseClosures(
     payload.sessions,
     archState.sessions.openTabPaths,
     archState.sessions.runningSessionPaths,
   );
-
-  // Record agent-review analytics for fresh done transitions BEFORE closing the
-  // tab. `closures` already encodes the fresh-done-transition + open-tab +
-  // non-running filters (computeReviewAutoCloseClosures), so this is the
-  // minimal place to join a review to its run. Recording before the
-  // CloseSession dispatch avoids depending on microtask ordering: the runId
-  // resolves from currentRun ?? lastRun, which is definitely present now.
-  const summaryByPath = new Map<string, SessionSummary>(
-    payload.sessions.map((summary) => [summary.path, summary]),
-  );
-  for (const sessionPath of closures) {
-    const summary = summaryByPath.get(sessionPath);
-    if (!summary || summary.done !== true) {
-      continue;
-    }
-    // A `closeSelf` marker is the reviewer session closing its own tab once
-    // its work is done — not an objective performance review. Skip scored
-    // agent-review analytics for it (the tab still closes below).
-    if (summary.selfClose === true) {
-      continue;
-    }
-    deps.runObserver.recordAgentReview(sessionPath, {
-      done: true,
-      rating: summary.rating ?? 0,
-      completion: summary.completion ?? 'partial',
-      reason: summary.reviewReason ?? '',
-      evaluatedAt: summary.evaluatedAt ?? new Date().toISOString(),
-      reviewerBuckets: summary.reviewerBuckets ?? [],
-      reviewerCount: summary.reviewerCount ?? 0,
-    });
-  }
-
-  // Auto-close tabs for sessions the agent just reviewed as `done: true` —
-  // the same `CloseSession` command a user-initiated tab close dispatches
-  // (handles pinned tabs too: `evictSession` drops them from
-  // `pinnedTabPaths`). Only fresh done transitions close; the first list
-  // seeds the known-done set so pre-existing done tabs aren't mass-closed.
-  for (const sessionPath of closures) {
+  for (const attempt of closeResult.attempts) {
+    const corrId = `review-close-action:${++reviewAutoCloseCorrIdCounter}`;
+    deps.state.beginReviewClosureAttempt(corrId, attempt);
     deps.dispatchArch({
       kind: 'Command',
       cmd: {
         kind: 'CloseSession',
-        corrId: `review-auto-close:${++reviewAutoCloseCorrIdCounter}`,
-        sessionPath,
+        corrId,
+        sessionPath: attempt.sessionPath,
+        ensureClosed: true,
       },
     });
   }

@@ -258,29 +258,22 @@ export class PieExtension implements vscode.Disposable {
           // to drop any pending path that slipped through (a pending tab can
           // be pinned while it resolves — never persist the transient path).
           const persistedPinnedTabPaths = pinnedTabPaths.filter((p) => !isPendingTabPath(p));
-          void context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects).then(undefined, (err) =>
-            appendPieLog('warn', 'globalState', 'update failed', {
-              key: OPEN_TABS_STORAGE_KEY,
+          try {
+            await Promise.all([
+              context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects),
+              context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath),
+              context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths),
+            ]);
+          } catch (err) {
+            appendPieLog('warn', 'globalState', 'tab persistence failed', {
               error: toErrorMessage(err),
-            })
-          );
-          void context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath).then(undefined, (err) =>
-            appendPieLog('warn', 'globalState', 'update failed', {
-              key: ACTIVE_SESSION_STORAGE_KEY,
-              error: toErrorMessage(err),
-            })
-          );
-          void context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths).then(undefined, (err) =>
-            appendPieLog('warn', 'globalState', 'update failed', {
-              key: PINNED_TABS_STORAGE_KEY,
-              error: toErrorMessage(err),
-            })
-          );
+            });
+            throw err;
+          }
 
-          // Push the currently-open tab summaries to the backend so the
-          // `session_review` tool can list "currently open" sessions (true
-          // host tab state) without a host→tool bridge. Mirrors the
-          // `warm-bash` env-push pattern.
+          // Push only after durable tab persistence succeeds. The correlated
+          // PersistTabsResult is also the closure outbox's authoritative hide
+          // completion signal for running sessions.
           this.pushOpenTabsRegistry();
         },
       },
@@ -408,6 +401,9 @@ export class PieExtension implements vscode.Disposable {
     // Pre-reducer side effects for specific event types.
     if (event.kind === 'SendResult' && event.ok && event.requestId) {
       this.service.bindRequestSessionPath(event.requestId, event.sessionPath);
+    }
+    if (event.kind === 'CloseSessionResult' || event.kind === 'PersistTabsResult') {
+      this.service.handleReviewClosureEffectResult(event);
     }
 
     const result = dispatch(this.archState, event);

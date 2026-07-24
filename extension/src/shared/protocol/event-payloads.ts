@@ -285,6 +285,16 @@ export function isContextUsageChangedPayload(value: unknown): value is ContextUs
   );
 }
 
+function isReviewHumanVerificationMetadata(value: unknown): boolean {
+  return isObject(value)
+    && value.purpose === 'review_human_verification'
+    && isString(value.targetSessionId)
+    && isString(value.targetSessionPath)
+    && isString(value.criterionId)
+    && isString(value.domain)
+    && isString(value.expectedObservation);
+}
+
 export function isExtensionUIRequestPayload(value: unknown): value is ExtensionUIRequestPayload {
   if (
     !isObject(value)
@@ -293,6 +303,7 @@ export function isExtensionUIRequestPayload(value: unknown): value is ExtensionU
     || !isOptionalString(value.extensionId)
     || !isOptionalString(value.subagentCallId)
     || !isOptionalString(value.toolCallId)
+    || (value.reviewMeta !== undefined && !isReviewHumanVerificationMetadata(value.reviewMeta))
     || (value.timeout !== undefined && (!isFiniteNumber(value.timeout) || value.timeout <= 0))
   ) {
     return false;

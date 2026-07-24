@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ExtensionUIRequestPayload } from '../../../src/shared/protocol';
+import { isExtensionUIRequestPayload } from '../../../src/shared/protocol';
 import { ExtensionUIBridge } from '../../../src/backend/extension-ui-bridge';
 
 // ─── harness ─────────────────────────────────────────────────────────────────
@@ -120,6 +121,33 @@ test('select: forwards ownership and custom-answer metadata when provided', asyn
   assert.equal(captured[0].payload.method === 'select' && captured[0].payload.allowCustom, true);
   resolveLast(bridge, captured, { value: 'a' });
   assert.equal(await pending, 'a');
+});
+
+test('select and input retain review metadata while routing through the reviewer session', async () => {
+  const { bridge, captured } = makeBridge('/sessions/reviewer.jsonl');
+  const reviewMeta = {
+    purpose: 'review_human_verification' as const,
+    targetSessionId: 'reviewed-id',
+    targetSessionPath: '/sessions/reviewed.jsonl',
+    criterionId: 'criterion-1',
+    domain: 'accessibility',
+    expectedObservation: 'The form can be completed with a keyboard.',
+  };
+
+  const select = bridge.select('Can you verify this?', ['Yes'], { reviewMeta });
+  assert.equal(captured[0].payload.sessionPath, '/sessions/reviewer.jsonl');
+  assert.deepEqual(captured[0].payload.reviewMeta, reviewMeta);
+  assert.equal(isExtensionUIRequestPayload(captured[0].payload), true);
+  resolveLast(bridge, captured, { value: 'Yes' });
+  assert.equal(await select, 'Yes');
+
+  const input = bridge.input('Describe the result', undefined, { reviewMeta });
+  assert.equal(captured[1].payload.sessionPath, '/sessions/reviewer.jsonl');
+  assert.deepEqual(captured[1].payload.reviewMeta, reviewMeta);
+  resolveLast(bridge, captured, { value: 'Works' });
+  assert.equal(await input, 'Works');
+
+  assert.equal(isExtensionUIRequestPayload({ ...captured[1].payload, reviewMeta: { ...reviewMeta, purpose: 'not-review' } }), false);
 });
 
 test('select: cancelled → undefined', async () => {

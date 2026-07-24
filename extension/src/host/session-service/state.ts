@@ -8,12 +8,19 @@ import {
   isPendingTabPath,
 } from '../../shared/tab-behavior';
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../shared/transcript-window';
+import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
 import {
   INITIAL_REVIEW_AUTO_CLOSE_STATE,
   computeReviewAutoCloseClosures,
+  type ReviewAutoCloseAttempt,
+  type ReviewAutoCloseResult,
   type ReviewAutoCloseState,
 } from '../../shared/review-auto-close';
-import type { SessionOpenedPayload } from '../../shared/protocol';
+import {
+  type ClosureAction,
+  type SessionOpenedPayload,
+} from '../../shared/protocol';
+import { appendClosureActionRecords } from '../../backend/session-review-store';
 import type { ScheduleRender, SelectionRequest } from './types';
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
@@ -22,6 +29,12 @@ export const OPEN_TABS_STORAGE_KEY = 'openTabPaths';
 export const ACTIVE_SESSION_STORAGE_KEY = 'activeSessionPath';
 export const PINNED_TABS_STORAGE_KEY = 'pinnedTabPaths';
 const DEFAULT_SELECTION_REQUEST_TIMEOUT_MS = 60_000;
+
+interface InFlightReviewClosureAttempt extends ReviewAutoCloseAttempt {
+  closeResultReceived: boolean;
+  persistResultReceived: boolean;
+  errors: string[];
+}
 
 export class SessionServiceState {
   private readonly busySeqMap = new Map<string, number>();
@@ -37,10 +50,10 @@ export class SessionServiceState {
   private pendingSessionCounter = 0;
   private selectionRequestCounter = 0;
   private currentSelectionToken: string | null = null;
-  /** Tracks agent-reviewed `done` sessions so the host auto-closes tabs on a
-   *  fresh done transition (and seeds on first list so startup does not
-   *  mass-close pre-existing done tabs). See `review-auto-close.ts`. */
+  /** Claims explicit closure-action IDs while their normal tab-close lifecycle
+   *  and terminal outbox append are being drained. */
   private reviewAutoClose: ReviewAutoCloseState = INITIAL_REVIEW_AUTO_CLOSE_STATE;
+  private readonly reviewClosureAttemptsByCorrId = new Map<string, InFlightReviewClosureAttempt>();
   private onPreloadedSessionOpened?: (payload: SessionOpenedPayload) => void;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
@@ -77,24 +90,106 @@ export class SessionServiceState {
     this.transcriptTouchedAtBySession.clear();
     this.currentSelectionToken = null;
     this.reviewAutoClose = INITIAL_REVIEW_AUTO_CLOSE_STATE;
+    this.reviewClosureAttemptsByCorrId.clear();
   }
 
-  /** Return the open-tab session paths that newly transitioned to `done` in
-   *  this session-list refresh and should be auto-closed for tab cleanup.
-   *  Pure-decision: delegates to `computeReviewAutoCloseClosures` and stores
-   *  the resulting state for the next call. */
+  /** Claim pending/retrying explicit closure actions for this list refresh. */
   consumeReviewAutoCloseClosures(
-    incoming: ReadonlyArray<{ path: string; done?: boolean }>,
+    incoming: ReadonlyArray<{ path: string; closureActions?: readonly ClosureAction[] }>,
     openTabPaths: readonly string[],
     runningPaths: readonly string[],
-  ): string[] {
+  ): ReviewAutoCloseResult {
     const result = computeReviewAutoCloseClosures(this.reviewAutoClose, {
       incoming,
       openTabPaths,
       runningPaths,
     });
     this.reviewAutoClose = result.next;
-    return result.closures;
+    return result;
+  }
+
+  /** Register before dispatching the correlated CloseSession command so even
+   *  immediately completing effects cannot outrun the outbox claim. */
+  beginReviewClosureAttempt(corrId: string, attempt: ReviewAutoCloseAttempt): void {
+    this.reviewClosureAttemptsByCorrId.set(corrId, {
+      ...attempt,
+      actions: [...attempt.actions],
+      closeResultReceived: !attempt.requiresCloseCompletion,
+      persistResultReceived: false,
+      errors: [],
+    });
+  }
+
+  /** Observe authoritative CQRS effect results. Idle/already-hidden targets
+   *  require both cleanup and tab persistence; running targets are deliberate
+   *  tab hides and require persistence only. */
+  handleReviewClosureEffectResult(
+    event: Extract<Event, { kind: 'CloseSessionResult' | 'PersistTabsResult' }>,
+  ): void {
+    const attempt = this.reviewClosureAttemptsByCorrId.get(event.corrId);
+    if (!attempt) return;
+
+    if (event.kind === 'CloseSessionResult') {
+      if (!attempt.requiresCloseCompletion || attempt.closeResultReceived) return;
+      attempt.closeResultReceived = true;
+    } else {
+      if (attempt.persistResultReceived) return;
+      attempt.persistResultReceived = true;
+    }
+    if (!event.ok) attempt.errors.push(event.error ?? `${event.kind} failed`);
+
+    if (!attempt.persistResultReceived || !attempt.closeResultReceived) return;
+    this.reviewClosureAttemptsByCorrId.delete(event.corrId);
+
+    if (this.getArchState().sessions.openTabPaths.includes(attempt.sessionPath)) {
+      attempt.errors.push('The target tab remained open after the closure effects completed.');
+    }
+    this.persistReviewClosureAttempt(attempt);
+  }
+
+  private persistReviewClosureAttempt(attempt: InFlightReviewClosureAttempt): void {
+    const reviewsDir = this.getReviewsDir();
+    const failed = attempt.errors.length > 0;
+    const timestamp = new Date().toISOString();
+    const records: ClosureAction[] = attempt.actions.map((action) => failed ? {
+      ...action,
+      status: 'retrying',
+      attempts: action.attempts + 1,
+      lastError: attempt.errors.join('; '),
+      settledAt: undefined,
+    } : {
+      ...action,
+      status: 'succeeded',
+      attempts: action.attempts + 1,
+      lastError: undefined,
+      settledAt: timestamp,
+    });
+
+    try {
+      if (!reviewsDir) throw new Error('review sidecar directory is unavailable');
+      appendClosureActionRecords(reviewsDir, records);
+      if (failed) this.releaseReviewClosureActionClaims(attempt.actions);
+    } catch (error) {
+      this.releaseReviewClosureActionClaims(attempt.actions);
+      auditLog('session-service', 'reviewClosure.settle.failed', {
+        actionIds: attempt.actions.map((action) => action.actionId),
+        message: toErrorMessage(error),
+      });
+    }
+  }
+
+  private getReviewsDir(): string | undefined {
+    const explicitDir = process.env.PIE_REVIEWS_DIR?.trim();
+    return explicitDir || resolveHostSessionStoragePaths(
+      process.env.PI_CODING_AGENT_DIR,
+      process.env.PI_CODING_AGENT_SESSION_DIR,
+    ).reviewsDir;
+  }
+
+  private releaseReviewClosureActionClaims(actions: readonly ClosureAction[]): void {
+    const claimedActionIds = new Set(this.reviewAutoClose.claimedActionIds);
+    for (const action of actions) claimedActionIds.delete(action.actionId);
+    this.reviewAutoClose = { claimedActionIds };
   }
 
   createPendingSessionPath(): string {
