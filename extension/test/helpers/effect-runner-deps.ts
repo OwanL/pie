@@ -177,7 +177,6 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     prepareForSend() {},
     onTruncatedAfter() {},
     onMessageEdited() {},
-    recordOutcome() {},
     startNewTask() {},
     continueTask() {},
   };

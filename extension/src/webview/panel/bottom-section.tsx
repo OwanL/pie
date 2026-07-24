@@ -45,10 +45,7 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
-  /** True when the active session owns a pending deferred trigger — greys out
-   *  the composer's mark-done button with an explanatory tooltip. */
-  activeSessionHasDeferredTriggers: boolean;
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleMarkComplete'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -80,7 +77,6 @@ export const BottomSection = memo(function BottomSection({
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
-  activeSessionHasDeferredTriggers,
   handlers,
 }: BottomSectionProps) {
   if (!hasActiveTabs || needsSessionRecovery) return null;
@@ -123,7 +119,6 @@ export const BottomSection = memo(function BottomSection({
         pendingComposerInputs={pendingComposerInputs}
         activeRunSummary={activeRunSummary}
         tokenRateBySession={tokenRateBySession}
-        activeSessionHasDeferredTriggers={activeSessionHasDeferredTriggers}
         focusTrigger={activeSession?.path}
         onSend={handlers.handleSend}
         onRetrySend={handlers.handleRetrySend}
@@ -136,7 +131,6 @@ export const BottomSection = memo(function BottomSection({
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}
-        onMarkComplete={handlers.handleMarkComplete}
       />
     </>
   );

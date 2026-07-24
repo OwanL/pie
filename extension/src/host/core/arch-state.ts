@@ -147,8 +147,6 @@ export interface SettingsState {
   prefs: ChatPrefs;
   /** Extensions that provide tool integrations. */
   availableExtensions: ExtensionInfo[];
-  /** Per-session outcome dialog visibility. */
-  showOutcomeDialogBySession: Record<string, boolean>;
   /** Per-session pending extension UI requests, keyed by request ID (ask-user inline choices). */
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
 }
@@ -457,7 +455,6 @@ export function createInitialArchState(): ArchState {
       noticeRaw: null,
       prefs: { ...DEFAULT_CHAT_PREFS },
       availableExtensions: [],
-      showOutcomeDialogBySession: {},
       pendingExtensionUIRequestsBySession: {},
     },
     composer: {

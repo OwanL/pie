@@ -218,13 +218,6 @@ export interface JumpToLatestTranscriptResultEvent {
   error?: string;
 }
 
-export interface RecordOutcomeResultEvent {
-  kind: 'RecordOutcomeResult';
-  corrId: string;
-  ok: boolean;
-  error?: string;
-}
-
 export interface StartNewTaskResultEvent {
   kind: 'StartNewTaskResult';
   corrId: string;
@@ -320,7 +313,6 @@ export type EffectResultEvent =
   | LoadOlderTranscriptResultEvent
   | LoadNewerTranscriptResultEvent
   | JumpToLatestTranscriptResultEvent
-  | RecordOutcomeResultEvent
   | StartNewTaskResultEvent
   | ContinueTaskResultEvent
   | OpenFileInEditorResultEvent

@@ -238,12 +238,6 @@ export interface JumpToLatestTranscriptEffect extends EffectBase {
   sessionPath: string;
 }
 
-export interface RecordOutcomeEffect extends EffectBase {
-  kind: 'RecordOutcome';
-  sessionPath: string;
-  outcome: import('../../shared/protocol').RunOutcome;
-}
-
 export interface StartNewTaskEffect extends EffectBase {
   kind: 'StartNewTask';
   sessionPath: string;
@@ -328,7 +322,6 @@ export type Effect =
   | LoadOlderTranscriptEffect
   | LoadNewerTranscriptEffect
   | JumpToLatestTranscriptEffect
-  | RecordOutcomeEffect
   | StartNewTaskEffect
   | ContinueTaskEffect
   | OpenFileInEditorEffect

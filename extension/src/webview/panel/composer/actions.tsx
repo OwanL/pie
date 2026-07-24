@@ -1,8 +1,6 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { getComposerRunControls } from '../session-tabs/run-state';
-
 export interface ComposerActionsProps {
   busy: boolean;
   /** Brief E: an interrupt was just clicked and the host hasn't yet cleared
@@ -10,16 +8,10 @@ export interface ComposerActionsProps {
    *  button so the click reflects within one frame (the host clears `busy`
    *  only after the abort round-trip completes). */
   interrupting?: boolean;
-  hasUserMessages: boolean;
   /** Steering (FollowUp): true when the transcript has pending 'queued' user
    *  messages (sent while a turn was running). Shows a "Clear queued"
    *  affordance to cancel them without stopping the current turn. */
   hasQueuedMessages: boolean;
-  completionAction: ReturnType<typeof getComposerRunControls>['action'];
-  onMarkComplete?: () => void;
-  /** When set, the mark-done button is disabled and its tooltip is replaced
-   *  with this reason (e.g. a pending deferred trigger blocks marking done). */
-  deferredBlockReason?: string | null;
   onInterrupt: () => void;
   /** Steering (FollowUp): cancel all queued messages for this session. */
   onClearQueue: () => void;
@@ -31,11 +23,7 @@ export interface ComposerActionsProps {
 export function ComposerActions({
   busy,
   interrupting,
-  hasUserMessages,
   hasQueuedMessages,
-  completionAction,
-  onMarkComplete,
-  deferredBlockReason,
   onInterrupt,
   onClearQueue,
   sendCurrentText,
@@ -56,19 +44,6 @@ export function ComposerActions({
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
           </svg>
         </button>
-        {completionAction && (
-          <button
-            class={`composer-run-action ${completionAction.tone}`}
-            type="button"
-            title={deferredBlockReason ?? completionAction.title}
-            aria-label={completionAction.ariaLabel}
-            aria-disabled={deferredBlockReason ? 'true' : undefined}
-            disabled={busy || !hasUserMessages || !onMarkComplete || !!deferredBlockReason}
-            onClick={() => onMarkComplete?.()}
-          >
-            {completionAction.text}
-          </button>
-        )}
       </div>
       <div class="composer-actions-right ml-auto flex flex-wrap items-center gap-2">
         {hasQueuedMessages && (

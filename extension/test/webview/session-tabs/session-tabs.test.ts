@@ -2,29 +2,26 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  COMPOSER_MARK_DONE_ACTION,
   getComposerRunControls,
   getSessionTabRunMenuItems,
 } from '../../../src/webview/panel/session-tabs/run-state';
 
-test('getSessionTabRunMenuItems exposes completion and task actions for open runs', () => {
+test('getSessionTabRunMenuItems exposes the start-new-task action for open runs', () => {
   assert.deepEqual(getSessionTabRunMenuItems({
     runId: 'run-1',
     status: 'open',
     scored: false,
   }), [
-    { action: 'recordOutcome', label: 'Mark tab as complete…' },
     { action: 'startNewTask', label: 'Start new task' },
   ]);
 });
 
-test('getSessionTabRunMenuItems keeps outcome capture available for closed unscored runs', () => {
+test('getSessionTabRunMenuItems offers continuation for closed unscored runs', () => {
   assert.deepEqual(getSessionTabRunMenuItems({
     runId: 'run-2',
     status: 'closed_unscored',
     scored: false,
   }), [
-    { action: 'recordOutcome', label: 'Rate completed run…' },
     { action: 'continueTask', label: 'Continue task' },
     { action: 'startNewTask', label: 'Start new task' },
   ]);
@@ -45,46 +42,33 @@ test('getSessionTabRunMenuItems returns no actions when there is no active run',
   assert.deepEqual(getSessionTabRunMenuItems(null), []);
 });
 
-test('getComposerRunControls returns a completion action for open runs', () => {
-  const controls = getComposerRunControls({
+test('getComposerRunControls returns no status for open runs without a queued new task', () => {
+  assert.deepEqual(getComposerRunControls({
     runId: 'run-open-toolbar',
     status: 'open',
     scored: false,
-  });
-
-  assert.deepEqual(controls, {
+  }), {
     status: null,
-    action: COMPOSER_MARK_DONE_ACTION,
   });
-  assert.strictEqual(controls.action, COMPOSER_MARK_DONE_ACTION);
 });
 
-test('getComposerRunControls keeps the mark-done action available for closed unscored runs', () => {
-  const controls = getComposerRunControls({
+test('getComposerRunControls returns no status for closed unscored runs without a queued new task', () => {
+  assert.deepEqual(getComposerRunControls({
     runId: 'run-needs-rating',
     status: 'closed_unscored',
     scored: false,
-  });
-
-  assert.deepEqual(controls, {
+  }), {
     status: null,
-    action: COMPOSER_MARK_DONE_ACTION,
   });
-  assert.strictEqual(controls.action, COMPOSER_MARK_DONE_ACTION);
 });
 
-test('getComposerRunControls returns outcome-saved status after a run is scored', () => {
+test('getComposerRunControls returns no status after a run is scored without a queued new task', () => {
   assert.deepEqual(getComposerRunControls({
     runId: 'run-complete',
     status: 'scored',
     scored: true,
   }), {
-    status: {
-      text: 'Outcome saved',
-      tone: 'subtle',
-      title: 'Local outcome saved. Send another message to continue this task, or queue a new one.',
-    },
-    action: null,
+    status: null,
   });
 });
 
@@ -100,7 +84,6 @@ test('getComposerRunControls surfaces queued new-task state', () => {
       tone: 'subtle',
       title: 'The next send will start a new task group instead of continuing the completed one.',
     },
-    action: null,
   });
 });
 
@@ -116,7 +99,6 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
       tone: 'subtle',
       title: 'The next send will close the current run and start a new task group.',
     },
-    action: COMPOSER_MARK_DONE_ACTION,
   });
 
   assert.deepEqual(getComposerRunControls({
@@ -130,7 +112,6 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
       tone: 'subtle',
       title: 'The next send will start a new task group after this completed run.',
     },
-    action: COMPOSER_MARK_DONE_ACTION,
   });
 
   assert.deepEqual(getSessionTabRunMenuItems({
@@ -142,5 +123,5 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
     runId: 'run-unknown',
     status: 'mystery' as never,
     scored: false,
-  }), { status: null, action: null });
+  }), { status: null });
 });

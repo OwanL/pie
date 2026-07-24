@@ -112,11 +112,6 @@ export function useAppBodyDerivedState(
     )),
     [deferredTimerSig],
   );
-  const activeSessionHasDeferredTriggers = useMemo(
-    () => deferredTriggers.some((t) => t.sessionPath === activeSessionPath),
-    [deferredSig, activeSessionPath],
-  );
-
   // Stable notice context value: `dismiss` is fixed for the AppBody lifetime
   // so consumers only re-render when `notice` actually changes, mirroring the
   // memoized `askUserContextValue` above.
@@ -139,6 +134,5 @@ export function useAppBodyDerivedState(
     deferredTriggers,
     deferredSessionPaths,
     deferredTimerSessionPaths,
-    activeSessionHasDeferredTriggers,
   };
 }

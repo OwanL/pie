@@ -452,7 +452,6 @@ function projectViewState(state: ArchState): ViewState {
     prepassStartedAt: prepass.startedAt,
     prepassLatencyMs: prepass.latencyMs,
     editingMessageId: activePath ? state.transcript.editingMessageIdBySession[activePath] ?? null : null,
-    showOutcomeDialog: activePath ? state.settings.showOutcomeDialogBySession[activePath] ?? false : false,
     pendingExtensionUIRequestsBySession: settings.pendingExtensionUIRequestsBySession,
     pendingExtensionUIRequest: activePath
       ? (() => {

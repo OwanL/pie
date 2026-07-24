@@ -1406,24 +1406,6 @@ test('reducer: SessionScopeCleared clears the in-flight paging flag for the sess
   assert.equal(result.state.transcript.pagingInFlightBySession['/s'], undefined);
 });
 
-test('reducer: RecordOutcome command produces RecordOutcome effect, state unchanged', () => {
-  const event: Event = {
-    kind: 'Command',
-    cmd: { kind: 'RecordOutcome', corrId: 'c-out', sessionPath: '/s', outcome: { resolution: 'resolved', satisfaction: 5 } },
-  };
-
-  const result = reducer(initialArchState, event);
-
-  assert.deepEqual(result.state, initialArchState);
-  assert.equal(result.effects.length, 1);
-  assert.equal(result.effects[0]?.kind, 'RecordOutcome');
-  if (result.effects[0]?.kind === 'RecordOutcome') {
-    assert.equal(result.effects[0].corrId, 'c-out');
-    assert.equal(result.effects[0].sessionPath, '/s');
-    assert.deepEqual(result.effects[0].outcome, { resolution: 'resolved', satisfaction: 5 });
-  }
-});
-
 test('reducer: StartNewTask command produces StartNewTask effect, state unchanged', () => {
   const event: Event = {
     kind: 'Command',

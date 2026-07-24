@@ -191,7 +191,6 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
         tools: [],
       },
       editingMessageId: null,
-      showOutcomeDialog: false,
       pendingExtensionUIRequestsBySession: {},
       pendingExtensionUIRequest: null,
     },
@@ -404,30 +403,6 @@ test('WebviewToHostMessage.send carries an explicit sessionPath', () => {
     assert.equal(msg.sessionPath, '/workspace/session.jsonl');
     assert.equal(msg.text, 'hello');
   }
-});
-
-test('WebviewToHostMessage includes run outcome and task-control actions', () => {
-  const outcome: WebviewToHostMessage = {
-    type: 'recordOutcome',
-    sessionPath: '/workspace/session.jsonl',
-    outcome: { resolution: 'resolved', satisfaction: 5 },
-  };
-  const newTask: WebviewToHostMessage = {
-    type: 'startNewTask',
-    sessionPath: '/workspace/session.jsonl',
-  };
-  const continueTask: WebviewToHostMessage = {
-    type: 'continueTask',
-    sessionPath: '/workspace/session.jsonl',
-  };
-
-  assert.equal(outcome.type, 'recordOutcome');
-  if (outcome.type === 'recordOutcome') {
-    assert.equal(outcome.outcome.resolution, 'resolved');
-    assert.equal(outcome.outcome.satisfaction, 5);
-  }
-  assert.equal(newTask.type, 'startNewTask');
-  assert.equal(continueTask.type, 'continueTask');
 });
 
 test('HostToWebviewMessage.sendRejected carries the text draft payload and optional composer inputs', () => {

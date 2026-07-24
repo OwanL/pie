@@ -23,7 +23,7 @@ const baseViewState: ViewState = {
   prepassPhase: 'idle', prepassStartedAt: null,
   pruningSettings: { mode: 'auto', skillCeiling: 8, toolCeiling: 10, skillAlwaysKeep: [], toolAlwaysKeep: [], model: 'gpt-5.4-mini', provider: 'github-copilot', thinkingLevel: 'minimal' },
   toolResultPruningSettings: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS, rules: { ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS.rules } },
-  pruningCatalog: { skills: [], tools: [] }, editingMessageId: null, showOutcomeDialog: false,
+  pruningCatalog: { skills: [], tools: [] }, editingMessageId: null,
   pendingExtensionUIRequestsBySession: {}, pendingExtensionUIRequest: null,
 };
 

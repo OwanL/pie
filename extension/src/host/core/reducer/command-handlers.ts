@@ -15,13 +15,11 @@ import {
   handleTruncateAfter,
   handleCompact,
   handleClearQueue,
-  handleSetOutcomeDialog,
   handleDismissNotice,
   handleRespondExtensionUI,
   handleSetPrefs,
   handleStartNewTask,
   handleContinueTask,
-  handleRecordOutcome,
   handleSetPruningSettings,
   handleSetToolResultPruningSettings,
 } from './command-misc-handlers.js';
@@ -166,10 +164,6 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
       return handleSetEditingMessage(state, cmd);
     }
 
-    case 'SetOutcomeDialog': {
-      return handleSetOutcomeDialog(state, cmd);
-    }
-
     case 'DismissNotice': {
       return handleDismissNotice(state, cmd);
     }
@@ -192,10 +186,6 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'JumpToLatestTranscript': {
       return handleJumpToLatestTranscript(state, cmd);
-    }
-
-    case 'RecordOutcome': {
-      return handleRecordOutcome(state, cmd);
     }
 
     case 'StartNewTask': {

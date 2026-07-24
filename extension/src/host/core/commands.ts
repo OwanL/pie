@@ -182,12 +182,6 @@ export interface SetEditingMessageCommand extends CommandBase {
   messageId: string | null;
 }
 
-export interface SetOutcomeDialogCommand extends CommandBase {
-  kind: 'SetOutcomeDialog';
-  sessionPath: string;
-  visible: boolean;
-}
-
 export interface DismissNoticeCommand extends CommandBase {
   kind: 'DismissNotice';
 }
@@ -230,12 +224,6 @@ export interface LoadNewerTranscriptCommand extends CommandBase {
 export interface JumpToLatestTranscriptCommand extends CommandBase {
   kind: 'JumpToLatestTranscript';
   sessionPath: string;
-}
-
-export interface RecordOutcomeCommand extends CommandBase {
-  kind: 'RecordOutcome';
-  sessionPath: string;
-  outcome: import('../../shared/protocol').RunOutcome;
 }
 
 export interface StartNewTaskCommand extends CommandBase {
@@ -323,14 +311,12 @@ export type Command =
   | RevertFileCommand
   | CloseSessionCommand
   | SetEditingMessageCommand
-  | SetOutcomeDialogCommand
   | DismissNoticeCommand
   | RespondExtensionUICommand
   | AddFilesystemPathsCommand
   | LoadOlderTranscriptCommand
   | LoadNewerTranscriptCommand
   | JumpToLatestTranscriptCommand
-  | RecordOutcomeCommand
   | StartNewTaskCommand
   | ContinueTaskCommand
   | OpenFileInEditorCommand

@@ -56,7 +56,7 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import type { EffectResultEvent, CommandEvent } from './events';
 import type { FileDiffService } from './file-diff-service';
-import type { ChatPrefs, ComposerInput, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, RunOutcome, ThinkingLevel, UserContentPart } from '../../shared/protocol';
+import type { ChatPrefs, ComposerInput, ProviderGateStats, PruningMode, PruningSettings, ToolResultPruningSettings, ThinkingLevel, UserContentPart } from '../../shared/protocol';
 import type { RequestOptions } from '../../shared/request-tracker';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../shared/live-pipeline-protocol';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
@@ -139,7 +139,6 @@ export interface StatsServiceLike {
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage?: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
-  recordOutcome(sessionPath: string, outcome: RunOutcome): void;
   startNewTask(sessionPath: string): void;
   continueTask(sessionPath: string): void;
 }
@@ -357,7 +356,6 @@ export class EffectRunner {
       LoadOlderTranscript: this.templateRow({ resultKind: 'LoadOlderTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadOlderTranscript(e.sessionPath) }),
       LoadNewerTranscript: this.templateRow({ resultKind: 'LoadNewerTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadNewerTranscript(e.sessionPath) }),
       JumpToLatestTranscript: this.templateRow({ resultKind: 'JumpToLatestTranscriptResult', withSessionPath: true, call: (e, d) => d.service.jumpToLatestTranscript(e.sessionPath) }),
-      RecordOutcome: this.templateRow({ resultKind: 'RecordOutcomeResult', withSessionPath: false, call: (e, d) => { d.statsService.recordOutcome(e.sessionPath, e.outcome); } }),
       StartNewTask: this.templateRow({ resultKind: 'StartNewTaskResult', withSessionPath: false, call: (e, d) => { d.statsService.startNewTask(e.sessionPath); } }),
       ContinueTask: this.templateRow({ resultKind: 'ContinueTaskResult', withSessionPath: false, call: (e, d) => { d.statsService.continueTask(e.sessionPath); } }),
       OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
@@ -490,7 +488,7 @@ export class EffectRunner {
    *  [sessionPath?], ok, error?})` handler for a pure 1:1 effect→result row.
    *
    *  `call` returns a `Promise` for await-rows and `void` for sync rows
-   *  (RecordOutcome / StartNewTask / ContinueTask call sync stats methods).
+   *  (StartNewTask / ContinueTask call sync stats methods).
    *  The helper awaits only when a `Promise` is returned, preserving the
    *  original await-vs-sync distinction exactly — sync rows must NOT gain an
    *  extra microtask (the dispatch would slip one tick later). */

@@ -120,7 +120,6 @@ export function reducer(state: ArchState, event: Event): ReducerResult {
     case 'LoadOlderTranscriptResult':
     case 'LoadNewerTranscriptResult':
     case 'JumpToLatestTranscriptResult':
-    case 'RecordOutcomeResult':
     case 'StartNewTaskResult':
     case 'ContinueTaskResult':
     case 'OpenFileInEditorResult':

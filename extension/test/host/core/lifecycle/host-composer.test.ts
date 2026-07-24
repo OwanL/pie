@@ -26,7 +26,6 @@ const NOOP_OBSERVER = {
   onSessionClosed: () => {},
   onUnsupportedInputAttempt: () => {},
   onSessionCompleted: () => {},
-  recordOutcome: () => {},
   startNewTask: () => {},
   continueTask: () => {},
 } as any;

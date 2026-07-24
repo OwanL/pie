@@ -378,15 +378,6 @@ export function handleTruncateAfter(state: ArchState, cmd: Extract<Command, { ki
   };
 }
 
-export function handleSetOutcomeDialog(state: ArchState, cmd: Extract<Command, { kind: 'SetOutcomeDialog' }>): ReducerResult {
-  return {
-    state: produce(state, (draft) => {
-      draft.settings.showOutcomeDialogBySession[cmd.sessionPath] = cmd.visible;
-    }),
-    effects: [],
-  };
-}
-
 export function handleDismissNotice(state: ArchState, _cmd: Extract<Command, { kind: 'DismissNotice' }>): ReducerResult {
   return {
     state: produce(state, (draft) => {
@@ -516,20 +507,6 @@ export function handleContinueTask(state: ArchState, cmd: Extract<Command, { kin
         kind: 'ContinueTask',
         corrId: cmd.corrId,
         sessionPath: cmd.sessionPath,
-      },
-    ],
-  };
-}
-
-export function handleRecordOutcome(state: ArchState, cmd: Extract<Command, { kind: 'RecordOutcome' }>): ReducerResult {
-  return {
-    state,
-    effects: [
-      {
-        kind: 'RecordOutcome',
-        corrId: cmd.corrId,
-        sessionPath: cmd.sessionPath,
-        outcome: cmd.outcome,
       },
     ],
   };

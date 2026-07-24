@@ -128,18 +128,6 @@ test('handleSessionScopeCleared cleans interruptInFlightBySession', () => {
   assert.equal(result.state.sessions.interruptInFlightBySession['/a'], undefined);
 });
 
-test('handleSessionScopeCleared cleans showOutcomeDialogBySession', () => {
-  const state: ArchState = {
-    ...readyState,
-    settings: {
-      ...readyState.settings,
-      showOutcomeDialogBySession: { '/a': true },
-    },
-  };
-  const result = reducer(state, sessionScopeCleared('/a', false));
-  assert.equal(result.state.settings.showOutcomeDialogBySession['/a'], undefined);
-});
-
 test('handleSessionScopeCleared cleans currentTurnBySession', () => {
   const state: ArchState = {
     ...readyState,
@@ -178,10 +166,6 @@ test('handleSessionScopeCleared preserves maps for other sessions', () => {
       ...readyState.sessions,
       interruptInFlightBySession: { '/a': true, '/b': false },
     },
-    settings: {
-      ...readyState.settings,
-      showOutcomeDialogBySession: { '/a': true, '/b': false },
-    },
     pending: {
       ...readyState.pending,
       currentTurnBySession: { '/a': currentTurn('/a'), '/b': currentTurn('/b') },
@@ -192,8 +176,6 @@ test('handleSessionScopeCleared preserves maps for other sessions', () => {
   assert.equal(result.state.transcript.editingMessageIdBySession['/b'], 'msg-b');
   assert.equal(result.state.sessions.interruptInFlightBySession['/a'], undefined);
   assert.equal(result.state.sessions.interruptInFlightBySession['/b'], false);
-  assert.equal(result.state.settings.showOutcomeDialogBySession['/a'], undefined);
-  assert.equal(result.state.settings.showOutcomeDialogBySession['/b'], false);
   assert.equal(result.state.pending.currentTurnBySession['/a'], undefined);
   assert.deepEqual(result.state.pending.currentTurnBySession['/b'], currentTurn('/b'));
 });
@@ -336,7 +318,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
       ...readyState.settings,
       availableModelsBySession: { [sp]: [], [other]: [] },
       contextUsageBySession: { [sp]: {} as never, [other]: {} as never },
-      showOutcomeDialogBySession: { [sp]: true, [other]: false },
       pendingExtensionUIRequestsBySession: {
         [sp]: { req1: extUiPayload },
         [other]: { req2: extUiPayload },
@@ -382,7 +363,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'sessions.interruptInFlightBySession', map: cleared.state.sessions.interruptInFlightBySession },
     { name: 'settings.availableModelsBySession', map: cleared.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: cleared.state.settings.contextUsageBySession },
-    { name: 'settings.showOutcomeDialogBySession', map: cleared.state.settings.showOutcomeDialogBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: cleared.state.settings.pendingExtensionUIRequestsBySession },
     { name: 'composer.pendingComposerInputsBySession', map: cleared.state.composer.pendingComposerInputsBySession },
     { name: 'composer.activeRunSummaryBySession', map: cleared.state.composer.activeRunSummaryBySession },
@@ -440,7 +420,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'sessions.interruptInFlightBySession', map: evicted.state.sessions.interruptInFlightBySession },
     { name: 'settings.availableModelsBySession', map: evicted.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: evicted.state.settings.contextUsageBySession },
-    { name: 'settings.showOutcomeDialogBySession', map: evicted.state.settings.showOutcomeDialogBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: evicted.state.settings.pendingExtensionUIRequestsBySession },
     { name: 'composer.pendingComposerInputsBySession', map: evicted.state.composer.pendingComposerInputsBySession },
     { name: 'composer.activeRunSummaryBySession', map: evicted.state.composer.activeRunSummaryBySession },

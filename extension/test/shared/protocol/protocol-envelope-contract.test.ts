@@ -91,7 +91,6 @@ function emptyViewState(): ViewState {
       tools: [],
     },
     editingMessageId: null,
-    showOutcomeDialog: false,
     pendingExtensionUIRequestsBySession: {},
     pendingExtensionUIRequest: null,
     deferredTriggers: [],

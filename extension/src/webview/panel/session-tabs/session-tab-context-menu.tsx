@@ -49,28 +49,17 @@ export function SessionTabContextMenu({
         {isPinned ? 'Unpin Tab' : 'Pin Tab'}
       </button>
       <div class="context-menu-separator" />
-      {runItems.map((item) => {
-        // `recordOutcome` ("Mark tab as complete…" / "Rate completed run…") opens
-        // the outcome dialog, whose confirm closes the session — so it is the
-        // mark-done path and must be greyed out for a deferred session, matching
-        // the composer's done button. `startNewTask` / `continueTask` don't
-        // close the tab, so they stay enabled.
-        const blocksWhenDeferred = item.action === 'recordOutcome';
-        const blocked = hasDeferredTriggers && blocksWhenDeferred;
-        return (
-          <button
-            key={item.action}
-            class="context-menu-item"
-            type="button"
-            disabled={blocked}
-            title={blocked ? 'Pending deferred trigger(s) — cancel from the status bar first.' : undefined}
-            onClick={() => onContextAction(item.action, tabContextMenu.tabPath)}
-          >
-            <CheckmarkIcon />
-            {item.label}
-          </button>
-        );
-      })}
+      {runItems.map((item) => (
+        <button
+          key={item.action}
+          class="context-menu-item"
+          type="button"
+          onClick={() => onContextAction(item.action, tabContextMenu.tabPath)}
+        >
+          <CheckmarkIcon />
+          {item.label}
+        </button>
+      ))}
       {runItems.length > 0 && <div class="context-menu-separator" />}
       <button
         class="context-menu-item"

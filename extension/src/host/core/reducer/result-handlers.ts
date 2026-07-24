@@ -618,7 +618,6 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
         }],
       };
     }
-    case 'RecordOutcomeResult':
     case 'StartNewTaskResult':
     case 'ContinueTaskResult':
     case 'OpenFileInEditorResult':

@@ -7,7 +7,6 @@ import type {
   WebviewToHostMessage,
 } from '../../shared/protocol';
 import { ContextMenu, type ContextMenuState } from './components/context-menu';
-import { RunOutcomeDialog } from './run-outcome-dialog';
 import { NoticeBanner } from './components/notice-banner';
 import { SessionTabs } from './ui';
 import { AggregateStatsStrip } from './ui';
@@ -159,13 +158,6 @@ export function AppBody({ adapter }: AppBodyProps) {
     <TranscriptCommitProvider target={commitTarget} postMessage={postMessage} appSurface={appCommitSurface}>
     <AskUserContext.Provider value={derived.askUserContextValue}>
     <div id="app">
-      {viewState.showOutcomeDialog && viewState.activeSession && (
-        <RunOutcomeDialog
-          sessionLabel={viewState.activeSession.name}
-          onCancel={handlers.handleCancelOutcome}
-          onSubmit={handlers.handleRecordOutcome}
-        />
-      )}
       {contextMenu && (
         <ContextMenu
           menu={contextMenu}
@@ -268,7 +260,6 @@ export function AppBody({ adapter }: AppBodyProps) {
         pendingComposerInputs={viewState.pendingComposerInputs}
         activeRunSummary={viewState.activeRunSummary}
         tokenRateBySession={viewState.tokenRateBySession}
-        activeSessionHasDeferredTriggers={derived.activeSessionHasDeferredTriggers}
         handlers={handlers}
       />
 

@@ -448,10 +448,9 @@ test('selectViewState: fileChanges returns empty when no active session', () => 
   assert.deepEqual(vs.fileChanges, []);
 });
 
-test('selectViewState: editingMessageId, showOutcomeDialog, pendingExtensionUIRequest are null/false initially', () => {
+test('selectViewState: editingMessageId and pendingExtensionUIRequest are null initially', () => {
   const vs = selectViewState(initialArchState);
   assert.equal(vs.editingMessageId, null);
-  assert.equal(vs.showOutcomeDialog, false);
   assert.equal(vs.pendingExtensionUIRequest, null);
   assert.deepEqual(vs.pendingExtensionUIRequestsBySession, {});
 });
@@ -690,7 +689,7 @@ test('ViewState: all fields are present in initial state', () => {
     'activeRunSummary', 'runSummariesBySession', 'busy', 'notice', 'backendReady',
     'workspaceCwd', 'systemPrompts', 'modelSettings', 'availableModels', 'contextUsage',
     'prefs', 'fileChanges', 'readFilePaths', 'availableExtensions', 'pruningResult', 'pruningSettings',
-    'pruningCatalog', 'editingMessageId', 'showOutcomeDialog', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
+    'pruningCatalog', 'editingMessageId', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
   ];
 
   for (const key of requiredKeys) {

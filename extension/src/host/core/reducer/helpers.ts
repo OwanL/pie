@@ -169,7 +169,6 @@ export function evictSession(
   const { [sp]: _ct, ...remainingTurns } = state.pending.currentTurnBySession;
   const { [sp]: _m, ...remainingModels } = state.settings.availableModelsBySession;
   const { [sp]: _cu, ...remainingContext } = state.settings.contextUsageBySession;
-  const { [sp]: _o, ...remainingOutcome } = state.settings.showOutcomeDialogBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
@@ -290,7 +289,6 @@ export function evictSession(
         ...state.settings,
         availableModelsBySession: remainingModels,
         contextUsageBySession: remainingContext,
-        showOutcomeDialogBySession: remainingOutcome,
         pendingExtensionUIRequestsBySession: remainingExtUI,
       },
       composer: {

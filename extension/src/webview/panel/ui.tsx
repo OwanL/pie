@@ -93,11 +93,6 @@ interface ComposerProps {
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
-  onMarkComplete?: () => void;
-  /** True when the active session owns a pending deferred trigger — greys out
-   *  the mark-done button with an explanatory tooltip (the trigger must be
-   *  cancelled first, from the status strip). */
-  activeSessionHasDeferredTriggers?: boolean;
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
    *  NoticeBanner's Retry button (rendered at the AppBody level, outside the
    *  composer) can re-send the LIVE composer draft. A ref (not state) — no
@@ -145,8 +140,6 @@ function ComposerView({
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
-  onMarkComplete,
-  activeSessionHasDeferredTriggers,
   sendRetryDraftRef,
 }: ComposerProps) {
   const composerAreaRef = useRef<HTMLDivElement>(null);
@@ -244,8 +237,6 @@ function ComposerView({
     [contextIndicator],
   );
   const runControls = getComposerRunControls(activeRunSummary ?? null);
-  const hasUserMessages = transcriptWindow.hasUserMessages;
-  const completionAction = runControls.action;
   // Steering (FollowUp): any optimistic 'queued' user messages (sent while a
   // turn was running) show a "Clear queued" affordance in the composer actions.
   const hasQueuedMessages = useMemo(
@@ -359,16 +350,12 @@ function ComposerView({
         <ComposerActions
           busy={busy}
           interrupting={interrupting}
-          hasUserMessages={hasUserMessages}
           hasQueuedMessages={hasQueuedMessages}
-          completionAction={completionAction}
-          onMarkComplete={onMarkComplete}
           onInterrupt={onInterrupt}
           onClearQueue={onClearQueue}
           sendCurrentText={sendCurrentText}
           canSend={canSend}
           onOpenFilePicker={onOpenFilePicker}
-          deferredBlockReason={activeSessionHasDeferredTriggers ? 'Cannot mark done: pending deferred trigger(s) — cancel them from the status bar first.' : null}
         />
       </div>
 
