@@ -7,7 +7,7 @@ Pie exposes one generic `computer` tool and a supporting `computer-use` skill fo
 Pinned dependencies live in `extensions/computer-use/package.json` and its lockfile:
 
 - `@trycua/cua-driver@0.12.5` — discovery, accessibility observations, desktop capture, launch, primary focus, and lifecycle;
-- `@computer-use/nut-js@4.2.0` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery;
+- `@computer-use/nut-js@4.2.0` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery; a bounded built-in Win32 PID/HWND-validated fallback handles Windows foreground-lock cases left unresolved by both libraries;
 - `pngjs@7.0.0` — bounded model/display PNG generation.
 
 Cua + NutJS was selected over Terminator `0.24.32` + NutJS. Both finalists passed all executable candidate-matrix rows, but Cua observations were about 2–21× faster depending on the surface, exposed richer browser/Electron trees, and shipped declared license metadata.
@@ -29,9 +29,9 @@ Target safety is fail-closed:
 - every window target requires a positive PID and HWND;
 - partial selectors reject ambiguity;
 - launched windows must remain a stable unique PID/HWND match;
-- every non-release physical input to a window revalidates the exact target, active foreground HWND, and unique NutJS HWND region immediately before delivery; a move or resize beyond the deterministic one-pixel tolerance fails with retryable `STALE_GEOMETRY` before input;
-- desktop actions are an intentional exception: they operate the current global desktop/foreground without PID/HWND binding, so exact window sessions are recommended for safe application work;
-- focus uses Cua first, then an exact-HWND NutJS `Window.focus()` fallback, and succeeds only after foreground proof;
+- every non-release physical input to a window revalidates the exact target, active foreground HWND, and unique NutJS HWND region immediately before delivery; if another app stole foreground between model turns, the backend safely reacquires the exact PID/HWND before delivery; a move or resize beyond the deterministic one-pixel tolerance fails with retryable `STALE_GEOMETRY` before input;
+- desktop actions are an intentional exception to target ownership, but desktop observation binds the same active HWND before and after capture, every physical action requires that latest revision, and input is refused with `DESKTOP_FOREGROUND_CHANGED` if the active HWND changed;
+- focus uses Cua first, immediately follows with a bounded Win32 thread-input fallback that validates the HWND's PID before activation and final foreground proof, then uses exact-HWND NutJS restore/focus as the last fallback;
 - stale, background, ambiguous, or vanished targets receive explicit retryable errors;
 - application close revalidates the exact PID/HWND;
 - key/button release is always allowed, attempts every owned input, and retains failures in parent/child ledgers for bounded retry.
@@ -81,7 +81,7 @@ Evaluation run `cu-20260725-01` used dependency-managed disposable candidates an
 - Public-tool Godot dogfood exposed and drove fixes for provider image-count exhaustion, unsafe launch correlation, foreground validation, UIA timeout degradation, Cua high-DPI crop, and display/full-image coordinate mismatch. Candidate-level Godot editor/runtime acceptance passed 3/3 each. A final model-orchestrated public-tool Godot workflow did not complete end to end on this desktop: focus/grounding retries and one model timeout stopped before runtime verification. The tool failed closed and cleanup targeted only exact evaluation-owned PIDs/HWNDs.
 - One early dogfood cleanup incident accepted an incomplete launch record and allowed global input to land on foreground VS Code/pie. The implementation now rejects missing/ambiguous identities, validates foreground before every dispatch, revalidates close, and has deterministic regression coverage for this path.
 
-Focused deterministic coverage: 91 passing computer-use tests with one opt-in live test skipped, plus generic renderer, shared result-format, package-runner, and fixture no-op discrimination tests. The extension build and root typecheck passed on 2026-07-25. A disposable detached source snapshot completed root `npm ci`, normal dependency installation, and resolved both pinned native packages. The full `npm run bootstrap` command was not run because it globally updates pi/extensions and could interrupt the controlling session.
+Focused deterministic coverage: 99 passing computer-use tests with one opt-in live test skipped, plus generic renderer, shared result-format, package-runner, and fixture no-op discrimination tests. The extension build and root typecheck passed on 2026-07-25. A disposable detached source snapshot completed root `npm ci`, normal dependency installation, and resolved both pinned native packages. The full `npm run bootstrap` command was not run because it globally updates pi/extensions and could interrupt the controlling session.
 
 ## Install and verification
 
@@ -100,7 +100,7 @@ Live desktop tests are excluded from the deterministic suite and require both `P
 
 - Windows ordinary, non-elevated desktop only; protected/elevated desktops are unsupported.
 - Window screenshots require exact foreground visibility and a region entirely on NutJS's main display. They capture the composited visible region, so overlays or other content drawn over the target can appear; pixels are not guaranteed to be HWND-owned.
-- Desktop sessions intentionally act on the current global desktop/foreground without HWND binding; prefer exact window sessions for safe application work.
+- Desktop sessions intentionally act on the current global desktop rather than a target HWND. They require a fresh revision and stable observed foreground for every physical action; prefer exact window sessions for safe application work.
 - Godot/custom surfaces may expose no useful UIA tree; pixel grounding remains available when a screenshot was requested.
 - Mixed-DPI movement between multiple monitors is not yet hardware-verified; window capture outside the main display is unsupported.
 - Visible applications can reject or delay physical input while the workstation is locked.

@@ -19,7 +19,7 @@ Use the generic `computer` tool for every visible-UI operation. Other coding too
 
 ## Act and verify
 
-- Use the smallest action that tests the next hypothesis. Keep focus explicit when it matters.
+- Use the smallest action that tests the next hypothesis. Exact-window input automatically attempts bounded PID/HWND-validated foreground recovery when another app stole focus; explicit `focus` remains useful before observation.
 - A semantic ref must belong to the target's latest revision. If a ref or target is stale, stop and observe again rather than retrying the same action.
 - After each meaningful action, obtain a fresh observation and verify a visible or fixture-reported postcondition. Check the cursor and held-input state as part of the observation when relevant.
 - Never claim success from an accepted action, a backend response, or an unchanged screenshot alone. Success requires a visible or fixture postcondition.
@@ -39,7 +39,9 @@ If the native sidecar hangs or restarts, assume targets, revisions, cursor state
 
 ## Desktop target exception
 
-A desktop session intentionally operates the current global desktop and foreground. Its actions are not bound to a PID or HWND, so focus changes can redirect input. Preserve this mode for workflows that genuinely require desktop-wide interaction, but prefer an exact window session for safe application work. Observe immediately before each desktop action and verify the current foreground afterward.
+A desktop session intentionally operates the current global desktop and foreground. Its actions are not bound to a target PID/HWND. Every physical desktop action therefore requires the latest observation revision and is refused if the active HWND changed since that observation. Preserve this mode for workflows that genuinely require desktop-wide interaction, but prefer an exact window session for safe application work. Observe immediately before each desktop action and verify the current foreground afterward.
+
+When an action opens a native file picker, permission prompt, or other modal window, treat it as a target transition: discover/open the new exact foreground window, observe it, interact through that session, then rediscover the parent after the dialog closes. Never continue keyboard input through the old parent target.
 
 ## Browser and ordinary visible applications
 

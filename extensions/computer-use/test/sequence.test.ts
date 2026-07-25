@@ -47,13 +47,13 @@ function heldBackend(throwKey?: number) {
       async releaseKey(key: number) { releasedKeys.push(key); }, async type() {},
     },
     mouse: { config: {}, async pressButton() {}, async releaseButton() {}, async setPosition() {}, async getPosition() { return { x: 0, y: 0 }; } },
-    screen: { async width() { return 100; }, async height() { return 100; } }, async getWindows() { return []; },
+    screen: { async width() { return 100; }, async height() { return 100; } }, async getWindows() { return []; }, async getActiveWindow() { return { windowHandle: 99 }; },
   };
   const backend: any = new ComputerBackend({ driver: { async shutdown() {} }, nut });
   return { backend, releasedKeys, pressedKeys };
 }
 function seed(backend: any, artifactDir: string) {
-  const target = { id: 'desktop:s', kind: 'desktop', revision: 0, refs: new Map() };
+  const target = { id: 'desktop:s', kind: 'desktop', revision: 1, desktopForegroundWindowId: 99, refs: new Map() };
   backend.sessions.set('s', { id: 's', artifactDir, targets: new Map([[target.id, target]]), activeTargetId: target.id, heldKeys: new Set(), heldButtons: new Set(), potentialKeys: new Set(), potentialButtons: new Set() });
 }
 
@@ -61,15 +61,15 @@ test('act holds cumulatively; sequence releases only newly held input unless pre
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-sequence-'));
   try {
     const fixture = heldBackend(); seed(fixture.backend, dir);
-    assert.deepEqual((await fixture.backend.act({ sessionId: 's', input: { kind: 'key_down', key: 'W' } })).held.keys, ['W']);
-    const released = await fixture.backend.runSequence({ sessionId: 's', sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'key_down', key: 'D' } }] }, preserveHeld: false });
+    assert.deepEqual((await fixture.backend.act({ sessionId: 's', revision: 1, input: { kind: 'key_down', key: 'W' } })).held.keys, ['W']);
+    const released = await fixture.backend.runSequence({ sessionId: 's', revision: 1, sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'key_down', key: 'D' } }] }, preserveHeld: false });
     assert.deepEqual(released.held.keys, ['W']); assert.ok(fixture.releasedKeys.includes(2));
     assert.equal(JSON.parse(await readFile(released.sequencePath, 'utf8')).version, 1);
     assert.equal(JSON.parse(await readFile(released.tracePath, 'utf8')).actions[0].status, 'ok');
-    const preserved = await fixture.backend.runSequence({ sessionId: 's', sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'key_down', key: 'D' } }] }, preserveHeld: true });
+    const preserved = await fixture.backend.runSequence({ sessionId: 's', revision: 1, sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'key_down', key: 'D' } }] }, preserveHeld: true });
     assert.deepEqual(new Set(preserved.held.keys), new Set(['W', 'D']));
-    await fixture.backend.act({ sessionId: 's', input: { kind: 'key_up', key: 'W' } });
-    assert.deepEqual((await fixture.backend.act({ sessionId: 's', input: { kind: 'key_up', key: 'W' } })).held.keys, ['D'], 'key_up on an already-up key is idempotent');
+    await fixture.backend.act({ sessionId: 's', revision: 1, input: { kind: 'key_up', key: 'W' } });
+    assert.deepEqual((await fixture.backend.act({ sessionId: 's', revision: 1, input: { kind: 'key_up', key: 'W' } })).held.keys, ['D'], 'key_up on an already-up key is idempotent');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -87,8 +87,8 @@ test('an action error releases cumulative and potential held keys', async () => 
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-cleanup-'));
   try {
     const fixture = heldBackend(3); seed(fixture.backend, dir);
-    await fixture.backend.act({ sessionId: 's', input: { kind: 'key_down', key: 'W' } });
-    await assert.rejects(() => fixture.backend.act({ sessionId: 's', input: { kind: 'key_down', key: 'A' } }), /injected/);
+    await fixture.backend.act({ sessionId: 's', revision: 1, input: { kind: 'key_down', key: 'W' } });
+    await assert.rejects(() => fixture.backend.act({ sessionId: 's', revision: 1, input: { kind: 'key_down', key: 'A' } }), /injected/);
     assert.deepEqual(fixture.backend.held(fixture.backend.sessions.get('s')), { keys: [], buttons: [] });
     assert.ok(fixture.releasedKeys.includes(1), 'cumulative W released'); assert.ok(fixture.releasedKeys.includes(3), 'potential A released');
   } finally { await rm(dir, { recursive: true, force: true }); }

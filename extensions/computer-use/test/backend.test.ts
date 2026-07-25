@@ -86,10 +86,10 @@ function timeoutFixture(options: {
   captureRegion?: 'png' | 'throw'; uiaPayload?: any;
   nutRegion?: { left: number; top: number; width: number; height: number };
   nutRegionAfterCapture?: { left: number; top: number; width: number; height: number };
-  activeAfterCapture?: number; mainDisplay?: { width: number; height: number };
+  activeAfterCapture?: number; activeAfterDesktopCapture?: number; mainDisplay?: { width: number; height: number };
   errorCode?: string; errorMessage?: string; minimized?: boolean; onScreen?: boolean;
 } = {}) {
-  const calls: Array<{ name: string; args: any }> = []; let activeWindow = 99; let windowAvailable = true;
+  const calls: Array<{ name: string; args: any }> = []; let activeWindow = 99; let windowAvailable = true; let invalidDesktopPng = false;
   let nutRegion = options.nutRegion ?? { left: 100, top: 50, width: 400, height: 200 };
   const mainDisplay = options.mainDisplay ?? { width: 1000, height: 600 };
   const driver = {
@@ -102,8 +102,12 @@ function timeoutFixture(options: {
         const error = new Error(options.errorMessage ?? 'get_window_state timed out'); (error as any).code = options.errorCode ?? 'CUA_TIMEOUT'; throw error;
       }
       if (name === 'get_desktop_state') {
-        if (args.screenshot_out_file) await writePng(args.screenshot_out_file, 1000, 600);
-        return tool({ screenshot_width: 1000, screenshot_height: 600, elements: [], tree_markdown: '' });
+        if (args.screenshot_out_file) {
+          if (invalidDesktopPng) await writeFile(args.screenshot_out_file, 'not-a-png');
+          else await writePng(args.screenshot_out_file, 1000, 600);
+        }
+        if (options.activeAfterDesktopCapture !== undefined) activeWindow = options.activeAfterDesktopCapture;
+        return tool({ screenshot_width: invalidDesktopPng ? 0 : 1000, screenshot_height: invalidDesktopPng ? 0 : 600, elements: [], tree_markdown: '' });
       }
       return tool({ active: true });
     },
@@ -136,7 +140,7 @@ function timeoutFixture(options: {
   };
   return {
     backend: new ComputerBackend({ driver, nut }), calls, positions,
-    setActive(windowId: number) { activeWindow = windowId; }, setWindowAvailable(value: boolean) { windowAvailable = value; },
+    setActive(windowId: number) { activeWindow = windowId; }, setWindowAvailable(value: boolean) { windowAvailable = value; }, setInvalidDesktopPng(value: boolean) { invalidDesktopPng = value; },
     setRegion(region: { left: number; top: number; width: number; height: number }) { nutRegion = region; },
   };
 }
@@ -144,14 +148,14 @@ function timeoutFixture(options: {
 function controlledFixture() {
   const calls: Array<{ name: string; args: any }> = []; const inputs: string[] = [];
   const failedKeyReleases = new Set<number>(); const failedButtonReleases = new Set<number>();
-  let activeWindow = 99; let windowAvailable = true; let bringActivates = true; let bringThrows = false; let nutFocusWindow = 99; let now = 0; let onType: (() => void) | undefined;
+  let activeWindow = 99; let windowAvailable = true; let bringActivates = true; let bringThrows = false; let bringHangs = false; let nutFocusWindow = 99; let nativeFocusWindow = 99; let now = 0; let onType: (() => void) | undefined;
   let nutRegion = { left: 100, top: 50, width: 400, height: 200 };
   const record = { pid: 10, window_id: 99, title: 'Editor', app_name: 'editor.exe', bounds: { x: 100, y: 50, width: 400, height: 200 }, minimized: false, is_on_screen: true };
   const driver = {
     async callTool(name: string, json: string) {
       const args = JSON.parse(json); calls.push({ name, args });
       if (name === 'list_windows') return tool({ _legacy_windows: windowAvailable ? [record] : [] });
-      if (name === 'bring_to_front') { if (bringThrows) throw new Error('bring_to_front failed'); if (bringActivates) activeWindow = 99; return tool({ active: true }); }
+      if (name === 'bring_to_front') { if (bringHangs) return await new Promise(() => {}); if (bringThrows) throw new Error('bring_to_front failed'); if (bringActivates) activeWindow = 99; return tool({ active: true }); }
       if (name === 'get_screen_size') return tool({ width: 1000, height: 600 });
       if (name === 'get_window_state') return tool({ screenshot_width: 400, screenshot_height: 200, elements: [{ role: 'button', label: 'Go', frame: { x: 10, y: 10, w: 20, h: 10 } }] });
       return tool({ active: true });
@@ -170,13 +174,16 @@ function controlledFixture() {
       async click() { inputs.push('click'); }, async doubleClick() { inputs.push('double_click'); }, async scrollDown() { inputs.push('scroll'); }, async scrollUp() { inputs.push('scroll'); }, async scrollLeft() { inputs.push('scroll'); }, async scrollRight() { inputs.push('scroll'); },
     },
     screen: { async width() { return 1000; }, async height() { return 600; } },
-    async getWindows() { return [{ windowHandle: 99, async focus() { calls.push({ name: 'nut_focus', args: { windowHandle: 99 } }); activeWindow = nutFocusWindow; }, async getRegion() { return nutRegion; } }]; },
+    async getWindows() { return [{ windowHandle: 99, async restore() { calls.push({ name: 'nut_restore', args: { windowHandle: 99 } }); }, async focus() { calls.push({ name: 'nut_focus', args: { windowHandle: 99 } }); activeWindow = nutFocusWindow; }, async getRegion() { return nutRegion; } }]; },
     async getActiveWindow() { return { windowHandle: activeWindow }; },
   };
   return {
-    backend: new ComputerBackend({ driver, nut, now: () => now, sleep: async (ms: number) => { now += ms; } }), calls, inputs,
+    backend: new ComputerBackend({
+      driver, nut, now: () => now, sleep: async (ms: number) => { now += ms; }, focusCuaCallTimeoutMs: 5,
+      nativeFocus: async () => { calls.push({ name: 'native_focus', args: { windowHandle: 99 } }); activeWindow = nativeFocusWindow; return activeWindow === 99; },
+    }), calls, inputs,
     setActive(value: number) { activeWindow = value; }, setAvailable(value: boolean) { windowAvailable = value; },
-    setBringActivates(value: boolean) { bringActivates = value; }, setBringThrows(value: boolean) { bringThrows = value; }, setNutFocusWindow(value: number) { nutFocusWindow = value; }, setOnType(value: (() => void) | undefined) { onType = value; },
+    setBringActivates(value: boolean) { bringActivates = value; }, setBringThrows(value: boolean) { bringThrows = value; }, setBringHangs(value: boolean) { bringHangs = value; }, setNutFocusWindow(value: number) { nutFocusWindow = value; }, setNativeFocusWindow(value: number) { nativeFocusWindow = value; }, setOnType(value: (() => void) | undefined) { onType = value; },
     setRegion(value: { left: number; top: number; width: number; height: number }) { nutRegion = value; },
     failKeyReleases(...keys: number[]) { failedKeyReleases.clear(); for (const key of keys) failedKeyReleases.add(key); },
     failButtonReleases(...buttons: number[]) { failedButtonReleases.clear(); for (const button of buttons) failedButtonReleases.add(button); },
@@ -396,11 +403,22 @@ test('screenshot-relative coordinates use exclusive upper bounds', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('physical input refuses background or stale exact targets without redirecting', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-proof-'));
+test('physical input safely reacquires the exact target when another window stole foreground', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-refocus-'));
   try {
     const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
     fixture.setActive(100);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'safe' } });
+    assert.deepEqual(fixture.inputs, ['text:safe']);
+    assert.equal(fixture.calls.some(({ name }) => name === 'bring_to_front'), true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('physical input refuses delivery when exact refocus fails or the target is stale', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-proof-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setActive(100); fixture.setBringActivates(false); fixture.setNutFocusWindow(101); fixture.setNativeFocusWindow(101);
     await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'unsafe' } }), (error: any) => error.code === 'TARGET_NOT_FOREGROUND' && error.retryable === true);
     assert.deepEqual(fixture.inputs, []);
     fixture.setActive(99); fixture.setAvailable(false);
@@ -439,6 +457,7 @@ test('failed session cleanup retains only failed values and release_all can retr
       { kind: 'mouse_down', button: 'left' }, { kind: 'mouse_down', button: 'right' },
     ]) await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input });
     fixture.failKeyReleases(1); fixture.failButtonReleases(3); fixture.setActive(100);
+    fixture.setBringActivates(false); fixture.setNutFocusWindow(101); fixture.setNativeFocusWindow(101);
     const beforeCleanup = fixture.inputs.length;
     await assert.rejects(
       () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'blocked' } }),
@@ -537,7 +556,7 @@ test('emergency_release reports aggregate and per-session remaining held values 
   assert.deepEqual(fixture.inputs, ['key_up:2', 'key_up:1', 'button_up:3', 'button_up:1']);
 });
 
-test('run_sequence revalidates every physical action after waits and prior actions', async () => {
+test('run_sequence revalidates and safely reacquires the exact target after prior actions', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-sequence-target-'));
   try {
     const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
@@ -549,8 +568,9 @@ test('run_sequence revalidates every physical action after waits and prior actio
       { atMs: 0, action: { kind: 'key_up', key: 'W' } },
       { atMs: 0, action: { kind: 'text', text: 'second' } },
     ] };
-    await assert.rejects(() => fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence }), (error: any) => error.code === 'TARGET_NOT_FOREGROUND');
-    assert.deepEqual(fixture.inputs, ['key_down:1', 'text:first', 'key_up:1']);
+    await fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence });
+    assert.deepEqual(fixture.inputs, ['key_down:1', 'text:first', 'key_up:1', 'text:second']);
+    assert.equal(fixture.calls.some(({ name }) => name === 'bring_to_front'), true);
 
     fixture.setActive(100); fixture.setBringActivates(true);
     const focused = { version: 1, actions: [
@@ -573,14 +593,16 @@ test('focus keeps Cua as the primary focus owner when it activates the exact HWN
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('focus falls back to the exact NutJS Window when Cua does not activate it', async () => {
+test('focus restores before the exact NutJS Window fallback when Cua does not activate it', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-nut-fallback-'));
   try {
     const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
-    fixture.setActive(100); fixture.setBringActivates(false);
+    fixture.setActive(100); fixture.setBringActivates(false); fixture.setNativeFocusWindow(101);
     await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } });
     assert.equal(fixture.calls.filter(({ name }) => name === 'bring_to_front').length, 1);
+    assert.equal(fixture.calls.filter(({ name }) => name === 'nut_restore').length, 1);
     assert.equal(fixture.calls.filter(({ name }) => name === 'nut_focus').length, 1);
+    assert.ok(fixture.calls.findIndex(({ name }) => name === 'nut_restore') < fixture.calls.findIndex(({ name }) => name === 'nut_focus'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -588,18 +610,43 @@ test('focus falls back to the exact NutJS Window when Cua throws', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-cua-error-'));
   try {
     const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
-    fixture.setActive(100); fixture.setBringThrows(true);
+    fixture.setActive(100); fixture.setBringThrows(true); fixture.setNativeFocusWindow(101);
     await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } });
     assert.equal(fixture.calls.filter(({ name }) => name === 'bring_to_front').length, 1);
     assert.equal(fixture.calls.filter(({ name }) => name === 'nut_focus').length, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('focus refuses success when NutJS focuses a different HWND', async () => {
+test('focus bounds a hung Cua call and still reaches the exact Win32 fallback', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-cua-hung-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setActive(100); fixture.setBringHangs(true); fixture.setNativeFocusWindow(99);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } });
+    assert.equal(fixture.calls.filter(({ name }) => name === 'bring_to_front').length, 1);
+    assert.equal(fixture.calls.filter(({ name }) => name === 'native_focus').length, 1);
+    assert.equal(fixture.calls.filter(({ name }) => name === 'nut_focus').length, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('focus uses bounded PID/HWND-validated Win32 fallback immediately after Cua cannot activate', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-native-fallback-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setActive(100); fixture.setBringActivates(false); fixture.setNutFocusWindow(101); fixture.setNativeFocusWindow(99);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } });
+    assert.equal(fixture.calls.filter(({ name }) => name === 'native_focus').length, 1);
+    assert.equal(fixture.calls.filter(({ name }) => name === 'nut_focus').length, 0);
+    const nativeIndex = fixture.calls.findIndex(({ name }) => name === 'native_focus');
+    assert.equal(fixture.calls.slice(nativeIndex + 1).some(({ name }) => name === 'list_windows'), false, 'foreground proof after native focus is immediate rather than delayed by Cua discovery');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('focus refuses success when all exact-HWND focus strategies fail', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-wrong-hwnd-'));
   try {
     const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
-    fixture.setActive(100); fixture.setBringActivates(false); fixture.setNutFocusWindow(101);
+    fixture.setActive(100); fixture.setBringActivates(false); fixture.setNutFocusWindow(101); fixture.setNativeFocusWindow(101);
     await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } }), (error: any) => error.code === 'TARGET_NOT_FOREGROUND' && error.retryable === true);
     assert.equal(fixture.calls.filter(({ name }) => name === 'nut_focus').length, 1);
     assert.deepEqual(fixture.inputs, []);
@@ -857,14 +904,59 @@ test('successful Cua UIA window screenshot refuses background capture, while scr
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test('desktop actions intentionally deliver to the current global desktop without HWND geometry binding', async () => {
+test('desktop input requires a fresh revision and unchanged observed foreground', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-desktop-action-'));
   try {
     const fixture = controlledFixture();
     const target = await fixture.backend.open({ sessionId: 's', selector: { kind: 'desktop' }, artifactDir: dir });
     fixture.setActive(100); fixture.setAvailable(false); fixture.setRegion({ left: 500, top: 500, width: 1, height: 1 });
-    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'global-desktop' } });
-    assert.deepEqual(fixture.inputs, ['text:global-desktop']);
+    const observed = await fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: false, tree: false, state: true });
+    assert.deepEqual(observed.state, { desktop: true, foreground: { windowId: 100 } });
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'missing-revision' } }),
+      (error: any) => error.code === 'INVALID_ARGUMENTS',
+    );
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, revision: observed.revision, input: { kind: 'text', text: 'bound-desktop' } });
+    fixture.setActive(101);
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, revision: observed.revision, input: { kind: 'text', text: 'wrong-window' } }),
+      (error: any) => error.code === 'DESKTOP_FOREGROUND_CHANGED' && error.retryable === true,
+    );
+    assert.deepEqual(fixture.inputs, ['text:bound-desktop']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('desktop observation rejects and cleans a capture when foreground changes mid-observation', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-desktop-race-'));
+  try {
+    const fixture = timeoutFixture({ activeAfterDesktopCapture: 100 });
+    const target = await fixture.backend.open({ sessionId: 's', selector: { kind: 'desktop' }, artifactDir: dir });
+    await assert.rejects(
+      () => fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: true, tree: true, state: true }),
+      (error: any) => error.code === 'DESKTOP_FOREGROUND_CHANGED' && error.retryable === true,
+    );
+    assert.deepEqual(await readdir(dir), [], 'raced desktop observation artifacts are deleted');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('failed desktop observation does not rebind the prior revision to new foreground', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-desktop-atomic-binding-'));
+  try {
+    const fixture = timeoutFixture();
+    const target = await fixture.backend.open({ sessionId: 's', selector: { kind: 'desktop' }, artifactDir: dir });
+    const first = await fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: true, tree: false, state: true });
+    assert.equal(first.revision, 1); assert.equal(first.state.foreground.windowId, 99);
+
+    fixture.setActive(100); fixture.setInvalidDesktopPng(true);
+    await assert.rejects(() => fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: true, tree: false, state: true }));
+    fixture.setInvalidDesktopPng(false); fixture.setActive(99);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, revision: first.revision, input: { kind: 'press', key: 'W' } });
+    fixture.setActive(100);
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, revision: first.revision, input: { kind: 'press', key: 'W' } }),
+      (error: any) => error.code === 'DESKTOP_FOREGROUND_CHANGED',
+    );
+    assert.equal((await readdir(dir)).some((name) => name.endsWith('.tmp') || name.includes('not-a-png')), false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

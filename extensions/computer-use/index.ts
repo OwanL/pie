@@ -68,7 +68,8 @@ export default function registerComputerUse(pi: ExtensionAPI) {
     promptSnippet: 'Observe and operate visible applications with screenshot-relative coordinates or revision-scoped semantic references.',
     promptGuidelines: [
       'Use computer observe before acting; screenshot coordinates are target-relative by default, and semantic references are valid only for the latest observation revision.',
-      'Prefer an exact window session for safe application work. A desktop session is an intentional global exception: its actions affect the current desktop/foreground without HWND binding.',
+      'Prefer an exact window session for safe application work; exact-window input safely reacquires and proves its PID/HWND when foreground was stolen. A desktop session is a global exception: observe immediately before every action and pass that revision, because input is refused if foreground changed.',
+      'After an action opens a native dialog or another window, discover/open that new exact foreground target before continuing; do not keep typing through the parent target.',
       'Use computer run_sequence for timing-sensitive or simultaneous input, and verify visible postconditions with a fresh observation.',
     ],
     executionMode: 'sequential',

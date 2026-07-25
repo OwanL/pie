@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { createDisplayPng, pngDimensions } from './image.mjs';
 import { abortableSleep, abortError, estimateSequenceDuration, runTimedSequence } from './sequence.mjs';
+import { focusWindowNative } from './win32-focus.mjs';
 
 const MAX_ELEMENTS = 250;
 const MAX_OBSERVATION_BYTES = 32 * 1024;
@@ -13,8 +14,10 @@ const TARGET_DISCOVERY_TIMEOUT_MS = 10000;
 // Cua list_windows can take ~0.75s on Electron-heavy desktops. The focus
 // proof revalidates the exact PID/HWND, so its deadline must allow multiple
 // discovery polls rather than expiring during the first proof.
-const FOCUS_TIMEOUT_MS = 5000;
-const FOCUS_PRIMARY_ATTEMPT_MS = 2000;
+const FOCUS_TIMEOUT_MS = 6500;
+const FOCUS_PRIMARY_ATTEMPT_MS = 1500;
+const FOCUS_CUA_CALL_TIMEOUT_MS = 1000;
+const FOCUS_NATIVE_ATTEMPT_MS = 4000;
 const GEOMETRY_TOLERANCE_PX = 1;
 const ACTION_KINDS = new Set(['move', 'mouse_down', 'mouse_up', 'click', 'double_click', 'right_click', 'drag', 'scroll', 'key_down', 'key_up', 'press', 'hotkey', 'text', 'wait', 'focus', 'release_all']);
 
@@ -22,6 +25,9 @@ function targetCoordinates(point) { return point && typeof point === 'object' &&
 function actionUsesTargetCoordinates(action) {
   if (targetCoordinates(action.target)) return true;
   return action.kind === 'drag' && (targetCoordinates(action.from) || targetCoordinates(action.to) || action.path?.some(targetCoordinates));
+}
+function actionNeedsDesktopBinding(action) {
+  return !new Set(['wait', 'focus', 'release_all', 'key_up', 'mouse_up']).has(action.kind);
 }
 function validateSequenceShape(sequence) {
   if (!sequence || sequence.version !== 1 || !Array.isArray(sequence.actions) || sequence.actions.length > 10000) throw runtimeError('MALFORMED_SEQUENCE', 'Sequence must be version 1 with at most 10000 actions.');
@@ -102,6 +108,8 @@ export class ComputerBackend {
   constructor(options = {}) {
     this.driver = options.driver; this.nut = options.nut; this.sessions = new Map(); this.initialized = Boolean(this.driver && this.nut);
     this.now = options.now ?? (() => performance.now()); this.sleep = options.sleep ?? abortableSleep;
+    this.nativeFocus = options.nativeFocus ?? focusWindowNative;
+    this.focusCuaCallTimeoutMs = options.focusCuaCallTimeoutMs ?? FOCUS_CUA_CALL_TIMEOUT_MS;
     this.refEpoch = randomUUID(); this.nextTargetGeneration = 1;
   }
 
@@ -120,6 +128,27 @@ export class ComputerBackend {
     await this.init();
     const result = await this.driver.callTool(name, JSON.stringify(args), signal ? { signal } : undefined);
     return parseToolResult(result, name);
+  }
+
+  async boundedCua(name, args, signal, timeoutMs) {
+    const controller = new AbortController(); let timedOut = false;
+    const relayAbort = () => controller.abort();
+    signal?.addEventListener('abort', relayAbort, { once: true });
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true; controller.abort();
+        reject(runtimeError('FOCUS_PHASE_TIMEOUT', `${name} exceeded its bounded focus phase.`, true));
+      }, Math.max(1, timeoutMs));
+    });
+    try { return await Promise.race([this.cua(name, args, controller.signal), timeout]); }
+    catch (error) {
+      if (signal?.aborted) throw abortError();
+      if (timedOut || error?.code === 'FOCUS_PHASE_TIMEOUT') throw runtimeError('FOCUS_PHASE_TIMEOUT', `${name} exceeded its bounded focus phase.`, true);
+      throw error;
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener('abort', relayAbort);
+    }
   }
 
   async listWindows(signal, pid) {
@@ -141,25 +170,60 @@ export class ComputerBackend {
     return record;
   }
 
+  async activeWindowIs(target) {
+    let active;
+    try { active = await this.nut.getActiveWindow(); } catch {}
+    return Boolean(active && sameHandle(active.windowHandle, target.windowId));
+  }
+
   async requireForeground(target, signal) {
     if (target.kind !== 'window') return undefined;
     const record = await this.exactWindowRecord(target, signal);
-    let active;
-    try { active = await this.nut.getActiveWindow(); }
-    catch { throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not prove that the exact target HWND is foreground; focus it and retry.', true); }
-    if (!active || !sameHandle(active.windowHandle, target.windowId)) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND is not foreground; focus it and retry.', true);
+    if (!await this.activeWindowIs(target)) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND is not foreground; focus it and retry.', true);
     return record;
   }
 
   async deliver(target, signal, operation) {
     if (signal?.aborted) throw abortError();
-    await this.requireForeground(target, signal);
     if (target.kind === 'window') {
+      try { await this.requireForeground(target, signal); }
+      catch (error) {
+        if (error?.code !== 'TARGET_NOT_FOREGROUND') throw error;
+        await this.focusTarget(target, signal);
+      }
       const current = await this.exactNutWindowRegion(target.windowId);
       if (!sameRegion(current, target.logicalBounds)) throw runtimeError('STALE_GEOMETRY', 'Window geometry changed since the latest open or observation; observe again before input.', true);
+      if (!await this.activeWindowIs(target)) await this.focusTarget(target, signal);
+      if (!await this.activeWindowIs(target)) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND lost foreground immediately before input.', true);
+    } else {
+      if (!target.desktopForegroundWindowId) throw runtimeError('OBSERVATION_REQUIRED', 'Observe the desktop before physical input so its foreground window can be bound.', true);
+      let active;
+      try { active = await this.nut.getActiveWindow(); } catch {}
+      if (!active || !sameHandle(active.windowHandle, target.desktopForegroundWindowId)) {
+        throw runtimeError('DESKTOP_FOREGROUND_CHANGED', 'The desktop foreground changed since the latest observation; observe again before input.', true);
+      }
     }
     if (signal?.aborted) throw abortError();
     return await operation();
+  }
+
+  async currentForegroundWindowId() {
+    let active;
+    try { active = await this.nut.getActiveWindow(); } catch {}
+    return positiveInteger(active?.windowHandle);
+  }
+
+  async describeDesktopForeground(observedWindowId) {
+    const windowId = observedWindowId ?? await this.currentForegroundWindowId();
+    if (!windowId) return undefined;
+    let record;
+    try { record = (await this.listWindows()).find((window) => sameHandle(window.window_id, windowId)); } catch {}
+    return {
+      windowId,
+      ...(positiveInteger(record?.pid) ? { pid: positiveInteger(record.pid) } : {}),
+      ...(record?.title ? { title: String(record.title) } : {}),
+      ...(record?.app_name ? { process: String(record.app_name) } : {}),
+    };
   }
 
   async exactNutWindowRegion(windowId) {
@@ -275,24 +339,37 @@ export class ComputerBackend {
     return { x: Math.max(0, Math.min(Math.max(0, width - 1), Math.round(point.x))), y: Math.max(0, Math.min(Math.max(0, height - 1), Math.round(point.y))) };
   }
   validateRevision(target, revision, actions) {
-    if (!actions.some(actionUsesTargetCoordinates)) return;
-    if (!Number.isInteger(revision) || revision < 1) throw runtimeError('INVALID_ARGUMENTS', 'revision is required for target-relative screenshot coordinates.');
-    if (revision !== target.revision) throw runtimeError('STALE_GEOMETRY', 'Screenshot geometry is stale; observe again.');
+    const desktopBindingRequired = target.kind === 'desktop' && actions.some(actionNeedsDesktopBinding);
+    if (!desktopBindingRequired && !actions.some(actionUsesTargetCoordinates)) return;
+    if (!Number.isInteger(revision) || revision < 1) {
+      throw runtimeError('INVALID_ARGUMENTS', desktopBindingRequired
+        ? 'revision is required for desktop input so the observed foreground can be verified.'
+        : 'revision is required for target-relative screenshot coordinates.');
+    }
+    if (revision !== target.revision) throw runtimeError('STALE_GEOMETRY', 'Screenshot geometry or foreground binding is stale; observe again.');
   }
 
   async observe(params, signal) {
     const session = this.session(params.sessionId); const target = this.target(session, params.targetId);
     const includeScreenshot = params.screenshot !== false; const includeTree = params.tree !== false; const includeState = params.state !== false;
     const fullImagePath = includeScreenshot ? uniquePath(session.artifactDir, 'full', 'png') : undefined;
-    let payload;
+    let payload; let pendingDesktopForeground;
     if (target.kind === 'desktop') {
       const captureImagePath = fullImagePath ? `${fullImagePath}.${randomUUID()}.tmp` : undefined;
+      const foregroundBefore = await this.currentForegroundWindowId();
+      if (!foregroundBefore) throw runtimeError('OBSERVE_UNAVAILABLE', 'Could not bind the desktop foreground before observation.', true);
       try {
         payload = await this.cua('get_desktop_state', { session: session.id, ...(captureImagePath ? { screenshot_out_file: captureImagePath } : {}) }, signal);
+        const foregroundAfter = await this.currentForegroundWindowId();
+        if (!foregroundAfter || !sameHandle(foregroundAfter, foregroundBefore)) {
+          throw runtimeError('DESKTOP_FOREGROUND_CHANGED', 'Desktop foreground changed during observation; observe again.', true);
+        }
+        pendingDesktopForeground = await this.describeDesktopForeground(foregroundAfter);
         target.logicalBounds = { x: 0, y: 0, width: await this.nut.screen.width(), height: await this.nut.screen.height() };
         if (captureImagePath && fullImagePath) await rename(captureImagePath, fullImagePath);
       } catch (error) {
         if (captureImagePath) await unlink(captureImagePath).catch(() => {});
+        if (fullImagePath) await unlink(fullImagePath).catch(() => {});
         if (signal?.aborted && !cancellationError(error)) throw abortError();
         throw error;
       }
@@ -314,8 +391,13 @@ export class ComputerBackend {
       } else target.logicalBounds = await this.logicalWindowBounds(target.windowId);
     }
     let dimensions = { width: Number(payload.screenshot_width ?? 0), height: Number(payload.screenshot_height ?? 0) };
-    if (fullImagePath && target.kind === 'window') dimensions = await pngDimensions(fullImagePath);
-    else if (fullImagePath && (!dimensions.width || !dimensions.height)) dimensions = await pngDimensions(fullImagePath);
+    try {
+      if (fullImagePath && target.kind === 'window') dimensions = await pngDimensions(fullImagePath);
+      else if (fullImagePath && (!dimensions.width || !dimensions.height)) dimensions = await pngDimensions(fullImagePath);
+    } catch (error) {
+      if (fullImagePath) await unlink(fullImagePath).catch(() => {});
+      throw error;
+    }
     if (fullImagePath) {
       target.screenshotWidth = dimensions.width || target.logicalBounds.width; target.screenshotHeight = dimensions.height || target.logicalBounds.height;
     } else {
@@ -336,6 +418,10 @@ export class ComputerBackend {
     truncated ||= treeResult.truncated;
     let displayImagePath;
     if (fullImagePath) { displayImagePath = uniquePath(session.artifactDir, 'display', 'png'); const display = await createDisplayPng(fullImagePath, displayImagePath, 1600); target.screenshotWidth = display.width; target.screenshotHeight = display.height; target.fullImageWidth = display.sourceWidth; target.fullImageHeight = display.sourceHeight; }
+    if (target.kind === 'desktop') {
+      target.desktopForegroundWindowId = pendingDesktopForeground.windowId;
+      target.desktopForeground = pendingDesktopForeground;
+    }
     const observedState = includeState ? await this.windowObservationState(target, signal) : undefined;
     return {
       sessionId: session.id, targetId: target.id, target: this.publicTarget(target), revision: target.revision,
@@ -347,7 +433,7 @@ export class ComputerBackend {
   }
 
   async windowObservationState(target, signal) {
-    if (target.kind === 'desktop') return { desktop: true };
+    if (target.kind === 'desktop') return { desktop: true, foreground: target.desktopForeground };
     const record = (await this.listWindows(signal, target.pid)).find((window) => sameHandle(window.window_id, target.windowId));
     const active = await this.nut.getActiveWindow().catch(() => undefined);
     return record ? { foreground: Boolean(active && sameHandle(record.window_id, active.windowHandle)), minimized: Boolean(record.minimized), onScreen: Boolean(record.is_on_screen) } : { available: false };
@@ -446,10 +532,7 @@ export class ComputerBackend {
 
   async waitForExactForeground(target, deadline, signal) {
     while (this.now() <= deadline) {
-      await this.exactWindowRecord(target, signal);
-      let active;
-      try { active = await this.nut.getActiveWindow(); } catch {}
-      if (active && sameHandle(active.windowHandle, target.windowId)) return true;
+      if (await this.activeWindowIs(target)) return true;
       const remaining = deadline - this.now();
       if (remaining <= 0) break;
       await this.sleep(Math.min(50, remaining), signal);
@@ -463,26 +546,36 @@ export class ComputerBackend {
     const deadline = started + FOCUS_TIMEOUT_MS;
     await this.exactWindowRecord(target, signal);
     try {
-      await this.cua('bring_to_front', { pid: target.pid, window_id: target.windowId }, signal);
+      await this.boundedCua('bring_to_front', { pid: target.pid, window_id: target.windowId }, signal, Math.min(this.focusCuaCallTimeoutMs, Math.max(1, deadline - this.now())));
       if (await this.waitForExactForeground(target, Math.min(deadline, started + FOCUS_PRIMARY_ATTEMPT_MS), signal)) return;
     } catch (error) {
       if (cancellationError(error)) throw error;
     }
 
-    if (this.now() > deadline) throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not make the exact target HWND foreground; retry focus.', true);
-    await this.exactWindowRecord(target, signal);
-    let windows;
-    try { windows = await this.nut.getWindows(); }
-    catch { throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not rediscover the exact target HWND for focus; retry focus.', true); }
-    const matches = Array.isArray(windows) ? windows.filter((window) => sameHandle(window.windowHandle, target.windowId)) : [];
-    if (matches.length !== 1 || typeof matches[0].focus !== 'function') {
-      throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not rediscover a unique exact target HWND for focus; retry focus.', true);
+    if (this.now() <= deadline) {
+      await this.exactWindowRecord(target, signal);
+      try {
+        await this.nativeFocus({ pid: target.pid, windowId: target.windowId, signal, timeoutMs: Math.max(250, Math.min(3000, deadline - this.now())) });
+      } catch (error) { if (cancellationError(error)) throw error; }
+      if (await this.waitForExactForeground(target, Math.min(deadline, started + FOCUS_NATIVE_ATTEMPT_MS), signal)) return;
     }
-    if (this.now() > deadline) throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not make the exact target HWND foreground; retry focus.', true);
-    try { await matches[0].focus(); }
-    catch (error) { if (cancellationError(error)) throw error; }
-    if (await this.waitForExactForeground(target, deadline, signal)) return;
-    throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not make the exact target HWND foreground; retry focus.', true);
+
+    if (this.now() <= deadline) {
+      await this.exactWindowRecord(target, signal);
+      let matches = [];
+      try {
+        const windows = await this.nut.getWindows();
+        matches = Array.isArray(windows) ? windows.filter((window) => sameHandle(window.windowHandle, target.windowId)) : [];
+      } catch {}
+      if (matches.length === 1 && typeof matches[0].focus === 'function') {
+        try {
+          if (typeof matches[0].restore === 'function') await matches[0].restore();
+          await matches[0].focus();
+        } catch (error) { if (cancellationError(error)) throw error; }
+        if (await this.waitForExactForeground(target, deadline, signal)) return;
+      }
+    }
+    throw runtimeError('TARGET_NOT_FOREGROUND', 'Could not make the exact target HWND foreground after Cua, bounded Win32, and NutJS focus attempts.', true);
   }
 
   async executeAction(session, target, action, signal) {
