@@ -318,7 +318,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       throw new Error('State envelopes must be posted by StateDeliveryController.');
     }
     if (!this.view || !this.webviewReady || this.hotReloader.isReloading()) {
-      if (msg.type === 'sendRejected') {
+      if (msg.type === 'sendRejected' || msg.type === 'detailResult') {
         this.pendingImperatives.push(msg);
         this.delivery.markDirty();
         this.armReadinessProbeIfStuck();
@@ -500,30 +500,30 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     const view = this.view;
     if (!view) return;
     void Promise.resolve(view.webview.postMessage(message)).then((delivered) => {
-      if (!delivered && message.type === 'sendRejected' && this.view === view) {
-        this.requeueRejectedImperative(message, view);
+      if (!delivered && (message.type === 'sendRejected' || message.type === 'detailResult') && this.view === view) {
+        this.requeueRecoverableImperative(message, view);
       }
     }, (error: unknown) => {
       appendPieLog('warn', 'sidebar-provider', 'imperative post rejected', {
         errorType: error instanceof Error ? error.name : typeof error,
         messageType: message.type,
       });
-      if (message.type === 'sendRejected' && this.view === view) {
-        this.requeueRejectedImperative(message, view);
+      if ((message.type === 'sendRejected' || message.type === 'detailResult') && this.view === view) {
+        this.requeueRecoverableImperative(message, view);
       }
     });
   }
 
-  private requeueRejectedImperative(
-    message: Extract<HostToWebviewMessage, { type: 'sendRejected' }>,
+  private requeueRecoverableImperative(
+    message: Extract<HostToWebviewMessage, { type: 'sendRejected' | 'detailResult' }>,
     view: vscode.WebviewView,
   ): void {
     if (this.view !== view) return;
     this.pendingImperatives.push(message);
-    // A false/rejected post means the bridge did not accept an imperative even
-    // though our last handshake said it was ready. Re-enter the existing
-    // serialized readiness-probe path so the queued draft restoration gets a
-    // bounded retry instead of waiting forever for another ready message.
+    // A false/rejected post means the bridge did not accept a recoverable
+    // imperative even though our last handshake said it was ready. Re-enter
+    // the serialized readiness-probe path so draft restoration or a fetched
+    // detail receives a bounded retry instead of waiting forever.
     this.webviewReady = false;
     this.delivery.markDirty();
     this.armReadinessProbeIfStuck();

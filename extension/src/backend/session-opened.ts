@@ -174,7 +174,7 @@ export function getPromptOptions(session: unknown): SdkBuildSystemPromptOptions 
 function ensureDisplayTranscriptCache(context: SessionContext) {
   const entries = (context.session.sessionManager.getBranch?.() ?? []) as SessionEntryLike[];
   if (isDisplayTranscriptCacheStale(context.displayTranscriptCache, entries)) {
-    context.displayTranscriptCache = buildDisplayTranscriptCache(entries);
+    context.displayTranscriptCache = buildDisplayTranscriptCache(entries, context.sessionPath);
   }
   return context.displayTranscriptCache!;
 }

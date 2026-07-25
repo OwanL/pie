@@ -149,7 +149,7 @@ export function validReview(overrides: Partial<SessionReviewV2> = {}): SessionRe
         componentAssessmentIds: ['assessment-small', 'assessment-medium'],
         amendmentIds: [],
       },
-      hostVersion: null,
+      hostVersion: process.env.PIE_EDITOR_VERSION?.trim() || null,
     },
   };
   return { ...review, ...overrides };

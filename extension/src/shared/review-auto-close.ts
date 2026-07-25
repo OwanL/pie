@@ -37,6 +37,20 @@ export interface ReviewAutoCloseResult {
   next: ReviewAutoCloseState;
 }
 
+/** Bounded retry budget for an explicit closure action. After this many
+ *  attempts, a still-failing action becomes terminal `failed` rather than
+ *  `retrying`, so a persistently-uncloseable target stops being reclaimed on
+ *  every list refresh. Crash reclaim is preserved: a crash before the fsynced
+ *  terminal append leaves the prior pending/retrying record authoritative, so
+ *  the action remains retryable until a durable `failed` is confirmed. */
+export const MAX_CLOSURE_ATTEMPTS = 3;
+
+/** A failed attempt that has reached the retry budget becomes terminal. The
+ *  argument is the post-increment attempt count (attempts already made). */
+export function closureActionExhaustedRetries(attempts: number): boolean {
+  return attempts >= MAX_CLOSURE_ATTEMPTS;
+}
+
 export const INITIAL_REVIEW_AUTO_CLOSE_STATE: ReviewAutoCloseState = {
   claimedActionIds: new Set(),
 };

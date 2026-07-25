@@ -1425,6 +1425,7 @@ export interface SessionReviewAnalyticsData {
     identityFallbackCount: number;
     joinedReviewCount: number;
     qualityIndexCount: number;
+    notAssessableReviewCount: number;
     meanQualityIndexV1: number | null;
     criterionCoverage: number | null;
     externalBlockerRate: number | null;

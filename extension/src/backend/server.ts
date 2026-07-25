@@ -10,6 +10,8 @@ import {
   type BusyChangedPayload,
   type ContextUsageChangedPayload,
   type ContextWindowUsage,
+  type DetailResult,
+  type LazyDetailRef,
   type MessageAbortedPayload,
   type ModelSettings,
   type RequestEnvelope,
@@ -77,6 +79,8 @@ import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { backendTrace, backendError, backendInfo, backendWarn } from './log';
 import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalizeDanglingTranscript } from './session-opened.js';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts.js';
+import { findDurableDetail } from '../shared/lazy-details.js';
+import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -602,7 +606,7 @@ export class BackendServer {
   private ensureDisplayTranscriptCache(context: SessionContext) {
     const entries = (context.session.sessionManager.getBranch() ?? []) as SessionEntryLike[];
     if (isDisplayTranscriptCacheStale(context.displayTranscriptCache, entries)) {
-      context.displayTranscriptCache = buildDisplayTranscriptCache(entries);
+      context.displayTranscriptCache = buildDisplayTranscriptCache(entries, context.sessionPath);
     }
     return context.displayTranscriptCache!;
   }
@@ -634,6 +638,24 @@ export class BackendServer {
       transcriptWindow: page.transcriptWindow,
       busy,
     };
+  }
+
+  private async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
+    if (ref.source !== 'durable') {
+      return { sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
+    }
+    const context = await this.ensureSessionContext(sessionPath);
+    const found = findDurableDetail(this.ensureDisplayTranscriptCache(context).transcript, ref);
+    if (found.status === 'unavailable') {
+      return { sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
+    }
+    if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
+      return { sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
+    }
+    if (found.sizeBytes !== ref.sizeBytes) {
+      return { sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh the session and retry.' };
+    }
+    return { sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
   }
 
   private resolveCurrentContextWindow(context: SessionContext): number | undefined {
@@ -1070,6 +1092,7 @@ export class BackendServer {
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
       ),
+      loadDetail: (sessionPath, ref) => this.loadDetail(sessionPath, ref),
       emit: (event, payload) => this.emit(event, payload),
       emitBusyChanged: (context, busy) => this.emitBusyChanged(context, busy),
       emitContextUsageChanged: (sessionContext) => this.emitContextUsageChanged(sessionContext),

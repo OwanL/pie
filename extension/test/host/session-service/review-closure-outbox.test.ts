@@ -8,6 +8,7 @@ import { createInitialArchState, type ArchState } from '../../../src/host/core/a
 import { SessionServiceState } from '../../../src/host/session-service/state';
 import type { ClosureAction } from '../../../src/shared/protocol';
 import type { ReviewAutoCloseAttempt } from '../../../src/shared/review-auto-close';
+import { MAX_CLOSURE_ATTEMPTS } from '../../../src/shared/review-auto-close';
 
 function action(overrides: Partial<ClosureAction> = {}): ClosureAction {
   return {
@@ -130,5 +131,92 @@ test('a crash before effect completion leaves the durable pending action claimab
       [],
     );
     assert.equal(retry.attempts.length, 1);
+  });
+});
+
+test('a failed attempt below the retry budget stays retrying and releases the claim', async () => {
+  await withReviewsDir((dir) => {
+    const sessionPath = '/idle';
+    const arch = createInitialArchState();
+    const state = createState(() => arch);
+    // attempts = MAX - 2: one failure away from the budget.
+    const near = action({ attempts: MAX_CLOSURE_ATTEMPTS - 2 });
+    const claimed = state.consumeReviewAutoCloseClosures(
+      [{ path: sessionPath, closureActions: [near] }],
+      [sessionPath],
+      [],
+    );
+    state.beginReviewClosureAttempt('corr-near', claimed.attempts[0]!);
+    state.handleReviewClosureEffectResult({ kind: 'CloseSessionResult', corrId: 'corr-near', sessionPath, ok: true });
+    state.handleReviewClosureEffectResult({ kind: 'PersistTabsResult', corrId: 'corr-near', ok: false, error: 'transient' });
+
+    const record = readOutbox(dir)[0]!;
+    assert.equal(record.status, 'retrying');
+    assert.equal(record.attempts, MAX_CLOSURE_ATTEMPTS - 1);
+    assert.match(record.lastError ?? '', /transient/);
+    // Claim released so the retrying action is reclaimable on the next refresh.
+    const reclaim = state.consumeReviewAutoCloseClosures(
+      [{ path: sessionPath, closureActions: [record] }],
+      [],
+      [],
+    );
+    assert.equal(reclaim.attempts.length, 1);
+  });
+});
+
+test('a failed attempt at the retry budget becomes terminal failed and is not reclaimed', async () => {
+  await withReviewsDir((dir) => {
+    const sessionPath = '/idle';
+    const arch = createInitialArchState();
+    const state = createState(() => arch);
+    // attempts = MAX - 1: the next failure exhausts the budget.
+    const exhausted = action({ attempts: MAX_CLOSURE_ATTEMPTS - 1 });
+    const claimed = state.consumeReviewAutoCloseClosures(
+      [{ path: sessionPath, closureActions: [exhausted] }],
+      [sessionPath],
+      [],
+    );
+    state.beginReviewClosureAttempt('corr-exhausted', claimed.attempts[0]!);
+    state.handleReviewClosureEffectResult({ kind: 'CloseSessionResult', corrId: 'corr-exhausted', sessionPath, ok: true });
+    state.handleReviewClosureEffectResult({ kind: 'PersistTabsResult', corrId: 'corr-exhausted', ok: false, error: 'persistent' });
+
+    const record = readOutbox(dir)[0]!;
+    assert.equal(record.status, 'failed');
+    assert.equal(record.attempts, MAX_CLOSURE_ATTEMPTS);
+    assert.match(record.lastError ?? '', /persistent/);
+    assert.ok(record.settledAt, 'terminal failed carries a settledAt timestamp');
+    // The durable `failed` status prevents reclaim even after a fresh host state.
+    const fresh = createState(() => arch);
+    const reclaim = fresh.consumeReviewAutoCloseClosures(
+      [{ path: sessionPath, closureActions: [record] }],
+      [],
+      [],
+    );
+    assert.equal(reclaim.attempts.length, 0, 'a terminal failed action is never reclaimed');
+  });
+});
+
+test('a running closeSelf that succeeds after PersistTabs only stays a hide and marks the tab review-closed', async () => {
+  await withReviewsDir((dir) => {
+    const sessionPath = '/running-self';
+    const arch: ArchState = {
+      ...createInitialArchState(),
+      sessions: {
+        ...createInitialArchState().sessions,
+        openTabPaths: [],
+        runningSessionPaths: [sessionPath],
+      },
+    };
+    const state = createState(() => arch);
+    const attempt: ReviewAutoCloseAttempt = {
+      sessionPath,
+      actions: [action({ kind: 'closeSelf', reviewId: undefined })],
+      requiresCloseCompletion: false,
+    };
+    state.beginReviewClosureAttempt('corr-self', attempt);
+    state.handleReviewClosureEffectResult({ kind: 'PersistTabsResult', corrId: 'corr-self', ok: true });
+
+    assert.equal(readOutbox(dir)[0]?.status, 'succeeded');
+    assert.deepEqual(arch.sessions.runningSessionPaths, [sessionPath]);
   });
 });

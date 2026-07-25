@@ -63,6 +63,8 @@ v2_review_author_cells AS (
   JOIN runs r ON r.session_id = review.session_id
   WHERE review.identity_fallback = FALSE
     AND review.blinding_applied = TRUE
+    AND r.status <> 'open'
+    AND r.identity_fallback = FALSE
     AND r.mixed_model_config = FALSE
     AND r.mixed_treatment_config = FALSE
 ),

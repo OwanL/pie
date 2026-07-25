@@ -151,6 +151,9 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     || (value.turn.thinkingLevel !== undefined && !isThinkingLevel(value.turn.thinkingLevel))
     || !Number.isSafeInteger(value.turn.seq)
     || !Number.isSafeInteger(value.turn.checkpointSeq)
+    || !isNonNegativeSafeInteger(value.turn.textBytes)
+    || !isNonNegativeSafeInteger(value.turn.reasoningBytes)
+    || !isNonNegativeSafeInteger(value.turn.aggregatePreviewBytes)
     || value.turn.checkpointSeq !== value.checkpointSeq
     || typeof value.turn.startedAt !== 'number'
     || !Number.isFinite(value.turn.startedAt)
@@ -185,11 +188,13 @@ function isCheckpointShape(value: unknown): value is LiveTurnCheckpoint {
     && Number.isFinite(tool.lastProgressAt)
     && (tool.progressRevision === undefined
       || (Number.isSafeInteger(tool.progressRevision) && (tool.progressRevision as number) >= 0))
+    && isNonNegativeSafeInteger(tool.previewBytes)
     && (tool.preview === undefined || isToolPreview(tool.preview))
     && isLiveToolPhase(tool.phase)
     && (tool.terminal === undefined
       || (isRecord(tool.terminal)
         && typeof tool.terminal.durableEntryId === 'string'
+        && isNonNegativeSafeInteger(tool.terminal.resultBytes)
         && (tool.terminal.status === 'completed' || tool.terminal.status === 'failed'))))) return false;
   if (value.terminal !== undefined
     && (!isRecord(value.terminal)
@@ -224,6 +229,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'oversize' | 'malformed' {
   if (checkpoint.pendingExtensionUiRequestIds.length > LIVE_PIPELINE_LIMITS.extensionUiRequests
     || checkpoint.turn.pendingExtensionUiRequestIds.length > LIVE_PIPELINE_LIMITS.extensionUiRequests
@@ -239,6 +248,8 @@ function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'o
   }
   if (textBytes > LIVE_PIPELINE_LIMITS.textPartBytes
     || reasoningBytes > LIVE_PIPELINE_LIMITS.reasoningPartBytes) return 'oversize';
+  if (checkpoint.turn.textBytes !== textBytes
+    || checkpoint.turn.reasoningBytes !== reasoningBytes) return 'malformed';
 
   const executionIds = new Set<string>();
   let previewBytes = 0;
@@ -250,14 +261,18 @@ function validateCheckpointPayload(checkpoint: LiveTurnCheckpoint): 'valid' | 'o
     executionIds.add(tool.executionId);
     const inputBytes = jsonByteLength(tool.immutableInput);
     const terminalBytes = jsonByteLength(tool.terminal?.result);
-    previewBytes += jsonByteLength(tool.preview);
+    const toolPreviewBytes = jsonByteLength(tool.preview);
+    previewBytes += toolPreviewBytes;
+    if (tool.previewBytes !== toolPreviewBytes
+      || (tool.terminal && tool.terminal.resultBytes !== terminalBytes)) return 'malformed';
     if (inputBytes > LIVE_PIPELINE_LIMITS.toolInputBytes
-      || (tool.preview && jsonByteLength(tool.preview) > LIVE_PIPELINE_LIMITS.previewBytes)
+      || toolPreviewBytes > LIVE_PIPELINE_LIMITS.previewBytes
       || terminalBytes > LIVE_PIPELINE_LIMITS.previewBytes) return 'oversize';
     if (tool.terminal && !tool.terminal.durableEntryId) return 'malformed';
   }
-  if (checkpoint.turn.toolExecutionIds.length !== executionIds.size
-    || previewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) return 'oversize';
+  if (checkpoint.turn.toolExecutionIds.length !== executionIds.size) return 'malformed';
+  if (previewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) return 'oversize';
+  if (checkpoint.turn.aggregatePreviewBytes !== previewBytes) return 'malformed';
   if (checkpoint.terminal && !checkpoint.terminal.durableEntryId) return 'malformed';
   return 'valid';
 }

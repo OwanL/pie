@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
-import type { ChatPrefs, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
+import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
   savePruningSettings,
@@ -24,10 +24,13 @@ import { SessionTabActions } from './tab-actions';
 import type { OnSessionCompleted, PostImperative, ScheduleRender } from './types';
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
+import { resolveLiveDetail } from './detail-retrieval';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const PRUNING_STORAGE_KEY = 'pruningSettings';
 const TOOL_RESULT_PRUNING_STORAGE_KEY = 'toolResultPruningSettings';
+const DETAIL_CACHE_MAX_ENTRIES = 32;
+const DETAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
 /**
  * Owns the PI backend process lifecycle and wires backend events to the
@@ -45,6 +48,11 @@ export class SessionService implements vscode.Disposable {
   private readonly messages: SessionMessageActions;
   private readonly getArchState: () => ArchState;
   private readonly dispatchArch: (event: Event) => void;
+  private readonly detailCache = new Map<string, { result: DetailResult; bytes: number }>();
+  private readonly detailRequests = new Map<string, Promise<DetailResult>>();
+  private readonly detailEpochBySession = new Map<string, number>();
+  private detailCacheBytes = 0;
+  private detailGeneration = 0;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -149,12 +157,24 @@ export class SessionService implements vscode.Disposable {
     this.state.bindRequestSessionPath(requestId, sessionPath);
   }
 
+  /** Feed correlated close/persistence results to the V2 closure outbox
+   *  observer before the reducer consumes its no-op result handlers. */
+  handleReviewClosureEffectResult(
+    event: Extract<Event, { kind: 'CloseSessionResult' | 'PersistTabsResult' }>,
+  ): void {
+    this.state.handleReviewClosureEffectResult(event);
+  }
+
   /** Bump the data epoch for a session (Phase 4, pre-send/edit). */
   bumpSessionDataEpoch(sessionPath: string): void {
+    this.clearDetailCacheForSession(sessionPath);
     this.state.bumpSessionDataEpoch(sessionPath);
   }
 
   async restart(): Promise<void> {
+    this.detailGeneration += 1;
+    this.detailCache.clear();
+    this.detailCacheBytes = 0;
     this.events.detach();
     await this.backend.stop();
     this.state.resetRuntimeState();
@@ -166,6 +186,9 @@ export class SessionService implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.detailGeneration += 1;
+    this.detailCache.clear();
+    this.detailCacheBytes = 0;
     this.events.detach();
     this.triggers.dispose();
   }
@@ -193,6 +216,7 @@ export class SessionService implements vscode.Disposable {
   }
 
   async closeSession(sessionPath: string, nextPath: string | null): Promise<void> {
+    this.clearDetailCacheForSession(sessionPath);
     await this.tabs.closeSession(sessionPath, nextPath);
   }
 
@@ -218,6 +242,66 @@ export class SessionService implements vscode.Disposable {
 
   async jumpToLatestTranscript(sessionPath?: string): Promise<void> {
     await this.messages.jumpToLatestTranscript(sessionPath);
+  }
+
+  /** Bounded, deduplicated retrieval for details omitted from state snapshots. */
+  async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
+    const cacheKey = `${sessionPath}\u0000${ref.key}`;
+    const cached = this.detailCache.get(cacheKey);
+    if (cached) {
+      this.detailCache.delete(cacheKey);
+      this.detailCache.set(cacheKey, cached);
+      return cached.result;
+    }
+    const pending = this.detailRequests.get(cacheKey);
+    if (pending) return await pending;
+
+    const requestEpoch = this.detailEpochBySession.get(sessionPath) ?? 0;
+    const requestGeneration = this.detailGeneration;
+    const request = (async (): Promise<DetailResult> => {
+      try {
+        const result = ref.source === 'live'
+          ? resolveLiveDetail(this.getArchState(), sessionPath, ref)
+          : await this.backend.request<DetailResult>('session.loadDetail', { sessionPath, ref });
+        if (this.detailGeneration !== requestGeneration
+          || (this.detailEpochBySession.get(sessionPath) ?? 0) !== requestEpoch) {
+          return { sessionPath, key: ref.key, status: 'stale', message: 'The session changed while details were loading.' };
+        }
+        if (result.status === 'loaded') this.cacheDetail(cacheKey, result);
+        return result;
+      } catch {
+        return { sessionPath, key: ref.key, status: 'failure', message: 'Could not load details. Retry to try again.' };
+      } finally {
+        this.detailRequests.delete(cacheKey);
+      }
+    })();
+    this.detailRequests.set(cacheKey, request);
+    return await request;
+  }
+
+  private clearDetailCacheForSession(sessionPath: string): void {
+    this.detailEpochBySession.set(sessionPath, (this.detailEpochBySession.get(sessionPath) ?? 0) + 1);
+    const prefix = `${sessionPath}\u0000`;
+    for (const [key, entry] of this.detailCache) {
+      if (!key.startsWith(prefix)) continue;
+      this.detailCache.delete(key);
+      this.detailCacheBytes -= entry.bytes;
+    }
+  }
+
+  private cacheDetail(cacheKey: string, result: Extract<DetailResult, { status: 'loaded' }>): void {
+    const existing = this.detailCache.get(cacheKey);
+    if (existing) this.detailCacheBytes -= existing.bytes;
+    this.detailCache.delete(cacheKey);
+    this.detailCache.set(cacheKey, { result, bytes: result.sizeBytes });
+    this.detailCacheBytes += result.sizeBytes;
+    while (this.detailCache.size > DETAIL_CACHE_MAX_ENTRIES || this.detailCacheBytes > DETAIL_CACHE_MAX_BYTES) {
+      const oldestKey = this.detailCache.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      const oldest = this.detailCache.get(oldestKey);
+      this.detailCache.delete(oldestKey);
+      this.detailCacheBytes -= oldest?.bytes ?? 0;
+    }
   }
 
   /** Effect-side delegate for the run-analytics observer. The reducer owns

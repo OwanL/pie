@@ -1,12 +1,24 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
-import type { ComposerInput, ComposerInputDraft, ChatMessage } from './messages.js';
+import type { ComposerInput, ComposerInputDraft, ChatMessage, DetailResult, LazyDetailRef } from './messages.js';
 import type { SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
-import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary, RunOutcome } from './settings.js';
+import type { ExtensionInfo, PruningResult, PruningSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
 import type { AggregateStats } from './aggregate-stats.js';
 import type { LiveTurnPhase } from '../live-pipeline-protocol.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
 import type { TokenRateIndicatorState } from '../token-rate.js';
 import type { NoticeKind } from '../error-mapping.js';
+
+/** Labels a human-verification question about a reviewed session. The owning
+ * request's `sessionPath` remains the reviewer session; these fields never
+ * participate in prompt routing. */
+export interface ReviewHumanVerificationMetadata {
+  purpose: 'review_human_verification';
+  targetSessionId: string;
+  targetSessionPath: string;
+  criterionId: string;
+  domain: string;
+  expectedObservation: string;
+}
 
 /** Base fields shared by all extension UI request variants. */
 export interface ExtensionUIRequestBase {
@@ -19,6 +31,8 @@ export interface ExtensionUIRequestBase {
   toolCallId?: string;
   /** Optional dialog timeout in milliseconds. The webview shows a countdown and auto-cancels. */
   timeout?: number;
+  /** Review display/audit metadata; never changes `sessionPath` routing. */
+  reviewMeta?: ReviewHumanVerificationMetadata;
 }
 
 /** A pending extension UI request (backend → host → webview). */
@@ -200,8 +214,6 @@ export interface ViewState {
   prepassLatencyMs?: number | null;
   /** Message ID currently being edited, or null. */
   editingMessageId: string | null;
-  /** Whether the run-outcome dialog is open. */
-  showOutcomeDialog: boolean;
   /** Pending extension UI requests keyed by session path, then by request ID. */
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
   /** First pending extension UI request for the active session, or null (for bottom-bar prompt). */
@@ -252,6 +264,10 @@ export type HostToWebviewMessage =
        * in the same transition; this payload lets the webview restore the
        * composer immediately, without waiting for the debounced snapshot. */
       inputs?: ComposerInput[];
+    }
+  | {
+      type: 'detailResult';
+      result: DetailResult;
     }
   | {
       /** Posted by the host when a session completes under the completion-
@@ -307,14 +323,14 @@ type WebviewToHostMessagePayload =
   | { type: 'clearQueue'; sessionPath: string }
   | { type: 'newSession' }
   | { type: 'openSession'; sessionPath: string }
-  | { type: 'closeSession'; sessionPath: string }
+  | { type: 'closeSession'; sessionPath: string; interactionId?: string }
+  | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
   | { type: 'duplicateSession'; sessionPath: string }
   | { type: 'moveSessionTab'; sessionPath?: string; fromIndex: number; toIndex: number }
   | { type: 'togglePinTab'; sessionPath: string }
   | { type: 'loadOlderTranscript'; sessionPath?: string }
   | { type: 'loadNewerTranscript'; sessionPath?: string }
   | { type: 'jumpToLatestTranscript'; sessionPath?: string }
-  | { type: 'recordOutcome'; sessionPath: string; outcome: RunOutcome }
   | { type: 'startNewTask'; sessionPath: string }
   | { type: 'continueTask'; sessionPath: string }
   | {
@@ -330,8 +346,6 @@ type WebviewToHostMessagePayload =
   | { type: 'startEdit'; sessionPath: string; messageId: string }
   | { type: 'cancelEdit'; sessionPath: string }
   | { type: 'dismissNotice' }
-  | { type: 'openOutcomeDialog'; sessionPath: string }
-  | { type: 'closeOutcomeDialog'; sessionPath: string }
   | { type: 'openFileDiff'; sessionPath: string; filePath: string }
   | { type: 'openFileInEditor'; sessionPath: string; filePath: string }
   | { type: 'revertFile'; sessionPath: string; filePath: string }

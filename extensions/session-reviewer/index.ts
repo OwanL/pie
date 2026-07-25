@@ -59,6 +59,15 @@ function eligibleTarget(snapshot: OrchestratorSnapshot, sessionPath?: string, se
   if (!current || current.isRunning) return undefined;
   return target;
 }
+/** Closure eligibility is broader than rating eligibility: an already-reviewed
+ *  running session is closeable as a durable tab hide, while evidence and
+ *  review recording remain forbidden for running targets. Self is always
+ *  excluded; the persisted canonical review match is checked by the caller. */
+function closureEligibleTarget(snapshot: OrchestratorSnapshot, sessionPath?: string, sessionId?: string): ListedSession | undefined {
+  const target = sessionPath ? snapshot.targetsByPath.get(sessionPath) : sessionId ? snapshot.targetsById.get(sessionId) : undefined;
+  if (!target || (sessionId && target.sessionId !== sessionId) || target.isSelf) return undefined;
+  return target;
+}
 
 function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession[] {
   const snapshot = readReviewStore();
@@ -180,8 +189,8 @@ export default function (pi: ExtensionAPI) {
         if (!p.sessionId || !p.reviewId) return err('closeReviewed requires sessionId and reviewId from list/recordReview.');
         const scope = snapshotFor(ctx);
         if (!scope) return err('List targets in this reviewer session before closing.');
-        const target = eligibleTarget(scope, p.sessionPath, p.sessionId);
-        if (!target) return err('Closure target is not an eligible selected/open snapshot member (self and running sessions are excluded).');
+        const target = closureEligibleTarget(scope, p.sessionPath, p.sessionId);
+        if (!target) return err('Closure target is not an eligible selected/open snapshot member (self is excluded; running already-reviewed sessions are closeable as a tab hide).');
         const snapshot = readReviewStore();
         const review = snapshot.canonicalBySessionId.get(p.sessionId);
         if (!review || review.reviewId !== p.reviewId) return err('closeReviewed requires a matching persisted canonical production review.');

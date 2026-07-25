@@ -1,7 +1,7 @@
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
-import { evictSession, removeFromArray } from './helpers.js';
+import { evictSession, removeFromArray, addToArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix } from '../../../shared/tab-behavior.js';
 
 export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind: 'OpenSession' }>): ReducerResult {
@@ -33,6 +33,7 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
       openTabPaths: nextOpenTabPaths,
       activeSessionPath: sessionPath,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
+      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
     },
   };
   return {
@@ -75,6 +76,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
       activeSessionPath: sessionPath,
       runningSessionPaths: nextRunningPaths,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
+      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
     },
     composer: {
       ...state.composer,
@@ -113,6 +115,43 @@ export function handleSelectSession(state: ArchState, cmd: Extract<Command, { ki
 
 export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kind: 'CloseSession' }>): ReducerResult {
   const { sessionPath } = cmd;
+  // A repeated or delayed user close for a tab that is already hidden is a
+  // no-op. Explicit outbox retries are different: after a crash or failed
+  // terminal append the durable action may still be pending while the tab is
+  // already hidden. Re-run idempotent persistence and (for idle sessions)
+  // host cleanup so success is backed by fresh authoritative effect results.
+  if (!state.sessions.openTabPaths.includes(sessionPath)) {
+    if (!cmd.ensureClosed) return { state, effects: [] };
+    const persistEffect = {
+      kind: 'PersistTabs' as const,
+      corrId: cmd.corrId,
+      openTabPaths: state.sessions.openTabPaths,
+      activeSessionPath: state.sessions.activeSessionPath,
+      pinnedTabPaths: state.sessions.pinnedTabPaths,
+    };
+    if (state.sessions.runningSessionPaths.includes(sessionPath)) {
+      // A review-closure retry may land here after a crash left the tab already
+      // hidden. Re-mark it so the ready handshake still won't resurrect it.
+      if (!cmd.reviewClosure) return { state, effects: [persistEffect] };
+      return {
+        state: {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            reviewClosedRunningPaths: addToArray(state.sessions.reviewClosedRunningPaths, sessionPath),
+          },
+        },
+        effects: [persistEffect],
+      };
+    }
+    return {
+      state,
+      effects: [
+        persistEffect,
+        { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath: null },
+      ],
+    };
+  }
   // The reducer owns the tab-close + per-session map clearing +
   // select-next-tab; the runner owns the host-side cleanup
   // (clearSelectionRequestsForPath, onSessionClosed, clearSessionScope,
@@ -146,15 +185,46 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     workspaceCwd: state.sessions.workspaceCwd,
     activeSessionPath: state.sessions.activeSessionPath,
   });
-  // Clear per-session keyed maps + drop the tab arrays (summary + running
-  // marker preserved). The helper also clears `fileChanges.expandedBySession`
-  // — previously leaked on this path.
-  const evicted = evictSession(state, sessionPath, { removeSummary: false, removeTabs: true });
-  // If the closed session was active, select the next tab (or null). Computed
-  // from the PRE-close state (nextPath above) and applied AFTER eviction so
-  // the override wins over the helper's null-ing.
   const wasActive = state.sessions.activeSessionPath === sessionPath;
-  const nextActivePath = wasActive ? (nextPath ?? null) : evicted.state.sessions.activeSessionPath;
+  const nextActivePath = wasActive ? (nextPath ?? null) : state.sessions.activeSessionPath;
+
+  if (state.sessions.runningSessionPaths.includes(sessionPath)) {
+    // Closing a running tab means hide, not teardown. Preserve transcript,
+    // live-pipeline, pending ownership, composer inputs, file changes, and run
+    // analytics while the backend continues. A later webview ready handshake
+    // prominently restores hidden running tabs; users can also reopen from the
+    // session list immediately. A review-closure hide is marked so the ready
+    // handshake does not resurrect a tab the reviewer intentionally closed.
+    const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
+    const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
+    const nextReviewClosedRunningPaths = cmd.reviewClosure
+      ? addToArray(state.sessions.reviewClosedRunningPaths, sessionPath)
+      : state.sessions.reviewClosedRunningPaths;
+    const nextState = {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        openTabPaths: nextOpenTabPaths,
+        pinnedTabPaths: nextPinnedTabPaths,
+        activeSessionPath: nextActivePath,
+        reviewClosedRunningPaths: nextReviewClosedRunningPaths,
+      },
+    };
+    return {
+      state: nextState,
+      effects: [{
+        kind: 'PersistTabs',
+        corrId: cmd.corrId,
+        openTabPaths: nextOpenTabPaths,
+        activeSessionPath: nextActivePath,
+        pinnedTabPaths: nextPinnedTabPaths,
+      }],
+    };
+  }
+
+  // Idle close performs the existing teardown. Clear per-session keyed maps +
+  // drop the tab arrays while retaining the durable session summary.
+  const evicted = evictSession(state, sessionPath, { removeSummary: false, removeTabs: true });
   const nextState = {
     ...evicted.state,
     sessions: {
@@ -222,6 +292,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
       activeSessionPath: sessionPath,
       runningSessionPaths: nextRunningPaths,
       unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) => p !== sessionPath),
+      reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, sessionPath),
     },
     composer: {
       ...state.composer,

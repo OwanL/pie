@@ -1,11 +1,42 @@
 import type { ThinkingLevel, AssistantUsage } from './models.js';
 import type { PruningDetails } from './settings.js';
 
+export type LazyDetailKind = 'tool-result' | 'reasoning';
+
+export interface LazyDetailRef {
+  key: string;
+  kind: LazyDetailKind;
+  source: 'durable' | 'live';
+  sessionPath: string;
+  messageId: string;
+  toolCallId?: string;
+  executionId?: string;
+  partIndex?: number;
+  /** Source revision used to reject a late live-detail response. */
+  sourceRevision?: number;
+  sizeBytes: number;
+  summary: string;
+  childCount?: number;
+  lineCount?: number;
+  available: boolean;
+}
+
+export interface DetailRequest {
+  sessionPath: string;
+  ref: LazyDetailRef;
+}
+
+export type DetailResult =
+  | { sessionPath: string; key: string; status: 'loaded'; value: unknown; sizeBytes: number }
+  | { sessionPath: string; key: string; status: 'failure' | 'unavailable' | 'stale'; message: string };
+
 export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
   result?: unknown;
+  /** Compact retrieval identity when a large result is omitted from snapshots. */
+  detailRef?: LazyDetailRef;
   status: 'running' | 'completed' | 'failed';
   /** Epoch milliseconds when the backend began executing this tool call. */
   startedAt?: number;
@@ -97,7 +128,9 @@ export interface ChatMessageTextPart {
 
 export interface ChatMessageReasoningPart {
   kind: 'reasoning';
+  /** Short summary when detailRef is present; otherwise the complete text. */
   text: string;
+  detailRef?: LazyDetailRef;
 }
 
 export interface ChatMessageToolCallPart {
@@ -128,6 +161,8 @@ export interface ChatMessage {
   parts?: ChatMessagePart[];
   /** Accumulated reasoning/thinking content (only present on assistant messages from reasoning models). */
   thinking?: string;
+  /** Retrieval identity when legacy `thinking` was compacted. */
+  thinkingDetailRef?: LazyDetailRef;
   /** Live-only tool-call draft; replaced by the authoritative call at message_end. */
   draftingToolCall?: DraftingToolCall;
   /** Model id used for this assistant response, when the backend can determine it. */

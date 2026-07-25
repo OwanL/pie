@@ -92,6 +92,22 @@ test('initial closure append is fsynced before enqueue resolves', async () => {
   assert.equal(calls, 1);
 });
 
+test('canonical review record append is fsynced before record resolves', async () => {
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const original = mutableFs.fsyncSync;
+  let calls = 0;
+  mutableFs.fsyncSync = ((descriptor: number) => { calls += 1; return original(descriptor); }) as typeof fs.fsyncSync;
+  syncBuiltinESMExports();
+  try {
+    const result = await recordReviewOnce(validReview());
+    assert.equal(result.written, true);
+  } finally {
+    mutableFs.fsyncSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(calls, 1);
+});
+
 test('closeSelf action carries no reviewId and creates no reviews file', async () => {
   const result = await enqueueClosure({ kind: 'closeSelf', targetSessionId: 'reviewer-session', targetSessionPath: '/reviewer.jsonl' });
   assert.equal(result.action.reviewId, undefined);

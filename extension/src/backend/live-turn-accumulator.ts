@@ -15,6 +15,7 @@ import {
   isJsonSafeValue,
   type JsonSafeValue,
 } from '../shared/json-structural-patch.js';
+import { compactDurableMessageDetails } from '../shared/lazy-details.js';
 import { normalizeToolProgress } from './tool-progress-normalizer.js';
 
 export interface BackendLiveTurnIdentity {
@@ -77,6 +78,9 @@ export class BackendLiveTurnAccumulator {
       phaseSince: identity.startedAt,
       lastSemanticProgressAt: identity.startedAt,
       parts: [],
+      textBytes: 0,
+      reasoningBytes: 0,
+      aggregatePreviewBytes: 0,
       toolExecutionIds: [],
       pendingExtensionUiRequestIds: [],
     };
@@ -124,7 +128,17 @@ export class BackendLiveTurnAccumulator {
         else parts.push({ kind: partKind, text: candidate.delta });
         if (candidate.kind === 'turn.text') this.textBytes = aggregateBytes;
         else this.reasoningBytes = aggregateBytes;
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, phase: 'streaming', phaseSince: this.turn.phase === 'streaming' ? this.turn.phaseSince : occurredAt, lastSemanticProgressAt: occurredAt, parts };
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          phase: 'streaming',
+          phaseSince: this.turn.phase === 'streaming' ? this.turn.phaseSince : occurredAt,
+          lastSemanticProgressAt: occurredAt,
+          parts,
+          textBytes: this.textBytes,
+          reasoningBytes: this.reasoningBytes,
+        };
         break;
       }
       case 'turn.toolDraft': {
@@ -187,6 +201,7 @@ export class BackendLiveTurnAccumulator {
           startedAt: candidate.startedAt,
           phaseSince: occurredAt,
           lastProgressAt: occurredAt,
+          previewBytes: 0,
         };
         this.turn = {
           ...this.turn,
@@ -208,10 +223,11 @@ export class BackendLiveTurnAccumulator {
         if (!tool) return this.replaceWithRejected(seq, occurredAt, 'owner_missing');
         if (!candidate.durableEntryId) return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         const boundedResult = normalizeLiveToolTerminalResult(tool.name, candidate.result);
-        if (jsonByteLength(boundedResult) > LIVE_PIPELINE_LIMITS.previewBytes) {
+        const resultBytes = jsonByteLength(boundedResult);
+        if (resultBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
           return this.replaceWithRejected(seq, occurredAt, 'payload_oversize');
         }
-        envelope = { ...base, ...candidate, result: boundedResult };
+        envelope = { ...base, ...candidate, result: boundedResult, resultBytes };
         const previousPreviewBytes = this.previewBytesByExecutionId.get(candidate.executionId) ?? 0;
         if (previousPreviewBytes > 0) {
           this.aggregatePreviewBytes -= previousPreviewBytes;
@@ -221,15 +237,23 @@ export class BackendLiveTurnAccumulator {
           ...tool,
           seq,
           preview: undefined,
+          previewBytes: 0,
           terminal: {
             status: candidate.status,
             result: boundedResult,
+            resultBytes,
             durationMs: candidate.durationMs,
             durableEntryId: candidate.durableEntryId,
           },
         };
         if (!tool.terminal) this.settledExecutionIds.push(candidate.executionId);
-        this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
+        this.turn = {
+          ...this.turn,
+          seq,
+          checkpointSeq: seq,
+          lastSemanticProgressAt: occurredAt,
+          aggregatePreviewBytes: this.aggregatePreviewBytes,
+        };
         this.compactSettledToolHistory();
         break;
       }
@@ -237,8 +261,9 @@ export class BackendLiveTurnAccumulator {
         if (!candidate.durableEntryId || candidate.durableMessage.durableEntryId !== candidate.durableEntryId) {
           return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         }
-        envelope = { ...base, ...candidate };
-        this.terminal = candidate.durableMessage;
+        const durableMessage = compactDurableMessageDetails(candidate.durableMessage, this.identity.sessionPath);
+        envelope = { ...base, ...candidate, durableMessage };
+        this.terminal = durableMessage;
         this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
         this.watermark = {
           sessionPath: this.identity.sessionPath,
@@ -263,6 +288,8 @@ export class BackendLiveTurnAccumulator {
       ? {
           ...this.turn,
           parts: [],
+          textBytes: 0,
+          reasoningBytes: 0,
           toolExecutionIds: [...this.turn.toolExecutionIds],
           pendingExtensionUiRequestIds: [],
           draftingToolCall: undefined,
@@ -343,18 +370,27 @@ export class BackendLiveTurnAccumulator {
       baseSeq,
       baseProgressRevision,
       progressRevision,
+      previewBytes: candidatePreviewBytes,
+      aggregatePreviewBytes,
       update,
     };
     this.tools[candidate.executionId] = {
       ...tool,
       seq,
       preview: candidate.preview,
+      previewBytes: candidatePreviewBytes,
       progressRevision,
       lastProgressAt: occurredAt,
     };
     this.previewBytesByExecutionId.set(candidate.executionId, candidatePreviewBytes);
     this.aggregatePreviewBytes = aggregatePreviewBytes;
-    this.turn = { ...this.turn, seq, checkpointSeq: seq, lastSemanticProgressAt: occurredAt };
+    this.turn = {
+      ...this.turn,
+      seq,
+      checkpointSeq: seq,
+      lastSemanticProgressAt: occurredAt,
+      aggregatePreviewBytes,
+    };
     return envelope;
   }
 

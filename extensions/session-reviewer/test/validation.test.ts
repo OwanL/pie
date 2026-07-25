@@ -183,3 +183,67 @@ test('requires component add findings to carry one matching post-freeze proposal
   }];
   assert.throws(() => validateSessionReviewV2(review), /exactly one matching material amendment proposal/);
 });
+
+test('non-skipped reviewer checks require a toolCallId and outputSha256; declined checks forbid them', () => {
+  const missingBinding = validReview();
+  missingBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'static_inspection', target: '/repo/a.ts', query: 'needle', result: '', status: 'pass', evidenceRefs: [] }];
+  missingBinding.reviewerChecksSha256 = hashJson(missingBinding.reviewerChecks);
+  missingBinding.provenance.pipeline.reviewerChecksSha256 = missingBinding.reviewerChecksSha256;
+  assert.throws(() => validateSessionReviewV2(missingBinding), /reviewerChecks\[0\]\.toolCallId/);
+
+  const withBinding = validReview();
+  withBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'static_inspection', target: '/repo/a.ts', query: 'needle', result: '', status: 'pass', evidenceRefs: [], toolCallId: 'tc-1', outputSha256: 'a'.repeat(64) }];
+  withBinding.reviewerChecksSha256 = hashJson(withBinding.reviewerChecks);
+  withBinding.provenance.pipeline.reviewerChecksSha256 = withBinding.reviewerChecksSha256;
+  assert.equal(validateSessionReviewV2(withBinding), withBinding);
+
+  const declinedWithBinding = validReview();
+  declinedWithBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'command', command: 'rm -rf src', cwd: '/repo', result: '', status: 'declined: mutating', evidenceRefs: [], toolCallId: 'tc-1', outputSha256: 'a'.repeat(64) }];
+  declinedWithBinding.reviewerChecksSha256 = hashJson(declinedWithBinding.reviewerChecks);
+  declinedWithBinding.provenance.pipeline.reviewerChecksSha256 = declinedWithBinding.reviewerChecksSha256;
+  assert.throws(() => validateSessionReviewV2(declinedWithBinding), /declined check must not bind/);
+
+  const declinedClean = validReview();
+  declinedClean.reviewerChecks = [{ checkId: 'chk-1', kind: 'command', command: 'rm -rf src', cwd: '/repo', result: '', status: 'declined: mutating', evidenceRefs: [] }];
+  declinedClean.reviewerChecksSha256 = hashJson(declinedClean.reviewerChecks);
+  declinedClean.provenance.pipeline.reviewerChecksSha256 = declinedClean.reviewerChecksSha256;
+  assert.equal(validateSessionReviewV2(declinedClean), declinedClean);
+});
+
+test('rejects spurious disputed fields that the components never disagreed on', () => {
+  const review = validReview();
+  review.components[1].classifications.evidence.execution = 'partial';
+  review.evidence.execution = 'partial';
+  review.disagreement.disputedFields = [
+    { field: 'evidence.execution', smallValue: 'direct', mediumValue: 'partial', resolvedValue: 'partial', resolution: 'deterministic_merge' },
+    { field: 'evidence.requirements', smallValue: 'clear', mediumValue: 'clear', resolvedValue: 'clear', resolution: 'deterministic_merge' },
+  ];
+  assert.throws(() => validateSessionReviewV2(review), /spurious disputed field evidence\.requirements/);
+});
+
+test('rejects an explicit answer key on cancelled and unanswered human responses', () => {
+  const review = validReview();
+  review.humanCheck = {
+    toolCallId: 'ask-1',
+    input: { question: 'Did it render?', options: ['Yes', 'No'], reviewMeta: { purpose: 'review_human_verification', targetSessionId: review.sessionId, targetSessionPath: review.sessionPathAtReview, criterionId: 'c1', domain: 'UI', expectedObservation: 'Correct rendering' } },
+    response: { answer: undefined, source: 'cancelled', cancelled: true, status: 'unanswered', recordedAt: '2026-07-24T11:00:00.000Z' },
+    interpretation: 'User cancelled.',
+  };
+  assert.throws(() => validateSessionReviewV2(review), /cannot carry an answer/);
+
+  const omitted = validReview();
+  omitted.humanCheck = { ...review.humanCheck, response: { source: 'cancelled', cancelled: true, status: 'unanswered', recordedAt: '2026-07-24T11:00:00.000Z' } };
+  // The omitted-answer shape is structurally valid (transcript binding is
+  // exercised in runtime-provenance tests).
+  assert.equal(validateSessionReviewV2(omitted), omitted);
+});
+
+test('hostVersion must be null or a non-empty version string', () => {
+  const empty = validReview();
+  empty.provenance.hostVersion = '';
+  assert.throws(() => validateSessionReviewV2(empty), /hostVersion must be null/);
+
+  const nonString = validReview();
+  (nonString.provenance as unknown as { hostVersion: unknown }).hostVersion = 42;
+  assert.throws(() => validateSessionReviewV2(nonString), /hostVersion must be null/);
+});

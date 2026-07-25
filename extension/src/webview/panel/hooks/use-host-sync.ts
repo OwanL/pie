@@ -6,6 +6,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks'
 import { playCompletionSound } from '../completion-sound';
 import { validateViewState } from '../state-validator';
 import { clearCollapsibleCache } from '../transcript/use-collapsible-open';
+import {
+  clearLazyDetailCache,
+  receiveLazyDetailResult,
+  setLazyDetailPostMessage,
+} from '../transcript/lazy-detail-store';
 
 import type {
   ChatMessage,
@@ -72,7 +77,6 @@ export const EMPTY_VIEW_STATE: ViewState = {
   prepassStartedAt: null,
   prepassLatencyMs: undefined,
   editingMessageId: null,
-  showOutcomeDialog: false,
   pendingExtensionUIRequestsBySession: {},
   pendingExtensionUIRequest: null,
 };
@@ -376,6 +380,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
     // re-resolve re-render of every visible collapsible per switch.
     if (hostChanged) {
       clearCollapsibleCache();
+      clearLazyDetailCache();
     }
   } else {
     // Brief D length/identity guard: the optimistic overlay is reconciled
@@ -570,11 +575,16 @@ export function useHostSync(
   });
 
   useEffect(() => {
+    setLazyDetailPostMessage(postMessage);
     const handleMessage = (event: MessageEvent) => {
       // Guard against malformed messages from non-host sources (browser
       // extensions, devtools, etc.). The dispatchHostMessage handler
       // further validates the `type` field against known handlers.
       if (!event.data || typeof event.data.type !== 'string') return;
+      if (event.data.type === 'detailResult' && event.data.result) {
+        receiveLazyDetailResult(event.data.result);
+        return;
+      }
       dispatchHostMessage(event.data as HostToWebviewMessage, {
         hydrateViewState,
         resetPerSessionState,

@@ -42,6 +42,9 @@ import {
 } from '../../src/host/sidebar/sync';
 import type { Event } from '../../src/host/core/events';
 import type { ChatMessage, ToolCall, ViewState } from '../../src/shared/protocol';
+import { createEmptyLivePipelineState } from '../../src/host/core/live-pipeline/model';
+import { applyLiveSemanticEnvelope } from '../../src/host/core/live-pipeline/transitions';
+import type { TurnSemanticEnvelope } from '../../src/shared/live-pipeline-protocol';
 
 // ─── Scenario constants ─────────────────────────────────────────────────────
 
@@ -54,6 +57,7 @@ const TOOL_CYCLES = 2; // tool.started → 4× progress → tool.finished each
 const TOOL_PROGRESS_PER_CYCLE = 4;
 const TRANSCRIPT_LENGTHS = [0, 100, 400, 1000];
 const TOOL_LOOKUP_ITERS = 5000;
+const LARGE_PREVIEW_MIB = [3, 15, 30];
 
 // ─── Orchestration mode (legacy vs current) ──────────────────────────────────
 //
@@ -79,6 +83,13 @@ const FIXED_ORCH: OrchestrationMode = {
 };
 
 // ─── Timings accumulator ──────────────────────────────────────────────────────
+
+interface LargePreviewResult {
+  sizeMiB: number;
+  previewBytes: number;
+  incrementalPatchUs: number;
+  legacySerializeUs: number;
+}
 
 interface Acc {
   reducerUs: number; // sum of dispatch() time
@@ -606,6 +617,78 @@ function gitSha(): string {
   }
 }
 
+function benchLargePreviewProgress(sizeMiB: number): LargePreviewResult {
+  const base = {
+    protocolVersion: 5,
+    sessionPath: '/perf-large.jsonl',
+    requestId: 'request-large',
+    turnId: 'turn-large',
+    attemptId: 'attempt-large',
+    occurredAt: 1,
+  } as const;
+  const apply = (state: ReturnType<typeof createEmptyLivePipelineState>, event: TurnSemanticEnvelope) => (
+    applyLiveSemanticEnvelope(state, event, 60_000).state
+  );
+  let state = apply(createEmptyLivePipelineState(), {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'message-large', startedAt: 1,
+  });
+  state = apply(state, {
+    ...base, kind: 'tool.started', seq: 2, executionId: 'execution-large', parentExecutionId: null,
+    rootExecutionId: 'execution-large', toolCallId: 'tool-large', name: 'subagent', input: {}, startedAt: 1,
+  });
+  const preview = {
+    kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+    children: [{ id: 'worker', phase: 'running' as const, streamingText: 'x'.repeat(sizeMiB * 1024 * 1024 - 1_024), messages: [] }],
+  };
+  let previewBytes = Buffer.byteLength(JSON.stringify(preview), 'utf8');
+  state = apply(state, {
+    ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-large',
+    baseProgressRevision: 0, progressRevision: 1, previewBytes, aggregatePreviewBytes: previewBytes,
+    update: { kind: 'snapshot', preview },
+  });
+
+  const incrementalSamples: number[] = [];
+  for (let revision = 2; revision <= 12; revision += 1) {
+    previewBytes += 1;
+    const start = performance.now();
+    state = apply(state, {
+      ...base, kind: 'tool.progress', seq: revision + 2, baseSeq: revision + 1,
+      executionId: 'execution-large', baseProgressRevision: revision - 1, progressRevision: revision,
+      previewBytes, aggregatePreviewBytes: previewBytes,
+      update: { kind: 'patch', operations: [{ op: 'appendString', path: ['children', 0, 'streamingText'], value: 'y' }] },
+    });
+    incrementalSamples.push((performance.now() - start) * 1_000);
+  }
+
+  const assembled = state.toolsByExecutionId['execution-large']?.preview;
+  const legacySamples: number[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    const start = performance.now();
+    JSON.stringify(assembled);
+    legacySamples.push((performance.now() - start) * 1_000);
+  }
+  return {
+    sizeMiB,
+    previewBytes,
+    incrementalPatchUs: median(incrementalSamples),
+    legacySerializeUs: median(legacySamples),
+  };
+}
+
+function printLargePreview(rows: LargePreviewResult[]): void {
+  console.log('\n=== Large recursive preview progress (per event) ===');
+  console.log('MiB | incremental metadata patch | legacy full JSON.stringify | avoided factor');
+  console.log('-'.repeat(82));
+  for (const row of rows) {
+    console.log([
+      String(row.sizeMiB).padStart(3),
+      fmt(row.incrementalPatchUs).padStart(26),
+      fmt(row.legacySerializeUs).padStart(26),
+      `×${(row.legacySerializeUs / Math.max(row.incrementalPatchUs, 0.001)).toFixed(1)}`.padStart(14),
+    ].join(' | '));
+  }
+}
+
 async function main(): Promise<void> {
   console.log('pie streaming-pipeline perf harness');
   console.log(`scenario: ${DELTA_COUNT} deltas + ${THINKING_COUNT} thinking + ${TOOL_CYCLES} tool cycles + finish`);
@@ -614,6 +697,7 @@ async function main(): Promise<void> {
   const runRows: RunResult[] = [];
   const toolRows: ToolLookupResult[] = [];
   const reducerInternalsRows: ReducerInternalsResult[] = [];
+  const largePreviewRows = LARGE_PREVIEW_MIB.map(benchLargePreviewProgress);
 
   for (const n of TRANSCRIPT_LENGTHS) {
     const base = setupActiveSession(createInitialArchState());
@@ -638,6 +722,7 @@ async function main(): Promise<void> {
   printScaling(runRows);
   printToolLookup(toolRows);
   printReducerInternals(reducerInternalsRows);
+  printLargePreview(largePreviewRows);
 
   // Write JSON report
   const here = dirname(fileURLToPath(import.meta.url));
@@ -656,6 +741,7 @@ async function main(): Promise<void> {
     runs: runRows,
     toolLookups: toolRows,
     reducerInternals: reducerInternalsRows,
+    largePreviewProgress: largePreviewRows,
   };
   const reportPath = join(reportsDir, `streaming-pipeline-${stamp}.json`);
   writeFileSync(reportPath, JSON.stringify(report, null, 2));

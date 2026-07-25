@@ -5,6 +5,7 @@ import type {
   LiveTurnRecord,
   TranscriptView,
 } from '../../../shared/live-pipeline-protocol.js';
+import { compactLiveReasoningPart, compactToolCallDetail } from '../../../shared/lazy-details.js';
 import { toolsForTurn } from './model.js';
 
 export function projectTranscriptView(
@@ -38,16 +39,26 @@ export function projectLiveTurn(
   const parts: ChatMessagePart[] = [];
   let markdown = '';
   let thinking = '';
-  for (const part of turn.parts) {
+  for (const [partIndex, part] of turn.parts.entries()) {
     if (part.kind === 'text') {
       markdown += part.text;
       parts.push({ kind: 'text', text: part.text });
     } else if (part.kind === 'reasoning') {
-      thinking += part.text;
-      parts.push({ kind: 'reasoning', text: part.text });
+      const projected = compactLiveReasoningPart(part.text, {
+        sessionPath: turn.sessionPath,
+        messageId: turn.canonicalMessageId,
+        partIndex,
+        sourceRevision: turn.reasoningBytes,
+        sizeBytes: turn.reasoningBytes,
+      });
+      thinking += projected.text;
+      parts.push(projected);
     } else {
       const tool = toolByCallId.get(part.toolCallId);
-      if (tool) parts.push({ kind: 'toolCall', toolCall: projectLiveTool(tool) });
+      if (tool) parts.push({
+        kind: 'toolCall',
+        toolCall: projectLiveTool(tool, turn.sessionPath, turn.canonicalMessageId),
+      });
     }
   }
   const toolCalls = parts
@@ -68,9 +79,9 @@ export function projectLiveTurn(
   };
 }
 
-export function projectLiveTool(tool: LiveToolRecord): ToolCall {
+export function projectLiveTool(tool: LiveToolRecord, sessionPath: string, messageId: string): ToolCall {
   const terminal = tool.terminal;
-  return {
+  const projected: ToolCall = {
     id: tool.transcriptToolCallId,
     name: tool.name,
     input: tool.immutableInput,
@@ -84,6 +95,13 @@ export function projectLiveTool(tool: LiveToolRecord): ToolCall {
     phase: terminal ? terminal.status : tool.phase,
     durableEntryId: terminal?.durableEntryId,
   };
+  return compactToolCallDetail(projected, {
+    sessionPath,
+    messageId,
+    source: 'live',
+    sizeBytes: terminal?.resultBytes ?? tool.previewBytes,
+    sourceRevision: tool.progressRevision ?? tool.seq,
+  });
 }
 
 /**

@@ -24,7 +24,6 @@ import type {
   PruningMode,
   PruningSettings,
   ToolResultPruningSettings,
-  RunOutcome,
   AppCommittedPayload,
   PaintObservedPayload,
   RenderFailurePayload,
@@ -165,17 +164,6 @@ function validateComposerInputDraft(value: unknown): value is ComposerInputDraft
     default:
       return false;
   }
-}
-
-function validateRunOutcome(value: unknown): value is RunOutcome {
-  return (
-    isObject(value)
-    && (value.resolution === 'resolved'
-      || value.resolution === 'partially_resolved'
-      || value.resolution === 'unresolved')
-    && isFiniteNumber(value.satisfaction)
-    && (value.source === undefined || value.source === 'user' || value.source === 'agent')
-  );
 }
 
 function isStringBooleanRecord(value: unknown): value is Record<string, boolean> {
@@ -519,8 +507,31 @@ export function validateWebviewToHostMessage(
       if (value.triggerId !== undefined && !isString(value.triggerId)) return fail('cancelDeferredTrigger: bad `triggerId`');
       return { ok: true, value: value as WebviewToHostMessage };
 
-    case 'openSession':
+    case 'requestDetail':
+      if (!isString(value.sessionPath)) return fail('requestDetail: missing string `sessionPath`');
+      if (!isObject(value.ref) || !isString(value.ref.key)
+        || (value.ref.kind !== 'tool-result' && value.ref.kind !== 'reasoning')
+        || (value.ref.source !== 'durable' && value.ref.source !== 'live')
+        || value.ref.sessionPath !== value.sessionPath
+        || !isString(value.ref.messageId)
+        || !isString(value.ref.summary)
+        || typeof value.ref.available !== 'boolean'
+        || !Number.isSafeInteger(value.ref.sizeBytes) || (value.ref.sizeBytes as number) < 0
+        || !isOptionalString(value.ref.toolCallId)
+        || !isOptionalString(value.ref.executionId)
+        || (value.ref.partIndex !== undefined && !Number.isSafeInteger(value.ref.partIndex))
+        || (value.ref.sourceRevision !== undefined
+          && (!Number.isSafeInteger(value.ref.sourceRevision) || (value.ref.sourceRevision as number) < 0))) {
+        return fail('requestDetail: invalid `ref`');
+      }
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'closeSession':
+      if (!isString(value.sessionPath)) return fail('closeSession: missing string `sessionPath`');
+      if (!isOptionalString(value.interactionId)) return fail('closeSession: invalid `interactionId`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'openSession':
     case 'duplicateSession':
     case 'togglePinTab':
       if (!isString(value.sessionPath)) return fail(`${type}: missing string \`sessionPath\``);
@@ -536,11 +547,6 @@ export function validateWebviewToHostMessage(
     case 'loadNewerTranscript':
     case 'jumpToLatestTranscript':
       if (!isOptionalString(value.sessionPath)) return fail(`${type}: bad \`sessionPath\``);
-      return { ok: true, value: value as WebviewToHostMessage };
-
-    case 'recordOutcome':
-      if (!isString(value.sessionPath)) return fail('recordOutcome: missing `sessionPath`');
-      if (!validateRunOutcome(value.outcome)) return fail('recordOutcome: invalid `outcome`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'startNewTask':
@@ -594,14 +600,6 @@ export function validateWebviewToHostMessage(
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'dismissNotice':
-      return { ok: true, value: value as WebviewToHostMessage };
-
-    case 'openOutcomeDialog':
-      if (!isString(value.sessionPath)) return fail('openOutcomeDialog: missing string `sessionPath`');
-      return { ok: true, value: value as WebviewToHostMessage };
-
-    case 'closeOutcomeDialog':
-      if (!isString(value.sessionPath)) return fail('closeOutcomeDialog: missing string `sessionPath`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'stateReceived':

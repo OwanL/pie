@@ -183,7 +183,7 @@ export class StateDeliveryController<T> {
   private nextRevision = 1;
   private activeOperation: PostOperation<T> | undefined;
   private accepted: AcceptedRevision[] = [];
-  /** Highest accepted revision retired by commit-timeout resnapshot recovery.
+  /** Highest posted revision retired by settlement/commit timeout recovery.
    * Late evidence for one of these revisions is stale, not a protocol defect. */
   private retiredAcceptedRevisionHighWater = 0;
   private lastTranscriptCommittedRevision = 0;
@@ -545,6 +545,14 @@ export class StateDeliveryController<T> {
 
   private handlePostTimeout(operation: PostOperation<T>): void {
     if (!this.isCurrentOperation(operation)) return;
+    // Chromium may have received/rendered the post even though VS Code did not
+    // settle postMessage within the host deadline. Retire its revision before
+    // dropping the operation so delayed evidence is stale telemetry rather
+    // than a false future/unaccepted protocol defect.
+    this.retiredAcceptedRevisionHighWater = Math.max(
+      this.retiredAcceptedRevisionHighWater,
+      operation.revision,
+    );
     this.clearActiveOperation(false);
     this.telemetry('post-timeout', operation);
     this.scheduleRetry();

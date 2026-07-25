@@ -154,6 +154,43 @@ test('backend terminal checkpoint and independently delivered watermark share fi
   assert.equal(checkpoint.checkpointSeq, terminal.seq);
 });
 
+test('durable terminal envelope replaces large tool and reasoning bodies with retrieval metadata', () => {
+  const value = accumulator();
+  value.observe({ kind: 'turn.started' }, 100);
+  const largeResult = { details: { results: [{ agent: 'worker', messages: [{ content: 'x'.repeat(64 * 1024) }] }] } };
+  const reasoning = 'plan '.repeat(8_000);
+  const terminal = value.observe({
+    kind: 'turn.terminal', terminalKind: 'completed', durableEntryId: 'assistant-entry',
+    durableMessage: {
+      id: 'message', role: 'assistant', createdAt: new Date(130).toISOString(), markdown: 'done',
+      thinking: reasoning, status: 'completed', durableEntryId: 'assistant-entry',
+      parts: [
+        { kind: 'reasoning', text: reasoning },
+        { kind: 'toolCall', toolCall: {
+          id: 'tool', name: 'subagent', input: {}, result: largeResult,
+          status: 'completed', durableEntryId: 'tool-entry',
+        } },
+      ],
+      toolCalls: [{
+        id: 'tool', name: 'subagent', input: {}, result: largeResult,
+        status: 'completed', durableEntryId: 'tool-entry',
+      }],
+    },
+  }, 130);
+
+  assert.equal(terminal.kind, 'turn.terminal');
+  if (terminal.kind !== 'turn.terminal') return;
+  const tool = terminal.durableMessage.parts?.[1]?.kind === 'toolCall'
+    ? terminal.durableMessage.parts[1].toolCall
+    : undefined;
+  assert.equal(tool?.result, undefined);
+  assert.equal(tool?.detailRef?.childCount, 1);
+  assert.ok(terminal.durableMessage.parts?.[0]?.kind === 'reasoning'
+    && terminal.durableMessage.parts[0].detailRef);
+  assert.equal(JSON.stringify(terminal).includes('x'.repeat(1_000)), false);
+  assert.equal(JSON.stringify(value.checkpoint()).includes('x'.repeat(1_000)), false);
+});
+
 test('large durability-confirmed terminal messages do not abort an otherwise completed turn', () => {
   const value = accumulator();
   value.observe({ kind: 'turn.started' }, 100);

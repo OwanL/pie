@@ -105,6 +105,13 @@ export interface SessionsState {
    *  Independent of `runningSessionPaths` (a retry sleeps between turns and the
    *  `willRetry` gate on `agent_end` keeps `busy` true throughout). */
   retryStatusBySession: Record<string, RetryStatus>;
+  /** Running session paths whose tab was intentionally hidden by an explicit
+   *  V2 review closure action (closeReviewed/closeSelf). The webview ready
+   *  handshake restores ordinary hidden running tabs but must NOT resurrect
+   *  these — their closure is a durable outbox action, not an accidental hide.
+   *  Host-owned so it survives webview reloads; pruned when a path is reopened
+   *  or no longer running. */
+  reviewClosedRunningPaths: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +449,7 @@ export function createInitialArchState(): ArchState {
       analyticsFactorsBySession: {},
       interruptInFlightBySession: {},
       retryStatusBySession: {},
+      reviewClosedRunningPaths: [],
     },
     settings: {
       modelSettings: null,

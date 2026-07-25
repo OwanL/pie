@@ -4,10 +4,14 @@ import type {
   TranscriptWindow,
 } from '../shared/protocol';
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../shared/transcript-window';
+import { compactDurableMessageDetails } from '../shared/lazy-details';
 import { mapTranscript, type SessionEntryLike } from './transcript';
 
 export interface DisplayTranscriptCache {
+  /** Full durable projection retained backend-side for detail retrieval. */
   transcript: ChatMessage[];
+  /** Compact transport projection used by ordinary transcript windows. */
+  transportTranscript?: ChatMessage[];
   hasUserMessages: boolean;
   branchEntryCount: number;
   branchLastEntryId?: string;
@@ -92,7 +96,7 @@ function buildSlice(
   };
 
   return {
-    transcript: cache.transcript.slice(range.start, range.end),
+    transcript: (cache.transportTranscript ?? cache.transcript).slice(range.start, range.end),
     transcriptWindow,
   };
 }
@@ -118,11 +122,13 @@ function deriveCacheFingerprint(entries: SessionEntryLike[]): {
   return { branchEntryCount, branchLastEntryId };
 }
 
-export function buildDisplayTranscriptCache(entries: SessionEntryLike[]): DisplayTranscriptCache {
+export function buildDisplayTranscriptCache(entries: SessionEntryLike[], sessionPath = ''): DisplayTranscriptCache {
   const transcript = mapTranscript(entries);
+  const transportTranscript = transcript.map((message) => compactDurableMessageDetails(message, sessionPath));
   const { branchEntryCount, branchLastEntryId } = deriveCacheFingerprint(entries);
   return {
     transcript,
+    transportTranscript,
     hasUserMessages: transcript.some((message) => message.role === 'user'),
     branchEntryCount,
     branchLastEntryId,

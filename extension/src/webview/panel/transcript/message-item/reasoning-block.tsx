@@ -11,9 +11,12 @@ import { useResizableHeight } from '../../components/use-resizable-height';
 import { useCollapsibleOpen } from '../use-collapsible-open';
 import { countTextLines } from '../../../../shared/tool-call-analysis';
 import { useCommittedReasoningLeaf } from '../commit-registry';
+import { useLazyDetail } from '../lazy-detail-store';
+import type { LazyDetailRef } from '../../../../shared/protocol';
 
 interface ReasoningBlockProps {
   text: string;
+  detailRef?: LazyDetailRef;
   autoExpand: boolean;
   collapsibleKey: string;
   onContextMenu: (e: MouseEvent) => void;
@@ -41,8 +44,12 @@ export function reasoningCommitEvidence(text: string, open: boolean): {
     : { text: reasoningSummary(text), policy: 'collapsed' };
 }
 
-export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu, streaming = false }: ReasoningBlockProps) {
+export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, onContextMenu, streaming = false }: ReasoningBlockProps) {
   const [open, setOpen] = useCollapsibleOpen(collapsibleKey, autoExpand);
+  const lazyDetail = useLazyDetail(detailRef, open);
+  const displayText = lazyDetail.state.status === 'loaded' && typeof lazyDetail.state.value === 'string'
+    ? lazyDetail.state.value
+    : text;
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
 
   // Throttled markdown re-parse: leading parse at most once per
@@ -51,13 +58,13 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
   // is always rendered. When closed, render '' (no parse). This mirrors the
   // BufferedTextPart throttle but reasoning reveals the full text immediately
   // (no progressive reveal), so only the parse is throttled.
-  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(text) : '', text }));
+  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(displayText) : '', text: displayText }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   // Latest text read by the scheduled (trailing) parse so it always reflects
   // the most recent token, not the token that scheduled it.
-  const textRef = useRef(text);
-  textRef.current = text;
+  const textRef = useRef(displayText);
+  textRef.current = displayText;
 
   useEffect(() => {
     if (!open) {
@@ -90,7 +97,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
       lastParseAtRef.current = Date.now();
       setRendered({ html: renderMarkdown(textRef.current), text: textRef.current });
     }, REASONING_PARSE_TRAILING_MS);
-  }, [text, open]);
+  }, [displayText, open]);
 
   // Clear any pending trailing parse on unmount.
   useEffect(() => () => {
@@ -103,7 +110,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
   // Collapsed size hint mirrors tool calls (`~543 lines`): a quick magnitude
   // signal before expanding. Only for multi-line reasoning — a single line is
   // trivially small and a hint would just be noise.
-  const lineCount = countTextLines(text);
+  const lineCount = detailRef?.lineCount ?? countTextLines(displayText);
   const showLineHint = !open && lineCount > 1;
   // Streaming cursor (polish): a blinking block at the end of the rendered
   // markdown while the assistant is still emitting reasoning tokens. Appended
@@ -114,7 +121,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
   const keyMatch = /^reasoning:(.*):(\d+)$/.exec(collapsibleKey);
   const messageId = keyMatch?.[1] ?? collapsibleKey;
   const partIndex = Number(keyMatch?.[2] ?? 0);
-  const commitEvidence = reasoningCommitEvidence(open ? rendered.text : text, open);
+  const commitEvidence = reasoningCommitEvidence(detailRef ? text : (open ? rendered.text : text), open);
   useCommittedReasoningLeaf(messageId, partIndex, commitEvidence.text, commitEvidence.policy);
 
   return (
@@ -130,7 +137,7 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
         <>
           <span class="transcript-header-label">Reasoning</span>
           {!open ? (
-            <span class="transcript-header-summary min-w-0 flex-1 truncate">{reasoningSummary(text)}</span>
+            <span class="transcript-header-summary min-w-0 flex-1 truncate">{detailRef?.summary ?? reasoningSummary(displayText)}</span>
           ) : null}
           {showLineHint && (
             <span
@@ -153,13 +160,26 @@ export function ReasoningBlock({ text, autoExpand, collapsibleKey, onContextMenu
             onReset={reset}
           />
         )}
-        <div
-          ref={scrollRef}
-          class="message-body reasoning-scroll"
-          dangerouslySetInnerHTML={{ __html: renderedHtml }}
-          aria-live="polite"
-          style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}
-        />
+        {detailRef && lazyDetail.state.status !== 'loaded' ? (
+          <div ref={scrollRef} class="message-body reasoning-scroll" role="status">
+            {lazyDetail.state.status === 'loading' || lazyDetail.state.status === 'idle'
+              ? 'Loading reasoning…'
+              : (
+                <div>
+                  <div>{lazyDetail.state.message}</div>
+                  <button type="button" class="mt-2 text-accent underline" onClick={lazyDetail.retry}>Retry</button>
+                </div>
+              )}
+          </div>
+        ) : (
+          <div
+            ref={scrollRef}
+            class="message-body reasoning-scroll"
+            dangerouslySetInnerHTML={{ __html: renderedHtml }}
+            aria-live="polite"
+            style={height ? { height: `${height}px`, maxHeight: 'none' } : undefined}
+          />
+        )}
         {canResize && (
           <ResizeHandle
             edge="bottom"

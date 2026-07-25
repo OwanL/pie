@@ -147,7 +147,10 @@ test('sequence gaps request a checkpoint and a terminal checkpoint repairs misse
       attemptId: base.attemptId,
       checkpointSeq: 4,
       phase: 'streaming',
-      turn: { ...turn, seq: 4, checkpointSeq: 4, phase: 'streaming', parts: [{ kind: 'text', text: 'authoritative' }] },
+      turn: {
+        ...turn, seq: 4, checkpointSeq: 4, phase: 'streaming',
+        parts: [{ kind: 'text', text: 'authoritative' }], textBytes: Buffer.byteLength('authoritative', 'utf8'),
+      },
       tools: [],
       pendingExtensionUiRequestIds: [],
       terminal,
@@ -253,12 +256,24 @@ test('checkpoint repair replays a coalesced v5 progress range from the checkpoin
     checkpoint: {
       protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 4, phase: 'running_tool',
-      turn: { ...owner, seq: 4, checkpointSeq: 4, phase: 'running_tool', reconciliation: undefined },
+      turn: {
+        ...owner, seq: 4, checkpointSeq: 4, phase: 'running_tool', reconciliation: undefined,
+        aggregatePreviewBytes: Buffer.byteLength(JSON.stringify({
+          kind: 'subagent', mode: 'single', omittedChildren: 0, children: [
+            { id: 'worker', phase: 'running', streamingText: 'ab' },
+          ],
+        }), 'utf8'),
+      },
       tools: [{
         ...tool, seq: 4, progressRevision: 2,
         preview: { kind: 'subagent', mode: 'single', omittedChildren: 0, children: [
           { id: 'worker', phase: 'running', streamingText: 'ab' },
         ] },
+        previewBytes: Buffer.byteLength(JSON.stringify({
+          kind: 'subagent', mode: 'single', omittedChildren: 0, children: [
+            { id: 'worker', phase: 'running', streamingText: 'ab' },
+          ],
+        }), 'utf8'),
       }],
       pendingExtensionUiRequestIds: [],
     },
@@ -284,7 +299,10 @@ test('checkpoint repair replays a newer envelope that arrived after checkpoint c
     checkpoint: {
       protocolVersion: 5, sessionPath: base.sessionPath, turnId: base.turnId,
       attemptId: base.attemptId, checkpointSeq: 2, phase: 'streaming',
-      turn: { ...turn, seq: 2, checkpointSeq: 2, phase: 'streaming', parts: [{ kind: 'text', text: 'before' }] },
+      turn: {
+        ...turn, seq: 2, checkpointSeq: 2, phase: 'streaming',
+        parts: [{ kind: 'text', text: 'before' }], textBytes: Buffer.byteLength('before', 'utf8'),
+      },
       tools: [], pendingExtensionUiRequestIds: [],
     },
   });

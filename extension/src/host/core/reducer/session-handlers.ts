@@ -356,12 +356,14 @@ export function handleSessionMetadataChanged(state: ArchState, event: Extract<Ev
 }
 
 export function handleRunningSessionsChanged(state: ArchState, event: Extract<Event, { kind: 'RunningSessionsChanged' }>): ReducerResult {
+  const running = new Set(event.sessionPaths);
   return {
     state: {
       ...state,
       sessions: {
         ...state.sessions,
         runningSessionPaths: event.sessionPaths,
+        reviewClosedRunningPaths: state.sessions.reviewClosedRunningPaths.filter((p) => running.has(p)),
       },
     },
     effects: [],
@@ -784,6 +786,7 @@ export function handleTabOpened(state: ArchState, event: Extract<Event, { kind: 
       sessions: {
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,
+        reviewClosedRunningPaths: removeFromArray(state.sessions.reviewClosedRunningPaths, event.sessionPath),
       },
     },
     effects: [],
@@ -808,6 +811,7 @@ export function handleOpenTabsChanged(state: ArchState, event: Extract<Event, { 
         unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) =>
           openTabPaths.includes(p),
         ),
+        reviewClosedRunningPaths: state.sessions.reviewClosedRunningPaths.filter((p) => !openTabPaths.includes(p)),
       },
     },
     effects: [],

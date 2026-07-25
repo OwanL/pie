@@ -8,7 +8,8 @@ WITH stable_author_sessions AS (
     COALESCE(model_family, model_id, '(unknown)') AS model_family,
     COALESCE(thinking_level, '(unspecified)') AS thinking_level
   FROM runs
-  WHERE identity_fallback = FALSE
+  WHERE status <> 'open'
+    AND identity_fallback = FALSE
     AND mixed_model_config = FALSE
     AND mixed_treatment_config = FALSE
 ),
@@ -31,6 +32,7 @@ SELECT
   thinking_level,
   ROUND(SUM(attribution_weight), 3) AS v2_review_count,
   ROUND(SUM(attribution_weight) FILTER (WHERE quality_index_v1 IS NOT NULL), 3) AS quality_index_count,
+  ROUND(SUM(attribution_weight) FILTER (WHERE quality_index_v1 IS NULL), 3) AS not_assessable_review_count,
   ROUND(SUM(quality_index_v1 * attribution_weight) FILTER (WHERE quality_index_v1 IS NOT NULL)
     / NULLIF(SUM(attribution_weight) FILTER (WHERE quality_index_v1 IS NOT NULL), 0), 1) AS mean_quality_index_v1,
   ROUND(SUM(criterion_coverage * attribution_weight) FILTER (WHERE criterion_coverage IS NOT NULL)

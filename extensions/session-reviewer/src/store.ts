@@ -132,6 +132,13 @@ function appendLineDurable(file: string, value: unknown): void {
     fs.fsyncSync(descriptor);
   } finally { fs.closeSync(descriptor); }
 }
+/** In-process write serializer. Each appended line is a single `writeSync` under
+ *  `O_APPEND`, so concurrent *processes* (separate reviewer sessions) rely on
+ *  the OS append atomicity as the documented cross-process fallback; a heavy
+ *  cross-process lockfile is intentionally not added because no safe,
+ *  portable atomic lock is straightforward here. Durability of a canonical
+ *  record or closure action is guaranteed separately via `appendLineDurable`
+ *  (open + write + fsync + close) before any dependent enqueue resolves. */
 async function withFileLock<T>(file: string, operation: () => T | Promise<T>): Promise<T> {
   const previous = writeLocks.get(file) ?? Promise.resolve();
   let release!: () => void;
@@ -160,7 +167,7 @@ export async function recordReviewOnce(review: SessionReviewV2): Promise<RecordR
       if (existing) return { written: false, reviewId: existing.reviewId, legacy: false, file };
       if (snapshot.reservedLegacyBySessionId.has(review.sessionId)) return { written: false, legacy: true, file };
     }
-    appendLine(file, review);
+    appendLineDurable(file, review);
     return { written: true, review, file };
   });
 }
@@ -203,11 +210,4 @@ export async function enqueueClosure(input: {
     appendLineDurable(file, action);
     return { action, existing: false, file };
   });
-}
-
-/** Host/outbox worker appends state transitions; review storage is untouched. */
-export async function appendClosureState(action: ClosureAction): Promise<string> {
-  const file = requireConfiguredFile(getClosureOutboxPath(), 'PIE_REVIEWS_DIR is not set — the host has not configured the closure-action outbox.');
-  await withFileLock(file, () => appendLine(file, action));
-  return file;
 }

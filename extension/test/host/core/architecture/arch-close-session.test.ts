@@ -117,12 +117,56 @@ test('CloseSession does NOT remove the session summary (unlike removeSessionFrom
   assert.deepEqual(out.state.sessions.sessions, [SUMMARY_A, SUMMARY_B]);
 });
 
-test('CloseSession does NOT touch runningSessionPaths (the session may still be running in the backend)', () => {
-  const state = buildState({ runningPaths: [A], activePath: B, openTabs: [A, B] });
+test('CloseSession hides a running tab without clearing recoverable state or finalizing its run', () => {
+  const state = buildState({
+    runningPaths: [A], activePath: B, openTabs: [A, B],
+    transcripts: { [A]: SAMPLE_MESSAGES },
+    activeRunSummaries: { [A]: STALE_RUN_SUMMARY },
+  });
   const out = reducer(state, closeCmd('c3', A));
 
-  // A is still running — closing its tab doesn't stop the backend.
+  assert.deepEqual(out.state.sessions.openTabPaths, [B]);
   assert.deepEqual(out.state.sessions.runningSessionPaths, [A]);
+  assert.deepEqual(out.state.transcript.bySession[A], SAMPLE_MESSAGES);
+  assert.deepEqual(out.state.composer.activeRunSummaryBySession[A], STALE_RUN_SUMMARY);
+  assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs']);
+});
+
+test('duplicate or stale CloseSession command for an already hidden tab is idempotent', () => {
+  const state = buildState({ openTabs: [A, B], activePath: B });
+  const first = reducer(state, closeCmd('c3-first', A));
+  const duplicate = reducer(first.state, closeCmd('c3-duplicate', A));
+
+  assert.equal(duplicate.state, first.state);
+  assert.deepEqual(duplicate.effects, []);
+});
+
+test('outbox ensureClosed retries persistence and idle cleanup for an already-hidden target', () => {
+  const state = buildState({ openTabs: [B], activePath: B });
+  const out = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'CloseSession', corrId: 'review-retry', sessionPath: A, ensureClosed: true },
+  });
+
+  assert.equal(out.state, state);
+  assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs', 'CloseSession']);
+  assert.equal(out.effects[1]?.kind === 'CloseSession' ? out.effects[1].nextPath : undefined, null);
+});
+
+test('outbox ensureClosed preserves hidden running-session state and retries persistence only', () => {
+  const state = buildState({
+    openTabs: [B], activePath: B, runningPaths: [A], transcripts: { [A]: SAMPLE_MESSAGES },
+    activeRunSummaries: { [A]: STALE_RUN_SUMMARY },
+  });
+  const out = reducer(state, {
+    kind: 'Command',
+    cmd: { kind: 'CloseSession', corrId: 'review-running-retry', sessionPath: A, ensureClosed: true },
+  });
+
+  assert.equal(out.state, state);
+  assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs']);
+  assert.deepEqual(out.state.transcript.bySession[A], SAMPLE_MESSAGES);
+  assert.deepEqual(out.state.composer.activeRunSummaryBySession[A], STALE_RUN_SUMMARY);
 });
 
 test('CloseSession clears the active-run summary for the closed session (mirror onSessionClosed)', () => {

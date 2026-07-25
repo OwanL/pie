@@ -68,6 +68,9 @@ export function applyLiveSemanticEnvelope(
       phaseSince: event.occurredAt,
       lastSemanticProgressAt: event.occurredAt,
       parts: [],
+      textBytes: 0,
+      reasoningBytes: 0,
+      aggregatePreviewBytes: 0,
       toolExecutionIds: [],
       pendingExtensionUiRequestIds: [],
     };
@@ -127,9 +130,8 @@ export function applyLiveSemanticEnvelope(
       ? LIVE_PIPELINE_LIMITS.textPartBytes
       : LIVE_PIPELINE_LIMITS.reasoningPartBytes;
     const partKind = event.kind === 'turn.text' ? 'text' as const : 'reasoning' as const;
-    const aggregateBytes = owner.parts.reduce((total, part) =>
-      part.kind === partKind ? total + Buffer.byteLength(part.text, 'utf8') : total,
-    0) + Buffer.byteLength(event.delta, 'utf8');
+    const aggregateBytes = (partKind === 'text' ? owner.textBytes : owner.reasoningBytes)
+      + Buffer.byteLength(event.delta, 'utf8');
     if (aggregateBytes > byteLimit) {
       return { classification: 'invalid', state: current, reason: 'aggregate part kind exceeds live byte limit' };
     }
@@ -147,6 +149,8 @@ export function applyLiveSemanticEnvelope(
       phaseSince: owner.phase === 'streaming' ? owner.phaseSince : event.occurredAt,
       lastSemanticProgressAt: event.occurredAt,
       parts,
+      textBytes: partKind === 'text' ? aggregateBytes : owner.textBytes,
+      reasoningBytes: partKind === 'reasoning' ? aggregateBytes : owner.reasoningBytes,
     });
   }
 
@@ -206,6 +210,7 @@ export function applyLiveSemanticEnvelope(
       startedAt: event.startedAt,
       phaseSince: event.occurredAt,
       lastProgressAt: event.occurredAt,
+      previewBytes: 0,
     };
     let state: LivePipelineState = {
       ...current,
@@ -255,12 +260,15 @@ export function applyLiveSemanticEnvelope(
       }
       preview = patched.value;
     }
-    const aggregatePreviewBytes = owner.toolExecutionIds.reduce((total, executionId) =>
-      total + (executionId === event.executionId
-        ? jsonByteLength(preview)
-        : jsonByteLength(current.toolsByExecutionId[executionId]?.preview)),
-    0);
-    if (aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes) {
+    // The backend assembled and measured the canonical preview before emitting
+    // this envelope. Trust that same-process metadata when present so a tiny
+    // structural append does not stringify the reconstructed multi-MiB value.
+    // The fallback retains compatibility with older v5 envelope producers.
+    const previewBytes = event.previewBytes ?? jsonByteLength(preview);
+    const aggregatePreviewBytes = owner.aggregatePreviewBytes - tool.previewBytes + previewBytes;
+    if (previewBytes > LIVE_PIPELINE_LIMITS.previewBytes
+      || aggregatePreviewBytes > LIVE_PIPELINE_LIMITS.toolPreviewAggregateBytes
+      || (event.aggregatePreviewBytes !== undefined && event.aggregatePreviewBytes !== aggregatePreviewBytes)) {
       return { classification: 'invalid', state: current, reason: 'aggregate tool preview capacity exceeded' };
     }
     const state = withTurn({
@@ -271,11 +279,17 @@ export function applyLiveSemanticEnvelope(
           ...tool,
           seq: event.seq,
           preview,
+          previewBytes,
           progressRevision: event.progressRevision,
           lastProgressAt: event.occurredAt,
         },
       },
-    }, event.sessionPath, { ...owner, seq: event.seq, lastSemanticProgressAt: event.occurredAt });
+    }, event.sessionPath, {
+      ...owner,
+      seq: event.seq,
+      lastSemanticProgressAt: event.occurredAt,
+      aggregatePreviewBytes,
+    });
     return { classification: 'applied', state };
   }
 
@@ -285,7 +299,8 @@ export function applyLiveSemanticEnvelope(
       return queueOwnerPending(current, event);
     }
     if (!event.durableEntryId) return { classification: 'invalid', state: current, reason: 'terminal tool lacks durable evidence' };
-    if (jsonByteLength(event.result) > LIVE_PIPELINE_LIMITS.previewBytes) {
+    const resultBytes = event.resultBytes ?? jsonByteLength(event.result);
+    if (resultBytes > LIVE_PIPELINE_LIMITS.previewBytes) {
       return { classification: 'invalid', state: current, reason: 'terminal tool result exceeds live byte limit' };
     }
     const state = withTurn({
@@ -295,15 +310,23 @@ export function applyLiveSemanticEnvelope(
         [event.executionId]: {
           ...tool,
           seq: event.seq,
+          preview: undefined,
+          previewBytes: 0,
           terminal: {
             status: event.status,
             result: event.result,
+            resultBytes,
             durationMs: event.durationMs,
             durableEntryId: event.durableEntryId,
           },
         },
       },
-    }, event.sessionPath, { ...owner, seq: event.seq, lastSemanticProgressAt: event.occurredAt });
+    }, event.sessionPath, {
+      ...owner,
+      seq: event.seq,
+      lastSemanticProgressAt: event.occurredAt,
+      aggregatePreviewBytes: owner.aggregatePreviewBytes - tool.previewBytes,
+    });
     return { classification: 'applied', state };
   }
 

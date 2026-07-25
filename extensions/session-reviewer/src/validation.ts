@@ -310,6 +310,16 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
     stringArray(check.evidenceRefs, `review.reviewerChecks[${i}].evidenceRefs`);
     const safety = checkSafety(item as never);
     if ((safety.safe && check.status === 'declined: mutating') || (!safety.safe && check.status !== 'declined: mutating')) fail(`review.reviewerChecks[${i}] status violates check safety result`);
+    // Executed checks must bind their result/status/evidence to a real prior
+    // orchestrator tool call and its immutable output; skipped (declined)
+    // checks must carry no such binding. The transcript binding itself is
+    // enforced in validateRuntimeProvenance (do not trust the caller).
+    if (check.status === 'declined: mutating') {
+      if ('toolCallId' in check || 'outputSha256' in check) fail(`review.reviewerChecks[${i}] declined check must not bind a tool call or output`);
+    } else {
+      string(check.toolCallId, `review.reviewerChecks[${i}].toolCallId`);
+      hash(check.outputSha256, `review.reviewerChecks[${i}].outputSha256`);
+    }
   }
   const checksHash = hash(v.reviewerChecksSha256, 'review.reviewerChecksSha256');
   if (checksHash !== hashJson(v.reviewerChecks)) fail('reviewerChecksSha256 does not match reviewerChecks');
@@ -415,7 +425,6 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
     member(field.resolution, values('small', 'medium', 'adjudicator', 'deterministic_merge'), `review.disagreement.disputedFields[${i}].resolution`);
     recordedFieldRecords.set(name, field);
   }
-  const recordedFields = new Set(recordedFieldRecords.keys());
   for (const field of computedMaterial) {
     const recorded = recordedFieldRecords.get(field);
     if (!recorded) fail(`material disputed field ${field} is not recorded`);
@@ -471,6 +480,14 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
     const mediumValue = componentFieldValue(mediumComponent, field);
     if (recorded.resolution !== expected.resolution || recorded.resolvedValue !== resolutionString(expected.value) || recorded.smallValue !== resolutionString(smallValue) || recorded.mediumValue !== resolutionString(mediumValue)) fail(`disputed field ${field} does not match its component values/canonical resolution`);
   }
+  // Reject spurious disputed fields: every recorded field must be either a
+  // material disagreement (requiring adjudication) or a deterministically
+  // differing field with a recorded merge. A caller cannot invent fields that
+  // the components never disagreed on.
+  const allowedDisputedFields = new Set<string>([...computedMaterial, ...canonical.differingFields.keys()]);
+  for (const name of recordedFieldRecords.keys()) {
+    if (!allowedDisputedFields.has(name)) fail(`spurious disputed field ${name} is not a material or deterministically differing field`);
+  }
 
   const attainment = object(v.attainment, 'review.attainment');
   const derivedAttainment = deriveAttainment(ledger);
@@ -479,6 +496,7 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
 
   const provenance = object(v.provenance, 'review.provenance');
   string(provenance.orchestratorSessionId, 'review.provenance.orchestratorSessionId');
+  if (provenance.hostVersion !== null && (typeof provenance.hostVersion !== 'string' || !provenance.hostVersion.trim())) fail('review.provenance.hostVersion must be null or a non-empty version string');
   if (provenance.rubricVersion !== v.rubricVersion) fail('provenance rubricVersion mismatch');
   if (provenance.indexVersion !== v.indexVersion) fail('provenance indexVersion mismatch');
   if (provenance.blindingApplied !== true) fail('provenance.blindingApplied must be true');
@@ -509,7 +527,7 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
       string(response.answer, 'review.humanCheck.response.answer');
       member(response.status, values('answered', 'inconclusive', 'unavailable'), 'review.humanCheck.response.status');
     } else {
-      if (response.answer !== undefined) fail('unanswered humanCheck response cannot carry an answer');
+      if ('answer' in response) fail('unanswered humanCheck response cannot carry an answer');
       if (source === 'cancelled' && (response.cancelled !== true || response.status !== 'unanswered')) fail('cancelled humanCheck response is inconsistent');
       if (source === 'unanswered' && (response.cancelled !== false || (response.status !== 'unanswered' && response.status !== 'unavailable'))) fail('unanswered humanCheck response is inconsistent');
     }

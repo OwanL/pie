@@ -35,6 +35,7 @@ import { TranscriptMessageList } from './transcript-message-list';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { getToolRenderer } from './registry';
 import { useCollapsibleOpen } from './use-collapsible-open';
+import { useLazyDetail } from './lazy-detail-store';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
@@ -857,6 +858,7 @@ function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallIt
     && left.seq === right.seq
     && left.phase === right.phase
     && left.durableEntryId === right.durableEntryId
+    && left.detailRef?.key === right.detailRef?.key
     && (left.result === undefined) === (right.result === undefined);
 }
 
@@ -868,14 +870,21 @@ function ToolCallItemBody({
   onContextMenu,
   renderToolCall,
 }: ToolCallItemProps) {
-  const subagentResult = getRenderableSubagentResultFromToolCall(toolCall);
-  const rendererName = toolCall.name === 'subagent' || !!subagentResult ? 'subagent' : toolCall.name;
+  const lazyDetail = useLazyDetail(toolCall.detailRef, false);
+  const renderedToolCall = lazyDetail.state.status === 'loaded'
+    ? { ...toolCall, result: lazyDetail.state.value, detailRef: undefined }
+    : toolCall;
+  const waitingForDetail = !!renderedToolCall.detailRef && lazyDetail.state.status !== 'loaded';
+  const subagentResult = waitingForDetail ? undefined : getRenderableSubagentResultFromToolCall(renderedToolCall);
+  const rendererName = waitingForDetail
+    ? '__default'
+    : renderedToolCall.name === 'subagent' || !!subagentResult ? 'subagent' : renderedToolCall.name;
   const Renderer = getToolRenderer(rendererName) ?? getToolRenderer('__default');
 
   if (Renderer) {
     return (
       <Renderer
-        toolCall={toolCall}
+        toolCall={renderedToolCall}
         prefs={prefs}
         workingDirectory={workingDirectory}
         onOpenFile={onOpenFile}
@@ -888,13 +897,13 @@ function ToolCallItemBody({
   const contextType = getToolCallContextType(rendererName);
   const handleContextMenu = (e: MouseEvent) => onContextMenu(
     contextType,
-    JSON.stringify(toolCall, null, 2),
+    JSON.stringify(renderedToolCall, null, 2),
     e,
   );
 
   return (
     <ToolCallCard
-      toolCall={toolCall}
+      toolCall={renderedToolCall}
       autoExpand={prefs.autoExpandToolCalls}
       workingDirectory={workingDirectory}
       onOpenFile={onOpenFile}

@@ -375,6 +375,11 @@ export interface CloseSessionCommand extends CommandBase {
   /** Outbox closure retries must re-run idempotent cleanup/persistence even
    *  when an earlier optimistic command already hid the tab. */
   ensureClosed?: boolean;
+  /** True when this close originates from a V2 review closure outbox action
+   *  (closeReviewed/closeSelf). The reducer marks a running target as
+   *  review-closure-hidden so the webview ready handshake does not resurrect
+   *  its tab. */
+  reviewClosure?: boolean;
 }
 
 /** Duplicate an existing session into a new pending tab. Mirrors

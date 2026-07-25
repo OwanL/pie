@@ -10,6 +10,7 @@ import { CollapsibleCloseFooter } from '../../components/collapsible-close-foote
 import { CollapsibleGutter } from '../../components/collapsible-gutter';
 import { textFromToolResult } from '../highlight';
 import { useCollapsibleOpen } from '../use-collapsible-open';
+import { useLazyDetail } from '../lazy-detail-store';
 
 import { formatToolCallResultForDisplay } from './format';
 import { isCommandSummaryTool, buildToolCallHeaderSummaryModel } from './summary-model';
@@ -88,6 +89,10 @@ export function ToolCallCard({
   // running even when collapsed, so users can watch execution unfold. The
   // `lingering` term keeps it expanded during the post-completion grace.
   const showBody = open || (isShell && isRunning) || lingering;
+  const lazyDetail = useLazyDetail(toolCall.detailRef, showBody);
+  const renderedToolCall = lazyDetail.state.status === 'loaded'
+    ? { ...toolCall, result: lazyDetail.state.value, detailRef: undefined }
+    : toolCall;
 
   // Detect running→completed/failed to (a) flash a completion pulse for all
   // tool calls, and (b) enter the lingering state for the auto-shown shell
@@ -301,7 +306,20 @@ export function ToolCallCard({
           }}
         >
           <div class="tool-call-body-inner">
-            <ToolCallBody toolCall={toolCall} onOpenFile={onOpenFile} />
+            {toolCall.detailRef && lazyDetail.state.status !== 'loaded' ? (
+              <div class="tool-call-body p-3" role="status">
+                {lazyDetail.state.status === 'loading' || lazyDetail.state.status === 'idle' ? (
+                  <span>Loading details…</span>
+                ) : (
+                  <div>
+                    <div>{lazyDetail.state.message}</div>
+                    <button type="button" class="mt-2 text-accent underline" onClick={lazyDetail.retry}>Retry</button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <ToolCallBody toolCall={renderedToolCall} onOpenFile={onOpenFile} />
+            )}
             {/* The footer is a close affordance for a *manually opened* body.
               The auto-shown shell body (running / post-completion grace) is
               transient and closes via its own grace path, where `data-closing`

@@ -235,6 +235,9 @@ export function evictSession(
   const nextRunningPaths = removeSummary
     ? removeFromArray(state.sessions.runningSessionPaths, sp)
     : state.sessions.runningSessionPaths;
+  const nextReviewClosedRunningPaths = removeSummary
+    ? removeFromArray(state.sessions.reviewClosedRunningPaths, sp)
+    : state.sessions.reviewClosedRunningPaths;
 
   // ── Tab arrays (removeTabs: close the tab) ──
   const nextOpenTabPaths = removeTabs
@@ -279,6 +282,7 @@ export function evictSession(
         openTabPaths: nextOpenTabPaths,
         pinnedTabPaths: nextPinnedPaths,
         runningSessionPaths: nextRunningPaths,
+        reviewClosedRunningPaths: nextReviewClosedRunningPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,
         activeSessionPath: nextActivePath,
         analyticsFactorsBySession: remainingAnalytics,

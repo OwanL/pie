@@ -98,6 +98,15 @@ export type ReviewerCheck = ReviewerCheckSpec & {
   result: string;
   status: 'pass' | 'fail' | 'inconclusive' | 'declined: mutating';
   evidenceRefs: string[];
+  /** Prior orchestrator tool call whose immutable output is bound to this
+   *  executed check. Required for every non-`declined: mutating` check and
+   *  forbidden for skipped checks; not trusted — validated against the
+   *  orchestrator transcript at record time. */
+  toolCallId?: string;
+  /** SHA-256 over the bound tool call's joined text output (the immutable
+   *  output). Required for every non-`declined: mutating` check and forbidden
+   *  for skipped checks. */
+  outputSha256?: string;
 };
 export interface ReviewHumanQuestionCandidate {
   criterionId: string;

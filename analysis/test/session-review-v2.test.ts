@@ -12,7 +12,7 @@ import { coerceSessionReviewV2, deriveReviewAttainment } from '../scripts/review
 import { buildSiteDataBundle } from '../scripts/site-data.ts';
 import { sessionReviewAnalyticsHtml } from '../site/app.ts';
 import { readMixedSessionReviews } from '../scripts/transcript-source.ts';
-import { buildDuckDbDatabase, runNamedDuckDbQuery, writeDuckDbStagingExports } from '../scripts/duckdb.ts';
+import { buildDuckDbDatabase, runDuckDbQuery, runNamedDuckDbQuery, writeDuckDbStagingExports } from '../scripts/duckdb.ts';
 import { deepClone, loadFixture, withTempDir } from './helpers.ts';
 
 const MIXED_FIXTURE = fileURLToPath(new URL('../fixtures/session-reviews-v1-v2.jsonl', import.meta.url));
@@ -274,5 +274,191 @@ test('DuckDB staging exports stable-ID V2 review, criterion, finding, and review
     assert.equal(findings.length, 0);
     assert.equal(reviewers.length, 5);
     assert.equal(path.basename(paths.sessionReviewsV2Path), 'session-reviews-v2.json');
+  });
+});
+
+// The canonical V2 fixture review (line 2 of the mixed sidecar) is the basis for
+// amendment/adjudication and not-assessable synthetic cases below. It is parsed
+// once at module load; every test deep-clones before mutating.
+const RAW_V2_REVIEW = JSON.parse((await fs.readFile(MIXED_FIXTURE, 'utf8')).trim().split(/\r?\n/)[1]!) as Record<string, any>;
+
+/** A canonical production review carrying all four amendment dispositions plus a
+ *  medium-bucket adjudication. Mirrors the extension's amendment/adjudication
+ *  contract (mapped target/downgrade, finding_downgraded severity, exact
+ *  amendmentIds) so the analytics coercion has a valid base to mutate. */
+function reviewWithAmendmentsAndAdjudication(): Record<string, any> {
+  const review = deepClone(RAW_V2_REVIEW);
+  const classifiedC1 = deepClone((review.ledger as any[])[0]!);
+  const c2Definition = {
+    criterionId: 'c2', statement: 'Added necessary-implied criterion', origin: 'necessary_implied',
+    importance: 'core', taxonomy: { activity: 'implement', surface: ['application_logic'], evidenceMode: ['automated_check'] },
+  };
+  const classifiedC2 = { ...c2Definition, status: 'met', reason: 'none', evidenceRefs: ['transcript:2'], findingRefs: [] };
+  review.ledger = [classifiedC1, classifiedC2];
+  review.attainment = deriveReviewAttainment(review.ledger as ClassifiedCriterion[]);
+  const amendmentIds = ['am-accepted', 'am-mapped', 'am-downgraded', 'am-rejected'];
+  review.amendments = [
+    { amendmentId: 'am-accepted', disposition: 'accepted', definition: c2Definition, classifiedCriterion: classifiedC2 },
+    { amendmentId: 'am-mapped', disposition: 'mapped_to_existing', targetCriterionId: 'c1', downgradedClassification: classifiedC1 },
+    { amendmentId: 'am-downgraded', disposition: 'finding_downgraded', downgradedSeverity: 'minor' },
+    { amendmentId: 'am-rejected', disposition: 'rejected' },
+  ];
+  review.disagreement = { material: true, adjudicated: true, disputedFields: [] };
+  review.adjudication = {
+    reviewerId: 'reviewer-adjudicator', toolCallId: 'call-adjudicator',
+    requestedBucket: 'medium', bucket: 'medium', bucketDowngraded: false,
+    modelId: 'model-adjudicator', provider: 'provider-b', family: 'family-b', thinkingLevel: null,
+    promptHash: 'prompt-adjudicator', rubricVersion: review.rubricVersion,
+    adjudicationId: 'adjudication-1', assessedAt: '2026-07-24T10:15:00.000Z',
+    amendmentIds: [...amendmentIds], resolvedFields: [],
+    canonicalOverall: { deliveredOverall: 'achieved', controllableOverall: 'achieved' },
+  };
+  review.provenance.pipeline.amendmentIds = [...amendmentIds];
+  review.provenance.pipeline.adjudicationId = 'adjudication-1';
+  return review;
+}
+
+/** A V2 review whose controllable attainment is `not_assessable` (every core
+ *  criterion is externally blocked), so its derived qualityIndexV1 is null. */
+function notAssessableReview(): Record<string, any> {
+  const review = deepClone(RAW_V2_REVIEW);
+  (review.ledger as any[])[0]!.status = 'blocked';
+  (review.ledger as any[])[0]!.reason = 'external_blocker';
+  review.reviewId = 'review-not-assessable';
+  review.sessionId = 'session-not-assessable';
+  review.sessionPathAtReview = 'C:\\sessions\\not-assessable.jsonl';
+  review.attainment = deriveReviewAttainment(review.ledger as ClassifiedCriterion[]);
+  return review;
+}
+
+test('V2 coercion accepts the full amendment + adjudication envelope and rejects every malformed disposition/adjudication payload', () => {
+  assert.ok(coerceSessionReviewV2(reviewWithAmendmentsAndAdjudication()), 'the canonical amendment/adjudication envelope must coerce');
+
+  const rejects = (mutate: (review: Record<string, any>) => void, label: string): void => {
+    const review = reviewWithAmendmentsAndAdjudication();
+    mutate(review);
+    assert.equal(coerceSessionReviewV2(review), null, `expected rejection: ${label}`);
+  };
+
+  // Adjudication: requestedBucket must be medium, rubricVersion must match, assessedAt must be ISO,
+  // and amendmentIds must exactly match the adjudicated amendments.
+  rejects((r) => { r.adjudication.requestedBucket = 'small'; r.adjudication.bucket = 'small'; }, 'adjudication requestedBucket not medium');
+  rejects((r) => { r.adjudication.rubricVersion = 'wrong'; }, 'adjudication rubricVersion mismatch');
+  rejects((r) => { r.adjudication.assessedAt = 'not-a-date'; }, 'adjudication assessedAt not ISO');
+  rejects((r) => { r.adjudication.amendmentIds = ['am-accepted']; }, 'adjudication amendmentIds not exact');
+  rejects((r) => { r.adjudication.amendmentIds = ['am-accepted', 'am-mapped', 'am-downgraded', 'am-rejected', 'am-extra']; }, 'adjudication amendmentIds extra id');
+
+  // Amendment dispositions: an unknown disposition is rejected (mutate the
+  // rejected amendment so the ledger/accepted-criterion invariant is untouched
+  // and only the disposition enum check can catch it).
+  rejects((r) => { (r.amendments as any[])[3]!.disposition = 'garbage'; }, 'unknown amendment disposition');
+
+  // mapped_to_existing: mapped target must be a frozen criterion, the downgrade
+  // classification must be present, point at the target, and match the ledger.
+  rejects((r) => { delete (r.amendments as any[])[1]!.targetCriterionId; }, 'mapped_to_existing missing target');
+  rejects((r) => { (r.amendments as any[])[1]!.targetCriterionId = 'c2'; }, 'mapped_to_existing target not frozen');
+  rejects((r) => { delete (r.amendments as any[])[1]!.downgradedClassification; }, 'mapped_to_existing missing downgrade classification');
+  rejects((r) => { (r.amendments as any[])[1]!.downgradedClassification.criterionId = 'c2'; }, 'mapped_to_existing downgrade points at wrong criterion');
+
+  // finding_downgraded: severity must be minor or nit.
+  rejects((r) => { (r.amendments as any[])[2]!.downgradedSeverity = 'critical'; }, 'finding_downgraded severity critical');
+  rejects((r) => { delete (r.amendments as any[])[2]!.downgradedSeverity; }, 'finding_downgraded missing severity');
+});
+
+test('reopened sessions keep V2 review mass at 1.0 and match site-data across all three attribution queries', async () => {
+  const source = await sourceWithMixedReviews();
+  const closedRun = source.completedRuns[0]!;
+  closedRun.sessionId = 'session-v2-fixture';
+  source.historicalSessions = [];
+  // A reopened session carries an in-progress (open) run that shares the stable
+  // sessionId but attributes to a different model family. The open run must not
+  // steal review mass before the author-cell weighting split.
+  source.openRuns = [
+    ...source.openRuns.filter((run) => run.runId !== closedRun.runId),
+    {
+      ...deepClone(closedRun), runId: 'reopened-open-run', taskGroupId: 'reopened-open-task',
+      modelId: 'reopened-open-family', status: 'open', finalizedAt: undefined, finalizationReason: undefined,
+      outcome: undefined, scored: false,
+    },
+  ];
+  const prepared = prepareSourceAnalytics(source);
+  const closedFamily = prepared.runs.find((run) => run.runId === closedRun.runId)!.modelFamily!;
+
+  const assertMassForQuery = (rows: Array<Record<string, unknown>>, label: string): void => {
+    const massByFamily = new Map<string, number>();
+    for (const row of rows) {
+      const family = String(row['model_family'] ?? row['model_id'] ?? '');
+      const mass = Number(row['v2_review_count'] ?? 0);
+      if (mass > 0) massByFamily.set(family, (massByFamily.get(family) ?? 0) + mass);
+    }
+    assert.equal([...massByFamily.values()].reduce((sum, value) => sum + value, 0), 1, `${label}: total V2 review mass must remain 1.0`);
+    assert.equal(massByFamily.get(closedFamily), 1, `${label}: the closed-run family receives the full review`);
+    assert.equal(massByFamily.get('reopened-open-family'), undefined, `${label}: the open run's family receives no mass`);
+  };
+
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, 'reviews.duckdb');
+    await buildDuckDbDatabase({ dbPath, exportsDir: path.join(dir, 'exports'), prepared });
+    const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
+    assertMassForQuery(await runNamedDuckDbQuery(dbPath, 'model_quality'), 'model_quality');
+    assertMassForQuery(await runNamedDuckDbQuery(dbPath, 'session_review_quality'), 'session_review_quality');
+    assertMassForQuery(await runDuckDbQuery(dbPath, leaderboardSql), 'model_leaderboard');
+  });
+
+  // Site-data (leaderboard.ts) excludes open runs from the stable attribution
+  // set, so the DuckDB mass must agree with the site-data agent outcome mass.
+  const bundle = buildSiteDataBundle(prepared);
+  const closedRow = bundle.modelLeaderboard.rows.find((row) => row.modelId === closedFamily)!;
+  assert.equal(closedRow.agentEvidenceMass, 1);
+  assert.equal(closedRow.agentOutcomeCount, 1);
+  assert.equal(
+    bundle.modelLeaderboard.rows.find((row) => row.modelId === 'reopened-open-family'),
+    undefined,
+    'the reopened open-run family has no completed run and no site-data row',
+  );
+});
+
+test('not-assessable review count is reconciled across SQL and site outputs', async () => {
+  const source = deepClone(await loadFixture());
+  const baseRun = source.completedRuns[0]!;
+  const assessable = coerceSessionReviewV2(deepClone(RAW_V2_REVIEW))!;
+  const notAssessable = coerceSessionReviewV2(notAssessableReview())!;
+  assert.ok(assessable && notAssessable, 'both the assessable and not-assessable reviews must coerce');
+  source.completedRuns = [
+    { ...deepClone(baseRun), sessionId: 'session-v2-fixture' },
+    { ...deepClone(baseRun), runId: 'run-na', taskGroupId: 'task-na', sessionId: 'session-not-assessable', sessionPath: 'C:\\sessions\\not-assessable-run.jsonl' },
+  ];
+  source.openRuns = [];
+  source.sessionReviewsV2 = [assessable, notAssessable];
+  source.legacySessionReviews = [];
+  source.agentReviews = [];
+  source.historicalSessions = [];
+
+  const prepared = prepareSourceAnalytics(source);
+  assert.equal(prepared.sessionReviewsV2.length, 2);
+  assert.deepEqual(
+    new Set(prepared.sessionReviewsV2.map((row) => row.attainment.qualityIndexV1)),
+    new Set([null, 100]),
+    'one review is assessable (qualityIndexV1=100) and one is not (null)',
+  );
+
+  // Site output: reviewCount == qualityIndexCount + notAssessableReviewCount.
+  const summary = buildSiteDataBundle(prepared).sessionReviewAnalytics.summary;
+  assert.equal(summary.reviewCount, 2);
+  assert.equal(summary.qualityIndexCount, 1);
+  assert.equal(summary.notAssessableReviewCount, 1);
+  assert.equal(summary.reviewCount, summary.qualityIndexCount + summary.notAssessableReviewCount);
+
+  // SQL output: the same partition is exposed as not_assessable_review_count,
+  // with v2_review_count == quality_index_count + not_assessable_review_count.
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, 'reviews.duckdb');
+    await buildDuckDbDatabase({ dbPath, exportsDir: path.join(dir, 'exports'), prepared });
+    const rows = await runNamedDuckDbQuery(dbPath, 'session_review_quality');
+    const total = (field: string): number => rows.reduce((sum, row) => sum + Number(row[field] ?? 0), 0);
+    assert.equal(total('v2_review_count'), 2);
+    assert.equal(total('quality_index_count'), 1);
+    assert.equal(total('not_assessable_review_count'), 1);
+    assert.equal(total('v2_review_count'), total('quality_index_count') + total('not_assessable_review_count'));
   });
 });

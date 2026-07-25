@@ -12,6 +12,7 @@ import { resolveHostSessionStoragePaths } from '../../shared/session-storage-pat
 import {
   INITIAL_REVIEW_AUTO_CLOSE_STATE,
   computeReviewAutoCloseClosures,
+  closureActionExhaustedRetries,
   type ReviewAutoCloseAttempt,
   type ReviewAutoCloseResult,
   type ReviewAutoCloseState,
@@ -151,24 +152,27 @@ export class SessionServiceState {
     const reviewsDir = this.getReviewsDir();
     const failed = attempt.errors.length > 0;
     const timestamp = new Date().toISOString();
-    const records: ClosureAction[] = attempt.actions.map((action) => failed ? {
-      ...action,
-      status: 'retrying',
-      attempts: action.attempts + 1,
-      lastError: attempt.errors.join('; '),
-      settledAt: undefined,
-    } : {
-      ...action,
-      status: 'succeeded',
-      attempts: action.attempts + 1,
-      lastError: undefined,
-      settledAt: timestamp,
+    const records: ClosureAction[] = attempt.actions.map((action) => {
+      const nextAttempts = action.attempts + 1;
+      if (failed && closureActionExhaustedRetries(nextAttempts)) {
+        return { ...action, status: 'failed', attempts: nextAttempts, lastError: attempt.errors.join('; '), settledAt: timestamp };
+      }
+      if (failed) {
+        return { ...action, status: 'retrying', attempts: nextAttempts, lastError: attempt.errors.join('; '), settledAt: undefined };
+      }
+      return { ...action, status: 'succeeded', attempts: nextAttempts, lastError: undefined, settledAt: timestamp };
     });
 
     try {
       if (!reviewsDir) throw new Error('review sidecar directory is unavailable');
       appendClosureActionRecords(reviewsDir, records);
-      if (failed) this.releaseReviewClosureActionClaims(attempt.actions);
+      if (failed) {
+        // Release claims only for actions that remain retryable; terminal
+        // `failed` actions stay claimed so they are not re-attempted in this
+        // runtime, and their durable status prevents reclaim after a crash.
+        const retryable = records.filter((record) => record.status === 'retrying');
+        if (retryable.length > 0) this.releaseReviewClosureActionClaims(retryable);
+      }
     } catch (error) {
       this.releaseReviewClosureActionClaims(attempt.actions);
       auditLog('session-service', 'reviewClosure.settle.failed', {

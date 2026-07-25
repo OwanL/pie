@@ -148,6 +148,11 @@ export interface LiveTurnRecord {
   lastSemanticProgressAt: number;
   inactivityBudgetMs?: number;
   parts: LiveAssistantPart[];
+  /** Cached UTF-8 bytes by streamed part kind; maintained incrementally. */
+  textBytes: number;
+  reasoningBytes: number;
+  /** Cached aggregate of active tool preview JSON bytes for this turn. */
+  aggregatePreviewBytes: number;
   draftingToolCall?: LiveToolCallDraft;
   toolExecutionIds: string[];
   pendingExtensionUiRequestIds: string[];
@@ -173,12 +178,15 @@ export interface LiveToolRecord {
   detail?: string;
   blocker?: ToolBlocker;
   preview?: ToolPreview;
+  /** Cached JSON byte count of preview; zero after terminal settlement. */
+  previewBytes: number;
   /** Monotonic revision of the assembled preview, independent of turn seq. */
   progressRevision?: number;
   /** Present only after the SDK durable toolResult append is confirmed. */
   terminal?: {
     status: 'completed' | 'failed';
     result: unknown;
+    resultBytes: number;
     durationMs?: number;
     durableEntryId: string;
   };
@@ -242,6 +250,10 @@ export type TurnSemanticEnvelope =
       baseSeq: number;
       baseProgressRevision: number;
       progressRevision: number;
+      /** Backend-calculated canonical preview bytes after this update. */
+      previewBytes?: number;
+      /** Backend-calculated aggregate active-preview bytes after this update. */
+      aggregatePreviewBytes?: number;
       update:
         | { kind: 'snapshot'; preview: ToolPreview; operations?: JsonStructuralPatchOperation[] }
         | { kind: 'patch'; operations: JsonStructuralPatchOperation[] };
@@ -251,6 +263,7 @@ export type TurnSemanticEnvelope =
       executionId: string;
       status: 'completed' | 'failed';
       result: unknown;
+      resultBytes?: number;
       durationMs?: number;
       durableEntryId: string;
     })
@@ -325,10 +338,16 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
       && Number.isSafeInteger(value.baseSeq) && (value.baseSeq as number) >= 1
       && Number.isSafeInteger(value.baseProgressRevision) && (value.baseProgressRevision as number) >= 0
       && Number.isSafeInteger(value.progressRevision) && (value.progressRevision as number) > (value.baseProgressRevision as number)
+      && optionalNonNegativeSafeInteger(value.previewBytes)
+      && optionalNonNegativeSafeInteger(value.aggregatePreviewBytes)
       && (value.seq as number) - (value.baseSeq as number)
         === (value.progressRevision as number) - (value.baseProgressRevision as number)
       && isToolProgressUpdate(value.update);
-    case 'tool.terminal': return typeof value.executionId === 'string' && (value.status === 'completed' || value.status === 'failed') && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0 && optionalFiniteNumber(value.durationMs);
+    case 'tool.terminal': return typeof value.executionId === 'string'
+      && (value.status === 'completed' || value.status === 'failed')
+      && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0
+      && optionalNonNegativeSafeInteger(value.resultBytes)
+      && optionalFiniteNumber(value.durationMs);
     case 'observation.rejected': return ['unsupported_observation', 'malformed_observation', 'malformed_payload', 'owner_missing', 'payload_oversize'].includes(String(value.reason));
     case 'turn.terminal': return ['completed', 'interrupted', 'error'].includes(String(value.terminalKind))
       && (value.userInitiated === undefined || typeof value.userInitiated === 'boolean')
@@ -389,3 +408,6 @@ function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function isFiniteNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function optionalFiniteNumber(value: unknown): boolean { return value === undefined || isFiniteNumber(value); }
+function optionalNonNegativeSafeInteger(value: unknown): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && (value as number) >= 0);
+}

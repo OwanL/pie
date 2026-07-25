@@ -233,9 +233,23 @@ Run each fault independently: missing `turn.started`, missing middle sequence, m
 
 ---
 
+## Scenario 9 — Large recursive detail, repeated close, and reload recovery
+
+1. Start a recursive subagent turn whose live preview approaches 3 MiB, then repeat with 15 MiB and (where provider/tool limits permit) 30 MiB.
+2. Record extension-host progress-event latency and responsiveness while frequent small child text/tool patches arrive. Confirm latency does not grow with already-accumulated preview bytes and no CPU profile is dominated by `jsonByteLength` in `live-pipeline/transitions.ts`.
+3. Inspect the initial state envelope: collapsed tool/subagent/reasoning rows contain only status, summary, child count, duration/size and `LazyDetailRef`; the recursive body is absent. Expand the row and confirm one `requestDetail`, an explicit loading state, then the complete body. Collapse/re-expand and confirm the loaded bounded cache prevents another request. Exercise failure/retry and a stale live response.
+4. Switch tabs while the large row is expanded. Confirm unchanged detail content is not copied into subsequent full snapshots; it remains an imperative detail response/cache entry.
+5. While work is still running, double-click close (or issue two close interactions within one event loop burst). Confirm only the first hides the tab, the backend/run analytics remain active, and live state remains recoverable. Reopen it from the session list and confirm the live preview is intact.
+6. Hide the running tab again and reload the webview. The ready handshake must restore the hidden running session to the visible tab strip. Its analytics must not be finalized as `closed_unscored` merely because the tab was hidden.
+7. Wedge `postMessage` until settlement timeout, then release delayed `stateReceived`, `appCommitted`, `transcriptCommitted`, and paint evidence for that retired revision. Confirm stale telemetry only—no future/unaccepted protocol defect or recovery loop.
+
+Record initial versus expanded payload bytes, detail request count/cache behavior, reload recovery, and any remaining payload hot spots. A full extension-host restart still stops the in-process backend and is not claimed as running-work preservation.
+
+---
+
 ## Done-criteria for this checklist
 
-- All 8 scenarios pass with the expected behavior.
+- All 9 scenarios pass with the expected behavior.
 - No `req-NN` id appears anywhere in the UI across any scenario.
 - No "old + new message at once" during scenario 6.
 - Pruning is restored to the user's prior mode after a "retry without pruning"

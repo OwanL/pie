@@ -465,3 +465,34 @@ test('an unaccepted sendRejected post enters readiness recovery and retries afte
   );
   provider.dispose();
 });
+
+test('an unaccepted detail result is retained through readiness recovery', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const { provider } = createProvider(clock, routed);
+  const view = new FakeView();
+  await resolveReady(provider, view);
+  const baselineMessage = stateMessages(view).at(-1)!;
+  view.send({
+    type: 'transcriptCommitted',
+    payload: {
+      revision: baselineMessage.revision,
+      viewGeneration: baselineMessage.viewGeneration,
+      identity: baselineMessage.expectedTranscriptIdentity,
+      mountGeneration: 1,
+      evidence: 'displayed',
+    },
+  });
+  view.imperativeOutcomes.push(false, true);
+  provider.postImperative({
+    type: 'detailResult',
+    result: { sessionPath: '/session/a', key: 'detail-1', status: 'loaded', value: 'full', sizeBytes: 4 },
+  });
+  await settle();
+
+  const accepted = await (provider as unknown as { delivery: { probe(): Promise<boolean> } }).delivery.probe();
+  await settle();
+  assert.equal(accepted, true);
+  assert.equal(view.posted.filter((message) => message.type === 'detailResult').length, 2);
+  provider.dispose();
+});

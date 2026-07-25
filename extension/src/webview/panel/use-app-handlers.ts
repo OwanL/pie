@@ -4,7 +4,6 @@ import type {
   ComposerInput,
   ComposerInputDraft,
   PruningSettings,
-  RunOutcome,
   ThinkingLevel,
   ToolResultPruningSettings,
   WebviewToHostMessage,
@@ -30,9 +29,7 @@ export interface AppHandlers {
   handleCloseTab: (path: string) => void;
   handleDuplicateTab: (path: string) => void;
   handleTogglePinTab: (path: string) => void;
-  handleMarkComplete: () => void;
   handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
-  handleCancelOutcome: () => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
@@ -43,7 +40,6 @@ export interface AppHandlers {
   handleRemoveComposerInput: (inputId: string) => void;
   handleSelectTab: (path: string) => void;
   handleMoveTab: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
-  handleRecordOutcome: (outcome: RunOutcome) => void;
   handleTabRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   handleModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
   handleEditSend: (messageId: string, text: string, inputs?: ComposerInput[]) => void;
@@ -111,14 +107,11 @@ export function useAppHandlers(
   const handleOpenFilePicker = useCallback(() => postMessage({ type: 'openFilePicker' }), [postMessage]);
   const handleOpenFile = useCallback((path: string) => postMessage({ type: 'openFile', path }), [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
-  const handleCloseTab = useCallback((path: string) => postMessage({ type: 'closeSession', sessionPath: path }), [postMessage]);
+  const handleCloseTab = useCallback((path: string) => postMessage({
+    type: 'closeSession', sessionPath: path, interactionId: crypto.randomUUID(),
+  }), [postMessage]);
   const handleDuplicateTab = useCallback((path: string) => postMessage({ type: 'duplicateSession', sessionPath: path }), [postMessage]);
   const handleTogglePinTab = useCallback((path: string) => postMessage({ type: 'togglePinTab', sessionPath: path }), [postMessage]);
-  const handleMarkComplete = useCallback(() => {
-    const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
-    postMessage({ type: 'openOutcomeDialog', sessionPath });
-  }, [postMessage, activeSessionPathRef]);
   // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
   // (carried on the trigger itself), not necessarily the active session, so it
   // is passed explicitly rather than read from the ref. Omit `triggerId` to
@@ -126,11 +119,6 @@ export function useAppHandlers(
   const handleCancelDeferredTrigger = useCallback((sessionPath: string, triggerId?: string) => {
     postMessage({ type: 'cancelDeferredTrigger', sessionPath, triggerId });
   }, [postMessage]);
-  const handleCancelOutcome = useCallback(() => {
-    const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
-    postMessage({ type: 'closeOutcomeDialog', sessionPath });
-  }, [postMessage, activeSessionPathRef]);
   const handleCancelEdit = useCallback(() => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -171,27 +159,12 @@ export function useAppHandlers(
     postMessage({ type: 'moveSessionTab', sessionPath, fromIndex, toIndex });
   }, [postMessage]);
 
-  const handleRecordOutcome = useCallback((outcome: RunOutcome) => {
-    const sessionPath = activeSessionPathRef.current;
-    if (!sessionPath) return;
-    postMessage({ type: 'recordOutcome', sessionPath, outcome });
-    // Close the outcome dialog before closing the session: closeSession may
-    // null/swap the active session and unmount the dialog before
-    // closeOutcomeDialog is applied, which can briefly re-render the dialog
-    // against a different session.
-    postMessage({ type: 'closeOutcomeDialog', sessionPath });
-    postMessage({ type: 'closeSession', sessionPath });
-  }, [postMessage, activeSessionPathRef]);
-
-  // Tab context-menu task actions. The outcome dialog renders against the
-  // active session, so selecting the tab first ensures the dialog (and any
-  // follow-up) targets the session the user right-clicked.
+  // Tab context-menu task actions. Selecting the tab first ensures the action
+  // targets the session the user right-clicked.
   const handleTabRunAction = useCallback((action: SessionTabRunAction, tabPath: string) => {
     activeSessionPathRef.current = tabPath;
     postMessage({ type: 'openSession', sessionPath: tabPath });
-    if (action === 'recordOutcome') {
-      postMessage({ type: 'openOutcomeDialog', sessionPath: tabPath });
-    } else if (action === 'startNewTask') {
+    if (action === 'startNewTask') {
       postMessage({ type: 'startNewTask', sessionPath: tabPath });
     } else if (action === 'continueTask') {
       postMessage({ type: 'continueTask', sessionPath: tabPath });
@@ -280,9 +253,7 @@ export function useAppHandlers(
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
-      handleMarkComplete,
       handleCancelDeferredTrigger,
-      handleCancelOutcome,
       handleCancelEdit,
       handleSetPrefs,
       handleSetSystemPromptToggles,
@@ -293,7 +264,6 @@ export function useAppHandlers(
       handleRemoveComposerInput,
       handleSelectTab,
       handleMoveTab,
-      handleRecordOutcome,
       handleTabRunAction,
       handleModelChange,
       handleEditSend,
@@ -315,9 +285,7 @@ export function useAppHandlers(
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
-      handleMarkComplete,
       handleCancelDeferredTrigger,
-      handleCancelOutcome,
       handleCancelEdit,
       handleSetPrefs,
       handleSetSystemPromptToggles,
@@ -328,7 +296,6 @@ export function useAppHandlers(
       handleRemoveComposerInput,
       handleSelectTab,
       handleMoveTab,
-      handleRecordOutcome,
       handleTabRunAction,
       handleModelChange,
       handleEditSend,

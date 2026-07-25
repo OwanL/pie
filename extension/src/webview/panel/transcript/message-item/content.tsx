@@ -122,6 +122,7 @@ function AssistantParts({
             <ReasoningBlock
               key={`reasoning-${messageId}-${index}`}
               text={part.text}
+              detailRef={part.detailRef}
               autoExpand={prefs.autoExpandReasoning}
               collapsibleKey={`reasoning:${messageId}:${index}`}
               streaming={isCurrentlyStreaming && index === parts.length - 1}

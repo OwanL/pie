@@ -118,6 +118,103 @@ test('webview `log` message with warn level is routed through appendPieLog at wa
   assert.ok(prefix.includes('render took too long'), `message should be preserved: ${prefix}`);
 });
 
+test('ready restores running sessions hidden from persisted tabs', async () => {
+  const events: unknown[] = [];
+  let posts = 0;
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({
+      sessions: { activeSessionPath: null, openTabPaths: ['/idle'], runningSessionPaths: ['/running'] },
+      settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
+    } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => { posts += 1; }, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  await router.handle({ type: 'ready' });
+  assert.ok(events.some((event) => (event as { kind?: string; sessionPath?: string }).kind === 'TabOpened'
+    && (event as { sessionPath?: string }).sessionPath === '/running'));
+  assert.ok(events.some((event) => (event as { kind?: string; cmd?: { kind?: string } }).cmd?.kind === 'SelectSession'));
+  assert.equal(posts, 1);
+});
+
+test('ready does not resurrect a review-closure-hidden running tab (closeSelf)', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({
+      sessions: {
+        activeSessionPath: null,
+        openTabPaths: [],
+        runningSessionPaths: ['/self', '/ordinary'],
+        reviewClosedRunningPaths: ['/self'],
+      },
+      settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
+    } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  await router.handle({ type: 'ready' });
+  const opened = events
+    .filter((event) => (event as { kind?: string }).kind === 'TabOpened')
+    .map((event) => (event as { sessionPath?: string }).sessionPath);
+  assert.deepEqual(opened, ['/ordinary'], 'only the ordinary hidden running tab is restored; the review-closure-hidden closeSelf tab stays hidden');
+  // The first restored ordinary tab is selected (not the review-closed self).
+  const select = events.find((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'SelectSession') as { cmd?: { sessionPath?: string } } | undefined;
+  assert.equal(select?.cmd?.sessionPath, '/ordinary');
+});
+
+test('ready restores a pinned hidden running tab but not its review-closed neighbor', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({
+      sessions: {
+        activeSessionPath: null,
+        openTabPaths: [],
+        runningSessionPaths: ['/pinned', '/closed'],
+        reviewClosedRunningPaths: ['/closed'],
+      },
+      settings: { backendReady: true, notice: null }, transcript: { windowBySession: {} },
+    } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  await router.handle({ type: 'ready' });
+  const opened = events
+    .filter((event) => (event as { kind?: string }).kind === 'TabOpened')
+    .map((event) => (event as { sessionPath?: string }).sessionPath);
+  assert.deepEqual(opened, ['/pinned'], 'the ordinary pinned hidden running tab is restored; the review-closed running tab is not');
+});
+
+test('replayed close interaction IDs are deduplicated before command dispatch', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [] } } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+  const close = { type: 'closeSession' as const, sessionPath: '/s', interactionId: 'interaction-1' };
+  await router.handle(close);
+  await router.handle(close);
+  assert.equal(events.filter((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'CloseSession').length, 1);
+});
+
 test('webview `log` message with error level is routed through appendPieLog at error', async () => {
   const router = newRouter();
 

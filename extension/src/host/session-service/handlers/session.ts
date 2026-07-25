@@ -52,6 +52,7 @@ export function onSessionListChanged(payload: SessionListChangedPayload, deps: H
         corrId,
         sessionPath: attempt.sessionPath,
         ensureClosed: true,
+        reviewClosure: true,
       },
     });
   }

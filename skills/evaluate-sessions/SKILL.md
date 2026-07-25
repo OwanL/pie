@@ -231,6 +231,19 @@ Record verbatim capped output and `pass|fail|inconclusive|declined: mutating`.
 A failure is evidence, not a reason to alter artifacts. Do not add, drop, or
 rerun checks after freezing.
 
+Every executed (non-`declined: mutating`) check must bind its result/status/
+evidence to the actual prior orchestrator tool call that ran it and that call's
+immutable output — do not fabricate or trust caller-supplied output. On each
+executed check record `toolCallId` (the prior bash/read/grep call id) and
+`outputSha256` (SHA-256 over the bound tool result's joined text output). The
+`result` field must be a verbatim prefix of that output (the cap; empty is
+valid). `command`/`automated_check` checks bind to a prior `bash` call whose
+`command` argument matches exactly; a non-zero exit (`isError`) must be recorded
+`fail`. `static_inspection` checks bind to a prior `read` (matching the target
+path) or `grep` (pattern === query, target referenced). A `declined: mutating`
+check is skipped and must carry no `toolCallId`/`outputSha256`. These bindings
+are re-validated against the orchestrator transcript at `recordReview` time.
+
 ### Pass 4 — ask all selected human questions, sequentially
 
 Only now, after every target has been inspected/consolidated and checks frozen,
@@ -387,12 +400,17 @@ coverage, confidence, or blocker penalties.
 For every unrated target, assemble and call `recordReview` with the complete V2
 record: exact frozen ledger/hash and classified ledger; amendments; deterministic
 attainment/index; canonical vectors/findings/human check/confidence; two Pass-1
-proposals, consolidation, shared checks/hash, two Pass-5 components,
+proposals, consolidation, shared checks/hash (each executed check bound to its
+prior tool call and immutable output), two Pass-5 components,
 disagreement/adjudication; evidence manifest; runtime pipeline IDs and requested/
-effective reviewer provenance. Verify status/reason, finding/ledger-effect,
-frozen-ledger/hash, amendment, tuple cardinality, and blinding invariants before
-writing. If an ordinary duplicate is returned, use its existing `reviewId`; never
-attempt a second production record.
+effective reviewer provenance; and `provenance.hostVersion` copied verbatim from
+the host's `PIE_EDITOR_VERSION` env var (or `null` when that var is unset — the
+reviewer never guesses a host version; it is re-validated against the host at
+record time). Verify status/reason, finding/ledger-effect, frozen-ledger/hash,
+amendment, tuple cardinality, and blinding invariants before writing. The
+canonical review record append is fsynced to disk before any `closeReviewed`
+enqueue is allowed. If an ordinary duplicate is returned, use its existing
+`reviewId`; never attempt a second production record.
 
 Only after each review persistence succeeds, call `closeReviewed` with that
 session's stable ID, path, and persisted `reviewId`. Also issue the queued
@@ -411,10 +429,11 @@ and end the turn; make no more tool calls.
 - [ ] Pass-0 partition was made once; self excluded; already-reviewed targets were not rated.
 - [ ] Every reviewer got the same target-specific blinded bundle; raw JSONL/model identity absent.
 - [ ] Both Pass-1 proposals and medium consolidation exist; frozen ledger/hash match exactly.
-- [ ] Shared checks were deterministic, safe, run once, frozen, and supplied to both final reviewers.
-- [ ] All human questions were asked sequentially after all consolidation; max one per affected target; inputs/results are embedded.
+- [ ] Shared checks were deterministic, safe, run once, frozen, and supplied to both final reviewers. Each executed check is bound to its prior orchestrator tool call (`toolCallId`) and immutable output (`outputSha256`, `result` a verbatim prefix); declined checks carry no binding.
+- [ ] All human questions were asked sequentially after all consolidation; max one per affected target; inputs/results are embedded. Cancelled/unanswered responses omit the `answer` key (an explicit `answer: undefined` is rejected).
 - [ ] Fresh small/medium Pass-5 assessments classify every frozen definition exactly once.
-- [ ] Material disagreements/amendments were adjudicated; otherwise only permitted adjacent deterministic merges occurred.
+- [ ] Material disagreements/amendments were adjudicated; otherwise only permitted adjacent deterministic merges occurred; no spurious disputed fields are recorded.
 - [ ] Critical/major canonical findings have a criterion and non-`none` ledger effect.
 - [ ] Attainment and index were derived from the canonical ledger, not reviewer overalls.
-- [ ] `recordReview` succeeded before each `closeReviewed`; closure retries use the outbox; `closeSelf` remains last.
+- [ ] `provenance.hostVersion` matches the host's `PIE_EDITOR_VERSION` (or `null` when unset).
+- [ ] `recordReview` succeeded (canonical append fsynced) before each `closeReviewed`; closure retries use the outbox; `closeSelf` remains last.

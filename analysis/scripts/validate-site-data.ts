@@ -236,6 +236,8 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
 
   const reviewData = bundle.sessionReviewAnalytics;
   assertCountField(reviewData.summary.reviewCount, 'session-review-analytics.json summary.reviewCount');
+  assertCountField(reviewData.summary.qualityIndexCount, 'session-review-analytics.json summary.qualityIndexCount');
+  assertCountField(reviewData.summary.notAssessableReviewCount, 'session-review-analytics.json summary.notAssessableReviewCount');
   assertCountField(reviewData.summary.stableIdentityCount, 'session-review-analytics.json summary.stableIdentityCount');
   assertCountField(reviewData.summary.identityFallbackCount, 'session-review-analytics.json summary.identityFallbackCount');
   assertNullableUnitInterval(reviewData.summary.criterionCoverage, 'session-review-analytics.json summary.criterionCoverage');

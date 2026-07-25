@@ -168,6 +168,26 @@ test('false, reject, never-settling timeout, and late true retry autonomously wi
   assert.equal(JSON.stringify(h.telemetry).includes('SECRET'), false);
 });
 
+test('evidence arriving after post-settlement timeout is stale telemetry, not a protocol defect', async () => {
+  const hung = deferred<boolean>();
+  const h = harness(() => hung.promise);
+  h.controller.markDirty();
+  const generation = h.controller.getDebugState().viewGeneration;
+  h.clock.advance(10);
+
+  h.controller.stateReceived({ revision: 1, viewGeneration: generation, snapshotBytes: 10 });
+  h.controller.appCommitted({ revision: 1, viewGeneration: generation, surface: 'app' });
+  h.controller.transcriptCommitted(transcriptCommit(1, generation));
+  h.controller.paintObserved({ ...transcriptCommit(1, generation), latencyMs: 1 });
+
+  assert.equal(h.defects.length, 0);
+  assert.equal(h.telemetry.filter((event) => event.kind === 'evidence-stale').length, 3);
+  assert.ok(h.telemetry.some((event) => event.kind === 'commit-stale' && event.detail === 'retired-after-timeout'));
+  hung.resolve(true);
+  await settle();
+  assert.ok(h.telemetry.some((event) => event.kind === 'post-late-settlement'));
+});
+
 test('new host changes cannot bypass a scheduled retry or spend its budget without a post', async () => {
   let calls = 0;
   const h = harness(() => {

@@ -826,6 +826,7 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
       identityFallbackCount: rows.filter((row) => row.identityFallback).length,
       joinedReviewCount: rows.filter((row) => row.joinKey !== 'unmatched').length,
       qualityIndexCount: quality.length,
+      notAssessableReviewCount: rows.length - quality.length,
       meanQualityIndexV1: average(quality, 1),
       criterionCoverage: activeCriteria.length ? round(assessableCriteria.length / activeCriteria.length, 4) : null,
       externalBlockerRate: activeCriteria.length ? round(externalBlocked.length / activeCriteria.length, 4) : null,
@@ -1315,6 +1316,9 @@ function validateSessionReviewAnalytics(data: unknown): asserts data is SessionR
   assert(Array.isArray(data.rows), 'session-review-analytics.json is missing rows.');
   assert(isRecord(data.summary), 'session-review-analytics.json is missing summary.');
   assert(typeof data.summary.reviewCount === 'number', 'session-review-analytics.json summary is missing reviewCount.');
+  assert(typeof data.summary.qualityIndexCount === 'number', 'session-review-analytics.json summary is missing qualityIndexCount.');
+  assert(typeof data.summary.notAssessableReviewCount === 'number', 'session-review-analytics.json summary is missing notAssessableReviewCount.');
+  assert(data.summary.reviewCount === data.summary.qualityIndexCount + data.summary.notAssessableReviewCount, 'session-review-analytics.json summary reviewCount must equal qualityIndexCount + notAssessableReviewCount.');
   assert(data.summary.meanQualityIndexV1 === null || (typeof data.summary.meanQualityIndexV1 === 'number' && data.summary.meanQualityIndexV1 >= 0 && data.summary.meanQualityIndexV1 <= 100), 'session-review-analytics.json has an invalid meanQualityIndexV1.');
   assert(isRecord(data.criteria) && typeof data.criteria.total === 'number', 'session-review-analytics.json is missing criterion diagnostics.');
   assert(isRecord(data.process), 'session-review-analytics.json is missing process diagnostics.');

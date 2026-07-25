@@ -68,6 +68,7 @@ test('checkpoint replacement is atomic and retains only newer pending envelopes'
       checkpointSeq: 3,
       phase: 'streaming',
       parts: [{ kind: 'text', text: 'authoritative' }],
+      textBytes: Buffer.byteLength('authoritative', 'utf8'),
     },
     tools: [],
     pendingExtensionUiRequestIds: [],
@@ -117,6 +118,7 @@ test('checkpoint older than the applied semantic sequence is stale and cannot re
       checkpointSeq: 2,
       phase: 'streaming',
       parts: [{ kind: 'text', text: 'two' }],
+      textBytes: Buffer.byteLength('two', 'utf8'),
     },
     tools: [],
     pendingExtensionUiRequestIds: [],
@@ -139,6 +141,7 @@ test('checkpoint older than the applied semantic sequence is stale and cannot re
       seq: 4,
       checkpointSeq: 4,
       parts: [{ kind: 'text', text: 'stale through four' }],
+      textBytes: Buffer.byteLength('stale through four', 'utf8'),
     },
   };
   const stale = applyLiveTurnCheckpoint(advanced, staleCheckpoint);
@@ -359,6 +362,96 @@ test('host patch assembly reconstructs the same recursive preview as a full snap
     full.state.toolsByExecutionId['execution-1']?.preview,
   );
   assert.deepEqual(projectTranscriptView([], reconstructed.state, base.sessionPath).liveTools[0]?.result, next);
+});
+
+test('frequent patches against 3, 15, and 30 MiB recursive previews use backend byte metadata without serialization', () => {
+  for (const sizeMiB of [3, 15, 30]) {
+    let state = apply(createEmptyLivePipelineState(), start()).state;
+    state = apply(state, {
+      ...base, kind: 'tool.started', seq: 2, executionId: 'execution-1', parentExecutionId: null,
+      rootExecutionId: 'execution-1', toolCallId: 'tool-1', name: 'subagent', input: {}, startedAt: 1_100,
+    }).state;
+    const preview = {
+      kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+      children: [{ id: 'worker', phase: 'running' as const, streamingText: 'x'.repeat(sizeMiB * 1024 * 1024 - 1_024), messages: [] }],
+    };
+    let previewBytes = Buffer.byteLength(JSON.stringify(preview), 'utf8');
+    let stringifyCalls = 0;
+    const originalStringify = JSON.stringify;
+    JSON.stringify = ((value: unknown, replacer?: unknown, space?: unknown) => {
+      stringifyCalls += 1;
+      return originalStringify(value, replacer as never, space as never);
+    }) as typeof JSON.stringify;
+    try {
+      state = apply(state, {
+        ...base, kind: 'tool.progress', seq: 3, baseSeq: 2, executionId: 'execution-1',
+        baseProgressRevision: 0, progressRevision: 1, previewBytes, aggregatePreviewBytes: previewBytes,
+        update: { kind: 'snapshot', preview },
+      }).state;
+      for (let revision = 2; revision <= 24; revision += 1) {
+        previewBytes += 1;
+        state = apply(state, {
+          ...base, kind: 'tool.progress', seq: revision + 2, baseSeq: revision + 1,
+          executionId: 'execution-1', baseProgressRevision: revision - 1, progressRevision: revision,
+          previewBytes, aggregatePreviewBytes: previewBytes,
+          update: { kind: 'patch', operations: [{ op: 'appendString', path: ['children', 0, 'streamingText'], value: 'y' }] },
+        }).state;
+      }
+    } finally {
+      JSON.stringify = originalStringify;
+    }
+    assert.equal(stringifyCalls, 0, `${sizeMiB} MiB progress processing must not stringify the accumulated preview`);
+    assert.equal(state.toolsByExecutionId['execution-1']?.previewBytes, previewBytes);
+    assert.equal(state.turnsBySession[base.sessionPath]?.aggregatePreviewBytes, previewBytes);
+    const projected = projectTranscriptView([], state, base.sessionPath).liveTools[0];
+    assert.equal(projected?.result, undefined, 'large recursive detail is absent from ordinary snapshots');
+    assert.equal(projected?.detailRef?.sizeBytes, previewBytes);
+    assert.equal(projected?.detailRef?.source, 'live');
+  }
+});
+
+test('multiple sibling previews enforce the aggregate limit incrementally and release bytes on terminal settlement', () => {
+  let state = apply(createEmptyLivePipelineState(), start()).state;
+  const bytesByExecution: Record<string, number> = {};
+  let seq = 1;
+  for (const executionId of ['execution-1', 'execution-2']) {
+    seq += 1;
+    state = apply(state, {
+      ...base, kind: 'tool.started', seq, executionId, parentExecutionId: null,
+      rootExecutionId: executionId, toolCallId: `tool-${executionId}`, name: 'subagent', input: {}, startedAt: 1_100,
+    }).state;
+    const preview = {
+      kind: 'subagent' as const, mode: 'single' as const, omittedChildren: 0,
+      children: [{ id: executionId, phase: 'running' as const, streamingText: 'x'.repeat(14 * 1024 * 1024), messages: [] }],
+    };
+    const previewBytes = Buffer.byteLength(JSON.stringify(preview), 'utf8');
+    bytesByExecution[executionId] = previewBytes;
+    seq += 1;
+    state = apply(state, {
+      ...base, kind: 'tool.progress', seq, baseSeq: seq - 1, executionId,
+      baseProgressRevision: 0, progressRevision: 1, previewBytes,
+      aggregatePreviewBytes: Object.values(bytesByExecution).reduce((total, bytes) => total + bytes, 0),
+      update: { kind: 'snapshot', preview },
+    }).state;
+  }
+  const aggregate = Object.values(bytesByExecution).reduce((total, bytes) => total + bytes, 0);
+  assert.equal(state.turnsBySession[base.sessionPath]?.aggregatePreviewBytes, aggregate);
+
+  const overflow = apply(state, {
+    ...base, kind: 'tool.progress', seq: seq + 1, baseSeq: seq, executionId: 'execution-1',
+    baseProgressRevision: 1, progressRevision: 2,
+    previewBytes: bytesByExecution['execution-1']! + 3 * 1024 * 1024,
+    aggregatePreviewBytes: aggregate + 3 * 1024 * 1024,
+    update: { kind: 'patch', operations: [{ op: 'appendString', path: ['children', 0, 'streamingText'], value: 'z' }] },
+  });
+  assert.equal(overflow.classification, 'invalid');
+
+  state = apply(state, {
+    ...base, kind: 'tool.terminal', seq: seq + 1, executionId: 'execution-2', status: 'completed',
+    result: { kind: 'generic', summary: 'done' }, durableEntryId: 'entry-2',
+  }).state;
+  assert.equal(state.turnsBySession[base.sessionPath]?.aggregatePreviewBytes, bytesByExecution['execution-1']);
+  assert.equal(state.toolsByExecutionId['execution-2']?.previewBytes, 0);
 });
 
 test('host rejects a missing patch range so reducer recovery can request a checkpoint', () => {

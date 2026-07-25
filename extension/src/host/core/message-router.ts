@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, PruningSettings, ToolResultPruningSettings, PruningMode } from '../../shared/protocol';
+import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, ToolResultPruningSettings, PruningMode } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
@@ -27,6 +27,7 @@ export interface SessionServiceLike {
   loadOlderTranscript(sessionPath?: string): Promise<void>;
   loadNewerTranscript(sessionPath?: string): Promise<void>;
   jumpToLatestTranscript(sessionPath?: string): Promise<void>;
+  loadDetail?(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult>;
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
@@ -47,6 +48,8 @@ export interface SessionServiceLike {
  * the render pipeline.
  */
 export class MessageRouter {
+  private readonly recentCloseInteractionIds = new Set<string>();
+  private readonly closeInteractionOrder: string[] = [];
 
   constructor(
     private readonly dispatchEvent: (event: Event) => void,
@@ -139,6 +142,9 @@ export class MessageRouter {
       case 'closeSession':
         return await this.onCloseSession(msg as Extract<WebviewToHostMessage, { type: 'closeSession' }>);
 
+      case 'requestDetail':
+        return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>);
+
       case 'duplicateSession':
         return await this.onDuplicateSession(msg as Extract<WebviewToHostMessage, { type: 'duplicateSession' }>);
 
@@ -156,9 +162,6 @@ export class MessageRouter {
 
       case 'jumpToLatestTranscript':
         return await this.onJumpToLatestTranscript(msg as Extract<WebviewToHostMessage, { type: 'jumpToLatestTranscript' }>);
-
-      case 'recordOutcome':
-        return this.onRecordOutcome(msg as Extract<WebviewToHostMessage, { type: 'recordOutcome' }>);
 
       case 'startNewTask':
         return this.onStartNewTask(msg as Extract<WebviewToHostMessage, { type: 'startNewTask' }>);
@@ -201,12 +204,6 @@ export class MessageRouter {
 
       case 'dismissNotice':
         return this.onDismissNotice();
-
-      case 'openOutcomeDialog':
-        return this.onOpenOutcomeDialog(msg as Extract<WebviewToHostMessage, { type: 'openOutcomeDialog' }>);
-
-      case 'closeOutcomeDialog':
-        return this.onCloseOutcomeDialog(msg as Extract<WebviewToHostMessage, { type: 'closeOutcomeDialog' }>);
 
       case 'stateReceived':
       case 'appCommitted':
@@ -255,6 +252,29 @@ export class MessageRouter {
   // ---------------------------------------------------------------------------
 
   private onReady(): void {
+    // A running tab may have been intentionally hidden while its backend turn
+    // continued. On renderer reload, prominently restore every such tab even
+    // though the persisted open-tab list omits it. Host-owned live state never
+    // left ArchState, so this is a cheap tab projection repair, not a reopen RPC.
+    //
+    // Review-closure-hidden running tabs (closeReviewed/closeSelf) are excluded:
+    // their hide is a durable outbox action, not an accidental pre-reload hide,
+    // so resurrecting them would undo the reviewer's explicit closure. The
+    // marker is host-owned and survives the webview reload boundary.
+    const arch = this.getArchState();
+    const reviewClosed = new Set(arch.sessions.reviewClosedRunningPaths);
+    const hiddenRunning = arch.sessions.runningSessionPaths.filter(
+      (sessionPath) => !arch.sessions.openTabPaths.includes(sessionPath) && !reviewClosed.has(sessionPath),
+    );
+    for (const sessionPath of hiddenRunning) {
+      this.dispatchEvent({ kind: 'TabOpened', sessionPath });
+    }
+    if (!arch.sessions.activeSessionPath && hiddenRunning[0]) {
+      this.dispatchEvent({
+        kind: 'Command',
+        cmd: { kind: 'SelectSession', corrId: crypto.randomUUID(), sessionPath: hiddenRunning[0] },
+      });
+    }
     this.sidebarProvider.postState();
   }
 
@@ -494,7 +514,6 @@ export class MessageRouter {
     // was never registered with beginSelectionRequest, so handleSelectionFailure
     // could not restore the previous active tab on failure.
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
-    this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetOutcomeDialog', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, visible: false } });
     this.service.openSession(msg.sessionPath);
     this.sidebarProvider.postState();
   }
@@ -519,10 +538,25 @@ export class MessageRouter {
   }
 
   private onCloseSession(msg: Extract<WebviewToHostMessage, { type: 'closeSession' }>): void {
+    if (msg.interactionId) {
+      if (this.recentCloseInteractionIds.has(msg.interactionId)) return;
+      this.recentCloseInteractionIds.add(msg.interactionId);
+      this.closeInteractionOrder.push(msg.interactionId);
+      if (this.closeInteractionOrder.length > 128) {
+        const retired = this.closeInteractionOrder.shift();
+        if (retired) this.recentCloseInteractionIds.delete(retired);
+      }
+    }
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'CloseSession', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath } });
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
-    this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetOutcomeDialog', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, visible: false } });
     this.sidebarProvider.postState();
+  }
+
+  private async onRequestDetail(msg: Extract<WebviewToHostMessage, { type: 'requestDetail' }>): Promise<void> {
+    const result = this.service.loadDetail
+      ? await this.service.loadDetail(msg.sessionPath, msg.ref)
+      : { sessionPath: msg.sessionPath, key: msg.ref.key, status: 'unavailable' as const, message: 'Detail retrieval is unavailable.' };
+    this.sidebarProvider.postImperative({ type: 'detailResult', result });
   }
 
   private onMoveSessionTab(msg: Extract<WebviewToHostMessage, { type: 'moveSessionTab' }>): void {
@@ -582,14 +616,6 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'JumpToLatestTranscript', corrId, sessionPath },
-    });
-  }
-
-  private onRecordOutcome(msg: Extract<WebviewToHostMessage, { type: 'recordOutcome' }>): void {
-    const corrId = crypto.randomUUID();
-    this.dispatchEvent({
-      kind: 'Command',
-      cmd: { kind: 'RecordOutcome', corrId, sessionPath: msg.sessionPath, outcome: msg.outcome },
     });
   }
 
@@ -731,22 +757,6 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'DismissNotice', corrId },
-    });
-  }
-
-  private onOpenOutcomeDialog(msg: Extract<WebviewToHostMessage, { type: 'openOutcomeDialog' }>): void {
-    const corrId = crypto.randomUUID();
-    this.dispatchEvent({
-      kind: 'Command',
-      cmd: { kind: 'SetOutcomeDialog', corrId, sessionPath: msg.sessionPath, visible: true },
-    });
-  }
-
-  private onCloseOutcomeDialog(msg: Extract<WebviewToHostMessage, { type: 'closeOutcomeDialog' }>): void {
-    const corrId = crypto.randomUUID();
-    this.dispatchEvent({
-      kind: 'Command',
-      cmd: { kind: 'SetOutcomeDialog', corrId, sessionPath: msg.sessionPath, visible: false },
     });
   }
 

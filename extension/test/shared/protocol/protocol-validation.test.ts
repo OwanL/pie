@@ -79,6 +79,16 @@ test('validateWebviewToHostMessage validates session-scoped messages with requir
   }
 });
 
+test('validateWebviewToHostMessage validates bounded detail retrieval requests', () => {
+  const ref = {
+    key: 'durable:tool:key', kind: 'tool-result', source: 'durable', sessionPath: '/a',
+    messageId: 'message', toolCallId: 'tool', sizeBytes: 100, summary: 'summary', available: true,
+  };
+  assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', sessionPath: '/a', ref }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', sessionPath: '/a', ref: { ...ref, kind: 'bad' } }).ok, false);
+  assert.equal(validateWebviewToHostMessage({ type: 'requestDetail', ref }).ok, false);
+});
+
 test('validateWebviewToHostMessage validates cancelDeferredTrigger (required sessionPath, optional triggerId)', () => {
   // sessionPath required; triggerId optional.
   assert.equal(validateWebviewToHostMessage({ type: 'cancelDeferredTrigger', sessionPath: '/a' }).ok, true);
@@ -192,33 +202,6 @@ test('validateWebviewToHostMessage validates removeComposerInput', () => {
   );
   assert.equal(
     validateWebviewToHostMessage({ type: 'removeComposerInput', sessionPath: '/a' }).ok,
-    false,
-  );
-});
-
-test('validateWebviewToHostMessage validates recordOutcome', () => {
-  assert.equal(
-    validateWebviewToHostMessage({
-      type: 'recordOutcome',
-      sessionPath: '/a',
-      outcome: { resolution: 'resolved', satisfaction: 4 },
-    }).ok,
-    true,
-  );
-  assert.equal(
-    validateWebviewToHostMessage({
-      type: 'recordOutcome',
-      sessionPath: '/a',
-      outcome: { resolution: 'unknown', satisfaction: 4 },
-    }).ok,
-    false,
-  );
-  assert.equal(
-    validateWebviewToHostMessage({
-      type: 'recordOutcome',
-      sessionPath: '/a',
-      outcome: { resolution: 'resolved' },
-    }).ok,
     false,
   );
 });

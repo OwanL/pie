@@ -37,20 +37,28 @@ export function cloneMessagePart(part: ChatMessagePart): ChatMessagePart {
     return { kind: 'toolCall', toolCall: cloneToolCall(part.toolCall) };
   }
 
-  return { kind: part.kind, text: part.text };
+  return part.kind === 'reasoning' && part.detailRef
+    ? { kind: part.kind, text: part.text, detailRef: part.detailRef }
+    : { kind: part.kind, text: part.text };
 }
 
 export function appendAssistantTextPart(
   parts: ChatMessagePart[],
   kind: 'text' | 'reasoning',
   text: string,
+  detailRef?: Extract<ChatMessagePart, { kind: 'reasoning' }>['detailRef'],
 ): void {
   if (!text) {
     return;
   }
 
+  if (kind === 'reasoning' && detailRef) {
+    parts.push({ kind, text, detailRef });
+    return;
+  }
+
   const last = parts[parts.length - 1];
-  if (last?.kind === kind) {
+  if (last?.kind === kind && (last.kind !== 'reasoning' || !last.detailRef)) {
     last.text += text;
     return;
   }
@@ -111,7 +119,9 @@ export function buildAssistantParts(message: ChatMessage): ChatMessagePart[] {
   const parts: ChatMessagePart[] = [];
 
   if (message.thinking) {
-    parts.push({ kind: 'reasoning', text: message.thinking });
+    parts.push(message.thinkingDetailRef
+      ? { kind: 'reasoning', text: message.thinking, detailRef: message.thinkingDetailRef }
+      : { kind: 'reasoning', text: message.thinking });
   }
   for (const toolCall of message.toolCalls ?? []) {
     parts.push({ kind: 'toolCall', toolCall: cloneToolCall(toolCall) });
@@ -146,7 +156,7 @@ export function mergeAssistantParts(
     if (nextPart.kind === 'toolCall') {
       upsertAssistantToolPart(merged, nextPart.toolCall);
     } else {
-      appendAssistantTextPart(merged, nextPart.kind, nextPart.text);
+      appendAssistantTextPart(merged, nextPart.kind, nextPart.text, nextPart.kind === 'reasoning' ? nextPart.detailRef : undefined);
     }
   }
 
@@ -155,7 +165,7 @@ export function mergeAssistantParts(
     if (nextPart.kind === 'toolCall') {
       upsertAssistantToolPart(merged, nextPart.toolCall);
     } else {
-      appendAssistantTextPart(merged, nextPart.kind, nextPart.text);
+      appendAssistantTextPart(merged, nextPart.kind, nextPart.text, nextPart.kind === 'reasoning' ? nextPart.detailRef : undefined);
     }
   }
 

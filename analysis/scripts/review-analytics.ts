@@ -177,17 +177,28 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
   if (!Array.isArray(value.amendments)) return false;
   const amendmentIds: string[] = [];
   const acceptedIds = new Set<string>();
+  const frozenIds = new Set(frozen.map((entry) => entry!.criterionId));
   for (const amendmentValue of value.amendments) {
     if (!isRecord(amendmentValue)) return false;
     const amendmentId = nonEmpty(amendmentValue.amendmentId);
     if (!amendmentId) return false;
     amendmentIds.push(amendmentId);
-    if (amendmentValue.disposition === 'accepted') {
+    const disposition = amendmentValue.disposition;
+    if (disposition === 'accepted') {
       const classified = coerceCriterion(amendmentValue.classifiedCriterion);
       const definition = coerceDefinition(amendmentValue.definition);
       if (!classified || !definition || !isDeepStrictEqual(definitionOf(classified), definition)
         || !isDeepStrictEqual(ledgerById.get(classified.criterionId), classified)) return false;
       acceptedIds.add(classified.criterionId);
+    } else if (disposition === 'mapped_to_existing') {
+      const target = nonEmpty(amendmentValue.targetCriterionId);
+      const downgraded = coerceCriterion(amendmentValue.downgradedClassification);
+      if (!target || !downgraded || !frozenIds.has(target) || downgraded.criterionId !== target
+        || !isDeepStrictEqual(ledgerById.get(target), downgraded)) return false;
+    } else if (disposition === 'finding_downgraded') {
+      if (amendmentValue.downgradedSeverity !== 'minor' && amendmentValue.downgradedSeverity !== 'nit') return false;
+    } else if (disposition !== 'rejected') {
+      return false;
     }
   }
   if (!unique(amendmentIds)) return false;
@@ -237,7 +248,11 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
 
   const adjudication = value.adjudication;
   const adjudicationId = isRecord(adjudication) ? nonEmpty(adjudication.adjudicationId) : null;
-  if (adjudication !== undefined && (!isRecord(adjudication) || !coerceReviewer(adjudication, 'adjudication') || !adjudicationId)) return false;
+  const adjudicationAmendmentIds = isRecord(adjudication) ? strings(adjudication.amendmentIds) : null;
+  if (adjudication !== undefined && (!isRecord(adjudication) || !coerceReviewer(adjudication, 'adjudication') || !adjudicationId
+    || adjudication.requestedBucket !== 'medium' || adjudication.rubricVersion !== value.rubricVersion
+    || !isoDate(adjudication.assessedAt) || !adjudicationAmendmentIds
+    || !isDeepStrictEqual([...adjudicationAmendmentIds].sort(), [...amendmentIds].sort()))) return false;
   if (!isRecord(value.disagreement) || value.disagreement.material !== (adjudication !== undefined)
     || value.disagreement.adjudicated !== (adjudication !== undefined)) return false;
   if (!isRecord(value.provenance) || value.provenance.blindingApplied !== true

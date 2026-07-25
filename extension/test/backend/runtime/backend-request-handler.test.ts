@@ -240,6 +240,26 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
   assert.deepEqual(settings, { defaultModel: 'model-a', defaultThinkingLevel: 'medium' });
 });
 
+test('session.loadDetail validates and delegates bounded retrieval identity', async () => {
+  const harness = createHarness();
+  const ref = {
+    key: 'durable:tool:key', kind: 'tool-result' as const, source: 'durable' as const,
+    sessionPath: '/repo/session.jsonl', messageId: 'message', toolCallId: 'tool',
+    sizeBytes: 4, summary: 'detail', available: true,
+  };
+  harness.deps.loadDetail = async (sessionPath, receivedRef) => ({
+    sessionPath, key: receivedRef.key, status: 'loaded', value: 'full', sizeBytes: 4,
+  });
+  assert.deepEqual(await handleBackendRequest(harness.deps, {
+    id: 'detail', method: 'session.loadDetail', params: { sessionPath: '/repo/session.jsonl', ref },
+  }), {
+    sessionPath: '/repo/session.jsonl', key: ref.key, status: 'loaded', value: 'full', sizeBytes: 4,
+  });
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'bad-detail', method: 'session.loadDetail', params: { sessionPath: '/repo/session.jsonl', ref: { key: '' } },
+  }), /requires sessionPath and ref/);
+});
+
 test('session.create returns a session from the configured backend session directory', async () => {
   const harness = createHarness();
   const configuredDir = path.resolve('/configured/sessions');

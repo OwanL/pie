@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type ErrorPayload, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
+import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type DetailResult, type ErrorPayload, type LazyDetailRef, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
 import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
@@ -174,6 +174,7 @@ export interface BackendRequestHandlerDeps {
     loadedStart?: number,
     loadedEnd?: number,
   ): Promise<TranscriptPagePayload>;
+  loadDetail?(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult>;
   emit(event: string, payload?: unknown): void;
   emitBusyChanged(context: SessionContext, busy: boolean): void;
   emitContextUsageChanged(context: SessionContext): void;
@@ -375,6 +376,33 @@ async function handleSessionLoadTranscriptPage(
     params.loadedStart,
     params.loadedEnd,
   );
+}
+
+async function handleSessionLoadDetail(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<DetailResult> {
+  const params = request.params;
+  if (!params || typeof params !== 'object') {
+    throw new BackendError('INVALID_PARAMS', 'session.loadDetail requires an object payload.');
+  }
+  const { sessionPath, ref } = params as { sessionPath?: unknown; ref?: unknown };
+  const candidate = ref as Partial<LazyDetailRef> | undefined;
+  if (typeof sessionPath !== 'string' || !candidate
+    || typeof candidate.key !== 'string' || candidate.key.length === 0
+    || candidate.sessionPath !== sessionPath
+    || (candidate.kind !== 'tool-result' && candidate.kind !== 'reasoning')
+    || candidate.source !== 'durable'
+    || typeof candidate.messageId !== 'string'
+    || typeof candidate.summary !== 'string'
+    || typeof candidate.available !== 'boolean'
+    || !Number.isSafeInteger(candidate.sizeBytes) || (candidate.sizeBytes ?? -1) < 0) {
+    throw new BackendError('INVALID_PARAMS', 'session.loadDetail requires sessionPath and ref.');
+  }
+  if (!deps.loadDetail) {
+    return { sessionPath, key: (ref as LazyDetailRef).key, status: 'unavailable', message: 'Detail retrieval is unavailable.' };
+  }
+  return await deps.loadDetail(sessionPath, ref as LazyDetailRef);
 }
 
 async function handleSessionTruncateAfter(
@@ -1311,6 +1339,7 @@ const handlers: Record<string, RequestHandler> = {
   'session.duplicate': handleSessionDuplicate,
   'session.preload': handleSessionPreload,
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
+  'session.loadDetail': handleSessionLoadDetail,
   'session.truncateAfter': handleSessionTruncateAfter,
   'message.send': handleMessageSend,
   'message.compact': handleMessageCompact,
