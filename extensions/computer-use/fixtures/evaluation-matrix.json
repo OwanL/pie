@@ -1,0 +1,136 @@
+{
+  "format": "computer-use-evaluation-matrix/v1",
+  "title": "Computer-use candidate-agnostic Phase 0 evaluation matrix",
+  "version": 1,
+  "evidenceContract": {
+    "rule": "A candidate success string is never sufficient. Capture the specified fixture, application, or process postcondition for every successful trial.",
+    "eventEndpoint": "GET /events returns the browser fixture event ledger; POST or GET /reset clears it.",
+    "actionDeliveryTrials": 3,
+    "lifecycleTrials": 1
+  },
+  "rows": [
+    {
+      "id": 1,
+      "name": "Local browser DOM fixture",
+      "status": "ready",
+      "precondition": "Start event-server.mjs, open /dom-fixture.html in an ordinary local browser window, then GET /reset and confirm an empty event ledger.",
+      "action": "Target the browser window and click Click target, type a unique token into Text target, drag at least 15 CSS pixels in Drag target, and scroll Scroll target.",
+      "postcondition": "The DOM page visibly says each action was recorded, the typed token and non-zero scroll position are visible, and GET /events contains corresponding click, type, drag, and scroll events with isTrusted: true.",
+      "reset": "GET /reset, reload /dom-fixture.html, clear Text target, and return Scroll target to scrollTop 0.",
+      "trials": 3
+    },
+    {
+      "id": 2,
+      "name": "Local browser canvas fixture",
+      "status": "ready",
+      "precondition": "Start event-server.mjs, open /canvas-fixture.html, focus the labelled canvas, then GET /reset and confirm an empty event ledger.",
+      "action": "Click a labelled grid coordinate, drag across the grid, scroll its wheel, and hold two keyboard keys simultaneously before releasing them.",
+      "postcondition": "GET /events has trusted pointer, scroll, key-down, and key-up events; each has canvas CSS/backing dimensions, DPR, coordinate fields, and heldKeys/heldButtons that show the simultaneous held state. The red canvas marker visibly moves.",
+      "reset": "GET /reset, reload /canvas-fixture.html, and release all candidate-held input before the next trial.",
+      "trials": 3
+    },
+    {
+      "id": 3,
+      "name": "Ordinary logged-in browser profile",
+      "status": "ready",
+      "precondition": "An ordinary user browser profile is already running and has a visible profile-backed state such as history, cookies, autofill, or an authenticated session.",
+      "action": "Rediscover or target its existing window and navigate through visible browser UI without launching a replacement automation profile.",
+      "postcondition": "A visible browser page and browser UI confirm the original profile remains in use, including one observable pre-existing profile-backed state.",
+      "reset": "Return to the original tab or a new tab without clearing profile data; document the exact non-destructive restoration.",
+      "trials": 1,
+      "trialNote": "This profile-preservation check is intentionally not resettable without changing user state."
+    },
+    {
+      "id": 4,
+      "name": "VS Code/pie sidebar observation and navigation",
+      "status": "ready",
+      "precondition": "A VS Code window with pie available is visible and not minimized.",
+      "action": "Observe the sidebar, open pie if needed through visible UI, then navigate one representative sidebar state.",
+      "postcondition": "A screenshot or semantic observation shows the intended sidebar state and an observable selected/navigated control.",
+      "reset": "Return the sidebar to its initial visible state through the same UI.",
+      "trials": 3
+    },
+    {
+      "id": 5,
+      "name": "Native Win32 application",
+      "status": "ready",
+      "precondition": "A standard non-elevated Win32 application such as Notepad is launched with an empty disposable document.",
+      "action": "Discover the window, focus it, type a unique token, select it, and perform a visible pointer action.",
+      "postcondition": "The document visibly contains the exact token and the window remains the selected target after the pointer action.",
+      "reset": "Discard the unsaved disposable document and relaunch or clear it.",
+      "trials": 3
+    },
+    {
+      "id": 6,
+      "name": "Modern Windows application",
+      "status": "ready",
+      "precondition": "A non-elevated modern Windows application with a reversible visible control is available.",
+      "action": "Discover the window, focus it, and toggle or navigate one reversible visible control.",
+      "postcondition": "A screenshot or app state visibly confirms the intended control changed.",
+      "reset": "Return the reversible control to its original state.",
+      "trials": 3
+    },
+    {
+      "id": 7,
+      "name": "Godot editor selection, inspector interaction, and object drag",
+      "status": "ready",
+      "precondition": "Open godot-input-fixture in the installed Godot 4.7.1 editor; use the disposable DraggableProbe child in an ignored copy of the fixture.",
+      "action": "Select the object, alter one reversible inspector value, and drag the object in the editor viewport.",
+      "postcondition": "The editor visibly shows the intended selection, changed inspector value, and moved object.",
+      "reset": "Undo the inspector and viewport changes or reopen the disposable scene.",
+      "trials": 3
+    },
+    {
+      "id": 8,
+      "name": "Launched Godot fixture held and timed input",
+      "status": "ready",
+      "precondition": "Launch godot-input-fixture with the installed Godot 4.7.1 editor or executable and capture its stdout.",
+      "action": "Focus the running fixture and execute a timed sequence containing held movement keys, simultaneous keys, pointer drag, and wheel input.",
+      "postcondition": "The visible event log and stdout lines prefixed __EVENT__ show the expected ordered events and held_keys/held_buttons state, including simultaneous keys.",
+      "reset": "Use Reset visible event state, release all input, and relaunch the fixture if focus or state cannot be restored.",
+      "trials": 3
+    },
+    {
+      "id": 9,
+      "name": "Multi-window rediscovery",
+      "status": "ready",
+      "precondition": "Two or more distinguishable windows are open, including the local browser fixture and a disposable native application.",
+      "action": "Target each window in turn, alter its reversible visible state, then rediscover the first after foreground focus changes.",
+      "postcondition": "Each visible state change appears in its intended window and rediscovery identifies the first window rather than the most recently focused one.",
+      "reset": "Restore each reversible state and leave the fixture browser foregrounded.",
+      "trials": 3
+    },
+    {
+      "id": 10,
+      "name": "Cancellation during held key or mouse action",
+      "status": "ready",
+      "precondition": "Canvas fixture is focused and GET /reset confirms no prior event; the candidate supports cancellation of an in-flight held-input action.",
+      "action": "Start an action or sequence that holds a key and mouse button, then cancel while both are held.",
+      "postcondition": "Canvas state and GET /events show a release or cleared held state; a subsequent normal input succeeds without a stuck key/button.",
+      "reset": "Explicitly release all input, GET /reset, reload the canvas fixture if needed, and verify the held state is empty.",
+      "trials": 3
+    },
+    {
+      "id": 11,
+      "name": "Child-process termination and restart",
+      "status": "ready",
+      "precondition": "The candidate uses a separately identifiable native child process or equivalent runtime process and the DOM fixture server is available.",
+      "action": "Terminate the candidate runtime process during a non-destructive fixture session, then restart/reopen it and rediscover the fixture target.",
+      "postcondition": "The controlling evaluation process remains alive; restart is explicit and the fixture can receive and report one new trusted action after recovery.",
+      "reset": "Close the replacement runtime cleanly, GET /reset, and restore the fixture browser page.",
+      "trials": 1,
+      "trialNote": "Destructive lifecycle check; one successful recovery proof is sufficient."
+    },
+    {
+      "id": 12,
+      "name": "Multi-monitor mixed-DPI coordinates",
+      "status": "blocked",
+      "blockedReason": "Blocked on this machine: no mixed-DPI multi-monitor arrangement is currently available. Do not infer a pass from single-monitor or same-DPI results.",
+      "precondition": "Two available monitors have different effective DPI scales, with a browser canvas fixture visible on each monitor in turn.",
+      "action": "Observe each fixture window and click the same labelled canvas CSS-grid coordinate after moving the window between monitors.",
+      "postcondition": "Each fixture event reports the intended CSS coordinate within the documented tolerance and its reported DPR agrees with the visible monitor scale.",
+      "reset": "Return the window to its original monitor and GET /reset after each placement.",
+      "trials": 3
+    }
+  ]
+}

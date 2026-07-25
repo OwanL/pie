@@ -16,6 +16,7 @@ import {
 
 import { isCommandSummaryTool } from './summary-model';
 import { TerminalOutput } from './terminal-output';
+import { hasImageToolResult, ToolResultContentParts } from './tool-result-content';
 
 interface ToolCallBodyProps {
   toolCall: ToolCall;
@@ -100,6 +101,9 @@ export function ToolCallBody({ toolCall, onOpenFile }: ToolCallBodyProps) {
 
   const resultText = textFromToolResult(toolCall.result);
   const resultIsTextOnly = isTextOnlyToolResult(toolCall.result);
+  // A result carrying image-typed content parts must take the mixed-content
+  // render path so image base64 is never serialized as YAML/text.
+  const hasImage = hasImageToolResult(toolCall.result);
   // Infer a highlight language for file-content tools (read/grep/glob/find/cat)
   // from the tool's input path. edit/write results are short confirmations,
   // so they fall through to plain/JSON-detect highlighting.
@@ -129,7 +133,9 @@ export function ToolCallBody({ toolCall, onOpenFile }: ToolCallBodyProps) {
       {toolCall.result !== undefined && (
         <div class="tool-call-section">
           <div class="tool-call-section-label">Result</div>
-          {resultIsTextOnly && resultText !== undefined ? (
+          {hasImage ? (
+            <ToolResultContentParts result={toolCall.result} languageHint={resultLanguageHint} />
+          ) : resultIsTextOnly && resultText !== undefined ? (
             <ResizablePre class="tool-call-pre tool-call-pre-resizable hljs-scope" minHeight={80}>
               <code class="hljs" dangerouslySetInnerHTML={{ __html: highlightToolResultText(resultText, resultLanguageHint) }} />
             </ResizablePre>

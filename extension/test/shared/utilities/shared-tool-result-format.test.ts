@@ -8,11 +8,9 @@ import type { ToolResultContentPartLike } from '../../../src/shared/tool-result-
  * `formatToolResult` reshapes a tool-result-like message into the value stored
  * on a `ToolCall.result`. It is intentionally defensive about `unknown` shapes:
  * it branches on whether `details` is present and whether `content` is a string
- * or a structured parts array, extracting text from `type:'text'` parts only.
- *
- * `textFromToolResultParts` is module-private, so we exercise every one of its
- * branches (empty, unknown part type, missing `text`, mixed parts) through
- * `formatToolResult`'s array path.
+ * or a structured parts array. Text-only arrays are flattened for the legacy
+ * display path; mixed/structured arrays stay intact so image parts survive to
+ * the generic transcript renderer.
  */
 
 test('details present with non-empty string content returns { content, details }', () => {
@@ -54,22 +52,21 @@ test('no details with content array joins text parts in order', () => {
   );
 });
 
-test('no details with mixed parts extracts only type:text parts with string text', () => {
-  // Unknown part types and text-less text parts must be filtered out so they do
-  // not contribute to the joined output.
-  assert.equal(
-    formatToolResult({
-      content: [
-        { type: 'text', text: 'a' },
-        { type: 'image', text: 'ignored-image' },
-        { type: 'json', text: 'ignored-json' },
-        { type: 'text' }, // type text but no `text` string -> filtered
-        { type: 'text', text: 'b' },
-        { type: 'unknown-type' },
-      ],
-    }),
-    'ab',
-  );
+test('no details with mixed text and image parts preserves the ordered content array', () => {
+  const content = [
+    { type: 'text', text: 'caption' },
+    { type: 'image', data: 'cG5n', mimeType: 'image/png' },
+  ];
+  assert.equal(formatToolResult({ content }), content);
+});
+
+test('no details with malformed or unknown parts preserves the content array', () => {
+  const content = [
+    { type: 'text', text: 'a' },
+    { type: 'json', text: 'structured' },
+    { type: 'text' },
+  ];
+  assert.equal(formatToolResult({ content }), content);
 });
 
 test('no details with empty content array returns the empty array (text is falsy)', () => {

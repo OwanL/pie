@@ -1,6 +1,8 @@
 export interface ToolResultContentPartLike {
   type?: string;
   text?: string;
+  data?: string;
+  mimeType?: string;
 }
 
 export interface ToolResultLike {
@@ -36,6 +38,15 @@ export function formatToolResult(message: ToolResultLike): unknown {
   }
 
   if (Array.isArray(message.content)) {
+    const isTextOnly = message.content.length > 0 && message.content.every(
+      (part) => part.type === 'text' && typeof part.text === 'string',
+    );
+    if (!isTextOnly) {
+      // Preserve mixed/structured parts so generic image results survive the
+      // backend → transcript → webview projection. Flattening only their text
+      // would silently discard images before the renderer can see them.
+      return message.content;
+    }
     const text = textFromToolResultParts(message.content);
     return text || message.content;
   }

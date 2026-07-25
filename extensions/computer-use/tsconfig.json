@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "typeRoots": ["../../node_modules/@types"],
+    "baseUrl": "../..",
+    "paths": {
+      "typebox": ["extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"],
+      "typebox/*": ["extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/*"],
+      "@earendil-works/pi-ai": ["extension/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["extension/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts", "types-global.d.ts"],
+  "exclude": ["node_modules", "fixtures"]
+}

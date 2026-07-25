@@ -115,6 +115,70 @@
   color: var(--panel-muted);
 }
 
+/* ── Generic mixed text/image tool-result content ──────────────────────── */
+/* Renders tool results whose `content` array mixes text and image parts
+   (e.g. a screenshot + caption). Images are bounded `<img>` elements whose
+   `src` is a `data:` URL built from the part's base64; image data is never
+   serialized as text/YAML. Text parts reuse the highlighted code surface; the
+   whole block is bounded to the shared section max height so a large
+   screenshot scrolls inside the card instead of pushing the transcript. */
+
+.tool-call-result-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: var(--expanded-section-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tool-call-result-content .tool-call-result-text {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--panel-code-surface);
+  border-radius: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  /* Wrap long caption/prose lines instead of horizontal-scrolling; preserves
+     significant whitespace within a part. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--panel-foreground);
+}
+
+.tool-call-result-content .tool-call-result-text code {
+  font-family: inherit;
+  background: transparent;
+  padding: 0;
+}
+
+.tool-call-result-image {
+  display: block;
+  max-width: 100%;
+  max-height: var(--expanded-section-max-height);
+  height: auto;
+  width: auto;
+  border-radius: var(--panel-radius-sm);
+  object-fit: contain;
+  background: var(--panel-code-surface);
+}
+
+.tool-call-result-unsupported {
+  padding: 4px 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  font-style: italic;
+  color: var(--panel-muted);
+}
+
+.tool-call-result-empty {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--panel-muted);
+}
+
 /* ── Subagent header ─────────────────────────────────────────────────────── */
 
 .subagent-header {

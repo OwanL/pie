@@ -166,6 +166,18 @@ const PACKAGE_CONFIGS = [
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
+  {
+    id: 'computer-use',
+    cwd: repoRoot,
+    testGlobs: ['extensions/computer-use/test/**/*.test.ts'],
+    coverageIncludes: [
+      'extensions/computer-use/index.ts',
+      'extensions/computer-use/src/**/*.ts',
+      'extensions/computer-use/src/**/*.mjs',
+    ],
+    thresholds: { lines: 80, branches: 60 },
+    tsxConfig: 'extensions/computer-use/tsconfig.json',
+  },
 ];
 
 const PACKAGE_LOOKUP = new Map();

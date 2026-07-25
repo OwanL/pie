@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Computer-use canvas fixture</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #172033; }
+    body { background: #f4f7fb; margin: 0; }
+    main { margin: 0 auto; max-width: 900px; padding: 24px; }
+    canvas { background: white; border: 2px solid #2b5b84; border-radius: 6px; display: block; height: 400px; touch-action: none; width: min(100%, 760px); }
+    .panel { background: white; border: 1px solid #b9c5d8; border-radius: 7px; margin-top: 14px; padding: 12px; }
+    #state, #event-log { font-family: ui-monospace, monospace; white-space: pre-wrap; }
+    #event-log { background: #0d1626; color: #d6e5ff; height: 180px; margin: 0; overflow: auto; padding: 10px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Computer-use canvas fixture</h1>
+    <p>Click the labelled grid to focus it, then use pointer, wheel, and keyboard input. Reports include CSS, backing-store, and device-pixel coordinates.</p>
+    <canvas id="grid" tabindex="0" aria-label="Canvas event grid"></canvas>
+    <div class="panel"><strong>Current input state</strong><output id="state">Awaiting an event</output></div>
+    <div class="panel"><strong>Reported events</strong><pre id="event-log">No events reported yet.</pre></div>
+  </main>
+
+  <script>
+    const canvas = document.querySelector("#grid");
+    const context = canvas.getContext("2d");
+    const state = document.querySelector("#state");
+    const eventLog = document.querySelector("#event-log");
+    const heldKeys = new Set();
+    const heldButtons = new Set();
+    let lastPoint = null;
+    let reportQueue = Promise.resolve();
+
+    function geometry() {
+      const rect = canvas.getBoundingClientRect();
+      return { rect, dpr: window.devicePixelRatio || 1 };
+    }
+
+    function redraw() {
+      const { rect, dpr } = geometry();
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, rect.width, rect.height);
+      context.strokeStyle = "#a9bfd3";
+      context.fillStyle = "#36556f";
+      context.font = "12px ui-monospace, monospace";
+      for (let x = 0; x <= rect.width; x += 50) {
+        context.beginPath(); context.moveTo(x, 0); context.lineTo(x, rect.height); context.stroke();
+        context.fillText(String(x), x + 3, 14);
+      }
+      for (let y = 0; y <= rect.height; y += 50) {
+        context.beginPath(); context.moveTo(0, y); context.lineTo(rect.width, y); context.stroke();
+        context.fillText(String(y), 3, y + 14);
+      }
+      context.fillStyle = "#172033";
+      context.fillText(`CSS ${Math.round(rect.width)}×${Math.round(rect.height)} | backing ${canvas.width}×${canvas.height} | DPR ${dpr}`, 12, rect.height - 12);
+      if (lastPoint) {
+        context.strokeStyle = "#d62728";
+        context.lineWidth = 2;
+        context.beginPath(); context.arc(lastPoint.x, lastPoint.y, 8, 0, Math.PI * 2); context.stroke();
+      }
+    }
+
+    function payload(event, action) {
+      const { rect, dpr } = geometry();
+      const cssX = typeof event.clientX === "number" ? event.clientX - rect.left : null;
+      const cssY = typeof event.clientY === "number" ? event.clientY - rect.top : null;
+      return {
+        fixture: "canvas",
+        action,
+        type: event.type,
+        isTrusted: event.isTrusted,
+        dpr,
+        canvasCss: { width: rect.width, height: rect.height },
+        canvasBacking: { width: canvas.width, height: canvas.height },
+        client: { x: event.clientX ?? null, y: event.clientY ?? null },
+        canvasCssPoint: { x: cssX, y: cssY },
+        canvasDevicePoint: { x: cssX === null ? null : cssX * dpr, y: cssY === null ? null : cssY * dpr },
+        key: event.key ?? null,
+        code: event.code ?? null,
+        heldKeys: [...heldKeys],
+        heldButtons: [...heldButtons],
+        deltaX: event.deltaX ?? 0,
+        deltaY: event.deltaY ?? 0,
+      };
+    }
+
+    function report(event, action) {
+      const details = payload(event, action);
+      state.textContent = `${details.isTrusted ? "Trusted" : "Untrusted"} ${action}; keys=[${details.heldKeys.join(", ")}] buttons=[${details.heldButtons.join(", ")}] DPR=${details.dpr}`;
+      reportQueue = reportQueue.then(async () => {
+        const response = await fetch("/evt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(details),
+        });
+        if (!response.ok) throw new Error(`POST /evt returned ${response.status}`);
+        const recorded = await response.json();
+        eventLog.textContent = `${JSON.stringify(recorded.event)}\n${eventLog.textContent}`.slice(0, 7000);
+      }).catch((error) => { state.textContent = `Report failed: ${error.message}`; });
+      return reportQueue;
+    }
+
+    function updatePoint(event) {
+      if (typeof event.clientX !== "number") return;
+      const { rect } = geometry();
+      lastPoint = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+      redraw();
+    }
+
+    canvas.addEventListener("pointerdown", async (event) => {
+      canvas.focus();
+      heldButtons.add(event.button);
+      canvas.setPointerCapture(event.pointerId);
+      updatePoint(event);
+      await report(event, "pointer-down");
+    });
+    canvas.addEventListener("pointermove", async (event) => { updatePoint(event); await report(event, "pointer-move"); });
+    canvas.addEventListener("pointerup", async (event) => {
+      heldButtons.delete(event.button);
+      updatePoint(event);
+      await report(event, "pointer-up");
+    });
+    canvas.addEventListener("wheel", async (event) => { updatePoint(event); await report(event, "scroll"); }, { passive: true });
+    canvas.addEventListener("keydown", async (event) => { heldKeys.add(event.code || event.key); await report(event, "key-down"); });
+    canvas.addEventListener("keyup", async (event) => { heldKeys.delete(event.code || event.key); await report(event, "key-up"); });
+    canvas.addEventListener("blur", () => { heldKeys.clear(); heldButtons.clear(); state.textContent = "Canvas lost focus; held input cleared"; });
+    window.addEventListener("resize", redraw);
+    redraw();
+  </script>
+</body>
+</html>

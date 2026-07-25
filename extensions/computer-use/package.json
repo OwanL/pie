@@ -1,0 +1,20 @@
+{
+  "name": "computer-use",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "@computer-use/nut-js": "4.2.0",
+    "@trycua/cua-driver": "0.12.5",
+    "pngjs": "7.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

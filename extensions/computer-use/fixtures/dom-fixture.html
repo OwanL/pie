@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Computer-use DOM fixture</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f4f7fb; color: #172033; }
+    main { box-sizing: border-box; max-width: 900px; margin: 0 auto; padding: 24px; }
+    h1 { margin-top: 0; }
+    .status { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .card, section { background: white; border: 1px solid #b9c5d8; border-radius: 8px; padding: 14px; }
+    .label { display: block; color: #4a5870; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+    output { display: block; min-height: 1.5em; margin-top: 5px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+    .controls { display: grid; gap: 16px; }
+    button, input { box-sizing: border-box; font: inherit; min-height: 40px; padding: 8px 12px; }
+    #click-target { background: #1769aa; border: 1px solid #0e4f83; border-radius: 5px; color: white; cursor: pointer; }
+    #text-target { border: 1px solid #7788a4; border-radius: 5px; width: 100%; }
+    #drag-target { align-items: center; background: repeating-linear-gradient(45deg, #f7cc65, #f7cc65 10px, #ffe9a8 10px, #ffe9a8 20px); border: 2px dashed #9b6a00; border-radius: 6px; cursor: grab; display: flex; height: 100px; justify-content: center; user-select: none; }
+    #drag-target:active { cursor: grabbing; }
+    #scroll-target { border: 1px solid #7788a4; height: 100px; overflow: auto; padding: 8px; }
+    #scroll-content { height: 420px; background: linear-gradient(#dceeff, #e8f4df); padding: 8px; }
+    #event-log { background: #0d1626; border-radius: 5px; color: #d6e5ff; font: 12px/1.4 ui-monospace, monospace; height: 150px; margin: 0; overflow: auto; padding: 10px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Computer-use DOM fixture</h1>
+    <p>Every interaction is reported to <code>POST /evt</code>. The response is awaited before the action state says it was recorded.</p>
+    <div class="status" aria-live="polite">
+      <div class="card"><span class="label">Trusted-event state</span><output id="trusted-state">Awaiting an event</output></div>
+      <div class="card"><span class="label">Action state</span><output id="action-state">No action has been recorded</output></div>
+    </div>
+
+    <div class="controls">
+      <section>
+        <h2>Click</h2>
+        <button id="click-target" type="button">Click target</button>
+      </section>
+      <section>
+        <h2>Type</h2>
+        <label for="text-target">Text target</label>
+        <input id="text-target" autocomplete="off" placeholder="Type fixture text here">
+      </section>
+      <section>
+        <h2>Drag</h2>
+        <div id="drag-target" tabindex="0" role="button" aria-label="Drag target">Drag from one part of this striped target to another</div>
+        <output id="drag-state">No completed drag</output>
+      </section>
+      <section>
+        <h2>Scroll</h2>
+        <div id="scroll-target" tabindex="0"><div id="scroll-content">Scroll this panel. Its scroll position is part of the reported event.<br><br>Lower content marker<br><br><br><br><br><br><br><br><br><br>Bottom marker</div></div>
+      </section>
+      <section>
+        <h2>Fixture event log</h2>
+        <pre id="event-log">No events reported yet.</pre>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const trustedState = document.querySelector("#trusted-state");
+    const actionState = document.querySelector("#action-state");
+    const eventLog = document.querySelector("#event-log");
+    const dragState = document.querySelector("#drag-state");
+    let pendingReport = Promise.resolve();
+
+    function eventDetails(event, action, extra = {}) {
+      return {
+        fixture: "dom",
+        action,
+        type: event.type,
+        isTrusted: event.isTrusted,
+        target: event.currentTarget?.id ?? event.target?.id ?? "unknown",
+        clientX: event.clientX ?? null,
+        clientY: event.clientY ?? null,
+        key: event.key ?? null,
+        value: event.currentTarget?.value ?? null,
+        scrollTop: event.currentTarget?.scrollTop ?? null,
+        ...extra,
+      };
+    }
+
+    function report(event, action, extra) {
+      const details = eventDetails(event, action, extra);
+      trustedState.textContent = details.isTrusted ? "Trusted browser event received" : "Untrusted/synthetic browser event received";
+      actionState.textContent = `Recording ${action}…`;
+      pendingReport = pendingReport.then(async () => {
+        const response = await fetch("/evt", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(details),
+        });
+        if (!response.ok) throw new Error(`POST /evt returned ${response.status}`);
+        const recorded = await response.json();
+        actionState.textContent = `Recorded ${action} as event #${recorded.event.id}`;
+        eventLog.textContent = `${JSON.stringify(recorded.event)}\n${eventLog.textContent}`.slice(0, 6000);
+      }).catch((error) => {
+        actionState.textContent = `Failed to record ${action}: ${error.message}`;
+      });
+      return pendingReport;
+    }
+
+    document.querySelector("#click-target").addEventListener("click", async (event) => { await report(event, "click"); });
+    document.querySelector("#text-target").addEventListener("input", async (event) => { await report(event, "type"); });
+    document.querySelector("#scroll-target").addEventListener("scroll", async (event) => { await report(event, "scroll"); });
+
+    const dragTarget = document.querySelector("#drag-target");
+    let dragStart = null;
+    dragTarget.addEventListener("pointerdown", async (event) => {
+      dragStart = { x: event.clientX, y: event.clientY };
+      dragTarget.setPointerCapture(event.pointerId);
+      await report(event, "drag-start", { dragStart });
+    });
+    dragTarget.addEventListener("pointerup", async (event) => {
+      const start = dragStart;
+      dragStart = null;
+      const distance = start ? Math.hypot(event.clientX - start.x, event.clientY - start.y) : 0;
+      dragState.textContent = `Pointer released after ${Math.round(distance)} CSS pixels`;
+      if (distance >= 15) await report(event, "drag", { dragStart: start, dragDistance: distance });
+      else await report(event, "drag-end", { dragStart: start, dragDistance: distance });
+    });
+  </script>
+</body>
+</html>
