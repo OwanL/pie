@@ -207,17 +207,21 @@ export class ComputerBackend {
     return await operation();
   }
 
-  async currentForegroundWindowId() {
+  async currentForegroundWindowId(signal) {
+    if (signal?.aborted) throw abortError();
     let active;
     try { active = await this.nut.getActiveWindow(); } catch {}
+    if (signal?.aborted) throw abortError();
     return positiveInteger(active?.windowHandle);
   }
 
-  async describeDesktopForeground(observedWindowId) {
-    const windowId = observedWindowId ?? await this.currentForegroundWindowId();
+  async describeDesktopForeground(observedWindowId, signal) {
+    const windowId = observedWindowId ?? await this.currentForegroundWindowId(signal);
     if (!windowId) return undefined;
     let record;
-    try { record = (await this.listWindows()).find((window) => sameHandle(window.window_id, windowId)); } catch {}
+    try { record = (await this.listWindows(signal)).find((window) => sameHandle(window.window_id, windowId)); }
+    catch (error) { if (cancellationError(error)) throw error; }
+    if (signal?.aborted) throw abortError();
     return {
       windowId,
       ...(positiveInteger(record?.pid) ? { pid: positiveInteger(record.pid) } : {}),
@@ -356,15 +360,15 @@ export class ComputerBackend {
     let payload; let pendingDesktopForeground;
     if (target.kind === 'desktop') {
       const captureImagePath = fullImagePath ? `${fullImagePath}.${randomUUID()}.tmp` : undefined;
-      const foregroundBefore = await this.currentForegroundWindowId();
+      const foregroundBefore = await this.currentForegroundWindowId(signal);
       if (!foregroundBefore) throw runtimeError('OBSERVE_UNAVAILABLE', 'Could not bind the desktop foreground before observation.', true);
       try {
         payload = await this.cua('get_desktop_state', { session: session.id, ...(captureImagePath ? { screenshot_out_file: captureImagePath } : {}) }, signal);
-        const foregroundAfter = await this.currentForegroundWindowId();
+        const foregroundAfter = await this.currentForegroundWindowId(signal);
         if (!foregroundAfter || !sameHandle(foregroundAfter, foregroundBefore)) {
           throw runtimeError('DESKTOP_FOREGROUND_CHANGED', 'Desktop foreground changed during observation; observe again.', true);
         }
-        pendingDesktopForeground = await this.describeDesktopForeground(foregroundAfter);
+        pendingDesktopForeground = await this.describeDesktopForeground(foregroundAfter, signal);
         target.logicalBounds = { x: 0, y: 0, width: await this.nut.screen.width(), height: await this.nut.screen.height() };
         if (captureImagePath && fullImagePath) await rename(captureImagePath, fullImagePath);
       } catch (error) {

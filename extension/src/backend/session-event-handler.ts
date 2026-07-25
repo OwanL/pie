@@ -691,8 +691,8 @@ function emitRejectedObservation(
 }
 
 function liveExecutionId(context: SessionContext, toolCallId: string): string {
-  const checkpoint = context.activeRequest?.liveTurnAccumulator?.checkpoint();
-  return `${checkpoint?.attemptId ?? 'unknown'}:${toolCallId}`;
+  const attemptId = context.activeRequest?.liveTurnAccumulator?.attemptId;
+  return `${attemptId ?? 'unknown'}:${toolCallId}`;
 }
 
 export function handleSdkSessionEvent(
@@ -738,7 +738,7 @@ export function handleSdkSessionEvent(
       }
       context.activeRequest.turnStartedAt = Date.now();
       context.activeRequest.providerTurnSequence = (context.activeRequest.providerTurnSequence ?? 0) + 1;
-      const liveSeq = context.activeRequest.liveTurnAccumulator?.checkpoint().checkpointSeq ?? 0;
+      const liveSeq = context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0;
       if (liveSeq === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
         emitSemanticCandidate(deps, context, {
@@ -808,7 +808,7 @@ export function handleSdkSessionEvent(
         context.activeRequest.promptSafetyTimer = undefined;
       }
 
-      if ((context.activeRequest.liveTurnAccumulator?.checkpoint().checkpointSeq ?? 0) === 0) {
+      if ((context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0) === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.currentMessageStartedAt);
       }
       emitSemanticCandidate(deps, context, {
@@ -955,11 +955,12 @@ export function handleSdkSessionEvent(
       toolStartMetadata.set(toolCallId, { name: event.toolName ?? '', input: event.args });
       context.activeRequest.toolStartMetadata = toolStartMetadata;
 
+      const executionId = liveExecutionId(context, toolCallId);
       emitSemanticCandidate(deps, context, {
         kind: 'tool.started',
-        executionId: liveExecutionId(context, toolCallId),
+        executionId,
         parentExecutionId: null,
-        rootExecutionId: liveExecutionId(context, toolCallId),
+        rootExecutionId: executionId,
         toolCallId,
         name: event.toolName ?? '',
         input: event.args,

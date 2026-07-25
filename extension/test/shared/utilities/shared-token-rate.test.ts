@@ -326,6 +326,22 @@ test('a subagent no longer running has its token snapshot removed from the map',
   assert.equal(acc.subagentTokens.size, 0);
 });
 
+test('a completed subagent represented by lazy detail is not counted as running', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const m = streamingMessage();
+  const completedLazyCall: ToolCall = {
+    id: 'sub-lazy', name: 'subagent', input: { agent: 'worker', task: 'done' },
+    status: 'completed',
+    detailRef: {
+      key: 'durable:tool:/session:entry:sub-lazy:0', kind: 'tool-result', source: 'durable',
+      sessionPath: '/session', messageId: m.id, toolCallId: 'sub-lazy',
+      sizeBytes: 100_000, summary: '1 subagent child', available: true,
+    },
+  };
+  tickTokenRate(acc, [{ ...m, toolCalls: [completedLazyCall] }], BASE_NOW + 1000);
+  assert.equal(acc.subagentTokens.size, 0);
+});
+
 // --- pruneContentTokenMap: keeps the most-recent (live) streaming id ---
 
 test('pruneContentTokenMap retains up to the bound and keeps only the live id once exceeded', () => {

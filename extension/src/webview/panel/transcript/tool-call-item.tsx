@@ -870,15 +870,19 @@ function ToolCallItemBody({
   onContextMenu,
   renderToolCall,
 }: ToolCallItemProps) {
-  const lazyDetail = useLazyDetail(toolCall.detailRef, false);
+  const isSubagent = toolCall.name === 'subagent';
+  // A subagent's collapsed card is itself a transcript preview, so visible
+  // subagents need their detail without a preliminary generic-card click.
+  // Generic tools remain strictly expansion-loaded.
+  const lazyDetail = useLazyDetail(toolCall.detailRef, isSubagent);
   const renderedToolCall = lazyDetail.state.status === 'loaded'
     ? { ...toolCall, result: lazyDetail.state.value, detailRef: undefined }
     : toolCall;
   const waitingForDetail = !!renderedToolCall.detailRef && lazyDetail.state.status !== 'loaded';
-  const subagentResult = waitingForDetail ? undefined : getRenderableSubagentResultFromToolCall(renderedToolCall);
-  const rendererName = waitingForDetail
-    ? '__default'
-    : renderedToolCall.name === 'subagent' || !!subagentResult ? 'subagent' : renderedToolCall.name;
+  const subagentResult = getRenderableSubagentResultFromToolCall(renderedToolCall);
+  const rendererName = isSubagent || !!subagentResult
+    ? 'subagent'
+    : waitingForDetail ? '__default' : renderedToolCall.name;
   const Renderer = getToolRenderer(rendererName) ?? getToolRenderer('__default');
 
   if (Renderer) {

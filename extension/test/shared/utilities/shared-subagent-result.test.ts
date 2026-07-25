@@ -118,6 +118,23 @@ test('completed tool call with no result and no synthesizable input returns unde
   assert.equal(getRenderableSubagentResultFromToolCall(toolCall), undefined);
 });
 
+test('completed tool call with lazy detail keeps a subagent placeholder renderable', () => {
+  const toolCall: Pick<ToolCall, 'input' | 'result' | 'status' | 'detailRef'> = {
+    input: { agent: 'worker', task: 'Keep the preview card mounted' },
+    status: 'completed',
+    result: undefined,
+    detailRef: {
+      key: 'durable:tool:/session:entry:tool:0', kind: 'tool-result', source: 'durable',
+      sessionPath: '/session', messageId: 'message', toolCallId: 'tool',
+      sizeBytes: 100_000, summary: '1 subagent child', available: true,
+    },
+  };
+  const result = getRenderableSubagentResultFromToolCall(toolCall);
+  assert.equal(result?.results[0]?.agent, 'worker');
+  assert.equal(result?.results[0]?.task, 'Keep the preview card mounted');
+  assert.equal(result?.results[0]?.exitCode, 0, 'terminal lazy placeholders must not look like running children');
+});
+
 test('terminal force-settle with empty child results renders failed cards from the original parallel input', () => {
   const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
     input: {

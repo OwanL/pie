@@ -86,7 +86,8 @@ function timeoutFixture(options: {
   captureRegion?: 'png' | 'throw'; uiaPayload?: any;
   nutRegion?: { left: number; top: number; width: number; height: number };
   nutRegionAfterCapture?: { left: number; top: number; width: number; height: number };
-  activeAfterCapture?: number; activeAfterDesktopCapture?: number; mainDisplay?: { width: number; height: number };
+  activeAfterCapture?: number; activeAfterDesktopCapture?: number; abortAfterDesktopCapture?: AbortController;
+  mainDisplay?: { width: number; height: number };
   errorCode?: string; errorMessage?: string; minimized?: boolean; onScreen?: boolean;
 } = {}) {
   const calls: Array<{ name: string; args: any }> = []; let activeWindow = 99; let windowAvailable = true; let invalidDesktopPng = false;
@@ -107,6 +108,7 @@ function timeoutFixture(options: {
           else await writePng(args.screenshot_out_file, 1000, 600);
         }
         if (options.activeAfterDesktopCapture !== undefined) activeWindow = options.activeAfterDesktopCapture;
+        options.abortAfterDesktopCapture?.abort();
         return tool({ screenshot_width: invalidDesktopPng ? 0 : 1000, screenshot_height: invalidDesktopPng ? 0 : 600, elements: [], tree_markdown: '' });
       }
       return tool({ active: true });
@@ -923,6 +925,23 @@ test('desktop input requires a fresh revision and unchanged observed foreground'
       (error: any) => error.code === 'DESKTOP_FOREGROUND_CHANGED' && error.retryable === true,
     );
     assert.deepEqual(fixture.inputs, ['text:bound-desktop']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('desktop observation stops after capture when cancellation arrives before foreground binding', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-desktop-cancel-'));
+  try {
+    const controller = new AbortController();
+    const fixture = timeoutFixture({ abortAfterDesktopCapture: controller });
+    const target = await fixture.backend.open({ sessionId: 's', selector: { kind: 'desktop' }, artifactDir: dir });
+    await assert.rejects(
+      () => fixture.backend.observe(
+        { sessionId: 's', targetId: target.targetId, screenshot: true, tree: true, state: true },
+        controller.signal,
+      ),
+      (error: any) => error.code === 'CANCELLED',
+    );
+    assert.deepEqual(await readdir(dir), [], 'cancelled desktop observation artifacts are deleted');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

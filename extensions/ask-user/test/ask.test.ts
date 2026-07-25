@@ -121,6 +121,25 @@ describe('runAsk', () => {
     });
   });
 
+  test('retains review provenance when the reviewer cancels verification', async () => {
+    const { runAsk } = await loadAsk();
+    const { port } = makePort({ selectResult: undefined });
+    const reviewMeta = {
+      purpose: 'review_human_verification' as const,
+      targetSessionId: 'reviewed-session-id',
+      targetSessionPath: '/sessions/reviewed.jsonl',
+      criterionId: 'criterion-visual',
+      domain: 'visual appearance',
+      expectedObservation: 'The dialog is usable.',
+    };
+
+    const result = await runAsk({ question: 'Did it work?', options: ['Yes'], reviewMeta }, port);
+
+    assert.deepEqual(result.details, {
+      answer: '', source: 'cancelled', cancelled: true, targetSessionId: 'reviewed-session-id',
+    });
+  });
+
   test('filters a sentinel-shaped preset option so it cannot collide with custom input metadata', async () => {
     const { runAsk, CUSTOM_SENTINEL } = await loadAsk();
     const { port, calls } = makePort({ selectResult: 'camelCase' });

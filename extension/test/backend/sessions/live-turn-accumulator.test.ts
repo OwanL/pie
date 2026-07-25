@@ -18,6 +18,15 @@ function accumulator() {
   });
 }
 
+test('backend accumulator exposes lightweight identity and sequence metadata', () => {
+  const value = accumulator();
+  assert.equal(value.attemptId, 'attempt');
+  assert.equal(value.currentSeq, 0);
+
+  const started = value.observe({ kind: 'turn.started' }, 100);
+  assert.equal(value.currentSeq, started.seq);
+});
+
 test('backend accumulator reserves every candidate sequence including rejections', () => {
   const value = accumulator();
   const started = value.observe({ kind: 'turn.started' }, 100);

@@ -86,6 +86,14 @@ export class BackendLiveTurnAccumulator {
     };
   }
 
+  get attemptId(): string {
+    return this.identity.attemptId;
+  }
+
+  get currentSeq(): number {
+    return this.seq;
+  }
+
   observe(candidate: Exclude<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope;
   observe(candidate: Extract<BackendSemanticCandidate, { kind: 'tool.progress' }>, occurredAt: number): TurnSemanticEnvelope | undefined;
   observe(candidate: BackendSemanticCandidate, occurredAt: number): TurnSemanticEnvelope | undefined;
@@ -257,7 +265,7 @@ export class BackendLiveTurnAccumulator {
         this.compactSettledToolHistory();
         break;
       }
-      case 'turn.terminal':
+      case 'turn.terminal': {
         if (!candidate.durableEntryId || candidate.durableMessage.durableEntryId !== candidate.durableEntryId) {
           return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         }
@@ -274,6 +282,7 @@ export class BackendLiveTurnAccumulator {
           terminalKind: candidate.terminalKind,
         };
         break;
+      }
     }
     return envelope;
   }

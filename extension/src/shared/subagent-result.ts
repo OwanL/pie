@@ -541,15 +541,20 @@ function lifecycleSource(
 }
 
 export function getRenderableSubagentResultFromToolCall(
-  toolCall: Pick<ToolCall, 'input' | 'result' | 'status'>,
+  toolCall: Pick<ToolCall, 'input' | 'result' | 'status' | 'detailRef'>,
 ): SubagentResult | undefined {
   const renderableResult = getRenderableSubagentResult(toolCall.result);
   if (renderableResult) {
     return normalizeRenderableSubagentResult(renderableResult, toolCall.status);
   }
 
-  if (toolCall.status === 'running') {
-    return synthesizeRenderableSubagentResult(toolCall.input);
+  if (toolCall.status === 'running' || toolCall.detailRef) {
+    // Large subagent results are omitted from ordinary snapshots. Keep their
+    // purpose-built card mounted from the first paint while the full detail is
+    // fetched, rather than briefly degrading to the generic tool row. Normalize
+    // the placeholder so terminal lazy calls cannot be counted as still running.
+    const synthesized = synthesizeRenderableSubagentResult(toolCall.input);
+    return synthesized ? normalizeRenderableSubagentResult(synthesized, toolCall.status) : undefined;
   }
 
   // Terminal calls with empty/missing child results are not successful empty

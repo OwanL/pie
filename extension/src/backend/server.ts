@@ -280,7 +280,7 @@ export class BackendServer {
 
       const context = owner?.context ?? currentContext;
       const accumulator = ownsCurrentRequest ? ownerRequest.liveTurnAccumulator : undefined;
-      const checkpointSeq = accumulator?.checkpoint().checkpointSeq ?? 0;
+      const checkpointSeq = accumulator?.currentSeq ?? 0;
       if (context && accumulator && checkpointSeq > 0) {
         if (observation.kind === 'gate_queue') {
           this.emit('live.semantic', accumulator.observe({ kind: 'turn.phase', phase: 'queued', inactivityBudgetMs: 120_000 }, observation.occurredAt));
