@@ -640,3 +640,89 @@ test('deriveFileChangesFromTranscript: skips failed subagent tool calls', () => 
   const changes = deriveFileChangesFromTranscript(transcript);
   assert.equal(changes.length, 0);
 });
+
+// ─── Path-identity canonicalization (parent/subagent + spelling variants) ──
+
+test('deriveFileChangesFromTranscript: merges parent + subagent edits to the same file across path spellings (cwd)', () => {
+  // Parent edits `src/shared.ts` (relative); the subagent edits the SAME file
+  // via its absolute spelling `/proj/src/shared.ts`. Without cwd-aware
+  // canonicalization these are two entries (the reported duplication bug).
+  const subagentResult = buildSubagentResult([
+    { name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } },
+  ]);
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc1', name: 'edit', input: { path: 'src/shared.ts', oldText: 'x', newText: 'a\nb' }, status: 'completed' },
+      ],
+    }),
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc2', name: 'subagent', input: { agent: 'worker', task: 'do more' }, result: subagentResult, status: 'completed' },
+      ],
+    }),
+  ];
+  const changes = deriveFileChangesFromTranscript(transcript, '/proj');
+  assert.equal(changes.length, 1, 'parent + subagent edits to one file must merge');
+  assert.equal(changes[0].additions, 6); // 2 (parent) + 4 (subagent)
+  assert.equal(changes[0].deletions, 3); // 1 (parent) + 2 (subagent)
+});
+
+test('deriveFileChangesFromTranscript: `./` prefix and bare relative merge (cwd)', () => {
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc1', name: 'edit', input: { path: 'src/x.ts', oldText: 'a', newText: 'b' }, status: 'completed' },
+      ],
+    }),
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc2', name: 'edit', input: { path: './src/x.ts', oldText: 'b', newText: 'c' }, status: 'completed' },
+      ],
+    }),
+  ];
+  const changes = deriveFileChangesFromTranscript(transcript, '/proj');
+  assert.equal(changes.length, 1);
+});
+
+test('deriveFileChangesFromTranscript: create-then-delete matches across relative/absolute spellings (cwd)', () => {
+  // A file created via a relative path and deleted via an absolute path must
+  // be recognized as the same file → net no-op (the stale create/delete
+  // bookkeeping bug: without canonicalization the delete never matched the
+  // create, leaving a stale created + a stale deleted entry).
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc1', name: 'write', input: { path: 'tmp/gen.uid', content: 'x' }, status: 'completed' },
+      ],
+    }),
+    makeChatMessage({
+      toolCalls: [
+        { id: 'tc2', name: 'bash', input: { command: 'rm /proj/tmp/gen.uid' }, status: 'completed' },
+      ],
+    }),
+  ];
+  const changes = deriveFileChangesFromTranscript(transcript, '/proj');
+  assert.equal(changes.length, 0, 'create + delete of the same file is a net no-op');
+});
+
+test('deriveFileChangesFromTranscript: kind reflects session-level file state, not the latest write verb', () => {
+  const createdThenEdited = deriveFileChangesFromTranscript([
+    makeChatMessage({ toolCalls: [{ id: 'w1', name: 'write', input: { path: 'new.ts', content: 'x' }, status: 'completed' }] }),
+    makeChatMessage({ toolCalls: [{ id: 'e1', name: 'edit', input: { path: 'new.ts', oldText: 'x', newText: 'y' }, status: 'completed' }] }),
+  ]);
+  assert.equal(createdThenEdited[0]?.kind, 'created');
+
+  const editedThenOverwritten = deriveFileChangesFromTranscript([
+    makeChatMessage({ toolCalls: [{ id: 'e2', name: 'edit', input: { path: 'existing.ts', oldText: 'x', newText: 'y' }, status: 'completed' }] }),
+    makeChatMessage({ toolCalls: [{ id: 'w2', name: 'write', input: { path: 'existing.ts', content: 'z' }, status: 'completed' }] }),
+  ]);
+  assert.equal(editedThenOverwritten[0]?.kind, 'modified');
+
+  const overwrittenThenDeleted = deriveFileChangesFromTranscript([
+    makeChatMessage({ toolCalls: [{ id: 'e3', name: 'edit', input: { path: 'existing.ts', oldText: 'x', newText: 'y' }, status: 'completed' }] }),
+    makeChatMessage({ toolCalls: [{ id: 'w3', name: 'write', input: { path: 'existing.ts', content: 'z' }, status: 'completed' }] }),
+    makeChatMessage({ toolCalls: [{ id: 'd3', name: 'bash', input: { command: 'rm existing.ts' }, status: 'completed' }] }),
+  ]);
+  assert.equal(overwrittenThenDeleted[0]?.kind, 'deleted');
+});

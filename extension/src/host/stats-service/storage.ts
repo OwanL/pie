@@ -18,11 +18,7 @@ import {
 } from '../run-analytics/query';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
-  coerceAgentReviewEntry,
-  coerceOutcomeHistoryLogEntry,
   coerceRunSnapshot,
-  type AgentReviewEntry,
-  type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
   type RunCheckpoint,
   type RunSnapshot,
@@ -37,8 +33,8 @@ interface RunAnalyticsStorageOptions {
   now: () => Date;
   serializeSessions: () => Record<string, PersistedSessionRunState>;
   onPersistError?: (error: { message: string; at: string }) => void;
-  /** Max lines retained per JSONL history file (`run-snapshots` /
-   *  `outcome-history` / `agent-reviews`). `<= 0` disables line-based pruning. */
+  /** Max lines retained per JSONL history file (`run-snapshots`).
+   *  `<= 0` disables line-based pruning. */
   maxRunHistoryEntries?: number;
   /** Hard max UTF-8 bytes retained per JSONL history file. When either this
    *  limit or {@link maxRunHistoryEntries} is exceeded, the file is rewritten to
@@ -97,13 +93,11 @@ export class RunAnalyticsStorage {
   /**
    * Appends staged by `schedulePersist` that have not yet been flushed to disk.
    * A failed JSONL append stays here and is replayed by the next persist
-   * instead of being silently dropped, so a scored snapshot/outcome is
+   * instead of being silently dropped, so a finalized snapshot is
    * eventually written or remains pending. Keyed by runId so the newest
-   * pending snapshot/outcome per run wins and retries don't double-append.
+   * pending snapshot per run wins and retries don't double-append.
    */
   private pendingSnapshots: Map<string, RunSnapshot> = new Map();
-  private pendingOutcomes: Map<string, OutcomeHistoryLogEntry> = new Map();
-  private pendingAgentReviews: Map<string, AgentReviewEntry> = new Map();
 
   constructor(options: RunAnalyticsStorageOptions) {
     const workspaceIds = [...new Set([options.workspaceId, ...(options.legacyWorkspaceIds ?? [])])];
@@ -196,8 +190,6 @@ export class RunAnalyticsStorage {
 
     const sourceFiles = [
       'run-snapshots.jsonl',
-      'outcome-history.jsonl',
-      'agent-reviews.jsonl',
       'open-runs.gen',
       'open-runs.a.json',
       'open-runs.b.json',
@@ -217,34 +209,16 @@ export class RunAnalyticsStorage {
     }
   }
 
-  schedulePersist(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
+  schedulePersist(snapshotToAppend?: RunSnapshot): void {
     if (this.disposed) return;
-    // Stage this persist's appends into the pending buffers so a failed append
+    // Stage this persist's append into the pending buffer so a failed append
     // is retried by the next persist rather than dropped. Dedup per runId keeps
-    // only the newest pending snapshot/outcome so retries don't double-append.
-    this.stagePendingAppend(snapshotToAppend, outcomeToAppend);
+    // only the newest pending snapshot so retries don't double-append.
+    this.stagePendingAppend(snapshotToAppend);
     this.dirty = true;
 
     // Coalesce high-frequency analytics events into a single debounced flush
     // instead of chaining a full checkpoint + JSONL write per event.
-    if (!this.flushTimer) {
-      this.flushTimer = setTimeout(() => {
-        this.flushTimer = null;
-        this.schedulePersistJob();
-      }, this.persistIntervalMs);
-    }
-  }
-
-  schedulePersistAgentReview(entry: AgentReviewEntry): void {
-    if (this.disposed) return;
-    // Stage the latest agent-review entry per runId so a failed append is
-    // retried by the next persist, and re-recording for the same run keeps
-    // only the newest review (mirrors pendingOutcomes / pendingSnapshots).
-    const existing = this.pendingAgentReviews.get(entry.runId);
-    if (!existing || this.agentReviewRecencyMs(entry) >= this.agentReviewRecencyMs(existing)) {
-      this.pendingAgentReviews.set(entry.runId, entry);
-    }
-    this.dirty = true;
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flushTimer = null;
@@ -267,7 +241,7 @@ export class RunAnalyticsStorage {
 
   async flush(): Promise<void> {
     this.cancelPersistTimer();
-    if (this.dirty || this.pendingSnapshots.size > 0 || this.pendingOutcomes.size > 0 || this.pendingAgentReviews.size > 0) {
+    if (this.dirty || this.pendingSnapshots.size > 0) {
       this.schedulePersistJob();
     }
 
@@ -336,18 +310,6 @@ export class RunAnalyticsStorage {
       } satisfies RunSnapshotLogEntry)).join('');
       await this.appendHistoryChunk('run-snapshots.jsonl', chunk, snapshots.length);
       this.deleteAppendedEntries(this.pendingSnapshots, snapshots);
-    }
-    const outcomes = [...this.pendingOutcomes.values()];
-    if (outcomes.length > 0) {
-      const chunk = outcomes.map((outcome) => serializeJsonLine(outcome)).join('');
-      await this.appendHistoryChunk('outcome-history.jsonl', chunk, outcomes.length);
-      this.deleteAppendedEntries(this.pendingOutcomes, outcomes);
-    }
-    const reviews = [...this.pendingAgentReviews.values()];
-    if (reviews.length > 0) {
-      const chunk = reviews.map((review) => serializeJsonLine(review)).join('');
-      await this.appendHistoryChunk('agent-reviews.jsonl', chunk, reviews.length);
-      this.deleteAppendedEntries(this.pendingAgentReviews, reviews);
     }
     if (needsCheckpoint) {
       const checkpoint = this.buildCheckpoint(++this.seq);
@@ -424,19 +386,13 @@ export class RunAnalyticsStorage {
     }
   }
 
-  private stagePendingAppend(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
+  private stagePendingAppend(snapshotToAppend?: RunSnapshot): void {
     if (snapshotToAppend) {
       const existing = this.pendingSnapshots.get(snapshotToAppend.runId);
       // Keep only the newest pending snapshot per runId; drop the older one
       // whether it is the incoming snapshot or the already-pending one.
       if (!existing || this.snapshotRecencyMs(snapshotToAppend) >= this.snapshotRecencyMs(existing)) {
         this.pendingSnapshots.set(snapshotToAppend.runId, snapshotToAppend);
-      }
-    }
-    if (outcomeToAppend) {
-      const existing = this.pendingOutcomes.get(outcomeToAppend.runId);
-      if (!existing || this.outcomeRecencyMs(outcomeToAppend) >= this.outcomeRecencyMs(existing)) {
-        this.pendingOutcomes.set(outcomeToAppend.runId, outcomeToAppend);
       }
     }
   }
@@ -453,14 +409,6 @@ export class RunAnalyticsStorage {
       }
     }
     return Date.parse(snapshot.startedAt);
-  }
-
-  private outcomeRecencyMs(outcome: OutcomeHistoryLogEntry): number {
-    return Date.parse(outcome.recordedAt);
-  }
-
-  private agentReviewRecencyMs(entry: AgentReviewEntry): number {
-    return Date.parse(entry.recordedAt);
   }
 
   private buildCheckpoint(seq: number): RunCheckpoint {
@@ -505,8 +453,6 @@ export class RunAnalyticsStorage {
     }
 
     await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'run-snapshots.jsonl');
-    await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'outcome-history.jsonl');
-    await this.mergeJsonlLogFiles(existingLegacyStorageDirs, 'agent-reviews.jsonl');
     await this.mergeCheckpointStates(existingLegacyStorageDirs);
   }
 
@@ -669,24 +615,6 @@ export class RunAnalyticsStorage {
                   : '',
         };
       }
-
-      if (fileName === 'outcome-history.jsonl'
-        && parsed.kind === 'run_outcome'
-        && typeof parsed.runId === 'string') {
-        return {
-          key: `run_outcome:${parsed.runId}`,
-          recency: typeof parsed.recordedAt === 'string' ? parsed.recordedAt : '',
-        };
-      }
-
-      if (fileName === 'agent-reviews.jsonl'
-        && parsed.kind === 'agent_review'
-        && typeof parsed.runId === 'string') {
-        return {
-          key: `agent_review:${parsed.runId}`,
-          recency: typeof parsed.recordedAt === 'string' ? parsed.recordedAt : '',
-        };
-      }
     } catch {
       // Fall back to the exact line content below.
     }
@@ -743,7 +671,7 @@ export class RunAnalyticsStorage {
       return;
     }
     await Promise.all(
-      ['run-snapshots.jsonl', 'outcome-history.jsonl', 'agent-reviews.jsonl'].map(
+      ['run-snapshots.jsonl'].map(
         (fileName) => this.pruneJsonlFile(fileName),
       ),
     );
@@ -833,10 +761,7 @@ export class RunAnalyticsStorage {
         // record and the canonical snapshot coercer validates/coerces its run.
         return entry.kind === 'run_snapshot' && coerceRunSnapshot(entry.run) !== null;
       }
-      if (fileName === 'outcome-history.jsonl') {
-        return coerceOutcomeHistoryLogEntry(parsed) !== null;
-      }
-      return coerceAgentReviewEntry(parsed) !== null;
+      return false;
     } catch {
       return false;
     }

@@ -1,0 +1,23 @@
+{
+  "//": "Typecheck gate for the image-context-guard extension. Mirrors computer-use: `module: preserve` + `moduleResolution: bundler` allow `import.meta` and `.js`-extension imports (jiti resolves `.js` to `.ts` at runtime). The `@earendil-works/pi-*` peer packages are provided by the pi runtime; paths point at the extension's node_modules for tsc. The guard reuses computer-use's newest-three projection helper via a relative import, so tsc also typechecks that module.",
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": "../..",
+    "paths": {
+      "@earendil-works/pi-ai": ["extension/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["extension/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules"]
+}

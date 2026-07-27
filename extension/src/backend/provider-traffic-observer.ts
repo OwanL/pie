@@ -30,6 +30,11 @@
  *    successful 2xx responses. Idempotent.
  */
 import { toErrorMessage } from '../shared/error-message';
+import {
+  classifyProviderHttpIncident,
+  classifyProviderTransportIncident,
+  publishProviderIncident,
+} from './provider-incident.js';
 
 type Level = 'info' | 'warn' | 'error';
 
@@ -170,7 +175,7 @@ function extractReqInfo(input: RequestInfo | URL, init?: RequestInit): ReqInfo |
     host,
     path,
     requestId: h.get('x-client-request-id'),
-    sessionAffinity: h.get('x-session-affinity'),
+    sessionAffinity: h.get('x-session-affinity') ?? h.get('session_id') ?? h.get('session-id'),
     requestBodyBytes,
     isProvider: h.has('authorization'),
   };
@@ -222,6 +227,18 @@ export function installProviderTrafficObserver(): void {
       } catch {
         /* never break */
       }
+      try {
+        if (info.sessionAffinity) {
+          publishProviderIncident(classifyProviderTransportIncident({
+            sessionId: info.sessionAffinity,
+            requestId: info.requestId,
+            providerHost: info.host,
+            error: err,
+          }));
+        }
+      } catch {
+        /* incident reporting must never break */
+      }
       throw err; // preserve original behavior
     }
 
@@ -262,6 +279,16 @@ export function installProviderTrafficObserver(): void {
           },
           'error',
         );
+        if (info.sessionAffinity) {
+          publishProviderIncident(classifyProviderHttpIncident({
+            sessionId: info.sessionAffinity,
+            requestId: info.requestId,
+            providerHost: info.host,
+            status,
+            headers: response.headers,
+            body,
+          }));
+        }
       } else if (VERBOSE) {
         emit(
           'response',

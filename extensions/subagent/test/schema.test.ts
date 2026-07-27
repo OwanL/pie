@@ -14,7 +14,7 @@ test("SubagentParams exposes one required task shape", () => {
 	assert.deepEqual(SubagentParams.required, ["agent", "task"]);
 	const props = SubagentParams.properties as Record<string, unknown>;
 	assert.deepEqual(Object.keys(props), [
-		"agent", "task", "userContext", "confirmProjectAgents", "cwd", "bucket", "thinkingLevel",
+		"agent", "task", "userContext", "confirmProjectAgents", "cwd", "bucket", "thinkingLevel", "modelRequirements",
 	]);
 	assert.equal("tasks" in props, false);
 	assert.equal("chain" in props, false);
@@ -88,4 +88,24 @@ test("SubagentParams rejects removed routes and malformed values", () => {
 	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", thinkingLevel: "max" }), false);
 	assert.equal(Value.Check(SubagentParams, { agent: "worker" }), false);
 	assert.equal(Value.Check(SubagentParams, { task: "a" }), false);
+});
+
+test("modelRequirements accepts image inputKinds and is optional", () => {
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] } }), true);
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: {} }), true, "empty object preserves behaviour");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: [] } }), true, "empty inputKinds preserves behaviour");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a" }), true, "absent preserves behaviour");
+});
+
+test("modelRequirements rejects unknown or malformed requirements", () => {
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: ["video"] } }), false, "unknown input kind");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { foo: 1 } }), false, "unknown property");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: { inputKinds: "image" } }), false, "non-array inputKinds");
+	assert.equal(Value.Check(SubagentParams, { agent: "worker", task: "a", modelRequirements: [] }), false, "non-object requirements");
+});
+
+test("prepareSubagentArguments passes modelRequirements through", () => {
+	assert.deepEqual(prepareSubagentArguments({ agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] } }), {
+		agent: "worker", task: "a", modelRequirements: { inputKinds: ["image"] },
+	});
 });

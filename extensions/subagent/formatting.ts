@@ -150,10 +150,13 @@ export function formatSelectionInfo(
 		retryCount?: number;
 		modelResolutionDiagnostic?: string;
 		bucketDowngradeReason?: string;
+		requestedModelRequirements?: { inputKinds?: Array<"image"> };
+		modelRequirementsSatisfied?: boolean;
+		requirementDiagnostic?: string;
 	},
 	themeFg: (color: any, text: string) => string,
 ): string | undefined {
-	if (!result.bucket && !result.selectedModel) return undefined;
+	if (!result.bucket && !result.selectedModel && !result.requestedModelRequirements && !result.requirementDiagnostic) return undefined;
 
 	const parts: string[] = [];
 
@@ -193,6 +196,23 @@ export function formatSelectionInfo(
 	// Nested-bucket cap: requested tier was downgraded (or fell back to active model)
 	if (result.bucketDowngradeReason) {
 		parts.push(themeFg("warning", "⚠ ") + themeFg("dim", result.bucketDowngradeReason));
+	}
+
+	// Requested hard model requirement (provenance). Surfaced when an active
+	// requirement was requested so the parent UI shows the constraint even when
+	// it was satisfied; a satisfied requirement is muted, an unsatisfied one is
+	// covered by the requirementDiagnostic warning below.
+	const requestedKinds = result.requestedModelRequirements?.inputKinds;
+	if (requestedKinds && requestedKinds.length > 0) {
+		const satisfied = result.modelRequirementsSatisfied !== false;
+		const label = `req:${requestedKinds.join(",")}`;
+		parts.push(satisfied ? themeFg("dim", label) : themeFg("warning", label));
+	}
+
+	// Requirement selection failure: bounded diagnostic identifying the unmet
+	// requirement and recovery actions.
+	if (result.requirementDiagnostic) {
+		parts.push(themeFg("warning", "⚠ ") + themeFg("dim", result.requirementDiagnostic));
 	}
 
 	return parts.length > 0 ? `🎯 ${parts.join(" ")}` : undefined;

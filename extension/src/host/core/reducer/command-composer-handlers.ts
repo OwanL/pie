@@ -72,6 +72,7 @@ export function handleSetEditingMessage(state: ArchState, cmd: Extract<Command, 
   return {
     state: produce(state, (draft) => {
       draft.transcript.editingMessageIdBySession[cmd.sessionPath] = cmd.messageId;
+      delete draft.transcript.editingDraftBySession[cmd.sessionPath];
     }),
     effects: [],
   };

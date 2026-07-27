@@ -29,7 +29,7 @@ import { h, render } from 'preact';
 import { useRef } from 'preact/hooks';
 import { act } from 'preact/test-utils';
 
-import { EMPTY_TRANSCRIPT_WINDOW } from '../../../../src/shared/protocol';
+import { EMPTY_TRANSCRIPT_WINDOW, type ChatMessage } from '../../../../src/shared/protocol';
 import { useTranscriptScroll } from '../../../../src/webview/panel/transcript/use-transcript-scroll';
 
 type ScrollResult = ReturnType<typeof useTranscriptScroll>;
@@ -68,25 +68,37 @@ function restoreRaf(): void {
 
 const capture: { r: ScrollResult | null } = { r: null };
 
-function Probe({ totalSize, busy, transcript }: { totalSize: number; busy: boolean; transcript?: readonly never[] }) {
+function Probe({
+  totalSize,
+  busy,
+  transcript,
+  hasNewer = false,
+  onJumpToLatest = noop,
+}: {
+  totalSize: number;
+  busy: boolean;
+  transcript?: readonly ChatMessage[];
+  hasNewer?: boolean;
+  onJumpToLatest?: () => void;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const r = useTranscriptScroll({
     scrollRef,
     sessionKey: '/s',
-    transcriptWindow: TRANSCRIPT_WINDOW,
+    transcriptWindow: { ...TRANSCRIPT_WINDOW, hasNewer },
     transcript: transcript ?? STABLE_TRANSCRIPT,
     transcriptLength: 1,
     busy,
     onLoadOlder: noop,
     onLoadNewer: noop,
-    onJumpToLatest: noop,
+    onJumpToLatest,
     totalSize,
   });
   capture.r = r;
   return h('div', { id: 'scroll-host', ref: scrollRef });
 }
 
-const STABLE_TRANSCRIPT: readonly never[] = [];
+const STABLE_TRANSCRIPT: readonly ChatMessage[] = [];
 
 let scrollHeightValue = 1000;
 let clientHeightValue = 200;
@@ -147,7 +159,7 @@ afterEach(() => {
   restoreRaf();
 });
 
-function rerender(busy: boolean, flush: number, transcript?: readonly never[]): void {
+function rerender(busy: boolean, flush: number, transcript?: readonly ChatMessage[]): void {
   tick += 1;
   act(() => {
     render(h(Probe, { totalSize: tick, busy, transcript }), container);
@@ -358,4 +370,99 @@ test('REGRESSION: sudden tool-card collapse (unmount) while pinned must not stop
   rerender(true, 8, []);
   assert.equal(capture.r!.autoFollowRef.current, true, 'sudden collapse must not disengage auto-follow');
   assert.ok(Math.abs(scrollTopValue - bottom()) <= 24, `sudden collapse: scrollTop=${scrollTopValue} bottom=${bottom()}`);
+});
+
+test('sending a prompt while scrolled up re-engages follow and jumps to the bottom', () => {
+  mountProbe(false);
+  settle();
+
+  scrollTopValue -= 240;
+  el.dispatchEvent(new Event('scroll'));
+  assert.equal(capture.r!.autoFollowRef.current, false, 'sanity: reading earlier content');
+
+  const optimisticPrompt: ChatMessage = {
+    id: 'local:new-send',
+    role: 'user',
+    createdAt: new Date().toISOString(),
+    markdown: 'continue',
+    status: 'completed',
+  };
+  scrollHeightValue += 120;
+  rerender(true, 2, [optimisticPrompt]);
+
+  assert.equal(capture.r!.autoFollowRef.current, true, 'a deliberate send should resume live follow');
+  assert.equal(scrollTopValue, bottom(), 'a deliberate send should snap to the new bottom');
+});
+
+test('sending from a partial window requests the latest page', () => {
+  mountProbe(false);
+  settle();
+
+  let jumpRequests = 0;
+  const optimisticPrompt: ChatMessage = {
+    id: 'local:partial-window-send',
+    role: 'user',
+    createdAt: new Date().toISOString(),
+    markdown: 'continue from here',
+    status: 'completed',
+  };
+  tick += 1;
+  act(() => {
+    render(h(Probe, {
+      totalSize: tick,
+      busy: true,
+      transcript: [optimisticPrompt],
+      hasNewer: true,
+      onJumpToLatest: () => { jumpRequests += 1; },
+    }), container);
+  });
+
+  assert.equal(jumpRequests, 1, 'send should load the real latest window before snapping');
+  assert.equal(capture.r!.autoFollowRef.current, true, 'send should re-engage follow while the latest page loads');
+});
+
+test('isAtBottom reflects real distance while auto-follow is catching up', () => {
+  mountProbe(true);
+  settle();
+  assert.equal(capture.r!.isAtBottom, true, 'sanity: settled at bottom');
+
+  scrollHeightValue += 400;
+  rerender(true, 1, []);
+  assert.ok(scrollTopValue < bottom() - 24, 'sanity: first ease frame is still away from bottom');
+  assert.equal(capture.r!.isAtBottom, false, 'jump control must remain visible while catching up');
+
+  act(() => flushFrames(8));
+  assert.equal(scrollTopValue, bottom(), 'follow should converge');
+  assert.equal(capture.r!.isAtBottom, true, 'bottom state should become true after convergence');
+});
+
+test('downward manual scrolling is exposed so the anchor can yield', () => {
+  mountProbe(false);
+  settle();
+
+  scrollTopValue -= 240;
+  el.dispatchEvent(new Event('scroll'));
+  scrollTopValue += 40;
+  el.dispatchEvent(new Event('scroll'));
+
+  assert.equal(capture.r!.autoFollowRef.current, false, 'still away from bottom');
+  assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'downward interaction signal should be active');
+});
+
+test('anchor yield survives a pause during a scrollbar or middle-button drag', async () => {
+  mountProbe(false);
+  settle();
+
+  scrollTopValue -= 240;
+  el.dispatchEvent(new Event('scroll'));
+  el.dispatchEvent(new MouseEvent('pointerdown', { button: 0 }));
+  scrollTopValue += 40;
+  el.dispatchEvent(new Event('scroll'));
+
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'an active pointer gesture must keep the anchor yielded');
+
+  window.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  assert.equal(capture.r!.isScrollingTowardBottomRef.current, false, 'anchoring resumes shortly after release');
 });

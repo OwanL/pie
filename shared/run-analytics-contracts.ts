@@ -56,20 +56,9 @@ export interface AssistantUsage {
   reportedCostUsd?: number;
 }
 
-export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
+export type ActiveRunStatus = 'open' | 'closed';
 
 export type PruningMode = 'auto' | 'shadow' | 'off' | 'custom';
-
-export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
-export type RunOutcomeSource = 'user' | 'agent';
-
-export interface RunOutcome {
-  resolution: RunOutcomeResolution;
-  /** Intended to be a user-facing ordinal score (e.g. 1–5). */
-  satisfaction: number;
-  /** Who supplied the outcome. Absent denotes a user-authored outcome for wire compatibility. */
-  source?: RunOutcomeSource;
-}
 
 /** The kind of composer input attached to a user send; equal to `ComposerInput['kind']` in the extension protocol. */
 export type InputKind = 'filesystemPathRef' | 'imageBlob' | 'fileBlob';
@@ -125,7 +114,7 @@ export interface SubagentTaskScoreRollup {
 // ─── Run-analytics snapshot types ───────────────────────────────────────────
 
 export type TaskBoundaryIntent = 'new_task' | 'continue_task' | null;
-export type RunFinalizationReason = 'scored' | 'closed_unscored' | 'new_task';
+export type RunFinalizationReason = 'closed' | 'new_task';
 
 export interface ToolFailureSample {
   toolName: string;
@@ -471,12 +460,10 @@ export interface RunSnapshot {
   runId: string;
   taskGroupId: string;
   status: ActiveRunStatus;
-  scored: boolean;
   startedAt: string;
   updatedAt: string;
   finalizedAt?: string;
   finalizationReason?: RunFinalizationReason;
-  outcome?: RunOutcome;
   modelId?: string;
   /** Provider selected alongside modelId; required to disambiguate shared model IDs. */
   provider?: string;

@@ -3,41 +3,26 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
+import { validateSessionReviewV2 } from '../../../extensions/session-reviewer/src/validation.js';
 import {
   REVIEW_CLOSURE_ACTIONS_FILE,
   type ClosureAction,
-  type SessionReview,
   type SessionSummary,
 } from '../shared/protocol';
-
-/**
- * Mixed V1/V2 session-review sidecar reader.
- *
- * V1 reviews retain latest-record-per-path semantics. Canonical V2 production
- * reviews are read once-only by stable session-header ID. Explicit closure
- * actions are read from a separate append-only outbox and never interpreted as
- * reviews.
- */
 
 export const REVIEWS_DIR_ENV = 'PIE_REVIEWS_DIR';
 export const REVIEWS_FILE = 'reviews.jsonl';
 
-interface SessionReviewV2Reference {
-  schemaVersion: number;
-  kind: 'production';
+interface ProductionReviewReference {
   reviewId: string;
   sessionId: string;
-  sessionPathAtReview: string;
   reviewedAt: string;
   identityFallback?: boolean;
 }
 
 export interface SessionReviewSidecar {
-  legacyByPath: Map<string, SessionReview>;
   /** First production review wins: later duplicates cannot replace canonical. */
-  productionBySessionId: Map<string, SessionReviewV2Reference>;
-  /** V1 paths whose current JSONL header could be resolved at cutover/read time. */
-  reservedLegacyBySessionId: Map<string, SessionReview>;
+  productionBySessionId: Map<string, ProductionReviewReference>;
   closureActionsBySessionId: Map<string, ClosureAction[]>;
 }
 
@@ -78,7 +63,7 @@ function readJsonLines(file: string | undefined): unknown[] {
   return values;
 }
 
-/** V1 normalized path-hash fallback from plan §14.5. */
+/** Deterministic normalized-path hash used only when the session header has no stable ID. */
 export function sessionPathHash(sessionPath: string): string {
   let normalized = sessionPath.trim().replace(/\\/g, '/');
   const wasUnc = normalized.startsWith('//');
@@ -97,8 +82,6 @@ function readFirstNonEmptyLine(filePath: string): string | undefined {
   let buffered = '';
   let totalBytes = 0;
   try {
-    // Session headers are small. Bound malformed files so identity lookup never
-    // reads a multi-megabyte transcript merely because its first newline is bad.
     while (totalBytes < 1024 * 1024) {
       const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
       if (bytesRead === 0) {
@@ -132,33 +115,42 @@ export function resolveSessionIdentity(sessionPath: string): SessionIdentity {
       }
     }
   } catch {
-    // Missing, unreadable, or malformed headers use the explicit legacy fallback.
+    // Missing, unreadable, or malformed headers use the deterministic fallback.
   }
   return { sessionId: sessionPathHash(sessionPath), identityFallback: true };
 }
 
-/** Read mixed reviews plus the separate closure-action outbox. */
-export function readReviews(): SessionReviewSidecar {
-  const legacyByPath = new Map<string, SessionReview>();
-  const productionBySessionId = new Map<string, SessionReviewV2Reference>();
+interface ReviewReference {
+  kind: 'production' | 'calibration';
+  reviewId: string;
+  sessionId: string;
+  reviewedAt: string;
+  identityFallback?: boolean;
+}
 
-  for (const value of readJsonLines(getSidecarFilePath(REVIEWS_FILE))) {
-    const v2 = normalizeV2Review(value);
-    if (v2) {
-      if (!productionBySessionId.has(v2.sessionId)) {
-        productionBySessionId.set(v2.sessionId, v2);
-      }
-      continue;
-    }
-    const legacy = normalizeLegacyReview(value);
-    if (legacy) legacyByPath.set(legacy.sessionPath, legacy);
+function normalizeV2Review(value: unknown): ReviewReference | undefined {
+  let review;
+  try {
+    review = validateSessionReviewV2(value);
+  } catch {
+    return undefined;
   }
+  return {
+    kind: review.kind,
+    reviewId: review.reviewId,
+    sessionId: review.sessionId,
+    reviewedAt: review.reviewedAt,
+    ...(typeof review.identityFallback === 'boolean' ? { identityFallback: review.identityFallback } : {}),
+  };
+}
 
-  const reservedLegacyBySessionId = new Map<string, SessionReview>();
-  for (const legacy of legacyByPath.values()) {
-    const identity = resolveSessionIdentity(legacy.sessionPath);
-    if (!identity.identityFallback) {
-      reservedLegacyBySessionId.set(identity.sessionId, legacy);
+/** Read V2 review records and the separate closure-action outbox. */
+export function readReviews(): SessionReviewSidecar {
+  const productionBySessionId = new Map<string, ProductionReviewReference>();
+  for (const value of readJsonLines(getSidecarFilePath(REVIEWS_FILE))) {
+    const review = normalizeV2Review(value);
+    if (review?.kind === 'production' && !productionBySessionId.has(review.sessionId)) {
+      productionBySessionId.set(review.sessionId, review);
     }
   }
 
@@ -178,57 +170,7 @@ export function readReviews(): SessionReviewSidecar {
     closureActionsBySessionId.set(action.targetSessionId, actions);
   }
 
-  return { legacyByPath, productionBySessionId, reservedLegacyBySessionId, closureActionsBySessionId };
-}
-
-function normalizeV2Review(value: unknown): SessionReviewV2Reference | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const v = value as Record<string, unknown>;
-  if (typeof v.schemaVersion !== 'number' || v.schemaVersion < 2) return undefined;
-  if (v.kind !== 'production') return undefined; // calibration is non-canonical
-  if (typeof v.reviewId !== 'string' || !v.reviewId.trim()) return undefined;
-  if (typeof v.sessionId !== 'string' || !v.sessionId.trim()) return undefined;
-  if (typeof v.sessionPathAtReview !== 'string') return undefined;
-  if (typeof v.reviewedAt !== 'string') return undefined;
-  return {
-    schemaVersion: v.schemaVersion,
-    kind: 'production',
-    reviewId: v.reviewId,
-    sessionId: v.sessionId,
-    sessionPathAtReview: v.sessionPathAtReview,
-    reviewedAt: v.reviewedAt,
-    ...(typeof v.identityFallback === 'boolean' ? { identityFallback: v.identityFallback } : {}),
-  };
-}
-
-function normalizeLegacyReview(value: unknown): SessionReview | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const v = value as Record<string, unknown>;
-  if (typeof v.sessionPath !== 'string') return undefined;
-  if (typeof v.done !== 'boolean') return undefined;
-  if (typeof v.rating !== 'number' || !Number.isFinite(v.rating)) return undefined;
-  const completion = v.completion;
-  if (completion !== 'fully' && completion !== 'partial' && completion !== 'setback') return undefined;
-  const rawBuckets = v.reviewerBuckets;
-  const reviewerBuckets = Array.isArray(rawBuckets) && rawBuckets.every((bucket) => typeof bucket === 'string')
-    ? rawBuckets as string[]
-    : undefined;
-  const rawCount = v.reviewerCount;
-  const reviewerCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
-    ? rawCount
-    : undefined;
-  const selfClose = typeof v.selfClose === 'boolean' ? v.selfClose : undefined;
-  return {
-    sessionPath: v.sessionPath,
-    done: v.done,
-    rating: v.rating,
-    completion,
-    reason: typeof v.reason === 'string' ? v.reason : '',
-    evaluatedAt: typeof v.evaluatedAt === 'string' ? v.evaluatedAt : new Date(0).toISOString(),
-    ...(reviewerBuckets !== undefined ? { reviewerBuckets } : {}),
-    ...(reviewerCount !== undefined ? { reviewerCount } : {}),
-    ...(selfClose !== undefined ? { selfClose } : {}),
-  };
+  return { productionBySessionId, closureActionsBySessionId };
 }
 
 function normalizeClosureAction(value: unknown): ClosureAction | undefined {
@@ -255,36 +197,21 @@ function normalizeClosureAction(value: unknown): ClosureAction | undefined {
   };
 }
 
-/** Merge V1/V2 review status and outbox actions into a session summary. */
+/** Merge canonical V2 review status and outbox actions into a session summary. */
 export function mergeReviewIntoSummary(summary: SessionSummary, reviews: SessionReviewSidecar): SessionSummary {
   const identity = resolveSessionIdentity(summary.path);
-  const v2 = reviews.productionBySessionId.get(identity.sessionId);
-  const exactLegacy = reviews.legacyByPath.get(summary.path);
-  const reservedLegacy = reviews.reservedLegacyBySessionId.get(identity.sessionId);
-  const legacy = v2 ? undefined : (reservedLegacy ?? exactLegacy);
+  const review = reviews.productionBySessionId.get(identity.sessionId);
   const closureActions = reviews.closureActionsBySessionId.get(identity.sessionId);
 
   return {
     ...summary,
     sessionId: identity.sessionId,
     ...(identity.identityFallback ? { identityFallback: true } : {}),
-    ...(v2 ? {
+    ...(review ? {
       reviewed: true,
-      reviewId: v2.reviewId,
-      reviewedAt: v2.reviewedAt,
-      ...(v2.identityFallback === true ? { identityFallback: true } : {}),
-    } : {}),
-    ...(legacy ? {
-      reviewed: true,
-      legacyReview: true,
-      done: legacy.done,
-      rating: legacy.rating,
-      completion: legacy.completion,
-      reviewReason: legacy.reason,
-      evaluatedAt: legacy.evaluatedAt,
-      ...(legacy.reviewerBuckets !== undefined ? { reviewerBuckets: legacy.reviewerBuckets } : {}),
-      ...(legacy.reviewerCount !== undefined ? { reviewerCount: legacy.reviewerCount } : {}),
-      ...(legacy.selfClose !== undefined ? { selfClose: legacy.selfClose } : {}),
+      reviewId: review.reviewId,
+      reviewedAt: review.reviewedAt,
+      ...(review.identityFallback === true ? { identityFallback: true } : {}),
     } : {}),
     ...(closureActions && closureActions.length > 0 ? { closureActions } : {}),
   };

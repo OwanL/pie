@@ -21,7 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { execGit, resolveBaselineRef } from '../../../extension/src/shared/git-baseline.js';
+import { execGit, resolveBaselineRef, isTrackedByGit } from '../../../extension/src/shared/git-baseline.js';
 import { minifyDiff, syntheticCreatedDiff } from './render.js';
 
 export type DiffKind = 'created' | 'modified' | 'deleted';
@@ -56,9 +56,20 @@ const NO_GIT_NOTE = 'no git baseline; use read to view';
 /** Compute one file's diff output. Never throws — git/fs failures become a
  *  header + inline note, matching `resolveBaselineRef`'s own `'HEAD'` fallback. */
 export async function computeFileDiff(input: DiffInput): Promise<DiffOutput> {
-  const { relPath, absPath, kind, context } = input;
+  const { relPath, absPath, context } = input;
+  let kind = input.kind;
   const additions = input.additions ?? 0;
   const deletions = input.deletions ?? 0;
+
+  // A `created` kind is the derivation's best guess from the tool NAME (write/
+  // create) — it cannot prove the file is new. Verify the claim against git: a
+  // tracked file existed before the session, so an overwrite is a modification,
+  // not a creation. Only treat as created (diff vs empty) when the file is NOT
+  // git-tracked. This is the evidence check: we do not claim a file is
+  // definitely created when git shows it already existed.
+  if (kind === 'created' && await isTrackedByGit(absPath)) {
+    kind = 'modified';
+  }
 
   // Created: full content as additions (diff vs empty). No git baseline needed.
   if (kind === 'created') {

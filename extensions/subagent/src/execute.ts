@@ -63,6 +63,9 @@ import {
 	attachSelectionMetadata,
 	isModelFailure,
 	checkTrailLoop,
+	modelInputSatisfiesRequirement,
+	requirementIsActive,
+	type ModelInputKind,
 	type SelectionContext,
 } from "./selection.js";
 
@@ -446,8 +449,31 @@ export async function maybeApproveProjectAgents(
 	};
 }
 
+/** Resolve and snapshot the effective subagent-only provider policy for a tree.
+ * Nested AgentSessions use in-memory session managers whose paths do not identify
+ * the main chat, so descendants must consume the root snapshot rather than
+ * re-resolving per-session preferences against their own session manager. */
+export function resolveTreeSubagentProviderToggles(
+	runtimeCtx: SubagentRuntimeContext,
+	rootSessionPath: string | undefined,
+): Record<string, boolean> {
+	if (runtimeCtx.subagentProviderToggles !== undefined) {
+		return runtimeCtx.subagentProviderToggles;
+	}
+	const resolved = resolveSubagentProviderToggles(
+		parseProviderToggles(process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV]),
+		parseSessionProviderToggles(process.env[SUBAGENT_PROVIDER_TOGGLES_ENV], rootSessionPath),
+	);
+	runtimeCtx.subagentProviderToggles = resolved;
+	return resolved;
+}
+
 /** Loads simple model config, reads user-configured buckets, and builds provider/model allowlists. */
-function setupModelSelection(ctx: ToolContext): SelectionContext {
+function setupModelSelection(
+	ctx: ToolContext,
+	runtimeCtx: SubagentRuntimeContext,
+	modelRequirements?: import("../types.js").ModelRequirements,
+): SelectionContext {
 	const modelConfigPath = path.join(CONFIG_ROOT, "model-profiles.json");
 	let modelConfig: SimpleModelConfig[] = [];
 	try {
@@ -463,13 +489,10 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 	const bucketAssignments = readBucketAssignments();
 
 	const disabledProviders = getDisabledProviders(parseProviderToggles(process.env[PROVIDER_TOGGLES_ENV]));
-	const sessionPath = readRuntimeContext().rootSessionPath
+	const sessionPath = runtimeCtx.rootSessionPath
 		?? ctx.sessionManager?.getSessionFile?.()
 		?? undefined;
-	const subagentProviderToggles = resolveSubagentProviderToggles(
-		parseProviderToggles(process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV]),
-		parseSessionProviderToggles(process.env[SUBAGENT_PROVIDER_TOGGLES_ENV], sessionPath),
-	);
+	const subagentProviderToggles = resolveTreeSubagentProviderToggles(runtimeCtx, sessionPath);
 	const subagentDisabled = getDisabledProviders(subagentProviderToggles);
 	for (const provider of subagentDisabled) disabledProviders.add(provider);
 	const availableModels = ctx.modelRegistry.getAvailable();
@@ -478,6 +501,29 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 			.filter((m) => !disabledProviders.has(m.provider))
 			.map((m) => m.id),
 	);
+
+	// Hard model requirement snapshot. Capability comes from the runtime
+	// `Model.input` array on `modelRegistry.getAvailable()` — `SimpleModelConfig`
+	// remains responsible for thinking/cost metadata only and is NOT treated as
+	// a capability source. A model id is requirement-qualified when at least one
+	// enabled provider-qualified declaration satisfies the requirement; this set
+	// is the hard filter applied by `selectModel` so duplicate ids exposed by an
+	// incompatible provider can never become eligible. Undefined (no filtering)
+	// when the requirement is absent or empty, preserving current behaviour.
+	const requirementActive = requirementIsActive(modelRequirements);
+	const requirementQualifiedModelIds = requirementActive
+		? new Set<string>(
+				availableModels
+					.filter((m) =>
+						!disabledProviders.has(m.provider)
+						&& modelInputSatisfiesRequirement(
+							(m as { input?: ReadonlyArray<string> }).input,
+							modelRequirements,
+						),
+					)
+					.map((m) => m.id),
+			)
+		: undefined;
 
 	return {
 		modelConfig,
@@ -490,6 +536,9 @@ function setupModelSelection(ctx: ToolContext): SelectionContext {
 		registryModels: availableModels,
 		modelFamilies: loadModelFamilies(path.join(CONFIG_ROOT, "models.json")),
 		nestedAllowedBuckets: readNestedAllowedBuckets(),
+		modelRequirements,
+		callerModelInput: ctx.model?.input as ReadonlyArray<ModelInputKind> | undefined,
+		requirementQualifiedModelIds,
 	};
 }
 
@@ -591,7 +640,7 @@ export async function execute(
 		};
 	}
 
-	const selectionCtx = setupModelSelection(ctx);
+	const selectionCtx = setupModelSelection(ctx, runtimeCtx, params.modelRequirements);
 	const requestedAgent = agents.find((candidate) => candidate.name === params.agent);
 	const provenanceSeed = {
 		promptHash: hashDelegatedPrompt(params.task),

@@ -53,13 +53,11 @@ export function toActiveRunSummary(
     ? {
         runId: run.runId,
         status: run.status,
-        scored: run.scored,
         nextSendStartsNewTask: true,
       }
     : {
         runId: run.runId,
         status: run.status,
-        scored: run.scored,
       };
 }
 

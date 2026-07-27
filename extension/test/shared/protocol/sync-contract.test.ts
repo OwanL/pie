@@ -149,6 +149,20 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
         isPartial: false,
         hasUserMessages: false,
       },
+      sessionUsage: {
+        samples: [{
+          sourceId: 'assistant:durable-1',
+          kind: 'assistant',
+          modelId: 'gpt-5.4',
+          provider: 'openai-codex',
+          inputTokens: 1_000,
+          outputTokens: 100,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 1_100,
+          reportedCostUsd: 0.01,
+        }],
+      },
       transcriptLoaded: false,
       pendingComposerInputs: [],
       activeRunSummary: null,
@@ -202,6 +216,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     assert.deepEqual(msg.state.pendingComposerInputs, []);
     assert.equal(msg.state.activeRunSummary, null);
     assert.deepEqual(msg.state.runSummariesBySession, {});
+    assert.equal(msg.state.sessionUsage?.samples[0]?.reportedCostUsd, 0.01);
   }
 });
 

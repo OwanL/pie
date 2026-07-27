@@ -161,7 +161,9 @@ export function evictSession(
   const { [sp]: _t, ...remainingTranscripts } = state.transcript.bySession;
   const { [sp]: _sp, ...remainingSystemPrompts } = state.transcript.systemPromptsBySession;
   const { [sp]: _w, ...remainingWindows } = state.transcript.windowBySession;
+  const { [sp]: _usage, ...remainingSessionUsage } = state.transcript.sessionUsageBySession ?? {};
   const { [sp]: _e, ...remainingEditing } = state.transcript.editingMessageIdBySession;
+  const { [sp]: _ed, ...remainingEditingDrafts } = state.transcript.editingDraftBySession;
   const { [sp]: _pf, ...remainingPagingInFlight } = state.transcript.pagingInFlightBySession;
   const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
   const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
@@ -273,7 +275,9 @@ export function evictSession(
         bySession: remainingTranscripts,
         systemPromptsBySession: remainingSystemPrompts,
         windowBySession: remainingWindows,
+        sessionUsageBySession: remainingSessionUsage,
         editingMessageIdBySession: remainingEditing,
+        editingDraftBySession: remainingEditingDrafts,
         pagingInFlightBySession: remainingPagingInFlight,
       },
       sessions: {

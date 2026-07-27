@@ -9,7 +9,6 @@ import type {
 } from '../scripts/contracts.ts';
 import { modelFamilyKey } from '../site/lib.ts';
 import { pruningRecoveryMetrics, pruningRecoverySpec } from '../site/charts/pruning.ts';
-import { satisfactionIntervalSpec, settingComparisonRows } from '../site/charts/settings.ts';
 import { runtimeFrictionTimingRows, toolTimeOverlapRows } from '../site/charts/latency-friction.ts';
 import {
   effectiveThroughputRows,
@@ -18,64 +17,10 @@ import {
   throughputVsConcurrencySpec,
 } from '../site/charts/throughput.ts';
 
-function settingRun(
-  runId: string,
-  mode: 'auto' | 'off' | null,
-  satisfaction: number | null,
-  status = 'scored',
-): PreparedRunRow {
-  return {
-    runId,
-    status,
-    fsPruningMode: mode,
-    satisfaction,
-    resolution: satisfaction === null ? null : 'resolved',
-  } as unknown as PreparedRunRow;
-}
-
 test('modelFamilyKey is canonical, trimmed, and falls back safely', () => {
   assert.equal(modelFamilyKey({ modelFamily: ' shared-family ', modelId: 'provider-id' }), 'shared-family');
   assert.equal(modelFamilyKey({ modelFamily: ' ', modelId: ' provider-id ' }), 'provider-id');
   assert.equal(modelFamilyKey({ modelFamily: null, modelId: null }), '(unknown)');
-});
-
-test('setting comparison excludes untracked groups, requires n>=3, and reports coverage', () => {
-  const runs = [
-    settingRun('auto-1', 'auto', 3),
-    settingRun('auto-2', 'auto', 4),
-    settingRun('auto-3', 'auto', 5),
-    settingRun('off-1', 'off', 4),
-    settingRun('off-2', 'off', 5),
-    settingRun('untracked-1', null, 1),
-    settingRun('untracked-2', null, 2),
-    settingRun('untracked-3', null, 3),
-    settingRun('untracked-4', null, 4),
-  ];
-
-  const comparison = settingComparisonRows(runs, (run) => run.fsPruningMode, ['auto', 'off']);
-  assert.deepEqual(comparison.rows.map((row) => row.group), ['auto']);
-  assert.equal(comparison.rows[0]!.scoredCount, 3);
-  assert.equal(comparison.rows[0]!.nLabel, 'n=3');
-  assert.ok(comparison.rows[0]!.ciLower < comparison.rows[0]!.avgSatisfaction);
-  assert.ok(comparison.rows[0]!.ciUpper > comparison.rows[0]!.avgSatisfaction);
-  assert.equal(comparison.totalRunCount, 9);
-  assert.equal(comparison.trackedRunCount, 5);
-  assert.equal(comparison.totalScoredCount, 9);
-  assert.equal(comparison.trackedScoredCount, 5);
-});
-
-test('setting satisfaction spec visibly layers 95% intervals and n labels', () => {
-  const rows = settingComparisonRows([
-    settingRun('auto-1', 'auto', 3),
-    settingRun('auto-2', 'auto', 4),
-    settingRun('auto-3', 'auto', 5),
-  ], (run) => run.fsPruningMode).rows;
-  const spec = satisfactionIntervalSpec(rows) as { layer: Array<Record<string, unknown>>; data: { values: Array<{ nLabel: string }> } };
-
-  assert.deepEqual(spec.layer.map((layer) => (layer.mark as { type: string }).type), ['bar', 'rule', 'point', 'text']);
-  assert.equal(spec.data.values[0]!.nLabel, 'n=3');
-  const textEncoding = spec.layer[3]!.encoding as { text: { field: string } };
-  assert.equal(textEncoding.text.field, 'nLabel');
 });
 
 test('pruning recovery transform keeps recoveries/decision separate from miss percent', () => {
@@ -126,15 +71,15 @@ function throughputTurn(
   return { runId, modelId, modelFamily, tokensPerSecond, concurrentBusySessions, endedAt } as PreparedTurnThroughputRow;
 }
 
-test('latency/friction transforms exclude absent legacy timing and expose overlap', () => {
+test('latency/friction transforms exclude absent timing and expose overlap', () => {
   const ctx = {
     runs: [
-      { runId: 'measured', status: 'scored', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: 300, toolDurationMs: 1000, criticalPathDurationMs: 700 },
-      { runId: 'legacy', status: 'scored', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: null, toolDurationMs: 900, criticalPathDurationMs: null },
+      { runId: 'measured', status: 'closed', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: 300, toolDurationMs: 1000, criticalPathDurationMs: 700 },
+      { runId: 'unmeasured', status: 'closed', modelId: 'm', modelFamily: 'family', skillPruningPrepassDurationMs: null, toolDurationMs: 900, criticalPathDurationMs: null },
     ],
     turnThroughputRows: [
       { runId: 'measured', providerQueueMs: 50 },
-      { runId: 'legacy', providerQueueMs: null },
+      { runId: 'unmeasured', providerQueueMs: null },
     ],
     retryTimingRows: [
       { runId: 'measured', scheduledDelayMs: 1000, measuredDelayMs: 1100, durationMs: 3000 },

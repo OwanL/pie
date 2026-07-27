@@ -143,8 +143,9 @@
         "family": { "type": "string" },
         "input": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "enum": ["text", "image"] }
         },
+        "maxImagesPerRequest": { "type": "integer", "minimum": 1 },
         "contextWindow": { "type": "integer", "minimum": 1 },
         "maxTokens": { "type": "integer", "minimum": 1 },
         "thinkingLevelMap": {

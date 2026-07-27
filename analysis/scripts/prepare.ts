@@ -1,13 +1,9 @@
 import {
-  type RunOutcome,
   type RunSnapshot,
-  type AgentReviewSourceEvent,
   type PreparedAnalyticsData,
-  type PreparedAgentReviewRow,
   type PreparedBackendErrorRow,
   type PreparedFileExtensionRow,
   type PreparedHistoricalSessionSummary,
-  type PreparedLegacySessionReviewRow,
   type PreparedPruningEventRow,
   type PreparedPruningSignalRow,
   type PreparedRetryTimingRow,
@@ -288,22 +284,6 @@ function toStartedDay(timestamp: string): string {
   return timestamp.slice(0, 10);
 }
 
-function getRunOutcome(run: RunSnapshot, outcomesByRunId: Map<string, RunOutcome>): RunOutcome | null {
-  return run.outcome ?? outcomesByRunId.get(run.runId) ?? null;
-}
-
-function outcomeFromAgentReview(review: AgentReviewSourceEvent): RunOutcome | null {
-  if (!review.done || !Number.isInteger(review.rating) || review.rating < 1 || review.rating > 5) {
-    return null;
-  }
-  const resolution = review.completion === 'fully'
-    ? 'resolved'
-    : review.completion === 'partial'
-      ? 'partially_resolved'
-      : 'unresolved';
-  return { resolution, satisfaction: review.rating, source: 'agent' };
-}
-
 function runStatusPriority(status: RunSnapshot['status']): number {
   return status === 'open' ? 0 : 1;
 }
@@ -317,14 +297,12 @@ function updatedAtMs(run: RunSnapshot): number {
  * Deduplicate runs by runId, preferring finalized over open and newer over older.
  *
  * Priority rules for same runId:
- *   1. Closed (scored / closed_unscored) over open
+ *   1. Closed over open
  *   2. Newer updatedAt over older updatedAt
  *   3. If both status and updatedAt are equal, prefer the later entry
  *
  * Note: if a run was closed and then reopened, the open version is discarded
  * in favor of the closed version, even though the open version has more recent data.
- * The closed version carries the outcome (satisfaction/resolution) which is preferred
- * for analytics purposes.
  */
 function pickPreferredRun(left: RunSnapshot, right: RunSnapshot): RunSnapshot {
   const leftPriority = runStatusPriority(left.status);
@@ -351,12 +329,10 @@ function dedupeRunsById(runs: RunSnapshot[]): RunSnapshot[] {
 
 function prepareRun(
   run: RunSnapshot,
-  outcomesByRunId: Map<string, RunOutcome>,
   pricingMap: ReturnType<typeof loadModelPricingMap>,
   familyMap: ReturnType<typeof loadModelFamilyMap>,
   identity: { sessionId: string; identityFallback: boolean },
 ): PreparedRunRow {
-  const outcome = getRunOutcome(run, outcomesByRunId);
   const verificationTotalCount = run.verification.totalCount;
   const verificationFailureCount = run.verification.failureCount;
   const startedDay = toStartedDay(run.startedAt);
@@ -419,23 +395,18 @@ function prepareRun(
 
   const prepassTokens = aggregateSkillPruningPrepassTokens(run);
 
-  const scored = run.scored || outcome !== null;
   return {
     runId: run.runId,
     taskGroupId: run.taskGroupId,
     sessionId: identity.sessionId,
     identityFallback: identity.identityFallback,
     sessionPathHash: sessionPathHash(run.sessionPath),
-    status: outcome ? 'scored' : run.status,
-    scored,
+    status: run.status,
     startedAt: run.startedAt,
     startedDay,
     updatedAt: run.updatedAt,
     finalizedAt: run.finalizedAt ?? null,
-    finalizationReason: outcome ? 'scored' : (run.finalizationReason ?? null),
-    resolution: outcome?.resolution ?? null,
-    satisfaction: outcome?.satisfaction ?? null,
-    outcomeSource: outcome ? (outcome.source ?? 'user') : null,
+    finalizationReason: run.finalizationReason ?? null,
     modelId: normalizedModelId,
     modelFamily,
     provider,
@@ -559,9 +530,6 @@ function prepareRun(
     cacheHitRatio: ((run.cacheReadTokens ?? 0) + (run.inputTokens ?? 0)) > 0
       ? round3((run.cacheReadTokens ?? 0) / ((run.cacheReadTokens ?? 0) + (run.inputTokens ?? 0)))
       : null,
-    firstAttemptSuccess: outcome
-      ? run.interruptedCount === 0 && run.messageEditCount === 0 && run.truncatedAfterCount === 0 && outcome.resolution === 'resolved'
-      : null,
     editRevisitRate: (() => {
       // File churn: fraction of attributed EDIT ops that revisited an already-edited file.
       // 0 = every edit touched a fresh file (no churn); →1 = kept re-editing the same files.
@@ -596,7 +564,7 @@ function prepareRun(
   };
 }
 
-function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): PreparedToolUsageRow[] {
+function prepareToolUsage(run: RunSnapshot): PreparedToolUsageRow[] {
   const startedDay = toStartedDay(run.startedAt);
   // Terminal events from older hosts sometimes lost their name while the
   // corresponding tool.started count remained correctly attributed. Preserve
@@ -642,9 +610,6 @@ function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): Prepare
         thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
         experimentAssignment: normalizeNullableText(run.experimentAssignment),
         mixedTreatmentConfig: run.mixedTreatmentConfig,
-        scored: run.scored || outcome !== null,
-        satisfaction: outcome?.satisfaction ?? null,
-        resolution: outcome?.resolution ?? null,
       };
     });
 }
@@ -655,7 +620,7 @@ function prepareToolUsage(run: RunSnapshot, outcome: RunOutcome | null): Prepare
  * classification at the aggregate level. Failures that cannot be attributed
  * to a specific tool are emitted as run-level rows (toolName = '(unattributed)').
  */
-function prepareToolFailures(run: RunSnapshot, outcome: RunOutcome | null): PreparedToolFailureRow[] {
+function prepareToolFailures(run: RunSnapshot): PreparedToolFailureRow[] {
   const startedDay = toStartedDay(run.startedAt);
   const rows: PreparedToolFailureRow[] = [];
   const sampleByKey = new Map<string, (typeof run.toolUsage.failureSamples)[number]>(
@@ -681,9 +646,6 @@ function prepareToolFailures(run: RunSnapshot, outcome: RunOutcome | null): Prep
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored || outcome !== null,
-      satisfaction: outcome?.satisfaction ?? null,
-      resolution: outcome?.resolution ?? null,
     });
   };
 
@@ -729,7 +691,7 @@ function prepareToolFailures(run: RunSnapshot, outcome: RunOutcome | null): Prep
   return rows;
 }
 
-function prepareToolResultIssues(run: RunSnapshot, outcome: RunOutcome | null): PreparedToolResultIssueRow[] {
+function prepareToolResultIssues(run: RunSnapshot): PreparedToolResultIssueRow[] {
   const startedDay = toStartedDay(run.startedAt);
   const rows: PreparedToolResultIssueRow[] = [];
   const emittedKeys = new Set<string>();
@@ -756,9 +718,6 @@ function prepareToolResultIssues(run: RunSnapshot, outcome: RunOutcome | null): 
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored || outcome !== null,
-      satisfaction: outcome?.satisfaction ?? null,
-      resolution: outcome?.resolution ?? null,
     });
   };
 
@@ -786,7 +745,7 @@ function prepareToolResultIssues(run: RunSnapshot, outcome: RunOutcome | null): 
   return rows;
 }
 
-function prepareVerificationUsage(run: RunSnapshot, outcome: RunOutcome | null): PreparedVerificationUsageRow[] {
+function prepareVerificationUsage(run: RunSnapshot): PreparedVerificationUsageRow[] {
   const startedDay = toStartedDay(run.startedAt);
   const kinds: VerificationCommandKind[] = ['test', 'build', 'lint', 'typecheck', 'format', 'other'];
   return kinds
@@ -803,13 +762,10 @@ function prepareVerificationUsage(run: RunSnapshot, outcome: RunOutcome | null):
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored || outcome !== null,
-      satisfaction: outcome?.satisfaction ?? null,
-      resolution: outcome?.resolution ?? null,
     }));
 }
 
-function prepareBackendErrors(run: RunSnapshot, outcome: RunOutcome | null): PreparedBackendErrorRow[] {
+function prepareBackendErrors(run: RunSnapshot): PreparedBackendErrorRow[] {
   if (run.backendErrorCodes.length === 0) {
     return [];
   }
@@ -833,13 +789,10 @@ function prepareBackendErrors(run: RunSnapshot, outcome: RunOutcome | null): Pre
     modelId: normalizeNullableText(run.modelId),
     thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
     experimentAssignment: normalizeNullableText(run.experimentAssignment),
-    scored: run.scored || outcome !== null,
-    satisfaction: outcome?.satisfaction ?? null,
-    resolution: outcome?.resolution ?? null,
   }));
 }
 
-function prepareFileExtensions(run: RunSnapshot, outcome: RunOutcome | null): PreparedFileExtensionRow[] {
+function prepareFileExtensions(run: RunSnapshot): PreparedFileExtensionRow[] {
   const exts = run.fileExtensions;
   if (!exts) {
     return [];
@@ -873,9 +826,6 @@ function prepareFileExtensions(run: RunSnapshot, outcome: RunOutcome | null): Pr
       thinkingLevel: normalizeThinkingLevel(run.thinkingLevel),
       experimentAssignment: normalizeNullableText(run.experimentAssignment),
       mixedTreatmentConfig: run.mixedTreatmentConfig,
-      scored: run.scored || outcome !== null,
-      satisfaction: outcome?.satisfaction ?? null,
-      resolution: outcome?.resolution ?? null,
     };
   });
 }
@@ -1038,43 +988,6 @@ function prepareWarmBashSummaries(
   });
 }
 
-/** Join agent-review events to runs by sessionPathHash + runId (the event carries both).
- *  Mirrors how outcomes are joined to runs, but disambiguates same-session runs via runId:
- *  the composite key `${sessionPathHash}::${runId}` picks the exact run whose session path
- *  hashes to the same prefix and whose runId matches. Unjoined reviews keep the event's runId
- *  with null model/satisfaction (they still surface in totals but not in agreement). */
-function prepareAgentReviews(
-  events: AgentReviewSourceEvent[],
-  runs: PreparedRunRow[],
-): PreparedAgentReviewRow[] {
-  const runByKey = new Map<string, PreparedRunRow>();
-  for (const run of runs) {
-    runByKey.set(`${run.sessionPathHash}::${run.runId}`, run);
-  }
-  return events.map((e) => {
-    const pathHash = sessionPathHash(e.sessionPath);
-    const matchedRun = runByKey.get(`${pathHash}::${e.runId}`);
-    return {
-      cohort: 'legacy_v1',
-      sessionId: matchedRun?.sessionId ?? pathHash,
-      identityFallback: matchedRun?.identityFallback ?? true,
-      runId: e.runId,
-      sessionPathHash: pathHash,
-      taskGroupId: e.taskGroupId,
-      recordedAt: e.recordedAt,
-      evaluatedAt: e.evaluatedAt,
-      startedDay: e.recordedAt.slice(0, 10),
-      modelFamily: matchedRun?.modelFamily ?? null,
-      agentRating: e.rating,
-      agentCompletion: e.completion,
-      agentDone: e.done,
-      reviewerBuckets: [...e.reviewerBuckets].sort(),
-      reviewerCount: e.reviewerCount,
-      userSatisfaction: matchedRun?.outcomeSource === 'user' ? matchedRun.satisfaction : null,
-    };
-  });
-}
-
 function roundThroughput(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -1159,22 +1072,6 @@ function prepareRetryTiming(
 }
 
 export function prepareSourceAnalytics(source: SourceAnalyticsPayload): PreparedAnalyticsData {
-  const outcomesByRunId = new Map<string, RunOutcome>();
-  const explicitOutcomeRunIds = new Set<string>();
-  for (const outcome of source.outcomes) {
-    outcomesByRunId.set(outcome.runId, outcome.outcome);
-    explicitOutcomeRunIds.add(outcome.runId);
-  }
-  // Backfill reviews recorded before agent outcomes were persisted directly.
-  // Explicit run outcomes always win; among agent reviews the latest source
-  // event wins for the same run.
-  for (const review of source.agentReviews ?? []) {
-    const outcome = outcomeFromAgentReview(review);
-    if (outcome && !explicitOutcomeRunIds.has(review.runId)) {
-      outcomesByRunId.set(review.runId, outcome);
-    }
-  }
-
   const dedupedRuns = dedupeRunsById([...source.completedRuns, ...source.openRuns]);
   const pricingMap = loadModelPricingMap();
   const familyMap = loadModelFamilyMap();
@@ -1182,13 +1079,10 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   for (const review of source.sessionReviewsV2 ?? []) {
     if (!review.identityFallback) stableIdByPath.set(normalizeSessionPath(review.sessionPathAtReview), review.sessionId);
   }
-  for (const review of source.legacySessionReviews ?? []) {
-    if (!review.identityFallback) stableIdByPath.set(normalizeSessionPath(review.normalizedSessionPath), review.sessionId);
-  }
   const runs = dedupedRuns.map((run) => {
     const headerSessionId = run.sessionId?.trim();
     const stableId = headerSessionId || stableIdByPath.get(normalizeSessionPath(run.sessionPath));
-    return prepareRun(run, outcomesByRunId, pricingMap, familyMap, stableId
+    return prepareRun(run, pricingMap, familyMap, stableId
       ? { sessionId: stableId, identityFallback: false }
       : { sessionId: sessionPathHash(run.sessionPath), identityFallback: true });
   });
@@ -1216,7 +1110,6 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     const existing = historicalBySessionId.get(summary.sessionId);
     if (existing) {
       prepared.sourceProvenance = [...new Set([...existing.sourceProvenance, ...prepared.sourceProvenance])].sort();
-      if (!prepared.review) prepared.review = existing.review;
     }
     historicalBySessionId.set(summary.sessionId, prepared);
   }
@@ -1231,13 +1124,12 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const retryTiming: PreparedRetryTimingRow[] = [];
 
   for (const run of dedupedRuns) {
-    const outcome = getRunOutcome(run, outcomesByRunId);
-    toolUsage.push(...prepareToolUsage(run, outcome));
-    toolFailures.push(...prepareToolFailures(run, outcome));
-    toolResultIssues.push(...prepareToolResultIssues(run, outcome));
-    verificationUsage.push(...prepareVerificationUsage(run, outcome));
-    backendErrors.push(...prepareBackendErrors(run, outcome));
-    fileExtensions.push(...prepareFileExtensions(run, outcome));
+    toolUsage.push(...prepareToolUsage(run));
+    toolFailures.push(...prepareToolFailures(run));
+    toolResultIssues.push(...prepareToolResultIssues(run));
+    verificationUsage.push(...prepareVerificationUsage(run));
+    backendErrors.push(...prepareBackendErrors(run));
+    fileExtensions.push(...prepareFileExtensions(run));
     turnThroughput.push(...prepareTurnThroughput(run, familyMap));
     retryTiming.push(...prepareRetryTiming(run, familyMap));
   }
@@ -1247,7 +1139,6 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
   const toolResultPruning = prepareToolResultPruning(source.toolResultPruningEvents ?? [], runs);
   const warmBashRewrites = prepareWarmBashRewrites(source.warmBashRewrites ?? [], runs);
   const warmBashSummaries = prepareWarmBashSummaries(source.warmBashSummaries ?? [], runs);
-  const agentReviews = prepareAgentReviews(source.agentReviews ?? [], runs);
   const runsBySessionId = new Map<string, PreparedRunRow[]>();
   for (const run of runs) {
     const matches = runsBySessionId.get(run.sessionId) ?? [];
@@ -1276,17 +1167,11 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
       criterionCoverage: activeCriteria.length ? assessable / activeCriteria.length : null,
       externalBlockerRate: activeCriteria.length ? externalBlocked / activeCriteria.length : null,
       process: review.process, evidence: review.evidence,
-      findings: review.findings.map(({ findingId, severity, category, criterionId, ledgerEffect }) => ({ findingId, severity, category, ...(criterionId ? { criterionId } : {}), ledgerEffect })),
       humanCheckStatus: review.humanCheckStatus, confidence: review.confidence,
       disagreement: review.disagreement, reviewers: review.reviewers,
       diversityAchieved: review.diversityAchieved, blindingApplied: review.blindingApplied,
     };
   });
-  const legacySessionReviews: PreparedLegacySessionReviewRow[] = (source.legacySessionReviews ?? []).map(({ normalizedSessionPath, ...review }) => ({
-    ...review,
-    sessionPathHash: sessionPathHash(normalizedSessionPath),
-  }));
-
   return {
     sourceSchemaVersion: source.schemaVersion,
     sourceExportedAt: source.exportedAt,
@@ -1305,9 +1190,8 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     toolResultPruning,
     warmBashRewrites,
     warmBashSummaries,
-    agentReviews,
     sessionReviewsV2,
-    legacySessionReviews,
+    sessionReviewV2Diagnostics: source.sessionReviewV2Diagnostics,
     historicalSessions,
   };
 }

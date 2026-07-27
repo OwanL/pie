@@ -3,6 +3,7 @@ import type {
   PaintObservedPayload,
   RenderFailurePayload,
   StateReceivedPayload,
+  TranscriptCommitBlockedPayload,
   TranscriptCommittedPayload,
 } from '../../shared/protocol';
 
@@ -72,6 +73,7 @@ export type StateDeliveryTelemetryKind =
   | 'render-failure'
   | 'evidence-stale'
   | 'commit-deferred'
+  | 'commit-blocked'
   | 'commit-advanced'
   | 'commit-stale'
   | 'commit-timeout'
@@ -163,6 +165,7 @@ type PostOperation<T> = {
   timeout: unknown;
   resolveProbe?: (accepted: boolean) => void;
   deferredCommit?: DeferredCommit;
+  deferredBlock?: TranscriptCommitBlockedPayload;
 };
 
 /**
@@ -305,6 +308,47 @@ export class StateDeliveryController<T> {
 
   appCommitted(payload: AppCommittedPayload): void {
     this.recordNonCommitEvidence('app-committed', payload.viewGeneration, payload.revision);
+  }
+
+  /**
+   * Renderer evidence can show that an accepted snapshot is already stale
+   * relative to newer coalesced host state (most often while text/tool leaves
+   * are streaming). In that case retire only the stale acceptance and post the
+   * latest desired snapshot. Without this path the commit gate waits for a
+   * snapshot the renderer has explicitly said it cannot prove, then enters a
+   * pointless reload loop while the stream keeps advancing.
+   *
+   * A block with no newer host state does not open the gate: the existing
+   * commit deadline still bounds a genuine, stable render mismatch.
+   */
+  transcriptCommitBlocked(payload: TranscriptCommitBlockedPayload): void {
+    const { revision, viewGeneration, reason } = payload;
+    if (!this.validateEvidenceGeneration('transcript-committed', viewGeneration, revision)) return;
+    if (revision <= this.lastTranscriptCommittedRevision || revision <= this.retiredAcceptedRevisionHighWater) {
+      this.telemetry('evidence-stale', { revision, viewGeneration }, 'transcript-commit-blocked');
+      return;
+    }
+    const entry = this.accepted.find((candidate) => candidate.revision === revision);
+    if (!entry) {
+      // A block may race postMessage settlement just like a successful commit.
+      // It cannot safely retire the active post until VS Code accepts it.
+      if (this.activeOperation?.revision === revision) {
+        this.activeOperation.deferredBlock = payload;
+        this.telemetry('commit-blocked', { revision, viewGeneration }, `${reason}:pre-settlement`);
+        return;
+      }
+      this.protocolDefect('future-or-unaccepted-evidence', 'transcript-committed', revision, viewGeneration);
+      return;
+    }
+
+    this.telemetry('commit-blocked', { revision, viewGeneration }, reason);
+    if (!this.dirty) return;
+
+    this.retiredAcceptedRevisionHighWater = Math.max(this.retiredAcceptedRevisionHighWater, revision);
+    this.accepted = this.accepted.filter((candidate) => candidate.revision > revision);
+    this.clearCommitTimer();
+    this.armCommitDeadline();
+    this.flush();
   }
 
   transcriptCommitted(payload: TranscriptCommittedPayload): void;
@@ -513,6 +557,8 @@ export class StateDeliveryController<T> {
     if (operation.deferredCommit) {
       const deferredCommit = operation.deferredCommit;
       this.recordTranscriptCommit(deferredCommit.revision, deferredCommit.identity, deferredCommit.viewGeneration);
+    } else if (operation.deferredBlock) {
+      this.transcriptCommitBlocked(operation.deferredBlock);
     }
 
     if (this.accepted.length > this.options.acceptedLedgerCapacity && !this.overflowReported) {

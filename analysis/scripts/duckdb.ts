@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 
 import type {
   PreparedAnalyticsData,
-  PreparedAgentReviewRow,
   PreparedBackendErrorRow,
   PreparedFileExtensionRow,
   PreparedPruningEventRow,
@@ -48,15 +47,11 @@ interface DuckDbRunRow {
   task_group_id: string;
   session_path_hash: string;
   status: string;
-  scored: boolean;
   started_at: string;
   started_day: string;
   updated_at: string;
   finalized_at: string | null;
   finalization_reason: string | null;
-  resolution: string | null;
-  satisfaction: number | null;
-  outcome_source: string | null;
   model_id: string | null;
   model_family: string | null;
   provider: string | null;
@@ -135,7 +130,6 @@ interface DuckDbRunRow {
   token_efficiency: number | null;
   context_utilization: number | null;
   cache_hit_ratio: number | null;
-  first_attempt_success: boolean | null;
   estimated_cost_usd: number | null;
   // ── Fields below were added after the initial DuckDB export layer and must be
   //    kept in sync with `PreparedRunRow` (contracts.ts) + `toDuckDbRunRow` +
@@ -189,9 +183,6 @@ interface DuckDbToolUsageRow {
   thinking_level: string | null;
   experiment_assignment: string | null;
   mixed_treatment_config: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbToolFailureRow {
@@ -208,9 +199,6 @@ interface DuckDbToolFailureRow {
   thinking_level: string | null;
   experiment_assignment: string | null;
   mixed_treatment_config: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbToolResultIssueRow {
@@ -227,9 +215,6 @@ interface DuckDbToolResultIssueRow {
   thinking_level: string | null;
   experiment_assignment: string | null;
   mixed_treatment_config: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbVerificationUsageRow {
@@ -243,9 +228,6 @@ interface DuckDbVerificationUsageRow {
   thinking_level: string | null;
   experiment_assignment: string | null;
   mixed_treatment_config: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbBackendErrorRow {
@@ -257,9 +239,6 @@ interface DuckDbBackendErrorRow {
   model_id: string | null;
   thinking_level: string | null;
   experiment_assignment: string | null;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbFileExtensionRow {
@@ -275,9 +254,6 @@ interface DuckDbFileExtensionRow {
   thinking_level: string | null;
   experiment_assignment: string | null;
   mixed_treatment_config: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: string | null;
 }
 
 interface DuckDbPruningEventRow {
@@ -358,25 +334,6 @@ interface DuckDbWarmBashSummaryRow {
   gnu_grep: boolean;
 }
 
-interface DuckDbAgentReviewRow {
-  cohort: 'legacy_v1';
-  session_id: string;
-  identity_fallback: boolean;
-  run_id: string;
-  session_path_hash: string;
-  task_group_id: string;
-  recorded_at: string;
-  evaluated_at: string;
-  started_day: string;
-  model_family: string | null;
-  agent_rating: number;
-  agent_completion: string;
-  agent_done: boolean;
-  reviewer_buckets: string[];
-  reviewer_count: number;
-  user_satisfaction: number | null;
-}
-
 interface DuckDbTurnThroughputRow {
   run_id: string;
   ended_at: string;
@@ -434,7 +391,6 @@ interface DuckDbSessionReviewV2Row {
   evidence_execution: string;
   evidence_human: string;
   evidence_limitation_count: number;
-  finding_count: number;
   material_disagreement: boolean;
   adjudicated: boolean;
   disputed_field_count: number;
@@ -464,15 +420,11 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     task_group_id: row.taskGroupId,
     session_path_hash: row.sessionPathHash,
     status: row.status,
-    scored: row.scored,
     started_at: row.startedAt,
     started_day: row.startedDay,
     updated_at: row.updatedAt,
     finalized_at: row.finalizedAt,
     finalization_reason: row.finalizationReason,
-    resolution: row.resolution,
-    satisfaction: row.satisfaction,
-    outcome_source: row.outcomeSource,
     model_id: row.modelId,
     model_family: row.modelFamily,
     provider: row.provider,
@@ -551,7 +503,6 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     token_efficiency: row.tokenEfficiency,
     context_utilization: row.contextUtilization,
     cache_hit_ratio: row.cacheHitRatio,
-    first_attempt_success: row.firstAttemptSuccess,
     estimated_cost_usd: row.estimatedCostUsd,
     subagent_input_tokens: row.subagentInputTokens,
     subagent_output_tokens: row.subagentOutputTokens,
@@ -602,9 +553,6 @@ function toDuckDbToolUsageRow(row: PreparedToolUsageRow): DuckDbToolUsageRow {
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     mixed_treatment_config: row.mixedTreatmentConfig,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -623,9 +571,6 @@ function toDuckDbToolFailureRow(row: PreparedToolFailureRow): DuckDbToolFailureR
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     mixed_treatment_config: row.mixedTreatmentConfig,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -644,9 +589,6 @@ function toDuckDbToolResultIssueRow(row: PreparedToolResultIssueRow): DuckDbTool
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     mixed_treatment_config: row.mixedTreatmentConfig,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -662,9 +604,6 @@ function toDuckDbVerificationUsageRow(row: PreparedVerificationUsageRow): DuckDb
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     mixed_treatment_config: row.mixedTreatmentConfig,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -678,9 +617,6 @@ function toDuckDbBackendErrorRow(row: PreparedBackendErrorRow): DuckDbBackendErr
     model_id: row.modelId,
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -698,9 +634,6 @@ function toDuckDbFileExtensionRow(row: PreparedFileExtensionRow): DuckDbFileExte
     thinking_level: row.thinkingLevel,
     experiment_assignment: row.experimentAssignment,
     mixed_treatment_config: row.mixedTreatmentConfig,
-    scored: row.scored,
-    satisfaction: row.satisfaction,
-    resolution: row.resolution,
   };
 }
 
@@ -792,27 +725,6 @@ function toDuckDbWarmBashSummaryRow(row: PreparedWarmBashSummaryRow): DuckDbWarm
   };
 }
 
-function toDuckDbAgentReviewRow(row: PreparedAgentReviewRow): DuckDbAgentReviewRow {
-  return {
-    cohort: row.cohort,
-    session_id: row.sessionId,
-    identity_fallback: row.identityFallback,
-    run_id: row.runId,
-    session_path_hash: row.sessionPathHash,
-    task_group_id: row.taskGroupId,
-    recorded_at: row.recordedAt,
-    evaluated_at: row.evaluatedAt,
-    started_day: row.startedDay,
-    model_family: row.modelFamily,
-    agent_rating: row.agentRating,
-    agent_completion: row.agentCompletion,
-    agent_done: row.agentDone,
-    reviewer_buckets: row.reviewerBuckets,
-    reviewer_count: row.reviewerCount,
-    user_satisfaction: row.userSatisfaction,
-  };
-}
-
 function toDuckDbTurnThroughputRow(row: PreparedTurnThroughputRow): DuckDbTurnThroughputRow {
   return {
     run_id: row.runId,
@@ -852,7 +764,7 @@ function toDuckDbSessionReviewV2Row(row: PreparedSessionReviewV2Row): DuckDbSess
     scope_control: row.process.scopeControl, recovery: row.process.recovery, final_claim_accuracy: row.process.finalClaimAccuracy,
     evidence_requirements: row.evidence.requirements, evidence_artifacts: row.evidence.artifacts,
     evidence_execution: row.evidence.execution, evidence_human: row.evidence.human,
-    evidence_limitation_count: row.evidence.limitations.length, finding_count: row.findings.length,
+    evidence_limitation_count: row.evidence.limitations.length,
     material_disagreement: row.disagreement.material, adjudicated: row.disagreement.adjudicated,
     disputed_field_count: row.disagreement.disputedFields.length, diversity_achieved: row.diversityAchieved,
     blinding_applied: row.blindingApplied,
@@ -890,10 +802,8 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   toolResultPruningPath: string;
   warmBashRewritesPath: string;
   warmBashSummariesPath: string;
-  agentReviewsPath: string;
   sessionReviewsV2Path: string;
   reviewCriteriaV2Path: string;
-  reviewFindingsV2Path: string;
   reviewReviewersV2Path: string;
   turnThroughputPath: string;
   retryTimingPath: string;
@@ -911,11 +821,10 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
   const toolResultPruningPath = path.join(exportsDir, 'tool-result-pruning.json');
   const warmBashRewritesPath = path.join(exportsDir, 'warm-bash-rewrites.json');
   const warmBashSummariesPath = path.join(exportsDir, 'warm-bash-summaries.json');
-  const agentReviewsPath = path.join(exportsDir, 'agent-reviews.json');
   const sessionReviewsV2Path = path.join(exportsDir, 'session-reviews-v2.json');
   const reviewCriteriaV2Path = path.join(exportsDir, 'review-criteria-v2.json');
-  const reviewFindingsV2Path = path.join(exportsDir, 'review-findings-v2.json');
   const reviewReviewersV2Path = path.join(exportsDir, 'review-reviewers-v2.json');
+  await fs.rm(path.join(exportsDir, 'review-findings-v2.json'), { force: true });
   const turnThroughputPath = path.join(exportsDir, 'turn-throughput.json');
   const retryTimingPath = path.join(exportsDir, 'retry-timing.json');
 
@@ -932,16 +841,11 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(toolResultPruningPath, prepared.toolResultPruning.map(toDuckDbToolResultPruningRow)),
     writeJsonFile(warmBashRewritesPath, prepared.warmBashRewrites.map(toDuckDbWarmBashRewriteRow)),
     writeJsonFile(warmBashSummariesPath, prepared.warmBashSummaries.map(toDuckDbWarmBashSummaryRow)),
-    writeJsonFile(agentReviewsPath, prepared.agentReviews.map(toDuckDbAgentReviewRow)),
     writeJsonFile(sessionReviewsV2Path, prepared.sessionReviewsV2.map(toDuckDbSessionReviewV2Row)),
     writeJsonFile(reviewCriteriaV2Path, prepared.sessionReviewsV2.flatMap((review) => review.criteria.map((criterion) => ({
       review_id: review.reviewId, session_id: review.sessionId, criterion_id: criterion.criterionId,
       importance: criterion.importance, origin: criterion.origin, activity: criterion.activity,
       surfaces: criterion.surfaces, evidence_modes: criterion.evidenceModes, status: criterion.status, reason: criterion.reason,
-    })))),
-    writeJsonFile(reviewFindingsV2Path, prepared.sessionReviewsV2.flatMap((review) => review.findings.map((finding) => ({
-      review_id: review.reviewId, session_id: review.sessionId, finding_id: finding.findingId,
-      severity: finding.severity, category: finding.category, criterion_id: finding.criterionId ?? null, ledger_effect: finding.ledgerEffect,
     })))),
     writeJsonFile(reviewReviewersV2Path, prepared.sessionReviewsV2.flatMap((review) => review.reviewers.map((reviewer) => ({
       review_id: review.reviewId, session_id: review.sessionId, role: reviewer.role, reviewer_id: reviewer.reviewerId,
@@ -952,7 +856,7 @@ export async function writeDuckDbStagingExports(exportsDir: string, prepared: Pr
     writeJsonFile(retryTimingPath, prepared.retryTiming.map(toDuckDbRetryTimingRow)),
   ]);
 
-  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, agentReviewsPath, sessionReviewsV2Path, reviewCriteriaV2Path, reviewFindingsV2Path, reviewReviewersV2Path, turnThroughputPath, retryTimingPath };
+  return { runsPath, toolUsagePath, toolFailuresPath, toolResultIssuesPath, verificationUsagePath, backendErrorsPath, fileExtensionsPath, pruningEventsPath, pruningSignalsPath, toolResultPruningPath, warmBashRewritesPath, warmBashSummariesPath, sessionReviewsV2Path, reviewCriteriaV2Path, reviewReviewersV2Path, turnThroughputPath, retryTimingPath };
 }
 
 async function openDuckDb(dbPath: string) {
@@ -982,15 +886,11 @@ CREATE TABLE runs (
   task_group_id VARCHAR,
   session_path_hash VARCHAR,
   status VARCHAR,
-  scored BOOLEAN,
   started_at TIMESTAMP,
   started_day DATE,
   updated_at TIMESTAMP,
   finalized_at TIMESTAMP,
   finalization_reason VARCHAR,
-  resolution VARCHAR,
-  satisfaction DOUBLE,
-  outcome_source VARCHAR,
   model_id VARCHAR,
   model_family VARCHAR,
   provider VARCHAR,
@@ -1069,7 +969,6 @@ CREATE TABLE runs (
   token_efficiency DOUBLE,
   context_utilization DOUBLE,
   cache_hit_ratio DOUBLE,
-  first_attempt_success BOOLEAN,
   estimated_cost_usd DOUBLE,
   subagent_input_tokens BIGINT,
   subagent_output_tokens BIGINT,
@@ -1121,10 +1020,7 @@ CREATE TABLE tool_usage (
   model_id VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
-  mixed_treatment_config BOOLEAN,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  mixed_treatment_config BOOLEAN
 );
 `.trim();
 }
@@ -1144,10 +1040,7 @@ CREATE TABLE tool_failures (
   model_id VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
-  mixed_treatment_config BOOLEAN,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  mixed_treatment_config BOOLEAN
 );
 `.trim();
 }
@@ -1167,10 +1060,7 @@ CREATE TABLE tool_result_issues (
   model_id VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
-  mixed_treatment_config BOOLEAN,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  mixed_treatment_config BOOLEAN
 );
 `.trim();
 }
@@ -1187,10 +1077,7 @@ CREATE TABLE verification_usage (
   model_id VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
-  mixed_treatment_config BOOLEAN,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  mixed_treatment_config BOOLEAN
 );
 `.trim();
 }
@@ -1205,10 +1092,7 @@ CREATE TABLE backend_errors (
   started_day DATE,
   model_id VARCHAR,
   thinking_level VARCHAR,
-  experiment_assignment VARCHAR,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  experiment_assignment VARCHAR
 );
 `.trim();
 }
@@ -1227,10 +1111,7 @@ CREATE TABLE file_extensions (
   model_id VARCHAR,
   thinking_level VARCHAR,
   experiment_assignment VARCHAR,
-  mixed_treatment_config BOOLEAN,
-  scored BOOLEAN,
-  satisfaction DOUBLE,
-  resolution VARCHAR
+  mixed_treatment_config BOOLEAN
 );
 `.trim();
 }
@@ -1333,29 +1214,6 @@ CREATE TABLE warm_bash_summaries (
 `.trim();
 }
 
-function agentReviewTableSchema(): string {
-  return `
-CREATE TABLE agent_reviews (
-  cohort VARCHAR,
-  session_id VARCHAR,
-  identity_fallback BOOLEAN,
-  run_id VARCHAR,
-  session_path_hash VARCHAR,
-  task_group_id VARCHAR,
-  recorded_at TIMESTAMP,
-  evaluated_at TIMESTAMP,
-  started_day DATE,
-  model_family VARCHAR,
-  agent_rating DOUBLE,
-  agent_completion VARCHAR,
-  agent_done BOOLEAN,
-  reviewer_buckets VARCHAR[],
-  reviewer_count INTEGER,
-  user_satisfaction DOUBLE
-);
-`.trim();
-}
-
 function sessionReviewV2TableSchema(): string {
   return `
 CREATE TABLE session_reviews_v2 (
@@ -1365,16 +1223,13 @@ CREATE TABLE session_reviews_v2 (
   criterion_coverage DOUBLE, external_blocker_rate DOUBLE, confidence VARCHAR,
   requirement_discipline VARCHAR, verification_discipline VARCHAR, scope_control VARCHAR, recovery VARCHAR, final_claim_accuracy VARCHAR,
   evidence_requirements VARCHAR, evidence_artifacts VARCHAR, evidence_execution VARCHAR, evidence_human VARCHAR,
-  evidence_limitation_count INTEGER, finding_count INTEGER, material_disagreement BOOLEAN, adjudicated BOOLEAN,
+  evidence_limitation_count INTEGER, material_disagreement BOOLEAN, adjudicated BOOLEAN,
   disputed_field_count INTEGER, diversity_achieved BOOLEAN, blinding_applied BOOLEAN
 );
 `.trim();
 }
 function reviewCriteriaV2TableSchema(): string {
   return 'CREATE TABLE review_criteria_v2 (review_id VARCHAR, session_id VARCHAR, criterion_id VARCHAR, importance VARCHAR, origin VARCHAR, activity VARCHAR, surfaces VARCHAR[], evidence_modes VARCHAR[], status VARCHAR, reason VARCHAR);';
-}
-function reviewFindingsV2TableSchema(): string {
-  return 'CREATE TABLE review_findings_v2 (review_id VARCHAR, session_id VARCHAR, finding_id VARCHAR, severity VARCHAR, category VARCHAR, criterion_id VARCHAR, ledger_effect VARCHAR);';
 }
 function reviewReviewersV2TableSchema(): string {
   return 'CREATE TABLE review_reviewers_v2 (review_id VARCHAR, session_id VARCHAR, role VARCHAR, reviewer_id VARCHAR, requested_bucket VARCHAR, effective_bucket VARCHAR, bucket_downgraded BOOLEAN, model_id VARCHAR, provider VARCHAR, family VARCHAR, thinking_level VARCHAR);';
@@ -1450,17 +1305,6 @@ async function createDerivedViews(connection: { run: (sql: string) => Promise<un
     'DROP VIEW IF EXISTS subagent_usage;',
     'DROP VIEW IF EXISTS file_mutation;',
     `
-CREATE VIEW outcomes AS
-SELECT
-  run_id,
-  task_group_id,
-  resolution,
-  satisfaction,
-  COALESCE(finalized_at, updated_at) AS recorded_at
-FROM runs
-WHERE scored = TRUE AND resolution IS NOT NULL;
-`.trim(),
-    `
 CREATE VIEW run_factors AS
 SELECT
   run_id,
@@ -1513,6 +1357,8 @@ export async function buildDuckDbDatabase(params: {
   const { instance, connection } = await openDuckDb(params.dbPath);
 
   try {
+    await connection.run('DROP TABLE IF EXISTS agent_reviews;');
+    await connection.run('DROP TABLE IF EXISTS review_findings_v2;');
     await populateTableFromJson(connection, 'runs', runsTableSchema(), stagingPaths.runsPath);
     await populateTableFromJson(connection, 'tool_usage', toolUsageTableSchema(), stagingPaths.toolUsagePath);
     await populateTableFromJson(connection, 'tool_failures', toolFailuresTableSchema(), stagingPaths.toolFailuresPath);
@@ -1525,10 +1371,8 @@ export async function buildDuckDbDatabase(params: {
     await populateTableFromJson(connection, 'tool_result_pruning', toolResultPruningTableSchema(), stagingPaths.toolResultPruningPath);
     await populateTableFromJson(connection, 'warm_bash_rewrites', warmBashRewritesTableSchema(), stagingPaths.warmBashRewritesPath);
     await populateTableFromJson(connection, 'warm_bash_summaries', warmBashSummariesTableSchema(), stagingPaths.warmBashSummariesPath);
-    await populateTableFromJson(connection, 'agent_reviews', agentReviewTableSchema(), stagingPaths.agentReviewsPath);
     await populateTableFromJson(connection, 'session_reviews_v2', sessionReviewV2TableSchema(), stagingPaths.sessionReviewsV2Path);
     await populateTableFromJson(connection, 'review_criteria_v2', reviewCriteriaV2TableSchema(), stagingPaths.reviewCriteriaV2Path);
-    await populateTableFromJson(connection, 'review_findings_v2', reviewFindingsV2TableSchema(), stagingPaths.reviewFindingsV2Path);
     await populateTableFromJson(connection, 'review_reviewers_v2', reviewReviewersV2TableSchema(), stagingPaths.reviewReviewersV2Path);
     await populateTableFromJson(connection, 'turn_throughput', turnThroughputTableSchema(), stagingPaths.turnThroughputPath);
     await populateTableFromJson(connection, 'retry_timing', retryTimingTableSchema(), stagingPaths.retryTimingPath);

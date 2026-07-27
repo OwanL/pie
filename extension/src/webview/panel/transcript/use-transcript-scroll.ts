@@ -1,4 +1,4 @@
-import { useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import type { ChatMessage, TranscriptWindow } from '../../../shared/protocol';
 import { useJumpToLatest } from './use-transcript-scroll-jump';
@@ -52,10 +52,43 @@ interface UseTranscriptScrollOptions {
   totalSize: number;
 }
 
+function useFollowOnPromptSendEffect(
+  transcript: readonly ChatMessage[],
+  sessionKey: string | null,
+  jumpToLatest: () => void,
+) {
+  const observedTailIdRef = useRef<string | null | undefined>(undefined);
+  const observedSessionRef = useRef(sessionKey);
+
+  useLayoutEffect(() => {
+    // Optimistic sends are always appended by useMergedTranscript, so the tail
+    // is the exact O(1) signal. Avoid scanning up to 240 loaded messages in a
+    // layout effect on every ~150 ms streaming snapshot.
+    const tail = transcript[transcript.length - 1];
+    const currentTailId = tail?.role === 'user'
+      && tail.id.startsWith('local:')
+      && !tail.id.startsWith('local:edit:')
+      ? tail.id
+      : null;
+
+    if (observedTailIdRef.current === undefined || observedSessionRef.current !== sessionKey) {
+      observedTailIdRef.current = currentTailId;
+      observedSessionRef.current = sessionKey;
+      return;
+    }
+
+    const hasNewSend = currentTailId !== null && currentTailId !== observedTailIdRef.current;
+    observedTailIdRef.current = currentTailId;
+    if (hasNewSend) jumpToLatest();
+  }, [jumpToLatest, sessionKey, transcript]);
+}
+
 interface UseTranscriptScrollResult {
   /** Live ref to the auto-follow state (true while pinned to the bottom).
    *  Read by scroll-anchoring to know when NOT to pin the top visible row. */
   autoFollowRef: { current: boolean };
+  /** Recent downward manual-scroll signal used by the scrolled-up anchor. */
+  isScrollingTowardBottomRef: { current: boolean };
   /** Reactive setter for auto-follow. Used by the user-message rail to
    *  disengage stick-to-bottom before jumping to a prompt so the smooth-follow
    *  rAF loop doesn't immediately re-pin to the bottom. */
@@ -100,7 +133,16 @@ export function useTranscriptScroll({
   // preview growth.
   const cachedTargetRef = useRef(0);
 
-  const { isAtBottom, setIsAtBottom, autoFollow, setAutoFollow, autoFollowRef, lastScrollTopRef, scrollToBottom } = useScrollState(scrollRef);
+  const {
+    isAtBottom,
+    setIsAtBottom,
+    autoFollow,
+    setAutoFollow,
+    autoFollowRef,
+    lastScrollTopRef,
+    isScrollingTowardBottomRef,
+    scrollToBottom,
+  } = useScrollState(scrollRef);
   const {
     isLoadingOlder,
     setIsLoadingOlder,
@@ -147,12 +189,15 @@ export function useTranscriptScroll({
     scrollRef,
     autoFollowRef,
     lastScrollTopRef,
+    isScrollingTowardBottomRef,
     setIsAtBottom,
     setAutoFollow,
     transcriptWindow.hasOlder,
     requestOlderPage,
     sessionKey,
   );
+
+  useFollowOnPromptSendEffect(transcript, sessionKey, jumpToLatest);
 
   usePaginationTrackingEffect(
     scrollRef,
@@ -194,6 +239,7 @@ export function useTranscriptScroll({
 
   return {
     autoFollowRef,
+    isScrollingTowardBottomRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,

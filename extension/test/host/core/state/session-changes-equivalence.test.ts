@@ -179,3 +179,42 @@ test('equivalence: churn totals match across both forms', () => {
     cs.reduce((a, c) => a + (c.deletions ?? 0), 0);
   assert.equal(sum(ext), sum(host));
 });
+
+test('equivalence: parent + subagent edits to one file merge across path spellings in both forms', () => {
+  // Parent edits `src/shared.ts` (relative); the subagent edits the SAME file
+  // via its absolute spelling `/proj/src/shared.ts`. Both adapters must merge
+  // them into a single entry (cwd=/proj from the JSONL header / passed to the
+  // host). This pins that canonicalization is consistent across the two
+  // traversal adapters — the reported parent/subagent duplication bug.
+  const details = {
+    mode: 'single', agentScope: 'user', projectAgentsDir: null,
+    results: [{
+      agent: 'worker', agentSource: 'user', task: 'merge', exitCode: 0,
+      messages: [
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } }] },
+      ],
+      stderr: '', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+    }],
+  };
+
+  const host = normalize(deriveFileChangesFromTranscript([
+    makeChatMessage({ id: 'm1', createdAt: 't1', toolCalls: [
+      { id: 'c1', name: 'edit', input: { path: 'src/shared.ts', oldText: 'x', newText: 'a\nb' }, status: 'completed' },
+    ] }),
+    makeChatMessage({ id: 'm2', createdAt: 't2', toolCalls: [
+      { id: 'c2', name: 'subagent', input: { agent: 'worker', task: 'merge' }, result: { content: [], details }, status: 'completed' },
+    ] }),
+  ], '/proj'));
+
+  const ext = normalize(deriveFileChangesFromSessionEntries([
+    { type: 'session', version: 3, id: 's1', timestamp: 't0', cwd: '/proj' },
+    { type: 'message', id: 'm1', timestamp: 't1', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'edit', arguments: { path: 'src/shared.ts', oldText: 'x', newText: 'a\nb' } }] } },
+    { type: 'message', id: 'tr1', timestamp: 't1', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'edit', content: 'ok', isError: false } },
+    { type: 'message', id: 'm2', timestamp: 't2', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c2', name: 'subagent', arguments: { agent: 'worker', task: 'merge' } }] } },
+    { type: 'message', id: 'tr2', timestamp: 't2', message: { role: 'toolResult', toolCallId: 'c2', toolName: 'subagent', content: 'done', isError: false, details } },
+  ] as never));
+
+  assert.equal(host.length, 1, 'host must merge parent + subagent into one entry');
+  assert.equal(ext.length, 1, 'extension must merge parent + subagent into one entry');
+  assert.deepEqual(ext, host);
+});

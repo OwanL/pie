@@ -34,10 +34,9 @@ interface ListedSession {
   isRunning: boolean;
   isSelf: boolean;
   identityFallback: boolean;
-  reviewStatus: 'unrated' | 'reviewed-v2' | 'reviewed-legacy' | 'legacy-unresolved';
+  reviewStatus: 'unrated' | 'reviewed-v2';
   reviewId?: string;
-  legacyReview?: { rating: number; completion: string; reason: string; evaluatedAt: string; identityFallback: boolean };
-  ratingQueueEligible: boolean;
+  reviewEligible: boolean;
   closureEligible: boolean;
 }
 interface OrchestratorSnapshot {
@@ -59,7 +58,7 @@ function eligibleTarget(snapshot: OrchestratorSnapshot, sessionPath?: string, se
   if (!current || current.isRunning) return undefined;
   return target;
 }
-/** Closure eligibility is broader than rating eligibility: an already-reviewed
+/** Closure eligibility is broader than review eligibility: an already-reviewed
  *  running session is closeable as a durable tab hide, while evidence and
  *  review recording remain forbidden for running targets. Self is always
  *  excluded; the persisted canonical review match is checked by the caller. */
@@ -78,10 +77,7 @@ function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession
     .map((tab) => {
       const identity = readSessionIdentity(tab.path);
       const v2 = snapshot.canonicalBySessionId.get(identity.sessionId);
-      const legacy = snapshot.reservedLegacyBySessionId.get(identity.sessionId);
-      const unresolved = snapshot.unresolvedLegacy.find((record) => record.sessionPath === tab.path);
-      const legacyRecord = legacy ?? unresolved;
-      const reviewStatus: ListedSession['reviewStatus'] = v2 ? 'reviewed-v2' : legacy ? 'reviewed-legacy' : unresolved ? 'legacy-unresolved' : 'unrated';
+      const reviewStatus: ListedSession['reviewStatus'] = v2 ? 'reviewed-v2' : 'unrated';
       const isSelf = !!selfId && identity.sessionId === selfId;
       const alreadyRated = reviewStatus !== 'unrated';
       return {
@@ -94,8 +90,7 @@ function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession
         identityFallback: identity.identityFallback,
         reviewStatus,
         ...(v2 ? { reviewId: v2.reviewId } : {}),
-        ...(legacyRecord ? { legacyReview: { rating: legacyRecord.rating, completion: legacyRecord.completion, reason: legacyRecord.reason, evaluatedAt: legacyRecord.evaluatedAt, identityFallback: !!unresolved } } : {}),
-        ratingQueueEligible: !isSelf && !tab.isRunning && !alreadyRated,
+        reviewEligible: !isSelf && !tab.isRunning && !alreadyRated,
         closureEligible: !isSelf && !!v2,
       };
     });
@@ -104,7 +99,7 @@ function renderList(items: ListedSession[], selectedOnly: boolean): string {
   if (!items.length) return selectedOnly ? 'No pinned sessions are selected.' : 'No open sessions are currently pushed from the host (PIE_OPEN_TABS empty/unset).';
   const rows = items.map((item) => {
     const flags = [item.isSelf ? 'self' : '', item.pinned ? 'pinned' : '', item.isRunning ? 'running' : '', item.identityFallback ? 'path-id-fallback' : ''].filter(Boolean).join(',');
-    return `  ${item.ratingQueueEligible ? '○ rate' : '✓ skip'}  ${item.reviewStatus.padEnd(17)} ${truncate(item.name, 30)}${flags ? ` (${flags})` : ''}\n    id=${item.sessionId}${item.reviewId ? ` reviewId=${item.reviewId}` : ''}\n    path=${item.sessionPath}`;
+    return `  ${item.reviewEligible ? '○ review' : '✓ skip'}  ${item.reviewStatus.padEnd(17)} ${truncate(item.name, 30)}${flags ? ` (${flags})` : ''}\n    id=${item.sessionId}${item.reviewId ? ` reviewId=${item.reviewId}` : ''}\n    path=${item.sessionPath}`;
   });
   return `${selectedOnly ? 'Selected' : 'Open'} sessions (${items.length}):\n${rows.join('\n')}`;
 }
@@ -143,7 +138,7 @@ export default function (pi: ExtensionAPI) {
         if (!scope) return err('List targets in this reviewer session before fetching evidence.');
         const target = eligibleTarget(scope, p.sessionPath);
         if (!target) return err('Evidence target is not an eligible selected/open snapshot member (self and running sessions are excluded).');
-        if (!target.ratingQueueEligible) return err('Evidence is only fetched for unrated rating targets; already-reviewed sessions are closure-only.');
+        if (!target.reviewEligible) return err('Evidence is only fetched for unrated review targets; already-reviewed sessions are closure-only.');
         try {
           const bundle = buildBlindedEvidence(target.sessionPath, typeof p.maxTurns === 'number' ? p.maxTurns : 40, p.artifacts ?? []);
           if (bundle.sessionId !== target.sessionId || bundle.identityFallback !== target.identityFallback) return err('Target identity changed after the list snapshot; list targets again.');
@@ -166,7 +161,7 @@ export default function (pi: ExtensionAPI) {
         try {
           const review = validateSessionReviewV2(p.review);
           const target = eligibleTarget(scope, review.sessionPathAtReview, review.sessionId);
-          if (!target || !target.ratingQueueEligible) return err('Review target is not an eligible unrated selected/open snapshot member.');
+          if (!target || !target.reviewEligible) return err('Review target is not an eligible unrated selected/open snapshot member.');
           const identity = readSessionIdentity(review.sessionPathAtReview);
           if (identity.sessionId !== review.sessionId || identity.identityFallback !== !!review.identityFallback) {
             return err('review session identity does not match the session JSONL header/path fallback.');
@@ -178,7 +173,6 @@ export default function (pi: ExtensionAPI) {
           validateRuntimeProvenance(review, scope.orchestratorPath);
           const result = await recordReviewOnce(review);
           if (!result.written) {
-            if (result.legacy) return err('session is reserved by a legacy V1 review and must not be re-rated; reconcile/import it explicitly.', result);
             return ok(`Session ${review.sessionId} already has canonical production review ${result.reviewId}; no duplicate was written.`, result);
           }
           return ok(`Recorded ${review.kind} V2 review ${review.reviewId} for session ${review.sessionId}.\nStored in ${result.file}. No closure action was written.`, result);
@@ -211,7 +205,7 @@ export default function (pi: ExtensionAPI) {
         const identity = readSessionIdentity(sessionPath);
         try {
           const result = await enqueueClosure({ kind: 'closeSelf', targetSessionId: identity.sessionId, targetSessionPath: sessionPath });
-          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeSelf action ${result.action.actionId} (${result.action.status}). No review/rating was written. End the turn now.`, result);
+          return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeSelf action ${result.action.actionId} (${result.action.status}). No review was written. End the turn now.`, result);
         } catch (error) { return err((error as Error).message); }
       }
 

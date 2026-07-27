@@ -1,20 +1,7 @@
-import type { ComposerInput, RunOutcome } from '../../shared/protocol';
+import type { ComposerInput } from '../../shared/protocol';
 
 export function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-export function isRunOutcome(value: unknown): value is RunOutcome {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const outcome = value as { resolution?: unknown; satisfaction?: unknown; source?: unknown };
-  return (outcome.resolution === 'resolved'
-      || outcome.resolution === 'partially_resolved'
-      || outcome.resolution === 'unresolved')
-    && typeof outcome.satisfaction === 'number'
-    && Number.isFinite(outcome.satisfaction)
-    && (outcome.source === undefined || outcome.source === 'user' || outcome.source === 'agent');
 }
 
 export function isInputKindArray(value: unknown): value is Array<ComposerInput['kind']> {

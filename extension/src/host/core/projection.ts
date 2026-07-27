@@ -212,6 +212,7 @@ interface ProjectionSignature {
   activeTranscriptWindow: TranscriptWindow;
   activeSystemPrompts: SystemPromptEntry[];
   activeEditingMessageId: string | null;
+  activeEditingDraft: import('../../shared/protocol').InlineEditDraft | null;
   activeLiveRevision: number;
   // ── Brief F ───────────────────────────────────────────────────────────────
   // `prepassPhase` / `prepassStartedAt` / `prepassLatencyMs` are derived from
@@ -249,6 +250,9 @@ function computeProjectionSignature(state: ArchState): ProjectionSignature {
     activeEditingMessageId: activePath
       ? state.transcript.editingMessageIdBySession[activePath] ?? null
       : null,
+    activeEditingDraft: activePath
+      ? state.transcript.editingDraftBySession[activePath] ?? null
+      : null,
     activeLiveRevision: activePath ? state.livePipeline.revisionBySession[activePath] ?? 0 : 0,
     activePromotedOp: activePath
       ? findPreflightOpForSession(state.pending.promoted, activePath) ?? null
@@ -274,6 +278,7 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
     a.activeTranscriptWindow === b.activeTranscriptWindow &&
     a.activeSystemPrompts === b.activeSystemPrompts &&
     a.activeEditingMessageId === b.activeEditingMessageId &&
+    a.activeEditingDraft === b.activeEditingDraft &&
     a.activeLiveRevision === b.activeLiveRevision &&
     a.activePromotedOp === b.activePromotedOp &&
     a.activePendingPreflightOp === b.activePendingPreflightOp &&
@@ -407,6 +412,7 @@ function projectViewState(state: ArchState): ViewState {
     activeSession,
     transcript: activeTranscript,
     transcriptWindow: activeTranscriptWindow,
+    sessionUsage: activePath ? transcript.sessionUsageBySession?.[activePath] ?? null : null,
     transcriptLoaded: activeTranscriptLoaded,
     pendingComposerInputs: activePendingComposerInputs,
     activeRunSummary,
@@ -452,6 +458,7 @@ function projectViewState(state: ArchState): ViewState {
     prepassStartedAt: prepass.startedAt,
     prepassLatencyMs: prepass.latencyMs,
     editingMessageId: activePath ? state.transcript.editingMessageIdBySession[activePath] ?? null : null,
+    editingDraft: activePath ? transcript.editingDraftBySession[activePath] ?? null : null,
     pendingExtensionUIRequestsBySession: settings.pendingExtensionUIRequestsBySession,
     pendingExtensionUIRequest: activePath
       ? (() => {

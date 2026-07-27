@@ -30,6 +30,7 @@ export const TYPECHECK_PROJECTS = [
   { id: 'session-changes', config: 'extensions/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'deferred-triggers', config: 'extensions/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'computer-use', config: 'extensions/computer-use/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+  { id: 'image-context-guard', config: 'extensions/image-context-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
   { id: 'subagent', config: 'extensions/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
 ];
 

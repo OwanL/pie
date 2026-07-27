@@ -108,7 +108,7 @@ test('a running target forbids evidence and recording but allows closeReviewed o
     const target = listed.details.sessions.find((s: any) => s.sessionId === 'target-id');
     assert.equal(target.isRunning, true);
     assert.equal(target.closureEligible, true, 'closureEligible stays truthful for a running already-reviewed session');
-    assert.equal(target.ratingQueueEligible, false, 'rating queue stays forbidden for a running session');
+    assert.equal(target.reviewEligible, false, 'review stays forbidden for a running session');
 
     // Evidence and recording remain forbidden for running targets.
     const evidence = await h.tool.execute('ev2', { action: 'getEvidence', sessionPath: h.targetPath }, undefined, undefined, h.ctx);

@@ -325,6 +325,7 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
   const nextRunningPaths = addToArray(state.sessions.runningSessionPaths, cmd.sessionPath);
   const nextState = produce(state, (draft) => {
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
+    delete draft.transcript.editingDraftBySession[cmd.sessionPath];
     // Optimistically truncate the edited message + everything after it (the
     // old user message, agent reply, and any continuation turns) so the UI
     // reflects the edit instantly. The removed tail is captured on the pending
@@ -342,6 +343,11 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
       // and a 'running' chip on promote, mirroring send (Brief F).
       startedAt: cmd.timestamp,
       removedTail,
+      editDraft: {
+        messageId: cmd.messageId,
+        text: cmd.text,
+        inputs: [...cmd.inputs],
+      },
     };
     draft.sessions.runningSessionPaths = nextRunningPaths;
     // Retry clears a stale prepass 'failed' chip from a previous turn.

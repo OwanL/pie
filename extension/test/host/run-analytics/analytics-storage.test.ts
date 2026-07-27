@@ -5,13 +5,63 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { RunAnalyticsStorage } from '../../../src/host/stats-service/storage';
-import { RUN_ANALYTICS_SCHEMA_VERSION, type OutcomeHistoryLogEntry } from '../../../src/host/run-analytics';
+import {
+  RUN_ANALYTICS_SCHEMA_VERSION,
+  createEmptyFileMutationRollup,
+  createEmptyToolUsageRollup,
+  createEmptyVerificationRollup,
+  type RunSnapshot,
+} from '../../../src/host/run-analytics';
 import { serializeJsonLine } from '../../../src/shared/jsonl';
 import {
   buildWorkspaceAnalyticsId,
   getDataOutcomesRootPath,
   getDefaultRunAnalyticsExportPath,
 } from '../../../src/host/run-analytics/storage';
+
+function validSnapshot(runId: string, updatedAt: string): RunSnapshot {
+  return {
+    runId,
+    sessionPath: `/session/${runId}`,
+    taskGroupId: `task-${runId}`,
+    status: 'open',
+    startedAt: updatedAt,
+    updatedAt,
+    mixedModelConfig: false,
+    mixedTreatmentConfig: false,
+    treatmentChangeKinds: [],
+    experimentAssignment: null,
+    analyticsFactors: null,
+    functionalSettings: null,
+    sendCount: 0,
+    assistantTurnCount: 0,
+    assistantTurnDurationMs: 0,
+    busyDurationMs: 0,
+    busyPeriodCount: 0,
+    interruptedCount: 0,
+    messageEditCount: 0,
+    truncatedAfterCount: 0,
+    backendErrorCodes: [],
+    contextTokens: null,
+    contextLimit: null,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    tokenReportedTurnCount: 0,
+    lastTurnUsage: null,
+    turnThroughputSamples: [],
+    filesystemPathRefCount: 0,
+    imageInputCount: 0,
+    imageInputBytes: 0,
+    unsupportedInputCount: 0,
+    inputKindsUsed: [],
+    toolUsage: createEmptyToolUsageRollup(),
+    fileMutation: createEmptyFileMutationRollup(),
+    fileExtensions: { readCountsByExtension: {}, writeCountsByExtension: {}, editCountsByExtension: {} },
+    verification: createEmptyVerificationRollup(),
+  } as RunSnapshot;
+}
 
 function createFileUri(fileSystemPath: string, raw = `file://${fileSystemPath}`) {
   return {
@@ -144,53 +194,55 @@ test('getDefaultRunAnalyticsExportPath falls back to extension global storage ou
 test('RunAnalyticsStorage prunes CRLF JSONL using actual UTF-8 bytes and keeps the newest record', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-storage-crlf-'));
   try {
+    const recordedAt = '2026-07-13T10:00:00.000Z';
+    const envelope = (runId: string, text: string) => ({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_snapshot' as const,
+      recordedAt,
+      run: { ...validSnapshot(runId, recordedAt), note: text },
+    });
+
+    // Compute a byte limit from the actual serialized record size so the test
+    // exercises UTF-8 byte retention: two records fit, three do not.
+    const oneRecordBytes = Buffer.byteLength(serializeJsonLine(envelope('r1', 'éé')), 'utf8');
+    const maxRunHistoryBytes = oneRecordBytes * 2 + Math.floor(oneRecordBytes / 2);
+
     const storage = new RunAnalyticsStorage({
       dataOutcomesRootPath: root,
       workspaceId: 'crlf-test',
-      now: () => new Date('2026-07-13T10:00:00.000Z'),
+      now: () => new Date(recordedAt),
       serializeSessions: () => ({}),
       maxRunHistoryEntries: 10,
-      maxRunHistoryBytes: 400,
+      maxRunHistoryBytes,
       autoExportSetTimeout: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setTimeout>,
     });
 
     await storage.start();
     const storageDir = storage.getStorageDir();
-    const filePath = path.join(storageDir, 'outcome-history.jsonl');
-
-    const outcome = (runId: string, text: string) => ({
-      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-      kind: 'run_outcome' as const,
-      recordedAt: '2026-07-13T10:00:00.000Z',
-      sessionPath: '/s',
-      runId,
-      taskGroupId: 't',
-      outcome: { resolution: 'resolved' as const, satisfaction: 4 },
-      text,
-    } as OutcomeHistoryLogEntry);
+    const filePath = path.join(storageDir, 'run-snapshots.jsonl');
 
     // Seed the file with CRLF line endings and multi-byte characters so the
     // UTF-8 byte count exceeds the naive string-length + 1 estimate.
-    const seeded = [outcome('r1', 'éé'), outcome('r2', '€€'), outcome('r3', 'ññ')];
+    const seeded = [envelope('r1', 'éé'), envelope('r2', '€€'), envelope('r3', 'ññ')];
     const crlfContent = seeded.map((line) => serializeJsonLine(line)).join('').replace(/\n/g, '\r\n');
     await fs.writeFile(filePath, crlfContent, 'utf8');
 
     const fullBytes = Buffer.byteLength(crlfContent, 'utf8');
-    assert.ok(fullBytes > 400, `seeded CRLF file ${fullBytes} B should exceed the byte limit`);
+    assert.ok(fullBytes > maxRunHistoryBytes, `seeded CRLF file ${fullBytes} B should exceed the byte limit`);
 
     // Appending a new record triggers the post-flush prune.
-    const newest = outcome('r4', 'üü');
-    storage.schedulePersist(undefined, newest);
+    const newest = { ...validSnapshot('r4', recordedAt), note: 'üü' } as RunSnapshot;
+    storage.schedulePersist(newest);
     await storage.flush();
 
     const raw = await fs.readFile(filePath, 'utf8');
     const keptLines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    const keptIds = keptLines.map((line) => JSON.parse(line).runId);
+    const keptIds = keptLines.map((line) => JSON.parse(line).run.runId);
 
     assert.ok(raw.includes('\r\n'), 'rewritten file preserves CRLF line endings');
     assert.deepEqual(keptIds, ['r3', 'r4'], 'oldest two records are pruned; newest two survive');
     const prunedBytes = Buffer.byteLength(raw, 'utf8');
-    assert.ok(prunedBytes <= 400, `pruned file ${prunedBytes} B must stay within the byte limit`);
+    assert.ok(prunedBytes <= maxRunHistoryBytes, `pruned file ${prunedBytes} B must stay within the byte limit`);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

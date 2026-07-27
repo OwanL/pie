@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -9,16 +10,17 @@ import {
   type ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 
-import { reconcileCatalogText } from './src/catalog-sync.js';
+import { withCatalogLock } from './src/catalog-lock.js';
+import { CopilotCatalogRefreshCoordinator } from './src/catalog-refresh.js';
+import { reconcileCatalogText, type CatalogReconciliation } from './src/catalog-sync.js';
 import { COPILOT_HEADERS, parseCopilotModelsResponse } from './src/copilot-models.js';
 
 const PROVIDER = 'github-copilot';
-const DISCOVERY_TIMEOUT_MS = 5_000;
-const initializedRegistries = new WeakSet<object>();
+const DISCOVERY_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
 
 async function atomicWrite(filePath: string, content: string): Promise<void> {
-  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, content, 'utf8');
   try {
     await rename(temporaryPath, filePath);
@@ -35,82 +37,97 @@ async function syncGeneratedCatalog(root: string): Promise<void> {
   });
 }
 
-async function syncCopilotCatalog(ctx: ExtensionContext): Promise<void> {
-  const registry = ctx.modelRegistry;
-  if (initializedRegistries.has(registry)) return;
-  initializedRegistries.add(registry);
-
-  const currentModels = registry.getAll().filter((model) => model.provider === PROVIDER);
-  if (currentModels.length === 0) return;
-
-  const root = getAgentDir();
-  const catalogPath = path.join(root, 'models.yaml');
-  let originalCatalog: string | undefined;
-  try {
-    // ModelRegistry refreshes and persists the OAuth credential when needed.
-    const apiKey = await registry.getApiKeyForProvider(PROVIDER);
-    if (!apiKey) return;
-
-    const baseUrl = currentModels[0].baseUrl.replace(/\/$/, '');
-    const response = await fetch(`${baseUrl}/models`, {
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        ...COPILOT_HEADERS,
-        'X-GitHub-Api-Version': '2026-06-01',
-      },
-      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-    });
-    if (!response.ok) throw new Error(`Copilot catalog sync returned HTTP ${response.status}`);
-
-    const remoteModels = parseCopilotModelsResponse(await response.json());
-    // pi-ai filters Copilot models through this credential-scoped list. Keep it
-    // aligned even when the access token was still fresh and OAuth refresh did
-    // not run, otherwise newly cataloged models remain hidden until expiry.
-    const credential = registry.authStorage.get(PROVIDER);
-    const availableModelIds = remoteModels.map((model) => model.id);
-    let availabilityChanged = false;
-    if (credential?.type === 'oauth') {
-      const previousIds = 'availableModelIds' in credential && Array.isArray(credential.availableModelIds)
-        ? credential.availableModelIds
-        : [];
-      availabilityChanged = previousIds.length !== availableModelIds.length
-        || previousIds.some((id, index) => id !== availableModelIds[index]);
-      if (availabilityChanged) {
-        registry.authStorage.set(PROVIDER, { ...credential, availableModelIds });
-      }
-    }
-    originalCatalog = await readFile(catalogPath, 'utf8');
+async function commitCatalog(
+  root: string,
+  catalogPath: string,
+  remoteModels: Parameters<typeof reconcileCatalogText>[1],
+): Promise<CatalogReconciliation> {
+  return withCatalogLock(`${catalogPath}.copilot-sync.lock`, async () => {
+    // Read only after acquiring the cross-process lock. Another VS Code window
+    // may have committed a newer catalog while this process fetched /models.
+    const originalCatalog = await readFile(catalogPath, 'utf8');
     const reconciliation = reconcileCatalogText(originalCatalog, remoteModels);
-    if (!reconciliation.changed) {
-      if (availabilityChanged) registry.refresh();
-      return;
-    }
+    if (!reconciliation.changed) return reconciliation;
 
     await atomicWrite(catalogPath, reconciliation.text);
     try {
       await syncGeneratedCatalog(root);
     } catch (error) {
-      // Keep source and generated catalog transactional if validation/codegen fails.
+      // Source and generated surfaces are one transaction while the lock is
+      // held, so no other process can observe and overwrite a partial commit.
       await atomicWrite(catalogPath, originalCatalog);
       await syncGeneratedCatalog(root).catch(() => undefined);
       throw error;
     }
-
-    registry.refresh();
-    const summary = [
-      reconciliation.added.length > 0 ? `added ${reconciliation.added.join(', ')}` : '',
-      reconciliation.removed.length > 0 ? `removed ${reconciliation.removed.join(', ')}` : '',
-      reconciliation.transferred.length > 0 ? `transferred ${reconciliation.transferred.join(', ')}` : '',
-      reconciliation.skippedConflicts.length > 0 ? `skipped conflicts ${reconciliation.skippedConflicts.join(', ')}` : '',
-    ].filter(Boolean).join('; ');
-    console.info(`[copilot-model-discovery] Catalog synchronized: ${summary}`);
-  } catch (error) {
-    // Network/auth failures leave models.yaml and all generated files untouched.
-    console.warn('[copilot-model-discovery] Catalog unchanged:', error instanceof Error ? error.message : error);
-  }
+    return reconciliation;
+  });
 }
 
+async function syncCopilotCatalog(registry: ExtensionContext['modelRegistry']): Promise<void> {
+  const currentModels = registry.getAll().filter((model) => model.provider === PROVIDER);
+  if (currentModels.length === 0) return;
+
+  const root = getAgentDir();
+  const catalogPath = path.join(root, 'models.yaml');
+  // ModelRegistry refreshes and persists the OAuth credential when needed.
+  const apiKey = await registry.getApiKeyForProvider(PROVIDER);
+  if (!apiKey) return;
+
+  const baseUrl = currentModels[0].baseUrl.replace(/\/$/, '');
+  const response = await fetch(`${baseUrl}/models`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      ...COPILOT_HEADERS,
+      'X-GitHub-Api-Version': '2026-06-01',
+    },
+    signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`Copilot catalog sync returned HTTP ${response.status}`);
+
+  const remoteModels = parseCopilotModelsResponse(await response.json());
+  if (remoteModels.length === 0) {
+    throw new Error('Copilot catalog returned no selectable models; preserving the existing catalog');
+  }
+
+  // pi-ai filters Copilot models through this credential-scoped list. Keep it
+  // aligned even when the access token was still fresh and OAuth refresh did
+  // not run, otherwise newly cataloged models remain hidden until expiry.
+  const credential = registry.authStorage.get(PROVIDER);
+  const availableModelIds = remoteModels.map((model) => model.id);
+  if (credential?.type === 'oauth') {
+    const previousIds = 'availableModelIds' in credential && Array.isArray(credential.availableModelIds)
+      ? credential.availableModelIds
+      : [];
+    const availabilityChanged = previousIds.length !== availableModelIds.length
+      || previousIds.some((id, index) => id !== availableModelIds[index]);
+    if (availabilityChanged) {
+      registry.authStorage.set(PROVIDER, { ...credential, availableModelIds });
+    }
+  }
+
+  const reconciliation = await commitCatalog(root, catalogPath, remoteModels);
+  if (!reconciliation.changed) {
+    console.info(`[copilot-model-discovery] Catalog current: ${remoteModels.length} selectable models`);
+    return;
+  }
+
+  const summary = [
+    reconciliation.added.length > 0 ? `added ${reconciliation.added.join(', ')}` : '',
+    reconciliation.removed.length > 0 ? `removed ${reconciliation.removed.join(', ')}` : '',
+  ].filter(Boolean).join('; ');
+  console.info(`[copilot-model-discovery] Catalog synchronized: ${summary}`);
+}
+
+const coordinator = new CopilotCatalogRefreshCoordinator<ExtensionContext['modelRegistry']>(syncCopilotCatalog);
+
 export default function registerCopilotModelDiscovery(pi: ExtensionAPI): void {
-  pi.on('session_start', (_event, ctx) => syncCopilotCatalog(ctx));
+  pi.on('session_start', async (_event, ctx) => {
+    try {
+      await coordinator.refresh(ctx.modelRegistry);
+    } catch (error) {
+      // A failure is not cached: the next session startup retries discovery.
+      console.warn('[copilot-model-discovery] Catalog unchanged:', error instanceof Error ? error.message : error);
+    }
+  });
 }

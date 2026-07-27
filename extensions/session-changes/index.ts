@@ -9,6 +9,7 @@ import type { ParsedSession } from './src/session-jsonl.js';
 import { renderList, renderDiffs } from './src/render.js';
 import { computeFileDiff } from './src/diff.js';
 import type { DiffOutput, DiffKind } from './src/diff.js';
+import { canonicalFilePath } from '../../extension/src/shared/file-path.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  *  extension id). Mirrors session-reviewer's isExtensionDisabledByToggle so the
@@ -85,9 +86,11 @@ function displayPath(filePath: string, cwd: string | undefined): string {
 }
 
 /** Find the manifest entry for a requested path: exact string match first, then
- *  a resolved-against-cwd match (so `src/x.ts` matches `./src/x.ts` or an
- *  absolute form). Returns undefined when the path isn't in the manifest
- *  (defaulting the caller to `modified`). */
+ *  a canonical-identity match (so `src/x.ts` matches `./src/x.ts`, an absolute
+ *  form, or a case/separator variant on case-insensitive filesystems). Returns
+ *  undefined when the path isn't in the manifest (defaulting the caller to
+ *  `modified`). Uses the shared `canonicalFilePath` so lookup identity matches
+ *  the accumulation identity exactly. */
 function findManifestEntry(
   changes: FileChange[],
   relPath: string,
@@ -95,8 +98,8 @@ function findManifestEntry(
 ): FileChange | undefined {
   const exact = changes.find((c) => c.path === relPath);
   if (exact) return exact;
-  const resolved = resolveAgainstCwd(relPath, cwd);
-  return changes.find((c) => resolveAgainstCwd(c.path, cwd) === resolved);
+  const key = canonicalFilePath(relPath, cwd);
+  return changes.find((c) => canonicalFilePath(c.path, cwd) === key);
 }
 
 /** Compute one file's diff, mapping the requested path to its manifest entry

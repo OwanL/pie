@@ -34,7 +34,8 @@
         "bash",
         "edit",
         "read",
-        "write"
+        "write",
+        "subagent"
       ]
     },
     "autoSkipBelowTokens": null

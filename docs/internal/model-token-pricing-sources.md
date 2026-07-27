@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-07-16 (OpenAI Codex catalog refreshed from official OpenAI pricing; Ollama Cloud rates last refreshed 2026-06-19 via OpenRouter)
+**Retrieval date:** 2026-07-27 (GitHub Copilot catalog refreshed from its official account-scoped `/models` endpoint; OpenAI Codex pricing refreshed 2026-07-16; Ollama Cloud rates last refreshed 2026-06-19 via OpenRouter)
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -45,6 +45,8 @@ Conversion: 1 AI credit = $0.01 USD
 | claude-opus-4.6 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Copilot docs table |
 | claude-opus-4.7 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Same tier as opus-4.6 per Copilot docs |
 | claude-opus-4.8 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Copilot docs table |
+| claude-opus-4.8-fast | $10.00 | $1.00 | $12.50 | $50.00 | USD/1M tokens | official | Account-scoped Copilot `/models` token prices, retrieved 2026-07-27 |
+| claude-opus-5 | $5.00 | $0.50 | $6.25 | $25.00 | USD/1M tokens | official | Account-scoped Copilot `/models` token prices, retrieved 2026-07-27 |
 
 **Disabled/ineligible Copilot Anthropic models** (historical pricing):
 
@@ -294,3 +296,4 @@ No models remain at `unknown` confidence as of 2026-06-19:
 | 2026-06-17 | Added `glm-5.2:cloud` with compute-estimate pricing (active params estimated 40B pending official spec) |
 | 2026-06-19 | **Ollama Cloud refresh to live API pricing.** Replaced stale compute-estimate cost blocks for all 22 compute-estimate Ollama Cloud models with live per-token rates from the OpenRouter model API (`/api/v1/models`), including cache-read where OpenRouter exposes it, and added the previously-missing `glm-5.2:cloud` price (`z-ai/glm-5.2`). Supersedes the 2026-06-04 Portkey snapshot (several Portkey values were stale or mis-mapped, e.g. `kimi-k2.7-code` had matched base `kimi-k2`, `minimax-m3` was 2× the live rate). Added the Umans section: twinned umans entries mirror their Ollama Cloud twin's OpenRouter rate as an opportunity-cost `cost` block (consistent with all other models); proprietary `umans-coder`/`flash`/`qwen3.6-35b-a3b` remain $0 (no public API twin). Cache captured via the shared `openai-completions` path. Newly-listed `umans-qwen3.6-35b-a3b` model + profile added. Copilot models unchanged (already official GitHub token pricing). |
 | 2026-07-16 | Added official OpenAI opportunity-cost pricing and long-context tiers for all built-in `openai-codex` GPT-5.4–5.6 models, eliminating unpriced Codex sessions. Corrected GPT-5.6 Terra cache-write precision from $3.12 to the published $3.125. |
+| 2026-07-27 | Added Claude Opus 5 and Claude Opus 4.8 Fast using token prices and long-context metadata returned by GitHub Copilot's official account-scoped `/models` endpoint. |

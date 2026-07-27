@@ -12,6 +12,7 @@ import type {
   ChatMessage,
   ChatPrefs,
   ComposerInput,
+  InlineEditDraft,
   PruningResult,
   PruningSettings,
   SystemPromptEntry,
@@ -52,6 +53,7 @@ function TranscriptSurface({
   pendingAssistantThinkingLevel,
   workingDirectory,
   editingId,
+  editingDraft,
   onEditRequest,
   onEditConfirm,
   onEditCancel,
@@ -89,6 +91,7 @@ function TranscriptSurface({
         pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
         workingDirectory={workingDirectory}
         editingId={editingId}
+        editingDraft={editingDraft}
         onEditRequest={onEditRequest}
         onEditConfirm={onEditConfirm}
         onEditCancel={onEditCancel}
@@ -122,6 +125,7 @@ export interface TranscriptHostProps {
   pendingAssistantThinkingLevel?: ThinkingLevel;
   workingDirectory: string | null;
   editingId: string | null;
+  editingDraft?: InlineEditDraft | null;
   onEditRequest: (messageId: string) => void;
   onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
@@ -163,6 +167,7 @@ export function TranscriptHost({
   pendingAssistantThinkingLevel,
   workingDirectory,
   editingId,
+  editingDraft,
   onEditRequest,
   onEditConfirm,
   onEditCancel,
@@ -333,6 +338,7 @@ export function TranscriptHost({
           pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
           workingDirectory={workingDirectory}
           editingId={editingId}
+          editingDraft={editingDraft}
           onEditRequest={onEditRequest}
           onEditConfirm={onEditConfirm}
           onEditCancel={onEditCancel}

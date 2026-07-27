@@ -166,6 +166,52 @@ test('busy session.opened records messageIdAlias when SDK message is deduped aga
   });
 });
 
+test('aliased continuation MessageFinished accumulates usage for the live session cost', () => {
+  const state = buildBaseState();
+  const canonical = state.transcript.bySession['/s']![1]!;
+  canonical.durableEntryId = 'durable-first';
+  canonical.usage = {
+    inputTokens: 10_000,
+    outputTokens: 1_000,
+    cacheReadTokens: 5_000,
+    cacheWriteTokens: 0,
+    totalTokens: 16_000,
+    reportedCostUsd: 0.06,
+  };
+  state.pending.messageIdAlias['sdk-next'] = { canonicalId: 'host-1', sessionPath: '/s' };
+
+  const result = reducer(state, {
+    kind: 'MessageFinished',
+    sessionPath: '/s',
+    message: {
+      id: 'sdk-next',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:01:00.000Z',
+      markdown: 'continued',
+      status: 'completed',
+      durableEntryId: 'durable-latest',
+      usage: {
+        inputTokens: 20_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 8_000,
+        cacheWriteTokens: 100,
+        totalTokens: 30_100,
+        reportedCostUsd: 0.09,
+      },
+    },
+  });
+
+  assert.equal(result.state.transcript.bySession['/s']![1]!.durableEntryId, 'durable-latest');
+  assert.deepEqual(result.state.transcript.bySession['/s']![1]!.usage, {
+    inputTokens: 30_000,
+    outputTokens: 3_000,
+    cacheReadTokens: 13_000,
+    cacheWriteTokens: 100,
+    totalTokens: 46_100,
+    reportedCostUsd: 0.15,
+  });
+});
+
 test('MessageFinished carrying deduped SDK id merges into kept local row instead of creating a duplicate', () => {
   const state = buildBaseState();
 

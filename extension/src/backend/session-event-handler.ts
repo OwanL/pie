@@ -361,6 +361,13 @@ function isGenericTerminalStreamError(detail: string): boolean {
   );
 }
 
+function isGenericConnectionError(detail: string): boolean {
+  const normalized = detail.toLowerCase();
+  return normalized === 'connection error.'
+    || normalized === 'connection error'
+    || normalized === 'fetch failed';
+}
+
 function mergeAssistantErrorDetail(
   messageError: string | undefined,
   retryError: string | undefined,
@@ -374,13 +381,18 @@ function mergeAssistantErrorDetail(
   if (!direct) {
     return `Upstream error: ${upstream}`;
   }
-  if (!isGenericTerminalStreamError(direct)) {
-    return direct;
-  }
-  if (direct.includes(upstream)) {
-    return direct;
-  }
+  if (isGenericConnectionError(direct)) return upstream;
+  if (!isGenericTerminalStreamError(direct)) return direct;
+  if (direct.includes(upstream)) return direct;
   return `${direct}\n\nUpstream error: ${upstream}`;
+}
+
+function clearSettledProviderIncident(context: SessionContext): void {
+  const active = context.activeRequest;
+  if (!active) return;
+  active.latestProviderIncident = undefined;
+  if (active.quotaSettlementTimer) clearTimeout(active.quotaSettlementTimer);
+  active.quotaSettlementTimer = undefined;
 }
 
 /** Best-effort extraction of plain text from an injected queued user message's
@@ -572,7 +584,9 @@ function emitLatestPruningResult(
   } satisfies CustomMessagePayload);
 }
 
-const PROVIDER_SEMANTIC_INACTIVITY_MS = 120_000;
+// Some providers keep extended reasoning private, so a healthy response may be
+// semantically silent until the reasoning phase completes.
+const PROVIDER_SEMANTIC_INACTIVITY_MS = 360_000;
 const TOOL_INACTIVITY_MS = 30 * 60_000;
 function configuredLeaseMs(envName: string, fallback: number): number {
   const value = Number(process.env[envName]);
@@ -837,6 +851,7 @@ export function handleSdkSessionEvent(
 
       if (event.assistantMessageEvent?.type === 'text_delta') {
         context.activeRequest.lastProviderErrorForDiagnostics = undefined;
+        clearSettledProviderIncident(context);
         renewSemanticLease(deps, context);
         emitSemanticCandidate(deps, context, {
           kind: 'turn.text', delta: event.assistantMessageEvent.delta ?? '',
@@ -854,6 +869,7 @@ export function handleSdkSessionEvent(
           event.assistantMessageEvent.thinking ?? event.assistantMessageEvent.delta ?? '';
         if (thinkingContent) {
           context.activeRequest.lastProviderErrorForDiagnostics = undefined;
+          clearSettledProviderIncident(context);
           renewSemanticLease(deps, context);
           emitSemanticCandidate(deps, context, {
             kind: 'turn.reasoning',
@@ -876,6 +892,7 @@ export function handleSdkSessionEvent(
           : toolCallEvent.partial?.content?.[contentIndex];
         if (content?.type === 'toolCall' && content.id && content.name) {
           context.activeRequest.lastProviderErrorForDiagnostics = undefined;
+          clearSettledProviderIncident(context);
           renewSemanticLease(deps, context);
           emitSemanticCandidate(deps, context, {
             kind: 'turn.toolDraft',
@@ -1207,7 +1224,8 @@ export function handleSdkSessionEvent(
       context.activeRequest.currentMessageStartedAt = undefined;
       const mergedErrorMessage = mergeAssistantErrorDetail(
         event.message.errorMessage,
-        context.activeRequest.lastRetryErrorMessage,
+        context.activeRequest.latestProviderIncident?.userMessage
+          ?? context.activeRequest.lastRetryErrorMessage,
       );
       const assistantEventMessage = mergedErrorMessage === event.message.errorMessage
         ? event.message
@@ -1301,18 +1319,27 @@ export function handleSdkSessionEvent(
           errorDetail: message.errorDetail ?? durableTurnFromBranch.errorDetail,
           durableEntryId: event.sessionEntryId,
         };
-        emitSemanticCandidate(deps, context, {
-          kind: 'turn.terminal',
-          terminalKind: message.status === 'interrupted'
-            ? 'interrupted'
-            : message.status === 'error' ? 'error' : 'completed',
-          userInitiated: message.status === 'interrupted' ? context.activeRequest.aborted === true : undefined,
+        const terminalCandidate = {
+          durableMessage: durableTurn,
+          durableEntryId: event.sessionEntryId,
           reason: message.status === 'interrupted' && context.activeRequest.aborted !== true
             ? resolveUnexpectedInterruptReason(message.errorDetail)
             : undefined,
-          durableMessage: durableTurn,
-          durableEntryId: event.sessionEntryId,
-        });
+        };
+        if (message.status === 'error') {
+          // message_end precedes agent_end, which alone tells us whether this
+          // error is terminal or merely the failed attempt before an automatic
+          // retry. Tombstoning here would make every later retry event stale.
+          context.activeRequest.pendingErrorTerminal = terminalCandidate;
+        } else {
+          context.activeRequest.pendingErrorTerminal = undefined;
+          emitSemanticCandidate(deps, context, {
+            kind: 'turn.terminal',
+            terminalKind: message.status === 'interrupted' ? 'interrupted' : 'completed',
+            userInitiated: message.status === 'interrupted' ? context.activeRequest.aborted === true : undefined,
+            ...terminalCandidate,
+          });
+        }
       }
 
       if (!context.activeRequest.liveTurnAccumulator) deps.emit('message.finished', {
@@ -1366,6 +1393,7 @@ export function handleSdkSessionEvent(
         // delayMs is unknown here (the SDK doesn't carry it on agent_end); use
         // 0 until auto_retry_start refines it (the grace alone bounds it).
         context.willRetryWatchdogClear = armWillRetryWatchdog(deps, context, 0);
+        if (context.activeRequest) context.activeRequest.pendingErrorTerminal = undefined;
         return;
       }
       clearSemanticLease(context);
@@ -1375,6 +1403,15 @@ export function handleSdkSessionEvent(
       const userInitiated = context.activeRequest?.aborted === true;
       const interruptedWithoutMessage = !!requestId && !messageId;
       const liveAccumulator = context.activeRequest?.liveTurnAccumulator;
+      const pendingErrorTerminal = context.activeRequest?.pendingErrorTerminal;
+      if (liveAccumulator && pendingErrorTerminal) {
+        emitSemanticCandidate(deps, context, {
+          kind: 'turn.terminal',
+          terminalKind: 'error',
+          ...pendingErrorTerminal,
+        });
+        context.activeRequest!.pendingErrorTerminal = undefined;
+      }
       const watermark = liveAccumulator?.lifecycleWatermark();
       if (watermark) deps.emit('live.lifecycle', watermark);
       if (liveAccumulator) {
@@ -1388,6 +1425,10 @@ export function handleSdkSessionEvent(
       if (context.willRetryWatchdogClear) {
         context.willRetryWatchdogClear();
         context.willRetryWatchdogClear = undefined;
+      }
+      if (context.activeRequest?.quotaSettlementTimer) {
+        clearTimeout(context.activeRequest.quotaSettlementTimer);
+        context.activeRequest.quotaSettlementTimer = undefined;
       }
 
       // Clear activeRequest BEFORE emitting session.opened so the payload
@@ -1477,8 +1518,12 @@ export function handleSdkSessionEvent(
       clearSemanticLease(context);
       const startedAt = Date.now();
       finishRetryTiming(deps, context, startedAt);
+      const incidentMessage = context.activeRequest?.latestProviderIncident?.userMessage;
+      const surfacedErrorMessage = incidentMessage
+        ?? nonEmptyTrimmed(event.errorMessage)
+        ?? '';
       if (context.activeRequest) {
-        const errorMessage = nonEmptyTrimmed(event.errorMessage);
+        const errorMessage = nonEmptyTrimmed(surfacedErrorMessage);
         context.activeRequest.lastRetryErrorMessage = errorMessage
           ?? context.activeRequest.lastRetryErrorMessage;
         context.activeRequest.lastProviderErrorForDiagnostics = errorMessage
@@ -1511,7 +1556,7 @@ export function handleSdkSessionEvent(
         attempt,
         maxAttempts: event.maxAttempts ?? 0,
         delayMs: event.delayMs ?? 0,
-        errorMessage: event.errorMessage ?? '',
+        errorMessage: surfacedErrorMessage,
         ...(requestId && retryId ? { requestId, retryId, startedAt } : {}),
       } satisfies RetryStartedPayload);
       return;
@@ -1522,6 +1567,8 @@ export function handleSdkSessionEvent(
       if (context.activeRequest) {
         if (event.success === true) {
           context.activeRequest.lastRetryErrorMessage = undefined;
+          context.activeRequest.pendingErrorTerminal = undefined;
+          clearSettledProviderIncident(context);
         } else {
           const finalError = nonEmptyTrimmed(event.finalError);
           context.activeRequest.lastRetryErrorMessage = finalError

@@ -144,25 +144,6 @@ test('prepareSourceAnalytics aggregates skill-pruning prepass tokens without dou
   assert.equal(row.inputTokens, 1000);
 });
 
-test('prepareSourceAnalytics firstAttemptSuccess is null only for unscored/no-outcome runs', async () => {
-  const fixture = deepClone(await loadFixture());
-  const run001 = fixture.completedRuns.find((r: any) => r.runId === 'run-001')!;
-  const run003 = fixture.completedRuns.find((r: any) => r.runId === 'run-003')!;
-  const run004 = fixture.completedRuns.find((r: any) => r.runId === 'run-004')!;
-  run001.interruptedCount = 0;
-  run001.messageEditCount = 0;
-  run001.truncatedAfterCount = 0;
-  run001.outcome = { resolution: 'resolved', satisfaction: 5 };
-  run003.interruptedCount = 1;
-  run003.outcome = { resolution: 'resolved', satisfaction: 5 };
-
-  const prepared = prepareSourceAnalytics(fixture);
-  const byId = new Map(prepared.runs.map((r) => [r.runId, r]));
-  assert.equal(byId.get('run-001')?.firstAttemptSuccess, true);
-  assert.equal(byId.get('run-003')?.firstAttemptSuccess, false);
-  assert.equal(byId.get('run-004')?.firstAttemptSuccess, null);
-});
-
 test('prepareSourceAnalytics preserves per-turn provider in throughput rows', async () => {
   const fixture = deepClone(await loadFixture());
   const run = fixture.completedRuns[0] as any;
@@ -305,8 +286,6 @@ test('prepareSourceAnalytics deduplicates run ids across completed and open snap
   const duplicateOpenRun = {
     ...fixture.completedRuns[0],
     status: 'open',
-    scored: false,
-    outcome: undefined,
     updatedAt: '2099-01-01T00:00:00.000Z',
   } as any;
   fixture.openRuns.push(duplicateOpenRun);
@@ -378,30 +357,26 @@ test('prepareSourceAnalytics computes derived efficiency metrics', async () => {
   const byId = new Map<string, PreparedRunRow>(prepared.runs.map((r) => [r.runId, r]));
 
   // run-001: output=3200, lmt=33 → tokenEfficiency=96.97; cacheRead=4800, input=15200 → ratio=0.24
-  //          ctx=18200/200000=0.091; interrupted=0, edited=1 → firstAttemptSuccess=false
+  //          ctx=18200/200000=0.091
   const r1 = byId.get('run-001')!;
   assert.ok(Math.abs(r1.tokenEfficiency! - 3200 / 33) < 0.01);
   assert.ok(Math.abs(r1.cacheHitRatio! - 4800 / (4800 + 15200)) < 0.001);
   assert.ok(Math.abs(r1.contextUtilization! - 18200 / 200000) < 0.001);
-  assert.equal(r1.firstAttemptSuccess, false);
 
   // run-003: no reported token usage despite lmt=35 → tokenEfficiency=null; cacheHitRatio=null
-  //          ctx=16800/200000; interrupted=0, edited=0, truncated=0, resolved → firstAttemptSuccess=true
+  //          ctx=16800/200000
   const r3 = byId.get('run-003')!;
   assert.equal(r3.tokenEfficiency, null);
   assert.equal(r3.cacheHitRatio, null);
   assert.ok(Math.abs(r3.contextUtilization! - 16800 / 200000) < 0.001);
-  assert.equal(r3.firstAttemptSuccess, true);
 
-  // run-004: lmt=0 → tokenEfficiency=null; no outcome → firstAttemptSuccess=null
+  // run-004: lmt=0 → tokenEfficiency=null
   const r4 = byId.get('run-004')!;
   assert.equal(r4.tokenEfficiency, null);
-  assert.equal(r4.firstAttemptSuccess, null);
 
-  // run-005: cacheRead=0, input=24500 → cacheHitRatio=0; interrupted=1 → firstAttemptSuccess=false
+  // run-005: cacheRead=0, input=24500 → cacheHitRatio=0
   const r5 = byId.get('run-005')!;
   assert.equal(r5.cacheHitRatio, 0);
-  assert.equal(r5.firstAttemptSuccess, false);
 
   // run-006: contextTokens=null → contextUtilization=null
   const r6 = byId.get('run-006')!;
@@ -456,7 +431,6 @@ test('prepareSourceAnalytics prices canonical subagent usage by child model with
   const base = fixture.completedRuns[0] as any;
   fixture.completedRuns = [];
   fixture.openRuns = [];
-  fixture.outcomes = [];
 
   const makeRun = (runId: string, parentModelId: string) => {
     const run = deepClone(base) as any;
@@ -633,13 +607,12 @@ test('prepareSourceAnalytics sets tokenEfficiency to null when lineMutationTotal
   assert.ok(r.cacheHitRatio !== null);
 });
 
-test('prepareSourceAnalytics buckets verification counts and falls back to outcome history', async () => {
+test('prepareSourceAnalytics buckets verification counts', async () => {
   const fixture = deepClone(await loadFixture());
-  const runWithOutcomeFallback = fixture.completedRuns[0] as any;
-  delete runWithOutcomeFallback.outcome;
-  runWithOutcomeFallback.verification.totalCount = 1;
-  runWithOutcomeFallback.verification.failureCount = 0;
-  runWithOutcomeFallback.verification.countsByKind = {
+  const runWithPassingVerification = fixture.completedRuns[0] as any;
+  runWithPassingVerification.verification.totalCount = 1;
+  runWithPassingVerification.verification.failureCount = 0;
+  runWithPassingVerification.verification.countsByKind = {
     test: 1,
     build: 0,
     lint: 0,
@@ -674,12 +647,8 @@ test('prepareSourceAnalytics buckets verification counts and falls back to outco
 
   const prepared = prepareSourceAnalytics(fixture);
   const byId = new Map<string, PreparedRunRow>(prepared.runs.map((run) => [run.runId, run]));
-  const fallbackOutcome = fixture.outcomes.find((outcome) => outcome.runId === runWithOutcomeFallback.runId)?.outcome;
-
-  assert.equal(byId.get(runWithOutcomeFallback.runId)?.verificationCountBucket, '1');
-  assert.equal(byId.get(runWithOutcomeFallback.runId)?.verificationState, 'passing');
-  assert.equal(byId.get(runWithOutcomeFallback.runId)?.resolution, fallbackOutcome?.resolution ?? null);
-  assert.equal(byId.get(runWithOutcomeFallback.runId)?.satisfaction, fallbackOutcome?.satisfaction ?? null);
+  assert.equal(byId.get(runWithPassingVerification.runId)?.verificationCountBucket, '1');
+  assert.equal(byId.get(runWithPassingVerification.runId)?.verificationState, 'passing');
 
   assert.equal(byId.get(runWithFailingVerification.runId)?.verificationCountBucket, '2-3');
   assert.equal(byId.get(runWithFailingVerification.runId)?.verificationState, 'failing');
@@ -696,8 +665,6 @@ test('prepareSourceAnalytics prefers newer same-status duplicates and later ties
     runId: 'duplicate-open-run',
     taskGroupId: 'duplicate-open-task',
     status: 'open',
-    scored: false,
-    outcome: undefined,
     finalizationReason: undefined,
     finalizedAt: undefined,
     updatedAt: 'not-a-timestamp',

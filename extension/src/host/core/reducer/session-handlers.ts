@@ -10,7 +10,9 @@ import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js'
 import { reorderOpenTabsPinnedFirst } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
 import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
-import { pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
+import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
+import { applyLiveTurnCheckpoint } from '../live-pipeline/checkpoint.js';
+import type { LiveTurnCheckpoint } from '../../../shared/live-pipeline-protocol.js';
 
 const BACKEND_EXIT_TOMBSTONE_GRACE_MS = 15_000;
 
@@ -34,11 +36,12 @@ function mergeSessionSummaryPreservingLocalName(
     // merges in. A backend list refresh that omits them (e.g. sidecar read
     // failed) must not wipe a previously-known review, so preserve the
     // existing value when the incoming summary doesn't carry one.
-    done: incoming.done ?? existing.done,
-    rating: incoming.rating ?? existing.rating,
-    completion: incoming.completion ?? existing.completion,
-    reviewReason: incoming.reviewReason ?? existing.reviewReason,
-    evaluatedAt: incoming.evaluatedAt ?? existing.evaluatedAt,
+    sessionId: incoming.sessionId ?? existing.sessionId,
+    identityFallback: incoming.identityFallback ?? existing.identityFallback,
+    reviewed: incoming.reviewed ?? existing.reviewed,
+    reviewId: incoming.reviewId ?? existing.reviewId,
+    reviewedAt: incoming.reviewedAt ?? existing.reviewedAt,
+    closureActions: incoming.closureActions ?? existing.closureActions,
   };
 }
 
@@ -129,21 +132,10 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
 
   // Preserve review fields across `session.opened`'s full-replace upsert.
   // `payload.session` comes from `buildCurrentSummary`, which merges the
-  // review sidecar; a transient sidecar read failure would omit `done`/`
-  // `rating`/etc. and the upsert (a full replace, NOT `mergeSessionSummary*`)
-  // would wipe previously-known review state. Fill from the existing summary
-  // when the incoming summary lacks a field.
+  // review sidecar; a transient sidecar read failure must not wipe previously
+  // known V2 review state.
   const existingForOpened = state.sessions.sessions.find((s) => s.path === payload.session.path);
-  const openedSummary: SessionSummary = existingForOpened
-    ? {
-        ...payload.session,
-        done: payload.session.done ?? existingForOpened.done,
-        rating: payload.session.rating ?? existingForOpened.rating,
-        completion: payload.session.completion ?? existingForOpened.completion,
-        reviewReason: payload.session.reviewReason ?? existingForOpened.reviewReason,
-        evaluatedAt: payload.session.evaluatedAt ?? existingForOpened.evaluatedAt,
-      }
-    : payload.session;
+  const openedSummary = mergeSessionSummaryPreservingLocalName(existingForOpened, payload.session);
 
   // Defensive model-picker hardening (STATE_CONTRACT § Optimistic
   // Reconciliation). An in-flight optimistic `SetModel` owns the model state
@@ -223,6 +215,12 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         ...next.transcript.windowBySession,
         [sessionPath]: resolvedWindow,
       },
+      ...(payload.sessionUsage && {
+        sessionUsageBySession: {
+          ...next.transcript.sessionUsageBySession,
+          [sessionPath]: payload.sessionUsage,
+        },
+      }),
       ...(payload.systemPrompts && {
         systemPromptsBySession: {
           ...next.transcript.systemPromptsBySession,
@@ -236,7 +234,59 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     },
   };
 
-  return { state: next, effects: [] };
+  const effects: Effect[] = [];
+  if (payload.liveTurnCheckpoint) {
+    next = applyAuthoritativeOpenedCheckpoint(next, sessionPath, payload.liveTurnCheckpoint);
+  } else if (payload.busy) {
+    // The backend kept the durable assistant tail visible because it could not
+    // provide an atomic checkpoint. If the host still knows the attempt
+    // identity, request a repair without making the transcript depend on it.
+    const liveTurn = next.livePipeline.turnsBySession[sessionPath];
+    if (liveTurn) {
+      effects.push({
+        kind: 'RequestLiveTurnCheckpoint',
+        corrId: `live-checkpoint:${liveTurn.turnId}:${liveTurn.attemptId}:session-opened`,
+        sessionPath,
+        turnId: liveTurn.turnId,
+        attemptId: liveTurn.attemptId,
+      });
+    }
+  }
+
+  return { state: next, effects };
+}
+
+/** `session.opened` and its checkpoint are one authoritative backend snapshot.
+ * Replace stale/tombstoned host state for that session before applying it; a
+ * prior retry attempt must not make the still-active request look terminal. */
+function applyAuthoritativeOpenedCheckpoint(
+  state: ArchState,
+  sessionPath: string,
+  checkpoint: LiveTurnCheckpoint,
+): ArchState {
+  const existing = state.livePipeline.turnsBySession[sessionPath];
+  const turnsBySession = { ...state.livePipeline.turnsBySession };
+  delete turnsBySession[sessionPath];
+  const toolsByExecutionId = { ...state.livePipeline.toolsByExecutionId };
+  if (existing) {
+    for (const executionId of existing.toolExecutionIds) delete toolsByExecutionId[executionId];
+  }
+  const pendingOwnerEvents = { ...state.livePipeline.pendingOwnerEvents };
+  if (existing) delete pendingOwnerEvents[pendingOwnerKey(existing.turnId, existing.attemptId)];
+  delete pendingOwnerEvents[pendingOwnerKey(checkpoint.turnId, checkpoint.attemptId)];
+  const terminalAttempts = { ...state.livePipeline.terminalAttempts };
+  delete terminalAttempts[terminalAttemptKey(checkpoint.turnId, checkpoint.attemptId)];
+  const cleared = {
+    ...state.livePipeline,
+    turnsBySession,
+    toolsByExecutionId,
+    pendingOwnerEvents,
+    terminalAttempts,
+  };
+  const applied = applyLiveTurnCheckpoint(cleared, checkpoint);
+  return applied.classification === 'applied'
+    ? { ...state, livePipeline: applied.state }
+    : state;
 }
 
 export function handleSessionNameDerived(state: ArchState, event: Extract<Event, { kind: 'SessionNameDerived' }>): ReducerResult {
@@ -516,6 +566,13 @@ export function handleSessionsInterrupted(state: ArchState, event: Extract<Event
         if (op.kind === 'edit' && op.removedTail?.length) {
           restoreRemovedTail(draft, sessionPath, op.removedTail);
         }
+        if (op.kind === 'edit' && op.editDraft) {
+          draft.transcript.editingMessageIdBySession[sessionPath] = op.editDraft.messageId;
+          draft.transcript.editingDraftBySession[sessionPath] = {
+            ...op.editDraft,
+            inputs: [...op.editDraft.inputs],
+          };
+        }
         if (op.kind === 'send') {
           draft.composer.draftTextBySession[sessionPath] = op.text ?? '';
           if (op.inputs?.length) draft.composer.pendingComposerInputsBySession[sessionPath] = [...op.inputs];
@@ -611,20 +668,7 @@ export function handleSessionSummaryUpserted(state: ArchState, event: Extract<Ev
     nextSessions.unshift(event.summary);
   } else {
     const existing = nextSessions[idx];
-    const keepExistingName = !existing.isPlaceholder && event.summary.isPlaceholder === true;
-    nextSessions[idx] = {
-      ...event.summary,
-      name: keepExistingName ? existing.name : event.summary.name,
-      isPlaceholder: keepExistingName ? false : event.summary.isPlaceholder,
-      modelId: event.summary.modelId ?? existing.modelId,
-      provider: event.summary.provider ?? existing.provider,
-      thinkingLevel: event.summary.thinkingLevel ?? existing.thinkingLevel,
-      done: event.summary.done ?? existing.done,
-      rating: event.summary.rating ?? existing.rating,
-      completion: event.summary.completion ?? existing.completion,
-      reviewReason: event.summary.reviewReason ?? existing.reviewReason,
-      evaluatedAt: event.summary.evaluatedAt ?? existing.evaluatedAt,
-    };
+    nextSessions[idx] = mergeSessionSummaryPreservingLocalName(existing, event.summary);
   }
   return {
     state: {

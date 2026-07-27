@@ -1,6 +1,5 @@
 import type {
   ModelSettings,
-  RunOutcome,
   SessionAnalyticsFactors,
   SessionSkillFactor,
   ThinkingLevel,
@@ -12,14 +11,11 @@ import {
   toPersistedSessionState,
 } from './helpers';
 import {
-  RUN_ANALYTICS_SCHEMA_VERSION,
   createEmptyFileExtensionRollup,
   createEmptyFileMutationRollup,
   createEmptyToolUsageRollup,
   createEmptyVerificationRollup,
   normalizeExperimentAssignment,
-  type AgentReviewEntry,
-  type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
   type RunFinalizationReason,
   type RunSnapshot,
@@ -55,8 +51,7 @@ function skillsKeyExcludingMtime(skills: SessionSkillFactor[]): string {
 interface SessionRunStateManagerOptions {
   getArchState: GetArchState;
   dispatchArchEvent: DispatchArchEvent;
-  schedulePersist: (snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry) => void;
-  schedulePersistAgentReview: (entry: AgentReviewEntry) => void;
+  schedulePersist: (snapshotToAppend?: RunSnapshot) => void;
   now: () => Date;
   createId: () => string;
   getExperimentAssignment: () => string | null;
@@ -67,7 +62,6 @@ export class SessionRunStateManager {
   private readonly getArchState: GetArchState;
   private readonly dispatchArchEvent: DispatchArchEvent;
   private readonly schedulePersistCallback: SessionRunStateManagerOptions['schedulePersist'];
-  private readonly schedulePersistAgentReviewCallback: SessionRunStateManagerOptions['schedulePersistAgentReview'];
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly getExperimentAssignment: () => string | null;
@@ -76,7 +70,6 @@ export class SessionRunStateManager {
     this.getArchState = options.getArchState;
     this.dispatchArchEvent = options.dispatchArchEvent;
     this.schedulePersistCallback = options.schedulePersist;
-    this.schedulePersistAgentReviewCallback = options.schedulePersistAgentReview;
     this.now = options.now;
     this.createId = options.createId;
     this.getExperimentAssignment = options.getExperimentAssignment;
@@ -137,7 +130,6 @@ export class SessionRunStateManager {
       runId: this.createId(),
       taskGroupId: shouldStartNewTaskGroup ? this.createId() : (state.lastRun?.taskGroupId ?? this.createId()),
       status: 'open',
-      scored: false,
       startedAt: nowIso,
       updatedAt: nowIso,
       modelId: currentConfig.modelId,
@@ -188,7 +180,6 @@ export class SessionRunStateManager {
   finalizeCurrentRun(
     sessionPath: string,
     reason: RunFinalizationReason,
-    outcome?: RunOutcome,
   ): RunSnapshot | null {
     const state = this.sessions.get(sessionPath);
     const currentRun = state?.currentRun;
@@ -201,10 +192,8 @@ export class SessionRunStateManager {
     const finalizedAt = this.isoNow();
     const finalizedRun: RunSnapshot = {
       ...currentRun,
-      status: outcome ? 'scored' : 'closed_unscored',
-      scored: !!outcome,
-      outcome,
-      finalizationReason: reason === 'scored' ? 'scored' : reason,
+      status: 'closed',
+      finalizationReason: reason,
       finalizedAt,
       updatedAt: finalizedAt,
     };
@@ -220,10 +209,7 @@ export class SessionRunStateManager {
     state.busyStartedAt = null;
 
     this.syncSessionSummary(sessionPath);
-    this.persist(
-      finalizedRun,
-      outcome ? this.buildOutcomeHistoryEntry(finalizedRun, outcome) : undefined,
-    );
+    this.persist(finalizedRun);
     return finalizedRun;
   }
 
@@ -296,18 +282,6 @@ export class SessionRunStateManager {
     return true;
   }
 
-  buildOutcomeHistoryEntry(run: RunSnapshot, outcome: RunOutcome): OutcomeHistoryLogEntry {
-    return {
-      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-      kind: 'run_outcome',
-      recordedAt: this.isoNow(),
-      sessionPath: run.sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      outcome,
-    };
-  }
-
   private getCurrentModelConfig(sessionPath: string): {
     modelId: string | undefined;
     provider: string | undefined;
@@ -361,12 +335,8 @@ export class SessionRunStateManager {
     });
   }
 
-  persist(snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry): void {
-    this.schedulePersistCallback(snapshotToAppend, outcomeToAppend);
-  }
-
-  persistAgentReview(entry: AgentReviewEntry): void {
-    this.schedulePersistAgentReviewCallback(entry);
+  persist(snapshotToAppend?: RunSnapshot): void {
+    this.schedulePersistCallback(snapshotToAppend);
   }
 
   isoNow(): string {

@@ -51,6 +51,20 @@ const existingTranscript: ChatMessage[] = [
 
 const refreshedModelSettings: ModelSettings = { /* minimal */ } as unknown as ModelSettings;
 const refreshedAvailableModels: ModelInfo[] = [{ id: 'm-new', label: 'New' } as unknown as ModelInfo];
+const wholeSessionUsage = {
+  samples: [{
+    sourceId: 'assistant:old',
+    kind: 'assistant' as const,
+    modelId: 'm-new',
+    provider: 'mock',
+    inputTokens: 10_000,
+    outputTokens: 1_000,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 11_000,
+    reportedCostUsd: 0.42,
+  }],
+};
 
 function buildBaseState(): ArchState {
   return {
@@ -86,6 +100,7 @@ function skipOpenedEvent(): Event {
     transcriptSkipped: true,
     modelSettings: refreshedModelSettings,
     availableModels: refreshedAvailableModels,
+    sessionUsage: wholeSessionUsage,
   };
   return { kind: 'SessionOpened', sessionPath, payload };
 }
@@ -102,6 +117,7 @@ test('SessionOpened with transcriptSkipped keeps the existing transcript + windo
   assert.equal(state.sessions.sessions.find((s) => s.path === sessionPath)?.name, 'Session (refreshed)');
   assert.equal(state.settings.modelSettings, refreshedModelSettings);
   assert.deepEqual(state.settings.availableModelsBySession[sessionPath], refreshedAvailableModels);
+  assert.deepEqual(state.transcript.sessionUsageBySession?.[sessionPath], wholeSessionUsage);
 });
 
 test('SessionOpened without transcriptSkipped replaces the transcript with the incoming snapshot (regression guard)', () => {

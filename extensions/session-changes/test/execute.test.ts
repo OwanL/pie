@@ -290,3 +290,100 @@ test('execute: disabled toggle → isError', async () => {
     process.env.PIE_EXTENSION_TOGGLES_JSON = prev;
   }
 });
+
+// ─── deletion verification (a "deleted" file that still exists is not deleted) ─
+
+/** Build a session whose bash `rm` targets a file that STILL EXISTS on disk —
+ *  the deletion did not take effect (or the file was regenerated). The
+ *  manifest must not claim it is deleted. */
+async function makeSessionWithStaleDeletion(): Promise<{ dir: string; file: string; sessionPath: string }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-del-'));
+  const file = path.join(dir, 'gen.uid');
+  await fs.writeFile(file, 'regenerated\n');
+  const entries = [
+    { type: 'session', version: 3, id: 's', timestamp: 't', cwd: dir },
+    {
+      type: 'message', id: 'm1', timestamp: 't',
+      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'rm gen.uid' } }] },
+    },
+    { type: 'message', id: 'tr1', timestamp: 't', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: 'ok', isError: false } },
+  ];
+  const sessionPath = path.join(dir, 'session.jsonl');
+  await fs.writeFile(sessionPath, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  return { dir, file, sessionPath };
+}
+
+test('execute: list does not report a deleted file that still exists on disk as deleted', async () => {
+  const { dir, sessionPath } = await makeSessionWithStaleDeletion();
+  try {
+    const res = await exe({ action: 'list', sessionPath });
+    assert.equal(res.isError, false);
+    const text = textOf(res);
+    // The file exists on disk → must NOT be reported as deleted (D).
+    assert.equal(text.split('\n').some((l) => l.startsWith('D\t')), false, 'a file that still exists must not be reported as deleted');
+    // It is downgraded to modified (M) — present, not suppressed.
+    assert.ok(text.split('\n').some((l) => l.startsWith('M\t')), 'downgraded to modified');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: list reports a real deletion (file actually gone) as deleted', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-real-del-'));
+  // Do NOT create the file — it is genuinely absent (a real deletion).
+  const entries = [
+    { type: 'session', version: 3, id: 's', timestamp: 't', cwd: dir },
+    {
+      type: 'message', id: 'm1', timestamp: 't',
+      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'rm gone.ts' } }] },
+    },
+    { type: 'message', id: 'tr1', timestamp: 't', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: 'ok', isError: false } },
+  ];
+  const sessionPath = path.join(dir, 'session.jsonl');
+  await fs.writeFile(sessionPath, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  try {
+    const res = await exe({ action: 'list', sessionPath });
+    assert.equal(res.isError, false);
+    assert.ok(textOf(res).split('\n').some((l) => l.startsWith('D\t')), 'a genuinely absent file is a real deletion');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── diff lookup: canonical path matching ──────────────────────────────────
+
+test('execute: diff finds a manifest entry via a `./`-prefixed path', async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    const res = await exe({ action: 'diff', sessionPath, path: ['./created.ts'] });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /^A created\.ts /m);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff finds a manifest entry via an absolute path inside the cwd', async () => {
+  const session = await makeSession({ toolPath: (dir) => path.join(dir, 'created.ts') });
+  try {
+    const res = await exe({ action: 'diff', sessionPath: session.sessionPath, path: [path.join(session.dir, 'created.ts')] });
+    assert.equal(res.isError, false);
+    assert.match(textOf(res), /^A created\.ts /m);
+  } finally {
+    await fs.rm(session.dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff finds a manifest entry via a case-variant path on Windows', { skip: process.platform !== 'win32' }, async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    const res = await exe({ action: 'diff', sessionPath, path: ['CREATED.TS'] });
+    assert.equal(res.isError, false);
+    // Must resolve to the created-kind entry (all-additions body), not default
+    // to modified — proving the case-variant path matched the manifest entry.
+    assert.match(textOf(res), /^A created\.ts /m);
+    assert.match(textOf(res), /@@ -0,0 \+1,2 @@/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

@@ -355,3 +355,38 @@ test("formatSelectionInfo handles selected model missing from pool", () => {
 	assert.ok(result);
 	assert.match(result!, /chosen/);
 });
+
+test("formatSelectionInfo surfaces a satisfied requirement as provenance", () => {
+	const result = formatSelectionInfo(
+		{
+			bucket: "medium",
+			selectedModel: "image-model",
+			selectionPool: ["image-model"],
+			requestedModelRequirements: { inputKinds: ["image"] },
+			modelRequirementsSatisfied: true,
+		},
+		fg,
+	);
+	assert.ok(result);
+	assert.match(result!, /req:image/);
+});
+
+test("formatSelectionInfo surfaces the requirement diagnostic when selection failed", () => {
+	const result = formatSelectionInfo(
+		{
+			requestedModelRequirements: { inputKinds: ["image"] },
+			modelRequirementsSatisfied: false,
+			requirementDiagnostic: 'No enabled image-capable model is available for the requested "medium" subagent bucket.',
+		},
+		fg,
+	);
+	assert.ok(result);
+	assert.match(result!, /⚠/);
+	assert.match(result!, /No enabled image-capable model/);
+	assert.match(result!, /req:image/);
+});
+
+test("formatSelectionInfo returns undefined when only an absent requirement is present", () => {
+	// No bucket/model and no active requirement → undefined (unchanged behaviour).
+	assert.equal(formatSelectionInfo({}, fg), undefined);
+});

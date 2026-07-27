@@ -1,7 +1,7 @@
 # Centralized Model Configuration
 
 > **Status:** Implemented, with later architecture changes. `models.yaml` owns the provider catalog and seed defaults; `npm run sync-models` regenerates `models.json` and provider-qualified `model-profiles.yaml`, then merges centrally-owned fields into `settings.json`. Model identity is the `(provider, id)` pair; duplicate ids across providers are supported by using `{ provider, id }` entries in `profileOrder`. Active chat and pruning selections are runtime user preferences: sync seeds missing values but preserves existing choices. The historical proxy sections below are retained as design rationale; see `README.md` and `AGENTS.md` for current usage.
-> **Current ownership:** `models.yaml` owns catalog data and retry policy. The settings UI owns active chat/pruning model, provider, and thinking-level selections. GitHub Copilot is account-scoped and reconciles its available models into `models.yaml` at the first session startup via `extensions/copilot-model-discovery`; the normal codegen then regenerates every derived catalog surface. It does not register a parallel runtime provider list.
+> **Current ownership:** `models.yaml` owns catalog data and retry policy. The settings UI owns active chat/pruning model, provider, and thinking-level selections. GitHub Copilot is account-scoped and reconciles its available models into `models.yaml` at session startup via the single-flight, retryable `extensions/copilot-model-discovery`; the normal codegen then regenerates every derived catalog surface. It does not register a parallel runtime provider list.
 
 ## 1. Problem
 
@@ -12,7 +12,7 @@ and one pairing (umans ↔ litellm) has no validation at all.
 | Surface | Path | Format | Owns | Readers |
 |---|---|---|---|---|
 | **models.json** | `./models.json` | JSON (24 KB) | provider wiring, real USD pricing, model registry | ~14 TS files (pricing loaders, subagent-profiles, agent-dir resolution, proxy-service via baseUrl match, startup) |
-| **model-profiles.yaml** | `./model-profiles.yaml` | YAML (9.5 KB) | eligibility flags, thinking-level allowlists, disabled reasons, 0–30 `cost` ranking (fallback only) | ~7 TS files (bucket-selector, subagent-profiles, stratified-ranker, pricing-core fallback) |
+| **model-profiles.yaml** | `./model-profiles.yaml` | YAML (9.5 KB) | eligibility flags, thinking-level allowlists, disabled reasons, 0–30 `cost` ranking (fallback only) | ~7 TS files (bucket-selector, subagent-profiles, pricing-core fallback) |
 | **litellm_config.yaml** | `./proxy/litellm_config.yaml` | YAML (5.7 KB) | LiteLLM routing for umans: `model_list[]` + concurrency limits | **LiteLLM Python process only** (passed via `--config` path; no TS code parses it) |
 | **settings.json** | `./settings.json` | JSON (0.9 KB) | defaultModel, defaultProvider, defaultThinkingLevel, retry, pruning.model/provider/thinkingLevel | extension runtime |
 

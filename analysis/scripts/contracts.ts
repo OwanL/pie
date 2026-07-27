@@ -14,7 +14,7 @@ export type {
 
 import type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
-  RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
@@ -23,7 +23,7 @@ import type {
 
 export type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
-  RunOutcomeResolution, RunOutcomeSource, RunOutcome, SessionContextFileFactor, SessionToolSnippetFactor,
+  SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
   SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
@@ -51,8 +51,6 @@ export const SITE_DATA_FILE_NAMES = [
   'model-leaderboard.json',
   'pruning-impact.json',
   'tool-result-pruning-impact.json',
-  'tool-result-pruning-outcomes.json',
-  'agent-review-comparison.json',
   'session-review-analytics.json',
   'backend-errors.json',
   'file-types.json',
@@ -64,42 +62,6 @@ export type SiteDataFileName = (typeof SITE_DATA_FILE_NAMES)[number];
 
 export type VerificationState = 'none' | 'passing' | 'failing';
 export type VerificationCountBucket = '0' | '1' | '2-3' | '4+';
-
-export interface OutcomeHistoryLogEntry {
-  schemaVersion: number;
-  kind: 'run_outcome';
-  recordedAt: string;
-  sessionPath: string;
-  runId: string;
-  taskGroupId: string;
-  outcome: RunOutcome;
-}
-
-/** Agent-review completion judgement, mirrored from the `session_review` tool. */
-export type AgentReviewCompletion = 'fully' | 'partial' | 'setback';
-
-/** Raw agent-authored session review read from `agent-reviews.jsonl` (one per line).
- *  The agent-side counterpart to the user's `run_outcome` ({@link OutcomeHistoryLogEntry}):
- *  carries the richer agent-review fields (done / 1–5 rating / completion / reason) plus
- *  multi-reviewer provenance (reviewerBuckets / reviewerCount) so agent judgement can be
- *  compared against the user's own outcome in the dashboard. */
-export interface AgentReviewSourceEvent {
-  schemaVersion: number;
-  kind: 'agent_review';
-  recordedAt: string;
-  sessionPath: string;
-  runId: string;
-  taskGroupId: string;
-  done: boolean;
-  rating: number;
-  completion: AgentReviewCompletion;
-  reason: string;
-  evaluatedAt: string;
-  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small']). */
-  reviewerBuckets: string[];
-  /** Number of sub-agent reviewers that fed the rating. */
-  reviewerCount: number;
-}
 
 export type CriterionOrigin = 'explicit' | 'necessary_implied';
 export type CriterionImportance = 'core' | 'supporting' | 'optional';
@@ -117,7 +79,6 @@ export interface ClassifiedCriterion {
   status: CriterionStatus;
   reason: CriterionReason;
   evidenceRefs: string[];
-  findingRefs: string[];
 }
 
 export interface CriterionAttainmentSummary {
@@ -149,16 +110,6 @@ export interface ReviewEvidenceVector {
   human: string;
   limitations: string[];
 }
-export interface ReviewFinding {
-  findingId: string;
-  severity: 'critical' | 'major' | 'minor' | 'nit';
-  category: string;
-  statement: string;
-  evidenceRefs: string[];
-  criterionId?: string;
-  ledgerEffect: 'downgrade' | 'add' | 'none';
-  remediation: string;
-}
 export interface ReviewerRuntimeReference {
   role: 'proposal' | 'consolidation' | 'component' | 'adjudication';
   reviewerId: string;
@@ -177,13 +128,12 @@ export interface SessionReviewV2Source {
   sessionId: string;
   sessionPathAtReview: string;
   identityFallback: boolean;
-  rubricVersion: string;
-  indexVersion: string | null;
+  rubricVersion: 'session-review-v2.1';
+  indexVersion: 'v1';
   reviewedAt: string;
   ledger: ClassifiedCriterion[];
   process: ReviewProcessVector;
   evidence: ReviewEvidenceVector;
-  findings: ReviewFinding[];
   humanCheckStatus: string | null;
   confidence: ReviewConfidence;
   disagreement: { material: boolean; adjudicated: boolean; disputedFields: { field: string; resolution: string }[] };
@@ -192,12 +142,18 @@ export interface SessionReviewV2Source {
   blindingApplied: boolean;
 }
 
-/** Explicitly separate V1 sidecar cohort; never coerced into a V2 ledger. */
-export interface LegacySessionReviewSource extends HistoricalSessionReview {
-  cohort: 'legacy_v1';
-  sessionId: string;
-  normalizedSessionPath: string;
-  identityFallback: boolean;
+export type SessionReviewV2RejectionReason =
+  | 'unsupported_schema'
+  | 'unsupported_rubric'
+  | 'unsupported_index'
+  | 'invalid_identity'
+  | 'invalid_payload';
+
+export interface SessionReviewV2IngestionDiagnostics {
+  rawProductionCount: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  rejectedByReason: Record<SessionReviewV2RejectionReason, number>;
 }
 
 export type TranscriptSourceProvenance = 'legacy' | 'configured' | 'portable-export';
@@ -209,16 +165,6 @@ export interface HistoricalSessionAttribution {
   share: number;
   successfulAssistantTurns: number;
   attributedTokens: number;
-}
-
-/** Review-sidecar fields safe for analysis. Free-text reasons are intentionally absent. */
-export interface HistoricalSessionReview {
-  rating: number;
-  completion: AgentReviewCompletion;
-  done: boolean;
-  evaluatedAt: string;
-  reviewerBuckets: string[];
-  reviewerCount: number;
 }
 
 /** Content-free transcript evidence retained while loading an analytics source. */
@@ -243,7 +189,6 @@ export interface HistoricalSessionSourceSummary {
   terminalStatus: 'success' | 'error' | 'aborted' | 'none';
   mixedModel: boolean;
   sourceProvenance: TranscriptSourceProvenance[];
-  review: HistoricalSessionReview | null;
 }
 
 export interface SourceAnalyticsPayload {
@@ -252,13 +197,10 @@ export interface SourceAnalyticsPayload {
   workspaceKey: string;
   completedRuns: RunSnapshot[];
   openRuns: RunSnapshot[];
-  outcomes: OutcomeHistoryLogEntry[];
-  /** V1 agent-authored 1–5 reviews. This is an explicitly legacy cohort. */
-  agentReviews: AgentReviewSourceEvent[];
   /** Canonical V2 production reviews keyed by stable session-header ID. */
   sessionReviewsV2?: SessionReviewV2Source[];
-  /** V1 sidecar reviews, including unresolved path-hash fallback identities. */
-  legacySessionReviews?: LegacySessionReviewSource[];
+  /** Validation accounting for every raw production review presented to this source loader. */
+  sessionReviewV2Diagnostics: SessionReviewV2IngestionDiagnostics;
   /** Optional content-free evidence reconstructed from historical session transcripts. */
   historicalSessions?: HistoricalSessionSourceSummary[];
   /** Raw pruning decisions read from data/pruning.jsonl. */
@@ -280,12 +222,6 @@ export interface LoadedSourceAnalytics {
   sourcePath: string;
 }
 
-export interface ResolutionCounts {
-  resolved: number;
-  partiallyResolved: number;
-  unresolved: number;
-}
-
 export interface PreparedSkillEntry {
   name: string;
   lastModifiedAt: string | null;
@@ -299,16 +235,11 @@ export interface PreparedRunRow {
   identityFallback: boolean;
   sessionPathHash: string;
   status: ActiveRunStatus;
-  scored: boolean;
   startedAt: string;
   startedDay: string;
   updatedAt: string;
   finalizedAt: string | null;
   finalizationReason: RunFinalizationReason | null;
-  resolution: RunOutcomeResolution | null;
-  satisfaction: number | null;
-  /** Outcome provenance; historical outcomes without a source are normalized to `user`. */
-  outcomeSource: RunOutcomeSource | null;
   /** Provider-specific model id as recorded (e.g. 'umans-glm-5.2', 'glm-5.2:cloud'). Stored distinctly so provider differences remain investigable. */
   modelId: string | null;
   /** Canonical, provider-agnostic model family (e.g. 'glm-5.2') resolved from `models.json`'s optional `family` field; falls back to `modelId` when unset, null when `modelId` is null. The leaderboard groups by this, not `modelId`. */
@@ -440,8 +371,6 @@ export interface PreparedRunRow {
   tokenEfficiency: number | null;
   contextUtilization: number | null;
   cacheHitRatio: number | null;
-  /** True only for scored runs that succeeded on the first attempt without interruption, edits, or truncation; null for unscored/no-outcome runs. */
-  firstAttemptSuccess: boolean | null;
   /** File-churn signal: fraction of EDIT ops that revisited an already-edited file in this run
    *   (0 = every edit touched a fresh file, no churn; →1 = kept re-editing the same files). Null
    *   when the run had no edits or lacked per-file attribution (legacy runs). Derived from
@@ -482,9 +411,6 @@ export interface PreparedToolUsageRow {
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   mixedTreatmentConfig: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 export interface PreparedToolFailureRow {
@@ -501,9 +427,6 @@ export interface PreparedToolFailureRow {
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   mixedTreatmentConfig: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 export interface PreparedVerificationUsageRow {
@@ -517,9 +440,6 @@ export interface PreparedVerificationUsageRow {
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   mixedTreatmentConfig: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 export interface PreparedBackendErrorRow {
@@ -531,9 +451,6 @@ export interface PreparedBackendErrorRow {
   modelId: string | null;
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 export interface PreparedFileExtensionRow {
@@ -549,9 +466,6 @@ export interface PreparedFileExtensionRow {
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   mixedTreatmentConfig: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 /**
@@ -625,9 +539,6 @@ export interface PreparedToolResultIssueRow {
   thinkingLevel: ThinkingLevel | null;
   experimentAssignment: string | null;
   mixedTreatmentConfig: boolean;
-  scored: boolean;
-  satisfaction: number | null;
-  resolution: RunOutcomeResolution | null;
 }
 
 /** Raw pruning decision as read from data/pruning.jsonl. */
@@ -767,31 +678,6 @@ export interface PreparedToolResultPruningRow {
   tokensSaved: number;
 }
 
-/** Prepared agent-review row for DuckDB + site-data (joined to a run by sessionPathHash + runId).
- *  Carries the matched run's model family + user satisfaction so the comparison builder is
- *  self-contained (no re-join to runs needed). */
-export interface PreparedAgentReviewRow {
-  /** Explicit legacy cohort label: V1 ratings are never blended into V2 quality. */
-  cohort: 'legacy_v1';
-  sessionId: string;
-  identityFallback: boolean;
-  runId: string;
-  sessionPathHash: string;
-  taskGroupId: string;
-  recordedAt: string;
-  evaluatedAt: string;
-  startedDay: string;
-  /** Canonical model family of the matched run (null when unjoined). */
-  modelFamily: string | null;
-  agentRating: number;
-  agentCompletion: AgentReviewCompletion;
-  agentDone: boolean;
-  reviewerBuckets: string[];
-  reviewerCount: number;
-  /** User satisfaction for the matched run (null when the run has no user outcome). */
-  userSatisfaction: number | null;
-}
-
 /** Prepared pruning event row for DuckDB. */
 export interface PreparedPruningEventRow {
   runId: string;
@@ -877,17 +763,12 @@ export interface PreparedSessionReviewV2Row {
   externalBlockerRate: number | null;
   process: ReviewProcessVector;
   evidence: ReviewEvidenceVector;
-  findings: Array<Pick<ReviewFinding, 'findingId' | 'severity' | 'category' | 'criterionId' | 'ledgerEffect'>>;
   humanCheckStatus: string | null;
   confidence: ReviewConfidence;
   disagreement: SessionReviewV2Source['disagreement'];
   reviewers: ReviewerRuntimeReference[];
   diversityAchieved: boolean;
   blindingApplied: boolean;
-}
-
-export interface PreparedLegacySessionReviewRow extends Omit<LegacySessionReviewSource, 'normalizedSessionPath'> {
-  sessionPathHash: string;
 }
 
 export interface PreparedAnalyticsData {
@@ -908,9 +789,8 @@ export interface PreparedAnalyticsData {
   toolResultPruning: PreparedToolResultPruningRow[];
   warmBashRewrites: PreparedWarmBashRewriteRow[];
   warmBashSummaries: PreparedWarmBashSummaryRow[];
-  agentReviews: PreparedAgentReviewRow[];
   sessionReviewsV2: PreparedSessionReviewV2Row[];
-  legacySessionReviews: PreparedLegacySessionReviewRow[];
+  sessionReviewV2Diagnostics: SessionReviewV2IngestionDiagnostics;
   /** Privacy-safe historical transcript evidence used by the family-level leaderboard. */
   historicalSessions: PreparedHistoricalSessionSummary[];
 }
@@ -923,7 +803,6 @@ export interface SiteManifest {
   sourceExportedAt: string;
   completedRunCount: number;
   openRunCount: number;
-  scoredRunCount: number;
   dataMode: typeof DATA_MODE_LOCAL_DEFAULT;
   generatorVersion: string;
 }
@@ -932,9 +811,6 @@ export interface OverviewData {
   schemaVersion: number;
   totalCompletedRuns: number;
   totalOpenRuns: number;
-  totalScoredRuns: number;
-  averageSatisfaction: number | null;
-  resolutionCounts: ResolutionCounts;
   medianBusyDurationMs: number | null;
   p90BusyDurationMs: number | null;
   p99BusyDurationMs: number | null;
@@ -944,7 +820,6 @@ export interface OverviewData {
   medianTokenEfficiency: number | null;
   averageContextUtilization: number | null;
   averageCacheHitRatio: number | null;
-  firstAttemptSuccessRate: number | null;
   totalEstimatedCostUsd: number | null;
   medianEstimatedCostUsd: number | null;
   latestRunTimestamp: string | null;
@@ -967,15 +842,8 @@ export interface ModelQualityAggregateRow {
    *  family row; sorted and deduplicated. Optional for backward compatibility with older
    *  model-quality.json artifacts that predate family grouping. */
   providerModelIds?: string[];
-  /** Non-mixed user outcomes eligible for model-quality scoring. */
-  scoredRunCount: number;
-  /** Supplemental non-mixed agent outcomes, excluded from scoredRunCount and outcome aggregates. Optional only for backward compatibility with older generated artifacts. */
-  agentOutcomeCount?: number;
-  /** Outcome-bearing mixed-model runs excluded from model attribution. Optional only for backward compatibility with older generated artifacts. */
-  mixedModelExcludedOutcomeCount?: number;
-  /** Outcome-bearing stable-model runs excluded because treatment changed mid-run. Optional only for backward compatibility. */
-  mixedTreatmentExcludedOutcomeCount?: number;
-  averageSatisfaction: number | null;
+  /** V2 production reviews attributed to this model family. */
+  v2ReviewCount?: number;
   averageBusyDurationMs: number | null;
   medianBusyDurationMs: number | null;
   p90BusyDurationMs: number | null;
@@ -985,13 +853,11 @@ export interface ModelQualityAggregateRow {
   medianTokenEfficiency: number | null;
   averageContextUtilization: number | null;
   averageCacheHitRatio: number | null;
-  firstAttemptSuccessRate: number | null;
-  resolutionCounts: ResolutionCounts;
 }
 
 export interface ModelQualityData {
   schemaVersion: number;
-  cohortLabels: { userOutcomes: 'Legacy V1 user satisfaction/resolution'; agentOutcomes: 'Legacy V1 agent ratings'; v2Reviews: 'V2 canonical production reviews (separate artifact)' };
+  cohortLabels: { v2Reviews: 'V2 canonical production reviews' };
   rows: ModelQualityAggregateRow[];
   notes: string[];
 }
@@ -1001,17 +867,11 @@ export interface VerificationImpactRow {
   countBucket: VerificationCountBucket;
   verificationState: VerificationState;
   runCount: number;
-  scoredRunCount: number;
-  averageSatisfaction: number | null;
-  resolutionCounts: ResolutionCounts;
 }
 
 export interface VerificationImpactSummaryRow {
   verificationState: VerificationState;
   runCount: number;
-  scoredRunCount: number;
-  averageSatisfaction: number | null;
-  resolutionCounts: ResolutionCounts;
 }
 
 export interface VerificationImpactData {
@@ -1030,8 +890,6 @@ export interface ToolUsageAggregateRow {
   probeFailureCount: number;
   resultIssueCount: number;
   affectedRunCount: number;
-  averageSatisfactionWhenUsed: number | null;
-  averageSatisfactionWhenUnused: number | null;
 }
 
 export interface ToolUsageData {
@@ -1048,9 +906,6 @@ export interface TreatmentComparisonRow {
   experimentAssignment: string;
   mixedTreatmentConfig: boolean;
   runCount: number;
-  scoredRunCount: number;
-  averageSatisfaction: number | null;
-  resolutionCounts: ResolutionCounts;
 }
 
 export interface TreatmentComparisonData {
@@ -1061,8 +916,6 @@ export interface TreatmentComparisonData {
 export interface TimelineRow {
   bucketStart: string;
   runCount: number;
-  scoredRunCount: number;
-  averageSatisfaction: number | null;
   verificationRunCount: number;
   toolFailureCount: number;
   averageBusyDurationMs: number | null;
@@ -1092,7 +945,6 @@ export interface ModelLeaderboardProviderBreakdown {
   /** Provider-specific model id collapsed into this family row. */
   modelId: string;
   runCount: number;
-  scoredRunCount: number;
   /** Distinct transcript-only sessions attributed to this provider-specific id (fractional attribution does not inflate this count). */
   transcriptOnlySessionCount: number;
   /** Fractional transcript evidence mass attributed to this provider-specific id (sum of prepared attribution shares). */
@@ -1106,7 +958,7 @@ export interface ModelLeaderboardThinkingBreakdown {
   attributionMass: number;
 }
 
-export type ModelLeaderboardEvidenceTier = 'outcome-backed' | 'thin-outcome' | 'telemetry-only';
+export type ModelLeaderboardEvidenceTier = 'review-backed' | 'thin-review' | 'telemetry-only';
 
 export interface ModelLeaderboardScoreInterval {
   lower: number;
@@ -1126,34 +978,26 @@ export interface ModelLeaderboardRow {
   thinkingLevels: ModelLeaderboardThinkingBreakdown[];
   /** All completed runs recorded in this group, including mixed-model runs retained for transparency. */
   runCount: number;
-  /** Non-mixed, stable-treatment user outcomes attributed to this model and eligible for dimensions, priors, evidence weight, and ranking. */
-  scoredRunCount: number;
-  /** Distinct task groups represented by eligible user outcomes; the rank gate and evidence weight use this effective count. */
+  /** Distinct task groups represented by eligible V2 reviews. */
   effectiveTaskCount: number;
-  /** Completed stable model/treatment runs that could have received a user outcome; retained for provenance. */
+  /** Completed stable model/treatment runs retained for provenance. */
   attributableRunCount: number;
   /** Distinct task groups among attributable completed stable model/treatment runs. */
   attributableTaskCount: number;
   /** effectiveTaskCount / attributableTaskCount; null when there are no attributable task groups. */
   scoringCoverage: number | null;
-  /** Whether task-level user-rating coverage is below the minimum required for ranking. */
+  /** Whether task-level V2 review coverage is below the minimum required for ranking. */
   scoringCoverageGateFailed: boolean;
-  /** Outcome-bearing mixed-model runs excluded from model-attributed scoring. */
+  /** V2-reviewed mixed-model runs excluded from model-attributed scoring. */
   mixedModelExcludedCount: number;
-  /** Outcome-bearing stable-model runs excluded because prompt/tool/skill/extension treatment changed mid-run. */
+  /** V2-reviewed stable-model runs excluded because treatment changed mid-run. */
   mixedTreatmentExcludedCount: number;
-  /** Canonical stable user outcomes, after task/family retry collapse. */
-  userOutcomeCount: number;
   /** Deduplicated V2 production-review effective mass. */
-  agentOutcomeCount: number;
-  /** V1 1–5 reviews retained for a separately labelled legacy cohort only. */
-  legacyAgentReviewCount: number;
+  v2ReviewCount: number;
   /** Mean unmodified per-session qualityIndexV1 (0–100); no process/coverage multiplier. */
   meanQualityIndexV1: number | null;
-  userEvidenceCount: number;
-  userEvidenceMass: number;
-  agentEvidenceCount: number;
-  agentEvidenceMass: number;
+  reviewEvidenceCount: number;
+  reviewEvidenceMass: number;
   processEvidenceCount: number;
   processEvidenceMass: number;
   canonicalTaskCount: number;
@@ -1161,8 +1005,7 @@ export interface ModelLeaderboardRow {
   mixedAttributionMass: number;
   evidenceTier: ModelLeaderboardEvidenceTier;
   /** Direct-evidence channel estimates. Null means the family has no direct evidence in that channel. */
-  userChannelScore: number | null;
-  agentChannelScore: number | null;
+  reviewChannelScore: number | null;
   processChannelScore: number | null;
   /** Regularized cohort-relative composite. Non-unknown observed families are always ranked. */
   compositeScore: number | null;
@@ -1176,13 +1019,11 @@ export interface ModelLeaderboardRow {
   /** True when a row passing the overall evidence gate is excluded under active case-mix adjustment because any represented target band has too few model-rated tasks. */
   caseMixBandOverlapGateFailed: boolean;
   rank: number | null;
-  /** n/(n+k): how much the row's own outcome evidence determines its regularized estimates. */
+  /** n/(n+k): how much the row's own V2 review evidence determines its regularized estimates. */
   evidenceWeight: number | null;
   /** @deprecated Compatibility alias for evidenceWeight; not a score multiplier. */
   reliabilityFactor: number | null;
   dimensions: {
-    satisfaction: LeaderboardDimension;
-    resolutionRate: LeaderboardDimension;
     fileChurn: LeaderboardDimension;
     toolReliability: LeaderboardDimension;
     verificationPassRate: LeaderboardDimension;
@@ -1190,13 +1031,13 @@ export interface ModelLeaderboardRow {
   };
   /** Median complete total estimated USD cost per run. Parent-only estimates are never substituted for unknown totals; not in the composite. */
   medianCostUsd: number | null;
-  /** Mean ex-ante task-complexity percentile (0–1) of eligible user outcomes. */
+  /** Mean ex-ante task-complexity percentile (0–1) of eligible reviewed sessions. */
   meanPreTaskComplexity: number | null;
-  /** Distinct eligible user-rated task-group counts by ex-ante complexity band. */
+  /** Distinct eligible reviewed task-group counts by ex-ante complexity band. */
   taskComplexityBandCounts: Record<TaskComplexityBand, number>;
   /** Share of the common target task mix covered by bands with direct evidence for this model. */
   caseMixOverlap: number | null;
-  /** Mean post-treatment workload intensity (0–1) of eligible user-outcome runs; descriptive only. */
+  /** Mean post-treatment workload intensity (0–1) of eligible reviewed runs; descriptive only. */
   meanWorkloadIntensity: number | null;
   /** @deprecated Compatibility alias for meanWorkloadIntensity; not used in the composite. */
   meanTaskComplexity: number | null;
@@ -1214,14 +1055,13 @@ export interface ModelLeaderboardRow {
 export interface ModelLeaderboardCaseMixAdjustment {
   method: 'direct_standardization';
   applied: boolean;
-  /** Global distinct attributable user-rated tasks required in each represented band to activate adjustment. */
+  /** Global distinct reviewed tasks required in each represented band to activate adjustment. */
   minimumRatedTasksPerBand: number;
   /** Model-specific rated tasks required in every represented band for an adjusted row to rank. */
   minimumModelRatedTasksPerBand: number;
   /** Bands below this target-population share do not gate activation; their sparse priors fall back to the overall pool. */
   minimumTargetBandWeight: number;
   targetBandWeights: Record<TaskComplexityBand, number>;
-  scoredBandCounts: Record<TaskComplexityBand, number>;
   activeSignals: PreTaskComplexitySignal[];
   initialUserMessageCoverage: number;
   notes: string[];
@@ -1229,22 +1069,19 @@ export interface ModelLeaderboardCaseMixAdjustment {
 
 export interface ModelLeaderboardData {
   schemaVersion: number;
-  sourceLabels: { user: 'Legacy V1 user outcomes'; agent: 'V2 qualityIndexV1'; process: 'Objective runtime process telemetry' };
+  sourceLabels: { review: 'V2 qualityIndexV1'; process: 'Objective runtime process telemetry' };
   rows: ModelLeaderboardRow[];
-  sourceWeights: { user: 0; agent: 1; process: 0 };
-  sourcePriors: { user: number; agent: number; process: number };
-  sourceLogitSpreads: { user: number; agent: number; process: number };
-  shrinkage: { user: 4; agent: 8; process: 20 };
+  sourceWeights: { review: 1; process: 0 };
+  sourcePriors: { review: number; process: number };
+  sourceLogitSpreads: { review: number; process: number };
+  shrinkage: { review: 8; process: 20 };
   weights: {
-    satisfaction: number;
-    resolutionRate: number;
     fileChurn: number;
     toolReliability: number;
     verificationPassRate: number;
     tokenEfficiency: number;
   };
-  minimumScoredRuns: number;
-  /** Rank gate expressed as distinct task groups; equal to minimumScoredRuns for compatibility. */
+  /** Rank gate expressed as distinct reviewed task groups. */
   minimumEffectiveTasks: number;
   /** Minimum effectiveTaskCount / attributableTaskCount required for ranking. */
   minimumTaskScoringCoverage: number;
@@ -1324,94 +1161,6 @@ export interface ToolResultPruningImpactData {
   summary: ToolResultPruningSummary;
 }
 
-/** One outcome bucket comparing runs with tool-result-pruning on vs off.
- *  `enabled` is the bucket key: `true` = pruning active at run start, `false` =
- *  disabled, `null` = untracked (run predates the field). Backs the
- *  tool-result-pruning-outcomes.json site-data file so the user can see whether
- *  outcomes tend to be better with or without the system. */
-export interface ToolResultPruningOutcomeBucket {
-  enabled: boolean | null;
-  /** All non-open runs in this bucket (closed/scored). */
-  runCount: number;
-  /** Runs in this bucket with a user outcome (satisfaction != null). */
-  scoredRunCount: number;
-  /** Mean user satisfaction (1–5) over scored runs; null when none scored. */
-  meanSatisfaction: number | null;
-  /** Fraction of scored runs resolved (resolution === 'resolved'); null when none scored. */
-  resolvedRate: number | null;
-  /** Fraction of runs that succeeded on the first attempt (no message edits / retries); null when runCount is 0. */
-  firstAttemptSuccessRate: number | null;
-  /** Mean tool-failure count over non-open runs; null when runCount is 0. */
-  meanToolFailureCount: number | null;
-  /** Mean file-edit count over non-open runs; null when runCount is 0. */
-  meanEditCount: number | null;
-  /** Mean assistant-turn count over non-open runs; null when runCount is 0. */
-  meanAssistantTurnCount: number | null;
-  /** Mean busy-duration (ms) over non-open runs; null when runCount is 0. */
-  meanBusyDurationMs: number | null;
-}
-
-/** Site-data payload comparing run outcomes by tool-result-pruning enabled state.
- *  Answers "are outcomes better with or without tool-result pruning?" by
- *  bucketing completed runs and contrasting satisfaction / resolution /
- *  first-attempt-success / tool-failure / churn signals. */
-export interface ToolResultPruningOutcomeData {
-  schemaVersion: number;
-  buckets: ToolResultPruningOutcomeBucket[];
-  notes: string[];
-}
-
-/** Agreement signal between agent rating and user satisfaction, computed only over runs
- *  scored by BOTH (an agent review AND a user outcome). */
-export interface AgentReviewAgreementSummary {
-  /** Mean of |agent_rating - user_satisfaction| over runs scored by both. Null when none scored by both. */
-  meanAbsDelta: number | null;
-  /** Runs where agent_rating === user_satisfaction. */
-  exactCount: number;
-  /** Runs where |agent_rating - user_satisfaction| === 1. */
-  offByOneCount: number;
-  /** Runs where |agent_rating - user_satisfaction| >= 2. */
-  offByTwoPlusCount: number;
-}
-
-/** Per-model aggregate comparing agent judgement vs user outcome. */
-export interface AgentReviewPerModelRow {
-  /** Canonical model family the row is grouped by (mirrors model-quality modelId). */
-  modelId: string;
-  agentReviewCount: number;
-  /** Runs in this model group scored by the user (satisfaction != null). */
-  userOutcomeCount: number;
-  /** Runs in this model group scored by BOTH agent and user. */
-  bothScoredCount: number;
-  agentAverageRating: number | null;
-  userAverageSatisfaction: number | null;
-  agentCompletion: { fully: number; partial: number; setback: number };
-  agreement: AgentReviewAgreementSummary;
-}
-
-/** Multi-reviewer coverage: review counts grouped by reviewer-bucket signature. */
-export interface AgentReviewReviewerBucketRow {
-  /** Sorted reviewer-bucket signature (e.g. ['medium','small']); empty array when no bucket provenance. */
-  reviewerBuckets: string[];
-  reviewCount: number;
-  averageAgentRating: number | null;
-}
-
-/** Site-data payload comparing agent-authored reviews against user outcomes. */
-export interface AgentReviewComparisonData {
-  schemaVersion: number;
-  cohort: 'legacy_v1';
-  cohortLabel: 'Legacy V1 agent ratings (1–5)';
-  perModel: AgentReviewPerModelRow[];
-  reviewerBucketCoverage: AgentReviewReviewerBucketRow[];
-  overall: {
-    totalAgentReviews: number;
-    totalRunsScoredByUser: number;
-    totalScoredByBoth: number;
-  };
-  notes: string[];
-}
-
 export interface CountByValueRow { value: string; count: number }
 export interface SessionReviewAnalyticsData {
   schemaVersion: number;
@@ -1419,6 +1168,7 @@ export interface SessionReviewAnalyticsData {
   cohortLabel: 'V2 canonical production reviews';
   indexVersion: 'v1';
   rows: PreparedSessionReviewV2Row[];
+  diagnostics: SessionReviewV2IngestionDiagnostics;
   summary: {
     reviewCount: number;
     stableIdentityCount: number;
@@ -1445,10 +1195,8 @@ export interface SessionReviewAnalyticsData {
   };
   process: Record<keyof ReviewProcessVector, CountByValueRow[]>;
   evidence: Record<'requirements' | 'artifacts' | 'execution' | 'human', CountByValueRow[]> & { limitationCount: number };
-  findings: { total: number; bySeverity: CountByValueRow[]; byCategory: CountByValueRow[] };
   disagreement: { materialCount: number; adjudicatedCount: number; disputedFieldCount: number; byResolution: CountByValueRow[] };
   reviewers: { callCount: number; bucketDowngradeCount: number; diversityAchievedCount: number; byRole: CountByValueRow[]; byRequestedBucket: CountByValueRow[]; byEffectiveBucket: CountByValueRow[]; byModel: CountByValueRow[]; byProvider: CountByValueRow[]; byFamily: CountByValueRow[] };
-  legacy: { cohort: 'legacy_v1'; cohortLabel: 'Legacy V1 agent/user outcome records'; runReviewCount: number; sidecarReviewCount: number; identityFallbackCount: number; excludedFromV2: true };
   notes: string[];
 }
 
@@ -1509,8 +1257,6 @@ export interface SiteDataBundle {
   modelLeaderboard: ModelLeaderboardData;
   pruningImpact: PruningImpactData;
   toolResultPruningImpact: ToolResultPruningImpactData;
-  toolResultPruningOutcomes: ToolResultPruningOutcomeData;
-  agentReviewComparison: AgentReviewComparisonData;
   sessionReviewAnalytics: SessionReviewAnalyticsData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;

@@ -689,7 +689,7 @@ test('ViewState: all fields are present in initial state', () => {
     'activeRunSummary', 'runSummariesBySession', 'busy', 'notice', 'backendReady',
     'workspaceCwd', 'systemPrompts', 'modelSettings', 'availableModels', 'contextUsage',
     'prefs', 'fileChanges', 'readFilePaths', 'availableExtensions', 'pruningResult', 'pruningSettings',
-    'pruningCatalog', 'editingMessageId', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
+    'pruningCatalog', 'editingMessageId', 'editingDraft', 'pendingExtensionUIRequest', 'pendingExtensionUIRequestsBySession',
   ];
 
   for (const key of requiredKeys) {

@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { artifactDirectory } from './src/artifacts.js';
-import { projectComputerImageContext } from './src/context.js';
 import { buildToolError, buildToolResult, modelAcceptsImages } from './src/result.js';
 import {
   installProcessTeardown, potentialHeldForAction, potentialHeldForSequence, runtimeRegistry,
@@ -69,6 +68,10 @@ export default function registerComputerUse(pi: ExtensionAPI) {
     promptGuidelines: [
       'Use computer observe before acting; screenshot coordinates are target-relative by default, and semantic references are valid only for the latest observation revision.',
       'Prefer an exact window session for safe application work; exact-window input safely reacquires and proves its PID/HWND when foreground was stolen. A desktop session is a global exception: observe immediately before every action and pass that revision, because input is refused if foreground changed.',
+      'open and run_sequence accept optional screenshot/tree/state to perform an inline observation (initial or trailing) exactly like observe, combining target registration/execution with grounding in one call.',
+      'For path launches, pass a native executable (.exe) or a bare name/shortcut that resolves to one; shell wrappers and scripts cannot be correlated by PID/HWND and are rejected with an actionable error.',
+      'A vanished exact HWND rebinds automatically only to one unique replacement window with the same PID and process identity, invalidating old semantic refs; if no unique replacement exists, re-open the target.',
+      'For repeatable visible probes, prefer stable labels/roles/menu actions over positional control indexes or incidental node names; run a focused scenario before replaying a full viewport/configuration matrix.',
       'After an action opens a native dialog or another window, discover/open that new exact foreground target before continuing; do not keep typing through the parent target.',
       'Use computer run_sequence for timing-sensitive or simultaneous input, and verify visible postconditions with a fresh observation.',
     ],
@@ -96,7 +99,8 @@ export default function registerComputerUse(pi: ExtensionAPI) {
           await client.releaseAllHeldKnown();
           const sessionId = params.sessionId ?? `computer-${randomUUID()}`;
           const artifactDir = await artifactDirectory(sessionPath, sessionId);
-          result = await client.request('open', { ...params, sessionId, artifactDir }, { signal, sessionId, allowNeedsReopen: true, timeoutMs: 30000 });
+          const observesInline = params.screenshot === true || params.tree === true || params.state === true;
+          result = await client.request('open', { ...params, sessionId, artifactDir }, { signal, sessionId, allowNeedsReopen: true, timeoutMs: observesInline ? 60000 : 30000 });
           client.markReopened();
         } else if (params.action === 'observe') {
           result = await client.request('observe', params, { signal, sessionId: params.sessionId, timeoutMs: 30000 });
@@ -105,12 +109,13 @@ export default function registerComputerUse(pi: ExtensionAPI) {
         } else if (params.action === 'run_sequence') {
           const potentialSequence = params.sequence ?? await sequenceFromArtifact(params.sequencePath!);
           validateRevisionForActions(sequenceUsesTargetCoordinates(potentialSequence), params.revision);
-          result = await client.request('run_sequence', params, { signal, sessionId: params.sessionId, potential: potentialHeldForSequence(potentialSequence), timeoutMs: estimateSequenceDuration(potentialSequence) + 30000 });
+          const observesInline = params.screenshot === true || params.tree === true || params.state === true;
+          result = await client.request('run_sequence', params, { signal, sessionId: params.sessionId, potential: potentialHeldForSequence(potentialSequence), timeoutMs: estimateSequenceDuration(potentialSequence) + (observesInline ? 60000 : 30000) });
         } else {
           await client.releaseAllHeldKnown();
           result = await client.request('close', params, { signal, sessionId: params.sessionId, timeoutMs: 30000, allowNeedsReopen: true });
         }
-        return await buildToolResult(params.action, result, params.action === 'observe' && modelAcceptsImages(ctx.model));
+        return await buildToolResult(params.action, result, (params.action === 'observe' || params.action === 'open' || params.action === 'run_sequence') && modelAcceptsImages(ctx.model));
       } catch (error) {
         if (sessionPath) {
           try {
@@ -124,8 +129,6 @@ export default function registerComputerUse(pi: ExtensionAPI) {
       }
     },
   } as any);
-
-  pi.on('context', (event) => ({ messages: projectComputerImageContext(event.messages) }));
 
   pi.on('session_shutdown', async (_event: unknown, ctx: ComputerToolContext) => {
     const sessionPath = ctx?.sessionManager?.getSessionFile();

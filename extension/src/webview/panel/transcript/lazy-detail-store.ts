@@ -17,8 +17,15 @@ export type LazyDetailState =
 
 const MAX_ENTRIES = 32;
 const MAX_BYTES = 64 * 1024 * 1024;
+// A single detail can approach the JSONL record ceiling. Do not allow several
+// deliberate expansions to make those responses queue behind one another in
+// the backend process: dispatch the next request only after the prior result
+// has crossed the host/webview boundary.
+const MAX_CONCURRENT_REQUESTS = 1;
 const entries = new Map<string, { state: LazyDetailState; bytes: number }>();
 const inFlight = new Set<string>();
+const activeRequests = new Set<string>();
+const pendingRequests: Array<{ sessionPath: string; ref: LazyDetailRef }> = [];
 const subscribersByKey = new Map<string, Set<() => void>>();
 let cacheGeneration = 0;
 let post: ((message: WebviewToHostMessage) => void) | undefined;
@@ -44,7 +51,9 @@ function enforceBounds(): string[] {
   const evictedKeys: string[] = [];
   let bytes = [...entries.values()].reduce((total, entry) => total + entry.bytes, 0);
   while (entries.size > MAX_ENTRIES || bytes > MAX_BYTES) {
-    const oldestKey = entries.keys().next().value as string | undefined;
+    // Loading entries represent explicit user intent and are not cache
+    // candidates. Evict the oldest settled entry instead.
+    const oldestKey = [...entries].find(([, entry]) => entry.state.status !== 'loading')?.[0];
     if (!oldestKey) break;
     const oldest = entries.get(oldestKey);
     entries.delete(oldestKey);
@@ -55,19 +64,34 @@ function enforceBounds(): string[] {
   return evictedKeys;
 }
 
+function pumpRequests(): void {
+  if (!post) return;
+  while (activeRequests.size < MAX_CONCURRENT_REQUESTS) {
+    const next = pendingRequests.shift();
+    if (!next) return;
+    if (!inFlight.has(next.ref.key)) continue;
+    activeRequests.add(next.ref.key);
+    post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
+  }
+}
+
 export function setLazyDetailPostMessage(value: (message: WebviewToHostMessage) => void): void {
   post = value;
+  pumpRequests();
 }
 
 export function clearLazyDetailCache(): void {
   entries.clear();
   inFlight.clear();
+  activeRequests.clear();
+  pendingRequests.length = 0;
   cacheGeneration += 1;
   notifyAll();
 }
 
 export function receiveLazyDetailResult(result: DetailResult): void {
   inFlight.delete(result.key);
+  activeRequests.delete(result.key);
   entries.delete(result.key);
   entries.set(result.key, result.status === 'loaded'
     ? { state: { status: 'loaded', value: result.value }, bytes: result.sizeBytes }
@@ -77,6 +101,7 @@ export function receiveLazyDetailResult(result: DetailResult): void {
   for (const key of evictedKeys) {
     if (key !== result.key) notifyKey(key);
   }
+  pumpRequests();
 }
 
 export function requestLazyDetail(sessionPath: string, ref: LazyDetailRef, force = false): void {
@@ -90,13 +115,14 @@ export function requestLazyDetail(sessionPath: string, ref: LazyDetailRef, force
   entries.delete(ref.key);
   entries.set(ref.key, { state: { status: 'loading' }, bytes: 0 });
   notifyKey(ref.key);
-  post?.({ type: 'requestDetail', sessionPath, ref });
+  pendingRequests.push({ sessionPath, ref });
+  pumpRequests();
 }
 
 export function useLazyDetail(
   ref: LazyDetailRef | undefined,
   expanded: boolean,
-): { state: LazyDetailState; retry: () => void } {
+): { state: LazyDetailState; load: () => void; retry: () => void } {
   const [, setVersion] = useState(0);
   const wasExpanded = useRef(false);
   const previousKey = useRef<string | undefined>(undefined);
@@ -136,6 +162,9 @@ export function useLazyDetail(
     previousKey.current = ref?.key;
     if (shouldRequest) requestLazyDetail(ref.sessionPath, ref);
   }, [expanded, ref?.key]);
+  const load = useCallback(() => {
+    if (ref) requestLazyDetail(ref.sessionPath, ref);
+  }, [ref?.key]);
   const retry = useCallback(() => {
     if (ref) requestLazyDetail(ref.sessionPath, ref, true);
   }, [ref?.key]);
@@ -154,5 +183,5 @@ export function useLazyDetail(
   ) {
     state = { status: 'loaded', value: lastLoaded.current.value };
   }
-  return { state, retry };
+  return { state, load, retry };
 }

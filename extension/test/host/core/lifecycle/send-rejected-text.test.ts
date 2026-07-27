@@ -64,7 +64,7 @@ test('SendResult{ok:false} emits sendRejected with the original sent text for dr
   }
 });
 
-test('EditResult{ok:false} does NOT emit sendRejected (no draft restoration for edits)', () => {
+test('EditResult{ok:false} reopens the host-projected inline editor without sendRejected', () => {
   let state = createInitialArchState();
   state = {
     ...state,
@@ -101,8 +101,11 @@ test('EditResult{ok:false} does NOT emit sendRejected (no draft restoration for 
   });
   state = editResult.state;
 
-  // Edit PendingOp should NOT have text
-  assert.equal(state.pending.ops['c2']?.text, undefined, 'Edit PendingOp should not store text');
+  // Edit rollback state is distinct from the bottom-composer send payload.
+  assert.equal(state.pending.ops['c2']?.text, undefined, 'Edit PendingOp should not use send text');
+  assert.deepEqual(state.pending.ops['c2']?.editDraft, {
+    messageId: 'msg1', text: 'edited text', inputs: [],
+  });
 
   // Dispatch EditResult{ok:false}
   const failResult = dispatch(state, {
@@ -115,5 +118,9 @@ test('EditResult{ok:false} does NOT emit sendRejected (no draft restoration for 
 
   // Should NOT emit PostImperative
   const postImperative = failResult.effects.find((e) => e.kind === 'PostImperative');
-  assert.equal(postImperative, undefined, 'EditResult{ok:false} should not emit PostImperative');
+  assert.equal(postImperative, undefined, 'EditResult{ok:false} should not emit sendRejected');
+  assert.equal(failResult.state.transcript.editingMessageIdBySession['/w/s.jsonl'], 'msg1');
+  assert.deepEqual(failResult.state.transcript.editingDraftBySession['/w/s.jsonl'], {
+    messageId: 'msg1', text: 'edited text', inputs: [],
+  });
 });

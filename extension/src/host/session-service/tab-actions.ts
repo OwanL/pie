@@ -164,7 +164,7 @@ export class SessionTabActions {
     // method does ONLY the host-side work the reducer can't:
     //   - clearSelectionRequestsForPath (host-local selection timer cleanup)
     //   - onSessionClosed (disk-persisting analytics: finalize run as
-    //     'closed_unscored' + dispatch ActiveRunSummaryChanged(null) —
+    //     'closed' + dispatch ActiveRunSummaryChanged(null) —
     //     redundant since the reducer already cleared the run summary, but
     //     idempotent)
     //   - clearSessionScope (host-local runtime state: busySeqMap,

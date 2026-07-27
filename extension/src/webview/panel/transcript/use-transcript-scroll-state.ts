@@ -20,6 +20,10 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
   const [autoFollow, setAutoFollowState] = useState(true);
   const autoFollowRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  // True only during recent downward scroll events. The scrolled-up anchor
+  // yields while this is set so continuous scrollbar/middle-button dragging
+  // toward the live edge cannot be counteracted by streaming row remeasures.
+  const isScrollingTowardBottomRef = useRef(false);
 
   // Co-located setter: updates the ref (synchronous reads in the rAF loop's
   // idle gate) AND the reactive state together, so the two never diverge.
@@ -48,7 +52,16 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
     setIsAtBottom(true);
   }, [scrollRef]);
 
-  return { isAtBottom, setIsAtBottom, autoFollow, setAutoFollow, autoFollowRef, lastScrollTopRef, scrollToBottom };
+  return {
+    isAtBottom,
+    setIsAtBottom,
+    autoFollow,
+    setAutoFollow,
+    autoFollowRef,
+    lastScrollTopRef,
+    isScrollingTowardBottomRef,
+    scrollToBottom,
+  };
 }
 
 export function usePaginationState(

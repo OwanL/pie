@@ -35,7 +35,7 @@ import { TranscriptMessageList } from './transcript-message-list';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import { getToolRenderer } from './registry';
 import { useCollapsibleOpen } from './use-collapsible-open';
-import { useLazyDetail } from './lazy-detail-store';
+import { type LazyDetailState, useLazyDetail } from './lazy-detail-store';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
@@ -54,6 +54,9 @@ interface ToolCallItemProps {
 interface SubagentBlockProps {
   toolCall: ToolCall;
   subagentResult?: SubagentResult;
+  detailState?: LazyDetailState;
+  onLoadDetail?: () => void;
+  onRetryDetail?: () => void;
   prefs: ChatPrefs;
   workingDirectory: string | null;
   onOpenFile: (path: string) => void;
@@ -394,6 +397,11 @@ export function singleResultStatus(
     return 'completed';
   }
   if (isFailed(result)) return 'failed';
+  // Block snapshots (sequential/parallel calls) can publish a child's terminal
+  // phase before the enclosing tool result refreshes its sentinel exitCode.
+  // Honour that explicit per-child terminal marker so a settled row gets the
+  // completed treatment while its siblings continue running.
+  if (result.activityPhase === 'completed' || result.completedAt != null) return 'completed';
   if (isSubagentSingleResultRunning(result)) {
     // A running call that has produced no activity yet is "idle" (queued /
     // not started).
@@ -408,6 +416,9 @@ export function singleResultStatus(
 interface SubagentSingleBlockProps {
   singleResult: SubagentSingleResult;
   toolCall: ToolCall;
+  detailState?: LazyDetailState;
+  onLoadDetail?: () => void;
+  onRetryDetail?: () => void;
   index: number;
   prefs: ChatPrefs;
   workingDirectory: string | null;
@@ -556,6 +567,9 @@ function SubagentMessages({
 function SubagentSingleBlock({
   singleResult,
   toolCall,
+  detailState,
+  onLoadDetail,
+  onRetryDetail,
   index,
   prefs,
   workingDirectory,
@@ -569,6 +583,9 @@ function SubagentSingleBlock({
     ? `subagent:${toolCall.id}-${index}`
     : `subagent:${toolCall.id}`;
   const [open, setOpen] = useCollapsibleOpen(collapsibleKey, prefs.autoExpandSubagentCalls);
+  useEffect(() => {
+    if (open && toolCall.detailRef) onLoadDetail?.();
+  }, [open, toolCall.detailRef?.key, onLoadDetail]);
   const status = singleResultStatus(singleResult, toolCall.status, multipleResults);
   const errorDetail = status === 'failed' || status === 'interrupted'
     ? subagentErrorDetail(singleResult)
@@ -728,22 +745,37 @@ function SubagentSingleBlock({
           onTransitionEnd={onBodyTransitionEnd}
         >
           <div class="collapsible-body-clip">
-            <SubagentCallContext.Provider value={{ id: subagentCallId, agent: singleResult.agent, depth: subagentDepth }}>
-              <SubagentMessages
-                singleResult={singleResult}
-                toolCall={toolCall}
-                index={index}
-                prefs={prefs}
-                workingDirectory={workingDirectory}
-                onOpenFile={onOpenFile}
-                onContextMenu={onContextMenu}
-                onNestedContextMenu={onNestedContextMenu}
-                renderToolCall={renderToolCall}
-                isNested={isNested}
-                bodyId={bodyId}
-                onClose={close}
-              />
-            </SubagentCallContext.Provider>
+            {toolCall.detailRef && detailState?.status !== 'loaded' ? (
+              <div id={bodyId} class="subagent-messages p-3" role="status">
+                {detailState?.status === 'failure'
+                  || detailState?.status === 'unavailable'
+                  || detailState?.status === 'stale' ? (
+                    <div>
+                      <div>{detailState.message}</div>
+                      <button type="button" class="mt-2 text-accent underline" onClick={onRetryDetail}>Retry</button>
+                    </div>
+                  ) : (
+                    <span>Loading subagent transcript…</span>
+                  )}
+              </div>
+            ) : (
+              <SubagentCallContext.Provider value={{ id: subagentCallId, agent: singleResult.agent, depth: subagentDepth }}>
+                <SubagentMessages
+                  singleResult={singleResult}
+                  toolCall={toolCall}
+                  index={index}
+                  prefs={prefs}
+                  workingDirectory={workingDirectory}
+                  onOpenFile={onOpenFile}
+                  onContextMenu={onContextMenu}
+                  onNestedContextMenu={onNestedContextMenu}
+                  renderToolCall={renderToolCall}
+                  isNested={isNested}
+                  bodyId={bodyId}
+                  onClose={close}
+                />
+              </SubagentCallContext.Provider>
+            )}
             {/* Left gutter collapse hitbox (border / indentation area). Only
               while actually open (not during the close animation). */}
             {open && <CollapsibleGutter onCollapse={close} />}
@@ -757,6 +789,9 @@ function SubagentSingleBlock({
 function SubagentBlock({
   toolCall,
   subagentResult,
+  detailState,
+  onLoadDetail,
+  onRetryDetail,
   prefs,
   workingDirectory,
   onOpenFile,
@@ -792,6 +827,9 @@ function SubagentBlock({
             <SubagentSingleBlock
               singleResult={singleResult}
               toolCall={toolCall}
+              detailState={detailState}
+              onLoadDetail={onLoadDetail}
+              onRetryDetail={onRetryDetail}
               index={index}
               prefs={prefs}
               workingDirectory={workingDirectory}
@@ -811,6 +849,9 @@ function SubagentBlock({
     <SubagentSingleBlock
       singleResult={result.results[0]}
       toolCall={toolCall}
+      detailState={detailState}
+      onLoadDetail={onLoadDetail}
+      onRetryDetail={onRetryDetail}
       index={0}
       prefs={prefs}
       workingDirectory={workingDirectory}
@@ -871,10 +912,10 @@ function ToolCallItemBody({
   renderToolCall,
 }: ToolCallItemProps) {
   const isSubagent = toolCall.name === 'subagent';
-  // A subagent's collapsed card is itself a transcript preview, so visible
-  // subagents need their detail without a preliminary generic-card click.
-  // Generic tools remain strictly expansion-loaded.
-  const lazyDetail = useLazyDetail(toolCall.detailRef, isSubagent);
+  // The compact tool/input projection is sufficient for the collapsed
+  // subagent preview. The recursive transcript is requested only by the
+  // subagent disclosure's open state, just like a main transcript row.
+  const lazyDetail = useLazyDetail(toolCall.detailRef, false);
   const renderedToolCall = lazyDetail.state.status === 'loaded'
     ? { ...toolCall, result: lazyDetail.state.value, detailRef: undefined }
     : toolCall;
@@ -889,6 +930,9 @@ function ToolCallItemBody({
     return (
       <Renderer
         toolCall={renderedToolCall}
+        detailState={lazyDetail.state}
+        onLoadDetail={lazyDetail.load}
+        onRetryDetail={lazyDetail.retry}
         prefs={prefs}
         workingDirectory={workingDirectory}
         onOpenFile={onOpenFile}
@@ -929,6 +973,9 @@ export function ToolCallItem(props: ToolCallItemProps) {
 /** Subagent renderer exposed for registry registration. */
 export function SubagentToolRenderer({
   toolCall,
+  detailState,
+  onLoadDetail,
+  onRetryDetail,
   prefs,
   workingDirectory,
   onOpenFile,
@@ -947,6 +994,9 @@ export function SubagentToolRenderer({
     <SubagentBlock
       toolCall={toolCall}
       subagentResult={subagentResult}
+      detailState={detailState}
+      onLoadDetail={onLoadDetail}
+      onRetryDetail={onRetryDetail}
       prefs={prefs}
       workingDirectory={workingDirectory}
       onOpenFile={onOpenFile}

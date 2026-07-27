@@ -16,10 +16,10 @@ Cua + NutJS was selected over Terminator `0.24.32` + NutJS. Both finalists passe
 
 `extensions/computer-use/index.ts` registers one sequential tool with five actions:
 
-- `open` — discover or launch an exact target;
+- `open` — discover or launch an exact target; accepts optional `screenshot`/`tree`/`state` to perform the initial observation inline, exactly like `observe`;
 - `observe` — return pixels, optional accessibility data, target/revision state, and artifacts;
 - `act` — execute one generic input/focus/release action;
-- `run_sequence` — execute a serializable monotonic input sequence;
+- `run_sequence` — execute a serializable monotonic input sequence; accepts optional `screenshot`/`tree`/`state` for a trailing verification observation;
 - `close` — release input and close runtime state, optionally the exact application.
 
 Each durable pie session owns a lazy Node sidecar keyed by canonical session path. Native packages load only in that child. Parent and child communicate through bounded 1 MiB JSONL records; screenshots remain files and never cross the sidecar protocol as base64. The parent owns timeout, restart, cancellation, and emergency-release recovery.
@@ -29,7 +29,9 @@ Target safety is fail-closed:
 - every window target requires a positive PID and HWND;
 - partial selectors reject ambiguity;
 - launched windows must remain a stable unique PID/HWND match;
+- launch path inputs are normalized: bare executable names resolve via PATH and `.lnk` shortcuts resolve to their target, but only a deterministically resolved native `.exe` is launched; shell wrappers, scripts, and unresolvable links are rejected with `LAUNCH_UNRESOLVED` rather than unsafe shell correlation;
 - every non-release physical input to a window revalidates the exact target, active foreground HWND, and unique NutJS HWND region immediately before delivery; if another app stole foreground between model turns, the backend safely reacquires the exact PID/HWND before delivery; a move or resize beyond the deterministic one-pixel tolerance fails with retryable `STALE_GEOMETRY` before input;
+- a vanished exact HWND rebinds only to one unique replacement window with the same PID and process identity, bumping the target generation so old semantic refs are stale and forcing a fresh observation for screenshot-relative coordinates; zero or multiple replacements stay fail-closed `STALE_TARGET`;
 - desktop actions are an intentional exception to target ownership, but desktop observation binds the same active HWND before and after capture, every physical action requires that latest revision, and input is refused with `DESKTOP_FOREGROUND_CHANGED` if the active HWND changed;
 - focus uses Cua first, immediately follows with a bounded Win32 thread-input fallback that validates the HWND's PID before activation and final foreground proof, then uses exact-HWND NutJS restore/focus as the last fallback;
 - stale, background, ambiguous, or vanished targets receive explicit retryable errors;
@@ -54,7 +56,7 @@ desktop = logicalWindowOrigin + displayCoordinate * logicalWindowSize / displayF
 
 Desktop-absolute coordinates require explicit `scope:"desktop"`. Target-relative coordinates use exclusive upper bounds: `x >= width` or `y >= height` is rejected. Pixel actions require the latest observation revision. Accessibility refs resolve to their exact observed element centers and are also revision scoped.
 
-A context projection retains only the newest three `computer` image parts for the next model request. It preserves all text and artifact paths, all non-computer images, and the durable session/transcript. This prevents providers with ten-image request limits from failing during long observe/act loops.
+The `computer` tool no longer registers its own context projection. A source-specific newest-three `computer` screenshot bound is now applied as the first pass of the generic `image-context-guard` extension, which then applies the active model's per-request image maximum (`maxImagesPerRequest`) to the resulting complete context and emits one aggregate omission notice. The newest-three rule preserves all text and artifact paths, all non-computer images, and the durable session/transcript; it is a sub-bound beneath the per-model total, not a standalone handler. See `extensions/image-context-guard/README.md`. This prevents providers with bounded image request limits from failing during long observe/act loops while keeping one deterministic owner for both passes. When a screenshot artifact exists but the active model is text-only, the tool returns an explicit `image_delivery: unavailable` notice with the artifact path and image-capable delegation guidance instead of silently omitting the pixels.
 
 ## Deterministic sequences
 

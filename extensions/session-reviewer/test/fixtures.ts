@@ -16,7 +16,6 @@ export const metCriterion: ClassifiedCriterion = {
   status: 'met',
   reason: 'none',
   evidenceRefs: ['transcript:1'],
-  findingRefs: [],
 };
 export const processVector = {
   requirementDiscipline: 'proportionate',
@@ -45,21 +44,19 @@ function reviewerRuntime<T extends 'small' | 'medium'>(requestedBucket: T, suffi
     family: requestedBucket === 'small' ? 'family-a' : 'family-b',
     thinkingLevel: null,
     promptHash: `prompt-${suffix}`,
-    rubricVersion: 'rubric-v2',
+    rubricVersion: 'session-review-v2.1',
   } as const;
 }
-function proposal(requestedBucket: 'small' | 'medium'): ReviewerProposal {
+export function proposal(requestedBucket: 'small' | 'medium'): ReviewerProposal {
   const suffix = `proposal-${requestedBucket}`;
   return {
     ...reviewerRuntime(requestedBucket, suffix),
     proposalId: suffix,
     proposedAt: '2026-07-24T10:00:00.000Z',
     criteria: [structuredClone(frozenCriterion)],
-    findings: [],
-    candidateChecks: [],
   };
 }
-function assessment(requestedBucket: 'small' | 'medium'): ReviewerAssessment {
+export function assessment(requestedBucket: 'small' | 'medium'): ReviewerAssessment {
   const suffix = `assessment-${requestedBucket}`;
   return {
     ...reviewerRuntime(requestedBucket, suffix),
@@ -69,10 +66,8 @@ function assessment(requestedBucket: 'small' | 'medium'): ReviewerAssessment {
       criteria: [structuredClone(metCriterion)],
       process: structuredClone(processVector),
       evidence: structuredClone(evidenceVector),
-      findings: [],
       confidence: 'high',
       proposedOverall: 'achieved',
-      proposedAmendments: [],
     },
   };
 }
@@ -100,8 +95,6 @@ export function validReview(overrides: Partial<SessionReviewV2> = {}): SessionRe
   const proposals: [ReviewerProposal, ReviewerProposal] = [proposal('small'), proposal('medium')];
   const components: [ReviewerAssessment, ReviewerAssessment] = [assessment('small'), assessment('medium')];
   const frozenLedgerSha256 = hashJson(frozenLedger);
-  const reviewerChecks: SessionReviewV2['reviewerChecks'] = [];
-  const reviewerChecksSha256 = hashJson(reviewerChecks);
   const manifest = evidenceManifest();
   const review: SessionReviewV2 = {
     schemaVersion: 2,
@@ -109,17 +102,15 @@ export function validReview(overrides: Partial<SessionReviewV2> = {}): SessionRe
     reviewId: 'review-1',
     sessionId: 'session-1',
     sessionPathAtReview: '/sessions/session-1.jsonl',
-    rubricVersion: 'rubric-v2',
+    rubricVersion: 'session-review-v2.1',
     indexVersion: 'v1',
     reviewedAt: '2026-07-24T10:20:00.000Z',
     frozenLedger,
     frozenLedgerSha256,
     ledger,
-    amendments: [],
     attainment: deriveAttainment(ledger),
     process: structuredClone(processVector),
     evidence: structuredClone(evidenceVector),
-    findings: [],
     confidence: 'high',
     proposals,
     consolidation: {
@@ -130,24 +121,20 @@ export function validReview(overrides: Partial<SessionReviewV2> = {}): SessionRe
       frozenLedgerSha256,
       provenance: { fromProposals: ['proposal-small', 'proposal-medium'], dedupNotes: [] },
     },
-    reviewerChecks,
-    reviewerChecksSha256,
     components,
     disagreement: { material: false, disputedFields: [], adjudicated: false },
     provenance: {
       orchestratorSessionId: 'reviewer-session',
-      rubricVersion: 'rubric-v2',
+      rubricVersion: 'session-review-v2.1',
       indexVersion: 'v1',
       blindingApplied: true,
       diversityAchieved: true,
       evidenceManifest: manifest,
       pipeline: {
         frozenLedgerSha256,
-        reviewerChecksSha256,
         proposalIds: ['proposal-small', 'proposal-medium'],
         consolidationId: 'consolidation-1',
         componentAssessmentIds: ['assessment-small', 'assessment-medium'],
-        amendmentIds: [],
       },
       hostVersion: process.env.PIE_EDITOR_VERSION?.trim() || null,
     },

@@ -12,6 +12,9 @@ interface UseTranscriptScrollAnchorArgs {
   virtualizer: Virtualizer<HTMLDivElement, HTMLDivElement>;
   /** True while pinned to the bottom; anchoring only runs when this is false. */
   autoFollowRef: { current: boolean };
+  /** Set during recent downward scroll events so anchoring yields to an active
+   *  scrollbar, wheel, trackpad, or middle-button move toward the bottom. */
+  isScrollingTowardBottomRef: { current: boolean };
   totalSize: number;
   /** Pagination in flight — anchoring is suppressed to avoid fighting the
    *  dedicated load-older scroll-anchor restore. */
@@ -20,6 +23,15 @@ interface UseTranscriptScrollAnchorArgs {
 }
 
 const RESTORE_EPSILON_PX = 1;
+
+export function shouldApplyScrollAnchorDelta(
+  delta: number | null,
+  isScrollingTowardBottom: boolean,
+): delta is number {
+  return !isScrollingTowardBottom
+    && delta !== null
+    && Math.abs(delta) >= RESTORE_EPSILON_PX;
+}
 
 function buildCandidates(items: ReadonlyArray<VirtualItem>): ScrollAnchorCandidate[] {
   const out: ScrollAnchorCandidate[] = [];
@@ -57,6 +69,7 @@ export function useTranscriptScrollAnchor({
   scrollRef,
   virtualizer,
   autoFollowRef,
+  isScrollingTowardBottomRef,
   totalSize,
   isLoadingOlder,
   isLoadingNewer,
@@ -98,7 +111,11 @@ export function useTranscriptScrollAnchor({
     ) {
       const candidates = buildCandidates(virtualizer.getVirtualItems());
       const delta = resolveScrollAnchorDelta(prev, candidates, el.scrollTop);
-      if (delta !== null && Math.abs(delta) >= RESTORE_EPSILON_PX) {
+      // An anchor restore preserves reading position while idle, but must never
+      // fight deliberate movement toward the live edge. Continuous scrollbar
+      // and middle-button scrolling otherwise loses the same few pixels on
+      // every streaming remeasure and can become unable to reach the bottom.
+      if (shouldApplyScrollAnchorDelta(delta, isScrollingTowardBottomRef.current)) {
         // Force an instant restore even if a theme or future style adds smooth
         // scrolling. Save/override/restore inline `scroll-behavior` the same
         // way `scrollToBottom` does, wrapped in try/finally so the prior value
@@ -113,5 +130,5 @@ export function useTranscriptScrollAnchor({
       }
     }
     captureAnchor();
-  }, [totalSize, scrollRef, virtualizer, autoFollowRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
+  }, [totalSize, scrollRef, virtualizer, autoFollowRef, isScrollingTowardBottomRef, captureAnchor, isLoadingOlder, isLoadingNewer]);
 }

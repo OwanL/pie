@@ -374,6 +374,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
               this.delivery.transcriptCommitted(msg.payload);
               break;
             case 'transcriptCommitBlocked':
+              this.delivery.transcriptCommitBlocked(msg.payload);
               if (this.lastTranscriptCommitBlockedReason !== msg.payload.reason) {
                 this.lastTranscriptCommitBlockedReason = msg.payload.reason;
                 appendPieLog('warn', 'sidebar-provider', 'transcript commit blocked', {

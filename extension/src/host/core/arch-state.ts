@@ -36,6 +36,7 @@ import type {
   ComposerInput,
   ActiveRunSummary,
   UserContentPart,
+  InlineEditDraft,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
 import type { LivePipelineState, LiveTurnPhase } from '../../shared/live-pipeline-protocol.js';
@@ -60,8 +61,12 @@ export interface TranscriptState {
   systemPromptsBySession: Record<string, SystemPromptEntry[]>;
   /** Transcript window (scroll/pagination state) keyed by session path. */
   windowBySession: Record<string, TranscriptWindow>;
+  /** Whole-branch accounting, retained independently of bounded transcript windows. */
+  sessionUsageBySession?: Record<string, import('../../shared/protocol').SessionUsageSnapshot>;
   /** Per-session message ID currently being edited. */
   editingMessageIdBySession: Record<string, string | null>;
+  /** Submitted content for an inline editor reopened after an edit rollback. */
+  editingDraftBySession: Record<string, InlineEditDraft | null>;
   /**
    * Per-session corrId of the in-flight transcript paging request
    * (loadOlder/loadNewer/jumpToLatest), or absent when none is in flight.
@@ -242,6 +247,8 @@ export interface PendingOp {
   /** Transcript messages removed by an optimistic edit so rollback handlers can
    *  restore the pre-edit tail if preflight or commit fails. */
   removedTail?: ChatMessage[];
+  /** Submitted inline-editor content retained exclusively for edit rollback. */
+  editDraft?: InlineEditDraft;
 }
 
 /** The pruning prepass phase for a session, surfaced as the live/cancelable
@@ -435,7 +442,9 @@ export function createInitialArchState(): ArchState {
       bySession: {},
       systemPromptsBySession: {},
       windowBySession: {},
+      sessionUsageBySession: {},
       editingMessageIdBySession: {},
+      editingDraftBySession: {},
       pagingInFlightBySession: {},
     },
     sessions: {

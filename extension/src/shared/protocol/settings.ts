@@ -536,7 +536,7 @@ export interface ChatPrefs {
   /** Hide the context-window usage indicator chip in the composer toolbar.
    *  Default false (visible). */
   hideContextIndicator: boolean;
-  /** Hide the run-status chip (scored/open/etc.) in the composer toolbar.
+  /** Hide the run-status chip (open/closed/etc.) in the composer toolbar.
    *  Default false (visible). */
   hideRunStatus: boolean;
 }
@@ -568,25 +568,13 @@ export const SUBAGENT_BUCKETS_ENV = 'PIE_SUBAGENT_BUCKETS_JSON';
  *  `NestedAllowedBuckets`. */
 export const NESTED_ALLOWED_BUCKETS_ENV = 'PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON';
 
-export type ActiveRunStatus = 'open' | 'scored' | 'closed_unscored';
+export type ActiveRunStatus = 'open' | 'closed';
 
 export interface ActiveRunSummary {
   runId: string;
   status: ActiveRunStatus;
-  scored: boolean;
   /** True when the next send is queued to start a new task group. */
   nextSendStartsNewTask?: boolean;
-}
-
-export type RunOutcomeResolution = 'resolved' | 'partially_resolved' | 'unresolved';
-export type RunOutcomeSource = 'user' | 'agent';
-
-export interface RunOutcome {
-  resolution: RunOutcomeResolution;
-  /** Intended to be a user-facing ordinal score (e.g. 1–5). */
-  satisfaction: number;
-  /** Who supplied the outcome. Absent denotes a user-authored outcome for wire compatibility. */
-  source?: RunOutcomeSource;
 }
 
 export const DEFAULT_CHAT_PREFS: ChatPrefs = {

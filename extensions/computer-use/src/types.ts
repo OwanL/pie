@@ -41,7 +41,7 @@ export type OpenSelector =
   | { kind: 'process'; process: string; launch?: boolean; args?: string[] }
   | { kind: 'path'; path: string; args?: string[] };
 
-export interface OpenParams { action: 'open'; selector: OpenSelector; sessionId?: string }
+export interface OpenParams { action: 'open'; selector: OpenSelector; sessionId?: string; screenshot?: boolean; tree?: boolean; state?: boolean }
 export interface ObserveParams {
   action: 'observe'; sessionId: string; targetId?: string;
   state?: boolean; screenshot?: boolean; tree?: boolean;
@@ -50,6 +50,7 @@ export interface ActParams { action: 'act'; sessionId: string; targetId?: string
 export interface RunSequenceParams {
   action: 'run_sequence'; sessionId: string; targetId?: string; revision?: number;
   sequence?: ComputerSequence; sequencePath?: string; preserveHeld?: boolean;
+  screenshot?: boolean; tree?: boolean; state?: boolean;
 }
 export interface CloseParams { action: 'close'; sessionId: string; closeApplication?: boolean }
 export type ComputerParams = OpenParams | ObserveParams | ActParams | RunSequenceParams | CloseParams;

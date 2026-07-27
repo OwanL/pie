@@ -1,4 +1,4 @@
-import type { FileChangeEntry, ChatMessage } from '../../shared/protocol';
+import type { FileChangeEntry, ChatMessage, SessionSummary } from '../../shared/protocol';
 import { isRecord } from '../../shared/type-guards';
 import {
   deriveFileChangesFromToolCall,
@@ -19,12 +19,28 @@ export {
   deriveFileChangeFromToolCall,
   deriveFileChangesFromToolCall,
   accumulateFileChange,
+  mergeFileChangeKind,
   deriveFileChangesFromSubagentResult,
 } from '../../shared/file-change-derivation';
 export type { ToolCallLikeInput } from '../../shared/file-change-derivation';
 
+/** Resolve the cwd to canonicalize file-change identities for a session: the
+ *  session's own cwd, falling back to the workspace cwd. Mirrors
+ *  `FileDiffService.resolveFileChangePath`'s base-path resolution (minus the
+ *  vscode workspace-folder fallback, which the pure derivation core does not
+ *  need). Returns `undefined` when no cwd is known — canonicalization then
+ *  degrades to separator/case/dot normalization only. */
+export function resolveSessionCwd(
+  sessions: SessionSummary[],
+  workspaceCwd: string | null,
+  sessionPath: string,
+): string | undefined {
+  return sessions.find((s) => s.path === sessionPath)?.cwd ?? workspaceCwd ?? undefined;
+}
+
 export function deriveFileChangesFromTranscript(
   transcript: ChatMessage[],
+  cwd?: string,
 ): FileChangeEntry[] {
   const seen = new Map<string, FileChangeEntry>();
   const createdPaths = new Set<string>();
@@ -43,7 +59,7 @@ export function deriveFileChangesFromTranscript(
           tool.id,
         );
         for (const entry of subagentChanges) {
-          accumulateFileChange(seen, createdPaths, entry);
+          accumulateFileChange(seen, createdPaths, entry, cwd);
         }
         continue;
       }
@@ -54,7 +70,7 @@ export function deriveFileChangesFromTranscript(
         message.createdAt,
       );
       for (const entry of entries) {
-        accumulateFileChange(seen, createdPaths, entry);
+        accumulateFileChange(seen, createdPaths, entry, cwd);
       }
     }
   }

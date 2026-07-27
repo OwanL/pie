@@ -2,9 +2,10 @@
 /** @jsxImportSource preact */
 
 import type { ComponentChildren } from 'preact';
-import type { ChatMessage, ChatPrefs, ComposerInput, PruningResult, SystemPromptEntry, ToolCall } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningResult, SystemPromptEntry, ToolCall } from '../../../shared/protocol';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import type { TranscriptRow } from './virtual-list-rows';
+import type { LazyDetailState } from './lazy-detail-store';
 
 // --- Row Registry ---
 
@@ -16,6 +17,7 @@ export interface RowRendererProps {
   pruningResult: PruningResult | null;
   workingDirectory: string | null;
   editingId: string | null;
+  editingDraft?: InlineEditDraft | null;
   isLoadingOlder: boolean;
   isLoadingNewer: boolean;
   isLastRow: boolean;
@@ -56,6 +58,12 @@ export function getRowRenderer(kind: string): RowRenderer | undefined {
 
 export interface ToolRendererProps {
   toolCall: ToolCall;
+  /** Optional disclosure-owned detail controls. Purpose-built renderers such
+   *  as subagent keep their compact preview mounted and invoke these only
+   *  when their own body is opened. */
+  detailState?: LazyDetailState;
+  onLoadDetail?: () => void;
+  onRetryDetail?: () => void;
   prefs: ChatPrefs;
   workingDirectory: string | null;
   onOpenFile: (path: string) => void;

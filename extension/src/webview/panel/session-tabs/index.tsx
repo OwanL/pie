@@ -71,7 +71,6 @@ function runSummariesEqual(previous: SessionTabsProps, next: SessionTabsProps): 
     return left === right || (
       left?.runId === right?.runId
       && left?.status === right?.status
-      && left?.scored === right?.scored
       && left?.nextSendStartsNewTask === right?.nextSendStartsNewTask
     );
   });

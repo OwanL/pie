@@ -3,7 +3,8 @@ import * as crypto from 'node:crypto';
 import type { ArchState } from '../../core/arch-state';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../core/events';
-import { deriveFileChangesFromToolCall, deriveFileChangesFromSubagentResult } from '../../core/file-change-derivation';
+import { deriveFileChangesFromToolCall, deriveFileChangesFromSubagentResult, mergeFileChangeKind, resolveSessionCwd } from '../../core/file-change-derivation';
+import { canonicalFilePath } from '../../../shared/file-path';
 import { isRecord } from '../../../shared/type-guards';
 import type {
   ToolFinishedPayload,
@@ -13,9 +14,13 @@ import type {
 } from '../../../shared/protocol';
 
 /** Upsert a file-change entry into a session's file-changes list, accumulating
- *  stats and removing create-then-delete pairs. */
-function upsertFileChange(list: FileChangeEntry[], change: FileChangeEntry): void {
-  const existingIdx = list.findIndex((entry) => entry.path === change.path);
+ *  stats and removing create-then-delete pairs. Path identity is canonicalized
+ *  against the session cwd so the same file reached through different spellings
+ *  (relative/absolute, `./`, separator/case variants, parent vs subagent)
+ *  collapses to one entry — matching the batch/JSONL derivation. */
+function upsertFileChange(list: FileChangeEntry[], change: FileChangeEntry, cwd?: string): void {
+  const key = canonicalFilePath(change.path, cwd);
+  const existingIdx = list.findIndex((entry) => canonicalFilePath(entry.path, cwd) === key);
   if (existingIdx !== -1) {
     const existing = list[existingIdx];
     if (change.kind === 'deleted' && existing.kind === 'created') {
@@ -26,6 +31,9 @@ function upsertFileChange(list: FileChangeEntry[], change: FileChangeEntry): voi
     const deletions = (existing.deletions ?? 0) + (change.deletions ?? 0);
     list[existingIdx] = {
       ...change,
+      kind: mergeFileChangeKind(existing.kind, change.kind),
+      // Preserve the first-seen path spelling for display stability.
+      path: existing.path,
       ...(additions > 0 && { additions }),
       ...(deletions > 0 && { deletions }),
     };
@@ -102,10 +110,12 @@ export function onToolStarted(
     new Date().toISOString(),
   );
   if (fileChanges.length > 0) {
-    const existing = deps.getArchState().fileChanges.bySession[sessionPath] ?? [];
+    const arch = deps.getArchState();
+    const cwd = resolveSessionCwd(arch.sessions.sessions, arch.sessions.workspaceCwd, sessionPath);
+    const existing = arch.fileChanges.bySession[sessionPath] ?? [];
     const next = [...existing];
     for (const change of fileChanges) {
-      upsertFileChange(next, change);
+      upsertFileChange(next, change, cwd);
     }
     deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: next });
     deps.scheduleRender();
@@ -161,8 +171,11 @@ export function onToolFinished(
   }
   deps.runObserver.onToolFinished(sessionPath, toolCall);
 
-  // Track file changes from subagent inner tool calls
-  if (toolCall.name === 'subagent' && isRecord(payload.result)) {
+  // Track file changes from subagent inner tool calls. A failed subagent is
+  // skipped entirely (matching the reattach derivation, which skips
+  // status==='failed' tools) — otherwise the live manifest would diverge from
+  // the reattach manifest by leaking a failed subagent's inner changes.
+  if (toolCall.name === 'subagent' && isRecord(payload.result) && payload.status !== 'failed') {
     const subagentChanges = deriveFileChangesFromSubagentResult(
       payload.result,
       payload.messageId,
@@ -170,11 +183,30 @@ export function onToolFinished(
       payload.toolCallId,
     );
     if (subagentChanges.length > 0) {
-      const existingChanges = deps.getArchState().fileChanges.bySession[sessionPath] ?? [];
+      const arch = deps.getArchState();
+      const cwd = resolveSessionCwd(arch.sessions.sessions, arch.sessions.workspaceCwd, sessionPath);
+      const existingChanges = arch.fileChanges.bySession[sessionPath] ?? [];
       const next = [...existingChanges];
       for (const change of subagentChanges) {
-        upsertFileChange(next, change);
+        upsertFileChange(next, change, cwd);
       }
+      deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: next });
+      deps.scheduleRender();
+    }
+  }
+
+  // Reconcile file changes on failure. onToolStarted derives file changes from
+  // the INPUT before the result is known (optimistic, for live UI feedback). If
+  // the tool later fails, those entries must be removed so the live manifest
+  // matches the reattach derivation (which skips status==='failed' tools) —
+  // eliminating the transient live-vs-reattach divergence. We filter by
+  // toolCallId rather than re-deriving from the transcript because the
+  // in-memory transcript may be windowed/compacted, and re-derivation could
+  // drop changes that survive only in the incremental fileChanges store.
+  if (payload.status === 'failed') {
+    const existing = deps.getArchState().fileChanges.bySession[sessionPath] ?? [];
+    const next = existing.filter((c) => c.toolCallId !== payload.toolCallId);
+    if (next.length !== existing.length) {
       deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: next });
       deps.scheduleRender();
     }

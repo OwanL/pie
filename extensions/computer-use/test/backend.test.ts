@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import pngjs from 'pngjs';
@@ -77,7 +77,7 @@ function launchFixture(launchPayload: unknown, listedWindows: unknown[] | unknow
         .map((window: any) => ({ windowHandle: window.window_id, async getRegion() { return { left: 10, top: 20, width: 300, height: 200 }; } }));
     },
   };
-  return { backend: new ComputerBackend({ driver, nut, now: () => now, sleep: async (ms: number) => { now += ms; } }), calls, get now() { return now; } };
+  return { backend: new ComputerBackend({ driver, nut, now: () => now, sleep: async (ms: number) => { now += ms; }, resolveLaunch: async (p: string) => p }), calls, get now() { return now; } };
 }
 
 // Simulates successful or accessibility-failed Cua window state independently
@@ -153,11 +153,12 @@ function controlledFixture() {
   let activeWindow = 99; let windowAvailable = true; let bringActivates = true; let bringThrows = false; let bringHangs = false; let nutFocusWindow = 99; let nativeFocusWindow = 99; let now = 0; let onType: (() => void) | undefined;
   let nutRegion = { left: 100, top: 50, width: 400, height: 200 };
   const record = { pid: 10, window_id: 99, title: 'Editor', app_name: 'editor.exe', bounds: { x: 100, y: 50, width: 400, height: 200 }, minimized: false, is_on_screen: true };
+  let windowList: any[] = [record];
   const driver = {
     async callTool(name: string, json: string) {
       const args = JSON.parse(json); calls.push({ name, args });
-      if (name === 'list_windows') return tool({ _legacy_windows: windowAvailable ? [record] : [] });
-      if (name === 'bring_to_front') { if (bringHangs) return await new Promise(() => {}); if (bringThrows) throw new Error('bring_to_front failed'); if (bringActivates) activeWindow = 99; return tool({ active: true }); }
+      if (name === 'list_windows') return tool({ _legacy_windows: windowAvailable ? windowList : [] });
+      if (name === 'bring_to_front') { if (bringHangs) return await new Promise(() => {}); if (bringThrows) throw new Error('bring_to_front failed'); if (bringActivates) activeWindow = Number(args.window_id); return tool({ active: true }); }
       if (name === 'get_screen_size') return tool({ width: 1000, height: 600 });
       if (name === 'get_window_state') return tool({ screenshot_width: 400, screenshot_height: 200, elements: [{ role: 'button', label: 'Go', frame: { x: 10, y: 10, w: 20, h: 10 } }] });
       return tool({ active: true });
@@ -176,7 +177,7 @@ function controlledFixture() {
       async click() { inputs.push('click'); }, async doubleClick() { inputs.push('double_click'); }, async scrollDown() { inputs.push('scroll'); }, async scrollUp() { inputs.push('scroll'); }, async scrollLeft() { inputs.push('scroll'); }, async scrollRight() { inputs.push('scroll'); },
     },
     screen: { async width() { return 1000; }, async height() { return 600; } },
-    async getWindows() { return [{ windowHandle: 99, async restore() { calls.push({ name: 'nut_restore', args: { windowHandle: 99 } }); }, async focus() { calls.push({ name: 'nut_focus', args: { windowHandle: 99 } }); activeWindow = nutFocusWindow; }, async getRegion() { return nutRegion; } }]; },
+    async getWindows() { return windowList.map((w: any) => ({ windowHandle: w.window_id, async restore() { calls.push({ name: 'nut_restore', args: { windowHandle: w.window_id } }); }, async focus() { calls.push({ name: 'nut_focus', args: { windowHandle: w.window_id } }); activeWindow = nutFocusWindow; }, async getRegion() { return nutRegion; } })); },
     async getActiveWindow() { return { windowHandle: activeWindow }; },
   };
   return {
@@ -187,6 +188,8 @@ function controlledFixture() {
     setActive(value: number) { activeWindow = value; }, setAvailable(value: boolean) { windowAvailable = value; },
     setBringActivates(value: boolean) { bringActivates = value; }, setBringThrows(value: boolean) { bringThrows = value; }, setBringHangs(value: boolean) { bringHangs = value; }, setNutFocusWindow(value: number) { nutFocusWindow = value; }, setNativeFocusWindow(value: number) { nativeFocusWindow = value; }, setOnType(value: (() => void) | undefined) { onType = value; },
     setRegion(value: { left: number; top: number; width: number; height: number }) { nutRegion = value; },
+    replaceWindow(id: number) { windowList = [{ ...record, window_id: id }]; activeWindow = id; nutFocusWindow = id; nativeFocusWindow = id; },
+    setWindows(list: any[]) { windowList = list; },
     failKeyReleases(...keys: number[]) { failedKeyReleases.clear(); for (const key of keys) failedKeyReleases.add(key); },
     failButtonReleases(...buttons: number[]) { failedButtonReleases.clear(); for (const button of buttons) failedButtonReleases.add(button); },
   };
@@ -293,6 +296,33 @@ test('open refuses a matched window without an exact positive PID and HWND', asy
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('path launch resolves a bare executable name to a native path before launching', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-launch-resolve-'));
+  try {
+    const fixture = launchFixture({ pid: 42 }, [{ pid: 42, window_id: 99, title: 'Editor', app_name: 'editor.exe', bounds: { x: 10, y: 20, width: 300, height: 200 } }]);
+    fixture.backend.resolveLaunch = async (p: string) => `C:\\resolved\\${p}.exe`;
+    const result = await fixture.backend.open({ sessionId: 's', selector: { kind: 'path', path: 'editor' }, artifactDir: dir });
+    const launchCall = fixture.calls.find(({ name }) => name === 'launch_app');
+    assert.ok(launchCall);
+    assert.equal(launchCall.args.path, 'C:\\resolved\\editor.exe');
+    assert.equal(result.targetId, 'window:42:99');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('path launch refuses an unresolved wrapper with an actionable error before launching', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-launch-unresolved-'));
+  try {
+    const fixture = launchFixture({ pid: 42 }, [{ pid: 42, window_id: 99, title: 'Editor', app_name: 'editor.exe', bounds: { x: 10, y: 20, width: 300, height: 200 } }]);
+    fixture.backend.resolveLaunch = async () => { const e = new Error('not a native executable'); (e as any).code = 'LAUNCH_UNRESOLVED'; throw e; };
+    await assert.rejects(
+      () => fixture.backend.open({ sessionId: 's', selector: { kind: 'path', path: 'godot.bat' }, artifactDir: dir }),
+      (error: any) => error.code === 'LAUNCH_UNRESOLVED',
+    );
+    assert.equal(fixture.calls.some(({ name }) => name === 'launch_app'), false);
+    assert.equal(fixture.calls.some(({ name }) => name === 'start_session'), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('open uses Cua for discovery/session and focus uses Cua bring_to_front', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'computer-focus-'));
   try {
@@ -301,6 +331,63 @@ test('open uses Cua for discovery/session and focus uses Cua bring_to_front', as
     assert.ok(fixture.calls.some((call) => call.name === 'list_windows'));
     assert.ok(fixture.calls.some((call) => call.name === 'start_session'));
     assert.ok(fixture.calls.some((call) => call.name === 'bring_to_front'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('open with observation flags performs the initial observation inline like observe', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-open-observe-'));
+  try {
+    const fixture = backendFixture();
+    const result = await fixture.backend.open({ sessionId: 's', selector: { kind: 'foreground' }, screenshot: true, tree: true, state: true, artifactDir: dir });
+    assert.equal(result.revision, 1);
+    assert.equal(result.accessibilityAvailable, true);
+    assert.ok(result.elements.length > 0);
+    assert.equal(result.tree, 'tree');
+    assert.ok(result.displayImagePath);
+    assert.ok(result.fullImagePath);
+    assert.ok(result.capabilities && result.capabilities.screenshot === true);
+    assert.equal(result.targetId, 'window:10:99');
+    assert.deepEqual(result.held, { keys: [], buttons: [] });
+    assert.ok(result.cursor);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('open without observation flags returns only registration and capabilities', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-open-bare-'));
+  try {
+    const fixture = backendFixture();
+    const result = await fixture.backend.open({ sessionId: 's', selector: { kind: 'foreground' }, artifactDir: dir });
+    assert.equal(result.revision, undefined);
+    assert.equal(result.elements, undefined);
+    assert.equal(result.displayImagePath, undefined);
+    assert.equal(result.tree, undefined);
+    assert.ok(result.capabilities && result.capabilities.screenshot === true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('open with state only performs a state observation without a screenshot', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-open-state-'));
+  try {
+    const fixture = backendFixture();
+    const result = await fixture.backend.open({ sessionId: 's', selector: { kind: 'foreground' }, state: true, artifactDir: dir });
+    assert.equal(result.revision, 1);
+    assert.equal(result.displayImagePath, undefined);
+    assert.equal(result.elements, undefined);
+    assert.ok(result.state && result.state.foreground === true);
+    assert.ok(result.capabilities);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('open with screenshot observes a desktop target inline like observe', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-open-desktop-'));
+  try {
+    const fixture = timeoutFixture({ captureRegion: 'throw' });
+    const result = await fixture.backend.open({ sessionId: 's', selector: { kind: 'desktop' }, screenshot: true, tree: false, state: false, artifactDir: dir });
+    assert.equal(result.revision, 1);
+    assert.ok(result.displayImagePath);
+    assert.equal(result.imageWidth, 1000);
+    assert.equal(result.imageHeight, 600);
+    assert.ok(result.capabilities && result.capabilities.screenshot === true);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -425,6 +512,62 @@ test('physical input refuses delivery when exact refocus fails or the target is 
     assert.deepEqual(fixture.inputs, []);
     fixture.setActive(99); fixture.setAvailable(false);
     await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'stale' } }), (error: any) => error.code === 'STALE_TARGET' && error.retryable === true);
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a vanished exact HWND rebinds to one unique same-PID replacement and invalidates old semantic refs', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-rebind-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    const observed = await fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: false, tree: true, state: false });
+    const oldRef = observed.elements[0].ref;
+    fixture.replaceWindow(100);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'rebound' } });
+    assert.deepEqual(fixture.inputs, ['text:rebound']);
+    const rebound = await fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: false, tree: true, state: false });
+    assert.equal(rebound.target.windowId, 100);
+    await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'move', target: { ref: oldRef } } }), (error: any) => error.code === 'STALE_REFERENCE');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('focus rebinds a vanished exact HWND to the unique same-PID replacement', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-rebind-focus-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.replaceWindow(100);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'focus' } });
+    const rebound = await fixture.backend.observe({ sessionId: 's', targetId: target.targetId, screenshot: false, tree: false, state: false });
+    assert.equal(rebound.target.windowId, 100);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a vanished exact HWND with multiple same-PID replacements stays fail-closed STALE_TARGET', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-rebind-ambiguous-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setWindows([{ pid: 10, window_id: 100, title: 'One', app_name: 'editor.exe', minimized: false, is_on_screen: true }, { pid: 10, window_id: 101, title: 'Two', app_name: 'editor.exe', minimized: false, is_on_screen: true }]);
+    await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'ambiguous' } }), (error: any) => error.code === 'STALE_TARGET' && error.retryable === true);
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a vanished exact HWND with no same-PID replacement remains STALE_TARGET', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-rebind-none-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setWindows([]);
+    await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'gone' } }), (error: any) => error.code === 'STALE_TARGET' && error.retryable === true);
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('same-PID HWND rebind rejects a replacement from a different process identity', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-rebind-process-mismatch-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setWindows([{ pid: 10, window_id: 100, title: 'Other', app_name: 'other.exe', minimized: false, is_on_screen: true }]);
+    await assert.rejects(() => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'wrong-process' } }), (error: any) => error.code === 'STALE_TARGET');
     assert.deepEqual(fixture.inputs, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -581,6 +724,51 @@ test('run_sequence revalidates and safely reacquires the exact target after prio
     ] };
     await fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence: focused });
     assert.equal(fixture.inputs.at(-1), 'text:after-focus');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('run_sequence with observation flags performs a trailing verification observation inline', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-sequence-observe-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    const sequence = { version: 1, actions: [{ atMs: 0, action: { kind: 'text', text: 'seq' } }] };
+    const result = await fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence, screenshot: false, tree: true, state: false });
+    assert.ok(result.sequencePath);
+    assert.ok(result.tracePath);
+    assert.equal(result.revision, 1);
+    assert.ok(result.elements.length > 0);
+    assert.equal(result.accessibilityAvailable, true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a failed trailing observation does not relabel a completed sequence trace as failed', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-sequence-observe-failure-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setOnType(() => fixture.setActive(100));
+    const sequence = { version: 1, actions: [{ atMs: 0, action: { kind: 'text', text: 'seq' } }] };
+    let error: any;
+    try {
+      await fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence, screenshot: true, tree: false, state: false });
+    } catch (cause) { error = cause; }
+    assert.equal(error?.code, 'TARGET_NOT_FOREGROUND');
+    assert.ok(error?.tracePath);
+    const trace = JSON.parse(await readFile(error.tracePath, 'utf8'));
+    assert.equal(trace.failed, undefined);
+    assert.equal(trace.actions.length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('run_sequence without observation flags returns only sequence and trace artifacts', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-sequence-bare-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    const sequence = { version: 1, actions: [{ atMs: 0, action: { kind: 'text', text: 'seq' } }] };
+    const result = await fixture.backend.runSequence({ sessionId: 's', targetId: target.targetId, sequence });
+    assert.ok(result.sequencePath);
+    assert.ok(result.tracePath);
+    assert.equal(result.revision, undefined);
+    assert.equal(result.elements, undefined);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

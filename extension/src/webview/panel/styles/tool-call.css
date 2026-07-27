@@ -537,13 +537,16 @@
    wrapper class is no longer applied (see content.tsx), so the cards revert to
    their normal completed styling and "done" reads as implicit. Failed members
    are never marked here — their failure treatment stays prominent. */
-.tool-call-parallel-item-done .tool-call-header {
+.tool-call-parallel-item-done .tool-call-header,
+.tool-call-parallel-item-done .subagent-header {
   opacity: 0.55;
 }
 
 .tool-call-parallel-item-done .tool-call-header .transcript-header-title-mono,
 .tool-call-parallel-item-done .tool-call-header .transcript-header-summary-mono,
-.tool-call-parallel-item-done .tool-call-header .transcript-header-command-preview {
+.tool-call-parallel-item-done .tool-call-header .transcript-header-command-preview,
+.tool-call-parallel-item-done .subagent-header .transcript-header-title-mono,
+.tool-call-parallel-item-done .subagent-header .transcript-header-summary-mono {
   text-decoration: line-through;
   text-decoration-color: color-mix(in srgb, var(--panel-muted) 60%, transparent);
 }

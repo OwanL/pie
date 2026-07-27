@@ -1,6 +1,7 @@
 import type { FileChangeEntry } from './protocol';
 import { isRecord } from './type-guards';
 import { parseDeletedPathsFromCommand } from './shell-deletion-parsing';
+import { canonicalFilePath } from './file-path';
 
 // ─── Per-tool-call file-change derivation (shared core) ────────────────────
 //
@@ -239,30 +240,58 @@ export function deriveFileChangesFromToolCall(
   return single ? [single] : [];
 }
 
+export function mergeFileChangeKind(
+  existing: FileChangeEntry['kind'],
+  incoming: FileChangeEntry['kind'],
+): FileChangeEntry['kind'] {
+  // Preserve the path's session-level state rather than merely reporting the
+  // latest tool verb. Edits to a newly created file remain created; a write to
+  // an already modified/deleted path is an overwrite/recreation, not proof that
+  // the path was absent when the session began.
+  if (existing === 'created' && incoming === 'modified') return 'created';
+  if (existing !== 'created' && incoming === 'created') return 'modified';
+  return incoming;
+}
+
 export function accumulateFileChange(
   seen: Map<string, FileChangeEntry>,
   createdPaths: Set<string>,
   entry: FileChangeEntry,
+  cwd?: string,
 ): void {
-  if (entry.kind === 'created') {
-    createdPaths.add(entry.path);
-  } else if (entry.kind === 'deleted' && createdPaths.has(entry.path)) {
-    // File was created in this session and then deleted — net no-op.
-    seen.delete(entry.path);
+  // Canonicalize the path identity against the session cwd so the same file
+  // reached through different spellings (relative/absolute, `./`, separator/
+  // case variants, parent vs subagent) collapses to one entry. The Map/Set
+  // are keyed by the canonical form; the entry keeps its original `path`
+  // spelling for display (the first-seen spelling is preserved on merge so
+  // manifest paths stay stable across re-derivation).
+  const key = canonicalFilePath(entry.path, cwd);
+  const existing = seen.get(key);
+  if (entry.kind === 'created' && (!existing || existing.kind === 'created')) {
+    createdPaths.add(key);
+  } else if (entry.kind === 'deleted' && createdPaths.has(key)) {
+    // File was created in this session and then deleted — net no-op. Clear the
+    // marker too: if the path is later recreated/modified, a subsequent delete
+    // must describe that later lifecycle rather than being suppressed forever.
+    createdPaths.delete(key);
+    seen.delete(key);
     return;
   }
 
-  const existing = seen.get(entry.path);
   if (existing) {
-    // Accumulate stats across edits to the same file
+    // Accumulate stats across edits to the same file.
+    entry.kind = mergeFileChangeKind(existing.kind, entry.kind);
     const additions = (existing.additions ?? 0) + (entry.additions ?? 0);
     const deletions = (existing.deletions ?? 0) + (entry.deletions ?? 0);
     if (additions > 0) entry.additions = additions;
     else delete entry.additions;
     if (deletions > 0) entry.deletions = deletions;
     else delete entry.deletions;
+    // Preserve the first-seen path spelling for display stability.
+    seen.set(key, { ...entry, path: existing.path });
+  } else {
+    seen.set(key, entry);
   }
-  seen.set(entry.path, entry);
 }
 
 /**

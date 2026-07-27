@@ -385,11 +385,18 @@ integrationTest('openFileDiff diffs a committed agent change against the pre-cha
   });
 });
 
-integrationTest('openFileDiff uses the empty diff for a created file regardless of git state', async () => {
+integrationTest('openFileDiff diffs a tracked created-kind file (an overwrite) against the baseline, not the empty diff', async () => {
+  // The derivation marks a `write` tool as `created` from the tool NAME — it
+  // cannot prove the file is new. A tracked file existed before the session,
+  // so an overwrite is a modification: the diff must use the git baseline as
+  // the left side, not the empty diff. (Previously this claimed created
+  // "regardless of git state" — the false-created bug.)
   await withTempRepo(async (dir) => {
     const file = path.join(dir, 'created.txt');
-    await fs.writeFile(file, 'new\n');
-    await commit(dir, 'create'); // already committed, but kind=created → empty left side
+    await fs.writeFile(file, 'v1\n');
+    const initial = await commit(dir, 'initial');
+    await fs.writeFile(file, 'v2\n'); // overwrite (write tool → kind 'created')
+    await commit(dir, 'agent change');
 
     const svc = new FileDiffService(() =>
       archStateWith({
@@ -401,8 +408,31 @@ integrationTest('openFileDiff uses the empty diff for a created file regardless 
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');
-    const originalUri = diffCall!.args[0] as { scheme: string };
-    assert.equal(originalUri.scheme, EMPTY_DIFF_SCHEME);
+    const originalUri = diffCall.args[0] as { scheme: string; query: string };
+    assert.equal(originalUri.scheme, 'git', 'a tracked overwrite must diff against the git baseline');
+    assert.equal((JSON.parse(originalUri.query) as { ref: string }).ref, initial);
+  });
+});
+
+integrationTest('openFileDiff uses the empty diff for an untracked created file', async () => {
+  await withTempRepo(async (dir) => {
+    await fs.writeFile(path.join(dir, 'seed.txt'), 'seed\n');
+    await commit(dir, 'seed'); // give HEAD a commit; created.txt stays untracked
+    const file = path.join(dir, 'created.txt');
+    await fs.writeFile(file, 'new\n'); // untracked new file
+
+    const svc = new FileDiffService(() =>
+      archStateWith({
+        sessions: [{ path: 's', cwd: dir }],
+        fileChanges: { s: [entry('created.txt', 'created')] },
+      }),
+    );
+    await svc.openFileDiff('s', 'created.txt');
+
+    const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
+    assert.ok(diffCall, 'vscode.diff was not invoked');
+    const originalUri = diffCall.args[0] as { scheme: string };
+    assert.equal(originalUri.scheme, EMPTY_DIFF_SCHEME, 'an untracked new file diffs vs empty');
   });
 });
 

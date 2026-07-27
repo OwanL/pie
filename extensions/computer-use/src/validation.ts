@@ -150,7 +150,7 @@ export function validateComputerParams(value: unknown): asserts value is Compute
   const p = object(value, 'parameters'); nonempty(p.action, 'parameters.action');
   switch (p.action) {
     case 'open': {
-      allowed(p, ['action', 'selector', 'sessionId'], 'parameters');
+      allowed(p, ['action', 'selector', 'sessionId', 'screenshot', 'tree', 'state'], 'parameters');
       const s = object(p.selector, 'selector'); nonempty(s.kind, 'selector.kind');
       const common = ['kind'];
       switch (s.kind) {
@@ -169,7 +169,7 @@ export function validateComputerParams(value: unknown): asserts value is Compute
       allowed(p, ['action', 'sessionId', 'targetId', 'revision', 'input'], 'parameters');
       validateComputerAction(p.input); validateRevisionForActions(actionUsesTargetCoordinates(p.input as ComputerAction), p.revision); break;
     case 'run_sequence':
-      allowed(p, ['action', 'sessionId', 'targetId', 'revision', 'sequence', 'sequencePath', 'preserveHeld'], 'parameters');
+      allowed(p, ['action', 'sessionId', 'targetId', 'revision', 'sequence', 'sequencePath', 'preserveHeld', 'screenshot', 'tree', 'state'], 'parameters');
       if ((p.sequence === undefined) === (p.sequencePath === undefined)) fail('run_sequence requires exactly one of sequence or sequencePath.');
       if (p.sequence !== undefined) {
         validateSequence(p.sequence); validateRevisionForActions(sequenceUsesTargetCoordinates(p.sequence as ComputerSequence), p.revision);

@@ -16,20 +16,20 @@ analytics source export or analytics store
   -> static localhost dashboard
 ```
 
-> **V2 model/harness ranking:** `analysis/scripts/leaderboard.ts` is the canonical dashboard leaderboard. It produces one provider-agnostic row per model family and ranks only families with attributable canonical V2 outcome-quality reviews. Legacy user/agent outcomes and runtime/process telemetry remain diagnostic and have zero ranking weight. `analysis/scripts/stratified-ranker.ts` remains an offline experiment.
+> **V2 model/harness ranking:** `analysis/scripts/leaderboard.ts` is the canonical dashboard leaderboard. It produces one provider-agnostic row per model family and ranks only families with attributable canonical V2 review-quality evidence. Runtime/process telemetry remains diagnostic and has zero ranking weight.
 
 ## Bias-aware model strength
 
 The leaderboard is an observational, cohort-relative estimate—not a universal or causal capability benchmark:
 
-- **Outcome-only ranking:** the rank uses only canonical V2 `qualityIndexV1 / 100`, deterministically derived from criterion attainment. Legacy V1 user satisfaction/resolution, V1 agent ratings, process/runtime telemetry, coverage, confidence, blockers, findings, cost, and latency have zero ranking weight.
-- **Evidence eligibility:** only model families with attributable stable-ID V2 review mass are ranked. Other observed families remain visible as unranked diagnostics. V2 outcome shrinkage uses `k=8`; rows are labelled `outcome-backed`, `thin-outcome`, or `telemetry-only`.
+- **Review-only ranking:** the rank uses only canonical V2 `qualityIndexV1 / 100`, deterministically derived from criterion attainment. Process/runtime telemetry, coverage, confidence, blockers, cost, and latency have zero ranking weight.
+- **Evidence eligibility:** only model families with attributable stable-ID V2 review mass are ranked. Other observed families remain visible as unranked diagnostics. V2 review shrinkage uses `k=8`; rows are labelled `review-backed`, `thin-review`, or `telemetry-only`.
 - **Stable identity and no double counting:** canonical retries collapse deterministically. V2 reviews join by stable session-header `sessionId`, including moved/renamed sessions when run exports carry that header ID. Path fallback is flagged and excluded.
 - **Mixed-model attribution:** transcript successful-token shares are used when available; otherwise each distinct stable model family receives an equal fraction. Shares sum to one review. DuckDB model/thinking cells use the disclosed equal-fraction fallback after retry deduplication.
-- **Common case mix:** ex-ante initial prompt characters, attachment count, and context-file count define low/medium/high bands. Tokens, duration, cost, tool volume, mutations, verification activity, and legacy outcomes never define or improve V2 quality.
+- **Common case mix:** ex-ante initial prompt characters, attachment count, and context-file count define low/medium/high bands. Tokens, duration, cost, tool volume, mutations, and verification activity never define or improve V2 quality.
 - **Uncertainty:** the 80% interval propagates V2 outcome-channel posterior variance through its standardized logit (`z=1.282`). Rank ranges come from interval overlap.
 
-Thinking-level, provider, legacy outcome, process, cost, usage, token, and duration diagnostics remain inspectable but do not affect V2 rank.
+Thinking-level, provider, process, cost, usage, token, and duration diagnostics remain inspectable but do not affect V2 rank.
 
 ## Feedback loop
 
@@ -51,7 +51,7 @@ first — none do today:
 
 1. **A read-back path.** The pruning catalog is fed by *live* per-session
    factors, not by `run-analytics.json`; no component currently consumes the
-   prepared/stratified analytics at runtime. A new reader + cache is needed.
+   prepared analytics at runtime. A new reader + cache is needed.
 2. **Aggregation.** Raw per-run signals are too noisy to act on directly; they
    need rolling aggregation (e.g. trailing-window failure rates, per-model
    bias-aware strength estimates from `analysis/scripts/leaderboard.ts`) before tuning.
@@ -150,7 +150,7 @@ npm run export-site-data -- --storage-dir ../data/outcomes/<workspace-hash>
 
 ### Historical transcript evidence (analysis-only)
 
-Local source modes also discover content-free summaries from both the legacy
+Local source modes also discover content-free summaries from both the historical
 `../sessions/**/*.jsonl` tree and the `sessionDir` configured in
 `../settings.json` (resolved from the runtime workspace/root). Overlapping paths
 are normalized case- and slash-insensitively on Windows and loaded once. An
@@ -174,7 +174,7 @@ mass. Its latest review may still supply deduplicated agent evidence. Only
 attribution share. Limitations: malformed JSONL lines are skipped; missing
 provider usage/cost stays missing; thinking is `null` when no active-branch
 change establishes it; transcript summaries cannot recover canonical task
-boundaries or user outcome semantics; and this evidence remains observational.
+boundaries or task-result semantics; and this evidence remains observational.
 
 ## Generated outputs
 
@@ -198,9 +198,7 @@ Site-data files:
 - `model-leaderboard.json`
 - `pruning-impact.json`
 - `tool-result-pruning-impact.json`
-- `tool-result-pruning-outcomes.json`
-- `agent-review-comparison.json` — explicitly labelled legacy V1 1–5 agent/user comparison
-- `session-review-analytics.json` — V2 delivered/controllable attainment, pure `qualityIndexV1`, criterion/process/evidence/finding/disagreement/reviewer diagnostics, and legacy cohort coverage
+- `session-review-analytics.json` — V2 delivered/controllable attainment, pure `qualityIndexV1`, ingestion accounting (raw/accepted/rejected/reasons), and criterion/process/evidence/disagreement/reviewer diagnostics
 - `backend-errors.json`
 - `file-types.json`
 - `token-throughput.json`
@@ -258,21 +256,21 @@ Do not rely on `file://` loading.
 
 - **Tool failure classification**: Runs recorded before per-tool failure classification was added lack `failureCountsByNameAndKind`. For these runs, the pipeline falls back to `failureCountsByKind` (aggregate-level classification) and emits failures under a sentinel tool name `(unattributed)`.
 - **Tool timing attribution**: Run rows retain `toolDurationMs` and `timedToolCallCount` independently of per-tool attribution. Historical terminal events that lost their tool metadata are surfaced as `(unknown)` tool-usage rows rather than dropped; their mean duration is null because no reliable terminal call count exists. New events repeat start metadata on `tool.finished`, so future duration, failure, verification, and file-mutation attribution remains named even when the owner transcript message is unavailable.
-- **Review cohorts**: V1 user satisfaction/resolution and V1 1–5 agent reviews are historical, explicitly labelled legacy metrics. V2 production reviews are a separate stable-session-ID cohort. V1 rows are never coerced into missing V2 dimensions, and fallback/unresolved identities remain flagged.
-- **Scoring gap**: Most runs are `closed_unscored` (no legacy satisfaction/resolution data). Legacy model-quality and treatment-comparison metrics are only meaningful for that scored subset; V2 review coverage is reported separately.
+- **V2 review identity**: Production reviews use stable session IDs. Path fallback and unmatched identities remain flagged and are excluded from stable-identity ranking evidence.
+- **V2 ingestion accounting**: `session-review-analytics.json` and the dashboard expose raw, accepted, and rejected production review counts plus rejection reasons; malformed or unsupported records are never silently treated as accepted evidence.
 - **Open runs excluded**: Verification impact and timeline metrics exclude open (in-progress) runs since they have no finalized outcome.
 - **Token usage**: `inputTokens`, `outputTokens`, `cacheReadTokens`, and `cacheWriteTokens` are available when the provider reports them. Many older runs have zero token data.
-- **Cost**: `estimatedCostUsd` is the **parent-run** cost derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). `subagentEstimatedCostUsd` is the cost of spawned sub-agent sessions (which bill separately and were historically excluded from run cost), and `totalEstimatedCostUsd` = parent + subagent (the headline spend the overview card and cost-trend now use, falling back to parent-only for legacy runs). The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`. The "Subagent cost attribution" chart stacks parent vs subagent spend by model to expose the hidden sub-agent portion.
+- **Cost**: `estimatedCostUsd` is the **parent-run** cost derived from token usage × per-model pricing in `models.json` (`null` when pricing is unknown, e.g. local/free models). `subagentEstimatedCostUsd` is the cost of spawned sub-agent sessions (which bill separately and were historically excluded from run cost), and `totalEstimatedCostUsd` = parent + subagent (the headline spend the overview card and cost-trend now use, leaving incomplete historical totals null). The dashboard's "Cost & token economics" section shows spend over time, spend over time by provider, spend per model, and average spend per model per session — a session rolls up all of its runs, so the per-session average differs from the per-run average when a session contains multiple runs. Per-provider spend attributes each run to its `models.json` provider; runs whose model isn't in the registry fall under `(unknown)`, and providers beyond the top 8 by spend fold into `Other`. The "Subagent cost attribution" chart stacks parent vs subagent spend by model to expose the hidden sub-agent portion.
 - **Per-turn tokens & context trajectory**: `turnThroughputSamples` now carry per-turn `inputTokens`/`cacheReadTokens`/`cacheWriteTokens`/`contextTokens` (in addition to `outputTokens`/`generationDurationMs`). These enable per-turn cost attribution and the context-growth trajectory chart. Older turns (recorded before this field existed) coerce to `0` (tokens) / `null` (context) and are excluded from those views.
-- **Provider queue timing**: `providerQueueMs` is nullable measured provider-gate wait per turn, and `providerQueueAttemptCount` records how many provider attempts contributed. An explicit `0ms` means an immediate observed grant; absent legacy/ungated observations remain `null` with attempt count `0` and are excluded from queue-duration coverage and medians.
+- **Provider queue timing**: `providerQueueMs` is nullable measured provider-gate wait per turn, and `providerQueueAttemptCount` records how many provider attempts contributed. An explicit `0ms` means an immediate observed grant; absent historical/ungated observations remain `null` with attempt count `0` and are excluded from queue-duration coverage and medians.
 - **Auxiliary prepass timing**: measured `durationMs` on `skill_pruning_prepass` auxiliary usage is summed per run as `skillPruningPrepassDurationMs`. Runs with no measured prepass duration remain `null`; token-only historical samples are not displayed as zero-duration prepasses.
 - **Per-turn model attribution**: each flattened throughput row attributes its `modelId` from `sample.modelId` when present (per-sample provider attribution, e.g. a sub-agent turn or a mid-run model swap), falling back to the parent run's `modelId`. `mixed_model_config` on the run flags when a run's turns span more than one model.
 - **Throughput artifact retention & concurrency**: the `token-throughput.json` site artifact retains every turn — including errored and tokenless turns with null `tokensPerSecond` — so coverage and error-rate analysis see the full population; chart transforms filter null `tokensPerSecond` at render time only. `concurrentBusySessions` is end-of-turn descriptive telemetry (how many sessions were mid-run when the turn ended); it is not a causal rate-limit signal, so treat any throughput-vs-concurrency correlation as descriptive, not causal.
 - **Compaction & retry**: `compactionCount` (history-compaction `/compact` LLM calls — a hidden billable call whose tokens the SDK does not report back, so they remain absent from token totals) and `autoRetryCount` (backend auto-retries of failed turns) are captured per run. Both counters are `0` for runs recorded before tracking existed. New `retryTimingSamples` preserve each attempt's scheduled backoff plus nullable measured gate-entry delay and nullable full retry-episode duration in `retry-timing.json` and DuckDB's `retry_timing` table. Historical runs have no rows, not synthetic zero-duration attempts. The "Compaction & retry friction" count chart and measured-only "Runtime friction timing" chart serve different purposes. Note: compaction token usage is not capturable today (no SDK usage hook); only the count and wall-clock (folded into `busyDurationMs`) are tracked.
-- **Tool critical path and overlap**: `toolDurationMs` is cumulative timed-tool duration, while `criticalPathDurationMs` is the non-overlapping union of reliably timed tool intervals. Their non-negative difference is parallel overlap. Legacy runs without interval-union telemetry remain `null` in prepared/site data and are excluded from critical-path/overlap coverage rather than shown as zero; DuckDB and the dashboard expose cumulative, critical-path, and overlap values together.
+- **Tool critical path and overlap**: `toolDurationMs` is cumulative timed-tool duration, while `criticalPathDurationMs` is the non-overlapping union of reliably timed tool intervals. Their non-negative difference is parallel overlap. Historical runs without interval-union telemetry remain `null` in prepared/site data and are excluded from critical-path/overlap coverage rather than shown as zero; DuckDB and the dashboard expose cumulative, critical-path, and overlap values together.
 - **Task group correlation**: Multiple canonical runs can share a `taskGroupId`; the leaderboard uses only the deterministic latest stable run per task and family, while other views may still report per-run counts.
 - **Case-mix coverage**: Transcript-only sessions join canonical tasks in the ex-ante complexity population. Historical sessions expose prompt character count but not attachment/context counts, which are conservatively zero; post-treatment telemetry is never used.
-- **Small samples**: Model quality cells with fewer than 3 scored runs have highly variable satisfaction averages. Notes in `model-quality.json` flag this.
+- **Small review samples**: Leaderboard rows expose review mass, evidence tier, 80% score intervals, and overlapping rank ranges. The dashboard keeps provisional ranks visible while making sparse evidence and uncertain ordering conspicuous.
 
 ## Manual smoke test
 
@@ -282,5 +280,5 @@ Do not rely on `file://` loading.
 4. Confirm:
    - charts render,
    - global filters update multiple charts,
-   - empty/no-scored subsets show useful messages,
+   - empty and sparse subsets show useful messages,
    - browser devtools show no CDN or third-party requests.

@@ -184,6 +184,60 @@ test('derive: created-then-deleted is a net no-op', () => {
   assert.equal(changes.length, 0);
 });
 
+test('derive: create-delete bookkeeping resets before a later modify-delete', () => {
+  const changes = derive([
+    header(),
+    assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'tmp.ts', content: 'x' })]),
+    toolResult('tr1', 't1', 'c1', 'write'),
+    assistantMsg('m2', 't2', [tc('c2', 'bash', { command: 'rm tmp.ts' })]),
+    toolResult('tr2', 't2', 'c2', 'bash'),
+    assistantMsg('m3', 't3', [tc('c3', 'edit', { path: 'tmp.ts', oldText: 'x', newText: 'y' })]),
+    toolResult('tr3', 't3', 'c3', 'edit'),
+    assistantMsg('m4', 't4', [tc('c4', 'bash', { command: 'rm tmp.ts' })]),
+    toolResult('tr4', 't4', 'c4', 'bash'),
+  ]);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.toolCallId, 'c4');
+});
+
+// ─── path-identity canonicalization (parent/subagent + spelling variants) ──
+
+test('derive: merges parent + subagent edits to the same file across relative/absolute spellings', () => {
+  // The session header carries cwd=/proj. The parent edits `src/shared.ts`
+  // (relative); the subagent edits `/proj/src/shared.ts` (absolute). Without
+  // cwd-aware canonicalization these are two entries (the duplication bug).
+  const details = {
+    mode: 'single', agentScope: 'user', projectAgentsDir: null,
+    results: [{
+      agent: 'worker', task: 't', exitCode: 0,
+      messages: [{ role: 'assistant', content: [tc('inner', 'edit', { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' })] }],
+      stderr: '', usage: {},
+    }],
+  };
+  const changes = derive([
+    header('/proj'),
+    assistantMsg('m1', 't1', [tc('c1', 'edit', { path: 'src/shared.ts', oldText: 'x', newText: 'a\nb' })]),
+    toolResult('tr1', 't1', 'c1', 'edit'),
+    assistantMsg('m2', 't2', [tc('c2', 'subagent', { agent: 'worker', task: 't' })]),
+    toolResult('tr2', 't2', 'c2', 'subagent', { details }),
+  ]);
+  assert.equal(changes.length, 1, 'parent + subagent edits to one file must merge');
+  assert.equal(changes[0].additions, 6);
+  assert.equal(changes[0].deletions, 3);
+});
+
+test('derive: create-then-delete matches across relative/absolute spellings', () => {
+  const changes = derive([
+    header('/proj'),
+    assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'tmp/gen.uid', content: 'x' })]),
+    toolResult('tr1', 't1', 'c1', 'write'),
+    assistantMsg('m2', 't2', [tc('c2', 'bash', { command: 'rm /proj/tmp/gen.uid' })]),
+    toolResult('tr2', 't2', 'c2', 'bash'),
+  ]);
+  assert.equal(changes.length, 0, 'create + delete of the same file is a net no-op');
+});
+
 // ─── parseSessionFileChanges (read-from-disk) ───────────────────────────────
 
 test('parseSessionFileChanges: reads cwd from header + derives from a JSONL file', async () => {

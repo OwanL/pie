@@ -6,7 +6,7 @@ import type { Event } from '../../core/events';
 import type { OnSessionCompleted } from '../types';
 import type { BusyChangedPayload, EventEnvelope, SessionOpenedPayload } from '../../../shared/protocol';
 import { resolveSessionOpenedTranscript } from '../../core/session-opened-transcript';
-import { deriveFileChangesFromTranscript } from '../../core/file-change-derivation';
+import { deriveFileChangesFromTranscript, resolveSessionCwd } from '../../core/file-change-derivation';
 import { deriveAvailableExtensions } from '../available-extensions.js';
 import { bootLog, auditLog } from '../../util/audit';
 import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
@@ -196,7 +196,7 @@ function applyPostDispatchState(
       payload.analyticsFactors.activeExtensions,
     ) });
   }
-  deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: deriveFileChangesFromTranscript(transcript) });
+  deps.dispatchArch({ kind: 'FileChangesUpdated', sessionPath, fileChanges: deriveFileChangesFromTranscript(transcript, resolveSessionCwd(deps.getArchState().sessions.sessions, deps.getArchState().sessions.workspaceCwd, sessionPath)) });
 }
 
 function finalizeSessionOpening(

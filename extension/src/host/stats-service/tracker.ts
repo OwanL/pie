@@ -10,7 +10,6 @@ import {
 import type {
   AssistantUsage,
   ComposerInput,
-  RunOutcome,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -20,12 +19,8 @@ import {
   getTerminalSubagentAttemptSamplesFromToolCall,
 } from '../../shared/subagent-result';
 import {
-  RUN_ANALYTICS_SCHEMA_VERSION,
   normalizeExperimentAssignment,
-  type AgentReviewCompletion,
-  type AgentReviewEntry,
   type AuxiliaryLlmUsageSample,
-  type OutcomeHistoryLogEntry,
   type RunSnapshot,
   type TreatmentChangeKind,
   type TurnLatencyMeasurement,
@@ -36,21 +31,6 @@ import { SessionRunStateManager } from './run-state-manager';
 import type { GetArchState, DispatchArchEvent } from './types';
 
 const TOOL_FAILURE_SAMPLE_LIMIT = 20;
-
-function outcomeFromAgentReview(
-  rating: number,
-  completion: AgentReviewCompletion,
-): RunOutcome | null {
-  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-    return null;
-  }
-  const resolution = completion === 'fully'
-    ? 'resolved'
-    : completion === 'partial'
-      ? 'partially_resolved'
-      : 'unresolved';
-  return { resolution, satisfaction: rating, source: 'agent' };
-}
 
 function toNonNegativeInt(value: unknown): number {
   return Number.isFinite(value) && typeof value === 'number' && value > 0 ? Math.trunc(value) : 0;
@@ -68,8 +48,7 @@ interface SessionRunTrackerOptions {
   getArchState: GetArchState;
   dispatchArchEvent: DispatchArchEvent;
   scheduleRender: () => void;
-  schedulePersist: (snapshotToAppend?: RunSnapshot, outcomeToAppend?: OutcomeHistoryLogEntry) => void;
-  schedulePersistAgentReview: (entry: AgentReviewEntry) => void;
+  schedulePersist: (snapshotToAppend?: RunSnapshot) => void;
   now: () => Date;
   createId: () => string;
   getExperimentAssignment: () => string | null;
@@ -94,7 +73,6 @@ export class SessionRunTracker {
       getArchState: options.getArchState,
       dispatchArchEvent: options.dispatchArchEvent,
       schedulePersist: options.schedulePersist,
-      schedulePersistAgentReview: options.schedulePersistAgentReview,
       now: options.now,
       createId: options.createId,
       getExperimentAssignment: options.getExperimentAssignment,
@@ -123,7 +101,7 @@ export class SessionRunTracker {
     if (state.currentRun) {
       this.runState.finalizeCurrentRun(
         sessionPath,
-        state.nextTaskIntent === 'new_task' ? 'new_task' : 'closed_unscored',
+        state.nextTaskIntent === 'new_task' ? 'new_task' : 'closed',
       );
     }
 
@@ -922,7 +900,7 @@ export class SessionRunTracker {
   onSessionClosed(sessionPath: string): void {
     this.busySessionPaths.delete(sessionPath);
     if (this.runState.sessions.get(sessionPath)?.currentRun) {
-      this.runState.finalizeCurrentRun(sessionPath, 'closed_unscored');
+      this.runState.finalizeCurrentRun(sessionPath, 'closed');
     }
     this.runState.sessions.delete(sessionPath);
     this.dispatchArchEvent({ kind: 'ActiveRunSummaryChanged', sessionPath, summary: null });
@@ -959,98 +937,6 @@ export class SessionRunTracker {
     this.runState.sessions.delete(oldPath);
     this.runState.sessions.set(newPath, state);
     this.runState.persist(snapshotToAppend ?? undefined);
-  }
-
-  recordOutcome(sessionPath: string, outcome: RunOutcome): void {
-    // User outcomes historically had no provenance field; keep that wire shape
-    // stable and reserve the explicit `agent` marker for agent-authored scores.
-    this.recordOutcomeWithSource(sessionPath, {
-      resolution: outcome.resolution,
-      satisfaction: outcome.satisfaction,
-    });
-  }
-
-  private recordOutcomeWithSource(sessionPath: string, outcome: RunOutcome): void {
-    const state = this.runState.getOrCreateSessionState(sessionPath);
-
-    if (state.currentRun) {
-      this.runState.finalizeCurrentRun(sessionPath, 'scored', outcome);
-      this.scheduleRender();
-      return;
-    }
-
-    // A user outcome may replace an agent-authored outcome, and a corrected
-    // agent review may replace its earlier agent-authored outcome. Never let an
-    // agent review overwrite an existing user outcome.
-    const canUpdateLastRun = state.lastRun?.status === 'closed_unscored'
-      || (state.lastRun?.status === 'scored' && state.lastRun.outcome?.source === 'agent');
-    if (!state.lastRun || !canUpdateLastRun) {
-      return;
-    }
-
-    const updatedRun: RunSnapshot = {
-      ...state.lastRun,
-      status: 'scored',
-      scored: true,
-      outcome,
-      finalizationReason: 'scored',
-      finalizedAt: state.lastRun.finalizedAt ?? this.runState.isoNow(),
-      updatedAt: this.runState.isoNow(),
-    };
-    state.lastRun = updatedRun;
-
-    this.runState.syncSessionSummary(sessionPath);
-    this.runState.persist(
-      updatedRun,
-      this.runState.buildOutcomeHistoryEntry(updatedRun, outcome),
-    );
-    this.scheduleRender();
-  }
-
-  recordAgentReview(
-    sessionPath: string,
-    review: {
-      done: boolean;
-      rating: number;
-      completion: AgentReviewCompletion;
-      reason: string;
-      evaluatedAt: string;
-      reviewerBuckets: string[];
-      reviewerCount: number;
-    },
-  ): void {
-    const state = this.runState.getOrCreateSessionState(sessionPath);
-    const run = state.currentRun ?? state.lastRun;
-    if (!run) {
-      return;
-    }
-    const recordedAt = this.runState.isoNow();
-    const entry: AgentReviewEntry = {
-      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-      kind: 'agent_review',
-      recordedAt,
-      sessionPath,
-      runId: run.runId,
-      taskGroupId: run.taskGroupId,
-      done: review.done,
-      rating: review.rating,
-      completion: review.completion,
-      reason: review.reason,
-      evaluatedAt: review.evaluatedAt ?? recordedAt,
-      reviewerBuckets: review.reviewerBuckets ?? [],
-      reviewerCount: review.reviewerCount ?? 0,
-    };
-    this.runState.persistAgentReview(entry);
-
-    // A completed agent review is a first-class run outcome. Persist the
-    // provenance on the outcome, but otherwise feed it through the same scored
-    // run path as a user rating so every aggregate and leaderboard sees it.
-    const outcome = review.done
-      ? outcomeFromAgentReview(review.rating, review.completion)
-      : null;
-    if (outcome) {
-      this.recordOutcomeWithSource(sessionPath, outcome);
-    }
   }
 
   startNewTask(sessionPath: string): void {
@@ -1100,7 +986,7 @@ export class SessionRunTracker {
       .map(([sessionPath]) => sessionPath);
 
     for (const sessionPath of openSessionPaths) {
-      this.runState.finalizeCurrentRun(sessionPath, 'closed_unscored');
+      this.runState.finalizeCurrentRun(sessionPath, 'closed');
     }
     this.busySessionPaths.clear();
   }

@@ -7,16 +7,11 @@
       "sessionPath": "C:\\Users\\analyst\\SENTINEL_SESSION_PATH_ALPHA\\run-001.jsonl",
       "runId": "run-001",
       "taskGroupId": "task-001",
-      "status": "scored",
-      "scored": true,
+      "status": "closed",
       "startedAt": "2026-05-10T14:05:00.000Z",
       "updatedAt": "2026-05-10T14:18:00.000Z",
       "finalizedAt": "2026-05-10T14:19:00.000Z",
-      "finalizationReason": "scored",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 5
-      },
+      "finalizationReason": "closed",
       "modelId": "gpt-4.1",
       "thinkingLevel": "low",
       "mixedModelConfig": false,
@@ -242,16 +237,11 @@
       "sessionPath": "C:\\Users\\analyst\\SENTINEL_SESSION_PATH_BRAVO\\run-002.jsonl",
       "runId": "run-002",
       "taskGroupId": "task-002",
-      "status": "scored",
-      "scored": true,
+      "status": "closed",
       "startedAt": "2026-05-10T16:40:00.000Z",
       "updatedAt": "2026-05-10T17:02:00.000Z",
       "finalizedAt": "2026-05-10T17:04:00.000Z",
-      "finalizationReason": "scored",
-      "outcome": {
-        "resolution": "partially_resolved",
-        "satisfaction": 3
-      },
+      "finalizationReason": "closed",
       "modelId": "gpt-4.1",
       "thinkingLevel": "high",
       "mixedModelConfig": false,
@@ -453,16 +443,11 @@
       "sessionPath": "/Users/analyst/SENTINEL_SESSION_PATH_CHARLIE/run-003.jsonl",
       "runId": "run-003",
       "taskGroupId": "task-003",
-      "status": "scored",
-      "scored": true,
+      "status": "closed",
       "startedAt": "2026-05-11T09:15:00.000Z",
       "updatedAt": "2026-05-11T09:34:00.000Z",
       "finalizedAt": "2026-05-11T09:35:00.000Z",
-      "finalizationReason": "scored",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 4
-      },
+      "finalizationReason": "closed",
       "modelId": "claude-sonnet-4",
       "thinkingLevel": "medium",
       "mixedModelConfig": false,
@@ -623,12 +608,11 @@
       "sessionPath": "/Users/analyst/SENTINEL_SESSION_PATH_DELTA/run-004.jsonl",
       "runId": "run-004",
       "taskGroupId": "task-004",
-      "status": "closed_unscored",
-      "scored": false,
+      "status": "closed",
       "startedAt": "2026-05-11T13:10:00.000Z",
       "updatedAt": "2026-05-11T13:22:00.000Z",
       "finalizedAt": "2026-05-11T13:22:30.000Z",
-      "finalizationReason": "closed_unscored",
+      "finalizationReason": "closed",
       "modelId": "claude-sonnet-4",
       "thinkingLevel": "off",
       "mixedModelConfig": false,
@@ -755,16 +739,11 @@
       "sessionPath": "D:\\Sessions\\SENTINEL_SESSION_PATH_ECHO\\run-005.jsonl",
       "runId": "run-005",
       "taskGroupId": "task-005",
-      "status": "scored",
-      "scored": true,
+      "status": "closed",
       "startedAt": "2026-05-12T10:00:00.000Z",
       "updatedAt": "2026-05-12T10:27:00.000Z",
       "finalizedAt": "2026-05-12T10:30:00.000Z",
-      "finalizationReason": "scored",
-      "outcome": {
-        "resolution": "unresolved",
-        "satisfaction": 2
-      },
+      "finalizationReason": "closed",
       "modelId": "gpt-4.1-mini",
       "mixedModelConfig": true,
       "mixedTreatmentConfig": true,
@@ -960,16 +939,11 @@
       "sessionPath": "/srv/local/SENTINEL_SESSION_PATH_FOXTROT/run-006.jsonl",
       "runId": "run-006",
       "taskGroupId": "task-006",
-      "status": "scored",
-      "scored": true,
+      "status": "closed",
       "startedAt": "2026-05-12T15:42:00.000Z",
       "updatedAt": "2026-05-12T15:58:00.000Z",
       "finalizedAt": "2026-05-12T16:00:00.000Z",
-      "finalizationReason": "scored",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 4
-      },
+      "finalizationReason": "closed",
       "modelId": "gpt-4.1-mini",
       "thinkingLevel": "minimal",
       "mixedModelConfig": false,
@@ -1084,12 +1058,11 @@
       "sessionPath": "/srv/local/SENTINEL_SESSION_PATH_HOTEL/run-008.jsonl",
       "runId": "run-008",
       "taskGroupId": "task-008",
-      "status": "closed_unscored",
-      "scored": false,
+      "status": "closed",
       "startedAt": "2026-05-13T11:30:00.000Z",
       "updatedAt": "2026-05-13T11:48:00.000Z",
       "finalizedAt": "2026-05-13T11:48:30.000Z",
-      "finalizationReason": "closed_unscored",
+      "finalizationReason": "closed",
       "modelId": "gpt-4.1-mini",
       "thinkingLevel": "medium",
       "mixedModelConfig": false,
@@ -1204,7 +1177,6 @@
       "runId": "run-007",
       "taskGroupId": "task-007",
       "status": "open",
-      "scored": false,
       "startedAt": "2026-05-13T08:05:00.000Z",
       "updatedAt": "2026-05-13T08:16:00.000Z",
       "modelId": "claude-sonnet-4",
@@ -1345,7 +1317,6 @@
       "runId": "run-001",
       "taskGroupId": "task-001",
       "status": "open",
-      "scored": false,
       "startedAt": "2026-05-10T14:05:00.000Z",
       "updatedAt": "2026-05-10T14:10:00.000Z",
       "modelId": "gpt-4.1",
@@ -1452,66 +1423,16 @@
       }
     }
   ],
-  "outcomes": [
-    {
-      "schemaVersion": 1,
-      "kind": "run_outcome",
-      "recordedAt": "2026-05-10T14:19:00.000Z",
-      "sessionPath": "C:\\Users\\analyst\\SENTINEL_SESSION_PATH_ALPHA\\run-001.jsonl",
-      "runId": "run-001",
-      "taskGroupId": "task-001",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 5
-      }
-    },
-    {
-      "schemaVersion": 1,
-      "kind": "run_outcome",
-      "recordedAt": "2026-05-10T17:04:00.000Z",
-      "sessionPath": "C:\\Users\\analyst\\SENTINEL_SESSION_PATH_BRAVO\\run-002.jsonl",
-      "runId": "run-002",
-      "taskGroupId": "task-002",
-      "outcome": {
-        "resolution": "partially_resolved",
-        "satisfaction": 3
-      }
-    },
-    {
-      "schemaVersion": 1,
-      "kind": "run_outcome",
-      "recordedAt": "2026-05-11T09:35:00.000Z",
-      "sessionPath": "/Users/analyst/SENTINEL_SESSION_PATH_CHARLIE/run-003.jsonl",
-      "runId": "run-003",
-      "taskGroupId": "task-003",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 4
-      }
-    },
-    {
-      "schemaVersion": 1,
-      "kind": "run_outcome",
-      "recordedAt": "2026-05-12T10:30:00.000Z",
-      "sessionPath": "D:\\Sessions\\SENTINEL_SESSION_PATH_ECHO\\run-005.jsonl",
-      "runId": "run-005",
-      "taskGroupId": "task-005",
-      "outcome": {
-        "resolution": "unresolved",
-        "satisfaction": 2
-      }
-    },
-    {
-      "schemaVersion": 1,
-      "kind": "run_outcome",
-      "recordedAt": "2026-05-12T16:00:00.000Z",
-      "sessionPath": "/srv/local/SENTINEL_SESSION_PATH_FOXTROT/run-006.jsonl",
-      "runId": "run-006",
-      "taskGroupId": "task-006",
-      "outcome": {
-        "resolution": "resolved",
-        "satisfaction": 4
-      }
+  "sessionReviewV2Diagnostics": {
+    "rawProductionCount": 0,
+    "acceptedCount": 0,
+    "rejectedCount": 0,
+    "rejectedByReason": {
+      "unsupported_schema": 0,
+      "unsupported_rubric": 0,
+      "unsupported_index": 0,
+      "invalid_identity": 0,
+      "invalid_payload": 0
     }
-  ]
+  }
 }

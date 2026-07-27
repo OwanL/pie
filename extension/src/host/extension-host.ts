@@ -371,7 +371,7 @@ export class PieExtension implements vscode.Disposable {
    *  the `session_review` tool can list "currently open" sessions (true host
    *  tab state) without a host→tool bridge. Called from `persistTabs` (on tab
    *  changes) and once after backend start/restart (startup gap). The
-   *  summaries already carry `done`/`rating` merged from the review sidecar. */
+   *  summaries already carry canonical V2 review state merged from the sidecar. */
   private pushOpenTabsRegistry(): void {
     const sessions = this.archState.sessions.sessions;
     const pinned = this.archState.sessions.pinnedTabPaths;

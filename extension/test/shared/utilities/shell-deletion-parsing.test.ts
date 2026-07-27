@@ -174,8 +174,10 @@ test('a single pipe stops tokenization mid-segment (rm target captured, rest dro
   assert.deepEqual(parseDeletedPathsFromCommand('rm a | rm b'), ['a']);
 });
 
-test('redirect operator stops tokenization', () => {
+test('redirect operator stops tokenization even when attached to a file descriptor', () => {
   assert.deepEqual(parseDeletedPathsFromCommand('rm a > out.txt'), ['a']);
+  assert.deepEqual(parseDeletedPathsFromCommand('rm a 2>/dev/null'), ['a']);
+  assert.deepEqual(parseDeletedPathsFromCommand('rm a>/dev/null'), ['a']);
 });
 
 test('sudo / env / FOO=bar prefixes are skipped to reach the command', () => {

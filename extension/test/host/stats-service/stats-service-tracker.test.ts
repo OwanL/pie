@@ -6,12 +6,12 @@ import { createInitialArchState } from '../../../src/host/core/arch-state';
 import { reducer } from '../../../src/host/core/reducer';
 import type { Event } from '../../../src/host/core/events';
 import type { ArchState, SettingsState } from '../../../src/host/core/arch-state';
-import type { AssistantUsage, ComposerInput, RunOutcome, SessionAnalyticsFactors, ToolCall } from '../../../src/shared/protocol';
+import type { AssistantUsage, ComposerInput, SessionAnalyticsFactors, ToolCall } from '../../../src/shared/protocol';
 import { produce } from 'immer';
 
 function createHarness() {
   const sessionPath = '/workspace/session.jsonl';
-  const persistCalls: Array<{ snapshot?: unknown; outcome?: unknown }> = [];
+  const persistCalls: Array<{ snapshot?: unknown }> = [];
   let renderCount = 0;
   let idCounter = 0;
   let nowMs = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -46,10 +46,9 @@ function createHarness() {
     scheduleRender: () => {
       renderCount += 1;
     },
-    schedulePersist: (snapshot, outcome) => {
-      persistCalls.push({ snapshot, outcome });
+    schedulePersist: (snapshot) => {
+      persistCalls.push({ snapshot });
     },
-    schedulePersistAgentReview: () => undefined,
     now: () => new Date(nowMs),
     createId: () => `id-${++idCounter}`,
     getExperimentAssignment: () => experimentAssignment,
@@ -273,31 +272,6 @@ test('duplicate onAssistantTurnEnded calls for the same turn do not double-count
   assert.equal(run?.turnThroughputSamples.length, 1, 'only one throughput sample recorded');
 });
 
-test('replaceSessionPath, continueTask, and recordOutcome handle last-run state transitions', () => {
-  const harness = createHarness();
-  const runId = harness.tracker.prepareForSend(harness.sessionPath, []);
-  const outcome: RunOutcome = { resolution: 'resolved', satisfaction: 5 };
-
-  harness.tracker.continueTask(harness.sessionPath);
-  harness.tracker.recordOutcome(harness.sessionPath, outcome);
-  harness.tracker.replaceSessionPath(harness.sessionPath, '/workspace/renamed-session.jsonl');
-  harness.tracker.replaceSessionPath('/missing', '/noop');
-  harness.tracker.replaceSessionPath('/workspace/renamed-session.jsonl', '/workspace/renamed-session.jsonl');
-
-  const sessions = harness.tracker.serializeSessions();
-  const lastRun = sessions['/workspace/renamed-session.jsonl']?.lastRun;
-
-  assert.equal(lastRun?.runId, runId);
-  assert.equal(lastRun?.status, 'scored');
-  assert.deepEqual(lastRun?.outcome, outcome);
-  assert.equal(lastRun?.sessionPath, '/workspace/renamed-session.jsonl');
-  assert.equal(harness.archState.composer.activeRunSummaryBySession[harness.sessionPath]?.status, 'scored');
-
-  const persistCountBefore = harness.persistCalls.length;
-  harness.tracker.recordOutcome('/workspace/renamed-session.jsonl', outcome);
-  assert.equal(harness.persistCalls.length, persistCountBefore, 'recordOutcome should no-op once the last run is already scored');
-});
-
 test('tracker no-op guards and metadata updates behave correctly across inactive and active runs', () => {
   const harness = createHarness();
 
@@ -349,8 +323,8 @@ test('onSessionClosed and finalizeOpenRunsForShutdown close active runs and clea
   second.tracker.finalizeOpenRunsForShutdown();
 
   const finalized = second.tracker.serializeSessions()[second.sessionPath]?.lastRun;
-  assert.equal(finalized?.status, 'closed_unscored');
-  assert.equal(finalized?.finalizationReason, 'closed_unscored');
+  assert.equal(finalized?.status, 'closed');
+  assert.equal(finalized?.finalizationReason, 'closed');
 });
 
 test('turn latency breakdown is recorded on throughput samples', () => {

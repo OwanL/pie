@@ -18,13 +18,12 @@ import { listStorageDirCandidates } from './source-auto.ts';
 import {
   coerceHistoricalSessionSummaries,
   discoverHistoricalSessions,
-  readMixedSessionReviews,
+  readSessionReviewsV2,
 } from './transcript-source.ts';
-import { coerceSessionReviewV2 } from './review-analytics.ts';
+import { inspectSessionReviewV2 } from './review-analytics.ts';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
-  type AgentReviewSourceEvent,
   type AssistantUsage,
   type AuxiliaryLlmUsageSample,
   type FileExtensionRollup,
@@ -32,8 +31,6 @@ import {
   type FunctionalSettingsSnapshot,
   type InputKind,
   type LoadedSourceAnalytics,
-  type LegacySessionReviewSource,
-  type OutcomeHistoryLogEntry,
   type PruningMode,
   type PruningSourceDecision,
   type PruningSourceEvent,
@@ -41,10 +38,10 @@ import {
   type WarmBashRewriteSourceEvent,
   type WarmBashSessionSummarySourceEvent,
   type RunFinalizationReason,
-  type RunOutcome,
   type RetryTimingSample,
   type RunSnapshot,
   type SessionAnalyticsFactors,
+  type SessionReviewV2IngestionDiagnostics,
   type SessionReviewV2Source,
   type SourceAnalyticsPayload,
   type ThinkingLevel,
@@ -72,7 +69,7 @@ export const DEFAULT_OUTCOMES_ROOT = path.join(CONFIG_ROOT, 'data', 'outcomes');
 const INPUT_KINDS = new Set<InputKind>(['filesystemPathRef', 'imageBlob', 'fileBlob']);
 const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const PRUNING_MODES = new Set<PruningMode>(['auto', 'shadow', 'off', 'custom']);
-const FINALIZATION_REASONS = new Set<RunFinalizationReason>(['scored', 'closed_unscored', 'new_task']);
+const FINALIZATION_REASONS = new Set<RunFinalizationReason>(['closed', 'new_task']);
 const TREATMENT_CHANGE_KINDS = new Set<TreatmentChangeKind>([
   'model',
   'thinking',
@@ -119,6 +116,7 @@ export interface SourceSelection {
   /** Test/embedding overrides for local transcript discovery. */
   legacySessionsDir?: string;
   configuredSessionsDir?: string;
+  /** Canonical V2 production-review JSONL sidecar. */
   reviewSidecarPath?: string;
   /**
    * Aggregate every run store found under this directory. When omitted (and no
@@ -817,28 +815,6 @@ function coerceFunctionalSettings(value: unknown): FunctionalSettingsSnapshot | 
   };
 }
 
-function coerceRunOutcome(value: unknown): RunOutcome | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  if (
-    (value.resolution !== 'resolved' && value.resolution !== 'partially_resolved' && value.resolution !== 'unresolved')
-    || typeof value.satisfaction !== 'number'
-    || !Number.isFinite(value.satisfaction)
-    || (value.source !== undefined && value.source !== 'user' && value.source !== 'agent')
-  ) {
-    return null;
-  }
-
-  const source = value.source === 'user' || value.source === 'agent' ? value.source : undefined;
-  return {
-    resolution: value.resolution,
-    satisfaction: value.satisfaction,
-    ...(source ? { source } : {}),
-  };
-}
-
 function coerceInputKinds(value: unknown): InputKind[] {
   if (!Array.isArray(value)) {
     return [];
@@ -914,16 +890,10 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     typeof value.sessionPath !== 'string'
     || typeof value.runId !== 'string'
     || typeof value.taskGroupId !== 'string'
-    || (status !== 'open' && status !== 'scored' && status !== 'closed_unscored')
-    || typeof value.scored !== 'boolean'
+    || (status !== 'open' && status !== 'closed')
     || typeof value.startedAt !== 'string'
     || typeof value.updatedAt !== 'string'
   ) {
-    return null;
-  }
-
-  const outcomeCandidate = value.outcome == null ? undefined : coerceRunOutcome(value.outcome);
-  if (value.outcome != null && !outcomeCandidate) {
     return null;
   }
 
@@ -938,12 +908,10 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
     runId: value.runId,
     taskGroupId: value.taskGroupId,
     status,
-    scored: value.scored,
     startedAt: value.startedAt,
     updatedAt: value.updatedAt,
     finalizedAt: coerceOptionalString(value.finalizedAt),
     finalizationReason,
-    outcome: outcomeCandidate ?? undefined,
     modelId: coerceOptionalString(value.modelId),
     provider: coerceOptionalString(value.provider),
     thinkingLevel,
@@ -996,35 +964,6 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
   };
 }
 
-export function coerceOutcomeHistoryEntry(value: unknown): OutcomeHistoryLogEntry | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const outcome = coerceRunOutcome(value.outcome);
-  if (
-    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION
-    || value.kind !== 'run_outcome'
-    || typeof value.recordedAt !== 'string'
-    || typeof value.sessionPath !== 'string'
-    || typeof value.runId !== 'string'
-    || typeof value.taskGroupId !== 'string'
-    || !outcome
-  ) {
-    return null;
-  }
-
-  return {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'run_outcome',
-    recordedAt: value.recordedAt,
-    sessionPath: value.sessionPath,
-    runId: value.runId,
-    taskGroupId: value.taskGroupId,
-    outcome,
-  };
-}
-
 function coerceRunSnapshotArray(label: string, value: unknown): RunSnapshot[] {
   if (!Array.isArray(value)) {
     throw new Error(`Expected ${label} to be an array.`);
@@ -1039,50 +978,77 @@ function coerceRunSnapshotArray(label: string, value: unknown): RunSnapshot[] {
   });
 }
 
-function coerceOutcomeArray(value: unknown): OutcomeHistoryLogEntry[] {
-  if (!Array.isArray(value)) {
-    throw new Error('Expected outcomes to be an array.');
-  }
+function emptySessionReviewV2Diagnostics(): SessionReviewV2IngestionDiagnostics {
+  return {
+    rawProductionCount: 0,
+    acceptedCount: 0,
+    rejectedCount: 0,
+    rejectedByReason: {
+      unsupported_schema: 0,
+      unsupported_rubric: 0,
+      unsupported_index: 0,
+      invalid_identity: 0,
+      invalid_payload: 0,
+    },
+  };
+}
 
-  return value.map((entry, index) => {
-    const outcome = coerceOutcomeHistoryEntry(entry);
-    if (!outcome) {
-      throw new Error(`Invalid outcome history entry at outcomes[${index}].`);
+function coerceSessionReviewV2Diagnostics(value: unknown): SessionReviewV2IngestionDiagnostics {
+  const diagnostics = emptySessionReviewV2Diagnostics();
+  if (!isRecord(value)) return diagnostics;
+  diagnostics.acceptedCount = toNonNegativeInteger(value.acceptedCount);
+  diagnostics.rejectedCount = toNonNegativeInteger(value.rejectedCount);
+  diagnostics.rawProductionCount = Math.max(
+    toNonNegativeInteger(value.rawProductionCount),
+    diagnostics.acceptedCount + diagnostics.rejectedCount,
+  );
+  if (isRecord(value.rejectedByReason)) {
+    for (const reason of Object.keys(diagnostics.rejectedByReason) as Array<keyof typeof diagnostics.rejectedByReason>) {
+      diagnostics.rejectedByReason[reason] = toNonNegativeInteger(value.rejectedByReason[reason]);
     }
-    return outcome;
-  });
+  }
+  return diagnostics;
 }
 
-function coerceSessionReviewsV2(value: unknown): SessionReviewV2Source[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const latest = new Map<string, SessionReviewV2Source>();
-  for (const entry of value) {
-    const review = coerceSessionReviewV2(entry);
-    if (!review) continue;
-    const previous = latest.get(review.sessionId);
-    if (!previous || review.reviewedAt > previous.reviewedAt
-      || (review.reviewedAt === previous.reviewedAt && review.reviewId > previous.reviewId)) latest.set(review.sessionId, review);
+function mergeSessionReviewV2Diagnostics(
+  computed: SessionReviewV2IngestionDiagnostics,
+  embedded: SessionReviewV2IngestionDiagnostics,
+): SessionReviewV2IngestionDiagnostics {
+  const rejectedByReason = { ...computed.rejectedByReason };
+  for (const reason of Object.keys(rejectedByReason) as Array<keyof typeof rejectedByReason>) {
+    rejectedByReason[reason] = Math.max(computed.rejectedByReason[reason], embedded.rejectedByReason[reason]);
   }
-  return latest.size ? [...latest.values()] : undefined;
+  const acceptedCount = Math.max(computed.acceptedCount, embedded.acceptedCount);
+  const rejectedCount = Math.max(computed.rejectedCount, embedded.rejectedCount, Object.values(rejectedByReason).reduce((sum, count) => sum + count, 0));
+  return {
+    rawProductionCount: Math.max(computed.rawProductionCount, embedded.rawProductionCount, acceptedCount + rejectedCount),
+    acceptedCount,
+    rejectedCount,
+    rejectedByReason,
+  };
 }
 
-function coerceLegacySessionReviews(value: unknown): LegacySessionReviewSource[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const reviews: LegacySessionReviewSource[] = [];
+function coerceSessionReviewsV2(value: unknown): {
+  reviews: SessionReviewV2Source[] | undefined;
+  diagnostics: SessionReviewV2IngestionDiagnostics;
+} {
+  const diagnostics = emptySessionReviewV2Diagnostics();
+  if (!Array.isArray(value)) return { reviews: undefined, diagnostics };
+  const canonical = new Map<string, SessionReviewV2Source>();
   for (const entry of value) {
-    if (!isRecord(entry) || entry.selfClose === true || entry.cohort !== 'legacy_v1' || typeof entry.sessionId !== 'string'
-      || typeof entry.normalizedSessionPath !== 'string' || typeof entry.identityFallback !== 'boolean'
-      || typeof entry.rating !== 'number' || typeof entry.done !== 'boolean'
-      || !['fully', 'partial', 'setback'].includes(String(entry.completion)) || typeof entry.evaluatedAt !== 'string') continue;
-    reviews.push({
-      cohort: 'legacy_v1', sessionId: entry.sessionId, normalizedSessionPath: entry.normalizedSessionPath,
-      identityFallback: entry.identityFallback, rating: entry.rating, done: entry.done,
-      completion: entry.completion as LegacySessionReviewSource['completion'], evaluatedAt: entry.evaluatedAt,
-      reviewerBuckets: Array.isArray(entry.reviewerBuckets) ? entry.reviewerBuckets.filter((item): item is string => typeof item === 'string') : [],
-      reviewerCount: typeof entry.reviewerCount === 'number' ? Math.max(0, Math.trunc(entry.reviewerCount)) : 0,
-    });
+    if (!isRecord(entry) || entry.kind !== 'production') continue;
+    diagnostics.rawProductionCount += 1;
+    const result = inspectSessionReviewV2(entry);
+    if (!result.review) {
+      diagnostics.rejectedCount += 1;
+      diagnostics.rejectedByReason[result.rejectionReason] += 1;
+      continue;
+    }
+    diagnostics.acceptedCount += 1;
+    const review = result.review;
+    if (!canonical.has(review.sessionId)) canonical.set(review.sessionId, review);
   }
-  return reviews.length ? reviews : undefined;
+  return { reviews: canonical.size ? [...canonical.values()] : undefined, diagnostics };
 }
 
 function coerceWarmBashRewrites(value: unknown): WarmBashRewriteSourceEvent[] | undefined {
@@ -1164,19 +1130,22 @@ export function coerceSourceAnalyticsPayload(value: unknown): SourceAnalyticsPay
     throw new Error('Source analytics payload is missing workspaceKey.');
   }
 
+  const sessionReviewsV2 = coerceSessionReviewsV2(value.sessionReviewsV2);
+  const sessionReviewV2Diagnostics = mergeSessionReviewV2Diagnostics(
+    sessionReviewsV2.diagnostics,
+    coerceSessionReviewV2Diagnostics(value.sessionReviewV2Diagnostics),
+  );
   return {
     schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
     exportedAt: value.exportedAt,
     workspaceKey: value.workspaceKey,
     completedRuns: coerceRunSnapshotArray('completedRuns', value.completedRuns),
     openRuns: coerceRunSnapshotArray('openRuns', value.openRuns),
-    outcomes: coerceOutcomeArray(value.outcomes),
     pruningDecisions: Array.isArray(value.pruningDecisions) ? value.pruningDecisions : [],
     pruningEvents: coercePruningEvents(value.pruningEvents),
     toolResultPruningEvents: coerceToolResultPruningEvents(value.toolResultPruningEvents),
-    agentReviews: coerceAgentReviews(value.agentReviews),
-    sessionReviewsV2: coerceSessionReviewsV2(value.sessionReviewsV2),
-    legacySessionReviews: coerceLegacySessionReviews(value.legacySessionReviews),
+    sessionReviewsV2: sessionReviewsV2.reviews,
+    sessionReviewV2Diagnostics,
     historicalSessions: coerceHistoricalSessionSummaries(value.historicalSessions),
     warmBashRewrites: coerceWarmBashRewrites(value.warmBashRewrites),
     warmBashSummaries: coerceWarmBashSummaries(value.warmBashSummaries),
@@ -1249,63 +1218,6 @@ function coerceToolResultPruningEvents(value: unknown): ToolResultPruningSourceE
   return events;
 }
 
-/** Coerce a single parsed JSONL line into an {@link AgentReviewSourceEvent}, or null if invalid. */
-function coerceAgentReviewEntry(value: unknown): AgentReviewSourceEvent | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const completion = value.completion;
-  if (
-    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION ||
-    value.kind !== 'agent_review' ||
-    typeof value.recordedAt !== 'string' ||
-    typeof value.sessionPath !== 'string' ||
-    typeof value.runId !== 'string' ||
-    typeof value.taskGroupId !== 'string' ||
-    typeof value.done !== 'boolean' ||
-    typeof value.rating !== 'number' ||
-    !Number.isFinite(value.rating) ||
-    (completion !== 'fully' && completion !== 'partial' && completion !== 'setback') ||
-    typeof value.evaluatedAt !== 'string' ||
-    !Array.isArray(value.reviewerBuckets) ||
-    !value.reviewerBuckets.every((b: unknown) => typeof b === 'string') ||
-    typeof value.reviewerCount !== 'number' ||
-    !Number.isFinite(value.reviewerCount)
-  ) {
-    return null;
-  }
-  return {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'agent_review',
-    recordedAt: value.recordedAt,
-    sessionPath: value.sessionPath,
-    runId: value.runId,
-    taskGroupId: value.taskGroupId,
-    done: value.done,
-    rating: value.rating,
-    completion,
-    reason: typeof value.reason === 'string' ? value.reason : '',
-    evaluatedAt: value.evaluatedAt,
-    reviewerBuckets: value.reviewerBuckets as string[],
-    reviewerCount: Math.trunc(value.reviewerCount),
-  };
-}
-
-/** Coerce a raw array into {@link AgentReviewSourceEvent}[], dropping malformed entries. */
-export function coerceAgentReviews(value: unknown): AgentReviewSourceEvent[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const events: AgentReviewSourceEvent[] = [];
-  for (const entry of value) {
-    const coerced = coerceAgentReviewEntry(entry);
-    if (coerced) {
-      events.push(coerced);
-    }
-  }
-  return events;
-}
-
 function readToolResultPruningLog(configRoot: string): ToolResultPruningSourceEvent[] {
   const logPath = path.join(configRoot, 'data', 'tool-result-pruning.jsonl');
   let raw: string;
@@ -1348,31 +1260,6 @@ function readToolResultPruningLog(configRoot: string): ToolResultPruningSourceEv
   return events;
 }
 
-/** Read `<storageDir>/agent-reviews.jsonl` (the agent-side counterpart to outcome-history.jsonl).
- *  Missing file or malformed lines are skipped; returns [] when the file is absent. */
-export function readAgentReviewsLog(storageDir: string): AgentReviewSourceEvent[] {
-  const logPath = path.join(storageDir, 'agent-reviews.jsonl');
-  let raw: string;
-  try {
-    raw = readFileSync(logPath, 'utf8');
-  } catch {
-    return [];
-  }
-  const lines = raw.trim().split('\n').filter((line) => line.trim().length > 0);
-  const events: AgentReviewSourceEvent[] = [];
-  for (const line of lines) {
-    try {
-      const parsed = parseJsonOrThrow<unknown>(line, logPath);
-      const coerced = coerceAgentReviewEntry(parsed);
-      if (coerced) {
-        events.push(coerced);
-      }
-    } catch {
-      // Skip malformed lines
-    }
-  }
-  return events;
-}
 export function readWarmBashLog(configRoot: string): { rewrites: WarmBashRewriteSourceEvent[]; summaries: WarmBashSessionSummarySourceEvent[] } {
   const logPath = path.join(configRoot, 'data', 'warm-bash.jsonl');
   let raw: string;
@@ -1562,8 +1449,7 @@ async function querySourceAnalyticsPayloadFromStorageDir(storageDir: string): Pr
     workspaceKey: path.basename(storageDir),
     completedRuns: result.completedRuns,
     openRuns: result.openRuns,
-    outcomes: result.outcomes,
-    agentReviews: readAgentReviewsLog(storageDir),
+    sessionReviewV2Diagnostics: emptySessionReviewV2Diagnostics(),
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],
@@ -1585,15 +1471,11 @@ async function queryAllRunAnalyticsStores(
   const candidates = await listStorageDirCandidates(outcomesRootDir);
   const completedRuns: RunSnapshot[] = [];
   const openRuns: RunSnapshot[] = [];
-  const outcomes: OutcomeHistoryLogEntry[] = [];
-  const agentReviews: AgentReviewSourceEvent[] = [];
 
   for (const { storageDir } of candidates) {
     const result = await querySourceAnalyticsPayloadFromStorageDir(storageDir);
     completedRuns.push(...result.completedRuns);
     openRuns.push(...result.openRuns);
-    outcomes.push(...result.outcomes);
-    agentReviews.push(...result.agentReviews);
   }
 
   const source: SourceAnalyticsPayload = {
@@ -1602,8 +1484,7 @@ async function queryAllRunAnalyticsStores(
     workspaceKey: 'all',
     completedRuns,
     openRuns,
-    outcomes,
-    agentReviews,
+    sessionReviewV2Diagnostics: emptySessionReviewV2Diagnostics(),
     pruningDecisions: [],
     pruningEvents: [],
     toolResultPruningEvents: [],
@@ -1627,29 +1508,16 @@ async function configuredSessionsDir(selection: SourceSelection): Promise<string
   return undefined;
 }
 
-export function backfillLegacySessionReviewIds(
-  reviews: LegacySessionReviewSource[],
-  historicalSessions: NonNullable<SourceAnalyticsPayload['historicalSessions']>,
-): LegacySessionReviewSource[] {
-  const stableIdByPath = new Map(historicalSessions.map((summary) => [summary.normalizedSessionPath, summary.sessionId]));
-  return reviews.map((review) => {
-    if (!review.identityFallback) return review;
-    const sessionId = stableIdByPath.get(review.normalizedSessionPath);
-    return sessionId ? { ...review, sessionId, identityFallback: false } : review;
-  });
-}
-
 async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, selection: SourceSelection): Promise<void> {
   const reviewSidecarPath = selection.reviewSidecarPath
     ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl');
   source.historicalSessions = await discoverHistoricalSessions({
     legacySessionsDir: selection.legacySessionsDir ?? path.join(CONFIG_ROOT, 'sessions'),
     configuredSessionsDir: await configuredSessionsDir(selection),
-    reviewSidecarPath,
   });
-  const mixed = await readMixedSessionReviews(reviewSidecarPath);
-  source.legacySessionReviews = backfillLegacySessionReviewIds(mixed.legacy, source.historicalSessions);
-  source.sessionReviewsV2 = mixed.productionV2;
+  const sidecar = await readSessionReviewsV2(reviewSidecarPath);
+  source.sessionReviewsV2 = sidecar.reviews;
+  source.sessionReviewV2Diagnostics = sidecar.diagnostics;
 }
 
 export async function loadSourceAnalytics(selection: SourceSelection = {}): Promise<LoadedSourceAnalytics> {

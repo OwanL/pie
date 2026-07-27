@@ -5,7 +5,6 @@ import * as path from 'node:path';
 
 const ANALYTICS_ACTIVITY_FILE_NAMES = [
   'run-snapshots.jsonl',
-  'outcome-history.jsonl',
   'open-runs.a.json',
   'open-runs.b.json',
   'open-runs.gen',
@@ -156,4 +155,42 @@ export async function detectPreferredStorageDir(
 export async function detectLatestStorageDir(outcomesRootDir: string): Promise<string | null> {
   const candidates = await listStorageDirCandidates(outcomesRootDir);
   return candidates[0]?.storageDir ?? null;
+}
+
+async function readMtimeMs(filePath: string): Promise<number | null> {
+  try {
+    const stat = await fs.stat(filePath);
+    return Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : Date.parse(stat.mtime.toISOString());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Latest local run-store, V2 review, catalog, or side-channel input used by local-default loading. */
+export async function readLatestLocalAnalyticsInputMs(
+  outcomesRootDir: string,
+  reviewSidecarPath: string,
+  additionalInputPaths: readonly string[] = [],
+): Promise<number | null> {
+  const candidates = await listStorageDirCandidates(outcomesRootDir);
+  const timestamps = [
+    candidates[0]?.latestActivityMs ?? null,
+    await readMtimeMs(reviewSidecarPath),
+    ...await Promise.all(additionalInputPaths.map(readMtimeMs)),
+  ].filter((timestamp): timestamp is number => timestamp !== null);
+  return timestamps.length ? Math.max(...timestamps) : null;
+}
+
+/** Missing databases and databases older than any local-default input must be rebuilt. */
+export async function shouldRebuildLocalDefaultDuckDb(
+  dbPath: string,
+  outcomesRootDir: string,
+  reviewSidecarPath: string,
+  additionalInputPaths: readonly string[] = [],
+): Promise<boolean> {
+  const dbMtimeMs = await readMtimeMs(dbPath);
+  if (dbMtimeMs === null) return true;
+  const inputMtimeMs = await readLatestLocalAnalyticsInputMs(outcomesRootDir, reviewSidecarPath, additionalInputPaths);
+  return inputMtimeMs !== null && inputMtimeMs > dbMtimeMs;
 }

@@ -425,12 +425,12 @@ export class EffectRunner {
       identifiers: { session: effect.sessionPath, turn: effect.turnId, attempt: effect.attemptId },
       eventKind: 'checkpoint',
     });
-    // Checkpoint repair is scoped to one already-existing session. It must
-    // serialize with mutations for that session, but it must never occupy the
-    // global lifecycle queue: a slow or repeatedly-requested repair previously
-    // sat ahead of tab switches and session creation, making every navigation
-    // control appear dead while an active turn was recovering.
-    void this.deps.queues.enqueueSessionOperation(effect.sessionPath, async () => {
+    // This is a read-only snapshot of backend-owned in-memory state. Run it
+    // outside lifecycle/session mutation queues: repair is needed precisely
+    // while a long request or extension-UI interaction may own that queue.
+    // The backend event loop captures the accumulator synchronously, so queue
+    // serialization adds head-of-line blocking without improving consistency.
+    void (async () => {
       try {
           const response = await this.deps.backend.request<{
             status: 'active' | 'terminal_grace' | 'inactive' | 'backend_restarted' | 'oversize';
@@ -476,10 +476,10 @@ export class EffectRunner {
             occurredAt: Date.now(),
             error: toErrorMessage(error),
           });
-      }
-    }).finally(() => {
+      } finally {
       this.liveCheckpointAttempts.delete(attemptKey);
-    });
+      }
+    })();
   }
 
   // ─── Template rows ────────────────────────────────────────────────────────

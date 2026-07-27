@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { parse } from '../../../extension/node_modules/yaml/dist/index.js';
 
+import { withCatalogLock } from '../src/catalog-lock.js';
+import { CopilotCatalogRefreshCoordinator } from '../src/catalog-refresh.js';
 import { reconcileCatalogText, toCatalogModel } from '../src/catalog-sync.js';
 import {
   isSelectableCopilotModel,
@@ -163,14 +168,93 @@ test('catalog mapper preserves review policy and handles capability/cost default
   );
 });
 
-test('reconciles the authoritative catalog, pruning stale models and transferring overrides', () => {
+test('catalog mapper preserves an existing maxImagesPerRequest for image-capable models', () => {
+  const discovered = toDiscoveredCopilotModel(gpt56)!;
+  const existing = {
+    id: discovered.id,
+    eligible: true,
+    thinking: ['high'],
+    disabledReason: null,
+    costRank: 17,
+    maxImagesPerRequest: 7,
+  };
+  const preserved = toCatalogModel(discovered, existing);
+  assert.equal(preserved.input, discovered.input);
+  assert.equal(preserved.maxImagesPerRequest, 7, 'an existing explicit maximum is preserved across reconciliation');
+});
+
+test('catalog mapper defaults maxImagesPerRequest to one for newly discovered image-capable models', () => {
+  const discovered = toDiscoveredCopilotModel(gpt56)!;
+  const entry = toCatalogModel(discovered);
+  assert.equal(entry.maxImagesPerRequest, 1, 'new image-capable models get the conservative fail-safe of one');
+  assert.deepEqual(entry.input, ['text', 'image']);
+});
+
+test('catalog mapper omits maxImagesPerRequest for text-only discovered models', () => {
+  const textOnly = toDiscoveredCopilotModel({
+    ...gpt56,
+    capabilities: { ...gpt56.capabilities, supports: { ...gpt56.capabilities.supports, vision: false } },
+  })!;
+  assert.deepEqual(textOnly.input, ['text']);
+  const entry = toCatalogModel(textOnly, { id: textOnly.id, maxImagesPerRequest: 4 });
+  assert.equal(entry.maxImagesPerRequest, undefined, 'a text-only model must not declare a positive image maximum');
+});
+
+test('reconciliation preserves maxImagesPerRequest and stays idempotent', () => {
+  const terra = toDiscoveredCopilotModel(gpt56)!;
+  const input = `profileOrder:
+  - gpt-5.6-terra
+providers:
+  github-copilot:
+    apiKey: copilot
+    models:
+      - id: gpt-5.6-terra
+        name: "Copilot: GPT-5.6 Terra"
+        api: openai-responses
+        reasoning: true
+        input: [text, image]
+        maxImagesPerRequest: 6
+        contextWindow: 1050000
+        maxTokens: 128000
+        pricing: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.12 }
+        eligible: true
+        thinking: [low, medium, high]
+        disabledReason: null
+        costRank: 10
+`;
+  const result = reconcileCatalogText(input, [terra]);
+  const source = parse(result.text) as {
+    providers: Record<string, { models: Array<{ id: string; maxImagesPerRequest?: number }> }>;
+  };
+  assert.equal(source.providers['github-copilot'].models[0].maxImagesPerRequest, 6, 'reconciliation preserves the explicit maximum');
+  const idempotent = reconcileCatalogText(result.text, [terra]);
+  assert.equal(idempotent.changed, false, 'a catalog with a preserved maximum is idempotent');
+  assert.equal(idempotent.text, result.text);
+});
+
+test('reconciliation seeds the conservative default for a newly discovered image-capable model', () => {
+  const terra = toDiscoveredCopilotModel(gpt56)!;
+  const input = `profileOrder: []
+providers:
+  github-copilot:
+    apiKey: copilot
+    models: []
+`;
+  const result = reconcileCatalogText(input, [terra]);
+  const source = parse(result.text) as {
+    providers: Record<string, { models: Array<{ id: string; maxImagesPerRequest?: number }> }> };
+  assert.equal(source.providers['github-copilot'].models[0].maxImagesPerRequest, 1);
+});
+
+test('reconciles Copilot without deleting same-id models owned by other providers', () => {
   const terra = toDiscoveredCopilotModel(gpt56)!;
   const novel = { ...terra, id: 'new-copilot-model', name: 'New Copilot Model' };
-  const conflict = { ...terra, id: 'shared-full-model', name: 'Shared Full Model' };
+  const shared = { ...terra, id: 'shared-full-model', name: 'Shared Full Model' };
   const input = `# catalog header
 profileOrder:
   - stale-copilot
-  - gpt-5.6-terra
+  - provider: openai-codex
+    id: gpt-5.6-terra
   - shared-full-model
   - other-model
 providers:
@@ -202,27 +286,97 @@ providers:
         name: Other
 `;
 
-  const result = reconcileCatalogText(input, [terra, novel, conflict]);
+  const result = reconcileCatalogText(input, [terra, novel, shared]);
   const source = parse(result.text) as {
-    profileOrder: string[];
+    profileOrder: Array<string | { provider: string; id: string }>;
     providers: Record<string, { models: Array<{ id: string }> }>;
   };
 
   assert.equal(result.changed, true);
   assert.deepEqual(result.removed, ['stale-copilot']);
-  assert.deepEqual(result.transferred, ['gpt-5.6-terra']);
-  assert.deepEqual(result.skippedConflicts, ['shared-full-model']);
   assert.deepEqual(source.providers['github-copilot'].models.map((model) => model.id), [
-    'gpt-5.6-terra', 'new-copilot-model',
+    'gpt-5.6-terra', 'new-copilot-model', 'shared-full-model',
   ]);
-  assert.deepEqual(source.providers['openai-codex'].models, []);
-  assert.deepEqual(source.profileOrder, ['new-copilot-model', 'gpt-5.6-terra', 'shared-full-model', 'other-model']);
+  assert.deepEqual(source.providers['openai-codex'].models.map((model) => model.id), ['gpt-5.6-terra']);
+  assert.deepEqual(source.providers.custom.models.map((model) => model.id), ['shared-full-model']);
+  assert.deepEqual(source.profileOrder, [
+    { provider: 'github-copilot', id: 'gpt-5.6-terra' },
+    'new-copilot-model',
+    { provider: 'github-copilot', id: 'shared-full-model' },
+    { provider: 'openai-codex', id: 'gpt-5.6-terra' },
+    { provider: 'custom', id: 'shared-full-model' },
+    'other-model',
+  ]);
   assert.match(result.text, /^# catalog header/m);
   assert.match(result.text, /# keep provider comment/);
 
-  const idempotent = reconcileCatalogText(result.text, [terra, novel, conflict]);
+  const idempotent = reconcileCatalogText(result.text, [terra, novel, shared]);
   assert.equal(idempotent.changed, false);
   assert.equal(idempotent.text, result.text);
+});
+
+test('coalesces concurrent startup refreshes and refreshes every live registry', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let runs = 0;
+  const coordinator = new CopilotCatalogRefreshCoordinator(async () => {
+    runs += 1;
+    await blocked;
+  });
+  const refreshes: string[] = [];
+  const first = { refresh: () => refreshes.push('first') };
+  const second = { refresh: () => refreshes.push('second') };
+
+  const firstRefresh = coordinator.refresh(first);
+  const secondRefresh = coordinator.refresh(second);
+  assert.equal(runs, 1);
+
+  release();
+  await Promise.all([firstRefresh, secondRefresh]);
+  assert.deepEqual(refreshes, ['first', 'second']);
+});
+
+test('serializes catalog writes from independent refresh coordinators', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pie-copilot-lock-'));
+  const lockPath = path.join(directory, 'catalog.lock');
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const events: string[] = [];
+
+  try {
+    const first = withCatalogLock(lockPath, async () => {
+      events.push('first:start');
+      await blocked;
+      events.push('first:end');
+    }, { retryDelayMs: 5 });
+    while (!events.includes('first:start')) await new Promise((resolve) => setTimeout(resolve, 1));
+
+    const second = withCatalogLock(lockPath, async () => {
+      events.push('second:start');
+      events.push('second:end');
+    }, { retryDelayMs: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(events, ['first:start']);
+
+    release();
+    await Promise.all([first, second]);
+    assert.deepEqual(events, ['first:start', 'first:end', 'second:start', 'second:end']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('retries discovery after a failed startup refresh', async () => {
+  let attempts = 0;
+  const coordinator = new CopilotCatalogRefreshCoordinator(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('temporary failure');
+  });
+  const registry = { refresh: () => undefined };
+
+  await assert.rejects(() => coordinator.refresh(registry), /temporary failure/);
+  await coordinator.refresh(registry);
+  assert.equal(attempts, 2);
 });
 
 test('catalog reconciliation rejects malformed or incomplete source YAML', () => {

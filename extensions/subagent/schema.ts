@@ -35,6 +35,26 @@ const UserContextSchema = Type.Optional(StringEnum(["latest", "all"] as const, {
 	description: "Parent prompts and ask_user clarifications only: omit for self-contained tasks; 'latest' for the current request and its clarifications; 'all' only when requirements span multiple user turns.",
 }));
 
+const InputKindSchema = StringEnum(["image"] as const, {
+	description: "Required runtime input kind the serving model must accept. `image` restricts selection to provider-qualified image-capable models; text-only models and fallbacks are never chosen for the child.",
+});
+
+const ModelRequirementsSchema = Type.Optional(
+	Type.Object(
+		{
+			inputKinds: Type.Optional(
+				Type.Array(InputKindSchema, {
+					description: "Required input kinds. An empty/absent array preserves current selection behaviour.",
+				}),
+			),
+		},
+		{
+			additionalProperties: false,
+			description: "Optional hard model requirements for the child. Absent or empty preserves current selection behaviour; { inputKinds: ['image'] } restricts selection to provider-qualified image-capable models.",
+		},
+	),
+);
+
 export const SubagentParams = Type.Object(
 	{
 		agent: Type.String({
@@ -52,6 +72,7 @@ export const SubagentParams = Type.Object(
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 		bucket: BucketSchema,
 		thinkingLevel: ThinkingLevelSchema,
+		modelRequirements: ModelRequirementsSchema,
 	},
 	{ additionalProperties: false },
 );

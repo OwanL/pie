@@ -235,20 +235,22 @@
   left: 50%;
   bottom: calc(var(--composer-height, 64px) + 8px);
   transform: translateX(-50%);
-  width: 32px;
+  min-width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   border-radius: 999px;
   border: 1px solid var(--panel-border-subtle);
   background: var(--panel-overlay-surface);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--panel-muted);
-  font-size: 15px;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1;
-  padding: 0;
+  padding: 0 12px;
   cursor: pointer;
   z-index: 280;
   box-shadow: var(--panel-shadow-sm);
@@ -259,6 +261,10 @@
     transform var(--panel-duration-fast) var(--panel-ease-spring),
     box-shadow var(--panel-transition-normal);
   animation: transcript-jump-latest-in var(--panel-duration-entrance) var(--panel-ease-out-expo);
+}
+
+.transcript-jump-latest-icon {
+  font-size: 15px;
 }
 
 .transcript-jump-latest:hover {

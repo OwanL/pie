@@ -37,6 +37,7 @@ export interface BottomSectionProps {
   systemPrompts: ViewState['systemPrompts'];
   transcript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
+  sessionUsage: ViewState['sessionUsage'];
   draftRestore: { text: string; nonce: number } | null;
   draftText: string;
   /** Brief H: AppBody registers the composer's `sendAsRetry` here so the
@@ -71,6 +72,7 @@ export const BottomSection = memo(function BottomSection({
   systemPrompts,
   transcript,
   transcriptWindow,
+  sessionUsage,
   draftRestore,
   draftText,
   sendRetryDraftRef,
@@ -114,6 +116,7 @@ export const BottomSection = memo(function BottomSection({
         systemPrompts={systemPrompts}
         transcript={transcript}
         transcriptWindow={transcriptWindow}
+        sessionUsage={sessionUsage}
         draftRestore={draftRestore}
         sendRetryDraftRef={sendRetryDraftRef}
         pendingComposerInputs={pendingComposerInputs}

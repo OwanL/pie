@@ -601,6 +601,17 @@ button:hover {
 .review-diagnostic-grid ul { margin: 5px 0; color: var(--text-muted); }
 .review-diagnostic-grid ul { padding-left: 18px; }
 
+.review-ingestion-warning,
+.data-table tbody tr.uncertain-rank-row {
+  border-color: rgba(255, 212, 121, 0.65);
+  background: rgba(255, 212, 121, 0.08);
+}
+
+.uncertain-rank-row td:nth-child(3) strong {
+  color: var(--gold);
+  letter-spacing: 0.04em;
+}
+
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 18px, 1480px);

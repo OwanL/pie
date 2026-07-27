@@ -42,83 +42,80 @@ test('DuckDB build and named queries work against the fixture', async () => {
   assert.ok(timelineRows.some((row) => row['bucket_start'] === '2026-05-10'));
 });
 
-test('model quality and leaderboard SQL label legacy outcomes and expose V2 joins', async () => {
+test('DuckDB exposes only V2 review quality tables and metrics', async () => {
   const rows = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
-  assert.ok(rows.every((row) => (
-    'legacy_v1_agent_outcome_count' in row
-      && 'legacy_user_outcome_count' in row
-      && 'v2_review_count' in row
-      && 'mean_quality_index_v1' in row
-      && 'mixed_model_excluded_outcome_count' in row
-      && 'mixed_treatment_excluded_outcome_count' in row
-  )));
+  assert.ok(rows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
 
-  const completed = prepared.runs.filter((run) => run.status !== 'open');
-  const expectedMixed = completed.filter((run) => (
-    run.scored && run.satisfaction !== null && run.mixedModelConfig
-  )).length;
-  const expectedStableUser = completed.filter((run) => (
-    run.scored && run.satisfaction !== null && !run.mixedModelConfig && !run.mixedTreatmentConfig && run.outcomeSource === 'user'
-  )).length;
-  const expectedStableAgent = completed.filter((run) => (
-    run.scored && run.satisfaction !== null && !run.mixedModelConfig && !run.mixedTreatmentConfig && run.outcomeSource === 'agent'
-  )).length;
-  const expectedMixedTreatment = completed.filter((run) => (
-    run.scored && run.satisfaction !== null && !run.mixedModelConfig && run.mixedTreatmentConfig
-  )).length;
-  const sum = (field: string): number => rows.reduce((total, row) => total + Number(row[field] ?? 0), 0);
+  const tables = await runDuckDbQuery(sharedDbPath, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'");
+  const tableNames = new Set(tables.map((row) => String(row['table_name'])));
+  assert.ok(tableNames.has('session_reviews_v2'));
+  assert.ok(tableNames.has('review_criteria_v2'));
+  assert.equal(tableNames.has('review_findings_v2'), false);
+  assert.ok(tableNames.has('review_reviewers_v2'));
+  assert.equal(tableNames.has('agent_reviews'), false);
 
-  assert.equal(sum('legacy_user_outcome_count'), expectedStableUser);
-  assert.equal(sum('legacy_v1_agent_outcome_count'), expectedStableAgent);
-  assert.equal(sum('v2_review_count'), 0);
-  assert.equal(sum('mixed_model_excluded_outcome_count'), expectedMixed);
-  assert.equal(sum('mixed_treatment_excluded_outcome_count'), expectedMixedTreatment);
+  const runColumns = await runDuckDbQuery(sharedDbPath, "SELECT column_name FROM information_schema.columns WHERE table_name = 'runs'");
+  const runColumnNames = new Set(runColumns.map((row) => String(row['column_name'])));
+  for (const removed of ['scored', 'resolution', 'satisfaction', 'outcome_source', 'first_attempt_success']) {
+    assert.equal(runColumnNames.has(removed), false, `${removed} must not remain in runs`);
+  }
+
+  const views = await runDuckDbQuery(sharedDbPath, "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'");
+  assert.equal(views.some((row) => row['view_name'] === 'outcomes'), false);
 
   const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
   const leaderboardRows = await runDuckDbQuery(sharedDbPath, leaderboardSql);
-  const leaderboardSum = (field: string): number => leaderboardRows.reduce(
-    (total, row) => total + Number(row[field] ?? 0),
-    0,
-  );
-  assert.equal(leaderboardSum('scored_run_count'), expectedStableUser);
-  assert.equal(leaderboardSum('user_outcome_count'), expectedStableUser);
-  assert.equal(leaderboardSum('legacy_v1_agent_outcome_count'), expectedStableAgent);
-  assert.equal(leaderboardSum('v2_review_count'), 0);
-  assert.equal(leaderboardSum('mixed_model_excluded_count'), expectedMixed);
-  assert.equal(leaderboardSum('mixed_treatment_excluded_count'), expectedMixedTreatment);
+  assert.ok(leaderboardRows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
 });
 
-test('model leaderboard SQL uses one latest scored run per task group', async () => {
-  const base = prepared.runs.find((run) => (
-    run.status !== 'open'
-    && run.scored
-    && run.satisfaction !== null
-    && !run.mixedModelConfig
-    && !run.mixedTreatmentConfig
-    && run.outcomeSource === 'user'
-  ));
-  assert.ok(base, 'fixture must contain an attributable user-scored run');
+test('V2 review mass flows through model quality and leaderboard SQL', async () => {
+  const base = prepared.runs.find((run) => run.status !== 'open' && !run.mixedModelConfig && !run.mixedTreatmentConfig);
+  assert.ok(base, 'fixture must contain a stable run');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-v2-review-'));
+  try {
+    const dbPath = path.join(dir, 'usage.duckdb');
+    await fs.copyFile(sharedDbPath, dbPath);
+    const runId = base.runId.replaceAll("'", "''");
+    await runDuckDbQuery(dbPath, `UPDATE runs SET session_id = 'v2-review-sql-session', identity_fallback = FALSE WHERE run_id = '${runId}'`);
+    await runDuckDbQuery(dbPath, `
+      INSERT INTO session_reviews_v2 (
+        review_id, session_id, identity_fallback, quality_index_v1,
+        criterion_coverage, external_blocker_rate, blinding_applied
+      ) VALUES ('v2-review-sql', 'v2-review-sql-session', FALSE, 87, 1, 0, TRUE)
+    `);
+
+    const qualityRows = await runNamedDuckDbQuery(dbPath, 'model_quality');
+    assert.ok(qualityRows.some((row) => Number(row['v2_review_count']) > 0 && Number(row['mean_quality_index_v1']) === 87));
+
+    const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
+    const leaderboardRows = await runDuckDbQuery(dbPath, leaderboardSql);
+    assert.ok(leaderboardRows.some((row) => Number(row['v2_review_count']) > 0 && Number(row['mean_quality_index_v1']) === 87));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('model leaderboard SQL uses one latest stable run per task group for process diagnostics', async () => {
+  const base = prepared.runs.find((run) => run.status !== 'open' && !run.mixedModelConfig && !run.mixedTreatmentConfig);
+  assert.ok(base, 'fixture must contain an attributable stable run');
   const first = {
     ...base,
     runId: 'terminal-a-first',
     taskGroupId: 'terminal-task',
     startedAt: '2026-05-10T01:00:00.000Z',
-    satisfaction: 5,
-    resolution: 'resolved' as const,
+    editRevisitRate: 0.1,
   };
   const later = {
     ...base,
     runId: 'terminal-a-later',
     taskGroupId: 'terminal-task',
     startedAt: '2026-05-10T02:00:00.000Z',
-    satisfaction: 1,
-    resolution: 'unresolved' as const,
+    editRevisitRate: 0.5,
   };
   const tiedByRunId = {
     ...later,
     runId: 'terminal-z-later',
-    satisfaction: 2,
-    resolution: 'partially_resolved' as const,
+    editRevisitRate: 0.8,
   };
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-terminal-task-'));
   try {
@@ -131,12 +128,9 @@ test('model leaderboard SQL uses one latest scored run per task group', async ()
     const sql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
     const rows = await runDuckDbQuery(dbPath, sql);
     assert.equal(rows.length, 1);
-    assert.equal(Number(rows[0]?.['scored_run_count']), 3, 'all retries remain provenance');
-    assert.equal(Number(rows[0]?.['effective_task_count']), 1, 'the task has one outcome vote');
+    assert.equal(Number(rows[0]?.['run_count']), 3, 'all retries remain provenance');
     assert.equal(Number(rows[0]?.['attributable_task_count']), 1);
-    assert.equal(Number(rows[0]?.['scoring_coverage']), 1);
-    assert.equal(Number(rows[0]?.['avg_satisfaction']), 2, 'latest timestamp then greatest runId selects the terminal vote');
-    assert.equal(Number(rows[0]?.['resolution_rate']), 0.5);
+    assert.equal(Number(rows[0]?.['file_churn_rate']), 0.8, 'latest timestamp then greatest runId selects the canonical diagnostic run');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -337,9 +331,6 @@ test('tool_result_issues table maps prepared rows and preserves sample detail', 
         thinkingLevel: run.thinkingLevel,
         experimentAssignment: run.experimentAssignment,
         mixedTreatmentConfig: run.mixedTreatmentConfig,
-        scored: run.scored,
-        satisfaction: run.satisfaction,
-        resolution: run.resolution,
       },
       {
         runId: 'issue-run',
@@ -355,9 +346,6 @@ test('tool_result_issues table maps prepared rows and preserves sample detail', 
         thinkingLevel: run.thinkingLevel,
         experimentAssignment: run.experimentAssignment,
         mixedTreatmentConfig: run.mixedTreatmentConfig,
-        scored: run.scored,
-        satisfaction: run.satisfaction,
-        resolution: run.resolution,
       },
     ];
     const dbPath = path.join(dir, 'usage.duckdb');
@@ -492,12 +480,11 @@ test('latency_friction query preserves measured coverage and tool overlap', asyn
   assert.equal(run?.['overlapping_tool_duration_ms'], '2300');
 });
 
-test('core_runs exposes model attribution, outcome source, mixed config, and parent/subagent/total cost', async () => {
+test('core_runs exposes model attribution, mixed config, and parent/subagent/total cost', async () => {
   const rows = await runNamedDuckDbQuery(sharedDbPath, 'core_runs');
   assert.ok(rows.length > 0, 'core_runs should return rows');
   for (const row of rows) {
     assert.ok('model_family' in row, 'core_runs must expose model_family');
-    assert.ok('outcome_source' in row, 'core_runs must expose outcome_source');
     assert.ok('mixed_model_config' in row, 'core_runs must expose mixed_model_config');
     assert.ok('estimated_cost_usd' in row, 'core_runs must expose parent cost (estimated_cost_usd)');
     assert.ok('subagent_estimated_cost_usd' in row, 'core_runs must expose subagent_estimated_cost_usd');

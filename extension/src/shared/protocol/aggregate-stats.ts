@@ -27,8 +27,6 @@
  * provider retain the historical first-priced-provider fallback.
  */
 
-import type { RunOutcome } from './settings.js';
-
 /**
  * Per-provider cost + token rollup. `provider` is the provider name from
  * `models.json` (or `'unknown'` when the model is unpriced/unknown).
@@ -179,8 +177,6 @@ export interface AggregateLastRun {
   modelId: string | null;
   /** Resolved provider name (or `'unknown'`). */
   provider: string;
-  /** Scored outcome, or null when the run closed unscored. */
-  outcome: RunOutcome | null;
   /** ISO timestamp the run started. */
   startedAt: string;
   /** ISO timestamp the run ended (finalizedAt, falling back to updatedAt). */

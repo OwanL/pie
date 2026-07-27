@@ -66,7 +66,17 @@ export class FileDiffService {
   async openFileDiff(sessionPath: string, filePath: string): Promise<void> {
     const resolvedPath = this.resolveFileChangePath(sessionPath, filePath);
     const uri = vscode.Uri.file(resolvedPath);
-    const kind = this.getFileChangeKind(sessionPath, filePath, resolvedPath);
+    let kind = this.getFileChangeKind(sessionPath, filePath, resolvedPath);
+    // A `created` kind is the derivation's best guess from the tool NAME
+    // (write/create) — it cannot prove the file is new. Verify the claim
+    // against git: a tracked file existed before the session, so an overwrite
+    // is a modification, not a creation. Only treat as created (diff vs
+    // empty) when the file is NOT git-tracked. This is the evidence check —
+    // we do not claim a file is definitely created when git shows it already
+    // existed.
+    if (kind === 'created' && await isTrackedByGit(resolvedPath)) {
+      kind = 'modified';
+    }
     const emptyUri = this.toEmptyDiffUri(uri);
     // Diff baseline: NOT a bare `HEAD`. The changed-files panel is derived
     // from transcript tool calls, and pi agents commit their work after each

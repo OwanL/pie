@@ -25,7 +25,6 @@ function makeRun(overrides: Partial<RunSnapshot>): RunSnapshot {
     runId: 'run-1',
     taskGroupId: 'tg-1',
     status: 'idle',
-    scored: false,
     startedAt: '2026-07-04T10:00:00.000Z',
     updatedAt: '2026-07-04T10:05:00.000Z',
     mixedModelConfig: false,
@@ -262,7 +261,7 @@ test('computeAggregateStats: last run is the most-recently ended run', () => {
   const earlier = isoLocal(2026, 7, 3, 10);
   const later = isoLocal(2026, 7, 4, 10);
   const runs = [
-    makeRun({ runId: 'r1', modelId: 'm', inputTokens: 500_000, outputTokens: 100_000, startedAt: earlier, updatedAt: earlier, finalizedAt: earlier, busyDurationMs: 30_000, outcome: { resolution: 'resolved', satisfaction: 4 } as any }),
+    makeRun({ runId: 'r1', modelId: 'm', inputTokens: 500_000, outputTokens: 100_000, startedAt: earlier, updatedAt: earlier, finalizedAt: earlier, busyDurationMs: 30_000 }),
     makeRun({ runId: 'r2', modelId: 'm', inputTokens: 1_000_000, outputTokens: 500_000, startedAt: later, updatedAt: later, finalizedAt: later, busyDurationMs: 90_000 }),
   ];
   const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
@@ -274,7 +273,6 @@ test('computeAggregateStats: last run is the most-recently ended run', () => {
   assert.equal(stats.lastRun!.cost, 5);
   assert.equal(stats.lastRun!.inputTokens, 1_000_000);
   assert.equal(stats.lastRun!.outputTokens, 500_000);
-  assert.equal(stats.lastRun!.outcome, null); // r2 unscored
 });
 
 test('computeAggregateStats: throughput is generation-time-weighted', () => {

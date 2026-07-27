@@ -39,7 +39,7 @@ const C = '/c';
 const SUMMARY_A: SessionSummary = { path: A, name: 'Alpha', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 3 };
 const SUMMARY_B: SessionSummary = { path: B, name: 'Beta', cwd: '/w', modifiedAt: '2024-01-02T00:00:00.000Z', messageCount: 5 };
 const SUMMARY_C: SessionSummary = { path: C, name: 'Gamma', cwd: '/w', modifiedAt: '2024-01-03T00:00:00.000Z', messageCount: 1 };
-const STALE_RUN_SUMMARY: ActiveRunSummary = { runId: 'r1', status: 'open', scored: false };
+const STALE_RUN_SUMMARY: ActiveRunSummary = { runId: 'r1', status: 'open' };
 
 const SAMPLE_MESSAGES: ChatMessage[] = [
   { id: 'm1', role: 'user', createdAt: '2024-01-01T00:00:00.000Z', markdown: 'hello', status: 'completed' } as ChatMessage,

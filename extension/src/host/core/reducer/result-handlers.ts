@@ -336,6 +336,13 @@ export function handlePreflightFailed(state: ArchState, event: Extract<Event, { 
     if (snapshot.kind === 'edit' && snapshot.removedTail && snapshot.removedTail.length > 0) {
       restoreRemovedTail(draft, snapshot.sessionPath, snapshot.removedTail);
     }
+    if (snapshot.kind === 'edit' && snapshot.editDraft) {
+      draft.transcript.editingMessageIdBySession[snapshot.sessionPath] = snapshot.editDraft.messageId;
+      draft.transcript.editingDraftBySession[snapshot.sessionPath] = {
+        ...snapshot.editDraft,
+        inputs: [...snapshot.editDraft.inputs],
+      };
+    }
     // Clear the host-side optimistic running state set at Send time
     draft.sessions.runningSessionPaths = removeFromArray(
       draft.sessions.runningSessionPaths,
@@ -454,6 +461,13 @@ export function handleEditResult(state: ArchState, event: Extract<Event, { kind:
     // command so the pre-edit conversation reappears on a pre-ack failure.
     if (pending.removedTail && pending.removedTail.length > 0) {
       restoreRemovedTail(draft, pending.sessionPath, pending.removedTail);
+    }
+    if (pending.editDraft) {
+      draft.transcript.editingMessageIdBySession[pending.sessionPath] = pending.editDraft.messageId;
+      draft.transcript.editingDraftBySession[pending.sessionPath] = {
+        ...pending.editDraft,
+        inputs: [...pending.editDraft.inputs],
+      };
     }
     draft.sessions.runningSessionPaths = removeFromArray(
       draft.sessions.runningSessionPaths,

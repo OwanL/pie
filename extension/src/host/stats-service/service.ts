@@ -6,7 +6,6 @@ import type {
   AssistantUsage,
   AuxiliaryLlmUsagePayload,
   ComposerInput,
-  RunOutcome,
   ThinkingLevel,
   ToolCall,
 } from '../../shared/protocol';
@@ -51,10 +50,7 @@ export class StatsService implements RunObserver {
       getArchState,
       dispatchArchEvent,
       scheduleRender: this.scheduleRender,
-      schedulePersist: (snapshotToAppend, outcomeToAppend) => (
-        this.storage.schedulePersist(snapshotToAppend, outcomeToAppend)
-      ),
-      schedulePersistAgentReview: (entry) => this.storage.schedulePersistAgentReview(entry),
+      schedulePersist: (snapshotToAppend) => this.storage.schedulePersist(snapshotToAppend),
       now,
       createId,
       getExperimentAssignment,
@@ -191,25 +187,6 @@ export class StatsService implements RunObserver {
 
   replaceSessionPath(oldPath: string, newPath: string): void {
     this.tracker.replaceSessionPath(oldPath, newPath);
-  }
-
-  recordOutcome(sessionPath: string, outcome: RunOutcome): void {
-    this.tracker.recordOutcome(sessionPath, outcome);
-  }
-
-  recordAgentReview(
-    sessionPath: string,
-    review: {
-      done: boolean;
-      rating: number;
-      completion: 'fully' | 'partial' | 'setback';
-      reason: string;
-      evaluatedAt: string;
-      reviewerBuckets: string[];
-      reviewerCount: number;
-    },
-  ): void {
-    this.tracker.recordAgentReview(sessionPath, review);
   }
 
   startNewTask(sessionPath: string): void {

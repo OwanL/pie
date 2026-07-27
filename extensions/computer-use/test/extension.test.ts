@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { URL } from 'node:url';
+import pngjs from 'pngjs';
 
 import registerComputer from '../index.js';
 import { runtimeRegistry } from '../src/runtime-client.js';
+
+const { PNG } = pngjs;
 
 function registeredTool(): any {
   let tool: any;
@@ -34,12 +39,12 @@ test('extension registers exactly one sequential computer tool and session-owned
   registerComputer({ registerTool(tool: any) { tools.push(tool); }, on(name: string, handler: Function) { handlers.set(name, handler); } } as any);
   assert.equal(tools.length, 1); assert.equal(tools[0].name, 'computer'); assert.equal(tools[0].executionMode, 'sequential');
   assert.deepEqual(tools[0].parameters.properties.action.enum, ['open', 'observe', 'act', 'run_sequence', 'close']);
-  assert.ok(handlers.has('context'));
-  const context = handlers.get('context')!({ messages: Array.from({ length: 4 }, (_, index) => ({
-    role: 'toolResult', toolCallId: String(index), toolName: 'computer', isError: false, timestamp: 0,
-    content: [{ type: 'text', text: 'observation' }, { type: 'image', data: String(index), mimeType: 'image/png' }],
-  })) }) as any;
-  assert.equal(context.messages.flatMap((message: any) => message.content).filter((part: any) => part.type === 'image').length, 3);
+  // The newest-three image projection is now owned by the generic
+  // image-context-guard extension (it reuses projectComputerImageContext from
+  // src/context.ts, still unit-tested in context.test.ts). computer-use no
+  // longer registers its own `context` handler, so the two limits are never
+  // enforced by two independently ordered handlers.
+  assert.equal(handlers.has('context'), false);
   assert.ok(handlers.has('session_shutdown'));
 });
 
@@ -119,4 +124,45 @@ test('failed emergency ownership cleanup prevents extension open and close reque
     assert.deepEqual(requests, [], `${params.action} was not sent`);
     assert.equal(cleanupCalls, 2, 'execute retries bounded cleanup in its catch and reports that failure');
   }
+});
+
+test('open delivers an inline observation image exactly like observe for image-capable models', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-ext-open-image-'));
+  const pngPath = path.join(dir, 'open.png');
+  await writeFile(pngPath, PNG.sync.write(new PNG({ width: 2, height: 2 })));
+  const imageContext = { sessionManager: { getSessionFile: () => path.join(dir, 'session.jsonl') }, model: { input: ['text', 'image'] } };
+  const client = {
+    async releaseAllHeldKnown() {},
+    async request(method: string) {
+      if (method === 'open') return { sessionId: 's', targetId: 'window:1:2', displayImagePath: pngPath, revision: 1, accessibilityAvailable: true };
+      return {};
+    },
+    markReopened() {},
+  };
+  await withFakeClient(client, async (tool) => {
+    const result: any = await tool.execute('x', { action: 'open', selector: { kind: 'foreground' }, screenshot: true }, undefined, undefined, imageContext);
+    assert.equal(result.isError, false);
+    assert.ok(result.content.some((part: any) => part.type === 'image'), 'image part is delivered for an image-capable model');
+  });
+});
+
+test('open with a screenshot and a text-only model emits the image_delivery unavailable notice', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-ext-open-text-'));
+  const pngPath = path.join(dir, 'open.png');
+  const textContext = { sessionManager: { getSessionFile: () => path.join(dir, 'session.jsonl') }, model: { input: ['text'] } };
+  const client = {
+    async releaseAllHeldKnown() {},
+    async request(method: string) {
+      if (method === 'open') return { sessionId: 's', targetId: 'window:1:2', displayImagePath: pngPath, revision: 1, accessibilityAvailable: true };
+      return {};
+    },
+    markReopened() {},
+  };
+  await withFakeClient(client, async (tool) => {
+    const result: any = await tool.execute('x', { action: 'open', selector: { kind: 'foreground' }, screenshot: true }, undefined, undefined, textContext);
+    assert.equal(result.isError, false);
+    assert.equal(result.content.some((part: any) => part.type === 'image'), false, 'no image part for a text-only model');
+    assert.match(result.content[0].text, /image_delivery: unavailable/);
+    assert.match(result.content[0].text, /delegate the artifact with modelRequirements\.inputKinds=\["image"\]/);
+  });
 });

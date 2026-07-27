@@ -19,6 +19,7 @@ import type {
   TranscriptVirtualListProps,
 } from './types';
 import { TranscriptVirtualRow } from './virtual-list-row';
+import { extractRangeWithPinnedIndexes } from './virtual-range';
 import { buildTranscriptRows, estimateTranscriptRowSize, type TranscriptRow } from './virtual-list-rows';
 
 
@@ -84,9 +85,21 @@ function useTranscriptRows({
 function useTranscriptVirtualizer(
   rows: readonly TranscriptRow[],
   scrollRef: { current: HTMLDivElement | null },
+  editingId: string | null,
 ) {
   const [, setRenderTick] = useState(0);
   const renderFrameRef = useRef<number | null>(null);
+  // The inline editor deliberately owns its live keystroke buffer. Keep its
+  // row in TanStack's range even when scroll/streaming would otherwise unmount
+  // it, so that buffer cannot reset before it is committed to host state.
+  const pinnedIndexes = useMemo(() => editingId === null
+    ? []
+    : rows.flatMap((row, index) => row.kind === 'message' && row.message.id === editingId ? [index] : []), [editingId, rows]);
+  const rangeExtractor = useCallback(
+    (range: { startIndex: number; endIndex: number; overscan: number; count: number }) =>
+      extractRangeWithPinnedIndexes(range, pinnedIndexes),
+    [pinnedIndexes],
+  );
 
   const scheduleVirtualRender = useCallback(() => {
     if (renderFrameRef.current !== null) {
@@ -110,6 +123,7 @@ function useTranscriptVirtualizer(
       observeElementRect,
       observeElementOffset,
       initialOffset: () => Number.MAX_SAFE_INTEGER,
+      rangeExtractor,
       // Five rows on either side is enough to hide normal wheel/trackpad
       // movement while halving expensive offscreen markdown/tool-card work on
       // transcript mounts and tab switches.
@@ -135,12 +149,13 @@ function useTranscriptVirtualizer(
       getScrollElement: () => scrollRef.current,
       estimateSize: (index) => estimateTranscriptRowSize(rows[index] ?? fallbackTranscriptRow(rows)),
       getItemKey: (index) => rows[index]?.key ?? index,
+      rangeExtractor,
       overscan: 5,
       useAnimationFrameWithResizeObserver: true,
       onChange: scheduleVirtualRender,
     });
     virtualizer._willUpdate();
-  }, [rows, scheduleVirtualRender, virtualizer]);
+  }, [rangeExtractor, rows, scheduleVirtualRender, virtualizer]);
 
   useEffect(() => {
     const cleanup = virtualizer._didMount();
@@ -191,6 +206,7 @@ interface VirtualRowProps {
   pruningResult: PruningResult | null;
   workingDirectory: string | null;
   editingId: string | null;
+  editingDraft: TranscriptVirtualListProps['editingDraft'];
   isLoadingOlder: boolean;
   isLoadingNewer: boolean;
   onEditRequest: (messageId: string) => void;
@@ -218,6 +234,7 @@ const VirtualRow = memo(function VirtualRow({
   pruningResult,
   workingDirectory,
   editingId,
+  editingDraft,
   isLoadingOlder,
   isLoadingNewer,
   onEditRequest,
@@ -261,6 +278,7 @@ const VirtualRow = memo(function VirtualRow({
         pruningResult={pruningResult}
         workingDirectory={workingDirectory}
         editingId={editingId}
+        editingDraft={editingDraft}
         isLoadingOlder={isLoadingOlder}
         isLoadingNewer={isLoadingNewer}
         isLastRow={row === lastRow}
@@ -296,6 +314,7 @@ export function TranscriptVirtualList({
   pendingAssistantThinkingLevel,
   workingDirectory,
   editingId,
+  editingDraft,
   onEditRequest,
   onEditConfirm,
   onEditCancel,
@@ -323,7 +342,7 @@ export function TranscriptVirtualList({
   // virtualizer's `totalSize` as a reactive prop, which drives its follow-target
   // refresh (every content-height change flows through totalSize).
   const scrollRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useTranscriptVirtualizer(rows, scrollRef);
+  const virtualizer = useTranscriptVirtualizer(rows, scrollRef, editingId);
 
   const renderToolCall = useTranscriptRenderToolCall({
     prefs,
@@ -355,6 +374,7 @@ export function TranscriptVirtualList({
 
   const {
     autoFollowRef,
+    isScrollingTowardBottomRef,
     setAutoFollow,
     isAtBottom,
     isInitialPositioning,
@@ -393,6 +413,7 @@ export function TranscriptVirtualList({
     scrollRef,
     virtualizer,
     autoFollowRef,
+    isScrollingTowardBottomRef,
     totalSize,
     isLoadingOlder,
     isLoadingNewer,
@@ -418,6 +439,7 @@ export function TranscriptVirtualList({
               pruningResult={pruningResult}
               workingDirectory={workingDirectory}
               editingId={editingId}
+              editingDraft={editingDraft}
               isLoadingOlder={isLoadingOlder}
               isLoadingNewer={isLoadingNewer}
               onEditRequest={onEditRequest}
@@ -441,11 +463,12 @@ export function TranscriptVirtualList({
           <button
             type="button"
             class="transcript-jump-latest"
-            aria-label="Jump to latest"
-            title="Jump to latest"
+            aria-label="Jump to bottom"
+            title="Jump to bottom"
             onClick={jumpToLatest}
           >
-            <span aria-hidden="true">↓</span>
+            <span class="transcript-jump-latest-icon" aria-hidden="true">↓</span>
+            <span>Bottom</span>
           </button>
         )}
       </div>

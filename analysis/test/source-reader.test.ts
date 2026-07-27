@@ -6,7 +6,6 @@ import test from 'node:test';
 import { RUN_ANALYTICS_SCHEMA_VERSION, type RunSnapshot, type SourceAnalyticsPayload } from '../scripts/contracts.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import {
-  coerceOutcomeHistoryEntry,
   coerceRunSnapshot,
   coerceSourceAnalyticsPayload,
   DEFAULT_FIXTURE_PATH,
@@ -20,7 +19,7 @@ test('readSourceAnalyticsPayload loads the committed fixture', async () => {
   assert.equal(fixture.schemaVersion, RUN_ANALYTICS_SCHEMA_VERSION);
   assert.equal(fixture.completedRuns.length, 7);
   assert.equal(fixture.openRuns.length, 2);
-  assert.equal(fixture.outcomes.length, 5);
+  assert.equal(fixture.sessionReviewV2Diagnostics.rawProductionCount, 0);
 });
 
 test('readSourceAnalyticsPayload rejects an invalid schema version', async () => {
@@ -56,11 +55,6 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
       })).join('\n') + '\n',
       'utf8',
     );
-    await fs.writeFile(
-      path.join(dir, 'outcome-history.jsonl'),
-      fixture.outcomes.slice(0, 2).map((entry) => JSON.stringify(entry)).join('\n') + '\n',
-      'utf8',
-    );
     await fs.writeFile(path.join(dir, 'open-runs.gen'), 'a', 'utf8');
     await fs.writeFile(
       path.join(dir, 'open-runs.a.json'),
@@ -84,7 +78,6 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
     assert.equal(loaded.sourceKind, 'storage-dir');
     assert.equal(loaded.source.completedRuns.length, 2);
     assert.equal(loaded.source.openRuns.length, 1);
-    assert.equal(loaded.source.outcomes.length, 2);
     assert.equal(loaded.source.workspaceKey, path.basename(dir));
   });
 });
@@ -120,9 +113,6 @@ test('loadSourceAnalytics aggregates every run store under an outcomes root', as
     const runsB = fixture.completedRuns.slice(3, 6);
     await writeRunSnapshotsJsonl(storeA, runsA);
     await writeRunSnapshotsJsonl(storeB, runsB);
-    // outcome-history.jsonl presence is what makes a dir qualify as a store.
-    await fs.writeFile(path.join(storeA, 'outcome-history.jsonl'), '', 'utf8');
-    await fs.writeFile(path.join(storeB, 'outcome-history.jsonl'), '', 'utf8');
 
     const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
     assert.equal(loaded.sourceKind, 'all-stores');
@@ -145,8 +135,6 @@ test('loadSourceAnalytics dedupes the same runId across stores via prepare', asy
     const sharedRun = fixture.completedRuns[0]!;
     await writeRunSnapshotsJsonl(storeA, [sharedRun]);
     await writeRunSnapshotsJsonl(storeB, [sharedRun]);
-    await fs.writeFile(path.join(storeA, 'outcome-history.jsonl'), '', 'utf8');
-    await fs.writeFile(path.join(storeB, 'outcome-history.jsonl'), '', 'utf8');
 
     const loaded = await loadSourceAnalytics({ outcomesRoot, ...withoutLocalSessionDiscovery(outcomesRoot) });
     assert.equal(loaded.source.completedRuns.length, 2); // merged before dedup
@@ -189,11 +177,10 @@ test('max thinking level alias is accepted and normalized to xhigh', async () =>
   });
 });
 
-test('coerceRunSnapshot rejects snapshots with invalid embedded outcomes', async () => {
+test('coerceRunSnapshot rejects legacy run statuses', async () => {
   const fixture = await loadFixture();
   const run = deepClone(fixture.completedRuns[0]) as any;
-  run.outcome = { resolution: 'invalid', satisfaction: 3 };
-
+  run.status = 'scored';
   assert.equal(coerceRunSnapshot(run), null);
 });
 
@@ -470,21 +457,6 @@ test('coerceRunSnapshot preserves functional settings and defaults missing ones 
   assert.equal(coerceRunSnapshot(run)?.functionalSettings, null);
 });
 
-test('coerceOutcomeHistoryEntry validates schema, kind, and outcome shape', async () => {
-  const fixture = await loadFixture();
-  const valid = coerceOutcomeHistoryEntry(fixture.outcomes[0]);
-  assert.ok(valid);
-
-  const invalidKind = { ...fixture.outcomes[0], kind: 'not-run-outcome' } as any;
-  assert.equal(coerceOutcomeHistoryEntry(invalidKind), null);
-
-  const invalidOutcome = {
-    ...fixture.outcomes[0],
-    outcome: { resolution: 'broken', satisfaction: 2 },
-  } as any;
-  assert.equal(coerceOutcomeHistoryEntry(invalidOutcome), null);
-});
-
 test('coerceSourceAnalyticsPayload enforces array and element validation', async () => {
   const fixture = deepClone(await loadFixture()) as any;
 
@@ -510,15 +482,6 @@ test('coerceSourceAnalyticsPayload enforces array and element validation', async
     /Invalid run snapshot at completedRuns\[0\]/,
   );
 
-  assert.throws(
-    () => coerceSourceAnalyticsPayload({ ...fixture, outcomes: {} }),
-    /Expected outcomes to be an array/,
-  );
-
-  assert.throws(
-    () => coerceSourceAnalyticsPayload({ ...fixture, outcomes: [{ ...fixture.outcomes[0], kind: 'broken' }] }),
-    /Invalid outcome history entry at outcomes\[0\]/,
-  );
 });
 
 test('coerceSourceAnalyticsPayload returns normalized payloads for valid inputs', async () => {
@@ -532,7 +495,6 @@ test('coerceSourceAnalyticsPayload returns normalized payloads for valid inputs'
   const coerced = coerceSourceAnalyticsPayload(fixture);
 
   assert.equal(coerced.completedRuns.length, fixture.completedRuns.length);
-  assert.equal(coerced.outcomes[0]?.recordedAt, fixture.outcomes[0].recordedAt);
   assert.deepEqual(coerced.completedRuns[0]?.backendErrorCodes, []);
   assert.equal(coerced.completedRuns[0]?.cacheReadTokens, 0);
   assert.equal(coerced.completedRuns[0]?.tokenReportedTurnCount, 0);
@@ -723,7 +685,6 @@ test('loadSourceAnalytics attaches local side-channel logs for storage-dir sourc
       }) + '\n',
       'utf8',
     );
-    await fs.writeFile(path.join(store, 'outcome-history.jsonl'), '', 'utf8');
     await fs.writeFile(
       path.join(store, 'open-runs.a.json'),
       JSON.stringify({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, seq: 1, sessions: {} }),

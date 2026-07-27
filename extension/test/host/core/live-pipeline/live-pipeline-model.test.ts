@@ -404,7 +404,16 @@ test('frequent patches against 3, 15, and 30 MiB recursive previews use backend 
     assert.equal(state.toolsByExecutionId['execution-1']?.previewBytes, previewBytes);
     assert.equal(state.turnsBySession[base.sessionPath]?.aggregatePreviewBytes, previewBytes);
     const projected = projectTranscriptView([], state, base.sessionPath).liveTools[0];
-    assert.equal(projected?.result, undefined, 'large recursive detail is absent from ordinary snapshots');
+    const compactPreview = projected?.result as {
+      kind?: string;
+      children?: Array<{ streamingText?: string; messages?: unknown[] }>;
+    } | undefined;
+    assert.equal(compactPreview?.kind, 'subagent');
+    assert.equal(compactPreview?.children?.length, 1);
+    assert.equal(compactPreview?.children?.[0]?.streamingText?.endsWith('y'.repeat(23)), true);
+    assert.deepEqual(compactPreview?.children?.[0]?.messages, []);
+    assert.ok(Buffer.byteLength(JSON.stringify(compactPreview), 'utf8') <= 64 * 1024,
+      'ordinary snapshots retain only a bounded top-level subagent preview');
     assert.equal(projected?.detailRef?.sizeBytes, previewBytes);
     assert.equal(projected?.detailRef?.source, 'live');
   }

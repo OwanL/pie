@@ -7,18 +7,48 @@ const AUTO_DISABLED_REASON = 'Auto-discovered from GitHub Copilot; not yet vette
 
 type SourceModel = Record<string, unknown> & { id: string };
 type SourceProvider = { models?: SourceModel[] } & Record<string, unknown>;
+type ModelRef = string | { provider: string; id: string };
 type SourceCatalog = {
-  profileOrder: string[];
+  profileOrder: ModelRef[];
   providers: Record<string, SourceProvider>;
 };
+
+type ModelIdentity = { provider: string; id: string };
+
+function identityKey(identity: ModelIdentity): string {
+  return JSON.stringify([identity.provider, identity.id]);
+}
+
+function providersById(providers: Record<string, SourceProvider>): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  for (const [providerName, provider] of Object.entries(providers)) {
+    for (const model of provider.models ?? []) {
+      const owners = result.get(model.id) ?? [];
+      owners.push(providerName);
+      result.set(model.id, owners);
+    }
+  }
+  return result;
+}
+
+function resolveProfileRef(ref: ModelRef, ownersById: Map<string, string[]>): ModelIdentity {
+  if (typeof ref !== 'string') return ref;
+  const owners = ownersById.get(ref) ?? [];
+  if (owners.length !== 1) {
+    throw new Error(`profileOrder model id '${ref}' is ${owners.length === 0 ? 'unknown' : 'ambiguous'}`);
+  }
+  return { provider: owners[0], id: ref };
+}
+
+function profileRef(identity: ModelIdentity, ownersById: Map<string, string[]>): ModelRef {
+  return (ownersById.get(identity.id)?.length ?? 0) > 1 ? identity : identity.id;
+}
 
 export interface CatalogReconciliation {
   text: string;
   changed: boolean;
   added: string[];
   removed: string[];
-  transferred: string[];
-  skippedConflicts: string[];
 }
 
 function thinkingLevels(model: DiscoveredCopilotModel): string[] {
@@ -46,6 +76,24 @@ function pricing(model: DiscoveredCopilotModel): Record<string, unknown> {
   };
 }
 
+function imageMaxForCatalog(
+  model: DiscoveredCopilotModel,
+  existing: SourceModel | undefined,
+): number | undefined {
+  // The discovered endpoint `input` is the source of truth for image
+  // capability. The per-request image maximum is pie-owned (the Copilot
+  // endpoint does not report one), so it is preserved from the existing entry
+  // and defaults to the conservative fail-safe of one for newly discovered
+  // image-capable models. Text-only models must not declare a maximum (their
+  // effective image budget is zero) — see
+  // extensions/image-context-guard/README.md.
+  if (!model.input.includes('image')) return undefined;
+  const preserved = existing?.maxImagesPerRequest;
+  return typeof preserved === 'number' && Number.isInteger(preserved) && preserved >= 1
+    ? preserved
+    : 1;
+}
+
 export function toCatalogModel(
   model: DiscoveredCopilotModel,
   existing?: SourceModel,
@@ -56,6 +104,7 @@ export function toCatalogModel(
   };
   const thinkingLevelMap = model.thinkingLevelMap ?? existing?.thinkingLevelMap;
   const reasoning = model.reasoning || existing?.reasoning === true;
+  const maxImagesPerRequest = imageMaxForCatalog(model, existing);
   return {
     id: model.id,
     name: `Copilot: ${model.name}`,
@@ -63,6 +112,7 @@ export function toCatalogModel(
     ...(Object.keys(compat).length > 0 ? { compat } : {}),
     ...(reasoning ? { reasoning: true } : {}),
     input: model.input,
+    ...(maxImagesPerRequest !== undefined ? { maxImagesPerRequest } : {}),
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     ...(thinkingLevelMap && typeof thinkingLevelMap === 'object' ? { thinkingLevelMap } : {}),
@@ -77,10 +127,9 @@ export function toCatalogModel(
 /** Reconcile account-visible Copilot models into the authoritative YAML catalog.
  *
  * Existing Copilot profile policy is retained, while endpoint-owned protocol,
- * capability and pricing fields are refreshed. An override-only entry under a
- * different provider is removed when Copilot claims the same ID; this transfers
- * catalog ownership without hiding the other provider's SDK-built-in model.
- * Full custom-model conflicts are skipped rather than destroyed.
+ * capability and pricing fields are refreshed. Other providers are never
+ * modified: model identity is the (provider, id) pair, and profile references
+ * are qualified automatically when discovery introduces a duplicate bare ID.
  */
 export function reconcileCatalogText(
   yamlText: string,
@@ -95,68 +144,68 @@ export function reconcileCatalogText(
   }
 
   const oldModels = copilot.models;
+  const originalProfileOrder = source.profileOrder;
   const oldById = new Map(oldModels.map((model) => [model.id, model]));
   const remoteIds = new Set(remoteModels.map((model) => model.id));
   const removed = oldModels.filter((model) => !remoteIds.has(model.id)).map((model) => model.id);
   const added: string[] = [];
-  const transferred: string[] = [];
-  const skippedConflicts: string[] = [];
 
-  const conflictingFullIds = new Set<string>();
-  const changedOtherProviders = new Set<string>();
-  for (const [providerName, provider] of Object.entries(source.providers)) {
-    if (providerName === PROVIDER || !Array.isArray(provider.models)) continue;
-    provider.models = provider.models.filter((model) => {
-      if (!remoteIds.has(model.id)) return true;
-      if (model.overrideOnly === true) {
-        transferred.push(model.id);
-        changedOtherProviders.add(providerName);
-        return false;
-      }
-      conflictingFullIds.add(model.id);
-      skippedConflicts.push(model.id);
-      return true;
-    });
-  }
+  // Resolve profile references before changing the provider catalog. This
+  // preserves provider identity when a newly discovered Copilot model shares
+  // an ID with another provider (for example openai-codex/gpt-*).
+  const oldOwnersById = providersById(source.providers);
+  const oldOrder = source.profileOrder.map((ref, index) => ({
+    identity: resolveProfileRef(ref, oldOwnersById),
+    index,
+  }));
 
-  const nextModels = remoteModels
-    .filter((model) => !conflictingFullIds.has(model.id))
-    .map((model) => {
-      if (!oldById.has(model.id)) added.push(model.id);
-      return toCatalogModel(model, oldById.get(model.id));
-    });
+  // Reconciliation owns only the Copilot provider. Duplicate model IDs across
+  // providers are valid because catalog identity is the (provider, id) pair;
+  // never delete or suppress another provider's independently configured model.
+  const nextModels = remoteModels.map((model) => {
+    if (!oldById.has(model.id)) added.push(model.id);
+    return toCatalogModel(model, oldById.get(model.id));
+  });
   copilot.models = nextModels;
 
-  const allNextIds = new Set<string>();
-  for (const provider of Object.values(source.providers)) {
-    for (const model of provider.models ?? []) allNextIds.add(model.id);
+  const activeIdentities = new Set<string>();
+  for (const [providerName, provider] of Object.entries(source.providers)) {
+    for (const model of provider.models ?? []) {
+      activeIdentities.add(identityKey({ provider: providerName, id: model.id }));
+    }
   }
 
-  const oldCopilotIds = new Set(oldModels.map((model) => model.id));
-  const firstCopilotIndex = source.profileOrder.findIndex((id) => oldCopilotIds.has(id));
-  const retainedOrder = source.profileOrder.filter((id) => allNextIds.has(id));
-  const missing = nextModels.map((model) => model.id).filter((id) => !retainedOrder.includes(id));
-  const insertionIndex = firstCopilotIndex < 0 ? retainedOrder.length : Math.min(firstCopilotIndex, retainedOrder.length);
-  retainedOrder.splice(insertionIndex, 0, ...missing);
-  source.profileOrder = retainedOrder;
+  const firstCopilotIndex = oldOrder.findIndex(({ identity }) => identity.provider === PROVIDER);
+  const retained = oldOrder.filter(({ identity }) => activeIdentities.has(identityKey(identity)));
+  const retainedKeys = new Set(retained.map(({ identity }) => identityKey(identity)));
+  const missing = nextModels
+    .map((model) => ({ provider: PROVIDER, id: model.id }))
+    .filter((identity) => !retainedKeys.has(identityKey(identity)));
+  const insertionIndex = firstCopilotIndex < 0
+    ? retained.length
+    : retained.filter(({ index }) => index < firstCopilotIndex).length;
+  const nextOrderIdentities = retained.map(({ identity }) => identity);
+  nextOrderIdentities.splice(insertionIndex, 0, ...missing);
 
-  const changed = added.length > 0 || removed.length > 0 || transferred.length > 0 ||
-    nextModels.some((model, index) => JSON.stringify(model) !== JSON.stringify(oldModels[index]));
+  // Bare IDs are retained only while globally unambiguous. If discovery adds a
+  // same-ID model under Copilot, qualify both profile references automatically.
+  const nextOwnersById = providersById(source.providers);
+  const nextProfileOrder = nextOrderIdentities.map((identity) => profileRef(identity, nextOwnersById));
+  source.profileOrder = nextProfileOrder;
+
+  const changed = added.length > 0 || removed.length > 0 ||
+    nextModels.some((model, index) => JSON.stringify(model) !== JSON.stringify(oldModels[index])) ||
+    JSON.stringify(nextProfileOrder) !== JSON.stringify(originalProfileOrder);
   if (!changed) {
-    return { text: yamlText, changed: false, added, removed, transferred, skippedConflicts };
+    return { text: yamlText, changed: false, added, removed };
   }
 
   document.setIn(['providers', PROVIDER, 'models'], nextModels);
-  for (const providerName of changedOtherProviders) {
-    document.setIn(['providers', providerName, 'models'], source.providers[providerName].models ?? []);
-  }
-  document.set('profileOrder', retainedOrder);
+  document.set('profileOrder', nextProfileOrder);
   return {
     text: document.toString({ lineWidth: 0 }),
     changed: true,
     added,
     removed,
-    transferred,
-    skippedConflicts,
   };
 }

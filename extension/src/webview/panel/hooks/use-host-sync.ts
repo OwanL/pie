@@ -20,6 +20,7 @@ import type {
   ModelInfo,
   PruningCatalog,
   PruningSettings,
+  SessionUsageSnapshot,
   ToolResultPruningSettings,
   ViewState,
   WebviewToHostMessage,
@@ -42,6 +43,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   activeSession: null,
   transcript: [],
   transcriptWindow: { ...EMPTY_TRANSCRIPT_WINDOW },
+  sessionUsage: null,
   transcriptLoaded: false,
   draftText: '',
   pendingComposerInputs: [],
@@ -77,6 +79,7 @@ export const EMPTY_VIEW_STATE: ViewState = {
   prepassStartedAt: null,
   prepassLatencyMs: undefined,
   editingMessageId: null,
+  editingDraft: null,
   pendingExtensionUIRequestsBySession: {},
   pendingExtensionUIRequest: null,
 };
@@ -131,6 +134,7 @@ function useHydrateViewState() {
   const stablePruningSettingsRef = useRef<PruningSettings | null>(null);
   const stableToolResultPruningSettingsRef = useRef<ToolResultPruningSettings | null>(null);
   const stablePruningCatalogRef = useRef<PruningCatalog | null>(null);
+  const stableSessionUsageRef = useRef<SessionUsageSnapshot | null>(null);
   /** Reference-stabilised `availableModels` (see `model-list-stabilize.ts`);
    *  seeded with `[]` to mirror `EMPTY_VIEW_STATE.availableModels`. */
   const stableAvailableModelsRef = useRef<ModelInfo[]>([]);
@@ -164,6 +168,14 @@ function useHydrateViewState() {
     // Composer) hold across snapshots whose model list did not actually change.
     const availableModels = pickStableModelList(stableAvailableModelsRef.current, raw.availableModels);
     stableAvailableModelsRef.current = availableModels;
+    // Whole-session accounting is a compact flat sample list, but structured
+    // cloning still gives it a fresh reference on every streaming snapshot.
+    // Stabilize it so cost calculation keeps its signature-gated O(1) path
+    // instead of recursively re-walking loaded subagent results ~7 times/sec.
+    const sessionUsage = raw.sessionUsage
+      ? pickStable(stableSessionUsageRef.current, raw.sessionUsage)
+      : null;
+    stableSessionUsageRef.current = sessionUsage;
     return {
       ...raw,
       prefs,
@@ -171,6 +183,7 @@ function useHydrateViewState() {
       toolResultPruningSettings,
       pruningCatalog,
       availableModels,
+      sessionUsage,
     };
   }, []);
 }

@@ -10,7 +10,7 @@ Use the generic `computer` tool for every visible-UI operation. Other coding too
 ## Open and observe
 
 1. Discover the desktop, foreground window, process, title, or another generic target.
-2. `open` or reuse the target and note its session/target identifiers, geometry, capabilities, and artifact root.
+2. `open` or reuse the target and note its session/target identifiers, geometry, capabilities, and artifact root. When first-frame grounding is needed, request `screenshot`/`tree`/`state` on `open` so registration and the initial observation happen in one call.
 3. `observe` before every new interaction. Record the observation revision, screenshot geometry, focus/foreground state, cursor position, and held keys/buttons.
 4. Target screenshot coordinates are in the returned model/display frame — the image part you receive and its `display_size` (long edge capped at 1600). The full-resolution `full_png` (with `full_png_size`) is durable evidence only; never scale coordinates against or read them from the full PNG dimensions.
 5. A window screenshot is a foreground visible-region capture, not an HWND-owned pixel surface. It supports only windows entirely on NutJS's main display, and composited overlays or other content drawn over the region can appear in the image.
@@ -24,6 +24,7 @@ Use the generic `computer` tool for every visible-UI operation. Other coding too
 - After each meaningful action, obtain a fresh observation and verify a visible or fixture-reported postcondition. Check the cursor and held-input state as part of the observation when relevant.
 - Never claim success from an accepted action, a backend response, or an unchanged screenshot alone. Success requires a visible or fixture postcondition.
 - When an action is unsupported or ambiguous, report that fact and return to discovery; do not invent an application-specific fallback.
+- Prefer stable semantic labels, roles, and visible menu actions over positional control indexes or incidental node/control names. Treat positions as observation-scoped evidence, never durable test identifiers.
 
 ## Recovery
 
@@ -53,7 +54,7 @@ Use `run_sequence` for timing-sensitive work rather than approximating timing wi
 
 - Put key/button down and up events, waits, paths, and simultaneous/held inputs explicitly in the sequence.
 - Save the sequence, inputs, and bounded trace as artifacts; give them stable names and reuse them for repeatable runs.
-- Observe before starting and after completion (or at declared checkpoints). Verify fixture-visible results and release state.
+- Observe before starting and request a trailing `screenshot`/`tree`/`state` on `run_sequence` when one end-state observation is sufficient; use explicit checkpoints for longer sequences.
 - On cancellation or failure, release all inputs; do not assume a sequence completed because its process returned.
 
 ## Long sessions: journal and evidence loop
@@ -77,5 +78,7 @@ Use this general loop:
 4. if reloading the controlling VS Code instance would interrupt the computer session, launch a separate Extension Development Host only for that evaluation loop;
 5. reopen or rediscover the resulting UI, observe freshly, and compare the stated postcondition with the captured baseline; and
 6. record the result and any remaining issue in the journal.
+
+For rendered integration probes, start with the smallest focused scenario and one representative viewport/configuration. Make each variant report its own postcondition and fail near the responsible step; run the full replay/matrix only after the focused probe passes. Keep selectors tied to user-visible semantics so unrelated node removal or control insertion does not break the probe.
 
 Do not stop at a successful build: visual or fixture verification is required. Do not claim an improvement, completed workflow, or working software without a visible or fixture-reported postcondition.

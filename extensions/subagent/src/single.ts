@@ -136,6 +136,40 @@ async function runWithModelRetry(args: RunWithModelRetryArgs): Promise<SingleRes
 			args.childDepth,
 		);
 
+		// Hard model requirement could not be satisfied (no enabled
+		// provider-qualified model in any eligible bucket, and the active-parent
+		// fallback is itself incompatible). This is a deterministic local
+		// selection error: fail before creating or prompting a child session,
+		// without dispatching, retrying, or charging a tree slot. The requirement
+		// never silently falls back to a text-only model; retries cannot escape it
+		// because `selectionCtx` is constant across attempts, so any retry would
+		// re-derive the same unmet requirement. Preserve prior dispatched-attempt
+		// analytics and cumulative usage when this fires mid-retry. Like the
+		// existing no-eligible-model path, a non-dispatching retry iteration does
+		// not count toward `retryCount`.
+		if (resolved.requirementDiagnostic) {
+			if (attempt > 0) retryCount--;
+			const now = clock.now();
+			const errorResult: SingleResult = {
+				agent: args.agent.name,
+				agentSource: args.agent.source,
+				task: args.task,
+				exitCode: 1,
+				messages: [],
+				stderr: resolved.requirementDiagnostic,
+				usage: { ...cumulativeUsage },
+				stopReason: "error",
+				errorMessage: resolved.requirementDiagnostic,
+				startedAt: now,
+				completedAt: now,
+				retryCount: retryCount > 0 ? retryCount : undefined,
+				failedModel: lastFailedModel,
+				attemptRecords: [...attemptRecords],
+			};
+			attachSelectionMetadata(errorResult, resolved);
+			return errorResult;
+		}
+
 		// Provider failover is stricter than normal bucket exhaustion: it may only
 		// dispatch another configured model from the same bucket, and must not
 		// retry the same provider that just failed. The first attempt may fall back
@@ -331,6 +365,7 @@ export async function executeSingleTask(args: {
 			canSpawn: agent.canSpawn,
 			budget: runtimeCtx.budget,
 			rootSessionPath: runtimeCtx.rootSessionPath ?? ctx.sessionManager?.getSessionFile?.() ?? undefined,
+			subagentProviderToggles: runtimeCtx.subagentProviderToggles,
 			keptSkills: runtimeCtx.keptSkills,
 			processPermitScope: runtimeCtx.processPermitScope,
 		}),
@@ -365,6 +400,7 @@ export async function executeSingleTask(args: {
 					{ clock: _internal?.clock ?? realRetryClock },
 					attemptId,
 					params.userContext ? { mode: params.userContext, content: parentUserContext } : undefined,
+					params.modelRequirements,
 				);
 			},
 	});

@@ -1,9 +1,10 @@
-import type { ContextWindowUsage, ThinkingLevel, ToolFinishedPayload } from '../shared/protocol';
+import type { ChatMessage, ContextWindowUsage, ThinkingLevel, ToolFinishedPayload } from '../shared/protocol';
 import type { DisplayTranscriptCache } from './transcript-window';
 import type { ExtensionUIBridge } from './extension-ui-bridge';
 import type { SdkBuildSystemPromptOptions, SdkRuntime, SdkSession } from './sdk';
 import type { SessionManagerFence } from './session-manager-fence';
 import type { BackendLiveTurnAccumulator } from './live-turn-accumulator';
+import type { ProviderIncident } from './provider-incident';
 
 export interface ActiveRequest {
   id: string;
@@ -72,6 +73,23 @@ export interface ActiveRequest {
    * `lastRetryErrorMessage`, this survives a retry's next `message_start` so a
    * subsequent silent timeout can still explain the failed attempt. */
   lastProviderErrorForDiagnostics?: string;
+  /** Most specific transport/HTTP incident observed below the SDK. The SDK
+   * may reduce this to "Connection error."; session events use this record to
+   * preserve the real status, quota reset, and provider in the UI. */
+  latestProviderIncident?: ProviderIncident;
+  /** Notice identities already emitted for this request, preventing SDK-level
+   * retries of one response from flooding the user with duplicate notices. */
+  providerIncidentNoticeKeys?: Set<string>;
+  /** Bounded settlement watchdog for terminal quota exhaustion. */
+  quotaSettlementTimer?: ReturnType<typeof setTimeout>;
+  /** Error message_end is observed before agent_end reveals whether the SDK
+   * will retry. Hold the terminal candidate until willRetry=false so a
+   * transient attempt cannot tombstone the still-running live turn. */
+  pendingErrorTerminal?: {
+    durableMessage: ChatMessage;
+    durableEntryId: string;
+    reason?: string;
+  };
   aborted: boolean;
   /** Backend pre-commit safety-net timer (see `PROMPT_TIMEOUT_MS` in
    *  `request-handler.ts`). Armed at `message.send` dispatch; MUST be cleared

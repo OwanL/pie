@@ -35,6 +35,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import type { FileChange } from './types.js';
 import {
@@ -92,6 +93,11 @@ export function deriveFileChangesFromSessionEntries(
 ): FileChange[] {
   const seen = new Map<string, FileChange>();
   const createdPaths = new Set<string>();
+  // Canonicalize file identity against the session cwd (read from the `session`
+  // header entry) so the same file reached through different spellings
+  // (relative/absolute, `./`, separator/case variants, parent vs subagent)
+  // collapses to one entry — matching the host's cwd-aware derivation.
+  const cwd = readSessionCwd(entries);
 
   // Pass 1: index toolResult entries by toolCallId (the join's right side).
   const resultsByCallId = new Map<string, { isError: boolean; details: unknown }>();
@@ -133,7 +139,7 @@ export function deriveFileChangesFromSessionEntries(
           timestamp,
           joined.id,
         );
-        for (const e of subagentChanges) accumulateFileChange(seen, createdPaths, e);
+        for (const e of subagentChanges) accumulateFileChange(seen, createdPaths, e, cwd);
         continue;
       }
 
@@ -142,7 +148,7 @@ export function deriveFileChangesFromSessionEntries(
         messageId,
         timestamp,
       );
-      for (const e of changes) accumulateFileChange(seen, createdPaths, e);
+      for (const e of changes) accumulateFileChange(seen, createdPaths, e, cwd);
     }
   }
 
@@ -189,6 +195,37 @@ export interface ParsedSession {
   changes: FileChange[];
 }
 
+/** Resolve a (possibly relative) path against the session cwd to an absolute
+ *  path for filesystem checks. Falls back to the path itself when no cwd is
+ *  available. */
+function resolveAbsPath(filePath: string, cwd?: string): string {
+  if (path.isAbsolute(filePath)) return filePath;
+  return cwd ? path.resolve(cwd, filePath) : filePath;
+}
+
+/** Verify deletion entries against the filesystem. A "deleted" file that still
+ *  exists on disk was not actually deleted — the command failed, or the file
+ *  was regenerated (the reported `.uid`-deleted-but-exists bug). Downgrade it
+ *  to `modified` so the manifest does not claim a false deletion. A genuinely
+ *  absent file stays `deleted`: a real deletion is never suppressed.
+ *
+ *  This is the bounded, evidence-based check the task calls for — it does not
+ *  touch the pure derivation (which has no filesystem access) and does not
+ *  suppress real deletions (file gone → stays `deleted`). */
+function verifyDeletions(changes: FileChange[], cwd?: string): FileChange[] {
+  return changes.map((c) => {
+    if (c.kind !== 'deleted') return c;
+    try {
+      if (fs.existsSync(resolveAbsPath(c.path, cwd))) {
+        return { ...c, kind: 'modified', description: c.description === 'deleted' ? 'modified' : c.description };
+      }
+    } catch {
+      // fs check failed → keep the derived kind.
+    }
+    return c;
+  });
+}
+
 /** Parse a session JSONL file into its derived file changes + the session cwd.
  *  Throws on read failure (the tool surfaces the message). */
 export function parseSessionFileChanges(sessionPath: string): ParsedSession {
@@ -215,6 +252,6 @@ export function parseSessionFileChanges(sessionPath: string): ParsedSession {
   return {
     sessionPath,
     cwd: readSessionCwd(entries),
-    changes: deriveFileChangesFromSessionEntries(entries),
+    changes: verifyDeletions(deriveFileChangesFromSessionEntries(entries), readSessionCwd(entries)),
   };
 }

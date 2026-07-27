@@ -47,6 +47,12 @@ test('mixed text/image results are emitted only for image-capable models and sur
     assert.equal(runPipeline({ toolName: 'computer', toolCallId: 'x', input: {}, content: mixed.content, details: mixed.details, isError: false }, DEFAULT_CONFIG), null, 'multipart image content must be left untouched');
     const textOnly = await buildToolResult('observe', response, false);
     assert.deepEqual(textOnly.content.map((part) => part.type), ['text']);
+    const [unavailable] = textOnly.content;
+    assert.equal(unavailable.type, 'text');
+    assert.match(unavailable.text, /image_delivery: unavailable/);
+    assert.match(unavailable.text, /reason: active_model_does_not_accept_image_input/);
+    assert.match(unavailable.text, new RegExp(`artifact: ${pngPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(unavailable.text, /modelRequirements\.inputKinds=\["image"\]/);
     assert.equal(JSON.stringify(textOnly.details).includes('base64'), false);
     assert.equal(modelAcceptsImages({ input: ['text', 'image'] }), true);
     assert.equal(modelAcceptsImages({ input: ['text'] }), false);
@@ -64,6 +70,8 @@ test('text observations report display and full PNG dimensions and paths for ima
   const textOnly = await buildToolResult('observe', response, false);
   assert.deepEqual(textOnly.content.map((part) => part.type), ['text']);
   const [text] = textOnly.content; assert.equal(text.type, 'text');
+  assert.match(text.text, /image_delivery: unavailable/);
+  assert.match(text.text, /artifact: \/artifacts\/display\.png/);
   assert.match(text.text, /display_png: \/artifacts\/display\.png/);
   assert.match(text.text, /display_size: 1600x855/);
   assert.match(text.text, /full_png: \/artifacts\/full\.png/);

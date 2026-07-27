@@ -7,10 +7,15 @@ import { buildSessionAnalyticsFactors } from './session-analytics';
 import { buildCurrentSummary, listAvailableModels } from './session-metadata';
 import { buildTailTranscriptWindow, buildDisplayTranscriptCache, isDisplayTranscriptCacheStale } from './transcript-window';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
+import { buildSessionUsageSnapshot } from '../shared/session-usage';
 import type { SessionOpenedPayload, SystemPromptEntry, TranscriptMode } from '../shared/protocol';
 import type { SessionContext, SessionPromptState } from './server-types';
 import type { SdkBuildSystemPromptOptions } from './sdk';
 import type { SessionEntryLike } from './transcript';
+import {
+  LIVE_PIPELINE_LIMITS,
+  type LiveTurnCheckpoint,
+} from '../shared/live-pipeline-protocol.js';
 
 export interface BuildSessionOpenedPayloadDeps {
   getContextUsage(context: SessionContext): import('../shared/protocol').ContextWindowUsage | undefined;
@@ -61,6 +66,7 @@ export async function buildSessionOpenedPayload(
   const mode: TranscriptMode = transcript === 'skip' && !streaming ? 'skip' : 'tail';
 
   const cache = ensureDisplayTranscriptCache(context);
+  const liveTurnCheckpoint = buildSessionOpenedLiveCheckpoint(context);
   const rawTranscriptSlice = mode === 'skip'
     ? { transcript: [] as SessionOpenedPayload['transcript'], transcriptWindow: emptySkipWindow(cache) }
     : buildTailTranscriptWindow(cache, {
@@ -68,7 +74,7 @@ export async function buildSessionOpenedPayload(
       });
   const transcriptSlice = {
     ...rawTranscriptSlice,
-    transcript: streaming
+    transcript: streaming && liveTurnCheckpoint
       ? stripActiveAssistantTail(rawTranscriptSlice.transcript)
       : normalizeDanglingTranscript(rawTranscriptSlice.transcript),
   };
@@ -79,6 +85,7 @@ export async function buildSessionOpenedPayload(
     transcript: transportTranscript,
     transcriptWindow: transcriptSlice.transcriptWindow,
     busy: context.session.isStreaming || !!context.activeRequest,
+    ...(liveTurnCheckpoint ? { liveTurnCheckpoint } : {}),
     selectionToken,
     ...(mode === 'skip' && { transcriptSkipped: true }),
     systemPrompts,
@@ -86,7 +93,27 @@ export async function buildSessionOpenedPayload(
     modelSettings,
     availableModels: listAvailableModels(context, deps.agentDir),
     contextUsage: contextUsage ?? undefined,
+    // Cost/token indicators must describe the whole durable branch, not the
+    // bounded transcript slice sent to the renderer. The full mapped cache is
+    // already available here, so this adds no session-file scan.
+    sessionUsage: buildSessionUsageSnapshot(cache.transcript),
   };
+}
+
+/** Build the atomic busy-open recovery snapshot. If it cannot be represented
+ * within the protocol bound, return no checkpoint; the caller then keeps the
+ * durable assistant tail visible instead of creating a false-empty session. */
+export function buildSessionOpenedLiveCheckpoint(
+  context: Pick<SessionContext, 'activeRequest'>,
+): LiveTurnCheckpoint | undefined {
+  const checkpoint = context.activeRequest?.liveTurnAccumulator?.checkpoint();
+  if (!checkpoint || checkpoint.terminal) return undefined;
+  try {
+    const bytes = Buffer.byteLength(JSON.stringify(checkpoint), 'utf8');
+    return bytes <= LIVE_PIPELINE_LIMITS.checkpointBytes ? checkpoint : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function stripActiveAssistantTail(

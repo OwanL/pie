@@ -413,9 +413,6 @@ function throughputTooltipNode(s: AggregateStats, source: 'live' | 'today' | 'al
 
 function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
   const modelLine = r.modelId ? `${r.modelId}  (${r.provider})` : `Provider: ${r.provider}`;
-  const outcomeLine = r.outcome
-    ? `${r.outcome.resolution.replace('_', ' ')}  ·  satisfaction ${r.outcome.satisfaction}`
-    : 'Outcome: unscored';
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
@@ -424,7 +421,7 @@ function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
       </div>
       <div class="rich-tooltip-sub">{formatDuration(r.durationMs)}  ·  ↓{formatCompactTokens(r.inputTokens)} in  ↑{formatCompactTokens(r.outputTokens)} out</div>
       <Sparkline data={r.turnSeries.map((t) => ({ ms: t.ms, value: t.outputTokens }))} />
-      <div class="rich-tooltip-sub">{[modelLine, outcomeLine, `${r.startedAt} → ${r.endedAt}`].join('\n')}</div>
+      <div class="rich-tooltip-sub">{[modelLine, `${r.startedAt} → ${r.endedAt}`].join('\n')}</div>
     </div>
   );
 }

@@ -45,6 +45,12 @@ function tokenizeShellSegment(segment: string): string[] {
           tok += s[i];
           i++;
         }
+      } else if (/[|<>]/.test(ch)) {
+        // Shell redirections can be attached to the preceding token (`a>out`)
+        // or to a file descriptor (`2>/dev/null`). Keep a real argument before
+        // the operator, but never report the descriptor/redirection as a path.
+        if (tok !== '' && !/^\d+$/.test(tok)) tokens.push(tok);
+        return tokens;
       } else {
         tok += ch;
         i++;

@@ -25,7 +25,8 @@ import { formatSubagentPrompt, type UserContextMode } from "./src/user-context.j
 import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
-import type { OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
+import { formatRequirementDiagnostic, requirementIsActive } from "./src/selection.js";
+import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentDetails, SubagentTurnThroughputSample } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { subagentContext } from "../../shared/subagent-context.js";
@@ -207,6 +208,10 @@ export interface SubagentRuntimeContext {
 	budget?: TreeBudget;
 	/** Main chat session whose per-session provider policy applies to this tree. */
 	rootSessionPath?: string;
+	/** Effective subagent-only provider policy snapshotted by the root call. Child
+	 * sessions have in-memory session managers, so they must inherit this policy
+	 * rather than trying to resolve a per-chat override from their own path. */
+	subagentProviderToggles?: Record<string, boolean>;
 	/** Main-turn skill selection inherited by every descendant. */
 	keptSkills?: string[] | "keep-all";
 	/** One process-wide permit held for the complete root-tree lifetime. */
@@ -1164,6 +1169,11 @@ export async function runSingleAgent(
 	 * The mode and exact inserted packet are retained as result metadata so the
 	 * parent UI can explain precisely what the child received. */
 	parentUserContext?: { mode: UserContextMode; content?: string },
+	/** Per-call hard model requirements (e.g. image input) to enforce at
+	 *  execution-model resolution. Threaded from `params.modelRequirements` so
+	 *  duplicate ids are resolved by provider-qualified capability on every
+	 *  attempt and the resolution layer never escapes to an incompatible model. */
+	modelRequirements?: ModelRequirements,
 ): Promise<SingleResult> {
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
@@ -1188,6 +1198,7 @@ export async function runSingleAgent(
 		readRouteAroundSaturatedProviders() && !readAlwaysParentModelFromEnv()
 			? readProviderCapacitySnapshot()
 			: undefined,
+		modelRequirements,
 	);
 
 	// 3. Build the result accumulator and the update emitter.
@@ -1206,6 +1217,31 @@ export async function runSingleAgent(
 	if (parentUserContext) {
 		currentResult.parentUserContextMode = parentUserContext.mode;
 		if (parentUserContext.content) currentResult.parentUserContext = parentUserContext.content;
+	}
+
+	// Final provider-qualified enforcement. Bucket selection works by model id,
+	// so execution resolution must remain fail-closed if the registry changes or
+	// every enabled declaration for a duplicate id is incompatible. Never pass an
+	// undefined model to createSession under an active hard requirement: the SDK
+	// could otherwise select its default (possibly text-only) model.
+	if (requirementIsActive(modelRequirements) && !resolvedModel) {
+		const requirementDiagnostic = formatRequirementDiagnostic(
+			modelRequirements,
+			bucketSelection?.bucket ?? agent.bucket ?? "medium",
+		);
+		const now = Date.now();
+		currentResult.exitCode = 1;
+		currentResult.stopReason = "error";
+		currentResult.stderr = requirementDiagnostic;
+		currentResult.errorMessage = requirementDiagnostic;
+		currentResult.requestedModelRequirements = modelRequirements;
+		currentResult.modelRequirementsSatisfied = false;
+		currentResult.requirementDiagnostic = requirementDiagnostic;
+		currentResult.activityPhase = "failed";
+		currentResult.activityDetail = requirementDiagnostic;
+		currentResult.activitySince = now;
+		currentResult.completedAt = now;
+		return currentResult;
 	}
 	const streamingTextRef = { value: "" };
 	const streamingReasoningRef = { value: "" };

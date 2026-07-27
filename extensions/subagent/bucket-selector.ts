@@ -120,6 +120,13 @@ function selectFairly(pool: string[]): string {
  * @param activeModelId - The caller's active model (fallback)
  * @param capacityAvailableModelIds - Soft live-capacity allowlist. Applied only
  *   when it leaves at least one otherwise-eligible bucket candidate.
+ * @param requirementQualifiedModelIds - Hard requirement allowlist: model ids
+ *   with at least one enabled provider-qualified declaration satisfying a
+ *   `modelRequirements.inputKinds` requirement. Undefined/absent preserves
+ *   current selection behaviour. The fallback to the active model is NOT
+ *   filtered here — the caller (`resolveModel`) checks the active model's own
+ *   capability and produces a local selection error when it does not satisfy
+ *   the requirement.
  */
 export function selectModel(
   bucket: string,
@@ -130,6 +137,7 @@ export function selectModel(
   excludeModels: Set<string> | undefined,
   activeModelId: string,
   capacityAvailableModelIds?: Set<string>,
+  requirementQualifiedModelIds?: Set<string>,
 ): BucketSelection {
   // Build thinking support lookup from model config.
   const thinkingSupport = new Map<string, ThinkingLevel[]>();
@@ -177,6 +185,14 @@ export function selectModel(
     }
     if (excludeModels && pool.length > 0) {
       pool = pool.filter((id) => !excludeModels.has(id));
+    }
+    // Hard model requirement: a model id is eligible only when at least one
+    // enabled provider-qualified declaration satisfies the requirement. This
+    // is a hard exclusion (never relaxed), distinct from the soft capacity
+    // filter below, and is applied before capacity routing so a saturated
+    // qualified provider can never weaken the requirement.
+    if (requirementQualifiedModelIds && pool.length > 0) {
+      pool = pool.filter((id) => requirementQualifiedModelIds.has(id));
     }
 
     // Live capacity is a soft exclusion, distinct from disabled providers.

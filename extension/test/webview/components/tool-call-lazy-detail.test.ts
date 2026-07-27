@@ -18,6 +18,7 @@ import { clearCollapsibleCache } from '../../../src/webview/panel/transcript/use
 import {
   clearLazyDetailCache,
   receiveLazyDetailResult,
+  requestLazyDetail,
   setLazyDetailPostMessage,
   useLazyDetail,
 } from '../../../src/webview/panel/transcript/lazy-detail-store';
@@ -35,11 +36,11 @@ beforeEach(() => {
   };
 });
 
-test('lazy subagents render their collapsed preview card immediately and have only two disclosure states', async () => {
+test('lazy subagents render a lightweight collapsed preview and load detail only when expanded', async () => {
   const messages: WebviewToHostMessage[] = [];
   setLazyDetailPostMessage((message) => messages.push(message));
   const detailRef: LazyDetailRef = {
-    key: 'durable:tool:/session:entry:tool:0', kind: 'tool-result', source: 'durable',
+    key: 'durable:subagent:/session:entry:tool:0', kind: 'tool-result', source: 'durable',
     sessionPath: '/session', messageId: 'message', toolCallId: 'tool', executionId: 'execution',
     sizeBytes: 100_000, summary: '1 subagent child', childCount: 1, available: true,
   };
@@ -48,6 +49,19 @@ test('lazy subagents render their collapsed preview card immediately and have on
     render(h(ToolCallItem, {
       toolCall: {
         id: 'tool', name: 'subagent', input: { agent: 'worker', task: 'work' },
+        result: {
+          details: {
+            mode: 'single',
+            results: [{
+              agent: 'worker',
+              task: 'work',
+              exitCode: 0,
+              messages: [],
+              model: 'preview-model',
+              streamingText: 'short retained preview',
+            }],
+          },
+        },
         status: 'completed', executionId: 'execution', detailRef,
       },
       prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: false },
@@ -62,17 +76,50 @@ test('lazy subagents render their collapsed preview card immediately and have on
   assert.ok(card, 'lazy detail must not degrade a subagent into the generic tool card');
   let toggle = card.querySelector('[role="button"]') as HTMLElement | null;
   assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
-  assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1,
-    'the visible collapsed preview fetches its detail without a preliminary click');
+  assert.match(container.textContent ?? '', /preview-model/);
+  assert.match(container.textContent ?? '', /short retained preview/);
+  assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 0,
+    'the collapsed preview does not fetch the recursive child transcript');
 
   await act(async () => toggle?.click());
   toggle = container.querySelector('.tool-call-subagent [role="button"]') as HTMLElement | null;
   assert.equal(toggle?.getAttribute('aria-expanded'), 'true');
   assert.ok(container.querySelector('.tool-call-subagent'));
+  assert.match(container.textContent ?? '', /Loading subagent transcript/);
+  assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1,
+    'opening the subagent requests its full transcript once');
   await act(async () => toggle?.click());
   toggle = container.querySelector('.tool-call-subagent [role="button"]') as HTMLElement | null;
   assert.equal(toggle?.getAttribute('aria-expanded'), 'false');
   assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1);
+});
+
+test('several expanded details are serialized so large responses cannot queue together', () => {
+  const messages: WebviewToHostMessage[] = [];
+  setLazyDetailPostMessage((message) => messages.push(message));
+  const first: LazyDetailRef = {
+    key: 'durable:first', kind: 'tool-result', source: 'durable',
+    sessionPath: '/session', messageId: 'message', toolCallId: 'first',
+    sizeBytes: 20 * 1024 * 1024, summary: 'first', available: true,
+  };
+  const second: LazyDetailRef = {
+    ...first, key: 'durable:second', toolCallId: 'second', summary: 'second',
+  };
+
+  requestLazyDetail(first.sessionPath, first);
+  requestLazyDetail(second.sessionPath, second);
+  assert.deepEqual(
+    messages.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key),
+    [first.key],
+  );
+
+  receiveLazyDetailResult({
+    sessionPath: first.sessionPath, key: first.key, status: 'loaded', value: 'first', sizeBytes: first.sizeBytes,
+  });
+  assert.deepEqual(
+    messages.filter((message) => message.type === 'requestDetail').map((message) => message.ref.key),
+    [first.key, second.key],
+  );
 });
 
 test('running lazy subagents retain their last preview across live revisions and refresh at the durable terminal', async () => {

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 
+import { validateSessionReviewV2 } from '../../extensions/session-reviewer/src/validation.ts';
 import { sha256Hex } from './hash.ts';
 import type {
   ClassifiedCriterion,
@@ -9,11 +10,14 @@ import type {
   CriterionStatus,
   OverallAttainment,
   ReviewEvidenceVector,
-  ReviewFinding,
   ReviewProcessVector,
   ReviewerRuntimeReference,
+  SessionReviewV2RejectionReason,
   SessionReviewV2Source,
 } from './contracts.ts';
+
+export const SESSION_REVIEW_V2_RUBRIC_VERSION = 'session-review-v2.1';
+export const SESSION_REVIEW_V2_INDEX_VERSION = 'v1';
 
 const IMPORTANCES: CriterionImportance[] = ['core', 'supporting', 'optional'];
 const STATUSES = new Set<CriterionStatus>(['met', 'partly_met', 'unmet', 'blocked', 'not_assessable', 'superseded']);
@@ -34,7 +38,6 @@ const EVIDENCE_VALUES = {
   execution: new Set(['direct', 'partial', 'reported_only', 'none', 'not_applicable']),
   human: new Set(['not_needed', 'supports', 'contradicts', 'inconclusive', 'unanswered', 'unavailable']),
 } as const;
-const FINDING_CATEGORIES = new Set(['correctness', 'regression', 'omission', 'scope_drift', 'verification_gap', 'security', 'performance', 'maintainability', 'attribution_error', 'other']);
 const ALLOWED_REASONS: Record<CriterionStatus, Set<CriterionReason>> = {
   met: new Set(['none']),
   partly_met: new Set(['omitted', 'attempt_failed', 'incorrect_result', 'regression', 'unknown']),
@@ -60,7 +63,7 @@ function hashJson(value: unknown): string { return sha256Hex(JSON.stringify(valu
 function validHash(value: unknown): value is string { return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value); }
 function unique(values: string[]): boolean { return new Set(values).size === values.length; }
 
-function coerceDefinition(value: unknown): Omit<ClassifiedCriterion, 'status' | 'reason' | 'evidenceRefs' | 'findingRefs'> | null {
+function coerceDefinition(value: unknown): Omit<ClassifiedCriterion, 'status' | 'reason' | 'evidenceRefs'> | null {
   if (!isRecord(value) || ['status', 'reason', 'evidenceRefs', 'findingRefs'].some((key) => key in value) || !isRecord(value.taxonomy)) return null;
   const criterionId = nonEmpty(value.criterionId);
   const statement = nonEmpty(value.statement);
@@ -73,8 +76,8 @@ function coerceDefinition(value: unknown): Omit<ClassifiedCriterion, 'status' | 
   return { criterionId, statement, origin: value.origin, importance: value.importance as CriterionImportance, taxonomy: { activity: String(value.taxonomy.activity), surface: surfaces, evidenceMode: evidenceModes } };
 }
 
-function definitionOf(value: ClassifiedCriterion): Omit<ClassifiedCriterion, 'status' | 'reason' | 'evidenceRefs' | 'findingRefs'> {
-  const { status: _status, reason: _reason, evidenceRefs: _evidenceRefs, findingRefs: _findingRefs, ...definition } = value;
+function definitionOf(value: ClassifiedCriterion): Omit<ClassifiedCriterion, 'status' | 'reason' | 'evidenceRefs'> {
+  const { status: _status, reason: _reason, evidenceRefs: _evidenceRefs, ...definition } = value;
   return definition;
 }
 function classifiesDefinitions(ledger: ClassifiedCriterion[], definitions: Array<ReturnType<typeof coerceDefinition>>): boolean {
@@ -92,12 +95,11 @@ function coerceCriterion(value: unknown): ClassifiedCriterion | null {
   const surfaces = strings(value.taxonomy.surface);
   const evidenceModes = strings(value.taxonomy.evidenceMode);
   const evidenceRefs = strings(value.evidenceRefs);
-  const findingRefs = strings(value.findingRefs);
   if (!criterionId || statement === null || (value.origin !== 'explicit' && value.origin !== 'necessary_implied')
     || !IMPORTANCES.includes(value.importance as CriterionImportance) || !STATUSES.has(value.status as CriterionStatus)
     || !REASONS.has(value.reason as CriterionReason) || !ACTIVITIES.has(String(value.taxonomy.activity))
     || !surfaces?.length || surfaces.some((surface) => !SURFACES.has(surface))
-    || !evidenceModes?.length || evidenceModes.some((mode) => !EVIDENCE_MODES.has(mode)) || !evidenceRefs || !findingRefs
+    || !evidenceModes?.length || evidenceModes.some((mode) => !EVIDENCE_MODES.has(mode)) || !evidenceRefs || 'findingRefs' in value
     || !ALLOWED_REASONS[value.status as CriterionStatus].has(value.reason as CriterionReason)) return null;
   return {
     criterionId,
@@ -108,7 +110,6 @@ function coerceCriterion(value: unknown): ClassifiedCriterion | null {
     status: value.status as CriterionStatus,
     reason: value.reason as CriterionReason,
     evidenceRefs,
-    findingRefs,
   };
 }
 
@@ -127,27 +128,6 @@ function coerceEvidence(value: unknown): ReviewEvidenceVector | null {
     || typeof value.human !== 'string' || !EVIDENCE_VALUES.human.has(value.human)) return null;
   return { requirements: value.requirements, artifacts: value.artifacts, execution: value.execution, human: value.human, limitations };
 }
-function coerceFinding(value: unknown): ReviewFinding | null {
-  if (!isRecord(value)) return null;
-  const findingId = nonEmpty(value.findingId);
-  const evidenceRefs = strings(value.evidenceRefs);
-  if (!findingId || !['critical', 'major', 'minor', 'nit'].includes(String(value.severity))
-    || typeof value.category !== 'string' || !FINDING_CATEGORIES.has(value.category) || typeof value.statement !== 'string' || !evidenceRefs
-    || !['downgrade', 'add', 'none'].includes(String(value.ledgerEffect)) || typeof value.remediation !== 'string'
-    || ((value.severity === 'critical' || value.severity === 'major') && (typeof value.criterionId !== 'string' || value.ledgerEffect === 'none'))
-    || (value.ledgerEffect === 'none' && value.severity !== 'minor' && value.severity !== 'nit')) return null;
-  return {
-    findingId,
-    severity: value.severity as ReviewFinding['severity'],
-    category: value.category,
-    statement: value.statement,
-    evidenceRefs,
-    ...(typeof value.criterionId === 'string' ? { criterionId: value.criterionId } : {}),
-    ledgerEffect: value.ledgerEffect as ReviewFinding['ledgerEffect'],
-    remediation: value.remediation,
-  };
-}
-
 function coerceReviewer(value: unknown, role: ReviewerRuntimeReference['role']): ReviewerRuntimeReference | null {
   if (!isRecord(value)) return null;
   const reviewerId = nonEmpty(value.reviewerId);
@@ -163,7 +143,7 @@ function coerceReviewer(value: unknown, role: ReviewerRuntimeReference['role']):
 }
 
 function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: ClassifiedCriterion[]): boolean {
-  if (value.indexVersion !== 'v1' || !Number.isInteger(value.schemaVersion) || !isoDate(value.reviewedAt)) return false;
+  if (!Number.isInteger(value.schemaVersion) || !isoDate(value.reviewedAt)) return false;
 
   const frozenRaw = value.frozenLedger;
   if (!Array.isArray(frozenRaw) || !frozenRaw.length || !validHash(value.frozenLedgerSha256)
@@ -171,97 +151,70 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
   const frozen = frozenRaw.map(coerceDefinition);
   if (frozen.some((entry) => !entry) || !unique(frozen.map((entry) => entry!.criterionId))
     || !unique(ledger.map((entry) => entry.criterionId))) return false;
-  const ledgerById = new Map(ledger.map((entry) => [entry.criterionId, entry]));
-  if (!classifiesDefinitions(ledger, frozen)) return false;
-
-  if (!Array.isArray(value.amendments)) return false;
-  const amendmentIds: string[] = [];
-  const acceptedIds = new Set<string>();
-  const frozenIds = new Set(frozen.map((entry) => entry!.criterionId));
-  for (const amendmentValue of value.amendments) {
-    if (!isRecord(amendmentValue)) return false;
-    const amendmentId = nonEmpty(amendmentValue.amendmentId);
-    if (!amendmentId) return false;
-    amendmentIds.push(amendmentId);
-    const disposition = amendmentValue.disposition;
-    if (disposition === 'accepted') {
-      const classified = coerceCriterion(amendmentValue.classifiedCriterion);
-      const definition = coerceDefinition(amendmentValue.definition);
-      if (!classified || !definition || !isDeepStrictEqual(definitionOf(classified), definition)
-        || !isDeepStrictEqual(ledgerById.get(classified.criterionId), classified)) return false;
-      acceptedIds.add(classified.criterionId);
-    } else if (disposition === 'mapped_to_existing') {
-      const target = nonEmpty(amendmentValue.targetCriterionId);
-      const downgraded = coerceCriterion(amendmentValue.downgradedClassification);
-      if (!target || !downgraded || !frozenIds.has(target) || downgraded.criterionId !== target
-        || !isDeepStrictEqual(ledgerById.get(target), downgraded)) return false;
-    } else if (disposition === 'finding_downgraded') {
-      if (amendmentValue.downgradedSeverity !== 'minor' && amendmentValue.downgradedSeverity !== 'nit') return false;
-    } else if (disposition !== 'rejected') {
-      return false;
-    }
-  }
-  if (!unique(amendmentIds)) return false;
-  const allowedLedgerIds = new Set([...frozen.map((entry) => entry!.criterionId), ...acceptedIds]);
-  if (ledger.length !== allowedLedgerIds.size || ledger.some((entry) => !allowedLedgerIds.has(entry.criterionId))) return false;
+  if (!classifiesDefinitions(ledger, frozen)
+    || ledger.length !== frozen.length
+    || ledger.some((entry) => !frozen.some((definition) => definition!.criterionId === entry.criterionId))) return false;
+  if (['amendments', 'findings', 'reviewerChecks', 'reviewerChecksSha256'].some((key) => key in value)) return false;
 
   if (!Array.isArray(value.proposals) || value.proposals.length !== 2) return false;
   const proposalIds: string[] = [];
   const proposalBuckets: string[] = [];
   for (const proposalValue of value.proposals) {
     if (!isRecord(proposalValue) || !coerceReviewer(proposalValue, 'proposal') || !isoDate(proposalValue.proposedAt)
-      || !Array.isArray(proposalValue.criteria) || !Array.isArray(proposalValue.findings) || !Array.isArray(proposalValue.candidateChecks)
+      || !Array.isArray(proposalValue.criteria) || 'findings' in proposalValue || 'candidateChecks' in proposalValue
       || proposalValue.rubricVersion !== value.rubricVersion) return false;
     const proposalId = nonEmpty(proposalValue.proposalId);
     if (!proposalId) return false;
     proposalIds.push(proposalId);
     proposalBuckets.push(String(proposalValue.requestedBucket));
   }
-  if (!unique(proposalIds) || !isDeepStrictEqual(proposalBuckets.sort(), ['medium', 'small'])) return false;
+  const sortedProposalBuckets = proposalBuckets.sort();
+  const smallOnly = isDeepStrictEqual(sortedProposalBuckets, ['small', 'small']);
+  if (!smallOnly && !isDeepStrictEqual(sortedProposalBuckets, ['medium', 'small'])) return false;
+  const orchestrationBucket = smallOnly ? 'small' : 'medium';
 
   if (!isRecord(value.consolidation) || !coerceReviewer(value.consolidation, 'consolidation')) return false;
   const consolidationId = nonEmpty(value.consolidation.consolidationId);
   const consolidationProvenance = isRecord(value.consolidation.provenance) ? value.consolidation.provenance : null;
   if (!consolidationId || !isoDate(value.consolidation.consolidatedAt) || value.consolidation.rubricVersion !== value.rubricVersion
-    || value.consolidation.requestedBucket !== 'medium' || value.consolidation.frozenLedgerSha256 !== value.frozenLedgerSha256
+    || value.consolidation.requestedBucket !== orchestrationBucket
+    || value.consolidation.frozenLedgerSha256 !== value.frozenLedgerSha256
     || !isDeepStrictEqual(value.consolidation.frozenLedger, frozenRaw) || !consolidationProvenance
     || !Array.isArray(consolidationProvenance.fromProposals)
     || !isDeepStrictEqual([...consolidationProvenance.fromProposals].sort(), [...proposalIds].sort())) return false;
 
-  if (!Array.isArray(value.reviewerChecks) || !validHash(value.reviewerChecksSha256)
-    || value.reviewerChecksSha256 !== hashJson(value.reviewerChecks)) return false;
   if (!Array.isArray(value.components) || value.components.length !== 2) return false;
   const componentIds: string[] = [];
   const componentBuckets: string[] = [];
   for (const componentValue of value.components) {
+    const classifications = isRecord(componentValue) && isRecord(componentValue.classifications) ? componentValue.classifications : null;
     if (!isRecord(componentValue) || !coerceReviewer(componentValue, 'component') || !isoDate(componentValue.assessedAt)
-      || componentValue.rubricVersion !== value.rubricVersion || !isRecord(componentValue.classifications)
-      || !Array.isArray(componentValue.classifications.criteria)) return false;
+      || componentValue.rubricVersion !== value.rubricVersion || !classifications
+      || !Array.isArray(classifications.criteria) || 'findings' in classifications || 'proposedAmendments' in classifications) return false;
     const assessmentId = nonEmpty(componentValue.assessmentId);
-    const classified = componentValue.classifications.criteria.map(coerceCriterion);
+    const classified = classifications.criteria.map(coerceCriterion);
     if (!assessmentId || classified.some((entry) => !entry) || classified.length !== frozen.length) return false;
     if (!classifiesDefinitions(classified as ClassifiedCriterion[], frozen)) return false;
     componentIds.push(assessmentId);
     componentBuckets.push(String(componentValue.requestedBucket));
   }
-  if (!unique(componentIds) || !isDeepStrictEqual(componentBuckets.sort(), ['medium', 'small'])) return false;
+  if (!unique(componentIds) || !isDeepStrictEqual(componentBuckets.sort(), sortedProposalBuckets)) return false;
 
   const adjudication = value.adjudication;
   const adjudicationId = isRecord(adjudication) ? nonEmpty(adjudication.adjudicationId) : null;
-  const adjudicationAmendmentIds = isRecord(adjudication) ? strings(adjudication.amendmentIds) : null;
   if (adjudication !== undefined && (!isRecord(adjudication) || !coerceReviewer(adjudication, 'adjudication') || !adjudicationId
-    || adjudication.requestedBucket !== 'medium' || adjudication.rubricVersion !== value.rubricVersion
-    || !isoDate(adjudication.assessedAt) || !adjudicationAmendmentIds
-    || !isDeepStrictEqual([...adjudicationAmendmentIds].sort(), [...amendmentIds].sort()))) return false;
+    || adjudication.requestedBucket !== orchestrationBucket
+    || adjudication.rubricVersion !== value.rubricVersion || 'amendmentIds' in adjudication
+    || !isoDate(adjudication.assessedAt))) return false;
   if (!isRecord(value.disagreement) || value.disagreement.material !== (adjudication !== undefined)
     || value.disagreement.adjudicated !== (adjudication !== undefined)) return false;
   if (!isRecord(value.provenance) || value.provenance.blindingApplied !== true
     || value.provenance.rubricVersion !== value.rubricVersion || value.provenance.indexVersion !== value.indexVersion
     || !isRecord(value.provenance.pipeline)) return false;
   const pipeline = value.provenance.pipeline;
-  if (pipeline.frozenLedgerSha256 !== value.frozenLedgerSha256 || pipeline.reviewerChecksSha256 !== value.reviewerChecksSha256
+  if (pipeline.frozenLedgerSha256 !== value.frozenLedgerSha256 || 'reviewerChecksSha256' in pipeline || 'amendmentIds' in pipeline
     || !isDeepStrictEqual(pipeline.proposalIds, proposalIds) || pipeline.consolidationId !== consolidationId
-    || !isDeepStrictEqual(pipeline.componentAssessmentIds, componentIds) || !isDeepStrictEqual(pipeline.amendmentIds, amendmentIds)
+    || !isDeepStrictEqual(pipeline.componentAssessmentIds, componentIds)
     || pipeline.adjudicationId !== (adjudicationId ?? undefined)) return false;
 
   const attainment = deriveReviewAttainment(ledger);
@@ -269,27 +222,50 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
   return true;
 }
 
-/** Analytics coercion for canonical production records. Calibration and malformed records are excluded. */
-export function coerceSessionReviewV2(value: unknown): SessionReviewV2Source | null {
-  if (!isRecord(value) || typeof value.schemaVersion !== 'number' || value.schemaVersion < 2 || value.kind !== 'production') return null;
+export type SessionReviewV2CoercionResult =
+  | { review: SessionReviewV2Source; rejectionReason: null }
+  | { review: null; rejectionReason: SessionReviewV2RejectionReason };
+
+/** Validate one production V2 record while retaining a coarse, stable rejection reason. */
+export function inspectSessionReviewV2(value: unknown): SessionReviewV2CoercionResult {
+  if (!isRecord(value) || value.kind !== 'production' || value.schemaVersion !== 2) {
+    return { review: null, rejectionReason: 'unsupported_schema' };
+  }
+  if (value.rubricVersion !== SESSION_REVIEW_V2_RUBRIC_VERSION) {
+    return { review: null, rejectionReason: 'unsupported_rubric' };
+  }
+  if (value.indexVersion !== SESSION_REVIEW_V2_INDEX_VERSION) {
+    return { review: null, rejectionReason: 'unsupported_index' };
+  }
   const reviewId = nonEmpty(value.reviewId);
   const sessionId = nonEmpty(value.sessionId);
-  const rubricVersion = nonEmpty(value.rubricVersion);
   const reviewedAt = nonEmpty(value.reviewedAt);
   const sessionPathAtReview = nonEmpty(value.sessionPathAtReview);
-  if (!reviewId || !sessionId || !rubricVersion || !reviewedAt || !sessionPathAtReview
-    || (value.identityFallback !== undefined && typeof value.identityFallback !== 'boolean')) return null;
+  if (!reviewId || !sessionId || !reviewedAt || !sessionPathAtReview
+    || (value.identityFallback !== undefined && typeof value.identityFallback !== 'boolean')) {
+    return { review: null, rejectionReason: 'invalid_identity' };
+  }
+  try {
+    validateSessionReviewV2(value);
+  } catch {
+    return { review: null, rejectionReason: 'invalid_payload' };
+  }
   const ledger = Array.isArray(value.ledger) ? value.ledger.map(coerceCriterion) : [];
   const process = coerceProcess(value.process);
   const evidence = coerceEvidence(value.evidence);
-  const findings = Array.isArray(value.findings) ? value.findings.map(coerceFinding) : [];
-  if (!ledger.length || ledger.some((entry) => !entry) || !process || !evidence || findings.some((entry) => !entry)) return null;
-  if (!validateCanonicalEnvelope(value, ledger as ClassifiedCriterion[])) return null;
-  if (value.confidence !== 'high' && value.confidence !== 'medium' && value.confidence !== 'low') return null;
-  if (!isRecord(value.disagreement) || typeof value.disagreement.material !== 'boolean' || typeof value.disagreement.adjudicated !== 'boolean' || !Array.isArray(value.disagreement.disputedFields)) return null;
+  if (!ledger.length || ledger.some((entry) => !entry) || !process || !evidence
+    || !validateCanonicalEnvelope(value, ledger as ClassifiedCriterion[])
+    || (value.confidence !== 'high' && value.confidence !== 'medium' && value.confidence !== 'low')
+    || !isRecord(value.disagreement) || typeof value.disagreement.material !== 'boolean'
+    || typeof value.disagreement.adjudicated !== 'boolean' || !Array.isArray(value.disagreement.disputedFields)) {
+    return { review: null, rejectionReason: 'invalid_payload' };
+  }
   const disputedFields = value.disagreement.disputedFields.flatMap((field) => isRecord(field) && typeof field.field === 'string' && typeof field.resolution === 'string' ? [{ field: field.field, resolution: field.resolution }] : []);
-  if (disputedFields.length !== value.disagreement.disputedFields.length) return null;
-  if (!isRecord(value.provenance) || typeof value.provenance.diversityAchieved !== 'boolean' || typeof value.provenance.blindingApplied !== 'boolean') return null;
+  if (disputedFields.length !== value.disagreement.disputedFields.length
+    || !isRecord(value.provenance) || typeof value.provenance.diversityAchieved !== 'boolean'
+    || typeof value.provenance.blindingApplied !== 'boolean') {
+    return { review: null, rejectionReason: 'invalid_payload' };
+  }
   const reviewers: ReviewerRuntimeReference[] = [];
   const add = (entry: unknown, role: ReviewerRuntimeReference['role']): boolean => {
     const reviewer = coerceReviewer(entry, role);
@@ -300,18 +276,28 @@ export function coerceSessionReviewV2(value: unknown): SessionReviewV2Source | n
   if (!Array.isArray(value.proposals) || !value.proposals.every((entry) => add(entry, 'proposal'))
     || !add(value.consolidation, 'consolidation')
     || !Array.isArray(value.components) || !value.components.every((entry) => add(entry, 'component'))
-    || (value.adjudication !== undefined && !add(value.adjudication, 'adjudication'))) return null;
+    || (value.adjudication !== undefined && !add(value.adjudication, 'adjudication'))) {
+    return { review: null, rejectionReason: 'invalid_payload' };
+  }
   const humanCheckStatus = isRecord(value.humanCheck) && isRecord(value.humanCheck.response) && typeof value.humanCheck.response.status === 'string'
     ? value.humanCheck.response.status : null;
   return {
-    schemaVersion: Math.trunc(value.schemaVersion), kind: 'production', reviewId, sessionId,
-    sessionPathAtReview, identityFallback: value.identityFallback === true,
-    rubricVersion, indexVersion: typeof value.indexVersion === 'string' ? value.indexVersion : null, reviewedAt,
-    ledger: ledger as ClassifiedCriterion[], process, evidence, findings: findings as ReviewFinding[], humanCheckStatus,
-    confidence: value.confidence,
-    disagreement: { material: value.disagreement.material, adjudicated: value.disagreement.adjudicated, disputedFields },
-    reviewers, diversityAchieved: value.provenance.diversityAchieved, blindingApplied: value.provenance.blindingApplied,
+    review: {
+      schemaVersion: Math.trunc(value.schemaVersion), kind: 'production', reviewId, sessionId,
+      sessionPathAtReview, identityFallback: value.identityFallback === true,
+      rubricVersion: SESSION_REVIEW_V2_RUBRIC_VERSION, indexVersion: SESSION_REVIEW_V2_INDEX_VERSION, reviewedAt,
+      ledger: ledger as ClassifiedCriterion[], process, evidence, humanCheckStatus,
+      confidence: value.confidence,
+      disagreement: { material: value.disagreement.material, adjudicated: value.disagreement.adjudicated, disputedFields },
+      reviewers, diversityAchieved: value.provenance.diversityAchieved, blindingApplied: value.provenance.blindingApplied,
+    },
+    rejectionReason: null,
   };
+}
+
+/** Analytics coercion for canonical production records. Calibration and malformed records are excluded. */
+export function coerceSessionReviewV2(value: unknown): SessionReviewV2Source | null {
+  return inspectSessionReviewV2(value).review;
 }
 
 function externallyBlocked(criterion: ClassifiedCriterion): boolean {

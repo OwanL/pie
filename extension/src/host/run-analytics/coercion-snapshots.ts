@@ -1,7 +1,6 @@
 import type { AssistantUsage, ThinkingLevel } from '../../shared/protocol';
 import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../../shared/run-analytics-contracts.js';
-import { RUN_ANALYTICS_SCHEMA_VERSION } from './types';
-import type { AgentReviewEntry, AuxiliaryLlmUsageSample, OutcomeHistoryLogEntry, RetryTimingSample, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
+import type { AuxiliaryLlmUsageSample, RetryTimingSample, RunSnapshot, TurnThroughputSample, TurnThroughputStatus } from './types';
 import { coerceSessionAnalyticsFactors } from './coercion-factors';
 import { coerceFunctionalSettings } from './coercion-functional-settings';
 import {
@@ -14,7 +13,6 @@ import {
 import {
   isInputKindArray,
   isObjectRecord,
-  isRunOutcome,
   toNonNegativeInteger,
   toNullableNonNegativeInteger,
 } from './coercion-utils';
@@ -262,13 +260,12 @@ function validateIdentity(candidate: Partial<RunSnapshot>): boolean {
     typeof candidate.sessionPath === 'string' &&
     typeof candidate.runId === 'string' &&
     typeof candidate.taskGroupId === 'string' &&
-    (candidate.status === 'open' || candidate.status === 'scored' || candidate.status === 'closed_unscored')
+    (candidate.status === 'open' || candidate.status === 'closed')
   );
 }
 
 function validateFlagsAndTimestamps(candidate: Partial<RunSnapshot>): boolean {
   return (
-    typeof candidate.scored === 'boolean' &&
     typeof candidate.startedAt === 'string' &&
     typeof candidate.updatedAt === 'string' &&
     typeof candidate.mixedModelConfig === 'boolean'
@@ -321,8 +318,7 @@ function validateOptionalStrings(candidate: Partial<RunSnapshot>): boolean {
 
 function validateOptionalEnums(candidate: Partial<RunSnapshot>): boolean {
   return (
-    (candidate.finalizationReason === undefined || candidate.finalizationReason === 'scored' || candidate.finalizationReason === 'closed_unscored' || candidate.finalizationReason === 'new_task') &&
-    (candidate.outcome === undefined || isRunOutcome(candidate.outcome))
+    candidate.finalizationReason === undefined || candidate.finalizationReason === 'closed' || candidate.finalizationReason === 'new_task'
   );
 }
 
@@ -347,17 +343,17 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
   const unknownSubagentAttemptRecordSourceIds = Array.isArray(candidate.unknownSubagentAttemptRecordSourceIds)
     ? [...new Set(candidate.unknownSubagentAttemptRecordSourceIds.filter((id): id is string => typeof id === 'string' && id.length > 0))]
     : undefined;
+  const status = c.status;
+  const finalizationReason = c.finalizationReason;
   return {
     sessionPath: c.sessionPath,
     runId: c.runId,
     taskGroupId: c.taskGroupId,
-    status: c.status,
-    scored: c.scored,
+    status,
     startedAt: c.startedAt,
     updatedAt: c.updatedAt,
     finalizedAt: c.finalizedAt,
-    finalizationReason: c.finalizationReason,
-    outcome: c.outcome,
+    finalizationReason,
     modelId: c.modelId,
     thinkingLevel: c.thinkingLevel as ThinkingLevel | undefined,
     mixedModelConfig: c.mixedModelConfig,
@@ -421,75 +417,6 @@ export function coerceRunSnapshot(value: unknown): RunSnapshot | null {
   }
 
   return buildRunSnapshot(candidate);
-}
-
-export function coerceOutcomeHistoryLogEntry(value: unknown): OutcomeHistoryLogEntry | null {
-  if (!isObjectRecord(value)) {
-    return null;
-  }
-
-  if (
-    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION
-    || value.kind !== 'run_outcome'
-    || typeof value.recordedAt !== 'string'
-    || typeof value.sessionPath !== 'string'
-    || typeof value.runId !== 'string'
-    || typeof value.taskGroupId !== 'string'
-    || !isRunOutcome(value.outcome)
-  ) {
-    return null;
-  }
-
-  return {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'run_outcome',
-    recordedAt: value.recordedAt,
-    sessionPath: value.sessionPath,
-    runId: value.runId,
-    taskGroupId: value.taskGroupId,
-    outcome: value.outcome,
-  };
-}
-
-export function coerceAgentReviewEntry(value: unknown): AgentReviewEntry | null {
-  if (!isObjectRecord(value)) {
-    return null;
-  }
-  if (
-    value.schemaVersion !== RUN_ANALYTICS_SCHEMA_VERSION
-    || value.kind !== 'agent_review'
-    || typeof value.recordedAt !== 'string'
-    || typeof value.sessionPath !== 'string'
-    || typeof value.runId !== 'string'
-    || typeof value.taskGroupId !== 'string'
-    || typeof value.done !== 'boolean'
-    || typeof value.rating !== 'number'
-    || !Number.isFinite(value.rating)
-    || (value.completion !== 'fully' && value.completion !== 'partial' && value.completion !== 'setback')
-    || typeof value.reason !== 'string'
-    || typeof value.evaluatedAt !== 'string'
-    || !Array.isArray(value.reviewerBuckets)
-    || !value.reviewerBuckets.every((v) => typeof v === 'string')
-    || typeof value.reviewerCount !== 'number'
-    || !Number.isFinite(value.reviewerCount)
-  ) {
-    return null;
-  }
-  return {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'agent_review',
-    recordedAt: value.recordedAt,
-    sessionPath: value.sessionPath,
-    runId: value.runId,
-    taskGroupId: value.taskGroupId,
-    done: value.done,
-    rating: value.rating,
-    completion: value.completion,
-    reason: value.reason,
-    evaluatedAt: value.evaluatedAt,
-    reviewerBuckets: value.reviewerBuckets as string[],
-    reviewerCount: Math.trunc(value.reviewerCount),
-  };
 }
 
 export function normalizeExperimentAssignment(value: string | null | undefined): string | null {

@@ -12,6 +12,7 @@ import {
   resolveSessionIdentity,
 } from '../../../src/backend/session-review-store';
 import { REVIEW_CLOSURE_ACTIONS_FILE, type SessionSummary } from '../../../src/shared/protocol';
+import { validReview } from '../../../../extensions/session-reviewer/test/fixtures.js';
 
 const REVIEWS_FILE = 'reviews.jsonl';
 const SESSION_ID = 'session-stable-id';
@@ -48,59 +49,19 @@ function baseSummary(pathOverride = sessionPath): SessionSummary {
   };
 }
 
-function rawReview(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    sessionPath,
-    done: true,
-    rating: 4,
-    completion: 'fully',
-    reason: 'looks good',
-    evaluatedAt: '2026-01-01T00:00:00.000Z',
-    ...overrides,
-  };
-}
-
 function v2Review(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    schemaVersion: 2,
+    ...structuredClone(validReview()),
     kind: 'production',
     reviewId: 'review-1',
     sessionId: SESSION_ID,
     sessionPathAtReview: sessionPath,
     reviewedAt: '2026-07-24T00:00:00.000Z',
     ...overrides,
-  };
+  } as unknown as Record<string, unknown>;
 }
 
-test('V1 remains readable with provenance and reserves its resolved stable session ID', () => {
-  writeLines(REVIEWS_FILE, [rawReview({ reviewerBuckets: ['medium', 'small'], reviewerCount: 2 })]);
-  const reviews = readReviews();
-  const merged = mergeReviewIntoSummary(baseSummary(), reviews);
-  assert.equal(merged.sessionId, SESSION_ID);
-  assert.equal(merged.reviewed, true);
-  assert.equal(merged.legacyReview, true);
-  assert.equal(merged.done, true);
-  assert.equal(merged.rating, 4);
-  assert.equal(merged.completion, 'fully');
-  assert.deepEqual(merged.reviewerBuckets, ['medium', 'small']);
-  assert.equal(merged.reviewerCount, 2);
-  assert.equal(reviews.reservedLegacyBySessionId.get(SESSION_ID)?.sessionPath, sessionPath);
-});
-
-test('V1 latest per path wins and malformed optional fields are dropped', () => {
-  writeLines(REVIEWS_FILE, [
-    rawReview({ reviewerBuckets: ['medium'], reviewerCount: 1, selfClose: false }),
-    rawReview({ reviewerBuckets: ['medium', 5], reviewerCount: -3, selfClose: 'yes' }),
-  ]);
-  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
-  assert.equal(merged.reviewed, true);
-  assert.equal(merged.rating, 4);
-  assert.equal(merged.reviewerBuckets, undefined);
-  assert.equal(merged.reviewerCount, undefined);
-  assert.equal(merged.selfClose, undefined);
-});
-
-test('V2 production status is keyed by sessionId across a path move and does not coerce to V1 fields', () => {
+test('V2 production status is keyed by sessionId across a path move', () => {
   const movedPath = path.join(dir, 'moved.jsonl');
   fs.renameSync(sessionPath, movedPath);
   writeLines(REVIEWS_FILE, [v2Review()]);
@@ -110,30 +71,41 @@ test('V2 production status is keyed by sessionId across a path move and does not
   assert.equal(merged.reviewed, true);
   assert.equal(merged.reviewId, 'review-1');
   assert.equal(merged.reviewedAt, '2026-07-24T00:00:00.000Z');
-  assert.equal(merged.rating, undefined);
-  assert.equal(merged.done, undefined);
-  assert.equal(merged.legacyReview, undefined);
 });
 
-test('the first V2 production review is canonical and calibration does not mark a session reviewed', () => {
+test('the first V2 production review is canonical and calibration is non-canonical', () => {
   writeLines(REVIEWS_FILE, [
     v2Review({ kind: 'calibration', reviewId: 'calibration-1' }),
     v2Review({ reviewId: 'review-first' }),
     v2Review({ reviewId: 'review-duplicate' }),
   ]);
   const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.reviewed, true);
   assert.equal(merged.reviewId, 'review-first');
 });
 
-test('resolved V1 review reserves the session after the summary path changes only when the old header remains resolvable', () => {
-  writeLines(REVIEWS_FILE, [rawReview()]);
-  const aliasPath = path.join(dir, 'alias.jsonl');
-  fs.copyFileSync(sessionPath, aliasPath);
+test('a shallow V2 envelope without canonical evidence is ignored', () => {
+  writeLines(REVIEWS_FILE, [{
+    schemaVersion: 2,
+    kind: 'production',
+    reviewId: 'shallow-review',
+    sessionId: SESSION_ID,
+    sessionPathAtReview: sessionPath,
+    rubricVersion: 'session-review-v2.1',
+    indexVersion: 'v1',
+    reviewedAt: '2026-07-24T00:00:00.000Z',
+  }]);
+  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.reviewed, undefined);
+});
 
-  const merged = mergeReviewIntoSummary(baseSummary(aliasPath), readReviews());
-  assert.equal(merged.sessionId, SESSION_ID);
-  assert.equal(merged.reviewed, true);
-  assert.equal(merged.legacyReview, true);
+test('records without the V2 rubric and index are ignored', () => {
+  writeLines(REVIEWS_FILE, [
+    v2Review({ rubricVersion: 'session-review-v2' }),
+    v2Review({ indexVersion: 'v2' }),
+  ]);
+  const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
+  assert.equal(merged.reviewed, undefined);
 });
 
 test('missing or malformed session headers expose a deterministic identity fallback', () => {
@@ -150,7 +122,7 @@ test('missing or malformed session headers expose a deterministic identity fallb
   assert.equal(merged.identityFallback, true);
 });
 
-test('closure outbox latest state is attached by sessionId without becoming V1 review data', () => {
+test('closure outbox latest state is attached by sessionId', () => {
   writeLines(REVIEWS_FILE, [v2Review()]);
   const pending = {
     actionId: 'close-1',
@@ -171,7 +143,6 @@ test('closure outbox latest state is attached by sessionId without becoming V1 r
   const merged = mergeReviewIntoSummary(baseSummary(), readReviews());
   assert.equal(merged.reviewed, true);
   assert.equal(merged.reviewId, 'review-1');
-  assert.equal(merged.done, undefined);
   assert.equal(merged.closureActions?.length, 1);
   assert.equal(merged.closureActions?.[0]?.status, 'retrying');
   assert.equal(merged.closureActions?.[0]?.attempts, 1);

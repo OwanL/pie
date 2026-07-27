@@ -97,6 +97,13 @@ export interface RenderFailurePayload {
 }
 
 /** The full view state sent from the extension host to the webview. */
+/** Host-owned submitted content used to reopen an inline editor after an edit rollback. */
+export interface InlineEditDraft {
+  messageId: string;
+  text: string;
+  inputs: ComposerInput[];
+}
+
 export interface ViewState {
   sessions: SessionSummary[];
   openTabPaths: string[];
@@ -115,6 +122,8 @@ export interface ViewState {
   activeSession: SessionSummary | null;
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
+  /** Whole-branch billable usage; unlike `transcript`, this is never windowed. */
+  sessionUsage?: import('./sessions.js').SessionUsageSnapshot | null;
   /** True once the active session's initial transcript snapshot has been received. */
   transcriptLoaded: boolean;
   /** Host-owned pending inputs for the active session. */
@@ -214,6 +223,8 @@ export interface ViewState {
   prepassLatencyMs?: number | null;
   /** Message ID currently being edited, or null. */
   editingMessageId: string | null;
+  /** Submitted inline-edit content to seed a reopened editor after rollback. */
+  editingDraft?: InlineEditDraft | null;
   /** Pending extension UI requests keyed by session path, then by request ID. */
   pendingExtensionUIRequestsBySession: Record<string, Record<string, ExtensionUIRequestPayload>>;
   /** First pending extension UI request for the active session, or null (for bottom-bar prompt). */

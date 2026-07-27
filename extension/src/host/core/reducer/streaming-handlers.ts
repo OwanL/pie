@@ -3,6 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { ChatMessage } from '../../../shared/protocol.js';
 import { stripReqIds } from '../../../shared/error-mapping.js';
+import { mergeAssistantUsage } from '../../../shared/session-usage.js';
 import {
   appendAssistantTextPart,
   appendContinuationSeparator,
@@ -243,6 +244,7 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
         if (normalizedMessage.modelId) canonical.modelId = normalizedMessage.modelId;
         if (normalizedMessage.provider) canonical.provider = normalizedMessage.provider;
         if (normalizedMessage.thinkingLevel) canonical.thinkingLevel = normalizedMessage.thinkingLevel;
+        if (normalizedMessage.durableEntryId) canonical.durableEntryId = normalizedMessage.durableEntryId;
         if (normalizedMessage.durationMs !== undefined) {
           canonical.durationMs = (canonical.durationMs ?? 0) + normalizedMessage.durationMs;
         }
@@ -254,6 +256,11 @@ export function handleMessageFinished(state: ArchState, event: Extract<Event, { 
         if (normalizedMessage.turnLatencyMs !== undefined) canonical.turnLatencyMs = normalizedMessage.turnLatencyMs;
         if (normalizedMessage.overheadMs !== undefined) canonical.overheadMs = normalizedMessage.overheadMs;
         if (normalizedMessage.providerLatencyMs !== undefined) canonical.providerLatencyMs = normalizedMessage.providerLatencyMs;
+        // One user turn can contain many provider calls separated by tools.
+        // Continuation messages alias back to one displayed assistant row, so
+        // their usage must be accumulated just like the durable transcript
+        // mapper does; otherwise the live cost freezes at the first call.
+        canonical.usage = mergeAssistantUsage(canonical.usage, normalizedMessage.usage);
         mergeContinuationToolCalls(canonical, normalizedMessage);
       }
     } else {

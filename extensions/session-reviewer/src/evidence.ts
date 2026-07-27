@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { deriveFileChangesFromSessionEntries, readSessionCwd } from '../../session-changes/src/session-jsonl.js';
 import type { BlindedEvidenceBundle, EvidenceArtifactExcerpt, EvidenceArtifactInput, EvidenceArtifactManifest } from './types.js';
+import { hashJson, sha256 } from './hash.js';
 import { parseSessionTranscriptBytes, renderTranscriptDetailed } from './transcript.js';
+
+export { hashJson, sha256 } from './hash.js';
 
 const MAX_ARTIFACTS = 20;
 const MAX_DERIVED_CHANGED_FILES = 12;
@@ -13,12 +15,7 @@ const MAX_ARTIFACT_EXCERPT_BYTES = 8 * 1024;
 const MAX_ARTIFACT_EXCERPTS_BYTES = 32 * 1024;
 const MAX_GIT_DIFF_BYTES = 1024 * 1024;
 
-export function sha256(value: string | Buffer): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-export function hashJson(value: unknown): string { return sha256(JSON.stringify(value)); }
-
-/** V1-compatible normalized path hash (§14.5). */
+/** Deterministic fallback when a session header has no stable ID. */
 export function normalizedPathHash(sessionPath: string): string {
   let normalized = sessionPath.trim().replace(/\\/g, '/');
   const unc = normalized.startsWith('//');

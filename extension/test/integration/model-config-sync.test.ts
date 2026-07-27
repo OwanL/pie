@@ -4,6 +4,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { mkdtemp, rm, copyFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 // tsx compiles .ts test files to CJS where __dirname is available.
 declare const __dirname: string;
@@ -223,4 +225,117 @@ test('settings.json merge seeds user-owned chat and pruning selections only when
   assert.equal(pruning.provider, source.pruning.provider);
   assert.equal(pruning.thinkingLevel, source.pruning.thinkingLevel);
   assert.deepEqual(pruning.tools, { ceiling: 7 });
+});
+
+// --- maxImagesPerRequest codegen + validation -------------------------------
+// See extensions/image-context-guard/README.md, "Policy source".
+
+/** Minimal valid models.yaml (emitted as JSON, which is valid YAML) for validation tests. */
+function catalogFixture(models: Record<string, Array<Record<string, unknown>>>): string {
+  return JSON.stringify({
+    defaults: { model: 'm', provider: 'p', thinkingLevel: 'medium' },
+    retry: { enabled: true, maxRetries: 1, baseDelayMs: 1, provider: { maxRetries: 1, maxRetryDelayMs: 1 } },
+    pruning: { model: 'm', provider: 'p', thinkingLevel: 'medium' },
+    profileOrder: [],
+    providers: Object.fromEntries(
+      Object.entries(models).map(([provider, list]) => [provider, { apiKey: 'k', models: list }]),
+    ),
+  }, null, 2);
+}
+
+/** Write a temp catalog (models.yaml + copied schema) and return its dir. */
+async function withTempCatalog(yamlText: string): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'pie-sync-models-'));
+  await copyFile(path.join(repoRoot, 'models.schema.json'), path.join(dir, 'models.schema.json'));
+  await writeFile(path.join(dir, 'models.yaml'), yamlText, 'utf8');
+  return dir;
+}
+
+test('maxImagesPerRequest flows from models.yaml to models.json for image-capable models', async () => {
+  const mod = await loadSyncModule();
+  const generated = mod.loadAndGenerate(repoRoot).modelsJson as {
+    providers: Record<string, {
+      models?: Array<{ id: string; input?: string[]; maxImagesPerRequest?: number }>;
+      modelOverrides?: Record<string, { input?: string[]; maxImagesPerRequest?: number }>;
+    }>;
+  };
+  const copilot = generated.providers['github-copilot'].models ?? [];
+  const sonnet = copilot.find((m) => m.id === 'claude-sonnet-5');
+  assert.ok(sonnet, 'claude-sonnet-5 should be in the catalog');
+  assert.deepEqual(sonnet!.input, ['text', 'image']);
+  assert.equal(sonnet!.maxImagesPerRequest, 1);
+  // A text-only model (no image in input) must not carry maxImagesPerRequest.
+  const allModels = Object.values(generated.providers).flatMap((p) => p.models ?? []);
+  const textModel = allModels.find((m) => !m.input?.includes('image'));
+  assert.ok(textModel, 'the catalog should include at least one text-only model');
+  assert.equal(textModel!.maxImagesPerRequest, undefined);
+});
+
+test('overrideOnly image-capable entries carry input + maxImagesPerRequest into modelOverrides', async () => {
+  const mod = await loadSyncModule();
+  const generated = mod.loadAndGenerate(repoRoot).modelsJson as {
+    providers: Record<string, { modelOverrides?: Record<string, { input?: string[]; maxImagesPerRequest?: number }> }>;
+  };
+  const overrides = generated.providers['openai-codex'].modelOverrides ?? {};
+  for (const id of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    assert.deepEqual(overrides[id]?.input, ['text', 'image'], `${id} override should self-declare image input`);
+    assert.equal(overrides[id]?.maxImagesPerRequest, 1, `${id} override should carry maxImagesPerRequest`);
+  }
+});
+
+test('validation rejects an image-capable model without maxImagesPerRequest', async () => {
+  const mod = await loadSyncModule();
+  const dir = await withTempCatalog(catalogFixture({
+    p: [{
+      id: 'vision-model', name: 'Vision', input: ['text', 'image'],
+      pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+    }],
+  }));
+  try {
+    assert.throws(
+      () => mod.loadSource(dir),
+      (err: Error) => err.message.includes('must declare maxImagesPerRequest') && err.message.includes('vision-model'),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('validation rejects a text-only model that declares maxImagesPerRequest', async () => {
+  const mod = await loadSyncModule();
+  const dir = await withTempCatalog(catalogFixture({
+    p: [{
+      id: 'text-model', name: 'Text', input: ['text'], maxImagesPerRequest: 1,
+      pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+    }],
+  }));
+  try {
+    assert.throws(
+      () => mod.loadSource(dir),
+      (err: Error) => err.message.includes('must not declare maxImagesPerRequest') && err.message.includes('text-model'),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('validation rejects an overrideOnly image-capable entry without maxImagesPerRequest', async () => {
+  const mod = await loadSyncModule();
+  const dir = await withTempCatalog(catalogFixture({
+    p: [{
+      id: 'override-vision', name: 'Override', overrideOnly: true, input: ['text', 'image'],
+      pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+    }],
+  }));
+  try {
+    assert.throws(
+      () => mod.loadSource(dir),
+      (err: Error) => err.message.includes('must declare maxImagesPerRequest') && err.message.includes('override-vision'),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

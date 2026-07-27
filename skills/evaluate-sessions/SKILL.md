@@ -7,22 +7,20 @@ description: Run the V2 once-only, blinded session-review workflow for selected 
 
 Use only when the user explicitly asks to review/evaluate and usually close selected,
 pinned, or open sessions. This is a **session-oriented, once-only production review**,
-not ordinary code review and not a V1 1–5 rating workflow.
+not ordinary code review.
 
 ## Outcome and non-negotiable rules
 
-Produce one canonical V2 production record per previously unrated stable session ID:
+Produce one canonical schema-version-2 production record per previously unreviewed stable session ID:
 
 - a frozen criterion-definition ledger and classified ledger;
-- delivered and controllable attainment, process/evidence vectors, findings,
-  confidence, evidence/provenance, proposals, consolidation, shared checks,
-  components, disagreement resolution, and any amendments;
-- no free-form rating, `done`/`completion`, `setReview`, implicit close, or
-  self-rating.
+- delivered and controllable attainment, process/evidence vectors, confidence,
+  evidence/provenance, proposals, consolidation, components, and disagreement resolution;
+- no directly chosen holistic score, implicit close, or self-review.
 
 Follow this exact batch order: **snapshot/partition → inspect/propose all →
-consolidate all → shared checks → ask all → fresh classify all →
-adjudicate/merge → record → explicit close → close self**. Never classify a target
+consolidate all → ask all → fresh classify all → adjudicate/merge → record →
+explicit close → close self**. Never classify a target
 before the batch human-evidence pass is complete or marked unavailable.
 
 1. Review only the user-selected target set. Exclude this reviewer session.
@@ -38,18 +36,19 @@ before the batch human-evidence pass is complete or marked unavailable.
    versions, reputation, and treatment telemetry. Hash raw JSONL but never give it
    to reviewers. Runtime, not reviewer prose, records effective reviewer model and
    blinding provenance.
-5. Reviewers are isolated from each other and from unrelated sessions. Requested
-   buckets are always one `small` and one `medium`; persist requested and actual
-   effective bucket/model. A bucket may downgrade under selector policy. Do not
-   treat requested labels as actual diversity.
-6. Reviewer-generated checks are shared, read-only, selected/executed once, and
-   immutable before final classification. Never credit reviewer work to the
-   original agent.
-7. A human response is criterion-scoped evidence, not a session score. Ask at most
+5. Reviewers are isolated from each other and from unrelated sessions. The accepted
+   reviewer profiles are `small` + `medium`, or user-constrained `small` + `small`.
+   The coordinator and adjudicator request `medium` for small + medium, or `small`
+   for small + small. A mixed-profile `medium` request may effectively downgrade to
+   `small` with `bucketDowngraded: true`; a small-only role requests and effectively
+   uses `small`. Persist requested and actual effective bucket/model. Both component
+   assessments participate in analytics and ranking. Diversity is diagnostic only; compute it from
+   effective provider/family, never requested labels.
+6. A human response is criterion-scoped evidence, not a session score. Ask at most
    one neutral question per affected session, sequentially, only after every target
    has reached consolidation. An unanswered question never blocks best-effort
    record/closure.
-8. `recordReview` persists; it does not close. Close only with `closeReviewed` or
+7. `recordReview` persists; it does not close. Close only with `closeReviewed` or
    `closeSelf`, which use the separate closure-action outbox. `closeSelf` is the
    final tool action.
 
@@ -59,8 +58,8 @@ Use the V2 `session_review` actions:
 
 - `listOpen` / `listSelected` — obtain the selected/open target snapshot, stable
   IDs/paths, reviewer-session marker, review state, and existing review IDs.
-- `getEvidence` — obtain one blinded bundle and `EvidenceManifest` for an unrated
-  target. It supplies the rendered blinded excerpt, diff/changed-file manifest,
+- `getEvidence` — obtain one blinded bundle and `EvidenceManifest` for an
+  unreviewed target. It supplies the rendered blinded excerpt, diff/changed-file manifest,
   hashes, and limitations; do not substitute raw JSONL for the bundle.
 - `recordReview` — validate and atomically persist one complete canonical V2
   production record keyed by `sessionId`; duplicate writes return/reject with the
@@ -76,12 +75,12 @@ runtime provenance only from each returned `details.results[0]`: map
 `modelId`, and copy `provider`, `family`, `thinkingLevel`, and `promptHash`
 verbatim. `promptHash` already hashes the exact delegated `task`; do not re-hash
 rendered output or invent missing metadata. Evidence hashes remain those from the
-evidence manifest. Use `ask_user` only for Pass 4 below. If the required V2
-tool/record capability is unavailable, do
-not fall back to V1 actions or invent a record: report the blocker and do not
-close unreviewed targets.
+evidence manifest. Use `ask_user` only for Pass 3 below. If the required tool/record capability is unavailable, report the blocker and do
+not invent a record or close unreviewed targets.
 
 ## Canonical rubric quick reference
+
+Every record has `schemaVersion: 2`; the canonical `rubricVersion` is `session-review-v2.1`. `indexVersion: 'v1'` identifies the current index formula only.
 
 ### Criterion definitions and classifications
 
@@ -94,7 +93,7 @@ taxonomy: { activity, surface[], evidenceMode[] }
 ```
 
 Use the plan's fixed taxonomy enums and `other` only where needed. A classified
-criterion additionally has `status`, `reason`, `evidenceRefs`, and `findingRefs`.
+criterion additionally has `status`, `reason`, and `evidenceRefs`.
 Definitions never carry classification.
 
 Statuses: `met`, `partly_met`, `unmet`, `blocked`, `not_assessable`, `superseded`.
@@ -114,25 +113,6 @@ all attainment views.
 Importance is user value: core defeats primary value if missed; supporting
 materially affects quality/completeness; optional is requested polish/useful but
 non-core.
-
-### Findings and amendments
-
-Every canonical `critical`/`major` finding must have a criterion ID and
-`ledgerEffect: "downgrade" | "add"`; `none` is only for `minor`/`nit`.
-A critical defect maps to a core criterion; a major defect maps to a core or
-supporting criterion. Before freeze, fold necessary-implied additions into the
-frozen ledger. After freeze, an addition is a `CriterionAmendmentProposal` and
-**always** invokes Pass-6 adjudication.
-
-For every post-freeze proposal, the adjudicator must choose exactly one:
-
-- `accepted`: classify and add the proposed criterion; finding remains `add`.
-- `mapped_to_existing`: point finding at an existing criterion and downgrade it.
-- `finding_downgraded`: reduce finding to `minor`/`nit`, `ledgerEffect: none`.
-- `rejected`: drop the finding.
-
-Do not retain a critical/major finding with no ledger effect. Component findings
-remain unmodified; only canonical findings reflect dispositions.
 
 ### Process and evidence vectors
 
@@ -160,45 +140,43 @@ human check).
    otherwise call `listOpen` only when the user explicitly asked for all open
    sessions. Snapshot stable ID and current path, excluding self.
 2. Partition exactly once by canonical production-review state:
-   - **Unrated:** no canonical record. These are the full-pipeline batch.
-   - **Already reviewed:** do not fetch rating evidence or run Passes 1–6. Queue
+   - **Unreviewed:** no canonical record. These are the full-pipeline batch.
+   - **Already reviewed:** do not fetch evidence or run Passes 1–5. Queue
      `closeReviewed { targetSessionId, targetSessionPath, reviewId: existingReviewId }`.
      A settled-success action is an idempotent no-op.
-3. For each unrated target call `getEvidence` once. Preserve its evidence manifest:
+3. For each unreviewed target call `getEvidence` once. Preserve its evidence manifest:
    raw JSONL SHA-256/bytes/mtime, rendered-excerpt SHA-256, artifact hashes/kinds,
    and limitations. Build the same blinded evidence bundle for every reviewer.
    Record `blindingApplied` and stripped/redacted fields.
 
 Do not ask a question, record a review, or close a new target during this pass.
 
-### Pass 1 — independent ledger proposals for every unrated target
+### Pass 1 — independent ledger proposals for every unreviewed target
 
-For each target, launch in parallel where capacity permits two isolated subagents:
-one requested `small`, one requested `medium`. They receive only that target's
-blinded evidence bundle and the following output contract. Do not pass either
-reviewer's output to the other.
+For each target, launch two isolated subagents in parallel where capacity permits.
+Use the small + medium profile unless the user explicitly constrains both reviewers
+to small + small. They receive only that target's blinded evidence bundle and the
+following output contract. Do not pass either reviewer's output to the other.
 
 ```text
-You are the [small|medium]-requested Pass-1 reviewer. You are blind to author
-identity and other reviewers. From the supplied blinded evidence only, return:
+You are the [first|second] Pass-1 reviewer, requested from the selected profile's
+assigned bucket. You are blind to author identity and other reviewers. From the supplied blinded evidence only, return:
 1. proposed CriterionDefinition[] (definitions only; no status/reason);
-2. material ReviewFinding[] with evidence refs and valid proposed ledger effect;
-3. at most relevant candidate human-only uncertainty/question; and
-4. executable candidate reviewer checks only:
-   command|automated_check => command + cwd;
-   static_inspection => target + query.
-Do not execute checks, classify the ledger, choose an overall result, expose
+2. at most one relevant candidate human-only uncertainty/question.
+Do not classify the ledger, choose an overall result, expose
 identity assumptions, write records, or contact the user. Keep criteria explicit
 or necessary-implied and retain superseded intent for consolidation.
 ```
 
 Persist both proposals, including proposal IDs and runtime-captured requested vs
-effective resolution. Candidate checks are proposals only.
+effective resolution.
 
-### Pass 2 — medium consolidation for every unrated target
+### Pass 2 — profile-matched coordination for every unreviewed target
 
-After both Pass-1 proposals, call one isolated medium-requested consolidator per
-target with the same blinded bundle plus both proposals. It must:
+After both Pass-1 proposals, call one isolated coordinator per target with the
+same blinded bundle plus both proposals: request medium for small + medium (which
+may effectively downgrade to small), or request/effectively use small for
+user-constrained small + small. It must:
 
 - deduplicate equivalent criteria, resolve requirement boundaries, retain
   superseded requirements, and reject generic quality criteria unless necessary;
@@ -210,43 +188,14 @@ target with the same blinded bundle plus both proposals. It must:
 ```text
 Return a ConsolidationRecord only: definition-only frozenLedger, its SHA-256,
 selectedHumanQuestion (0 or 1), and source/dedup provenance. Do not classify,
-execute checks, ask the user, or mutate the frozen ledger.
+run tools, ask the user, or mutate the frozen ledger.
 ```
 
-Complete this pass for **every** unrated target before asking any question.
+Complete this pass for **every** unreviewed target before asking any question.
 
-### Pass 3 — one deterministic shared reviewer-check pass
+### Pass 3 — ask all selected human questions, sequentially
 
-For each frozen target, collect both proposals' check specs; semantically
-deduplicate, safety-filter, deterministically select at most about five, then
-execute each selected check exactly once. This is orchestrator work, not a model
-call. Freeze `ReviewerCheck[]` and `reviewerChecksSha256`; append them unchanged
-to that target's blinded bundle for both final reviewers and any adjudicator.
-
-Checks may read/grep, inspect diffs/files, or run no-write/dry-run typecheck,
-build, or test. They must never edit source, mutate the working tree or an
-external system, deploy, use write-capable credentials, require confirmation, or
-otherwise mutate. Mark a prohibited check `declined: mutating`, do not run it.
-Record verbatim capped output and `pass|fail|inconclusive|declined: mutating`.
-A failure is evidence, not a reason to alter artifacts. Do not add, drop, or
-rerun checks after freezing.
-
-Every executed (non-`declined: mutating`) check must bind its result/status/
-evidence to the actual prior orchestrator tool call that ran it and that call's
-immutable output — do not fabricate or trust caller-supplied output. On each
-executed check record `toolCallId` (the prior bash/read/grep call id) and
-`outputSha256` (SHA-256 over the bound tool result's joined text output). The
-`result` field must be a verbatim prefix of that output (the cap; empty is
-valid). `command`/`automated_check` checks bind to a prior `bash` call whose
-`command` argument matches exactly; a non-zero exit (`isError`) must be recorded
-`fail`. `static_inspection` checks bind to a prior `read` (matching the target
-path) or `grep` (pattern === query, target referenced). A `declined: mutating`
-check is skipped and must carry no `toolCallId`/`outputSha256`. These bindings
-are re-validated against the orchestrator transcript at `recordReview` time.
-
-### Pass 4 — ask all selected human questions, sequentially
-
-Only now, after every target has been inspected/consolidated and checks frozen,
+Only now, after every target has been inspected/consolidated,
 ask each affected target's single selected question sequentially. Ask only when
 it resolves a material human-observable uncertainty unavailable from the bundle
 (visual/interactions, semantics/tone, accessibility experience, external account,
@@ -284,43 +233,40 @@ recordedAt: <time> }`, while preserving that original raw result in the evidence
 bundle/transcript. Store a factual interpretation. For cancelled, unanswered,
 unavailable, or inconclusive answers, set human evidence truthfully, mark only
 affected criteria `not_assessable` when needed, lower coverage/confidence
-appropriately, and continue. Do not start Pass 5 until the whole batch has
+appropriately, and continue. Do not start Pass 4 until the whole batch has
 answered or been marked unavailable.
 
-### Pass 5 — fresh independent final classifications
+### Pass 4 — fresh independent final classifications
 
-For every unrated target, launch **fresh** isolated small-requested and
-medium-requested reviewers in parallel. Do not reuse Pass-1 reviewers as the
-classification output. Give each exactly the same final blinded bundle:
-frozen ledger/hash, rendered transcript/diff manifest, immutable shared checks
-and hash, and the target's human response (if any).
+For every unreviewed target, launch **fresh** isolated reviewers in parallel using
+the selected reviewer profile. Do not reuse Pass-1 reviewers as the classification
+output. Give each exactly the same final blinded bundle:
+frozen ledger/hash, rendered transcript/diff manifest, and the target's human
+response (if any).
 
 ```text
-You are the [small|medium]-requested Pass-5 classifier. Classify every and only
-frozen definition once as ClassifiedCriterion, using valid status/reason pairs
-and evidence/finding refs. Return process vector, evidence vector, findings,
-confidence, and proposed overall (comparison only). Do not derive canonical
-attainment, add/drop/rerun checks, alter frozenLedger, write records, or ask the
-user. If a critical/major necessary-implied defect needs a new criterion, return
-a CriterionAmendmentProposal with its motivating finding instead; do not mutate
-the frozen ledger. You are blind to author identity and other reviewers.
+You are the [first|second] Pass-4 classifier, requested from the selected profile's
+assigned bucket. Classify every and only frozen definition once as ClassifiedCriterion, using valid status/reason pairs
+and evidence refs. Return process vector, evidence vector, confidence, and
+proposed overall (comparison only). Do not derive canonical attainment, alter
+frozenLedger, write records, or ask the user. You are blind to author identity
+and other reviewers.
 ```
 
 Persist both complete component assessments with actual runtime metadata. Compute
 `diversityAchieved` only from their effective provider/family pair.
 
-### Pass 6 — detect disagreement, then adjudicate or merge
+### Pass 5 — detect disagreement, then adjudicate or merge
 
-First compare the two final assessments. Invoke exactly one fresh
-medium-requested adjudicator if **any** material condition occurs:
+First compare the two final assessments. Invoke exactly one fresh profile-matched adjudicator if **any** material condition
+occurs: request medium for small + medium (which may effectively downgrade to
+small), or request/effectively use small for user-constrained small + small.
 
 - any core criterion-status disagreement, including any `blocked`,
   `not_assessable`, or `superseded` pair;
 - supporting/optional statuses differing two graded steps (`met` ↔ `unmet`), or
   any pair involving `blocked`, `not_assessable`, or `superseded`;
-- a critical/major finding, or a regression finding, reported by only one reviewer;
 - any unequal categorical `evidence.human` value;
-- any proposed post-freeze criterion amendment;
 - opposite/incomparable process values: `proportionate` vs `oververified` or
   `overclarified`; `underverified` vs `oververified`; `underclarified` vs
   `overclarified`; `effective` vs `ineffective`; `controlled` vs
@@ -329,8 +275,7 @@ medium-requested adjudicator if **any** material condition occurs:
   or `no_final_claim`.
 
 The adjudicator sees both assessments and the same immutable final blinded bundle.
-It resolves disputed fields with evidence refs and all amendments with one of the
-four required dispositions. It may not execute checks or mutate frozen definitions.
+It resolves disputed fields with evidence refs. It may not mutate frozen definitions.
 Mark every adjudicated field `resolution: adjudicator`.
 
 If no material condition exists, apply these **only** deterministic rules; never
@@ -352,11 +297,13 @@ average categorical values or invent a conservative result for off-scale values:
 | recovery | `partly_effective`/`ineffective` | `ineffective` |
 
 For a chosen status, use its matching reason; same-status reasons choose the more
-specific valid reason. Union limitations. Union findings (a one-sided minor/nit
-remains). Use lower confidence. `none`/`not_applicable` versus graded evidence
+specific valid reason. Union limitations. Use lower confidence. `none`/`not_applicable` versus graded evidence
 coverage is material, as are non-adjacent graded process pairs and every
-final-claim-accuracy disagreement. Record each field source as `small`, `medium`,
-`deterministic_merge`, or `adjudicator`; discard both proposed overalls.
+final-claim-accuracy disagreement. For each disputed comparison, record `firstValue` and `secondValue` in component
+order; resolution is only `adjudicator` or
+`deterministic_merge`. Adjudication `resolvedFields` must exactly cover the computed
+material fields, including a criterion reason paired with a material status. Discard
+both proposed overalls.
 
 ### Derive attainment and index deterministically
 
@@ -392,22 +339,21 @@ Set `qualityIndexV1` to `null` if controllable overall is `not_assessable`.
 Otherwise calculate class-weighted controllable assessable attainment with weights
 core `1`, supporting `.5`, optional `.25`, then round/clamp within the fixed band:
 `not_achieved [0,24]`, `partly_achieved [25,59]`, `mostly_achieved [60,84]`,
-`achieved [85,100]`; `round(floor + width * attainment)`. Do not add finding,
-coverage, confidence, or blocker penalties.
+`achieved [85,100]`; `round(floor + width * attainment)`. Do not add coverage,
+confidence, or blocker penalties.
 
-### Pass 7 — persist, explicitly close, then self-close
+### Pass 6 — persist, explicitly close, then self-close
 
-For every unrated target, assemble and call `recordReview` with the complete V2
-record: exact frozen ledger/hash and classified ledger; amendments; deterministic
-attainment/index; canonical vectors/findings/human check/confidence; two Pass-1
-proposals, consolidation, shared checks/hash (each executed check bound to its
-prior tool call and immutable output), two Pass-5 components,
+For every unreviewed target, assemble and call `recordReview` with the complete
+schema-version-2 record: exact frozen ledger/hash and classified ledger;
+deterministic attainment/index; canonical vectors/human check/confidence; two
+Pass-1 proposals, consolidation, two Pass-4 components,
 disagreement/adjudication; evidence manifest; runtime pipeline IDs and requested/
 effective reviewer provenance; and `provenance.hostVersion` copied verbatim from
 the host's `PIE_EDITOR_VERSION` env var (or `null` when that var is unset — the
 reviewer never guesses a host version; it is re-validated against the host at
-record time). Verify status/reason, finding/ledger-effect, frozen-ledger/hash,
-amendment, tuple cardinality, and blinding invariants before writing. The
+record time). Verify status/reason, frozen-ledger/hash, tuple cardinality, and
+blinding invariants before writing. The
 canonical review record append is fsynced to disk before any `closeReviewed`
 enqueue is allowed. If an ordinary duplicate is returned, use its existing
 `reviewId`; never attempt a second production record.
@@ -426,14 +372,12 @@ and end the turn; make no more tool calls.
 
 ## Pre-record checklist
 
-- [ ] Pass-0 partition was made once; self excluded; already-reviewed targets were not rated.
+- [ ] Pass-0 partition was made once; self excluded; already-reviewed targets did not enter the review pipeline.
 - [ ] Every reviewer got the same target-specific blinded bundle; raw JSONL/model identity absent.
-- [ ] Both Pass-1 proposals and medium consolidation exist; frozen ledger/hash match exactly.
-- [ ] Shared checks were deterministic, safe, run once, frozen, and supplied to both final reviewers. Each executed check is bound to its prior orchestrator tool call (`toolCallId`) and immutable output (`outputSha256`, `result` a verbatim prefix); declined checks carry no binding.
+- [ ] Both Pass-1 proposals and profile-matched coordination exist; frozen ledger/hash match exactly.
 - [ ] All human questions were asked sequentially after all consolidation; max one per affected target; inputs/results are embedded. Cancelled/unanswered responses omit the `answer` key (an explicit `answer: undefined` is rejected).
-- [ ] Fresh small/medium Pass-5 assessments classify every frozen definition exactly once.
-- [ ] Material disagreements/amendments were adjudicated; otherwise only permitted adjacent deterministic merges occurred; no spurious disputed fields are recorded.
-- [ ] Critical/major canonical findings have a criterion and non-`none` ledger effect.
+- [ ] Fresh Pass-4 assessments matching the accepted reviewer profile classify every frozen definition exactly once.
+- [ ] Material disagreements were adjudicated; otherwise only permitted adjacent deterministic merges occurred; no spurious disputed fields are recorded.
 - [ ] Attainment and index were derived from the canonical ledger, not reviewer overalls.
 - [ ] `provenance.hostVersion` matches the host's `PIE_EDITOR_VERSION` (or `null` when unset).
 - [ ] `recordReview` succeeded (canonical append fsynced) before each `closeReviewed`; closure retries use the outbox; `closeSelf` remains last.

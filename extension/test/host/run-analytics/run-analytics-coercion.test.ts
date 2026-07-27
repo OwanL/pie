@@ -32,7 +32,6 @@ function makeRunSnapshot(): RunSnapshot {
     runId: 'run-1',
     taskGroupId: 'task-1',
     status: 'open',
-    scored: false,
     startedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     mixedModelConfig: false,
@@ -249,8 +248,8 @@ test('stats-service helpers summarize inputs, checkpoint parsing, and utility he
   assert.notEqual(workspaceHash('workspace-a'), workspaceHash('workspace-b'));
 
   assert.equal(toActiveRunSummary(null), null);
-  assert.deepEqual(toActiveRunSummary(run), { runId: 'run-1', status: 'open', scored: false });
-  assert.deepEqual(toActiveRunSummary(run, true), { runId: 'run-1', status: 'open', scored: false, nextSendStartsNewTask: true });
+  assert.deepEqual(toActiveRunSummary(run), { runId: 'run-1', status: 'open' });
+  assert.deepEqual(toActiveRunSummary(run, true), { runId: 'run-1', status: 'open', nextSendStartsNewTask: true });
 
   const persisted = toPersistedSessionState({
     currentRun: run,
@@ -352,6 +351,15 @@ test('coerceRunSnapshot preserves per-turn provider on throughput samples', () =
   const coerced = coerceRunSnapshot(snapshot);
   assert.equal(coerced?.turnThroughputSamples[0]?.provider, 'openai');
   assert.equal(coerced?.turnThroughputSamples[1]?.provider, undefined);
+});
+
+test('coerceRunSnapshot rejects removed scoring-era statuses', () => {
+  for (const value of [
+    { ...makeRunSnapshot(), status: 'scored', finalizationReason: 'scored' },
+    { ...makeRunSnapshot(), status: 'closed_unscored', finalizationReason: 'closed_unscored' },
+  ]) {
+    assert.equal(coerceRunSnapshot(value as unknown as RunSnapshot), null);
+  }
 });
 
 test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defaulting missing/malformed ones to null', () => {

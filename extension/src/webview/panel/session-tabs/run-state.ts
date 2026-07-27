@@ -27,12 +27,7 @@ export function getSessionTabRunMenuItems(runSummary: ActiveRunSummary | null): 
       return [
         { action: 'startNewTask', label: 'Start new task' },
       ];
-    case 'closed_unscored':
-      return [
-        { action: 'continueTask', label: 'Continue task' },
-        { action: 'startNewTask', label: 'Start new task' },
-      ];
-    case 'scored':
+    case 'closed':
       return [
         { action: 'continueTask', label: 'Continue task' },
         { action: 'startNewTask', label: 'Start new task' },
@@ -58,23 +53,13 @@ export function getComposerRunControls(runSummary: ActiveRunSummary | null): Com
             }
           : null,
       };
-    case 'closed_unscored':
+    case 'closed':
       return {
         status: runSummary.nextSendStartsNewTask
           ? {
               text: 'New task queued',
               tone: 'subtle',
               title: 'The next send will start a new task group after this completed run.',
-            }
-          : null,
-      };
-    case 'scored':
-      return {
-        status: runSummary.nextSendStartsNewTask
-          ? {
-              text: 'New task queued',
-              tone: 'subtle',
-              title: 'The next send will start a new task group instead of continuing the completed one.',
             }
           : null,
       };

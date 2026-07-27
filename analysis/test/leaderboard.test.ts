@@ -1,20 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { PreparedRunRow } from '../scripts/contracts.ts';
+import type { PreparedAnalyticsData, PreparedRunRow, PreparedSessionReviewV2Row, ReviewerRuntimeReference } from '../scripts/contracts.ts';
 import { createModelLeaderboard, createModelLeaderboardFromRuns } from '../scripts/leaderboard.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { deepClone, loadFixture } from './helpers.ts';
 
-test('V2 model leaderboard is outcome-only and leaves legacy/runtime-only families unranked', async () => {
+test('V2 model leaderboard is review-only and leaves runtime-only families unranked', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
   assert.equal(leaderboard.schemaVersion, 6);
-  assert.deepEqual(leaderboard.sourceWeights, { user: 0, agent: 1, process: 0 });
-  assert.deepEqual(leaderboard.shrinkage, { user: 4, agent: 8, process: 20 });
+  assert.deepEqual(leaderboard.sourceWeights, { review: 1, process: 0 });
+  assert.deepEqual(leaderboard.shrinkage, { review: 8, process: 20 });
   assert.ok(leaderboard.rows.some((row) => row.modelId !== '(unknown)'));
   assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
-  assert.match(leaderboard.notes.join(' '), /outcome-only/i);
+  assert.match(leaderboard.notes.join(' '), /review-only/i);
 });
 
 test('run-only compatibility path collapses thinking levels to one family row', async () => {
@@ -35,16 +35,12 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
     sessionId: overrides.sessionId ?? `session-${overrides.runId}`,
     identityFallback: overrides.identityFallback ?? false,
     sessionPathHash: overrides.sessionPathHash ?? `hash-${overrides.runId}`,
-    status: overrides.status ?? 'scored',
-    scored: overrides.scored ?? true,
+    status: overrides.status ?? 'closed',
     startedAt: overrides.startedAt ?? '2026-05-10T12:00:00.000Z',
     startedDay: overrides.startedDay ?? '2026-05-10',
     updatedAt: overrides.updatedAt ?? '2026-05-10T12:00:00.000Z',
     finalizedAt: overrides.finalizedAt ?? '2026-05-10T12:00:00.000Z',
-    finalizationReason: overrides.finalizationReason ?? 'scored',
-    resolution: overrides.resolution ?? 'resolved',
-    satisfaction: overrides.satisfaction ?? 4,
-    outcomeSource: overrides.outcomeSource ?? 'user',
+    finalizationReason: overrides.finalizationReason ?? 'closed',
     modelId: overrides.modelId,
     modelFamily: overrides.modelFamily ?? overrides.modelId,
     provider: overrides.provider ?? null,
@@ -147,7 +143,6 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
     tokenEfficiency: overrides.tokenEfficiency ?? null,
     contextUtilization: overrides.contextUtilization ?? null,
     cacheHitRatio: overrides.cacheHitRatio ?? null,
-    firstAttemptSuccess: overrides.firstAttemptSuccess ?? true,
     editRevisitRate: overrides.editRevisitRate ?? null,
     filesReviewedCount: overrides.filesReviewedCount ?? 0,
     readRevisitRate: overrides.readRevisitRate ?? null,
@@ -155,12 +150,84 @@ function makeRun(overrides: Partial<PreparedRunRow> & { runId: string; modelId: 
   };
 }
 
+function makeReview(run: PreparedRunRow, reviewId: string, qualityIndexV1: number, reviewers: ReviewerRuntimeReference[], overrides: Partial<PreparedSessionReviewV2Row> = {}): PreparedSessionReviewV2Row {
+  return {
+    cohort: 'v2_production', schemaVersion: 2, reviewId, sessionId: run.sessionId,
+    identityFallback: false, rubricVersion: 'session-review-v2.1', indexVersion: 'v1',
+    reviewedAt: '2026-07-24T10:00:00.000Z', startedDay: '2026-07-24', joinKey: 'session_id',
+    runIds: [run.runId], modelFamilies: [run.modelFamily!], criteria: [],
+    attainment: {
+      deliveredOverall: 'achieved', controllableOverall: 'achieved',
+      core: { total: 1, assessable: 1, controllableDenominator: 1, met: 1, partlyMet: 0, unmet: 0, blocked: 0, externalBlocked: 0, notAssessable: 0, superseded: 0, deliveredRate: 1, controllableRate: 1 },
+      supporting: { total: 0, assessable: 0, controllableDenominator: 0, met: 0, partlyMet: 0, unmet: 0, blocked: 0, externalBlocked: 0, notAssessable: 0, superseded: 0, deliveredRate: 0, controllableRate: 0 },
+      optional: { total: 0, assessable: 0, controllableDenominator: 0, met: 0, partlyMet: 0, unmet: 0, blocked: 0, externalBlocked: 0, notAssessable: 0, superseded: 0, deliveredRate: 0, controllableRate: 0 },
+      qualityIndexV1,
+    },
+    criterionCoverage: 1, externalBlockerRate: 0,
+    process: { requirementDiscipline: 'strong', verificationDiscipline: 'strong', scopeControl: 'strong', recovery: 'not_needed', finalClaimAccuracy: 'accurate' },
+    evidence: { requirements: 'strong', artifacts: 'strong', execution: 'strong', human: 'not_needed', limitations: [] },
+    humanCheckStatus: null, confidence: 'high',
+    disagreement: { material: false, adjudicated: false, disputedFields: [] },
+    reviewers, diversityAchieved: reviewers.some((reviewer) => reviewer.requestedBucket === 'medium'), blindingApplied: true,
+    ...overrides,
+  };
+}
+
+function reviewer(reviewerId: string, requestedBucket: 'small' | 'medium'): ReviewerRuntimeReference {
+  return {
+    role: 'proposal', reviewerId, requestedBucket, bucket: requestedBucket,
+    bucketDowngraded: false, modelId: `reviewer-${reviewerId}`, provider: 'test',
+    family: `reviewer-${reviewerId}`, thinkingLevel: null,
+  };
+}
+
+async function preparedForLeaderboard(runs: PreparedRunRow[], reviews: PreparedSessionReviewV2Row[]): Promise<PreparedAnalyticsData> {
+  const prepared = prepareSourceAnalytics(await loadFixture());
+  return { ...prepared, runs, sessionReviewsV2: reviews, historicalSessions: [] };
+}
+
+test('accepted mixed-bucket and small-only V2 reviews both produce provisional ranks', async () => {
+  const smallOnlyRun = makeRun({ runId: 'small-only', modelId: 'reviewed-model', sessionId: 'small-only-session' });
+  const mixedRun = makeRun({ runId: 'mixed-reviewers', modelId: 'reviewed-model', sessionId: 'mixed-reviewers-session' });
+  const smallOnly = [reviewer('small-a', 'small'), reviewer('small-b', 'small')];
+  const mixed = [reviewer('small-c', 'small'), reviewer('medium-a', 'medium')];
+  const prepared = await preparedForLeaderboard(
+    [smallOnlyRun, mixedRun],
+    [makeReview(smallOnlyRun, 'small-only-review', 80, smallOnly), makeReview(mixedRun, 'mixed-review', 100, mixed)],
+  );
+
+  const row = createModelLeaderboard(prepared).rows[0]!;
+  assert.equal(row.v2ReviewCount, 2);
+  assert.equal(row.reviewEvidenceMass, 2);
+  assert.equal(row.evidenceTier, 'thin-review');
+  assert.equal(row.rank, 1);
+  assert.ok(row.compositeScore !== null);
+  assert.ok(row.scoreInterval80!.lower <= row.compositeScore! && row.compositeScore! <= row.scoreInterval80!.upper);
+});
+
+test('three accepted V2 reviews are review-backed and excluded reviews cannot rank', async () => {
+  const runs = Array.from({ length: 3 }, (_, index) => makeRun({ runId: `reviewed-${index}`, modelId: 'reviewed-model', sessionId: `reviewed-session-${index}` }));
+  const reviews = runs.map((run, index) => makeReview(run, `review-${index}`, 75 + index * 10, [reviewer(`small-${index}`, 'small')]));
+  const ranked = createModelLeaderboard(await preparedForLeaderboard(runs, reviews)).rows[0]!;
+  assert.equal(ranked.evidenceTier, 'review-backed');
+  assert.equal(ranked.rank, 1);
+  assert.deepEqual([ranked.scoreInterval80!.bestRank, ranked.scoreInterval80!.worstRank], [1, 1]);
+
+  const excluded = [
+    makeReview(runs[0]!, 'identity-fallback', 100, [reviewer('excluded-a', 'small')], { identityFallback: true }),
+    makeReview(runs[1]!, 'unblinded', 100, [reviewer('excluded-b', 'small')], { blindingApplied: false }),
+  ];
+  const unranked = createModelLeaderboard(await preparedForLeaderboard(runs.slice(0, 2), excluded)).rows[0]!;
+  assert.equal(unranked.evidenceTier, 'telemetry-only');
+  assert.equal(unranked.compositeScore, null);
+  assert.equal(unranked.rank, null);
+});
+
 test('dimension native bounds: all dimension values stay within their native ranges', () => {
   const runs: PreparedRunRow[] = [];
   for (let i = 0; i < 5; i++) {
     runs.push(makeRun({
       runId: `strong-${i}`, modelId: 'strong-model',
-      satisfaction: 5, resolution: 'resolved',
       editRevisitRate: 0.8, tokenEfficiency: 40,
       toolCallCount: 10, toolFailureCount: 2,
       verificationTotalCount: 3, verificationState: 'passing',
@@ -169,10 +236,6 @@ test('dimension native bounds: all dimension values stay within their native ran
   const leaderboard = createModelLeaderboardFromRuns(runs);
   const row = leaderboard.rows[0]!;
   const dims = row.dimensions;
-  // satisfaction is mapped to [1, 5]
-  assert.ok(dims.satisfaction.value! >= 1 && dims.satisfaction.value! <= 5, `satisfaction ${dims.satisfaction.value} in [1,5]`);
-  // resolutionRate is [0, 1]
-  assert.ok(dims.resolutionRate.value! >= 0 && dims.resolutionRate.value! <= 1, `resolutionRate ${dims.resolutionRate.value} in [0,1]`);
   // fileChurn is [0, 1] (re-edit rate)
   assert.ok(dims.fileChurn.value! >= 0 && dims.fileChurn.value! <= 1, `fileChurn ${dims.fileChurn.value} in [0,1]`);
   // toolReliability is [0, 1]
@@ -197,13 +260,6 @@ test('subagent context fields: subagentRunCount, usageRate, and avgTasks are pop
   assert.equal(row.avgSubagentTasksPerRun, 4);
 });
 
-test('legacy user outcome differences do not create a V2 rank', () => {
-  const strong = makeRun({ runId: 'strong', modelId: 'strong-model', satisfaction: 5, resolution: 'resolved' });
-  const weak = makeRun({ runId: 'weak', modelId: 'weak-model', satisfaction: 1, resolution: 'unresolved' });
-  const leaderboard = createModelLeaderboardFromRuns([strong, weak]);
-  assert.ok(leaderboard.rows.every((row) => row.rank === null && row.compositeScore === null));
-});
-
 test('fileChurn diagnostic direction: value is re-edit rate, shrunk inverts for display', () => {
   const runs: PreparedRunRow[] = [
     makeRun({ runId: 'churn-1', modelId: 'churn-model', editRevisitRate: 0.9 }),
@@ -224,13 +280,12 @@ test('runtime process differences do not create a V2 rank', () => {
 
 test('open runs excluded from leaderboard run counts', () => {
   const runs: PreparedRunRow[] = [
-    makeRun({ runId: 'completed-1', modelId: 'excl-model', status: 'scored', satisfaction: 4 }),
-    makeRun({ runId: 'open-1', modelId: 'excl-model', status: 'open', scored: false, satisfaction: null, resolution: null, outcomeSource: null }),
+    makeRun({ runId: 'completed-1', modelId: 'excl-model', status: 'closed' }),
+    makeRun({ runId: 'open-1', modelId: 'excl-model', status: 'open' }),
   ];
   const leaderboard = createModelLeaderboardFromRuns(runs);
   const row = leaderboard.rows.find((row) => row.modelId === 'excl-model')!;
   assert.equal(row.runCount, 1, 'open run is excluded from runCount');
-  assert.equal(row.scoredRunCount, 1);
 });
 
 test('null telemetry produces finite leaderboard values (no NaN/Infinity)', () => {
@@ -262,28 +317,17 @@ test('null telemetry produces finite leaderboard values (no NaN/Infinity)', () =
   assert.equal(row.medianCostUsd, null, 'no cost → null');
 });
 
-test('provider canonical sums: runCount and scoredRunCount sum to row totals', async () => {
+test('provider canonical run counts sum to row totals', async () => {
   const fixture = deepClone(await loadFixture());
   const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
   for (const row of leaderboard.rows) {
     const runSum = row.providers.reduce((sum, provider) => sum + provider.runCount, 0);
-    const scoredSum = row.providers.reduce((sum, provider) => sum + provider.scoredRunCount, 0);
     assert.equal(runSum, row.runCount, `provider runCount sum matches row.runCount for ${row.modelId}`);
-    assert.equal(scoredSum, row.scoredRunCount, `provider scoredRunCount sum matches row.scoredRunCount for ${row.modelId}`);
     // Transcript fields are always present and non-negative.
     for (const provider of row.providers) {
       assert.ok(typeof provider.transcriptOnlySessionCount === 'number' && provider.transcriptOnlySessionCount >= 0);
       assert.ok(typeof provider.transcriptEvidenceMass === 'number' && Number.isFinite(provider.transcriptEvidenceMass) && provider.transcriptEvidenceMass >= 0);
     }
-  }
-});
-
-test('userOutcomeCount and agentOutcomeCount are rounded consistently with evidence mass', async () => {
-  const prepared = prepareSourceAnalytics(await loadFixture());
-  const leaderboard = createModelLeaderboard(prepared);
-  for (const row of leaderboard.rows) {
-    assert.equal(row.userOutcomeCount, row.userEvidenceMass, 'userOutcomeCount matches userEvidenceMass (both rounded)');
-    assert.equal(row.agentOutcomeCount, row.agentEvidenceMass, 'agentOutcomeCount matches agentEvidenceMass (both rounded)');
   }
 });
 

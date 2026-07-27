@@ -51,6 +51,7 @@ import {
 } from './sdk';
 import { ProviderGate } from './provider-gate.js';
 import { observeProviderTransport } from './provider-progress-bus.js';
+import { observeProviderIncidents, providerIncidentCode } from './provider-incident.js';
 import { BackendError, extractRequestError, log, responseError, responseOk, writeStdout } from './server-io';
 import { isBackendLivePipelineTraceEnabled, recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
 import {
@@ -174,6 +175,7 @@ export class BackendServer {
   private sessionCatalogPollingActive = false;
   private sessionCatalogPollInFlight = false;
   private stopProviderProgressObserver?: () => void;
+  private stopProviderIncidentObserver?: () => void;
   /** Captures request+turn ownership at an attempt's first synchronous gate
    * observation so a late acquisition cannot be charged to a newer request. */
   private readonly providerAttemptOwners = new Map<string, {
@@ -307,6 +309,49 @@ export class BackendServer {
                   ? 'semantic_stream'
                   : 'terminal',
         });
+      }
+    });
+
+    this.stopProviderIncidentObserver = observeProviderIncidents((incident) => {
+      const context = [...this.sessionContexts.values()].find((candidate) =>
+        candidate.session.sessionManager.getSessionId?.() === incident.sessionId,
+      );
+      const active = context?.activeRequest;
+      if (!context || !active) return;
+
+      active.latestProviderIncident = incident;
+      active.lastProviderErrorForDiagnostics = incident.userMessage;
+      const noticeKey = [
+        incident.kind,
+        incident.providerHost,
+        incident.status ?? '',
+        incident.retryAt ?? '',
+      ].join(':');
+      const emitted = active.providerIncidentNoticeKeys ?? new Set<string>();
+      active.providerIncidentNoticeKeys = emitted;
+      if (!emitted.has(noticeKey)) {
+        emitted.add(noticeKey);
+        this.emit('operational-error', {
+          code: providerIncidentCode(incident.kind),
+          message: incident.userMessage,
+          detail: incident.detail,
+          sessionPath: context.sessionPath,
+          requestId: active.id,
+        });
+      }
+
+      // A terminal quota response cannot recover by waiting on the same
+      // provider. Give the SDK a short window to publish its normal terminal
+      // message, then fence/replace the runtime if it remains busy. This turns
+      // hidden SDK backoff into a bounded, explicit failure.
+      if (incident.kind === 'quota_exhausted' && !active.quotaSettlementTimer) {
+        const requestId = active.id;
+        active.quotaSettlementTimer = setTimeout(() => {
+          const current = context.activeRequest;
+          if (current?.id !== requestId || current.latestProviderIncident?.kind !== 'quota_exhausted') return;
+          this.recoverStuckSession(context, current.latestProviderIncident.userMessage);
+        }, 15_000);
+        active.quotaSettlementTimer.unref?.();
       }
     });
 
@@ -1151,8 +1196,10 @@ export class BackendServer {
     context.willRetryWatchdogClear = undefined;
     if (active.promptSafetyTimer) clearTimeout(active.promptSafetyTimer);
     if (active.semanticLeaseTimer) clearTimeout(active.semanticLeaseTimer);
+    if (active.quotaSettlementTimer) clearTimeout(active.quotaSettlementTimer);
     active.promptSafetyTimer = undefined;
     active.semanticLeaseTimer = undefined;
+    active.quotaSettlementTimer = undefined;
     active.pendingDurableToolTerminals?.clear();
     active.aborted = true;
     if (active.liveTurnAccumulator) {
@@ -1246,6 +1293,8 @@ export class BackendServer {
     this.stopReviewWatcher = undefined;
     this.stopProviderProgressObserver?.();
     this.stopProviderProgressObserver = undefined;
+    this.stopProviderIncidentObserver?.();
+    this.stopProviderIncidentObserver = undefined;
     this.providerAttemptOwners.clear();
 
     for (const context of contexts) {

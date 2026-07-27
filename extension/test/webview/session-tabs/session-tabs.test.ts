@@ -10,28 +10,15 @@ test('getSessionTabRunMenuItems exposes the start-new-task action for open runs'
   assert.deepEqual(getSessionTabRunMenuItems({
     runId: 'run-1',
     status: 'open',
-    scored: false,
   }), [
     { action: 'startNewTask', label: 'Start new task' },
   ]);
 });
 
-test('getSessionTabRunMenuItems offers continuation for closed unscored runs', () => {
+test('getSessionTabRunMenuItems offers continuation for closed runs', () => {
   assert.deepEqual(getSessionTabRunMenuItems({
     runId: 'run-2',
-    status: 'closed_unscored',
-    scored: false,
-  }), [
-    { action: 'continueTask', label: 'Continue task' },
-    { action: 'startNewTask', label: 'Start new task' },
-  ]);
-});
-
-test('getSessionTabRunMenuItems offers continuation for scored runs', () => {
-  assert.deepEqual(getSessionTabRunMenuItems({
-    runId: 'run-3',
-    status: 'scored',
-    scored: true,
+    status: 'closed',
   }), [
     { action: 'continueTask', label: 'Continue task' },
     { action: 'startNewTask', label: 'Start new task' },
@@ -46,27 +33,15 @@ test('getComposerRunControls returns no status for open runs without a queued ne
   assert.deepEqual(getComposerRunControls({
     runId: 'run-open-toolbar',
     status: 'open',
-    scored: false,
   }), {
     status: null,
   });
 });
 
-test('getComposerRunControls returns no status for closed unscored runs without a queued new task', () => {
+test('getComposerRunControls returns no status for closed runs without a queued new task', () => {
   assert.deepEqual(getComposerRunControls({
-    runId: 'run-needs-rating',
-    status: 'closed_unscored',
-    scored: false,
-  }), {
-    status: null,
-  });
-});
-
-test('getComposerRunControls returns no status after a run is scored without a queued new task', () => {
-  assert.deepEqual(getComposerRunControls({
-    runId: 'run-complete',
-    status: 'scored',
-    scored: true,
+    runId: 'run-closed',
+    status: 'closed',
   }), {
     status: null,
   });
@@ -75,14 +50,13 @@ test('getComposerRunControls returns no status after a run is scored without a q
 test('getComposerRunControls surfaces queued new-task state', () => {
   assert.deepEqual(getComposerRunControls({
     runId: 'run-queued',
-    status: 'scored',
-    scored: true,
+    status: 'closed',
     nextSendStartsNewTask: true,
   }), {
     status: {
       text: 'New task queued',
       tone: 'subtle',
-      title: 'The next send will start a new task group instead of continuing the completed one.',
+      title: 'The next send will start a new task group after this completed run.',
     },
   });
 });
@@ -91,7 +65,6 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
   assert.deepEqual(getComposerRunControls({
     runId: 'run-open-queued',
     status: 'open',
-    scored: false,
     nextSendStartsNewTask: true,
   }), {
     status: {
@@ -103,8 +76,7 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
 
   assert.deepEqual(getComposerRunControls({
     runId: 'run-closed-queued',
-    status: 'closed_unscored',
-    scored: false,
+    status: 'closed',
     nextSendStartsNewTask: true,
   }), {
     status: {
@@ -117,11 +89,9 @@ test('run-state helpers handle queued states and unknown statuses defensively', 
   assert.deepEqual(getSessionTabRunMenuItems({
     runId: 'run-unknown',
     status: 'mystery' as never,
-    scored: false,
   }), []);
   assert.deepEqual(getComposerRunControls({
     runId: 'run-unknown',
     status: 'mystery' as never,
-    scored: false,
   }), { status: null });
 });

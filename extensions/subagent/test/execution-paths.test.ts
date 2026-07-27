@@ -183,6 +183,50 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(state.disposeCalls, 1);
 });
 
+test("runSingleAgent fails closed before session creation when final provider resolution cannot satisfy image input", async () => {
+	const { sdk, state } = createFakeSdk();
+	const textOnly = { id: "model-a", provider: "test", input: ["text"] } as any;
+	const registry = {
+		getAvailable: () => [textOnly],
+		getAll: () => [textOnly],
+		find: () => textOnly,
+	} as any;
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"inspect image",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		registry,
+		textOnly,
+		{ modelId: "model-a", bucket: "small", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 50 },
+		undefined,
+		undefined,
+		{ inputKinds: ["image"] },
+	);
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "error");
+	assert.equal(result.modelRequirementsSatisfied, false);
+	assert.deepEqual(result.requestedModelRequirements, { inputKinds: ["image"] });
+	assert.match(result.requirementDiagnostic ?? "", /No enabled image-capable model/);
+	assert.match(result.requirementDiagnostic ?? "", /remove modelRequirements\.inputKinds=\["image"\]/);
+	assert.equal(state.createResourceLoaderArgs.length, 0);
+	assert.equal(state.createSessionArgs.length, 0);
+	assert.equal(state.promptCalls, 0);
+});
+
 test("runSingleAgent fences late SDK events even when unsubscribe is a no-op", async () => {
 	const updates: unknown[] = [];
 	const { bridge, calls } = makeParentBridge();

@@ -1,0 +1,133 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { BackendLiveTurnAccumulator } from '../../../../src/backend/live-turn-accumulator';
+import { initialArchState, reducer, type ArchState } from '../../../../src/host/core/reducer';
+import { projectTranscriptView } from '../../../../src/host/core/live-pipeline/projection';
+import type { SessionOpenedPayload } from '../../../../src/shared/protocol';
+import { LIVE_PIPELINE_PROTOCOL_VERSION } from '../../../../src/shared/live-pipeline-protocol';
+
+const sessionPath = '/session.jsonl';
+
+function liveCheckpoint(text: string) {
+  const accumulator = new BackendLiveTurnAccumulator({
+    protocolVersion: LIVE_PIPELINE_PROTOCOL_VERSION,
+    sessionPath,
+    requestId: 'request-1',
+    turnId: 'turn-1',
+    attemptId: 'attempt-1',
+    canonicalMessageId: 'request-1:1',
+    modelId: 'model-1',
+    startedAt: 1_000,
+  });
+  accumulator.observe({ kind: 'turn.started' }, 1_000);
+  accumulator.observe({ kind: 'turn.text', delta: text }, 1_001);
+  return accumulator.checkpoint();
+}
+
+function payload(checkpoint = liveCheckpoint('Recovered work')): SessionOpenedPayload {
+  return {
+    session: {
+      path: sessionPath,
+      cwd: '/workspace',
+      name: 'Running',
+      modifiedAt: '2026-07-28T00:00:00.000Z',
+      messageCount: 2,
+    },
+    transcript: [{
+      id: 'user-1',
+      role: 'user',
+      createdAt: '2026-07-28T00:00:00.000Z',
+      markdown: 'Do the work',
+      status: 'completed',
+    }],
+    transcriptWindow: {
+      totalCount: 2,
+      loadedStart: 0,
+      loadedEnd: 1,
+      hasOlder: false,
+      hasNewer: true,
+      isPartial: true,
+      hasUserMessages: true,
+    },
+    busy: true,
+    liveTurnCheckpoint: checkpoint,
+  };
+}
+
+test('busy session.opened atomically replaces a stale/tombstoned live turn from its checkpoint', () => {
+  const stale = liveCheckpoint('starting model...');
+  const key = `${stale.turnId}\u0000${stale.attemptId}`;
+  const before: ArchState = {
+    ...initialArchState,
+    livePipeline: {
+      ...initialArchState.livePipeline,
+      turnsBySession: { [sessionPath]: stale.turn },
+      terminalAttempts: {
+        [key]: {
+          sessionPath,
+          turnId: stale.turnId,
+          attemptId: stale.attemptId,
+          finalSeq: stale.checkpointSeq,
+          terminalKind: 'error',
+          expiresAt: 99_999,
+        },
+      },
+    },
+  };
+
+  const result = reducer(before, {
+    kind: 'SessionOpened',
+    sessionPath,
+    payload: payload(),
+  });
+
+  const turn = result.state.livePipeline.turnsBySession[sessionPath];
+  assert.ok(turn);
+  assert.equal(turn.parts.find((part) => part.kind === 'text')?.text, 'Recovered work');
+  assert.equal(result.state.livePipeline.terminalAttempts[key], undefined);
+  const view = projectTranscriptView(
+    result.state.transcript.bySession[sessionPath] ?? [],
+    result.state.livePipeline,
+    sessionPath,
+  );
+  assert.equal(view.activeTurn?.markdown, 'Recovered work');
+  assert.equal(result.effects.length, 0);
+});
+
+test('busy open without a checkpoint keeps the durable assistant tail visible and requests repair', () => {
+  const checkpoint = liveCheckpoint('stale live');
+  const before: ArchState = {
+    ...initialArchState,
+    livePipeline: {
+      ...initialArchState.livePipeline,
+      turnsBySession: { [sessionPath]: checkpoint.turn },
+    },
+  };
+  const opened = payload();
+  delete opened.liveTurnCheckpoint;
+  opened.transcript = [
+    opened.transcript[0]!,
+    {
+      id: 'assistant-durable',
+      role: 'assistant',
+      createdAt: '2026-07-28T00:01:00.000Z',
+      markdown: 'Forty-five tools of durable work',
+      status: 'error',
+      errorDetail: 'Provider timed out.',
+    },
+  ];
+  opened.transcriptWindow = {
+    ...opened.transcriptWindow,
+    loadedEnd: 2,
+    hasNewer: false,
+    isPartial: false,
+  };
+
+  const result = reducer(before, { kind: 'SessionOpened', sessionPath, payload: opened });
+  assert.equal(
+    result.state.transcript.bySession[sessionPath]?.at(-1)?.markdown,
+    'Forty-five tools of durable work',
+  );
+  assert.equal(result.effects[0]?.kind, 'RequestLiveTurnCheckpoint');
+});

@@ -773,7 +773,46 @@ test('subagentSingleResultToChatMessages omits model metadata from synthesized n
   assert.equal(messages[0]?.modelId, undefined);
 });
 
-test('subagentSingleResultToChatMessages restores final output from compacted results', () => {
+test('subagentSingleResultToChatMessages does not duplicate an uncompacted final reply split across assistant turns', () => {
+  const messages = subagentSingleResultToChatMessages({
+    agent: 'worker',
+    task: 'inspect the file',
+    exitCode: 0,
+    finalOutput: 'Finished the implementation.',
+    messages: [
+      { role: 'assistant', content: [{ type: 'text', text: 'I will inspect it. ' }, { type: 'toolCall', id: 'tc-1', name: 'read', arguments: { path: 'a.ts' } }] },
+      { role: 'toolResult', toolCallId: 'tc-1', content: 'contents' },
+      { role: 'assistant', content: [{ type: 'text', text: 'Finished the implementation.' }] },
+    ],
+  } as any, 'subagent');
+
+  assert.equal(messages.filter((message) => message.role === 'assistant').length, 1);
+  assert.equal(messages.at(-1)?.markdown, 'I will inspect it. Finished the implementation.');
+  assert.equal(messages.at(-1)?.markdown?.match(/Finished the implementation\./g)?.length, 1);
+});
+
+test('subagentSingleResultToChatMessages does not duplicate a retained final text part in a compacted transcript', () => {
+  const messages = subagentSingleResultToChatMessages({
+    agent: 'worker',
+    task: 'inspect the file',
+    exitCode: 0,
+    transcriptCompacted: true,
+    finalOutput: 'Finished the implementation.',
+    messages: [{
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'Inspection complete. ' },
+        { type: 'toolCall', id: 'tc-1', name: 'read', arguments: { path: 'a.ts' } },
+        { type: 'text', text: 'Finished the implementation.' },
+      ],
+    }],
+  } as any, 'subagent');
+
+  assert.equal(messages.at(-1)?.markdown, 'Inspection complete. Finished the implementation.');
+  assert.equal(messages.at(-1)?.markdown?.match(/Finished the implementation\./g)?.length, 1);
+});
+
+test('subagentSingleResultToChatMessages restores final output into the existing compacted assistant row', () => {
   const messages = subagentSingleResultToChatMessages({
     agent: 'worker',
     task: 'edit the file',
@@ -785,6 +824,21 @@ test('subagentSingleResultToChatMessages restores final output from compacted re
 
   assert.equal(messages.at(-1)?.role, 'assistant');
   assert.equal(messages.at(-1)?.markdown, 'Finished the implementation.');
+  assert.equal(messages.filter((message) => message.role === 'assistant').length, 1);
+  assert.deepEqual(messages.at(-1)?.parts?.map((part) => part.kind), ['toolCall', 'text']);
+});
+
+test('singleResultStatus completes a settled block child before the enclosing tool settles', () => {
+  const result = {
+    agent: 'worker',
+    task: 'edit the file',
+    exitCode: -1,
+    messages: [],
+    activityPhase: 'completed',
+    completedAt: Date.now(),
+  } as any;
+
+  assert.equal(singleResultStatus(result, 'running', true), 'completed');
 });
 
 test('subagentSingleResultToChatMessages returns no rows for running results without task text or transcript', () => {

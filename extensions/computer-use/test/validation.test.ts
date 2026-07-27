@@ -24,6 +24,14 @@ test('validation rejects fields and selector combinations belonging to another a
   valid({ action: 'open', selector: { kind: 'path', path: 'C:/app.exe', args: [] } });
 });
 
+test('open accepts optional screenshot/tree/state for an inline initial observation', () => {
+  valid({ action: 'open', selector: { kind: 'desktop' }, screenshot: true, tree: true, state: true });
+  valid({ action: 'open', selector: { kind: 'foreground' }, screenshot: false, tree: false, state: false });
+  valid({ action: 'open', selector: { kind: 'foreground' }, state: true });
+  invalid({ action: 'open', selector: { kind: 'desktop' }, revision: 1 }, /parameters.revision/);
+  invalid({ action: 'open', selector: { kind: 'desktop' }, input: { kind: 'focus' } }, /parameters.input/);
+});
+
 test('point unions require exactly ref or coordinates and desktop scope is explicit', () => {
   invalid({ action: 'act', sessionId: 's', input: { kind: 'move', target: { ref: 'e:1:0', x: 1, y: 2 } } }, /exactly one/);
   invalid({ action: 'act', sessionId: 's', input: { kind: 'move', target: { x: -1, y: 2 } } }, /cannot be negative/);
@@ -65,4 +73,10 @@ test('target-relative screenshot coordinates require a top-level revision, unlik
   valid({ action: 'act', sessionId: 's', input: { kind: 'move', target: { x: 1, y: 1, scope: 'desktop' } } });
   valid({ action: 'act', sessionId: 's', input: { kind: 'move', target: { ref: 'e:1:0' } } });
   invalid({ action: 'run_sequence', sessionId: 's', sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'move', target: { x: 1, y: 1 } } }] } }, /revision is required/);
+});
+
+test('run_sequence accepts optional screenshot/tree/state for a trailing verification observation', () => {
+  valid({ action: 'run_sequence', sessionId: 's', sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'text', text: 'x' } }] }, screenshot: true, tree: true, state: true });
+  valid({ action: 'run_sequence', sessionId: 's', sequencePath: 'x.json', state: true });
+  invalid({ action: 'run_sequence', sessionId: 's', sequence: { version: 1, actions: [{ atMs: 0, action: { kind: 'text', text: 'x' } }] }, input: { kind: 'focus' } }, /parameters.input/);
 });

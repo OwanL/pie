@@ -8,8 +8,6 @@ import type {
   FunctionalSettingsSnapshot,
   PruningMode,
   RunFinalizationReason,
-  RunOutcome,
-  RunOutcomeResolution,
   RunSnapshot,
   RetryTimingSample,
   SessionAnalyticsFactors,
@@ -34,8 +32,6 @@ export type {
   FunctionalSettingsSnapshot,
   PruningMode,
   RunFinalizationReason,
-  RunOutcome,
-  RunOutcomeResolution,
   RunSnapshot,
   RetryTimingSample,
   SessionAnalyticsFactors,
@@ -93,41 +89,4 @@ export interface RunSnapshotLogEntry {
   kind: 'run_snapshot';
   recordedAt: string;
   run: RunSnapshot;
-}
-
-export interface OutcomeHistoryLogEntry {
-  schemaVersion: number;
-  kind: 'run_outcome';
-  recordedAt: string;
-  sessionPath: string;
-  runId: string;
-  taskGroupId: string;
-  outcome: RunOutcome;
-}
-
-/** A single agent-authored session review (from the `session_review` tool),
- *  persisted to `agent-reviews.jsonl` and joined to the run in effect when the
- *  review was recorded. Mirrors {@link OutcomeHistoryLogEntry} but carries the
- *  richer agent-review fields (done / 1–5 rating / completion / reason) plus
- *  the multi-reviewer provenance (reviewerBuckets / reviewerCount) so agent
- *  judgement can be compared against the user's own `run_outcome` in the
- *  dashboard. */
-export type AgentReviewCompletion = 'fully' | 'partial' | 'setback';
-
-export interface AgentReviewEntry {
-  schemaVersion: number;
-  kind: 'agent_review';
-  recordedAt: string;
-  sessionPath: string;
-  runId: string;
-  taskGroupId: string;
-  done: boolean;
-  rating: number;
-  completion: AgentReviewCompletion;
-  reason: string;
-  evaluatedAt: string;
-  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small']). */
-  reviewerBuckets: string[];
-  /** Number of sub-agent reviewers that fed the rating. */
-  reviewerCount: number;
 }

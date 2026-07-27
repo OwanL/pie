@@ -16,6 +16,18 @@ export const TASK_PREVIEW_SHORT = 40;
 export const TASK_PREVIEW_LONG = 60;
 export const AGENT_SCOPE_VALUES = new Set<AgentScope>(["user", "project", "both"]);
 
+/** Optional hard model requirements on a subagent call. Absent or empty
+ *  preserves current selection behaviour. The object form leaves room for
+ *  future model constraints without adding one-off tool flags; this initial
+ *  schema adds only image-input support. */
+export interface ModelRequirements {
+	/** Required runtime input kinds the serving model must accept. `['image']`
+	 *  restricts selection to provider-qualified models whose runtime `input`
+	 *  includes `image`; text-only models, buckets, and fallbacks are never
+	 *  chosen for the child. */
+	inputKinds?: Array<"image">;
+}
+
 export interface UsageStats {
 	input: number;
 	output: number;
@@ -178,6 +190,19 @@ export interface SingleResult {
 	/** Diagnostic when a nested subagent's requested bucket was not allowed and
 	 *  was downgraded (or fell back to the active model) under the nested-bucket cap. */
 	bucketDowngradeReason?: string;
+	/** Requested hard model requirements for this delegation (e.g. image input).
+	 *  Absent when the call made no requirement. Retained on running, terminal,
+	 *  retried, and compacted results as provenance. */
+	requestedModelRequirements?: ModelRequirements;
+	/** Whether the resolved effective model satisfies
+	 *  {@link SingleResult.requestedModelRequirements}. Undefined when no
+	 *  requirement was made. `true` when an active requirement was satisfied.
+	 *  `false` (with {@link SingleResult.requirementDiagnostic}) when selection
+	 *  failed before dispatching a child session. */
+	modelRequirementsSatisfied?: boolean;
+	/** Bounded diagnostic when a requested model requirement could not be
+	 *  satisfied and selection failed before dispatching a child session. */
+	requirementDiagnostic?: string;
 	/** Stable identity for this dispatched model attempt, shared with the orphan cleanup registry. */
 	attemptId?: string;
 	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */

@@ -14,7 +14,7 @@ function transcript(path: string, modelId: string, share = 1): HistoricalSession
     successfulAssistantTurns: 1, errorAssistantTurns: 0, abortedAssistantTurns: 0,
     inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0,
     reportedCostUsd: null, toolCallCount: 2, toolErrorCount: 0, terminalStatus: 'success',
-    mixedModel: false, sourceProvenance: ['legacy'], review: null,
+    mixedModel: false, sourceProvenance: ['legacy'],
   };
 }
 
@@ -83,30 +83,6 @@ test('provider breakdown includes transcriptOnlySessionCount and transcriptEvide
   const provider = row.providers.find((provider) => provider.modelId === 'claude-opus-4.8')!;
   assert.ok(provider, 'transcript-only provider entry exists');
   assert.equal(provider.runCount, 0, 'transcript sessions do not inflate canonical runCount');
-  assert.equal(provider.scoredRunCount, 0, 'transcript sessions do not inflate canonical scoredRunCount');
   assert.equal(provider.transcriptOnlySessionCount, 2, 'two unique transcript sessions');
   assert.equal(provider.transcriptEvidenceMass, 1, '0.6 + 0.4 = 1.0 fractional mass');
-});
-
-test('run-linked vs transcript V1 review dedup remains in the labelled legacy cohort', async () => {
-  const fixture = deepClone(await loadFixture());
-  const baseRun = fixture.completedRuns[0]!;
-  // Create a transcript that matches the canonical run's session path, with its own review.
-  const matched = transcript(baseRun.sessionPath, baseRun.modelId!);
-  matched.review = { rating: 3, completion: 'partial', done: true, evaluatedAt: '2026-05-10T10:00:00.000Z', reviewerBuckets: [], reviewerCount: 1 };
-  fixture.historicalSessions = [matched];
-  // Also add an agent review for the same session path with a different rating.
-  fixture.agentReviews = [{
-    schemaVersion: 1, kind: 'agent_review',
-    recordedAt: '2026-05-10T12:00:00.000Z',
-    sessionPath: baseRun.sessionPath, runId: baseRun.runId, taskGroupId: baseRun.taskGroupId,
-    done: true, rating: 5, completion: 'fully', reason: '',
-    evaluatedAt: '2026-05-10T12:00:00.000Z', reviewerBuckets: [], reviewerCount: 1,
-  }];
-  const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
-  const family = prepareSourceAnalytics(fixture).runs[0]!.modelFamily!;
-  const row = leaderboard.rows.find((row) => row.modelId === family)!;
-  assert.equal(row.agentEvidenceCount, 0, 'V1 reviews are excluded from the V2 quality channel');
-  assert.equal(row.agentEvidenceMass, 0);
-  assert.equal(row.legacyAgentReviewCount, 1, 'duplicate V1 sources count once in the legacy cohort');
 });

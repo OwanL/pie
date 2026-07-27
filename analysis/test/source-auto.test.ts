@@ -9,6 +9,8 @@ import {
   detectPreferredStorageDir,
   listStorageDirCandidates,
   normalizeFileSystemPathForWorkspaceKey,
+  readLatestLocalAnalyticsInputMs,
+  shouldRebuildLocalDefaultDuckDb,
   workspaceStorageHash,
   workspaceStorageHashCandidates,
 } from '../scripts/source-auto.ts';
@@ -50,7 +52,7 @@ test('detectPreferredStorageDir returns null when no workspace-hash match exists
     const olderDir = path.join(outcomesRoot, '1111111111111111');
     const newerDir = path.join(outcomesRoot, '2222222222222222');
 
-    await writeArtifact(olderDir, 'outcome-history.jsonl', 5_000);
+    await writeArtifact(olderDir, 'open-runs.b.json', 5_000);
     await writeArtifact(newerDir, 'run-snapshots.jsonl', 9_000);
 
     const selected = await detectPreferredStorageDir(outcomesRoot, '/tmp/unrelated-workspace', 'linux');
@@ -63,7 +65,7 @@ test('detectLatestStorageDir returns the most recently active storage dir', asyn
     const olderDir = path.join(outcomesRoot, '1111111111111111');
     const newerDir = path.join(outcomesRoot, '2222222222222222');
 
-    await writeArtifact(olderDir, 'outcome-history.jsonl', 5_000);
+    await writeArtifact(olderDir, 'open-runs.b.json', 5_000);
     await writeArtifact(newerDir, 'run-snapshots.jsonl', 9_000);
 
     const selected = await detectLatestStorageDir(outcomesRoot);
@@ -115,13 +117,39 @@ test('workspace and outcomes discovery tolerate missing directories', async () =
   });
 });
 
+test('local-default freshness includes run stores, V2 reviews, catalogs, and side-channel logs', async () => {
+  await withTempDir(async (root) => {
+    const outcomesRoot = path.join(root, 'outcomes');
+    const storageDir = path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa');
+    const reviewPath = path.join(outcomesRoot, 'session-reviews', 'reviews.jsonl');
+    const dbPath = path.join(root, 'usage.duckdb');
+    const modelsPath = path.join(root, 'models.json');
+    const pruningPath = path.join(root, 'pruning.jsonl');
+    const additionalInputs = [modelsPath, pruningPath];
+
+    await writeArtifact(storageDir, 'run-snapshots.jsonl', 10_000);
+    await writeArtifact(path.dirname(reviewPath), path.basename(reviewPath), 20_000);
+    await writeArtifact(root, path.basename(modelsPath), 25_000);
+    await writeArtifact(root, path.basename(pruningPath), 22_000);
+    await writeArtifact(root, path.basename(dbPath), 15_000);
+
+    assert.equal(await readLatestLocalAnalyticsInputMs(outcomesRoot, reviewPath, additionalInputs), 25_000);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, reviewPath, additionalInputs), true);
+
+    const newerDbTime = new Date(30_000);
+    await fs.utimes(dbPath, newerDbTime, newerDbTime);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(dbPath, outcomesRoot, reviewPath, additionalInputs), false);
+    assert.equal(await shouldRebuildLocalDefaultDuckDb(path.join(root, 'missing.duckdb'), outcomesRoot, reviewPath, additionalInputs), true);
+  });
+});
+
 test('listStorageDirCandidates sorts tied directories alphabetically and rethrows invalid roots', async () => {
   await withTempDir(async (root) => {
     const outcomesRoot = path.join(root, 'outcomes');
     await fs.mkdir(outcomesRoot, { recursive: true });
 
     await writeArtifact(path.join(outcomesRoot, 'bbbbbbbbbbbbbbbb'), 'run-snapshots.jsonl', 12_000);
-    await writeArtifact(path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa'), 'outcome-history.jsonl', 12_000);
+    await writeArtifact(path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa'), 'open-runs.gen', 12_000);
     await fs.writeFile(path.join(outcomesRoot, 'notes.txt'), 'ignore me', 'utf8');
 
     const candidates = await listStorageDirCandidates(outcomesRoot);

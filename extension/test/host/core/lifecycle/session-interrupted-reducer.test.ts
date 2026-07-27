@@ -166,11 +166,20 @@ test('SessionsInterrupted restores the removed tail for a promoted optimistic ed
     draft.pending.promoted['edit-corr'] = {
       kind: 'edit', sessionPath: '/edit', localId: 'local-edit', previousSummary: null,
       removedTail: [oldUser, oldReply], startedAt: 1, requestId: 'request-edit',
+      editDraft: {
+        messageId: 'old-user', text: 'submitted replacement',
+        inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }],
+      },
     };
   });
   const result = reducer(initial, { kind: 'SessionsInterrupted', sessionPaths: ['/edit'], reason: 'backend exited' });
   assert.deepEqual(result.state.transcript.bySession['/edit'], [oldUser, oldReply]);
   assert.equal(result.state.pending.promoted['edit-corr'], undefined);
+  assert.equal(result.state.transcript.editingMessageIdBySession['/edit'], 'old-user');
+  assert.deepEqual(result.state.transcript.editingDraftBySession['/edit'], {
+    messageId: 'old-user', text: 'submitted replacement',
+    inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }],
+  });
   assert.equal(result.effects.some((effect) => effect.kind === 'PostImperative'), false);
 });
 

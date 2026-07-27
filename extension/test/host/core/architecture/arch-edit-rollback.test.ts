@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { reducer, initialArchState, type ArchState } from '../../../../src/host/core/reducer';
+import { selectViewState } from '../../../../src/host/core/projection';
 import type { Event } from '../../../../src/host/core/events';
 import type { ChatMessage, SessionSummary, TranscriptWindow } from '../../../../src/shared/protocol';
 
@@ -111,6 +112,7 @@ test('reducer: Edit command optimistically truncates the original message + repl
   assert.equal(op.removedTail?.length, 2);
   assert.equal(op.removedTail?.[0]?.id, 'user-1');
   assert.equal(op.removedTail?.[1]?.id, 'assistant-1');
+  assert.deepEqual(op.editDraft, { messageId: 'user-1', text: 'edited question', inputs: [] });
 
   // EditRpc effect emitted.
   assert.equal(result.effects.length, 1);
@@ -157,6 +159,7 @@ test('reducer: EditResult{ok:false} restores the truncated original message + re
           localId: 'local:edit:abc',
           previousSummary: null,
           startedAt: 1,
+          editDraft: { messageId: 'user-1', text: 'edited question', inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }] },
           removedTail: [
             userMessage('user-1', 'original question'),
             assistantMessage('assistant-1', 'original answer'),
@@ -191,6 +194,14 @@ test('reducer: EditResult{ok:false} restores the truncated original message + re
 
   // Optimistic edit message is gone.
   assert.ok(!transcript.some((m) => m.id === 'local:edit:abc'));
+
+  // The original row is reopened from host-owned submitted content (not the
+  // bottom-composer sendRejected imperative), including its attachments.
+  assert.equal(result.state.transcript.editingMessageIdBySession['/s'], 'user-1');
+  assert.deepEqual(result.state.transcript.editingDraftBySession['/s'], {
+    messageId: 'user-1', text: 'edited question', inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }],
+  });
+  assert.deepEqual(selectViewState(result.state).editingDraft, result.state.transcript.editingDraftBySession['/s']);
 
   // Failure notice surfaced.
   assert.match(result.state.settings.notice!, /Couldn't edit/);
@@ -238,6 +249,7 @@ test('reducer: PreflightFailed restores the truncated original message + reply f
           previousSummary: null,
           startedAt: 1,
           requestId: 'req-edit',
+          editDraft: { messageId: 'user-1', text: 'edited question', inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }] },
           removedTail: [
             userMessage('user-1', 'original question'),
             assistantMessage('assistant-1', 'original answer'),
@@ -272,6 +284,11 @@ test('reducer: PreflightFailed restores the truncated original message + reply f
 
   // Optimistic edit message is gone.
   assert.ok(!transcript.some((m) => m.id === 'local:edit:abc'));
+
+  assert.equal(result.state.transcript.editingMessageIdBySession['/s'], 'user-1');
+  assert.deepEqual(result.state.transcript.editingDraftBySession['/s'], {
+    messageId: 'user-1', text: 'edited question', inputs: [{ id: 'edited-input', kind: 'filesystemPathRef', path: '/edited', name: 'edited', source: 'picker' }],
+  });
 
   // Failure notice surfaced as an edit failure.
   assert.match(result.state.settings.notice!, /edit/);

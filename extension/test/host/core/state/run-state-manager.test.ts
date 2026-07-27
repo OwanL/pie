@@ -8,9 +8,6 @@ import { reducer } from '../../../../src/host/core/reducer';
 import type { Event } from '../../../../src/host/core/events';
 import type { ArchState } from '../../../../src/host/core/arch-state';
 import {
-  RUN_ANALYTICS_SCHEMA_VERSION,
-  type AgentReviewEntry,
-  type OutcomeHistoryLogEntry,
   type PersistedSessionRunState,
   type RunSnapshot,
   type TreatmentChangeKind,
@@ -21,8 +18,7 @@ import type { SessionAnalyticsFactors, SessionSkillFactor } from '../../../../sr
 
 interface Harness {
   manager: SessionRunStateManager;
-  persistCalls: Array<{ snapshot?: RunSnapshot; outcome?: OutcomeHistoryLogEntry }>;
-  agentReviewCalls: AgentReviewEntry[];
+  persistCalls: Array<{ snapshot?: RunSnapshot }>;
   renderCount: number;
   getArchState: () => ArchState;
   dispatchArchEvent: (event: Event) => void;
@@ -74,8 +70,7 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
     draft.sessions.analyticsFactorsBySession[sessionPath] = baseAnalyticsFactors('a');
   });
 
-  const persistCalls: Array<{ snapshot?: RunSnapshot; outcome?: OutcomeHistoryLogEntry }> = [];
-  const agentReviewCalls: AgentReviewEntry[] = [];
+  const persistCalls: Array<{ snapshot?: RunSnapshot }> = [];
   const renderCount = 0;
 
   const getArchState = () => archState;
@@ -87,11 +82,8 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
   const manager = new SessionRunStateManager({
     getArchState,
     dispatchArchEvent,
-    schedulePersist: (snapshot, outcome) => {
-      persistCalls.push({ snapshot, outcome });
-    },
-    schedulePersistAgentReview: (entry) => {
-      agentReviewCalls.push(entry);
+    schedulePersist: (snapshot) => {
+      persistCalls.push({ snapshot });
     },
     now: () => new Date(nowMs),
     createId: () => `id-${++idCounter}`,
@@ -105,7 +97,6 @@ function createHarness(sessionPath = '/workspace/session-rsm.jsonl'): Harness {
   return {
     manager,
     persistCalls,
-    agentReviewCalls,
     get renderCount() { return renderCount; },
     getArchState,
     dispatchArchEvent,
@@ -131,7 +122,6 @@ test('createRunSnapshot seeds an open run from arch state with no counted activi
 
   assert.equal(run.sessionPath, sessionPath);
   assert.equal(run.status, 'open');
-  assert.equal(run.scored, false);
   assert.equal(run.runId, 'id-1');
   assert.equal(run.taskGroupId, 'id-2', 'no lastRun ⇒ fresh task group id');
   assert.equal(run.modelId, 'claude-test', 'modelId comes from the session row');
@@ -179,7 +169,7 @@ test('createRunSnapshot falls back to default model settings when the session ro
   assert.equal(run.thinkingLevel, 'low', 'falls back to defaultThinkingLevel');
 });
 
-test('finalizeCurrentRun with outcome transitions to scored and persists snapshot + outcome entry', () => {
+test('finalizeCurrentRun with closed reason transitions to closed and persists snapshot', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
@@ -189,26 +179,18 @@ test('finalizeCurrentRun with outcome transitions to scored and persists snapsho
   h.setNow(Date.UTC(2026, 0, 1, 0, 0, 5));
   const expectedFinalizedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, 5)).toISOString();
 
-  const outcome = { resolution: 'resolved' as const, satisfaction: 5 };
-  const finalized = h.manager.finalizeCurrentRun(sessionPath, 'scored', outcome);
+  const finalized = h.manager.finalizeCurrentRun(sessionPath, 'closed');
 
   assert.ok(finalized, 'finalizeCurrentRun should return the finalized run');
   assert.equal(finalized!.runId, run.runId);
-  assert.equal(finalized!.status, 'scored');
-  assert.equal(finalized!.scored, true);
-  assert.equal(finalized!.outcome, outcome);
-  assert.equal(finalized!.finalizationReason, 'scored');
+  assert.equal(finalized!.status, 'closed');
+  assert.equal(finalized!.finalizationReason, 'closed');
   assert.equal(finalized!.finalizedAt, expectedFinalizedAt, 'finalizedAt uses the injected now()');
   assert.notEqual(finalized!.finalizedAt, run.startedAt, 'finalizedAt advances past startedAt');
 
   // The returned snapshot is the exact object downstream persistence receives (no copy/loss).
   assert.equal(h.persistCalls.length, 1, 'exactly one persist call on finalize');
   assert.equal(h.persistCalls[0].snapshot, finalized, 'persisted snapshot is the finalized run object');
-  assert.ok(h.persistCalls[0].outcome, 'scored finalize schedules an outcome history entry');
-  assert.equal(h.persistCalls[0].outcome!.kind, 'run_outcome');
-  assert.equal(h.persistCalls[0].outcome!.runId, run.runId);
-  assert.equal(h.persistCalls[0].outcome!.taskGroupId, run.taskGroupId);
-  assert.deepEqual(h.persistCalls[0].outcome!.outcome, outcome);
 
   // currentRun cleared, lastRun holds the finalized snapshot.
   const state = h.manager.sessions.get(sessionPath);
@@ -216,14 +198,14 @@ test('finalizeCurrentRun with outcome transitions to scored and persists snapsho
   assert.equal(state!.lastRun, finalized);
   assert.equal(state!.busyStartedAt, null);
 
-  // ActiveRunSummaryChanged dispatched with scored summary.
+  // ActiveRunSummaryChanged dispatched with closed summary.
   assert.deepEqual(
     h.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'scored', scored: true },
+    { runId: run.runId, status: 'closed' },
   );
 });
 
-test('finalizeCurrentRun without outcome transitions to closed_unscored and persists snapshot only', () => {
+test('finalizeCurrentRun with new_task reason transitions to closed and persists snapshot', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
@@ -231,14 +213,11 @@ test('finalizeCurrentRun without outcome transitions to closed_unscored and pers
 
   const finalized = h.manager.finalizeCurrentRun(sessionPath, 'new_task');
   assert.ok(finalized);
-  assert.equal(finalized!.status, 'closed_unscored');
-  assert.equal(finalized!.scored, false);
-  assert.equal(finalized!.outcome, undefined);
+  assert.equal(finalized!.status, 'closed');
   assert.equal(finalized!.finalizationReason, 'new_task');
 
   assert.equal(h.persistCalls.length, 1);
   assert.equal(h.persistCalls[0].snapshot, finalized);
-  assert.equal(h.persistCalls[0].outcome, undefined, 'no outcome entry when unscored');
 });
 
 test('finalizeCurrentRun is a safe no-op when there is no current run (idempotent)', () => {
@@ -246,7 +225,7 @@ test('finalizeCurrentRun is a safe no-op when there is no current run (idempoten
   const sessionPath = '/workspace/session-rsm.jsonl';
   h.persistCalls.length = 0;
   // Session state has never been created — no current run.
-  const result = h.manager.finalizeCurrentRun(sessionPath, 'closed_unscored');
+  const result = h.manager.finalizeCurrentRun(sessionPath, 'closed');
   assert.equal(result, null);
   assert.equal(h.persistCalls.length, 0, 'no persist scheduled when nothing to finalize');
   // No summary dispatched for an unknown session.
@@ -254,9 +233,9 @@ test('finalizeCurrentRun is a safe no-op when there is no current run (idempoten
 
   // Even after a run exists and is finalized, a second finalize is a no-op.
   openRun(h.manager, sessionPath);
-  h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 4 });
+  h.manager.finalizeCurrentRun(sessionPath, 'closed');
   h.persistCalls.length = 0;
-  const second = h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 3 });
+  const second = h.manager.finalizeCurrentRun(sessionPath, 'closed');
   assert.equal(second, null);
   assert.equal(h.persistCalls.length, 0, 'second finalize after closing is a no-op (no double persist)');
 });
@@ -278,7 +257,7 @@ test('getOrCreateSessionState is idempotent and getMostRelevantRun prefers curre
   assert.equal(h.manager.getMostRelevantRun(sessionPath), run);
 
   // After finalize, currentRun gone ⇒ lastRun returned.
-  const finalized = h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 5 });
+  const finalized = h.manager.finalizeCurrentRun(sessionPath, 'closed');
   assert.equal(h.manager.getMostRelevantRun(sessionPath), finalized);
 
   // Unknown session ⇒ null.
@@ -454,7 +433,7 @@ test('serializeSessions then restore round-trips persisted state exactly and res
   // restore dispatches a summary reflecting nextTaskIntent === 'new_task'.
   assert.deepEqual(
     h2.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'open', scored: false, nextSendStartsNewTask: true },
+    { runId: run.runId, status: 'open', nextSendStartsNewTask: true },
   );
 
   // restore clears the in-memory map. By design it only syncs summaries for
@@ -496,14 +475,14 @@ test('syncSessionSummary reflects nextSendStartsNewTask only when nextTaskIntent
   h.manager.syncSessionSummary(sessionPath);
   assert.deepEqual(
     h.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'open', scored: false },
+    { runId: run.runId, status: 'open' },
   );
 
   state.nextTaskIntent = 'continue_task';
   h.manager.syncSessionSummary(sessionPath);
   assert.deepEqual(
     h.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'open', scored: false },
+    { runId: run.runId, status: 'open' },
     'continue_task does not set nextSendStartsNewTask',
   );
 
@@ -511,7 +490,7 @@ test('syncSessionSummary reflects nextSendStartsNewTask only when nextTaskIntent
   h.manager.syncSessionSummary(sessionPath);
   assert.deepEqual(
     h.getArchState().composer.activeRunSummaryBySession[sessionPath],
-    { runId: run.runId, status: 'open', scored: false, nextSendStartsNewTask: true },
+    { runId: run.runId, status: 'open', nextSendStartsNewTask: true },
   );
 
   // Unknown session ⇒ null summary dispatched.
@@ -519,63 +498,18 @@ test('syncSessionSummary reflects nextSendStartsNewTask only when nextTaskIntent
   assert.equal(h.getArchState().composer.activeRunSummaryBySession['/workspace/unknown.jsonl'], null);
 });
 
-test('buildOutcomeHistoryEntry produces the exact downstream outcome-log record', () => {
+test('persist forwards verbatim to the scheduled callback', () => {
   const h = createHarness();
   const sessionPath = '/workspace/session-rsm.jsonl';
   const run = openRun(h.manager, sessionPath);
-  const outcome = { resolution: 'partially_resolved' as const, satisfaction: 3 };
-
-  const entry = h.manager.buildOutcomeHistoryEntry(run, outcome);
-  assert.equal(entry.schemaVersion, RUN_ANALYTICS_SCHEMA_VERSION);
-  assert.equal(entry.kind, 'run_outcome');
-  assert.ok(entry.recordedAt);
-  assert.equal(entry.sessionPath, sessionPath);
-  assert.equal(entry.runId, run.runId);
-  assert.equal(entry.taskGroupId, run.taskGroupId);
-  assert.equal(entry.outcome, outcome);
-});
-
-test('persist and persistAgentReview forward verbatim to the scheduled callbacks', () => {
-  const h = createHarness();
-  const sessionPath = '/workspace/session-rsm.jsonl';
-  const run = openRun(h.manager, sessionPath);
-  const outcomeEntry: OutcomeHistoryLogEntry = {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'run_outcome',
-    recordedAt: new Date().toISOString(),
-    sessionPath,
-    runId: run.runId,
-    taskGroupId: run.taskGroupId,
-    outcome: { resolution: 'resolved', satisfaction: 5 },
-  };
 
   h.persistCalls.length = 0;
-  h.manager.persist(run, outcomeEntry);
+  h.manager.persist(run);
   assert.equal(h.persistCalls.length, 1);
   assert.equal(h.persistCalls[0].snapshot, run);
-  assert.equal(h.persistCalls[0].outcome, outcomeEntry);
 
   h.manager.persist();
   assert.equal(h.persistCalls.length, 2, 'persist with no args still forwards');
-
-  const review: AgentReviewEntry = {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'agent_review',
-    recordedAt: new Date().toISOString(),
-    sessionPath,
-    runId: run.runId,
-    taskGroupId: run.taskGroupId,
-    done: true,
-    rating: 5,
-    completion: 'fully',
-    reason: 'great',
-    evaluatedAt: new Date().toISOString(),
-    reviewerBuckets: ['medium'],
-    reviewerCount: 1,
-  };
-  h.manager.persistAgentReview(review);
-  assert.equal(h.agentReviewCalls.length, 1);
-  assert.equal(h.agentReviewCalls[0], review);
 });
 
 test('createRunSnapshot reuses the last taskGroupId across sends within a task, but mints a new one on new_task', () => {
@@ -590,7 +524,7 @@ test('createRunSnapshot reuses the last taskGroupId across sends within a task, 
   assert.equal(run1.taskGroupId, 'id-2');
 
   // Finalize run1 → lastRun set; default nextTaskIntent null ⇒ continue.
-  h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 5 });
+  h.manager.finalizeCurrentRun(sessionPath, 'closed');
   state = h.manager.sessions.get(sessionPath)!;
   assert.equal(state.lastRun!.taskGroupId, 'id-2');
 
@@ -602,7 +536,7 @@ test('createRunSnapshot reuses the last taskGroupId across sends within a task, 
 
   // Explicitly continue_task ⇒ still reuses.
   state.currentRun = run2;
-  h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 4 });
+  h.manager.finalizeCurrentRun(sessionPath, 'closed');
   state = h.manager.sessions.get(sessionPath)!;
   state.nextTaskIntent = 'continue_task';
   const run3 = h.manager.createRunSnapshot(sessionPath, state);
@@ -610,7 +544,7 @@ test('createRunSnapshot reuses the last taskGroupId across sends within a task, 
 
   // new_task ⇒ mints a fresh task group id.
   state.currentRun = run3;
-  h.manager.finalizeCurrentRun(sessionPath, 'scored', { resolution: 'resolved', satisfaction: 3 });
+  h.manager.finalizeCurrentRun(sessionPath, 'closed');
   state = h.manager.sessions.get(sessionPath)!;
   state.nextTaskIntent = 'new_task';
   const run4 = h.manager.createRunSnapshot(sessionPath, state);

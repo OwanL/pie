@@ -19,6 +19,7 @@ import type {
   PruningSettings,
   ProviderGateStats,
   RetryStatus,
+  SessionUsageSnapshot,
   SystemPromptEntry,
   ThinkingLevel,
   ToolResultPruningSettings,
@@ -71,6 +72,7 @@ interface ComposerProps {
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
+  sessionUsage?: SessionUsageSnapshot | null;
   pendingComposerInputs: ComposerInput[];
   activeRunSummary?: ActiveRunSummary | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
@@ -124,6 +126,7 @@ function ComposerView({
   systemPrompts,
   transcript,
   transcriptWindow,
+  sessionUsage,
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
@@ -164,6 +167,7 @@ function ComposerView({
     systemPrompts,
     transcript,
     transcriptWindow,
+    sessionUsage,
     pruningResult,
     busy,
     sessionPath,

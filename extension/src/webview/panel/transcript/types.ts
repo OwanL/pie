@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   ChatPrefs,
   ComposerInput,
+  InlineEditDraft,
   PruningResult,
   PruningSettings,
   SystemPromptEntry,
@@ -45,6 +46,7 @@ export interface TranscriptCommonProps {
   pendingAssistantThinkingLevel?: ThinkingLevel;
   workingDirectory: string | null;
   editingId: string | null;
+  editingDraft?: InlineEditDraft | null;
   onEditRequest: (messageId: string) => void;
   onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;

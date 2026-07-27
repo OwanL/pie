@@ -165,7 +165,7 @@ test('a slow session RPC cannot block creating another session', async () => {
   runner.dispose();
 });
 
-test('live checkpoint repair uses only the target session queue so navigation stays responsive', async () => {
+test('live checkpoint repair bypasses mutation queues so active-session work cannot block recovery', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps({
     requestImpl: async (method) => method === 'liveTurn.checkpoint'
       ? { status: 'inactive', checkpoint: null, watermark: null }
@@ -190,8 +190,7 @@ test('live checkpoint repair uses only the target session queue so navigation st
     false,
     'repair traffic must not block create/open operations on the global lifecycle queue',
   );
-  assert.deepEqual(meaningfulCalls[0], { kind: 'session', sessionPath: '/active' });
-  assert.deepEqual(meaningfulCalls[1], {
+  assert.deepEqual(meaningfulCalls[0], {
     kind: 'request',
     method: 'liveTurn.checkpoint',
     params: { sessionPath: '/active' },

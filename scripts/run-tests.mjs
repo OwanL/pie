@@ -178,6 +178,17 @@ const PACKAGE_CONFIGS = [
     thresholds: { lines: 80, branches: 60 },
     tsxConfig: 'extensions/computer-use/tsconfig.json',
   },
+  {
+    id: 'image-context-guard',
+    cwd: repoRoot,
+    testGlobs: ['extensions/image-context-guard/test/**/*.test.ts'],
+    coverageIncludes: [
+      'extensions/image-context-guard/index.ts',
+      'extensions/image-context-guard/src/**/*.ts',
+    ],
+    thresholds: { lines: 80, branches: 60 },
+    tsxConfig: 'extensions/image-context-guard/tsconfig.json',
+  },
 ];
 
 const PACKAGE_LOOKUP = new Map();

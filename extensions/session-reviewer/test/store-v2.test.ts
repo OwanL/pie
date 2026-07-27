@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import test, { afterEach, beforeEach } from 'node:test';
 
-import { appendReview, enqueueClosure, readClosureActions, readReviewStore, recordReviewOnce } from '../src/store.js';
+import { enqueueClosure, readClosureActions, readReviewStore, recordReviewOnce } from '../src/store.js';
 import { validReview } from './fixtures.js';
 
 let dir: string;
@@ -42,25 +42,23 @@ test('calibration records do not collide with canonical production uniqueness', 
   assert.equal(readReviewStore().v2.length, 3);
 });
 
-test('mixed V1/V2 storage stays readable and malformed lines are isolated', async () => {
-  appendReview({ sessionPath: '/legacy.jsonl', done: true, rating: 4, completion: 'fully', reason: 'legacy', evaluatedAt: '2026-01-01T00:00:00Z' });
+test('malformed lines are isolated and V2 records stay readable', async () => {
   fs.appendFileSync(path.join(dir, 'reviews.jsonl'), 'not-json\n');
   await recordReviewOnce(validReview());
   const snapshot = readReviewStore();
-  assert.equal(snapshot.legacy.length, 1);
   assert.equal(snapshot.v2.length, 1);
-  assert.equal(snapshot.legacy[0]!.rating, 4);
-  assert.equal(snapshot.unresolvedLegacy.length, 1);
 });
 
-test('resolved V1 path reserves its stable session ID from V2 cutover', async () => {
-  const sessionPath = path.join(dir, 'legacy-session.jsonl');
-  fs.writeFileSync(sessionPath, `${JSON.stringify({ type: 'session', id: 'legacy-stable' })}\n`);
-  appendReview({ sessionPath, done: true, rating: 5, completion: 'fully', reason: 'legacy', evaluatedAt: '2026-01-01T00:00:00Z' });
-  const result = await recordReviewOnce(validReview({ sessionId: 'legacy-stable', sessionPathAtReview: sessionPath }));
-  assert.deepEqual(result.written, false);
-  if (!result.written) assert.equal(result.legacy, true);
-  assert.equal(readReviewStore().v2.length, 0);
+test('shallow malformed V2 envelopes are ignored and do not block a valid production write', async () => {
+  fs.appendFileSync(path.join(dir, 'reviews.jsonl'), `${JSON.stringify({
+    schemaVersion: 2, kind: 'production', reviewId: 'shallow-review', sessionId: 'session-1',
+    sessionPathAtReview: '/sessions/session-1.jsonl', rubricVersion: 'session-review-v2.1', indexVersion: 'v1', reviewedAt: '2026-07-24T10:20:00.000Z',
+  })}\n`);
+  const result = await recordReviewOnce(validReview());
+  assert.equal(result.written, true);
+  const snapshot = readReviewStore();
+  assert.equal(snapshot.v2.length, 1);
+  assert.equal(snapshot.canonicalBySessionId.get('session-1')?.reviewId, 'review-1');
 });
 
 test('closure actions are separate, idempotent while active, and never append a review', async () => {

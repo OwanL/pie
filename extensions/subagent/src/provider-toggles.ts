@@ -36,6 +36,13 @@ export function parseProviderToggles(
   }
 }
 
+function comparableSessionPath(sessionPath: string): string {
+  const slashNormalized = sessionPath.replace(/\\/g, "/");
+  // Windows paths are case-insensitive. The host/webview and SDK can serialize
+  // the same session path with different drive-letter casing and separators.
+  return /^[a-z]:\//i.test(slashNormalized) ? slashNormalized.toLowerCase() : slashNormalized;
+}
+
 export function parseSessionProviderToggles(
   raw: string | undefined,
   sessionPath: string | undefined,
@@ -44,7 +51,10 @@ export function parseSessionProviderToggles(
   try {
     const parsed = parseJsonOrThrow<unknown>(raw, "per-session subagent provider toggles");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const sessionValue = (parsed as Record<string, unknown>)[sessionPath];
+    const sessions = parsed as Record<string, unknown>;
+    const sessionValue = sessions[sessionPath] ?? Object.entries(sessions).find(
+      ([candidate]) => comparableSessionPath(candidate) === comparableSessionPath(sessionPath),
+    )?.[1];
     if (!sessionValue || typeof sessionValue !== "object" || Array.isArray(sessionValue)) return {};
     const result: Record<string, boolean> = {};
     for (const [provider, enabled] of Object.entries(sessionValue)) {

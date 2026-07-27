@@ -135,26 +135,7 @@ test('coerces optional portable summaries without retaining unknown private fiel
   assert.doesNotMatch(JSON.stringify(summaries), /PRIVATE/);
 });
 
-test('latest review sidecar wins and free-text reason never enters evidence', async () => {
-  await withTempDir(async (dir) => {
-    const sessions = path.join(dir, 'sessions');
-    const sessionPath = path.join(sessions, 'one.jsonl');
-    const reviewsPath = path.join(dir, 'reviews.jsonl');
-    await fs.mkdir(sessions);
-    await fs.writeFile(sessionPath, transcript([header(), user('u', null, 'do secret work'), assistant('a', 'u', 'model', 'stop', 10)]));
-    await fs.writeFile(reviewsPath, [
-      line({ sessionPath: sessionPath.toUpperCase(), done: false, rating: 2, completion: 'partial', reason: 'OLD PRIVATE REASON', evaluatedAt: '2026-01-01T00:00:00.000Z' }),
-      line({ sessionPath, done: true, rating: 5, completion: 'fully', reason: 'NEW PRIVATE REASON', evaluatedAt: '2026-01-02T00:00:00.000Z', reviewerBuckets: ['small'], reviewerCount: 1 }),
-    ].join('\n'));
-
-    const summaries = await discoverHistoricalSessions({ legacySessionsDir: sessions, reviewSidecarPath: reviewsPath });
-    assert.equal(summaries[0]?.review?.rating, 5);
-    assert.deepEqual(summaries[0]?.review?.reviewerBuckets, ['small']);
-    assert.doesNotMatch(JSON.stringify(summaries), /PRIVATE REASON|do secret work/);
-  });
-});
-
-test('canonical paths suppress transcript-only evidence without removing its review', async () => {
+test('canonical paths suppress transcript-only evidence', async () => {
   const fixture = deepClone(await loadFixture());
   const canonicalPath = fixture.completedRuns[0]!.sessionPath;
   fixture.historicalSessions = [{
@@ -165,13 +146,11 @@ test('canonical paths suppress transcript-only evidence without removing its rev
     inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
     reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0,
     terminalStatus: 'success', mixedModel: false, sourceProvenance: ['legacy'],
-    review: { rating: 5, completion: 'fully', done: true, evaluatedAt: '2026-01-02T00:00:00.000Z', reviewerBuckets: [], reviewerCount: 0 },
   }];
 
   const historical = prepareSourceAnalytics(fixture).historicalSessions[0]!;
   assert.equal(historical.matchedCanonical, true);
   assert.equal(historical.transcriptOnly, false);
-  assert.equal(historical.review?.rating, 5);
   assert.equal('normalizedSessionPath' in historical, false);
 });
 

@@ -613,6 +613,16 @@ describe("parseSessionProviderToggles", () => {
     assert.deepEqual(parseSessionProviderToggles(raw, "/a.jsonl"), { fast: false, cheap: true });
   });
 
+  it("matches equivalent Windows session paths across casing and separators", () => {
+    const raw = JSON.stringify({
+      "C:\\Users\\Example\\session.jsonl": { "openai-codex": true, umans: false },
+    });
+    assert.deepEqual(
+      parseSessionProviderToggles(raw, "c:/users/example/session.jsonl"),
+      { "openai-codex": true, umans: false },
+    );
+  });
+
   it("fails closed to no extra toggles for malformed or missing sessions", () => {
     assert.deepEqual(parseSessionProviderToggles("bad", "/a.jsonl"), {});
     assert.deepEqual(parseSessionProviderToggles(JSON.stringify({}), "/a.jsonl"), {});

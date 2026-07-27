@@ -38,7 +38,7 @@ const NEW_SUMMARY: SessionSummary = {
 const PLACEHOLDER: SessionSummary = {
   path: NEW, name: 'Loading...', cwd: '/w', modifiedAt: '2024-02-01T00:00:00.000Z', messageCount: 0, isPlaceholder: true,
 };
-const STALE_RUN_SUMMARY: ActiveRunSummary = { runId: 'r1', status: 'open', scored: false };
+const STALE_RUN_SUMMARY: ActiveRunSummary = { runId: 'r1', status: 'open' };
 
 interface BuildOpts {
   openTabs?: string[];

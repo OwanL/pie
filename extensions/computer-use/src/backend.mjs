@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createDisplayPng, pngDimensions } from './image.mjs';
+import { resolveLaunchExecutable } from './launch-resolve.mjs';
 import { abortableSleep, abortError, estimateSequenceDuration, runTimedSequence } from './sequence.mjs';
 import { focusWindowNative } from './win32-focus.mjs';
 
@@ -110,6 +111,7 @@ export class ComputerBackend {
     this.now = options.now ?? (() => performance.now()); this.sleep = options.sleep ?? abortableSleep;
     this.nativeFocus = options.nativeFocus ?? focusWindowNative;
     this.focusCuaCallTimeoutMs = options.focusCuaCallTimeoutMs ?? FOCUS_CUA_CALL_TIMEOUT_MS;
+    this.resolveLaunch = options.resolveLaunch ?? resolveLaunchExecutable;
     this.refEpoch = randomUUID(); this.nextTargetGeneration = 1;
   }
 
@@ -166,8 +168,37 @@ export class ComputerBackend {
       throw runtimeError('STALE_TARGET', 'Could not prove that the exact target PID/HWND still exists; open it again.', true);
     }
     const record = windows.find((window) => Number(window.pid) === target.pid && sameHandle(window.window_id, target.windowId));
-    if (!record) throw runtimeError('STALE_TARGET', 'The exact target PID/HWND no longer exists; open it again.', true);
-    return record;
+    if (record) return record;
+    const rebound = await this.rebindVanishedWindow(target, windows, signal);
+    if (rebound) return rebound;
+    throw runtimeError('STALE_TARGET', 'The exact target PID/HWND no longer exists; open it again.', true);
+  }
+
+  async rebindVanishedWindow(target, windows, signal) {
+    const expectedProcess = String(target.process ?? '').trim().toLowerCase();
+    const replacements = windows.filter((window) => {
+      const process = String(window.app_name ?? '').trim().toLowerCase();
+      return !sameHandle(window.window_id, target.windowId)
+        && validWindowRecord(window, target.pid)
+        && (!expectedProcess || process === expectedProcess);
+    });
+    if (replacements.length !== 1) return undefined;
+    const replacement = replacements[0];
+    const windowId = positiveInteger(replacement.window_id);
+    if (!windowId) return undefined;
+    target.windowId = windowId;
+    target.title = String(replacement.title ?? target.title ?? '');
+    target.process = String(replacement.app_name ?? target.process ?? '');
+    target.generation = this.nextTargetGeneration++;
+    target.revision = 0;
+    target.refs = new Map();
+    delete target.screenshotWidth; delete target.screenshotHeight; delete target.fullImageWidth; delete target.fullImageHeight; delete target.logicalBounds;
+    try { target.logicalBounds = await this.logicalWindowBounds(target.windowId); }
+    catch (error) {
+      if (signal?.aborted) throw abortError();
+      if (cancellationError(error)) throw error;
+    }
+    return replacement;
   }
 
   async activeWindowIs(target) {
@@ -267,7 +298,8 @@ export class ComputerBackend {
       let windows = await this.listWindows(signal);
       let launchedPid;
       if (selector.kind === 'path') {
-        const launched = await this.cua('launch_app', { path: selector.path, additional_arguments: selector.args ?? [] }, signal);
+        const resolvedPath = await this.resolveLaunch(selector.path);
+        const launched = await this.cua('launch_app', { path: resolvedPath, additional_arguments: selector.args ?? [] }, signal);
         launchedPid = positiveInteger(launched.pid);
         if (!launchedPid) throw runtimeError('LAUNCH_UNCORRELATED', 'Launched application did not return a valid process id; refusing to target another window.', true);
         windows = [await this.waitForStableLaunchedWindow(signal, launchedPid)];
@@ -307,7 +339,12 @@ export class ComputerBackend {
     }
     const state = { id: sessionId, artifactDir, targets: new Map([[target.id, { ...target, generation: this.nextTargetGeneration++, revision: 0, refs: new Map() }]]), activeTargetId: target.id, heldKeys: new Set(), heldButtons: new Set(), potentialKeys: new Set(), potentialButtons: new Set() };
     this.sessions.set(sessionId, state);
-    return { sessionId, targetId: target.id, target: this.publicTarget(target), capabilities: { screenshot: true, accessibilityTree: true, semanticReferences: true, deterministicSequence: true, heldInput: true }, held: emptyHeld() };
+    const base = { sessionId, targetId: target.id, target: this.publicTarget(target), capabilities: { screenshot: true, accessibilityTree: true, semanticReferences: true, deterministicSequence: true, heldInput: true }, held: emptyHeld() };
+    if (params.screenshot === true || params.tree === true || params.state === true) {
+      const observation = await this.observe({ sessionId, targetId: target.id, screenshot: params.screenshot ?? false, tree: params.tree ?? false, state: params.state ?? false }, signal);
+      return { ...base, ...observation };
+    }
+    return base;
   }
 
   async waitForStableLaunchedWindow(signal, pid) {
@@ -694,7 +731,7 @@ export class ComputerBackend {
     validateSequenceShape(sequence); this.validateRevision(target, params.revision, sequence.actions.map((step) => step.action));
     const sequencePath = uniquePath(session.artifactDir, 'sequence-v1', 'json'); const tracePath = uniquePath(session.artifactDir, 'trace', 'json');
     await atomicJson(sequencePath, sequence);
-    const initiallyHeld = this.held(session); const initialKeys = new Set(initiallyHeld.keys); const initialButtons = new Set(initiallyHeld.buttons); let trace = [];
+    const initiallyHeld = this.held(session); const initialKeys = new Set(initiallyHeld.keys); const initialButtons = new Set(initiallyHeld.buttons); let trace = []; let base;
     try {
       trace = await runTimedSequence(sequence, (action) => this.executeAction(session, target, action, signal), { signal });
       if (!params.preserveHeld) {
@@ -706,7 +743,7 @@ export class ComputerBackend {
         if (hasHeld(remaining)) { const error = releaseFailure(remaining, 'Sequence cleanup failed to release newly held input.'); error.cleanupDone = true; throw error; }
       }
       await atomicJson(tracePath, { version: 1, startedAt: new Date().toISOString(), actions: trace });
-      return { sessionId: session.id, targetId: target.id, sequencePath, tracePath, held: this.held(session) };
+      base = { sessionId: session.id, targetId: target.id, sequencePath, tracePath, held: this.held(session) };
     } catch (error) {
       trace = error.sequenceTrace ?? trace; await atomicJson(tracePath, { version: 1, failed: true, actions: trace }).catch(() => {});
       error.sequencePath = sequencePath; error.tracePath = tracePath;
@@ -715,6 +752,18 @@ export class ComputerBackend {
       if (hasHeld(remaining)) { const failure = releaseFailure(remaining, `Sequence cleanup failed after: ${error.message ?? String(error)}`, error); failure.cleanupDone = true; throw failure; }
       error.held = remaining; error.cleanupDone = true; throw error;
     }
+    if (params.screenshot === true || params.tree === true || params.state === true) {
+      try {
+        const observation = await this.observe({ sessionId: session.id, targetId: target.id, screenshot: params.screenshot ?? false, tree: params.tree ?? false, state: params.state ?? false }, signal);
+        return { ...base, ...observation };
+      } catch (error) {
+        // The sequence and its trace completed successfully; keep that evidence
+        // truthful when only the optional trailing observation fails.
+        error.sequencePath = sequencePath; error.tracePath = tracePath;
+        throw error;
+      }
+    }
+    return base;
   }
 
   async releaseValues(held) {

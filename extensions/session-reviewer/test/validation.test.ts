@@ -4,246 +4,172 @@ import test from 'node:test';
 import { deriveAttainment } from '../src/attainment.js';
 import { hashJson } from '../src/evidence.js';
 import { validateSessionReviewV2 } from '../src/validation.js';
-import { frozenCriterion, metCriterion, validReview } from './fixtures.js';
+import { assessment, proposal, validReview } from './fixtures.js';
 
-test('validates a complete V2 vertical slice', () => {
+test('validates the simplified V2 schema without findings, amendments, or reviewer checks', () => {
   const review = validReview();
   assert.equal(validateSessionReviewV2(review), review);
+  assert.deepEqual(Object.keys(review.provenance.pipeline).sort(), ['componentAssessmentIds', 'consolidationId', 'frozenLedgerSha256', 'proposalIds']);
 });
 
-test('rejects status/reason invariant violations', () => {
-  const review = validReview();
-  review.ledger[0] = { ...review.ledger[0]!, status: 'met', reason: 'external_blocker' };
-  assert.throws(() => validateSessionReviewV2(review), /invalid status\/reason pair/);
+test('rejects removed V2 fields at every former schema boundary', () => {
+  const cases: Array<[string, (review: ReturnType<typeof validReview>) => void]> = [
+    ['review.findings', (review) => { (review as unknown as Record<string, unknown>).findings = []; }],
+    ['ledger findingRefs', (review) => { (review.ledger[0] as unknown as Record<string, unknown>).findingRefs = []; }],
+    ['proposal candidateChecks', (review) => { (review.proposals[0] as unknown as Record<string, unknown>).candidateChecks = []; }],
+    ['assessment proposedAmendments', (review) => { (review.components[0].classifications as unknown as Record<string, unknown>).proposedAmendments = []; }],
+    ['pipeline reviewerChecksSha256', (review) => { (review.provenance.pipeline as unknown as Record<string, unknown>).reviewerChecksSha256 = 'a'.repeat(64); }],
+  ];
+  for (const [name, mutate] of cases) {
+    const review = validReview(); mutate(review);
+    assert.throws(() => validateSessionReviewV2(review), /simplified V2 schema|unclassified definition/, name);
+  }
 });
 
-test('rejects classified fields in the frozen definition ledger', () => {
-  const review = validReview();
-  (review.frozenLedger[0] as unknown as Record<string, unknown>).status = 'met';
-  review.frozenLedgerSha256 = hashJson(review.frozenLedger);
-  review.consolidation.frozenLedger = structuredClone(review.frozenLedger);
-  review.consolidation.frozenLedgerSha256 = review.frozenLedgerSha256;
-  review.provenance.pipeline.frozenLedgerSha256 = review.frozenLedgerSha256;
-  assert.throws(() => validateSessionReviewV2(review), /unclassified definition/);
+test('rejects status/reason and frozen-definition invariant violations', () => {
+  const status = validReview();
+  status.ledger[0] = { ...status.ledger[0]!, status: 'met', reason: 'external_blocker' };
+  assert.throws(() => validateSessionReviewV2(status), /invalid status\/reason pair/);
+
+  const frozen = validReview();
+  (frozen.frozenLedger[0] as unknown as Record<string, unknown>).status = 'met';
+  frozen.frozenLedgerSha256 = hashJson(frozen.frozenLedger);
+  frozen.consolidation.frozenLedger = structuredClone(frozen.frozenLedger);
+  frozen.consolidation.frozenLedgerSha256 = frozen.frozenLedgerSha256;
+  frozen.provenance.pipeline.frozenLedgerSha256 = frozen.frozenLedgerSha256;
+  assert.throws(() => validateSessionReviewV2(frozen), /unclassified definition/);
 });
 
-test('rejects hash and pipeline provenance drift', () => {
-  const badHash = validReview();
-  badHash.frozenLedgerSha256 = '0'.repeat(64);
+test('preserves strict hash, rubric, and index versions', () => {
+  const badHash = validReview(); badHash.frozenLedgerSha256 = '0'.repeat(64);
   assert.throws(() => validateSessionReviewV2(badHash), /does not match frozenLedger/);
-
-  const badId = validReview();
-  badId.provenance.pipeline.componentAssessmentIds[0] = 'wrong';
-  assert.throws(() => validateSessionReviewV2(badId), /artifact IDs/);
-});
-
-test('rejects canonical critical findings without ledger effect', () => {
-  const review = validReview();
-  review.findings = [{
-    findingId: 'f1', severity: 'critical', category: 'correctness', statement: 'Broken', evidenceRefs: ['e1'],
-    criterionId: 'c1', ledgerEffect: 'none', remediation: 'Fix it',
-  }];
-  assert.throws(() => validateSessionReviewV2(review), /critical\/major finding requires criterionId and ledger effect|ledgerEffect none/);
+  const badRubric = validReview(); badRubric.rubricVersion = 'rubric-v2';
+  assert.throws(() => validateSessionReviewV2(badRubric), /rubricVersion must be session-review-v2.1/);
+  const badIndex = validReview(); badIndex.indexVersion = 'v2';
+  assert.throws(() => validateSessionReviewV2(badIndex), /indexVersion must be v1/);
 });
 
 test('requires material component disagreement to be adjudicated', () => {
   const review = validReview();
-  review.components[1].classifications.criteria[0] = {
-    ...review.components[1].classifications.criteria[0]!, status: 'unmet', reason: 'omitted',
-  };
+  review.components[1].classifications.criteria[0] = { ...review.components[1].classifications.criteria[0]!, status: 'unmet', reason: 'omitted' };
   assert.throws(() => validateSessionReviewV2(review), /disagreement\.material/);
 });
 
-test('rejects unsafe reviewer checks unless declined as mutating', () => {
+test('accepts a downgraded mixed-profile coordinator and adjudicator that resolve a material criterion disagreement', () => {
   const review = validReview();
-  review.reviewerChecks = [{
-    checkId: 'check-1', kind: 'command', command: 'rm -rf src', cwd: '/repo', result: '', status: 'pass', evidenceRefs: [],
-  }];
-  review.reviewerChecksSha256 = hashJson(review.reviewerChecks);
-  review.provenance.pipeline.reviewerChecksSha256 = review.reviewerChecksSha256;
-  assert.throws(() => validateSessionReviewV2(review), /check safety/);
-});
-
-test('validates accepted amendments as the only allowed added ledger criteria', () => {
-  const review = validReview();
-  const definition = { ...structuredClone(frozenCriterion), criterionId: 'c2', statement: 'Avoid a regression.', origin: 'necessary_implied' as const };
-  const classification = { ...definition, status: 'unmet' as const, reason: 'regression' as const, evidenceRefs: ['e2'], findingRefs: ['f2'] };
-  const proposal = { amendmentId: 'amend-1', definition, motivatingFindingId: 'f2', evidenceRefs: ['e2'] };
-  review.components[0].classifications.proposedAmendments = [structuredClone(proposal)];
-  review.components[0].classifications.findings = [{ findingId: 'f2', severity: 'major', category: 'regression', statement: 'Regression', evidenceRefs: ['e2'], criterionId: 'c2', ledgerEffect: 'add', remediation: 'Fix' }];
-  review.amendments = [{
-    ...proposal, proposedByReviewerId: review.components[0].reviewerId, disposition: 'accepted', adjudicatedByReviewerId: 'adjudicator',
-    adjudicatedAt: '2026-07-24T10:15:00.000Z', rationale: 'Material regression', classifiedCriterion: classification,
-  }];
-  review.ledger.push(classification);
-  review.findings = [{ findingId: 'f2', severity: 'major', category: 'regression', statement: 'Regression', evidenceRefs: ['e2'], criterionId: 'c2', ledgerEffect: 'add', remediation: 'Fix' }];
+  review.components[1].classifications.criteria[0] = { ...review.components[1].classifications.criteria[0]!, status: 'unmet', reason: 'omitted' };
+  review.ledger[0] = { ...review.ledger[0]!, status: 'unmet', reason: 'omitted' };
   review.attainment = deriveAttainment(review.ledger);
   review.disagreement = { material: true, adjudicated: true, disputedFields: [
-    { field: 'amendments', smallValue: '1', mediumValue: '0', resolvedValue: 'accepted', resolution: 'adjudicator' },
-    { field: 'finding:f2', smallValue: 'major', mediumValue: 'absent', resolvedValue: 'major', resolution: 'adjudicator' },
-    { field: 'findings', smallValue: JSON.stringify(review.components[0].classifications.findings), mediumValue: '[]', resolvedValue: JSON.stringify(review.findings), resolution: 'adjudicator' },
+    { field: 'criterion:c1.status', firstValue: 'met', secondValue: 'unmet', resolvedValue: 'unmet', resolution: 'adjudicator' },
+    { field: 'criterion:c1.reason', firstValue: 'none', secondValue: 'omitted', resolvedValue: 'omitted', resolution: 'adjudicator' },
   ] };
+  review.consolidation.bucket = 'small';
+  review.consolidation.bucketDowngraded = true;
   review.adjudication = {
-    reviewerId: 'adjudicator', toolCallId: 'call-adjudicator', requestedBucket: 'medium', bucket: 'medium', bucketDowngraded: false, modelId: 'm-adj', provider: 'p-adj', family: 'f-adj', thinkingLevel: null,
-    promptHash: 'prompt-adj', rubricVersion: 'rubric-v2', adjudicationId: 'adj-1', assessedAt: '2026-07-24T10:15:00.000Z', resolvedFields: [
-      { field: 'findings', value: JSON.stringify(review.findings), rationale: 'Accepted finding', evidenceRefs: ['e2'] },
-    ], amendmentIds: ['amend-1'],
+    reviewerId: 'reviewer-adjudicator', toolCallId: 'call-adjudicator', requestedBucket: 'medium', bucket: 'small', bucketDowngraded: true,
+    modelId: 'model-adjudicator', provider: 'provider-adjudicator', family: 'family-adjudicator', thinkingLevel: null, promptHash: 'prompt-adjudicator', rubricVersion: 'session-review-v2.1',
+    adjudicationId: 'adjudication-1', assessedAt: '2026-07-24T10:15:00.000Z',
+    resolvedFields: [
+      { field: 'criterion:c1.status', value: 'unmet', rationale: 'The omitted artifact is decisive.', evidenceRefs: ['diff:1'] },
+      { field: 'criterion:c1.reason', value: 'omitted', rationale: 'The behavior is absent.', evidenceRefs: ['diff:1'] },
+    ],
     canonicalOverall: { deliveredOverall: review.attainment.deliveredOverall, controllableOverall: review.attainment.controllableOverall },
   };
-  review.provenance.pipeline.amendmentIds = ['amend-1'];
-  review.provenance.pipeline.adjudicationId = 'adj-1';
-  review.provenance.adjudicatorReviewerId = 'adjudicator';
+  review.provenance.pipeline.adjudicationId = 'adjudication-1';
+  review.provenance.adjudicatorReviewerId = 'reviewer-adjudicator';
+  assert.equal(validateSessionReviewV2(review), review);
+
+  review.adjudication!.resolvedFields.push({ field: 'obsolete.field', value: 'ignored', rationale: 'obsolete', evidenceRefs: [] });
+  assert.throws(() => validateSessionReviewV2(review), /resolvedFields must exactly match computed material fields/);
+  review.adjudication!.resolvedFields.pop();
+  (review.adjudication as unknown as Record<string, unknown>).amendmentIds = [];
+  assert.throws(() => validateSessionReviewV2(review), /simplified V2 schema/);
+});
+
+test('canonical derivation merges only criteria, process, evidence, and confidence', () => {
+  const review = validReview();
+  review.components[1].classifications.criteria[0] = { ...review.components[1].classifications.criteria[0]!, evidenceRefs: ['diff:1'] };
+  review.components[1].classifications.process.scopeControl = 'minor_avoidable_drift';
+  review.components[1].classifications.evidence.execution = 'partial';
+  review.components[1].classifications.confidence = 'medium';
+  review.ledger[0] = { ...review.ledger[0]!, evidenceRefs: ['diff:1', 'transcript:1'] };
+  review.process.scopeControl = 'minor_avoidable_drift';
+  review.evidence.execution = 'partial';
+  review.confidence = 'medium';
+  review.attainment = deriveAttainment(review.ledger);
+  review.disagreement.disputedFields = [
+    { field: 'criterion:c1.evidenceRefs', firstValue: '["transcript:1"]', secondValue: '["diff:1"]', resolvedValue: '["diff:1","transcript:1"]', resolution: 'deterministic_merge' },
+    { field: 'process.scopeControl', firstValue: 'controlled', secondValue: 'minor_avoidable_drift', resolvedValue: 'minor_avoidable_drift', resolution: 'deterministic_merge' },
+    { field: 'evidence.execution', firstValue: 'direct', secondValue: 'partial', resolvedValue: 'partial', resolution: 'deterministic_merge' },
+    { field: 'confidence', firstValue: 'high', secondValue: 'medium', resolvedValue: 'medium', resolution: 'deterministic_merge' },
+  ];
   assert.equal(validateSessionReviewV2(review), review);
 });
 
-test('mapped amendments must strictly worsen, and never upgrade, the pre-amendment classification', () => {
-  const mappedReview = (preStatus: 'met' | 'partly_met', mappedStatus: 'met' | 'partly_met') => {
-    const review = validReview();
-    const definition = { ...structuredClone(frozenCriterion), criterionId: 'c2', statement: 'Avoid a regression.', origin: 'necessary_implied' as const };
-    const proposal = { amendmentId: 'mapped-1', definition, motivatingFindingId: 'f2', evidenceRefs: ['diff:x'] };
-    const componentFinding = { findingId: 'f2', severity: 'major' as const, category: 'regression' as const, statement: 'A required regression guard is absent.', evidenceRefs: ['diff:x'], criterionId: 'c2', ledgerEffect: 'add' as const, remediation: 'Restore the guard.' };
-    for (const component of review.components) {
-      component.classifications.criteria[0] = { ...component.classifications.criteria[0]!, status: preStatus, reason: preStatus === 'met' ? 'none' : 'omitted' };
-    }
-    review.components[0].classifications.proposedAmendments = [structuredClone(proposal)];
-    review.components[0].classifications.findings = [componentFinding];
-    const canonicalFinding = { ...componentFinding, severity: 'minor' as const, criterionId: 'c1', ledgerEffect: 'downgrade' as const };
-    const mapped = { ...structuredClone(metCriterion), status: mappedStatus, reason: mappedStatus === 'met' ? 'none' as const : 'omitted' as const, evidenceRefs: ['diff:x'], findingRefs: ['f2'] };
-    review.amendments = [{
-      ...proposal, proposedByReviewerId: review.components[0].reviewerId, disposition: 'mapped_to_existing', targetCriterionId: 'c1', downgradedClassification: mapped,
-      adjudicatedByReviewerId: 'adjudicator', adjudicatedAt: '2026-07-24T10:15:00.000Z', rationale: 'Maps to the existing criterion.',
-    }];
-    review.ledger = [mapped];
-    review.findings = [canonicalFinding];
-    review.attainment = deriveAttainment(review.ledger);
-    review.disagreement = { material: true, adjudicated: true, disputedFields: [
-      { field: 'amendments', smallValue: '1', mediumValue: '0', resolvedValue: 'mapped_to_existing', resolution: 'adjudicator' },
-      { field: 'finding:f2', smallValue: 'major', mediumValue: 'absent', resolvedValue: 'minor', resolution: 'adjudicator' },
-      { field: 'findings', smallValue: JSON.stringify(review.components[0].classifications.findings), mediumValue: '[]', resolvedValue: JSON.stringify(review.findings), resolution: 'adjudicator' },
-    ] };
-    review.adjudication = {
-      reviewerId: 'adjudicator', toolCallId: 'call-adjudicator', requestedBucket: 'medium', bucket: 'medium', bucketDowngraded: false, modelId: 'm-adj', provider: 'p-adj', family: 'f-adj', thinkingLevel: null,
-      promptHash: 'prompt-adj', rubricVersion: 'rubric-v2', adjudicationId: 'adj-mapped', assessedAt: '2026-07-24T10:15:00.000Z',
-      resolvedFields: [{ field: 'findings', value: JSON.stringify(review.findings), rationale: 'Map to existing criterion.', evidenceRefs: ['diff:x'] }],
-      amendmentIds: ['mapped-1'], canonicalOverall: { deliveredOverall: review.attainment.deliveredOverall, controllableOverall: review.attainment.controllableOverall },
-    };
-    review.provenance.pipeline.amendmentIds = ['mapped-1'];
-    review.provenance.pipeline.adjudicationId = 'adj-mapped';
-    review.provenance.adjudicatorReviewerId = 'adjudicator';
-    return review;
-  };
-
-  assert.equal(validateSessionReviewV2(mappedReview('met', 'partly_met')).reviewId, 'review-1');
-  assert.throws(() => validateSessionReviewV2(mappedReview('partly_met', 'met')), /must strictly worsen the pre-amendment criterion classification/);
-  assert.throws(() => validateSessionReviewV2(mappedReview('partly_met', 'partly_met')), /must strictly worsen the pre-amendment criterion classification/);
+test('rejects canonical values not bound to component resolution and spurious disputed fields', () => {
+  const process = validReview(); process.process.scopeControl = 'minor_avoidable_drift';
+  assert.throws(() => validateSessionReviewV2(process), /canonical process/);
+  const spurious = validReview();
+  spurious.disagreement.disputedFields = [{ field: 'evidence.requirements', firstValue: 'clear', secondValue: 'clear', resolvedValue: 'clear', resolution: 'deterministic_merge' }];
+  assert.throws(() => validateSessionReviewV2(spurious), /spurious disputed field/);
 });
 
-test('rejects caller-supplied attainment that differs from deterministic derivation', () => {
+test('rejects duplicate proposal and component assessment IDs', () => {
+  const duplicateProposals = validReview();
+  duplicateProposals.proposals[1].proposalId = duplicateProposals.proposals[0].proposalId;
+  assert.throws(() => validateSessionReviewV2(duplicateProposals), /review\.proposals must contain unique IDs/);
+
+  const duplicateAssessments = validReview();
+  duplicateAssessments.components[1].assessmentId = duplicateAssessments.components[0].assessmentId;
+  assert.throws(() => validateSessionReviewV2(duplicateAssessments), /review\.components must contain unique IDs/);
+});
+
+test('retains human-question validation and deterministic attainment', () => {
   const review = validReview();
   review.attainment.qualityIndexV1 = 1;
   assert.throws(() => validateSessionReviewV2(review), /attainment does not match/);
-});
 
-test('rejects canonical vectors and ledger values not bound to component resolution', () => {
-  const process = validReview();
-  process.process.scopeControl = 'minor_avoidable_drift';
-  assert.throws(() => validateSessionReviewV2(process), /canonical process/);
-
-  const ledger = validReview();
-  ledger.ledger[0] = { ...ledger.ledger[0]!, status: 'partly_met', reason: 'unknown' };
-  ledger.attainment = deriveAttainment(ledger.ledger);
-  assert.throws(() => validateSessionReviewV2(ledger), /canonical ledger/);
-});
-
-test('accepts and records deterministic conservative vector merges', () => {
-  const review = validReview();
-  review.components[1].classifications.evidence.execution = 'partial';
-  review.evidence.execution = 'partial';
-  review.disagreement.disputedFields = [{
-    field: 'evidence.execution', smallValue: 'direct', mediumValue: 'partial', resolvedValue: 'partial', resolution: 'deterministic_merge',
-  }];
-  assert.equal(validateSessionReviewV2(review), review);
-});
-
-test('requires exactly one disposition for every proposed amendment', () => {
-  const review = validReview();
-  review.components[0].classifications.findings = [{
-    findingId: 'f-proposed', severity: 'major', category: 'omission', statement: 'Missing necessary behavior.', evidenceRefs: ['e1'], criterionId: 'c2', ledgerEffect: 'add', remediation: 'Add it.',
-  }];
-  review.components[0].classifications.proposedAmendments = [{
-    amendmentId: 'a-undisposed', definition: { ...structuredClone(frozenCriterion), criterionId: 'c2', origin: 'necessary_implied' }, motivatingFindingId: 'f-proposed', evidenceRefs: ['e1'],
-  }];
-  assert.throws(() => validateSessionReviewV2(review), /every proposed amendment must have exactly one disposition/);
-});
-
-test('requires component add findings to carry one matching post-freeze proposal', () => {
-  const review = validReview();
-  review.components[0].classifications.findings = [{
-    findingId: 'orphan-add', severity: 'major', category: 'omission', statement: 'Missing necessary behavior.', evidenceRefs: ['e1'], criterionId: 'c2', ledgerEffect: 'add', remediation: 'Add it.',
-  }];
-  assert.throws(() => validateSessionReviewV2(review), /exactly one matching material amendment proposal/);
-});
-
-test('non-skipped reviewer checks require a toolCallId and outputSha256; declined checks forbid them', () => {
-  const missingBinding = validReview();
-  missingBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'static_inspection', target: '/repo/a.ts', query: 'needle', result: '', status: 'pass', evidenceRefs: [] }];
-  missingBinding.reviewerChecksSha256 = hashJson(missingBinding.reviewerChecks);
-  missingBinding.provenance.pipeline.reviewerChecksSha256 = missingBinding.reviewerChecksSha256;
-  assert.throws(() => validateSessionReviewV2(missingBinding), /reviewerChecks\[0\]\.toolCallId/);
-
-  const withBinding = validReview();
-  withBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'static_inspection', target: '/repo/a.ts', query: 'needle', result: '', status: 'pass', evidenceRefs: [], toolCallId: 'tc-1', outputSha256: 'a'.repeat(64) }];
-  withBinding.reviewerChecksSha256 = hashJson(withBinding.reviewerChecks);
-  withBinding.provenance.pipeline.reviewerChecksSha256 = withBinding.reviewerChecksSha256;
-  assert.equal(validateSessionReviewV2(withBinding), withBinding);
-
-  const declinedWithBinding = validReview();
-  declinedWithBinding.reviewerChecks = [{ checkId: 'chk-1', kind: 'command', command: 'rm -rf src', cwd: '/repo', result: '', status: 'declined: mutating', evidenceRefs: [], toolCallId: 'tc-1', outputSha256: 'a'.repeat(64) }];
-  declinedWithBinding.reviewerChecksSha256 = hashJson(declinedWithBinding.reviewerChecks);
-  declinedWithBinding.provenance.pipeline.reviewerChecksSha256 = declinedWithBinding.reviewerChecksSha256;
-  assert.throws(() => validateSessionReviewV2(declinedWithBinding), /declined check must not bind/);
-
-  const declinedClean = validReview();
-  declinedClean.reviewerChecks = [{ checkId: 'chk-1', kind: 'command', command: 'rm -rf src', cwd: '/repo', result: '', status: 'declined: mutating', evidenceRefs: [] }];
-  declinedClean.reviewerChecksSha256 = hashJson(declinedClean.reviewerChecks);
-  declinedClean.provenance.pipeline.reviewerChecksSha256 = declinedClean.reviewerChecksSha256;
-  assert.equal(validateSessionReviewV2(declinedClean), declinedClean);
-});
-
-test('rejects spurious disputed fields that the components never disagreed on', () => {
-  const review = validReview();
-  review.components[1].classifications.evidence.execution = 'partial';
-  review.evidence.execution = 'partial';
-  review.disagreement.disputedFields = [
-    { field: 'evidence.execution', smallValue: 'direct', mediumValue: 'partial', resolvedValue: 'partial', resolution: 'deterministic_merge' },
-    { field: 'evidence.requirements', smallValue: 'clear', mediumValue: 'clear', resolvedValue: 'clear', resolution: 'deterministic_merge' },
-  ];
-  assert.throws(() => validateSessionReviewV2(review), /spurious disputed field evidence\.requirements/);
-});
-
-test('rejects an explicit answer key on cancelled and unanswered human responses', () => {
-  const review = validReview();
-  review.humanCheck = {
-    toolCallId: 'ask-1',
-    input: { question: 'Did it render?', options: ['Yes', 'No'], reviewMeta: { purpose: 'review_human_verification', targetSessionId: review.sessionId, targetSessionPath: review.sessionPathAtReview, criterionId: 'c1', domain: 'UI', expectedObservation: 'Correct rendering' } },
-    response: { answer: undefined, source: 'cancelled', cancelled: true, status: 'unanswered', recordedAt: '2026-07-24T11:00:00.000Z' },
-    interpretation: 'User cancelled.',
+  const human = validReview();
+  human.humanCheck = {
+    toolCallId: 'ask-1', input: { question: 'Did it render?', options: ['Yes', 'No'], reviewMeta: { purpose: 'review_human_verification', targetSessionId: human.sessionId, targetSessionPath: human.sessionPathAtReview, criterionId: 'c1', domain: 'UI', expectedObservation: 'Correct rendering' } },
+    response: { source: 'cancelled', cancelled: true, status: 'unanswered', recordedAt: '2026-07-24T11:00:00.000Z' }, interpretation: 'User cancelled.',
   };
-  assert.throws(() => validateSessionReviewV2(review), /cannot carry an answer/);
-
-  const omitted = validReview();
-  omitted.humanCheck = { ...review.humanCheck, response: { source: 'cancelled', cancelled: true, status: 'unanswered', recordedAt: '2026-07-24T11:00:00.000Z' } };
-  // The omitted-answer shape is structurally valid (transcript binding is
-  // exercised in runtime-provenance tests).
-  assert.equal(validateSessionReviewV2(omitted), omitted);
+  assert.equal(validateSessionReviewV2(human), human);
 });
 
-test('hostVersion must be null or a non-empty version string', () => {
-  const empty = validReview();
-  empty.provenance.hostVersion = '';
-  assert.throws(() => validateSessionReviewV2(empty), /hostVersion must be null/);
+test('accepts small+small and requires medium coordination for mixed profiles', () => {
+  const review = validReview();
+  const secondProposal = proposal('small'); secondProposal.proposalId = 'proposal-small-2';
+  review.proposals = [proposal('small'), secondProposal];
+  const secondAssessment = assessment('small'); secondAssessment.assessmentId = 'assessment-small-2';
+  review.components = [assessment('small'), secondAssessment];
+  review.consolidation.requestedBucket = 'small'; review.consolidation.bucket = 'small'; review.consolidation.bucketDowngraded = false;
+  review.provenance.diversityAchieved = false;
+  review.provenance.pipeline.proposalIds = ['proposal-small', 'proposal-small-2'];
+  review.provenance.pipeline.componentAssessmentIds = ['assessment-small', 'assessment-small-2'];
+  review.consolidation.provenance.fromProposals = ['proposal-small', 'proposal-small-2'];
+  assert.equal(validateSessionReviewV2(review), review);
 
-  const nonString = validReview();
-  (nonString.provenance as unknown as { hostVersion: unknown }).hostVersion = 42;
-  assert.throws(() => validateSessionReviewV2(nonString), /hostVersion must be null/);
+  const mixed = validReview(); mixed.consolidation.requestedBucket = 'small'; mixed.consolidation.bucket = 'small';
+  assert.throws(() => validateSessionReviewV2(mixed), /requestedBucket has an unsupported value/);
+});
+
+test('uses neutral first/second disputed values for a small-only profile', () => {
+  const review = validReview();
+  const secondProposal = proposal('small'); secondProposal.proposalId = 'proposal-small-2';
+  review.proposals = [proposal('small'), secondProposal];
+  const secondAssessment = assessment('small'); secondAssessment.assessmentId = 'assessment-small-2';
+  review.components = [assessment('small'), secondAssessment];
+  review.components[1].classifications.evidence.execution = 'partial';
+  review.evidence.execution = 'partial';
+  review.consolidation.requestedBucket = 'small'; review.consolidation.bucket = 'small'; review.consolidation.bucketDowngraded = false;
+  review.consolidation.provenance.fromProposals = ['proposal-small', 'proposal-small-2'];
+  review.provenance.diversityAchieved = false;
+  review.provenance.pipeline.proposalIds = ['proposal-small', 'proposal-small-2'];
+  review.provenance.pipeline.componentAssessmentIds = ['assessment-small', 'assessment-small-2'];
+  review.disagreement.disputedFields = [
+    { field: 'evidence.execution', firstValue: 'direct', secondValue: 'partial', resolvedValue: 'partial', resolution: 'deterministic_merge' },
+  ];
+  assert.equal(validateSessionReviewV2(review), review);
 });

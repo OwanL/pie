@@ -1,7 +1,6 @@
-/** V2 contracts for the `session_review` tool. V1 records remain read-only. */
+/** V2 contracts for the `session_review` tool. */
 
 export type ReviewAction = 'listOpen' | 'listSelected' | 'getEvidence' | 'recordReview' | 'closeReviewed' | 'closeSelf';
-export type Completion = 'fully' | 'partial' | 'setback';
 
 export interface OpenTabSummary {
   path: string;
@@ -11,28 +10,9 @@ export interface OpenTabSummary {
   messageCount?: number;
   modelId?: string;
   thinkingLevel?: string;
-  done?: boolean;
-  rating?: number;
-  completion?: Completion;
-  reviewReason?: string;
-  evaluatedAt?: string;
   pinned?: boolean;
   isRunning?: boolean;
 }
-
-/** Legacy V1 sidecar shape. Never converted to V2. */
-export interface ReviewRecordV1 {
-  sessionPath: string;
-  done: boolean;
-  rating: number;
-  completion: Completion;
-  reason: string;
-  evaluatedAt: string;
-  reviewerBuckets?: string[];
-  reviewerCount?: number;
-  selfClose?: boolean;
-}
-export type ReviewRecord = ReviewRecordV1;
 
 export type CriterionOrigin = 'explicit' | 'necessary_implied';
 export type CriterionImportance = 'core' | 'supporting' | 'optional';
@@ -53,20 +33,6 @@ export interface ClassifiedCriterion extends CriterionDefinition {
   status: CriterionStatus;
   reason: CriterionReason;
   evidenceRefs: string[];
-  findingRefs: string[];
-}
-
-export type FindingSeverity = 'critical' | 'major' | 'minor' | 'nit';
-export type FindingCategory = 'correctness' | 'regression' | 'omission' | 'scope_drift' | 'verification_gap' | 'security' | 'performance' | 'maintainability' | 'attribution_error' | 'other';
-export interface ReviewFinding {
-  findingId: string;
-  severity: FindingSeverity;
-  category: FindingCategory;
-  statement: string;
-  evidenceRefs: string[];
-  criterionId?: string;
-  ledgerEffect: 'downgrade' | 'add' | 'none';
-  remediation: string;
 }
 
 export interface ReviewProcessVector {
@@ -89,25 +55,6 @@ export type ReviewKind = 'production' | 'calibration';
 export type BucketTier = 'small' | 'medium' | 'frontier';
 export type ReviewerBucket = 'small' | 'medium';
 
-export interface ReviewerCheckBase { checkId: string; criterionId?: string }
-export type ReviewerCheckSpec = ReviewerCheckBase & (
-  | { kind: 'command' | 'automated_check'; command: string; cwd: string }
-  | { kind: 'static_inspection'; target: string; query: string }
-);
-export type ReviewerCheck = ReviewerCheckSpec & {
-  result: string;
-  status: 'pass' | 'fail' | 'inconclusive' | 'declined: mutating';
-  evidenceRefs: string[];
-  /** Prior orchestrator tool call whose immutable output is bound to this
-   *  executed check. Required for every non-`declined: mutating` check and
-   *  forbidden for skipped checks; not trusted — validated against the
-   *  orchestrator transcript at record time. */
-  toolCallId?: string;
-  /** SHA-256 over the bound tool call's joined text output (the immutable
-   *  output). Required for every non-`declined: mutating` check and forbidden
-   *  for skipped checks. */
-  outputSha256?: string;
-};
 export interface ReviewHumanQuestionCandidate {
   criterionId: string;
   domain: string;
@@ -134,13 +81,11 @@ export interface ReviewerProposal extends ReviewerRuntime {
   proposalId: string;
   proposedAt: string;
   criteria: CriterionDefinition[];
-  findings: ReviewFinding[];
-  candidateChecks: ReviewerCheckSpec[];
   candidateHumanQuestion?: ReviewHumanQuestionCandidate;
 }
 export interface ConsolidationRecord extends Omit<ReviewerRuntime, 'requestedBucket'> {
   consolidationId: string;
-  requestedBucket: 'medium';
+  requestedBucket: ReviewerBucket;
   consolidatedAt: string;
   frozenLedger: CriterionDefinition[];
   frozenLedgerSha256: string;
@@ -188,26 +133,6 @@ export interface ReviewHumanCheck {
   interpretation: string;
 }
 
-export interface CriterionAmendmentProposal {
-  amendmentId: string;
-  definition: CriterionDefinition;
-  motivatingFindingId: string;
-  evidenceRefs: string[];
-}
-export type CriterionAmendmentDisposition = 'accepted' | 'mapped_to_existing' | 'finding_downgraded' | 'rejected';
-interface CriterionAmendmentCommon extends CriterionAmendmentProposal {
-  proposedByReviewerId: string;
-  disposition: CriterionAmendmentDisposition;
-  adjudicatedByReviewerId: string;
-  adjudicatedAt: string;
-  rationale: string;
-}
-export type CriterionAmendment =
-  | (CriterionAmendmentCommon & { disposition: 'accepted'; classifiedCriterion: ClassifiedCriterion })
-  | (CriterionAmendmentCommon & { disposition: 'mapped_to_existing'; targetCriterionId: string; downgradedClassification: ClassifiedCriterion })
-  | (CriterionAmendmentCommon & { disposition: 'finding_downgraded'; downgradedSeverity: 'minor' | 'nit' })
-  | (CriterionAmendmentCommon & { disposition: 'rejected' });
-
 export interface ReviewerAssessment extends ReviewerRuntime {
   assessmentId: string;
   assessedAt: string;
@@ -215,26 +140,23 @@ export interface ReviewerAssessment extends ReviewerRuntime {
     criteria: ClassifiedCriterion[];
     process: ReviewProcessVector;
     evidence: ReviewEvidenceVector;
-    findings: ReviewFinding[];
     confidence: ReviewConfidence;
     proposedOverall: OverallAttainment;
-    proposedAmendments: CriterionAmendmentProposal[];
   };
 }
 export interface DisputedField {
   field: string;
-  smallValue: string;
-  mediumValue: string;
+  firstValue: string;
+  secondValue: string;
   resolvedValue: string;
-  resolution: 'small' | 'medium' | 'adjudicator' | 'deterministic_merge';
+  resolution: 'adjudicator' | 'deterministic_merge';
 }
 export interface ReviewDisagreementSummary { material: boolean; disputedFields: DisputedField[]; adjudicated: boolean }
 export interface ReviewerAdjudication extends Omit<ReviewerRuntime, 'requestedBucket'> {
   adjudicationId: string;
-  requestedBucket: 'medium';
+  requestedBucket: ReviewerBucket;
   assessedAt: string;
   resolvedFields: { field: string; value: string; rationale: string; evidenceRefs: string[] }[];
-  amendmentIds: string[];
   canonicalOverall: { deliveredOverall: OverallAttainment; controllableOverall: OverallAttainment };
 }
 
@@ -274,17 +196,15 @@ export interface BlindedEvidenceBundle {
 export interface ReviewProvenance {
   orchestratorSessionId: string;
   rubricVersion: string;
-  indexVersion?: string;
+  indexVersion: string;
   blindingApplied: boolean;
   diversityAchieved: boolean;
   evidenceManifest: EvidenceManifest;
   pipeline: {
     frozenLedgerSha256: string;
-    reviewerChecksSha256: string;
     proposalIds: [string, string];
     consolidationId: string;
     componentAssessmentIds: [string, string];
-    amendmentIds: string[];
     adjudicationId?: string;
   };
   adjudicatorReviewerId?: string;
@@ -299,12 +219,11 @@ export interface SessionReviewV2 {
   sessionPathAtReview: string;
   identityFallback?: boolean;
   rubricVersion: string;
-  indexVersion?: string;
+  indexVersion: string;
   reviewedAt: string;
   frozenLedger: CriterionDefinition[];
   frozenLedgerSha256: string;
   ledger: ClassifiedCriterion[];
-  amendments: CriterionAmendment[];
   attainment: {
     deliveredOverall: OverallAttainment;
     controllableOverall: OverallAttainment;
@@ -315,13 +234,10 @@ export interface SessionReviewV2 {
   };
   process: ReviewProcessVector;
   evidence: ReviewEvidenceVector;
-  findings: ReviewFinding[];
   humanCheck?: ReviewHumanCheck;
   confidence: ReviewConfidence;
   proposals: [ReviewerProposal, ReviewerProposal];
   consolidation: ConsolidationRecord;
-  reviewerChecks: ReviewerCheck[];
-  reviewerChecksSha256: string;
   components: [ReviewerAssessment, ReviewerAssessment];
   disagreement: ReviewDisagreementSummary;
   adjudication?: ReviewerAdjudication;
@@ -366,7 +282,7 @@ export const sessionReviewSchema = {
     sessionId: { type: 'string', description: 'Stable session-header ID (required for closeReviewed; checked against sessionPath when supplied).' },
     reviewId: { type: 'string', description: 'Persisted review ID required by closeReviewed.' },
     review: { type: 'object', description: 'Complete SessionReviewV2 record for recordReview.', additionalProperties: true },
-    reason: { type: 'string', description: 'Optional close reason (not stored as a rating).' },
+    reason: { type: 'string', description: 'Optional close reason.' },
     maxTurns: { type: 'integer', minimum: 1, maximum: 200, description: 'getEvidence transcript turn cap (default 40).' },
     artifacts: {
       type: 'array',

@@ -235,14 +235,49 @@ function subagentTaskMessage(result: SubagentSingleResult, idPrefix: string): Ch
 export function subagentSingleResultToChatMessages(result: SubagentSingleResult, idPrefix: string): ChatMessage[] {
   const chatMessages = rawMessagesToChatMessages(Array.isArray(result.messages) ? result.messages : [], idPrefix);
   const finalOutput = nonEmptyText(result.finalOutput);
-  if (!isSubagentSingleResultRunning(result) && finalOutput && !chatMessages.some((message) => message.role === 'assistant' && message.markdown?.trim() === finalOutput)) {
-    chatMessages.push({
-      id: `${idPrefix}-final-output`,
-      role: 'assistant',
-      createdAt: '',
-      markdown: finalOutput,
-      status: isSubagentSingleResultFailed(result) ? 'error' : 'completed',
-    });
+  // The ordinary transcript already contains the terminal assistant turn.
+  // `finalOutput` is only a recovery copy for transcripts whose terminal text
+  // was removed by result compaction; appending it for every settled result
+  // duplicates the last reply whenever assistant turns were merged or split
+  // into multiple text parts.
+  const hasFinalOutput = finalOutput
+    ? chatMessages.some((message) => {
+      if (message.role !== 'assistant') return false;
+      if (message.markdown?.trim() === finalOutput) return true;
+      return assistantPartsFromMessage(message)?.some(
+        (part) => part.kind === 'text' && part.text.trim() === finalOutput,
+      ) === true;
+    })
+    : false;
+  if (!isSubagentSingleResultRunning(result) && result.transcriptCompacted && finalOutput && !hasFinalOutput) {
+    let lastAssistant: ChatMessage | undefined;
+    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
+      if (chatMessages[index]?.role === 'assistant') {
+        lastAssistant = chatMessages[index];
+        break;
+      }
+    }
+    if (lastAssistant) {
+      // `finalOutput` is the terminal text of the same child turn, stored
+      // separately so it survives transcript compaction. Keep it in that
+      // assistant row rather than synthesizing a second reply below the
+      // subagent's tool calls (the common compacted/block result shape).
+      const parts = assistantPartsFromMessage(lastAssistant) ?? [];
+      appendAssistantTextPart(parts, 'text', finalOutput);
+      lastAssistant.parts = parts;
+      lastAssistant.markdown = textFromMessageParts(parts);
+      lastAssistant.thinking = reasoningFromMessageParts(parts);
+      lastAssistant.toolCalls = toolCallsFromMessageParts(parts);
+      lastAssistant.status = isSubagentSingleResultFailed(result) ? 'error' : 'completed';
+    } else {
+      chatMessages.push({
+        id: `${idPrefix}-final-output`,
+        role: 'assistant',
+        createdAt: '',
+        markdown: finalOutput,
+        status: isSubagentSingleResultFailed(result) ? 'error' : 'completed',
+      });
+    }
   }
   const hasExplicitUserTask = chatMessages.some((message) => message.role === 'user');
   const taskMessage = hasExplicitUserTask ? undefined : subagentTaskMessage(result, idPrefix);

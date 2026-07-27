@@ -187,6 +187,7 @@ export function useSmoothAutoFollow(
         // Settled follow is event-driven: transcript/measurement dependencies
         // restart this effect, while container resizes bump targetRevision. Do
         // not burn a no-op rAF every frame at an unchanged bottom.
+        setIsAtBottom(true);
         raf = 0;
         return;
       }
@@ -199,7 +200,9 @@ export function useSmoothAutoFollow(
       // fragile for one frame. scrollTop reads are cheap (no forced reflow,
       // unlike scrollHeight/clientHeight); scrollToBottom uses the same pattern.
       lastScrollTopRef.current = el.scrollTop;
-      setIsAtBottom(true);
+      // Do not claim arrival while easing. The metric-based scroll listener
+      // keeps this false until the viewport is genuinely near the bottom, so
+      // the jump-to-bottom control remains available during long catch-ups.
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

@@ -543,6 +543,10 @@ function clearActiveRequest(
       clearTimeout(context.activeRequest.semanticLeaseTimer);
       context.activeRequest.semanticLeaseTimer = undefined;
     }
+    if (context.activeRequest.quotaSettlementTimer) {
+      clearTimeout(context.activeRequest.quotaSettlementTimer);
+      context.activeRequest.quotaSettlementTimer = undefined;
+    }
     context.activeRequest.pendingDurableToolTerminals?.clear();
     context.activeRequest = undefined;
   }

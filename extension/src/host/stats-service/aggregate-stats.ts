@@ -862,7 +862,6 @@ export function accumulateAggregateStats(
         durationMs: run.busyDurationMs ?? 0,
         modelId: run.modelId ?? null,
         provider: providerForModel(run.modelId, pricingMap, run.provider),
-        outcome: run.outcome ?? null,
         startedAt: run.startedAt,
         endedAt: run.finalizedAt ?? run.updatedAt,
         inputTokens: runInputTokens,

@@ -71,6 +71,26 @@ test('computeFileDiff: created file missing on disk → note, empty body', async
   });
 });
 
+test('computeFileDiff: created-but-git-tracked file (an overwrite) diffs against the baseline, not as all-additions', async () => {
+  // The derivation marks a `write` tool as `created` from the tool NAME alone —
+  // it cannot prove the file is new. At diff time we verify the claim against
+  // git: a tracked file existed before the session, so an overwrite is a
+  // modification, not a creation. The diff must show the delta (-old/+new),
+  // not the whole file as additions.
+  await withTempRepo(async (dir) => {
+    const file = path.join(dir, 'f.ts');
+    await fs.writeFile(file, 'v1\n');
+    await commit(dir, 'initial');
+    await fs.writeFile(file, 'v2\n'); // overwrite (write tool → kind 'created')
+
+    const out = await computeFileDiff(input(file, 'created', 'f.ts'));
+    assert.equal(out.kind, 'modified', 'a tracked overwrite is a modification');
+    assert.match(out.body, /-v1/);
+    assert.match(out.body, /\+v2/);
+    assert.ok(!out.body.includes('@@ -0,0'), 'must not be a synthetic all-additions patch');
+  });
+});
+
 // ─── modified: diff against the pre-change baseline (not bare HEAD) ─────────
 
 test('computeFileDiff: modified committed change → diff vs pre-change baseline', async () => {

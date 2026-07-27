@@ -439,6 +439,7 @@ test('reducer: Edit command records pending, inserts optimistic message, produce
     previousSummary: null,
     startedAt: 1,
     removedTail: [],
+    editDraft: { messageId: 'msg-1', text: 'new text', inputs: [] },
   });
 
   // Optimistic user message in transcript.

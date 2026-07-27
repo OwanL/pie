@@ -3,14 +3,21 @@ import test from 'node:test';
 
 import {
   buildCompletedCostSummary,
+  buildCompletedCostSummaryFromSnapshot,
   buildLiveSessionCostEstimate,
   buildSessionCostIndicator,
   buildSessionTokenIndicator,
+  buildSessionTokenUsageFromSnapshot,
   extractSubagentCostSummary,
+  extractSubagentCostSummaryFromSnapshot,
   extractSubagentDirectCost,
   formatCostUsd,
   type SessionTokenUsageSummary,
 } from '../../../src/webview/panel/session-tabs/token-usage';
+import {
+  buildSessionUsageSnapshot,
+  mergeSessionUsageSnapshots,
+} from '../../../src/shared/session-usage';
 
 function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTokenUsageSummary {
   return {
@@ -69,6 +76,88 @@ test('buildSessionCostIndicator stays quiet until a turn reports usage', () => {
   const summary = makeSummary();
   const pricing = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
   assert.equal(buildSessionCostIndicator(summary, pricing, 'Model', buildCompletedCostSummary(summary, [], pricing, undefined), extractSubagentDirectCost([]), undefined), null);
+});
+
+test('whole-session accounting prevents a partial transcript window from undercounting cost', () => {
+  const pricing = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
+  const hiddenOldTurn = {
+    id: 'old', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    modelId: 'claude', provider: 'anthropic',
+    usage: { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1_000_000 },
+  };
+  const loadedTailTurn = {
+    id: 'tail', role: 'assistant' as const, createdAt: '', markdown: '', status: 'completed' as const,
+    modelId: 'claude', provider: 'anthropic',
+    usage: { inputTokens: 0, outputTokens: 1_000_000, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 1_000_000 },
+  };
+  const durableSnapshot = buildSessionUsageSnapshot([hiddenOldTurn, loadedTailTurn]);
+  const loadedWindowSnapshot = buildSessionUsageSnapshot([loadedTailTurn]);
+  const accounting = mergeSessionUsageSnapshots(durableSnapshot, loadedWindowSnapshot);
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const resolvePricing = () => pricing;
+
+  const result = buildSessionCostIndicator(
+    summary,
+    pricing,
+    'Claude',
+    buildCompletedCostSummaryFromSnapshot(accounting, pricing, resolvePricing),
+    extractSubagentCostSummaryFromSnapshot(accounting, resolvePricing),
+    undefined,
+    resolvePricing,
+    undefined,
+    'claude',
+    'anthropic',
+    accounting,
+  );
+
+  assert.ok(result);
+  assert.equal(summary.reportedTurnCount, 2);
+  assert.equal(result.label, '$18.00');
+  assert.match(result.tooltip, /anthropic \/ claude:\s+\$18\.0000/);
+});
+
+test('whole-session accounting includes every pruning prepass rather than only the latest', () => {
+  const pruningMessages = [0.01, 0.02].map((cost, index) => ({
+    id: `pruning-${index}`,
+    role: 'system' as const,
+    createdAt: '',
+    markdown: '',
+    status: 'completed' as const,
+    customType: 'pruning-result',
+    customDetails: {
+      mode: 'auto' as const,
+      skillTokensSaved: 0,
+      toolTokensSaved: 0,
+      includedSkills: [],
+      excludedSkills: [],
+      includedTools: [],
+      excludedTools: [],
+      prepassModel: 'pruner',
+      prepassProvider: 'openai',
+      prepassInputTokens: 1_000,
+      prepassOutputTokens: 100,
+      prepassReportedCostUsd: cost,
+    },
+  }));
+  const accounting = buildSessionUsageSnapshot(pruningMessages);
+  const summary = buildSessionTokenUsageFromSnapshot(accounting);
+  const result = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot(accounting, undefined, undefined),
+    extractSubagentCostSummaryFromSnapshot(accounting),
+    pruningMessages[1]!.customDetails,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    accounting,
+  );
+
+  assert.ok(result);
+  assert.equal(result.label, '$0.03');
+  assert.match(result.tooltip, /openai \/ pruner:\s+\$0\.0300/);
 });
 
 test('buildSessionCostIndicator computes cost across all channels', () => {
@@ -260,6 +349,44 @@ test('subagent retry costs remain provider-scoped when model ids collide', () =>
   assert.equal(summary.totalCost, 0.03);
   assert.equal(summary.modelCosts.get('openai-codex/shared-model')?.cost, 0.01);
   assert.equal(summary.modelCosts.get('github-copilot/shared-model')?.cost, 0.02);
+
+  const snapshotSummary = extractSubagentCostSummaryFromSnapshot(buildSessionUsageSnapshot(transcript));
+  assert.equal(snapshotSummary.totalCost, 0.03);
+  assert.equal(snapshotSummary.modelCosts.get('openai-codex/shared-model')?.cost, 0.01);
+  assert.equal(snapshotSummary.modelCosts.get('github-copilot/shared-model')?.cost, 0.02);
+});
+
+test('whole-session subagent accounting preserves top-level cost when attempt records omit exact cost', () => {
+  const transcript = [{
+    id: 'parent',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: '',
+    status: 'completed' as const,
+    toolCalls: [{
+      id: 'subagent-call',
+      name: 'subagent',
+      input: {},
+      status: 'completed' as const,
+      result: { details: { mode: 'single', results: [{
+        model: 'worker-model',
+        provider: 'openai',
+        messages: [],
+        usage: { input: 10_000, output: 1_000, cacheRead: 0, cacheWrite: 0, cost: 0.07 },
+        attemptRecords: [{
+          attemptId: 'priced-only-at-result',
+          model: 'worker-model',
+          provider: 'openai',
+          usage: { input: 10_000, output: 1_000, cacheRead: 0, cacheWrite: 0 },
+        }],
+      }] } },
+    }],
+  }];
+  const accounting = buildSessionUsageSnapshot(transcript);
+  const summary = extractSubagentCostSummaryFromSnapshot(accounting);
+
+  assert.equal(summary.totalCost, 0.07);
+  assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 0.07);
 });
 
 test('buildSessionCostIndicator merges the live estimate into the selected model\'s by-model row', () => {

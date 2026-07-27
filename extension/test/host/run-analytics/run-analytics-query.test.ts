@@ -78,7 +78,6 @@ test('queryRunAnalyticsStore returns finalized snapshots and checkpointed open r
 
     await stats.start();
     const firstRunId = stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 5 });
     const secondRunId = stats.prepareForSend(sessionPath, []);
     await stats.flush();
 
@@ -93,7 +92,6 @@ test('queryRunAnalyticsStore returns finalized snapshots and checkpointed open r
     assert.equal(result.completedRuns[0]?.analyticsFactors?.promptHash, 'prompt-hash');
     assert.equal(result.openRuns.length, 1);
     assert.equal(result.openRuns[0]?.runId, 'id-3');
-    assert.equal(result.outcomes.length, 1);
 
     await stats.shutdown();
   });
@@ -133,12 +131,11 @@ test('post-finalization lastRun mutations are exported (A2)', async () => {
 
     await stats.start();
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 5 });
-    // currentRun is now null; lastRun holds the finalized run. A late backend
-    // error mutates lastRun and must be appended so it surfaces in exports
-    // (previously it was written only to the checkpoint's lastRun, which query
-    // never reads, so it was silently lost).
+    // A backend error recorded on the active run must survive finalization and
+    // surface in exports once the run is closed. Closing the session finalizes
+    // the run and appends its snapshot (carrying the error code) to the store.
     stats.onBackendError(sessionPath, 'E_LATE');
+    stats.onSessionClosed(sessionPath);
     await stats.flush();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -237,7 +234,7 @@ test('exportRunAnalyticsStore writes a supported JSON export payload', async () 
 
     await stats.start();
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
+    stats.onSessionClosed(sessionPath);
     await stats.flush();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -248,18 +245,13 @@ test('exportRunAnalyticsStore writes a supported JSON export payload', async () 
       exportedAt: string;
       completedRuns: Array<{ runId: string }>;
       openRuns: unknown[];
-      outcomes: Array<{ runId: string }>;
-      agentReviews: Array<{ runId: string }>;
     };
 
     assert.equal(payload.completedRuns.length, 1);
     assert.equal(payload.openRuns.length, 0);
-    assert.equal(payload.agentReviews.length, 0);
     assert.equal(written.schemaVersion, 1);
     assert.equal(written.exportedAt, '2026-01-01T00:00:00.000Z');
     assert.equal(written.completedRuns[0]?.runId, 'id-1');
-    assert.equal(written.outcomes[0]?.runId, 'id-1');
-    assert.equal(written.agentReviews.length, 0);
 
     await stats.shutdown();
   });
@@ -299,31 +291,16 @@ test('agent reviews are surfaced in query and export payloads', async () => {
 
     await stats.start();
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
-    stats.recordAgentReview(sessionPath, {
-      done: true,
-      rating: 5,
-      completion: 'fully',
-      reason: 'all green',
-      evaluatedAt: '2026-07-08T12:00:00.000Z',
-      reviewerBuckets: ['medium', 'small'],
-      reviewerCount: 2,
-    });
+    stats.onSessionClosed(sessionPath);
     await stats.flush();
 
     const storageDir = await getRunStorageDir(tempDir);
     const result = await queryRunAnalyticsStore(storageDir);
     assert.equal(result.completedRuns.length, 1);
-    assert.equal(result.agentReviews.length, 1);
-    assert.equal(result.agentReviews[0]?.runId, 'id-1');
-    assert.equal(result.agentReviews[0]?.rating, 5);
-    assert.equal(result.agentReviews[0]?.completion, 'fully');
-    assert.deepEqual(result.agentReviews[0]?.reviewerBuckets, ['medium', 'small']);
 
     const targetPath = path.join(tempDir, 'analytics-export-reviews.json');
     const payload = await exportRunAnalyticsStore(storageDir, targetPath, () => new Date('2026-07-08T00:00:00.000Z'));
-    assert.equal(payload.agentReviews.length, 1);
-    assert.equal(payload.agentReviews[0]?.runId, 'id-1');
+    assert.equal(payload.completedRuns.length, 1);
 
     await stats.shutdown();
   });
@@ -361,7 +338,7 @@ test('exportRunAnalyticsStore embeds parsed global side-channel logs', async () 
 
     await stats.start();
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
+    stats.onSessionClosed(sessionPath);
     await stats.flush();
 
     // Global side-channel logs live at <configRoot>/data/*.jsonl, two levels

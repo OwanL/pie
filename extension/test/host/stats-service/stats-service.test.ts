@@ -50,7 +50,6 @@ function createOpenRunSnapshot(sessionPath: string, runId: string): RunSnapshot 
     runId,
     taskGroupId: `${runId}-task`,
     status: 'open',
-    scored: false,
     startedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     mixedModelConfig: false,
@@ -153,19 +152,11 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
     assert.deepEqual(archState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'id-1',
       status: 'open',
-      scored: false,
     });
 
     stats.onAssistantTurnStarted(sessionPath, 'req-1');
     stats.onAssistantTurnEnded(sessionPath, 'req-1', 1200);
     stats.onContextUsageChanged(sessionPath, 8000, 200000);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 5 });
-
-    assert.deepEqual(archState.composer.activeRunSummaryBySession[sessionPath], {
-      runId: 'id-1',
-      status: 'scored',
-      scored: true,
-    });
 
     await stats.shutdown();
 
@@ -176,7 +167,6 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
         runId: string;
         taskGroupId: string;
         status: string;
-        scored: boolean;
         sendCount: number;
         assistantTurnCount: number;
         assistantTurnDurationMs: number;
@@ -185,27 +175,18 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
         imageInputBytes: number;
         contextTokens: number | null;
         contextLimit: number | null;
-        outcome?: { resolution: string; satisfaction: number };
       };
-    }>;
-    const outcomeEntries = await readJsonl(path.join(storageDir, 'outcome-history.jsonl')) as Array<{
-      kind: string;
-      runId: string;
-      taskGroupId: string;
-      outcome: { resolution: string; satisfaction: number };
     }>;
     const autoExport = JSON.parse(await fs.readFile(path.join(storageDir, 'run-analytics.json'), 'utf8')) as {
       completedRuns: Array<{ runId: string; status: string }>;
       openRuns: Array<{ runId: string }>;
-      outcomes: Array<{ runId: string }>;
     };
 
     assert.equal(snapshotEntries.length, 1);
     assert.equal(snapshotEntries[0].kind, 'run_snapshot');
     assert.equal(snapshotEntries[0].run.runId, 'id-1');
     assert.equal(snapshotEntries[0].run.taskGroupId, 'id-2');
-    assert.equal(snapshotEntries[0].run.status, 'scored');
-    assert.equal(snapshotEntries[0].run.scored, true);
+    assert.equal(snapshotEntries[0].run.status, 'closed');
     assert.equal(snapshotEntries[0].run.sendCount, 1);
     assert.equal(snapshotEntries[0].run.assistantTurnCount, 1);
     assert.equal(snapshotEntries[0].run.assistantTurnDurationMs, 1200);
@@ -214,19 +195,11 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
     assert.equal(snapshotEntries[0].run.imageInputBytes, 2048);
     assert.equal(snapshotEntries[0].run.contextTokens, 8000);
     assert.equal(snapshotEntries[0].run.contextLimit, 200000);
-    assert.deepEqual(snapshotEntries[0].run.outcome, { resolution: 'resolved', satisfaction: 5 });
-
-    assert.equal(outcomeEntries.length, 1);
-    assert.equal(outcomeEntries[0].kind, 'run_outcome');
-    assert.equal(outcomeEntries[0].runId, 'id-1');
-    assert.equal(outcomeEntries[0].taskGroupId, 'id-2');
-    assert.deepEqual(outcomeEntries[0].outcome, { resolution: 'resolved', satisfaction: 5 });
 
     assert.equal(autoExport.completedRuns.length, 1);
     assert.equal(autoExport.completedRuns[0]?.runId, 'id-1');
-    assert.equal(autoExport.completedRuns[0]?.status, 'scored');
+    assert.equal(autoExport.completedRuns[0]?.status, 'closed');
     assert.equal(autoExport.openRuns.length, 0);
-    assert.equal(autoExport.outcomes[0]?.runId, 'id-1');
   });
 });
 
@@ -302,7 +275,6 @@ test('StatsService starts a new task group on the next send after startNewTask',
     assert.deepEqual(archState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'id-3',
       status: 'open',
-      scored: false,
     });
 
     await stats.shutdown();
@@ -321,10 +293,10 @@ test('StatsService starts a new task group on the next send after startNewTask',
     assert.equal(snapshotEntries[0].run.runId, 'id-1');
     assert.equal(snapshotEntries[0].run.taskGroupId, 'id-2');
     assert.equal(snapshotEntries[0].run.finalizationReason, 'new_task');
-    assert.equal(snapshotEntries[0].run.status, 'closed_unscored');
+    assert.equal(snapshotEntries[0].run.status, 'closed');
     assert.equal(snapshotEntries[1].run.runId, 'id-3');
     assert.equal(snapshotEntries[1].run.taskGroupId, 'id-4');
-    assert.equal(snapshotEntries[1].run.finalizationReason, 'closed_unscored');
+    assert.equal(snapshotEntries[1].run.finalizationReason, 'closed');
   });
 });
 
@@ -390,7 +362,6 @@ test('StatsService restores active run summaries from checkpointed state', async
     assert.deepEqual(secondArchState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'id-1',
       status: 'open',
-      scored: false,
     });
 
     await firstStats.shutdown();
@@ -448,7 +419,6 @@ test('StatsService restores completed runs and queued new-task state across rest
 
     await firstStats.start();
     firstStats.prepareForSend(sessionPath, []);
-    firstStats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     firstStats.startNewTask(sessionPath);
     await firstStats.flush();
     await firstStats.shutdown();
@@ -466,8 +436,7 @@ test('StatsService restores completed runs and queued new-task state across rest
 
     assert.deepEqual(secondArchState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'id-1',
-      status: 'scored',
-      scored: true,
+      status: 'closed',
       nextSendStartsNewTask: true,
     });
 
@@ -476,7 +445,6 @@ test('StatsService restores completed runs and queued new-task state across rest
     assert.deepEqual(secondArchState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'id-3',
       status: 'open',
-      scored: false,
     });
 
     await secondStats.shutdown();
@@ -493,10 +461,10 @@ test('StatsService restores completed runs and queued new-task state across rest
     assert.equal(snapshotEntries.length, 2);
     assert.equal(snapshotEntries[0].run.runId, 'id-1');
     assert.equal(snapshotEntries[0].run.taskGroupId, 'id-2');
-    assert.equal(snapshotEntries[0].run.status, 'scored');
+    assert.equal(snapshotEntries[0].run.status, 'closed');
     assert.equal(snapshotEntries[1].run.runId, 'id-3');
     assert.equal(snapshotEntries[1].run.taskGroupId, 'id-4');
-    assert.equal(snapshotEntries[1].run.status, 'closed_unscored');
+    assert.equal(snapshotEntries[1].run.status, 'closed');
   });
 });
 
@@ -542,7 +510,6 @@ test('StatsService counts multiple assistant turns using distinct turn ids withi
     stats.onAssistantTurnEnded(sessionPath, 'req-1:1', 400);
     stats.onAssistantTurnStarted(sessionPath, 'req-1:2');
     stats.onAssistantTurnEnded(sessionPath, 'req-1:2', 600);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -598,7 +565,6 @@ test('StatsService marks runs mixed when model config changes mid-run', async ()
     await stats.start();
     stats.prepareForSend(sessionPath, []);
     stats.onModelConfigChanged(sessionPath, 'gpt-4.1', 'high');
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -652,7 +618,6 @@ test('StatsService carries unsupported input attempts into the next run snapshot
     await stats.start();
     stats.onUnsupportedInputAttempt(sessionPath);
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -730,7 +695,6 @@ test('StatsService captures structured analytics factors and experiment assignme
 
     await stats.start();
     stats.prepareForSend(sessionPath, []);
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 5 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -830,8 +794,6 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
     };
     stats.onToolStarted(sessionPath, { ...mutationTool, result: undefined, status: 'running' });
     stats.onToolFinished(sessionPath, mutationTool);
-
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -1003,7 +965,6 @@ test('StatsService tracks busy durations and mixed treatment changes', async () 
     stats.onBusyChanged(sessionPath, false);
 
     stats.onExperimentAssignmentChanged('exp-b');
-    stats.recordOutcome(sessionPath, { resolution: 'resolved', satisfaction: 4 });
     await stats.shutdown();
 
     const storageDir = await getRunStorageDir(tempDir);
@@ -1385,12 +1346,10 @@ test('StatsService merges legacy checkpoint sessions with existing canonical che
     assert.deepEqual(archState.composer.activeRunSummaryBySession[currentSessionPath], {
       runId: 'run-current',
       status: 'open',
-      scored: false,
     });
     assert.deepEqual(archState.composer.activeRunSummaryBySession[legacySessionPath], {
       runId: 'run-legacy',
       status: 'open',
-      scored: false,
     });
 
     await stats.shutdown();
@@ -1453,7 +1412,6 @@ test('StatsService prefers the newer checkpoint state for overlapping session pa
     assert.deepEqual(archState.composer.activeRunSummaryBySession[sessionPath], {
       runId: 'run-legacy',
       status: 'open',
-      scored: false,
     });
 
     await stats.shutdown();

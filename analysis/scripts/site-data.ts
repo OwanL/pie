@@ -6,16 +6,13 @@ import {
   DATA_MODE_LOCAL_DEFAULT,
   SITE_DATA_FILE_NAMES,
   SITE_DATA_SCHEMA_VERSION,
-  type AgentReviewComparisonData,
   type BackendErrorData,
   type FileExtensionData,
   type ModelQualityAggregateRow,
   type ModelQualityData,
   type OverviewData,
   type PruningImpactData,
-  type ResolutionCounts,
   type PreparedAnalyticsData,
-  type PreparedAgentReviewRow,
   type PreparedRunRow,
   type PreparedTurnThroughputRow,
   type RetryTimingData,
@@ -27,8 +24,6 @@ import {
   type TimelineRow,
   type TokenThroughputData,
   type ToolResultPruningImpactData,
-  type ToolResultPruningOutcomeBucket,
-  type ToolResultPruningOutcomeData,
   type ToolUsageAggregateRow,
   type ToolUsageData,
   type TreatmentComparisonData,
@@ -109,102 +104,41 @@ function completeEstimatedRunCostUsd(run: PreparedRunRow): number | null {
     : null;
 }
 
-function hasUserOutcome(run: PreparedRunRow): boolean {
-  return run.scored && run.satisfaction !== null && run.outcomeSource === 'user';
-}
-
-function hasScorableUserOutcome(run: PreparedRunRow): boolean {
-  return hasUserOutcome(run) && !run.mixedModelConfig && !run.mixedTreatmentConfig;
-}
-
-function createEmptyResolutionCounts(): ResolutionCounts {
-  return {
-    resolved: 0,
-    partiallyResolved: 0,
-    unresolved: 0,
-  };
-}
-
-function addResolutionCount(counts: ResolutionCounts, resolution: PreparedRunRow['resolution']): void {
-  switch (resolution) {
-    case 'resolved':
-      counts.resolved += 1;
-      break;
-    case 'partially_resolved':
-      counts.partiallyResolved += 1;
-      break;
-    case 'unresolved':
-      counts.unresolved += 1;
-      break;
-    default:
-      break;
-  }
-}
-
 function createManifest(prepared: PreparedAnalyticsData, generatedAt: Date): SiteManifest {
-  const completedRunCount = prepared.runs.filter((run) => run.status !== 'open').length;
-  const openRunCount = prepared.runs.filter((run) => run.status === 'open').length;
-  const scoredRunCount = prepared.runs.filter(hasUserOutcome).length;
-
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     sourceAnalyticsSchemaVersion: prepared.sourceSchemaVersion,
     generatedAt: generatedAt.toISOString(),
     sourceWorkspaceKey: prepared.sourceWorkspaceKey,
     sourceExportedAt: prepared.sourceExportedAt,
-    completedRunCount,
-    openRunCount,
-    scoredRunCount,
+    completedRunCount: prepared.runs.filter((run) => run.status !== 'open').length,
+    openRunCount: prepared.runs.filter((run) => run.status === 'open').length,
     dataMode: DATA_MODE_LOCAL_DEFAULT,
     generatorVersion: GENERATOR_VERSION,
   };
 }
 
 function createOverview(prepared: PreparedAnalyticsData): OverviewData {
-  const runs = prepared.runs;
-  const completedRuns = runs.filter((run) => run.status !== 'open');
-  const scoredRuns = completedRuns.filter(hasUserOutcome);
-  // True spend requires a complete parent + applicable subagent total; parent-only estimates
-  // are never substituted for incomplete/unknown totals.
-  const costValues = completedRuns.map(completeEstimatedRunCostUsd).filter((v): v is number => v !== null);
-  const resolutionCounts = createEmptyResolutionCounts();
-  for (const run of scoredRuns) {
-    addResolutionCount(resolutionCounts, run.resolution);
-  }
-
+  const completedRuns = prepared.runs.filter((run) => run.status !== 'open');
+  const costValues = completedRuns.map(completeEstimatedRunCostUsd).filter((value): value is number => value !== null);
   const totalToolCalls = completedRuns.reduce((sum, run) => sum + run.toolCallCount, 0);
   const totalToolFailures = completedRuns.reduce((sum, run) => sum + run.toolFailureCount, 0);
   const totalResultIssues = completedRuns.reduce((sum, run) => sum + run.resultIssueCount, 0);
-  const latestRunTimestamp = [...completedRuns]
-    .map((run) => run.updatedAt)
-    .sort((left, right) => left.localeCompare(right))
-    .at(-1) ?? null;
-
+  const latestRunTimestamp = completedRuns.map((run) => run.updatedAt).sort().at(-1) ?? null;
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     totalCompletedRuns: completedRuns.length,
-    totalOpenRuns: runs.filter((run) => run.status === 'open').length,
-    totalScoredRuns: scoredRuns.length,
-    averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
-    resolutionCounts,
+    totalOpenRuns: prepared.runs.filter((run) => run.status === 'open').length,
     medianBusyDurationMs: median(completedRuns.map((run) => run.busyDurationMs)),
     p90BusyDurationMs: percentile(completedRuns.map((run) => run.busyDurationMs), 90),
     p99BusyDurationMs: percentile(completedRuns.map((run) => run.busyDurationMs), 99),
-    verificationRunRate: completedRuns.length === 0
-      ? null
-      : round(completedRuns.filter((run) => run.verificationTotalCount > 0).length / completedRuns.length, 3),
+    verificationRunRate: completedRuns.length === 0 ? null : round(completedRuns.filter((run) => run.verificationTotalCount > 0).length / completedRuns.length, 3),
     toolFailureRate: totalToolCalls === 0 ? null : round(totalToolFailures / totalToolCalls, 3),
     resultIssueRate: totalToolCalls === 0 ? null : round(totalResultIssues / totalToolCalls, 3),
-    medianTokenEfficiency: percentile(completedRuns.map((r) => r.tokenEfficiency).filter((v): v is number => v !== null), 50, 1),
-    averageContextUtilization: average(completedRuns.map((r) => r.contextUtilization).filter((v): v is number => v !== null), 3),
-    averageCacheHitRatio: average(completedRuns.map((r) => r.cacheHitRatio).filter((v): v is number => v !== null), 3),
-    firstAttemptSuccessRate: (() => {
-      const eligible = completedRuns.filter((r) => r.firstAttemptSuccess !== null);
-      return eligible.length === 0
-        ? null
-        : round(eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length, 3);
-    })(),
-    totalEstimatedCostUsd: costValues.length === 0 ? null : round(costValues.reduce((sum, v) => sum + v, 0), 4),
+    medianTokenEfficiency: percentile(completedRuns.map((run) => run.tokenEfficiency).filter((value): value is number => value !== null), 50, 1),
+    averageContextUtilization: average(completedRuns.map((run) => run.contextUtilization).filter((value): value is number => value !== null), 3),
+    averageCacheHitRatio: average(completedRuns.map((run) => run.cacheHitRatio).filter((value): value is number => value !== null), 3),
+    totalEstimatedCostUsd: costValues.length === 0 ? null : round(costValues.reduce((sum, value) => sum + value, 0), 4),
     medianEstimatedCostUsd: percentile(costValues, 50, 4),
     latestRunTimestamp,
   };
@@ -213,94 +147,45 @@ function createOverview(prepared: PreparedAnalyticsData): OverviewData {
 function createModelQuality(prepared: PreparedAnalyticsData): ModelQualityData {
   const groups = new Map<string, PreparedRunRow[]>();
   for (const run of prepared.runs.filter((entry) => entry.status !== 'open')) {
-    // Group by canonical model family (provider-agnostic), mirroring the leaderboard —
-    // provider-specific ids sharing a family collapse into one row. modelFamily is resolved at
-    // prepare time; falls back to modelId when unset (and '(unknown)' when missing).
-    const mid = run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
-    const key = [
-      mid,
-      normalizeThinkingLevel(run.thinkingLevel),
-      normalizeExperimentAssignment(run.experimentAssignment),
-    ].join('::');
+    const modelId = run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
+    const key = [modelId, normalizeThinkingLevel(run.thinkingLevel), normalizeExperimentAssignment(run.experimentAssignment)].join('::');
     const existing = groups.get(key) ?? [];
     existing.push(run);
     groups.set(key, existing);
   }
-
-  const rows: ModelQualityAggregateRow[] = [...groups.entries()].map(([key, runs]) => {
-    const [modelId, thinkingLevel, experimentAssignment] = key.split('::');
-    const scoredRuns = runs.filter(hasScorableUserOutcome);
-    const nonMixedAgentOutcomes = runs.filter((run) => (
-      run.scored
-      && run.satisfaction !== null
-      && !run.mixedModelConfig
-      && !run.mixedTreatmentConfig
-      && run.outcomeSource === 'agent'
-    ));
-    const mixedModelExcludedOutcomes = runs.filter((run) => hasUserOutcome(run) && run.mixedModelConfig);
-    const mixedTreatmentExcludedOutcomes = runs.filter((run) => hasUserOutcome(run) && !run.mixedModelConfig && run.mixedTreatmentConfig);
-    const resolutionCounts = createEmptyResolutionCounts();
-    for (const run of scoredRuns) {
-      addResolutionCount(resolutionCounts, run.resolution);
+  const reviewCountByFamily = new Map<string, number>();
+  for (const review of prepared.sessionReviewsV2) {
+    for (const family of new Set(review.modelFamilies)) {
+      reviewCountByFamily.set(family, (reviewCountByFamily.get(family) ?? 0) + 1);
     }
-
+  }
+  const rows: ModelQualityAggregateRow[] = [...groups.entries()].map(([key, runs]) => {
+    const [modelId = '(unknown)', thinkingLevel = '(unspecified)', experimentAssignment = '(none)'] = key.split('::');
     return {
-      modelId: modelId ?? '(unknown)',
-      thinkingLevel: thinkingLevel ?? '(unspecified)',
-      experimentAssignment: experimentAssignment ?? '(none)',
+      modelId,
+      thinkingLevel,
+      experimentAssignment,
       runCount: runs.length,
-      providerModelIds: [...new Set(runs.map((r) => (r.modelId ?? '').trim() || '(unknown)'))].sort(),
-      scoredRunCount: scoredRuns.length,
-      agentOutcomeCount: nonMixedAgentOutcomes.length,
-      mixedModelExcludedOutcomeCount: mixedModelExcludedOutcomes.length,
-      mixedTreatmentExcludedOutcomeCount: mixedTreatmentExcludedOutcomes.length,
-      averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
+      providerModelIds: [...new Set(runs.map((run) => run.modelId?.trim() || '(unknown)'))].sort(),
+      v2ReviewCount: reviewCountByFamily.get(modelId) ?? 0,
       averageBusyDurationMs: average(runs.map((run) => run.busyDurationMs), 0),
       medianBusyDurationMs: median(runs.map((run) => run.busyDurationMs)),
       p90BusyDurationMs: percentile(runs.map((run) => run.busyDurationMs), 90),
       p99BusyDurationMs: percentile(runs.map((run) => run.busyDurationMs), 99),
       averageToolFailures: average(runs.map((run) => run.toolFailureCount), 2),
-      verificationRunRate: runs.length === 0
-        ? null
-        : round(runs.filter((run) => run.verificationTotalCount > 0).length / runs.length, 3),
-      medianTokenEfficiency: percentile(runs.map((r) => r.tokenEfficiency).filter((v): v is number => v !== null), 50, 1),
-      averageContextUtilization: average(runs.map((r) => r.contextUtilization).filter((v): v is number => v !== null), 3),
-      averageCacheHitRatio: average(runs.map((r) => r.cacheHitRatio).filter((v): v is number => v !== null), 3),
-      firstAttemptSuccessRate: (() => {
-        const eligible = runs.filter((r) => r.firstAttemptSuccess !== null);
-        return eligible.length === 0
-          ? null
-          : round(eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length, 3);
-      })(),
-      resolutionCounts,
+      verificationRunRate: runs.length === 0 ? null : round(runs.filter((run) => run.verificationTotalCount > 0).length / runs.length, 3),
+      medianTokenEfficiency: percentile(runs.map((run) => run.tokenEfficiency).filter((value): value is number => value !== null), 50, 1),
+      averageContextUtilization: average(runs.map((run) => run.contextUtilization).filter((value): value is number => value !== null), 3),
+      averageCacheHitRatio: average(runs.map((run) => run.cacheHitRatio).filter((value): value is number => value !== null), 3),
     };
-  });
-
-  rows.sort((left, right) => {
-    if (right.runCount !== left.runCount) {
-      return right.runCount - left.runCount;
-    }
-    if (left.modelId !== right.modelId) {
-      return left.modelId.localeCompare(right.modelId);
-    }
-    if (left.thinkingLevel !== right.thinkingLevel) {
-      return left.thinkingLevel.localeCompare(right.thinkingLevel);
-    }
-    return left.experimentAssignment.localeCompare(right.experimentAssignment);
-  });
-
+  }).sort((left, right) => right.runCount - left.runCount || left.modelId.localeCompare(right.modelId) || left.thinkingLevel.localeCompare(right.thinkingLevel) || left.experimentAssignment.localeCompare(right.experimentAssignment));
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    cohortLabels: {
-      userOutcomes: 'Legacy V1 user satisfaction/resolution',
-      agentOutcomes: 'Legacy V1 agent ratings',
-      v2Reviews: 'V2 canonical production reviews (separate artifact)',
-    },
+    cohortLabels: { v2Reviews: 'V2 canonical production reviews' },
     rows,
     notes: [
-      'Legacy V1 satisfaction, resolution, and scoredRunCount use only stable-model, stable-treatment user outcomes. agentOutcomeCount is also a legacy V1 supplemental field. V2 reviews are exposed separately in session-review-analytics.json and the V2 leaderboard channel.',
-      'Satisfaction averages from fewer than 3 user outcomes are highly variable and should be interpreted with caution.',
-      'Operational run metrics use all completed runs in each group. Runs from the same task group are not independent observations; treat per-run sample sizes as upper bounds.',
+      'V2 review counts are diagnostic stable-session review coverage; runtime metrics use all completed runs in each group.',
+      'Operational metrics and review coverage are observational and do not independently determine the V2 leaderboard rank.',
     ],
   };
 }
@@ -319,89 +204,36 @@ function verificationBucket(count: number): VerificationCountBucket {
 }
 
 function createVerificationImpact(prepared: PreparedAnalyticsData): VerificationImpactData {
-  const groupedRuns = new Map<string, PreparedRunRow[]>();
-  const summaryGroups = new Map<string, PreparedRunRow[]>();
-
-  // Pre-group verification-usage rows by runId so each run's lookup is O(1)
-  // instead of re-filtering the full usage list per run (O(R×V) → O(V+R)).
-  // Order is preserved (Map arrays follow prepared.verificationUsage order),
-  // so the emitted rows are identical to the prior per-run `.filter`.
+  const groupedRuns = new Map<string, Set<string>>();
+  const summaryGroups = new Map<string, Set<string>>();
   const usageByRunId = new Map<string, typeof prepared.verificationUsage>();
   for (const row of prepared.verificationUsage) {
     const existing = usageByRunId.get(row.runId) ?? [];
     existing.push(row);
     usageByRunId.set(row.runId, existing);
   }
-
   for (const run of prepared.runs.filter((entry) => entry.status !== 'open')) {
     const usageRows = usageByRunId.get(run.runId) ?? [];
-    const kinds = usageRows.map((row) => row.kind);
-    const effectiveKinds = kinds.length > 0 ? [...new Set(kinds)] : ['none'];
-    for (const verificationKind of effectiveKinds) {
+    const kinds = usageRows.length > 0 ? [...new Set(usageRows.map((row) => row.kind))] : ['none'];
+    for (const verificationKind of kinds) {
       const count = verificationKind === 'none' ? 0 : usageRows.find((row) => row.kind === verificationKind)?.count ?? 0;
-      const countBucket = verificationBucket(count);
-      const key = [verificationKind, countBucket, run.verificationState].join('::');
-      const existing = groupedRuns.get(key) ?? [];
-      existing.push(run);
+      const key = [verificationKind, verificationBucket(count), run.verificationState].join('::');
+      const existing = groupedRuns.get(key) ?? new Set<string>();
+      existing.add(run.runId);
       groupedRuns.set(key, existing);
     }
-
-    const summaryExisting = summaryGroups.get(run.verificationState) ?? [];
-    summaryExisting.push(run);
-    summaryGroups.set(run.verificationState, summaryExisting);
+    const summary = summaryGroups.get(run.verificationState) ?? new Set<string>();
+    summary.add(run.runId);
+    summaryGroups.set(run.verificationState, summary);
   }
-
-  const rows: VerificationImpactRow[] = [...groupedRuns.entries()].map(([key, runs]) => {
-    const [verificationKind, countBucket, verificationState] = key.split('::');
-    const scoredRuns = runs.filter(hasUserOutcome);
-    const resolutionCounts = createEmptyResolutionCounts();
-    for (const run of scoredRuns) {
-      addResolutionCount(resolutionCounts, run.resolution);
-    }
-    return {
-      verificationKind: verificationKind ?? 'none',
-      countBucket: (countBucket ?? '0') as VerificationImpactRow['countBucket'],
-      verificationState: (verificationState ?? 'none') as VerificationImpactRow['verificationState'],
-      runCount: new Set(runs.map((run) => run.runId)).size,
-      scoredRunCount: new Set(scoredRuns.map((run) => run.runId)).size,
-      averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
-      resolutionCounts,
-    };
-  });
-
-  rows.sort((left, right) => {
-    if (left.verificationKind !== right.verificationKind) {
-      return left.verificationKind.localeCompare(right.verificationKind);
-    }
-    if (left.countBucket !== right.countBucket) {
-      return left.countBucket.localeCompare(right.countBucket);
-    }
-    return left.verificationState.localeCompare(right.verificationState);
-  });
-
-  const summaryRows = [...summaryGroups.entries()].map(([verificationState, runs]) => {
-    const scoredRuns = runs.filter(hasUserOutcome);
-    const resolutionCounts = createEmptyResolutionCounts();
-    for (const run of scoredRuns) {
-      addResolutionCount(resolutionCounts, run.resolution);
-    }
-    return {
-      verificationState: verificationState as VerificationImpactData['summaryRows'][number]['verificationState'],
-      runCount: runs.length,
-      scoredRunCount: scoredRuns.length,
-      averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
-      resolutionCounts,
-    };
-  });
-
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    rows,
-    summaryRows,
-    notes: [
-      'Verification failures are tracked at the run level; per-kind failure attribution is not available in the source snapshots.',
-      'Open (in-progress) runs are excluded from verification impact metrics.',
-    ],
+    rows: [...groupedRuns.entries()].map(([key, runIds]) => {
+      const [verificationKind = 'none', countBucket = '0', verificationState = 'none'] = key.split('::');
+      return { verificationKind, countBucket: countBucket as VerificationImpactRow['countBucket'], verificationState: verificationState as VerificationImpactRow['verificationState'], runCount: runIds.size };
+    }).sort((left, right) => left.verificationKind.localeCompare(right.verificationKind) || left.countBucket.localeCompare(right.countBucket) || left.verificationState.localeCompare(right.verificationState)),
+    summaryRows: [...summaryGroups.entries()].map(([verificationState, runIds]) => ({ verificationState: verificationState as VerificationImpactData['summaryRows'][number]['verificationState'], runCount: runIds.size })),
+    notes: ['Verification failures are tracked at run level; per-kind failure attribution is unavailable.', 'Open runs are excluded.'],
   };
 }
 
@@ -412,93 +244,32 @@ function createToolUsage(prepared: PreparedAnalyticsData): ToolUsageData {
     existing.push(row);
     grouped.set(row.toolName, existing);
   }
-
-  const scoredRuns = prepared.runs.filter(hasUserOutcome);
-
-  const summaryRows: ToolUsageAggregateRow[] = [...grouped.entries()].map(([toolName, toolRows]) => {
-    const usedRunIds = new Set(toolRows.map((row) => row.runId));
-    const usedRuns = scoredRuns.filter((run) => usedRunIds.has(run.runId));
-    const unusedRuns = scoredRuns.filter((run) => !usedRunIds.has(run.runId));
-    return {
-      toolName,
-      callCount: toolRows.reduce((sum, row) => sum + row.callCount, 0),
-      failureCount: toolRows.reduce((sum, row) => sum + row.failureCount, 0),
-      executionFailureCount: toolRows.reduce((sum, row) => sum + row.executionFailureCount, 0),
-      verificationProjectFailureCount: toolRows.reduce((sum, row) => sum + row.verificationProjectFailureCount, 0),
-      probeFailureCount: toolRows.reduce((sum, row) => sum + row.probeFailureCount, 0),
-      resultIssueCount: toolRows.reduce((sum, row) => sum + row.resultIssueCount, 0),
-      affectedRunCount: usedRunIds.size,
-      averageSatisfactionWhenUsed: average(usedRuns.map((run) => run.satisfaction!), 2),
-      averageSatisfactionWhenUnused: average(unusedRuns.map((run) => run.satisfaction!), 2),
-    };
-  });
-
-  summaryRows.sort((left, right) => {
-    if (right.callCount !== left.callCount) {
-      return right.callCount - left.callCount;
-    }
-    return left.toolName.localeCompare(right.toolName);
-  });
-
-  return {
-    schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    rows: prepared.toolUsage,
-    summaryRows,
-  };
+  const summaryRows: ToolUsageAggregateRow[] = [...grouped.entries()].map(([toolName, rows]) => ({
+    toolName,
+    callCount: rows.reduce((sum, row) => sum + row.callCount, 0),
+    failureCount: rows.reduce((sum, row) => sum + row.failureCount, 0),
+    executionFailureCount: rows.reduce((sum, row) => sum + row.executionFailureCount, 0),
+    verificationProjectFailureCount: rows.reduce((sum, row) => sum + row.verificationProjectFailureCount, 0),
+    probeFailureCount: rows.reduce((sum, row) => sum + row.probeFailureCount, 0),
+    resultIssueCount: rows.reduce((sum, row) => sum + row.resultIssueCount, 0),
+    affectedRunCount: new Set(rows.map((row) => row.runId)).size,
+  })).sort((left, right) => right.callCount - left.callCount || left.toolName.localeCompare(right.toolName));
+  return { schemaVersion: SITE_DATA_SCHEMA_VERSION, rows: prepared.toolUsage, summaryRows };
 }
 
 function createTreatmentComparison(prepared: PreparedAnalyticsData): TreatmentComparisonData {
   const groups = new Map<string, PreparedRunRow[]>();
   for (const run of prepared.runs.filter((entry) => entry.status !== 'open')) {
-    const key = [
-      normalizePromptFamily(run.promptFamily),
-      run.promptHashPrefix ?? '',
-      run.toolSetHashPrefix ?? '',
-      run.skillSetHashPrefix ?? '',
-      normalizeExperimentAssignment(run.experimentAssignment),
-      run.mixedTreatmentConfig ? 'mixed' : 'pure',
-    ].join('::');
+    const key = [normalizePromptFamily(run.promptFamily), run.promptHashPrefix ?? '', run.toolSetHashPrefix ?? '', run.skillSetHashPrefix ?? '', normalizeExperimentAssignment(run.experimentAssignment), run.mixedTreatmentConfig ? 'mixed' : 'pure'].join('::');
     const existing = groups.get(key) ?? [];
     existing.push(run);
     groups.set(key, existing);
   }
-
   const rows: TreatmentComparisonRow[] = [...groups.entries()].map(([key, runs]) => {
-    const [promptFamily, promptHashPrefix, toolSetHashPrefix, skillSetHashPrefix, experimentAssignment, purity] = key.split('::');
-    const scoredRuns = runs.filter(hasUserOutcome);
-    const resolutionCounts = createEmptyResolutionCounts();
-    for (const run of scoredRuns) {
-      addResolutionCount(resolutionCounts, run.resolution);
-    }
-
-    return {
-      promptFamily: promptFamily ?? '(none)',
-      promptHashPrefix: promptHashPrefix || null,
-      toolSetHashPrefix: toolSetHashPrefix || null,
-      skillSetHashPrefix: skillSetHashPrefix || null,
-      experimentAssignment: experimentAssignment ?? '(none)',
-      mixedTreatmentConfig: purity === 'mixed',
-      runCount: runs.length,
-      scoredRunCount: scoredRuns.length,
-      averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
-      resolutionCounts,
-    };
-  });
-
-  rows.sort((left, right) => {
-    if (right.runCount !== left.runCount) {
-      return right.runCount - left.runCount;
-    }
-    if (left.promptFamily !== right.promptFamily) {
-      return left.promptFamily.localeCompare(right.promptFamily);
-    }
-    return left.experimentAssignment.localeCompare(right.experimentAssignment);
-  });
-
-  return {
-    schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    rows,
-  };
+    const [promptFamily = '(none)', promptHashPrefix = '', toolSetHashPrefix = '', skillSetHashPrefix = '', experimentAssignment = '(none)', purity = 'pure'] = key.split('::');
+    return { promptFamily, promptHashPrefix: promptHashPrefix || null, toolSetHashPrefix: toolSetHashPrefix || null, skillSetHashPrefix: skillSetHashPrefix || null, experimentAssignment, mixedTreatmentConfig: purity === 'mixed', runCount: runs.length };
+  }).sort((left, right) => right.runCount - left.runCount || left.promptFamily.localeCompare(right.promptFamily) || left.experimentAssignment.localeCompare(right.experimentAssignment));
+  return { schemaVersion: SITE_DATA_SCHEMA_VERSION, rows };
 }
 
 function createTimeline(prepared: PreparedAnalyticsData): TimelineData {
@@ -508,35 +279,19 @@ function createTimeline(prepared: PreparedAnalyticsData): TimelineData {
     existing.push(run);
     groups.set(run.startedDay, existing);
   }
-
-  const rows: TimelineRow[] = [...groups.entries()]
-    .sort(([leftBucket], [rightBucket]) => leftBucket.localeCompare(rightBucket))
-    .map(([bucketStart, runs]) => {
-      const scoredRuns = runs.filter(hasUserOutcome);
-      const modelMix = Object.fromEntries(
-        [...runs.reduce((counts, run) => {
-          const mid = run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
-          counts.set(mid, (counts.get(mid) ?? 0) + 1);
-          return counts;
-        }, new Map<string, number>()).entries()].sort(([left], [right]) => left.localeCompare(right)),
-      );
-
-      return {
-        bucketStart,
-        runCount: runs.length,
-        scoredRunCount: scoredRuns.length,
-        averageSatisfaction: average(scoredRuns.map((run) => run.satisfaction!), 2),
-        verificationRunCount: runs.filter((run) => run.verificationTotalCount > 0).length,
-        toolFailureCount: runs.reduce((sum, run) => sum + run.toolFailureCount, 0),
-        averageBusyDurationMs: average(runs.map((run) => run.busyDurationMs), 0),
-        modelMix,
-      };
-    });
-
-  return {
-    schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    rows,
-  };
+  const rows: TimelineRow[] = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([bucketStart, runs]) => ({
+    bucketStart,
+    runCount: runs.length,
+    verificationRunCount: runs.filter((run) => run.verificationTotalCount > 0).length,
+    toolFailureCount: runs.reduce((sum, run) => sum + run.toolFailureCount, 0),
+    averageBusyDurationMs: average(runs.map((run) => run.busyDurationMs), 0),
+    modelMix: Object.fromEntries([...runs.reduce((counts, run) => {
+      const modelId = run.modelFamily?.trim() || run.modelId?.trim() || '(unknown)';
+      counts.set(modelId, (counts.get(modelId) ?? 0) + 1);
+      return counts;
+    }, new Map<string, number>()).entries()].sort(([left], [right]) => left.localeCompare(right))),
+  }));
+  return { schemaVersion: SITE_DATA_SCHEMA_VERSION, rows };
 }
 
 function createPruningImpact(prepared: PreparedAnalyticsData): PruningImpactData {
@@ -601,68 +356,6 @@ function createPruningImpact(prepared: PreparedAnalyticsData): PruningImpactData
   };
 }
 
-/** Mean of a numeric field over a set of runs; null when the set is empty. */
-function meanOver(runs: PreparedRunRow[], pick: (r: PreparedRunRow) => number): number | null {
-  if (runs.length === 0) return null;
-  return runs.reduce((sum, r) => sum + pick(r), 0) / runs.length;
-}
-
-/** Fraction of runs satisfying a predicate; null when the set is empty. */
-function rateOver(runs: PreparedRunRow[], predicate: (r: PreparedRunRow) => boolean): number | null {
-  if (runs.length === 0) return null;
-  return runs.filter(predicate).length / runs.length;
-}
-
-/** Build the outcome-comparison payload: bucket completed runs by whether
- *  tool-result-pruning was enabled at run start and contrast satisfaction /
- *  resolution / first-attempt-success / tool-failure / churn signals. This
- *  answers the user's question: are outcomes better with or without the
- *  system? */
-function buildToolResultPruningOutcomes(prepared: PreparedAnalyticsData): ToolResultPruningOutcomeData {
-  const completed = prepared.runs.filter((r) => r.status !== 'open');
-  const buckets = new Map<string, PreparedRunRow[]>();
-  for (const run of completed) {
-    const key = run.fsToolResultPruningEnabled === null ? 'null' : String(run.fsToolResultPruningEnabled);
-    const list = buckets.get(key) ?? [];
-    list.push(run);
-    buckets.set(key, list);
-  }
-  const order: (boolean | null)[] = [true, false, null];
-  const bucketRows = order
-    .filter((k) => buckets.has(k === null ? 'null' : String(k)))
-    .map((k) => {
-      const list = buckets.get(k === null ? 'null' : String(k))!;
-      const scored = list.filter(hasUserOutcome);
-      const resolvedCount = scored.filter((r) => r.resolution === 'resolved').length;
-      return {
-        enabled: k,
-        runCount: list.length,
-        scoredRunCount: scored.length,
-        meanSatisfaction: meanOver(scored, (r) => r.satisfaction ?? 0),
-        resolvedRate: scored.length > 0 ? resolvedCount / scored.length : null,
-        firstAttemptSuccessRate: (() => {
-          const eligible = list.filter((r) => r.firstAttemptSuccess !== null);
-          return eligible.length === 0 ? null : eligible.filter((r) => r.firstAttemptSuccess).length / eligible.length;
-        })(),
-        meanToolFailureCount: meanOver(list, (r) => r.toolFailureCount),
-        meanEditCount: meanOver(list, (r) => r.fileEditCount),
-        meanAssistantTurnCount: meanOver(list, (r) => r.assistantTurnCount),
-        meanBusyDurationMs: meanOver(list, (r) => r.busyDurationMs),
-      } satisfies ToolResultPruningOutcomeBucket;
-    });
-  return {
-    schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    buckets: bucketRows,
-    notes: [
-      'Compares completed (non-open) runs bucketed by whether tool-result pruning was enabled at run start.',
-      'enabled=true: pruning active; enabled=false: disabled (config.enabled=false or extension toggle off); enabled=null: run predates the field (untracked).',
-      'read-tool results are never pruned (hard safety guard), so enabled runs prune bash/ls/grep/find/etc. output only — the comparison reflects that scope.',
-      'The system is enabled by default, so the disabled bucket may be small or skewed toward sessions where the user explicitly turned it off (selection bias).',
-      'meanSatisfaction / resolvedRate are computed over legacy user-scored runs only; V1 agent ratings are excluded. Other means use all completed runs in the bucket.',
-    ],
-  };
-}
-
 function createToolResultPruningImpact(prepared: PreparedAnalyticsData): ToolResultPruningImpactData {
   const rows = prepared.toolResultPruning;
   const totalTokensSaved = rows.reduce((sum, r) => sum + r.tokensSaved, 0);
@@ -697,104 +390,6 @@ function createToolResultPruningImpact(prepared: PreparedAnalyticsData): ToolRes
   };
 }
 
-/** Build the agent-vs-user outcome comparison site-data payload. Agent ratings (1–5) come
- *  from the session_review tool; user satisfaction (1–5) comes from the user's run_outcome.
- *  Agreement is computed only over runs scored by BOTH (an agent review joined to a run that
- *  has a user outcome). Multi-reviewer coverage groups reviews by their reviewer-bucket
- *  signature so multi-reviewer vs single-reviewer populations can be contrasted. */
-function buildAgentReviewComparison(prepared: PreparedAnalyticsData): AgentReviewComparisonData {
-  const rows = prepared.agentReviews;
-
-  // Agent side: group review rows by model family.
-  const agentByModel = new Map<string, PreparedAgentReviewRow[]>();
-  for (const row of rows) {
-    const mid = row.modelFamily?.trim() || '(unknown)';
-    const existing = agentByModel.get(mid) ?? [];
-    existing.push(row);
-    agentByModel.set(mid, existing);
-  }
-
-  // User side: group user-scored runs (satisfaction != null) by model family.
-  const userByModel = new Map<string, number[]>();
-  for (const run of prepared.runs) {
-    if (run.status === 'open' || run.satisfaction === null || run.outcomeSource !== 'user') {
-      continue;
-    }
-    const mid = run.modelFamily?.trim() || '(unknown)';
-    const existing = userByModel.get(mid) ?? [];
-    existing.push(run.satisfaction);
-    userByModel.set(mid, existing);
-  }
-
-  const modelKeys = new Set<string>([...agentByModel.keys(), ...userByModel.keys()]);
-
-  const perModel = [...modelKeys].map((modelId) => {
-    const agentRows = agentByModel.get(modelId) ?? [];
-    const userSatisfactions = userByModel.get(modelId) ?? [];
-    const agentRatings = agentRows.map((r) => r.agentRating);
-    const bothScored = agentRows.filter((r) => r.userSatisfaction !== null);
-    const deltas = bothScored.map((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)));
-    const completion = { fully: 0, partial: 0, setback: 0 };
-    for (const r of agentRows) {
-      completion[r.agentCompletion] += 1;
-    }
-    return {
-      modelId,
-      agentReviewCount: agentRows.length,
-      userOutcomeCount: userSatisfactions.length,
-      bothScoredCount: bothScored.length,
-      agentAverageRating: average(agentRatings, 2),
-      userAverageSatisfaction: average(userSatisfactions, 2),
-      agentCompletion: completion,
-      agreement: {
-        meanAbsDelta: deltas.length > 0 ? round(deltas.reduce((a, b) => a + b, 0) / deltas.length, 3) : null,
-        exactCount: bothScored.filter((r) => r.agentRating === r.userSatisfaction).length,
-        offByOneCount: bothScored.filter((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)) === 1).length,
-        offByTwoPlusCount: bothScored.filter((r) => Math.abs(r.agentRating - (r.userSatisfaction as number)) >= 2).length,
-      },
-    };
-  }).sort((a, b) => b.agentReviewCount - a.agentReviewCount || a.modelId.localeCompare(b.modelId));
-
-  // Multi-reviewer coverage: group by sorted reviewer-bucket signature.
-  const byBucket = new Map<string, { buckets: string[]; rows: PreparedAgentReviewRow[] }>();
-  for (const row of rows) {
-    const sig = JSON.stringify(row.reviewerBuckets);
-    const existing = byBucket.get(sig) ?? { buckets: row.reviewerBuckets, rows: [] };
-    existing.rows.push(row);
-    byBucket.set(sig, existing);
-  }
-  const reviewerBucketCoverage = [...byBucket.values()]
-    .map((entry) => ({
-      reviewerBuckets: entry.buckets,
-      reviewCount: entry.rows.length,
-      averageAgentRating: average(entry.rows.map((r) => r.agentRating), 2),
-    }))
-    .sort((a, b) => b.reviewCount - a.reviewCount || JSON.stringify(a.reviewerBuckets).localeCompare(JSON.stringify(b.reviewerBuckets)));
-
-  const totalAgentReviews = rows.length;
-  const totalRunsScoredByUser = prepared.runs.filter(
-    (r) => r.status !== 'open' && r.satisfaction !== null && r.outcomeSource === 'user',
-  ).length;
-  const totalScoredByBoth = rows.filter((r) => r.userSatisfaction !== null).length;
-
-  return {
-    schemaVersion: SITE_DATA_SCHEMA_VERSION,
-    cohort: 'legacy_v1',
-    cohortLabel: 'Legacy V1 agent ratings (1–5)',
-    perModel,
-    reviewerBucketCoverage,
-    overall: {
-      totalAgentReviews,
-      totalRunsScoredByUser,
-      totalScoredByBoth,
-    },
-    notes: [
-      'Legacy V1 cohort only. These 1–5 agent ratings and user outcomes are retained for historical reads and are excluded from V2 criterion and quality-index analytics.',
-      "reviewerBuckets is the sorted sub-agent bucket signature that fed the legacy rating (e.g. ['medium','small']); an empty array means no bucket provenance.",
-    ],
-  };
-}
-
 function countValues(values: string[]): Array<{ value: string; count: number }> {
   const counts = new Map<string, number>();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
@@ -805,7 +400,6 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
   const rows = prepared.sessionReviewsV2;
   const criteria = rows.flatMap((row) => row.criteria);
   const reviewers = rows.flatMap((row) => row.reviewers);
-  const findings = rows.flatMap((row) => row.findings);
   const quality = rows.map((row) => row.attainment.qualityIndexV1).filter((value): value is number => value !== null);
   const activeCriteria = criteria.filter((criterion) => criterion.status !== 'superseded');
   const assessableCriteria = activeCriteria.filter((criterion) => criterion.status !== 'not_assessable');
@@ -820,6 +414,7 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
   return {
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     cohort: 'v2_production', cohortLabel: 'V2 canonical production reviews', indexVersion: 'v1', rows,
+    diagnostics: prepared.sessionReviewV2Diagnostics,
     summary: {
       reviewCount: rows.length,
       stableIdentityCount: rows.filter((row) => !row.identityFallback).length,
@@ -845,7 +440,6 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
     },
     process,
     evidence,
-    findings: { total: findings.length, bySeverity: countValues(findings.map((finding) => finding.severity)), byCategory: countValues(findings.map((finding) => finding.category)) },
     disagreement: {
       materialCount: rows.filter((row) => row.disagreement.material).length,
       adjudicatedCount: rows.filter((row) => row.disagreement.adjudicated).length,
@@ -863,17 +457,10 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
       byProvider: countValues(reviewers.map((reviewer) => reviewer.provider)),
       byFamily: countValues(reviewers.map((reviewer) => reviewer.family)),
     },
-    legacy: {
-      cohort: 'legacy_v1', cohortLabel: 'Legacy V1 agent/user outcome records',
-      runReviewCount: prepared.agentReviews.length, sidecarReviewCount: prepared.legacySessionReviews.length,
-      identityFallbackCount: prepared.agentReviews.filter((row) => row.identityFallback).length + prepared.legacySessionReviews.filter((row) => row.identityFallback).length,
-      excludedFromV2: true,
-    },
     notes: [
-      'qualityIndexV1 is derived only from agent-controllable assessable criterion attainment. Coverage, confidence, findings, blockers, and process classifications are exposed separately and never multiply or penalize the index.',
+      'qualityIndexV1 is derived only from agent-controllable assessable criterion attainment. Coverage, confidence, blockers, and process classifications are exposed separately and never multiply or penalize the index.',
       'V2 reviews join runtime rows by stable sessionId. path_fallback and unmatched rows are explicitly flagged and may be excluded from stable-identity cohorts.',
       'Reviewer author identity/treatments are joined only after the blinded canonical review has been persisted. Associations with tools, skills, models, and treatments are observational unless assignment was controlled.',
-      'Legacy V1 1–5 agent ratings and user satisfaction/resolution remain readable as a separate cohort and are never coerced into criterion-ledger dimensions.',
     ],
   };
 }
@@ -974,8 +561,6 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     modelLeaderboard: createModelLeaderboard(prepared),
     pruningImpact: createPruningImpact(prepared),
     toolResultPruningImpact: createToolResultPruningImpact(prepared),
-    toolResultPruningOutcomes: buildToolResultPruningOutcomes(prepared),
-    agentReviewComparison: buildAgentReviewComparison(prepared),
     sessionReviewAnalytics: buildSessionReviewAnalytics(prepared),
     backendErrors: createBackendErrors(prepared),
     fileExtensions: createFileExtensions(prepared),
@@ -997,8 +582,6 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'model-leaderboard.json': bundle.modelLeaderboard,
     'pruning-impact.json': bundle.pruningImpact,
     'tool-result-pruning-impact.json': bundle.toolResultPruningImpact,
-    'tool-result-pruning-outcomes.json': bundle.toolResultPruningOutcomes,
-    'agent-review-comparison.json': bundle.agentReviewComparison,
     'session-review-analytics.json': bundle.sessionReviewAnalytics,
     'backend-errors.json': bundle.backendErrors,
     'file-types.json': bundle.fileExtensions,
@@ -1061,7 +644,6 @@ function validateManifest(manifest: unknown): asserts manifest is SiteManifest {
   assert(typeof manifest.sourceExportedAt === 'string', 'manifest.json is missing sourceExportedAt.');
   assert(typeof manifest.completedRunCount === 'number', 'manifest.json is missing completedRunCount.');
   assert(typeof manifest.openRunCount === 'number', 'manifest.json is missing openRunCount.');
-  assert(typeof manifest.scoredRunCount === 'number', 'manifest.json is missing scoredRunCount.');
   assert(manifest.dataMode === DATA_MODE_LOCAL_DEFAULT, 'manifest.json has an unexpected dataMode.');
 }
 
@@ -1070,7 +652,6 @@ function validateOverview(overview: unknown, manifest: SiteManifest): asserts ov
   assert(overview.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'overview.json has an unexpected schemaVersion.');
   assert(overview.totalCompletedRuns === manifest.completedRunCount, 'overview.json totalCompletedRuns does not match manifest.json.');
   assert(overview.totalOpenRuns === manifest.openRunCount, 'overview.json totalOpenRuns does not match manifest.json.');
-  assert(overview.totalScoredRuns === manifest.scoredRunCount, 'overview.json totalScoredRuns does not match manifest.json.');
 }
 
 function validateRunSummary(runSummary: unknown): void {
@@ -1148,32 +729,22 @@ function validateTimeline(timeline: unknown): asserts timeline is TimelineData {
 }
 
 function validateModelLeaderboard(leaderboard: unknown): void {
-  const isNonNegativeInteger = (value: unknown): value is number => (
-    typeof value === 'number' && Number.isInteger(value) && value >= 0
-  );
-  const isUnitInterval = (value: unknown): value is number => (
-    typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
-  );
-
+  const isNonNegativeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0;
+  const isUnitInterval = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
   assert(isRecord(leaderboard), 'model-leaderboard.json must contain an object.');
   assert(leaderboard.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'model-leaderboard.json has an unexpected schemaVersion.');
   assert(Array.isArray(leaderboard.rows), 'model-leaderboard.json is missing rows.');
-  assert(isRecord(leaderboard.sourceLabels) && leaderboard.sourceLabels.agent === 'V2 qualityIndexV1', 'model-leaderboard.json is missing explicit source cohort labels.');
+  assert(isRecord(leaderboard.sourceLabels) && leaderboard.sourceLabels.review === 'V2 qualityIndexV1', 'model-leaderboard.json is missing the V2 review cohort label.');
   assert(isRecord(leaderboard.weights), 'model-leaderboard.json is missing weights.');
-  for (const dimension of ['satisfaction', 'resolutionRate', 'fileChurn', 'toolReliability', 'verificationPassRate', 'tokenEfficiency']) {
-    assert(typeof leaderboard.weights[dimension] === 'number' && Number.isFinite(leaderboard.weights[dimension]), `model-leaderboard.json weights.${dimension} is invalid.`);
+  for (const dimension of ['fileChurn', 'toolReliability', 'verificationPassRate', 'tokenEfficiency']) {
+    assert(leaderboard.weights[dimension] === 0, `model-leaderboard.json weights.${dimension} must be zero.`);
   }
-  assert(leaderboard.weights.fileChurn === 0, 'model-leaderboard.json process weights must be zero.');
-  assert(leaderboard.weights.toolReliability === 0, 'model-leaderboard.json process weights must be zero.');
-  assert(leaderboard.weights.verificationPassRate === 0, 'model-leaderboard.json process weights must be zero.');
-  assert(leaderboard.weights.tokenEfficiency === 0, 'model-leaderboard.json process weights must be zero.');
-  assert(
-    Math.abs((leaderboard.weights.satisfaction as number) + (leaderboard.weights.resolutionRate as number) - 1) <= 1e-9,
-    'model-leaderboard.json satisfaction and resolution weights must sum to 1.',
-  );
-  assert(isNonNegativeInteger(leaderboard.minimumScoredRuns), 'model-leaderboard.json has an invalid minimumScoredRuns.');
   assert(isNonNegativeInteger(leaderboard.minimumEffectiveTasks), 'model-leaderboard.json has an invalid minimumEffectiveTasks.');
   assert(isUnitInterval(leaderboard.minimumTaskScoringCoverage), 'model-leaderboard.json minimumTaskScoringCoverage must be in [0,1].');
+  assert(isRecord(leaderboard.sourceWeights) && leaderboard.sourceWeights.review === 1 && leaderboard.sourceWeights.process === 0, 'model-leaderboard.json V2 ranking must be review-only.');
+  assert(isRecord(leaderboard.sourcePriors), 'model-leaderboard.json is missing sourcePriors.');
+  assert(isRecord(leaderboard.sourceLogitSpreads), 'model-leaderboard.json is missing sourceLogitSpreads.');
+  assert(isRecord(leaderboard.shrinkage), 'model-leaderboard.json is missing shrinkage.');
   assert(isRecord(leaderboard.caseMix), 'model-leaderboard.json is missing caseMix.');
   const caseMix = leaderboard.caseMix;
   assert(caseMix.method === 'direct_standardization', 'model-leaderboard.json has an invalid caseMix method.');
@@ -1182,74 +753,49 @@ function validateModelLeaderboard(leaderboard: unknown): void {
   assert(isNonNegativeInteger(caseMix.minimumModelRatedTasksPerBand), 'model-leaderboard.json caseMix has an invalid minimumModelRatedTasksPerBand.');
   assert(isUnitInterval(caseMix.minimumTargetBandWeight), 'model-leaderboard.json caseMix has an invalid minimumTargetBandWeight.');
   assert(isRecord(caseMix.targetBandWeights), 'model-leaderboard.json caseMix is missing targetBandWeights.');
-  assert(isRecord(caseMix.scoredBandCounts), 'model-leaderboard.json caseMix is missing scoredBandCounts.');
   const bands = ['low', 'medium', 'high'] as const;
-  for (const band of bands) {
-    assert(isUnitInterval(caseMix.targetBandWeights[band]), `model-leaderboard.json caseMix.targetBandWeights.${band} is invalid.`);
-    assert(isNonNegativeInteger(caseMix.scoredBandCounts[band]), `model-leaderboard.json caseMix.scoredBandCounts.${band} is invalid.`);
-  }
+  for (const band of bands) assert(isUnitInterval(caseMix.targetBandWeights[band]), `model-leaderboard.json caseMix.targetBandWeights.${band} is invalid.`);
   assert(Array.isArray(caseMix.activeSignals), 'model-leaderboard.json caseMix is missing activeSignals.');
   assert(Array.isArray(leaderboard.notes), 'model-leaderboard.json is missing notes.');
-  assert(isRecord(leaderboard.sourceWeights), 'model-leaderboard.json is missing sourceWeights.');
-  assert(leaderboard.sourceWeights.user === 0 && leaderboard.sourceWeights.agent === 1 && leaderboard.sourceWeights.process === 0,
-    'model-leaderboard.json V2 ranking must be outcome-only.');
-  assert(isRecord(leaderboard.sourcePriors), 'model-leaderboard.json is missing sourcePriors.');
-  assert(isRecord(leaderboard.sourceLogitSpreads), 'model-leaderboard.json is missing sourceLogitSpreads.');
-  assert(isRecord(leaderboard.shrinkage), 'model-leaderboard.json is missing shrinkage.');
+
   let expectedRank = 1;
   let seenUnranked = false;
   for (const [index, row] of leaderboard.rows.entries()) {
     assert(isRecord(row), `model-leaderboard.json row ${index} must be an object.`);
     assert(typeof row.modelId === 'string' && row.thinkingLevel === '(all)', `model-leaderboard.json row ${index} must be a family-level row.`);
     assert(Array.isArray(row.thinkingLevels), `model-leaderboard.json row ${index} is missing thinkingLevels.`);
-    for (const field of ['userEvidenceCount', 'userEvidenceMass', 'agentEvidenceCount', 'agentEvidenceMass', 'processEvidenceCount', 'processEvidenceMass', 'canonicalTaskCount', 'transcriptOnlySessionCount', 'mixedAttributionMass', 'legacyAgentReviewCount']) {
+    for (const field of ['reviewEvidenceCount', 'reviewEvidenceMass', 'processEvidenceCount', 'processEvidenceMass', 'canonicalTaskCount', 'transcriptOnlySessionCount', 'mixedAttributionMass', 'v2ReviewCount']) {
       assert(typeof row[field] === 'number' && Number.isFinite(row[field]) && row[field] >= 0, `model-leaderboard.json row ${index}.${field} is invalid.`);
     }
     assert(row.meanQualityIndexV1 === null || (typeof row.meanQualityIndexV1 === 'number' && Number.isFinite(row.meanQualityIndexV1) && row.meanQualityIndexV1 >= 0 && row.meanQualityIndexV1 <= 100), `model-leaderboard.json row ${index}.meanQualityIndexV1 is invalid.`);
-    assert(['outcome-backed', 'thin-outcome', 'telemetry-only'].includes(String(row.evidenceTier)), `model-leaderboard.json row ${index} has invalid evidenceTier.`);
-    for (const field of ['userChannelScore', 'agentChannelScore', 'processChannelScore', 'compositeScore']) {
-      assert(row[field] === null || isUnitInterval(row[field]), `model-leaderboard.json row ${index}.${field} is invalid.`);
-    }
-    // Migrated invariants: count / coverage / gate-shape fields.
-    assert(isNonNegativeInteger(row.runCount), `model-leaderboard.json row ${index} has an invalid runCount.`);
-    assert(isNonNegativeInteger(row.scoredRunCount), `model-leaderboard.json row ${index} has an invalid scoredRunCount.`);
-    assert(isNonNegativeInteger(row.effectiveTaskCount), `model-leaderboard.json row ${index} has an invalid effectiveTaskCount.`);
-    assert(isNonNegativeInteger(row.attributableRunCount), `model-leaderboard.json row ${index} has an invalid attributableRunCount.`);
-    assert(isNonNegativeInteger(row.attributableTaskCount), `model-leaderboard.json row ${index} has an invalid attributableTaskCount.`);
+    assert(['review-backed', 'thin-review', 'telemetry-only'].includes(String(row.evidenceTier)), `model-leaderboard.json row ${index} has invalid evidenceTier.`);
+    for (const field of ['reviewChannelScore', 'processChannelScore', 'compositeScore']) assert(row[field] === null || isUnitInterval(row[field]), `model-leaderboard.json row ${index}.${field} is invalid.`);
+    for (const field of ['runCount', 'attributableRunCount', 'attributableTaskCount', 'mixedModelExcludedCount', 'mixedTreatmentExcludedCount']) assert(isNonNegativeInteger(row[field]), `model-leaderboard.json row ${index} has an invalid ${field}.`);
+    assert(typeof row.effectiveTaskCount === 'number' && Number.isFinite(row.effectiveTaskCount) && row.effectiveTaskCount >= 0, `model-leaderboard.json row ${index} has an invalid effectiveTaskCount.`);
     assert(row.scoringCoverage === null || isUnitInterval(row.scoringCoverage), `model-leaderboard.json row ${index} has invalid scoringCoverage.`);
     assert(typeof row.scoringCoverageGateFailed === 'boolean', `model-leaderboard.json row ${index} is missing scoringCoverageGateFailed.`);
     assert(typeof row.caseMixAdjusted === 'boolean', `model-leaderboard.json row ${index} is missing caseMixAdjusted.`);
     assert(typeof row.caseMixBandOverlapGateFailed === 'boolean', `model-leaderboard.json row ${index} is missing caseMixBandOverlapGateFailed.`);
     assert(isRecord(row.taskComplexityBandCounts), `model-leaderboard.json row ${index} is missing taskComplexityBandCounts.`);
-    for (const band of bands) {
-      assert(isNonNegativeInteger(row.taskComplexityBandCounts[band]), `model-leaderboard.json row ${index} has invalid ${band} task count.`);
-    }
-    // Migrated invariant: provider canonical run/scored sums (transcript fields are separate).
+    for (const band of bands) assert(typeof row.taskComplexityBandCounts[band] === 'number' && Number.isFinite(row.taskComplexityBandCounts[band]) && row.taskComplexityBandCounts[band] >= 0, `model-leaderboard.json row ${index} has invalid ${band} task mass.`);
     assert(Array.isArray(row.providers), `model-leaderboard.json row ${index} is missing providers.`);
     let providerRunSum = 0;
-    let providerScoredSum = 0;
-    for (const [pIndex, provider] of row.providers.entries()) {
-      assert(isRecord(provider), `model-leaderboard.json row ${index} providers[${pIndex}] must be an object.`);
-      assert(typeof provider.modelId === 'string', `model-leaderboard.json row ${index} providers[${pIndex}] is missing modelId.`);
-      assert(isNonNegativeInteger(provider.runCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid runCount.`);
-      assert(isNonNegativeInteger(provider.scoredRunCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid scoredRunCount.`);
-      assert(isNonNegativeInteger(provider.transcriptOnlySessionCount), `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid transcriptOnlySessionCount.`);
-      assert(typeof provider.transcriptEvidenceMass === 'number' && Number.isFinite(provider.transcriptEvidenceMass) && provider.transcriptEvidenceMass >= 0, `model-leaderboard.json row ${index} providers[${pIndex}] has an invalid transcriptEvidenceMass.`);
+    for (const [providerIndex, provider] of row.providers.entries()) {
+      assert(isRecord(provider), `model-leaderboard.json row ${index} providers[${providerIndex}] must be an object.`);
+      assert(typeof provider.modelId === 'string', `model-leaderboard.json row ${index} providers[${providerIndex}] is missing modelId.`);
+      assert(isNonNegativeInteger(provider.runCount), `model-leaderboard.json row ${index} providers[${providerIndex}] has an invalid runCount.`);
+      assert(isNonNegativeInteger(provider.transcriptOnlySessionCount), `model-leaderboard.json row ${index} providers[${providerIndex}] has an invalid transcriptOnlySessionCount.`);
+      assert(typeof provider.transcriptEvidenceMass === 'number' && Number.isFinite(provider.transcriptEvidenceMass) && provider.transcriptEvidenceMass >= 0, `model-leaderboard.json row ${index} providers[${providerIndex}] has an invalid transcriptEvidenceMass.`);
       providerRunSum += provider.runCount;
-      providerScoredSum += provider.scoredRunCount;
     }
     assert(providerRunSum === row.runCount, `model-leaderboard.json row ${index} provider runCount sum (${providerRunSum}) != row.runCount (${row.runCount}).`);
-    assert(providerScoredSum === row.scoredRunCount, `model-leaderboard.json row ${index} provider scoredRunCount sum (${providerScoredSum}) != row.scoredRunCount (${row.scoredRunCount}).`);
-    // Migrated invariant: dimensions shape/ranges.
     assert(isRecord(row.dimensions), `model-leaderboard.json row ${index} is missing dimensions.`);
-    assert(isRecord(row.dimensions.tokenEfficiency), `model-leaderboard.json row ${index} is missing tokenEfficiency dimension.`);
-    // Migrated invariant: rank ordering / sequential ranks.
+    for (const dimension of ['fileChurn', 'toolReliability', 'verificationPassRate', 'tokenEfficiency']) assert(isRecord(row.dimensions[dimension]), `model-leaderboard.json row ${index} is missing ${dimension} dimension.`);
     if (row.compositeScore !== null) {
       assert(row.rank === expectedRank, `model-leaderboard.json row ${index} has a non-contiguous rank.`);
       expectedRank += 1;
       assert(!seenUnranked, `model-leaderboard.json row ${index} is ranked after unranked rows.`);
       assert(row.unadjustedCompositeScore !== null, `model-leaderboard.json row ${index} has rank but null unadjustedCompositeScore.`);
-      assert(row.reliabilityFactor !== null && typeof row.reliabilityFactor === 'number', `model-leaderboard.json row ${index} has rank but invalid reliabilityFactor.`);
       assert(isRecord(row.scoreInterval80) && isUnitInterval(row.scoreInterval80.lower) && isUnitInterval(row.scoreInterval80.upper), `model-leaderboard.json row ${index} has invalid scoreInterval80.`);
       assert(row.scoreInterval80.level === 0.8, `model-leaderboard.json row ${index} has invalid interval level.`);
       assert(isNonNegativeInteger(row.scoreInterval80.bestRank) && isNonNegativeInteger(row.scoreInterval80.worstRank), `model-leaderboard.json row ${index} has invalid rank interval.`);
@@ -1288,32 +834,18 @@ function validateToolResultPruningImpact(data: unknown): asserts data is ToolRes
   assert(Array.isArray(data.summary.byTool), 'tool-result-pruning-impact.json summary is missing byTool.');
 }
 
-function validateToolResultPruningOutcomes(data: unknown): asserts data is ToolResultPruningOutcomeData {
-  assert(isRecord(data), 'tool-result-pruning-outcomes.json must contain an object.');
-  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'tool-result-pruning-outcomes.json has an unexpected schemaVersion.');
-  assert(Array.isArray(data.buckets), 'tool-result-pruning-outcomes.json is missing buckets.');
-  assert(Array.isArray(data.notes), 'tool-result-pruning-outcomes.json is missing notes.');
-}
-
-function validateAgentReviewComparison(data: unknown): asserts data is AgentReviewComparisonData {
-  assert(isRecord(data), 'agent-review-comparison.json must contain an object.');
-  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'agent-review-comparison.json has an unexpected schemaVersion.');
-  assert(data.cohort === 'legacy_v1', 'agent-review-comparison.json must be labelled as the legacy_v1 cohort.');
-  assert(Array.isArray(data.perModel), 'agent-review-comparison.json is missing perModel.');
-  assert(Array.isArray(data.reviewerBucketCoverage), 'agent-review-comparison.json is missing reviewerBucketCoverage.');
-  assert(isRecord(data.overall), 'agent-review-comparison.json is missing overall.');
-  assert(typeof data.overall.totalAgentReviews === 'number', 'agent-review-comparison.json overall is missing totalAgentReviews.');
-  assert(typeof data.overall.totalRunsScoredByUser === 'number', 'agent-review-comparison.json overall is missing totalRunsScoredByUser.');
-  assert(typeof data.overall.totalScoredByBoth === 'number', 'agent-review-comparison.json overall is missing totalScoredByBoth.');
-  assert(Array.isArray(data.notes), 'agent-review-comparison.json is missing notes.');
-}
-
 function validateSessionReviewAnalytics(data: unknown): asserts data is SessionReviewAnalyticsData {
   assert(isRecord(data), 'session-review-analytics.json must contain an object.');
   assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'session-review-analytics.json has an unexpected schemaVersion.');
   assert(data.cohort === 'v2_production', 'session-review-analytics.json must contain only the v2_production cohort.');
   assert(data.indexVersion === 'v1', 'session-review-analytics.json has an unexpected indexVersion.');
   assert(Array.isArray(data.rows), 'session-review-analytics.json is missing rows.');
+  assert(isRecord(data.diagnostics), 'session-review-analytics.json is missing ingestion diagnostics.');
+  assert(typeof data.diagnostics.rawProductionCount === 'number', 'session-review-analytics.json diagnostics is missing rawProductionCount.');
+  assert(typeof data.diagnostics.acceptedCount === 'number', 'session-review-analytics.json diagnostics is missing acceptedCount.');
+  assert(typeof data.diagnostics.rejectedCount === 'number', 'session-review-analytics.json diagnostics is missing rejectedCount.');
+  assert(isRecord(data.diagnostics.rejectedByReason), 'session-review-analytics.json diagnostics is missing rejectedByReason.');
+  assert(data.diagnostics.rawProductionCount === data.diagnostics.acceptedCount + data.diagnostics.rejectedCount, 'session-review-analytics.json diagnostics raw count must equal accepted + rejected.');
   assert(isRecord(data.summary), 'session-review-analytics.json is missing summary.');
   assert(typeof data.summary.reviewCount === 'number', 'session-review-analytics.json summary is missing reviewCount.');
   assert(typeof data.summary.qualityIndexCount === 'number', 'session-review-analytics.json summary is missing qualityIndexCount.');
@@ -1323,10 +855,8 @@ function validateSessionReviewAnalytics(data: unknown): asserts data is SessionR
   assert(isRecord(data.criteria) && typeof data.criteria.total === 'number', 'session-review-analytics.json is missing criterion diagnostics.');
   assert(isRecord(data.process), 'session-review-analytics.json is missing process diagnostics.');
   assert(isRecord(data.evidence), 'session-review-analytics.json is missing evidence diagnostics.');
-  assert(isRecord(data.findings), 'session-review-analytics.json is missing finding diagnostics.');
   assert(isRecord(data.disagreement), 'session-review-analytics.json is missing disagreement diagnostics.');
   assert(isRecord(data.reviewers), 'session-review-analytics.json is missing reviewer diagnostics.');
-  assert(isRecord(data.legacy) && data.legacy.excludedFromV2 === true, 'session-review-analytics.json must label the excluded legacy cohort.');
   for (const [index, row] of data.rows.entries()) {
     assert(isRecord(row) && row.cohort === 'v2_production', `session-review-analytics.json row ${index} has an invalid cohort.`);
     assert(typeof row.sessionId === 'string' && row.sessionId.length > 0, `session-review-analytics.json row ${index} is missing sessionId.`);
@@ -1395,7 +925,7 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateManifest(bundle.manifest);
   validateOverview(bundle.overview, bundle.manifest);
   validateRunSummary(bundle.runSummary);
-  assert(bundle.modelQuality.cohortLabels.userOutcomes.startsWith('Legacy V1'), 'model-quality.json is missing explicit legacy cohort labels.');
+  assert(bundle.modelQuality.cohortLabels.v2Reviews === 'V2 canonical production reviews', 'model-quality.json is missing the V2 cohort label.');
   validateComparativeRows('model-quality.json', bundle.modelQuality.rows);
   validateVerificationImpact(bundle.verificationImpact);
   validateToolUsage(bundle.toolUsage);
@@ -1404,8 +934,6 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validateModelLeaderboard(bundle.modelLeaderboard);
   validatePruningImpact(bundle.pruningImpact);
   validateToolResultPruningImpact(bundle.toolResultPruningImpact);
-  validateToolResultPruningOutcomes(bundle.toolResultPruningOutcomes);
-  validateAgentReviewComparison(bundle.agentReviewComparison);
   validateSessionReviewAnalytics(bundle.sessionReviewAnalytics);
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
@@ -1432,8 +960,6 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     modelLeaderboard: files['model-leaderboard.json'] as SiteDataBundle['modelLeaderboard'],
     pruningImpact: files['pruning-impact.json'] as SiteDataBundle['pruningImpact'],
     toolResultPruningImpact: files['tool-result-pruning-impact.json'] as SiteDataBundle['toolResultPruningImpact'],
-    toolResultPruningOutcomes: files['tool-result-pruning-outcomes.json'] as SiteDataBundle['toolResultPruningOutcomes'],
-    agentReviewComparison: files['agent-review-comparison.json'] as SiteDataBundle['agentReviewComparison'],
     sessionReviewAnalytics: files['session-review-analytics.json'] as SiteDataBundle['sessionReviewAnalytics'],
     backendErrors: files['backend-errors.json'] as SiteDataBundle['backendErrors'],
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],

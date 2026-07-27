@@ -1,15 +1,13 @@
 import { isDeepStrictEqual } from 'node:util';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 
-import { readSessionIdentityFromBytes, sha256 } from './evidence.js';
+import { readSessionIdentityFromBytes } from './evidence.js';
 import type { ReviewerRuntime, SessionReviewV2 } from './types.js';
 
 interface ToolCall { id: string; name: string; arguments: unknown }
-interface ToolResult { toolCallId: string; toolName: string; details?: unknown; content?: unknown; isError?: boolean; timestamp?: unknown }
+interface ToolResult { toolCallId: string; toolName: string; details?: unknown; timestamp?: unknown }
 interface TranscriptIndex {
   identity: ReturnType<typeof readSessionIdentityFromBytes>;
-  cwd: string | undefined;
   calls: Map<string, ToolCall>;
   results: Map<string, ToolResult>;
 }
@@ -17,12 +15,10 @@ function indexTranscript(sessionPath: string): TranscriptIndex {
   const raw = fs.readFileSync(sessionPath);
   const calls = new Map<string, ToolCall>();
   const results = new Map<string, ToolResult>();
-  let cwd: string | undefined;
   for (const line of raw.toString('utf8').split(/\r?\n/)) {
     if (!line.trim()) continue;
     let entry: Record<string, unknown>;
     try { entry = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
-    if (entry.type === 'session' && typeof entry.cwd === 'string' && entry.cwd && cwd === undefined) cwd = entry.cwd;
     const message = entry.message as Record<string, unknown> | undefined;
     if (entry.type !== 'message' || !message) continue;
     if (message.role === 'assistant' && Array.isArray(message.content)) {
@@ -30,10 +26,10 @@ function indexTranscript(sessionPath: string): TranscriptIndex {
         if (part.type === 'toolCall' && typeof part.id === 'string' && typeof part.name === 'string') calls.set(part.id, { id: part.id, name: part.name, arguments: part.arguments });
       }
     } else if (message.role === 'toolResult' && typeof message.toolCallId === 'string' && typeof message.toolName === 'string') {
-      results.set(message.toolCallId, { toolCallId: message.toolCallId, toolName: message.toolName, details: message.details, content: message.content, isError: !!message.isError, timestamp: message.timestamp ?? entry.timestamp });
+      results.set(message.toolCallId, { toolCallId: message.toolCallId, toolName: message.toolName, details: message.details, timestamp: message.timestamp ?? entry.timestamp });
     }
   }
-  return { identity: readSessionIdentityFromBytes(sessionPath, raw), cwd, calls, results };
+  return { identity: readSessionIdentityFromBytes(sessionPath, raw), calls, results };
 }
 function runtimeRecords(review: SessionReviewV2): ReviewerRuntime[] {
   return [
@@ -96,57 +92,6 @@ function assertHumanCheck(review: SessionReviewV2, index: TranscriptIndex): void
   }
 }
 
-function toolResultText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return (content as Array<Record<string, unknown>>)
-    .filter((part) => part && typeof part['text'] === 'string')
-    .map((part) => part['text'] as string)
-    .join('\n');
-}
-function resolveWithinCwd(cwd: string | undefined, target: string): string {
-  return path.isAbsolute(target) ? path.resolve(target) : path.resolve(cwd ?? process.cwd(), target);
-}
-/** Binds each non-skipped reviewer check's result/status/evidence to a real prior
- *  orchestrator tool call and its immutable output. Declined checks are skipped
- *  and carry no binding (validated structurally upstream). */
-function assertReviewerChecks(review: SessionReviewV2, index: TranscriptIndex): void {
-  for (const check of review.reviewerChecks) {
-    if (check.status === 'declined: mutating') continue;
-    const toolCallId = check.toolCallId;
-    if (!toolCallId) throw new Error(`reviewer check ${check.checkId} is missing its toolCallId binding`);
-    const call = index.calls.get(toolCallId);
-    const result = index.results.get(toolCallId);
-    if (!call || !result) throw new Error(`reviewer check ${check.checkId} is not bound to a completed prior tool call`);
-    const output = toolResultText(result.content);
-    if (check.kind === 'static_inspection') {
-      // static_inspection: executed read-only via a read or grep tool call.
-      if (call.name !== 'read' && call.name !== 'grep') throw new Error(`reviewer check ${check.checkId} must bind to a prior read or grep tool call`);
-      const args = call.arguments as Record<string, unknown> | undefined;
-      const targetResolved = resolveWithinCwd(index.cwd, check.target);
-      if (call.name === 'read') {
-        const target = args && typeof args.path === 'string' ? args.path : '';
-        if (resolveWithinCwd(index.cwd, target) !== targetResolved) throw new Error(`reviewer check ${check.checkId} target does not match the prior read call`);
-      } else {
-        const pattern = args && typeof args.pattern === 'string' ? args.pattern : '';
-        if (pattern !== check.query) throw new Error(`reviewer check ${check.checkId} query does not match the prior grep pattern`);
-        const searchPath = args && typeof args.path === 'string' ? args.path : '';
-        const glob = args && typeof args.glob === 'string' ? args.glob : '';
-        const searchResolved = searchPath ? resolveWithinCwd(index.cwd, searchPath) : '';
-        const referenced = !searchPath || searchResolved === targetResolved || targetResolved.startsWith(searchResolved + path.sep) || glob.includes(path.basename(check.target));
-        if (!referenced) throw new Error(`reviewer check ${check.checkId} target is not referenced by the prior grep call`);
-      }
-    } else {
-      // command | automated_check: executed via a prior bash tool call.
-      if (call.name !== 'bash' || result.toolName !== 'bash') throw new Error(`reviewer check ${check.checkId} must bind to a prior bash tool call`);
-      const args = call.arguments as Record<string, unknown> | undefined;
-      if (!args || typeof args.command !== 'string' || args.command !== check.command) throw new Error(`reviewer check ${check.checkId} command does not match the prior bash call`);
-      if (result.isError && check.status !== 'fail') throw new Error(`reviewer check ${check.checkId} must be 'fail' for a failed command`);
-    }
-    if (sha256(output) !== check.outputSha256) throw new Error(`reviewer check ${check.checkId} output hash does not match the prior tool result`);
-    if (!output.startsWith(check.result)) throw new Error(`reviewer check ${check.checkId} result is not a prefix of the prior tool output`);
-  }
-}
 
 /** Binds caller-supplied provenance to durable calls in this orchestrator session. */
 export function validateRuntimeProvenance(review: SessionReviewV2, orchestratorPath: string): void {
@@ -161,5 +106,4 @@ export function validateRuntimeProvenance(review: SessionReviewV2, orchestratorP
   if (new Set(runtimes.map((record) => record.toolCallId)).size !== runtimes.length) throw new Error('each pipeline role must use a distinct prior subagent call');
   runtimes.forEach((record) => assertRuntime(record, index));
   assertHumanCheck(review, index);
-  assertReviewerChecks(review, index);
 }

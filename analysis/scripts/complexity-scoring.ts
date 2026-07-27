@@ -2,16 +2,16 @@
  * Dependency-free workload-intensity scoring helpers.
  *
  * Shared by the generated leaderboard (`scripts/leaderboard.ts`) and browser dashboard only for
- * descriptive workload context. The stratified ranker and canonical leaderboard use
- * `pre-task-complexity.ts` for ex-ante task bands instead. Post-treatment workload is never a
- * multiplier, adjustment covariate, or difficulty label.
+ * descriptive workload context. The canonical leaderboard uses `pre-task-complexity.ts` for
+ * ex-ante task bands instead. Post-treatment workload is never a multiplier, adjustment
+ * covariate, or difficulty label.
  *
  * Workload intensity = mean percentile rank of 6 per-run signals (line mutations, touched files,
  * tool calls, busy duration, verification count, input tokens), giving a 0–1 descriptive value.
  */
 import type { PreparedRunRow } from './contracts.ts';
 
-// --- Workload-intensity primitives (also used by the stratified ranker) ---
+// --- Workload-intensity primitives ---
 
 export interface ComplexitySignals {
   lineMutations: number;
@@ -78,30 +78,4 @@ export function computeWorkloadIntensityScores(runs: PreparedRunRow[]): Map<stri
     scores.set(runs[index]!.runId, score);
   }
   return scores;
-}
-
-/**
- * Compatibility helper for the former workload-weighted leaderboard calculation. The generated
- * leaderboard no longer calls it because post-treatment workload must not alter outcome scores.
- */
-export function complexityWeightedMean(
-  pairs: { complexity: number; outcome: number }[],
-  outcomeExponent = 1,
-): number | null {
-  if (pairs.length === 0) return null;
-  let sum = 0;
-  for (const pair of pairs) sum += pair.complexity * (pair.outcome ** outcomeExponent);
-  return sum / pairs.length;
-}
-
-/** Compatibility helper indicating whether descriptive workload-intensity values vary. */
-export function hasComplexityVariance(complexityScores: number[]): boolean {
-  if (complexityScores.length === 0) return false;
-  let min = Infinity;
-  let max = -Infinity;
-  for (const score of complexityScores) {
-    if (score < min) min = score;
-    if (score > max) max = score;
-  }
-  return Number.isFinite(min) && Number.isFinite(max) && max - min > 1e-9;
 }

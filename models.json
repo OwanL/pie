@@ -123,6 +123,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1048576,
           "maxTokens": 65536,
           "cost": {
@@ -140,6 +141,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -194,6 +196,9 @@
           "name": "Ollama Cloud: GLM 5.2",
           "reasoning": true,
           "family": "glm-5.2",
+          "input": [
+            "text"
+          ],
           "contextWindow": 1000000,
           "maxTokens": 65536,
           "cost": {
@@ -237,6 +242,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -255,6 +261,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -273,6 +280,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -353,6 +361,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -370,6 +379,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "cost": {
@@ -400,6 +410,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 524288,
           "maxTokens": 65536,
           "cost": {
@@ -451,6 +462,47 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+            "minimal": "low"
+          },
+          "cost": {
+            "input": 10,
+            "output": 50,
+            "cacheRead": 1,
+            "cacheWrite": 12.5,
+            "tiers": [
+              {
+                "inputTokensAbove": 200000,
+                "input": 10,
+                "output": 50,
+                "cacheRead": 1,
+                "cacheWrite": 12.5
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-opus-4.8-fast",
+          "name": "Copilot: Claude Opus 4.8 (fast mode)",
+          "api": "anthropic-messages",
+          "compat": {
+            "supportsEagerToolInputStreaming": false,
+            "forceAdaptiveThinking": true
+          },
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1000000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -490,6 +542,47 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+            "minimal": "low"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25,
+            "tiers": [
+              {
+                "inputTokensAbove": 200000,
+                "input": 5,
+                "output": 25,
+                "cacheRead": 0.5,
+                "cacheWrite": 6.25
+              }
+            ]
+          }
+        },
+        {
+          "id": "claude-opus-5",
+          "name": "Copilot: Claude Opus 5",
+          "api": "anthropic-messages",
+          "compat": {
+            "supportsEagerToolInputStreaming": false,
+            "forceAdaptiveThinking": true
+          },
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1000000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -529,6 +622,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1000000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -567,6 +661,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1000000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -607,6 +702,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1000000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -640,6 +736,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 400000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -665,6 +762,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1050000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -701,6 +799,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1050000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -737,6 +836,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 1050000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -752,7 +852,7 @@
             "input": 2.5,
             "output": 15,
             "cacheRead": 0.25,
-            "cacheWrite": 3.125,
+            "cacheWrite": 3.12,
             "tiers": [
               {
                 "inputTokensAbove": 272000,
@@ -773,6 +873,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 264000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -800,6 +901,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 32000,
           "cost": {
@@ -821,6 +923,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 32000,
           "cost": {
@@ -855,6 +958,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "thinkingLevelMap": {
@@ -880,6 +984,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "thinkingLevelMap": {
@@ -906,6 +1011,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "thinkingLevelMap": {
@@ -932,6 +1038,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "thinkingLevelMap": {
@@ -958,6 +1065,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 202752,
           "maxTokens": 65536,
           "thinkingLevelMap": {
@@ -981,8 +1089,7 @@
           "reasoning": true,
           "family": "glm-5.2",
           "input": [
-            "text",
-            "image"
+            "text"
           ],
           "contextWindow": 405504,
           "maxTokens": 65536,
@@ -1009,6 +1116,7 @@
             "text",
             "image"
           ],
+          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "thinkingLevelMap": {
@@ -1039,6 +1147,11 @@
       "modelOverrides": {
         "gpt-5.6-sol": {
           "name": "GPT-5.6 Sol",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
           "cost": {
             "input": 5,
             "output": 30,
@@ -1057,6 +1170,11 @@
         },
         "gpt-5.6-terra": {
           "name": "GPT-5.6 Terra",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
           "cost": {
             "input": 2.5,
             "output": 15,
@@ -1075,6 +1193,11 @@
         },
         "gpt-5.6-luna": {
           "name": "GPT-5.6 Luna",
+          "input": [
+            "text",
+            "image"
+          ],
+          "maxImagesPerRequest": 1,
           "cost": {
             "input": 1,
             "output": 6,

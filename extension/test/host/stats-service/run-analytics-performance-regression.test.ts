@@ -14,7 +14,6 @@ import {
   createEmptyFileMutationRollup,
   createEmptyToolUsageRollup,
   createEmptyVerificationRollup,
-  type OutcomeHistoryLogEntry,
   type RunSnapshot,
 } from '../../../src/host/run-analytics';
 import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../../src/shared/protocol/aggregate-stats';
@@ -26,18 +25,6 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
-}
-
-function outcome(runId: string, recordedAt: string): OutcomeHistoryLogEntry {
-  return {
-    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-    kind: 'run_outcome',
-    recordedAt,
-    sessionPath: `/session/${runId}`,
-    runId,
-    taskGroupId: `task-${runId}`,
-    outcome: { resolution: 'resolved', satisfaction: 4 },
-  };
 }
 
 function snapshot(runId: string, updatedAt: string): RunSnapshot {
@@ -52,7 +39,6 @@ function validSnapshot(runId: string, updatedAt: string): RunSnapshot {
     sessionPath: `/session/${runId}`,
     taskGroupId: `task-${runId}`,
     status: 'open',
-    scored: false,
     startedAt: updatedAt,
     updatedAt,
     mixedModelConfig: false,
@@ -113,7 +99,7 @@ test('persist job batches each pending JSONL file and throttles automatic export
     const storageDir = path.join(root, workspaceHash('batch-and-export'));
     await fs.mkdir(storageDir, { recursive: true });
     const autoExportPath = path.join(storageDir, 'run-analytics.json');
-    const emptyExport = JSON.stringify({ completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] });
+    const emptyExport = JSON.stringify({ completedRuns: [], openRuns: [] });
     await fs.writeFile(autoExportPath, emptyExport, 'utf8');
     await fs.utimes(autoExportPath, new Date(nowMs), new Date(nowMs));
 
@@ -134,24 +120,23 @@ test('persist job batches each pending JSONL file and throttles automatic export
     const startupExport = await fs.readFile(autoExportPath, 'utf8');
 
     const recordedAt = new Date(nowMs).toISOString();
-    storage.schedulePersist(snapshot('r1', recordedAt), outcome('r1', recordedAt));
-    storage.schedulePersist(snapshot('r2', recordedAt), outcome('r2', recordedAt));
+    storage.schedulePersist(snapshot('r1', recordedAt));
+    storage.schedulePersist(snapshot('r2', recordedAt));
     await storage.flush();
 
     assert.equal(appendCalls.get('run-snapshots.jsonl'), 1);
-    assert.equal(appendCalls.get('outcome-history.jsonl'), 1);
     assert.equal((await fs.readFile(path.join(storage.getStorageDir(), 'run-snapshots.jsonl'), 'utf8')).trim().split('\n').length, 2);
     assert.equal(await fs.readFile(autoExportPath, 'utf8'), startupExport, 'ordinary flush must not rebuild auto-export inside the 30s window');
 
     nowMs += 1_000;
     const explicitPath = path.join(root, 'explicit.json');
     const explicit = await storage.exportRunAnalytics(explicitPath);
-    assert.deepEqual(explicit.outcomes.map((entry) => entry.runId), ['r1', 'r2']);
+    assert.deepEqual(explicit.completedRuns.map((entry) => entry.runId), ['r1', 'r2']);
     assert.equal(await fs.readFile(autoExportPath, 'utf8'), startupExport, 'explicit export to another path does not bypass auto-export throttling');
 
     await storage.dispose();
-    const shutdownExport = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { outcomes: OutcomeHistoryLogEntry[] };
-    assert.deepEqual(shutdownExport.outcomes.map((entry) => entry.runId), ['r1', 'r2']);
+    const shutdownExport = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { completedRuns: { runId: string }[] };
+    assert.deepEqual(shutdownExport.completedRuns.map((entry) => entry.runId), ['r1', 'r2']);
   });
 });
 
@@ -244,7 +229,7 @@ test('Phase 3: start does not rewrite a fresh auto-export', async () => {
     await fs.writeFile(sourcePath, '', 'utf8');
     await fs.utimes(sourcePath, oldTime, oldTime);
 
-    const baseline = JSON.stringify({ completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] });
+    const baseline = JSON.stringify({ completedRuns: [], openRuns: [] });
     await fs.writeFile(autoExportPath, baseline, 'utf8');
     await fs.utimes(autoExportPath, newTime, newTime);
 
@@ -401,7 +386,7 @@ test('automatic export refreshes within its configured bounded interval', async 
     await (storage as unknown as { persistenceQueue: Promise<void> }).persistenceQueue;
 
     const recordedAt = new Date().toISOString();
-    storage.schedulePersist(undefined, outcome('bounded', recordedAt));
+    storage.schedulePersist(snapshot('bounded', recordedAt));
     await storage.flush();
 
     const postFlushTimer = await takeScheduledTimer();
@@ -410,8 +395,8 @@ test('automatic export refreshes within its configured bounded interval', async 
     postFlushTimer.callback();
     await (storage as unknown as { persistenceQueue: Promise<void> }).persistenceQueue;
 
-    const payload = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { outcomes: OutcomeHistoryLogEntry[] };
-    assert.ok(payload.outcomes.some((entry) => entry.runId === 'bounded'));
+    const payload = JSON.parse(await fs.readFile(autoExportPath, 'utf8')) as { completedRuns: { runId: string }[] };
+    assert.ok(payload.completedRuns.some((entry) => entry.runId === 'bounded'));
     await storage.dispose();
   });
 });
@@ -425,7 +410,7 @@ test('aggregate refresh reads completed history once while active ticks use live
       getStorageDir: () => storageDir,
       queryPersistedRunAnalytics: async () => {
         persistedQueries += 1;
-        return { completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] };
+        return { completedRuns: [], openRuns: [] };
       },
       getOpenRuns: () => {
         openRunReads += 1;
@@ -469,7 +454,6 @@ test('AggregateStatsService includes live open-run tokens and counts without re-
       sessionPath: '/live',
       taskGroupId: 'tg-1',
       status: 'open',
-      scored: false,
       startedAt: now.toISOString(),
       updatedAt: now.toISOString(),
       modelId: 'claude-sonnet-4',
@@ -485,7 +469,7 @@ test('AggregateStatsService includes live open-run tokens and counts without re-
       getStorageDir: () => storageDir,
       queryPersistedRunAnalytics: async () => {
         persistedQueries += 1;
-        return { completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] };
+        return { completedRuns: [], openRuns: [] };
       },
       getOpenRuns: () => [openRun],
       getPendingCompletedRuns: () => [],
@@ -534,7 +518,7 @@ test('AggregateStatsService refreshLive updates estimated streaming tokens and c
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => {
           persistedQueries += 1;
-          return { completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] };
+          return { completedRuns: [], openRuns: [] };
         },
         getOpenRuns: () => [openRun],
         getPendingCompletedRuns: () => [],
@@ -580,7 +564,7 @@ test('AggregateStatsService refreshLive retains a just-persisted run until the c
       statsService: {
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => ({
-          completedRuns: [], openRuns: [], outcomes: [], agentReviews: [],
+          completedRuns: [], openRuns: [],
         }),
         getOpenRuns: () => [],
         getPendingCompletedRuns: () => pendingRuns,
@@ -618,7 +602,7 @@ test('AggregateStatsService cache keys on snapshots only — checkpoint churn do
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => {
           persistedQueries += 1;
-          return { completedRuns: [], openRuns: [], outcomes: [], agentReviews: [] };
+          return { completedRuns: [], openRuns: [] };
         },
         getOpenRuns: () => [],
         getPendingCompletedRuns: () => [],
@@ -674,7 +658,7 @@ test('AggregateStatsService caches completed accumulation, rebuilds open runs, a
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => {
           persistedQueries += 1;
-          return { completedRuns, openRuns: [], outcomes: [], agentReviews: [] };
+          return { completedRuns, openRuns: [] };
         },
         getOpenRuns: () => openRuns,
         getPendingCompletedRuns: () => pendingCompletedRuns,
@@ -704,9 +688,7 @@ test('AggregateStatsService caches completed accumulation, rebuilds open runs, a
     const finalizedAt = new Date(Date.parse(now) + 1_000).toISOString();
     const finalized = {
       ...openRuns[0]!,
-      status: 'scored',
-      scored: true,
-      outcome: { resolution: 'resolved', satisfaction: 5 },
+      status: 'closed',
       finalizedAt,
       updatedAt: finalizedAt,
     } as RunSnapshot;
@@ -716,7 +698,6 @@ test('AggregateStatsService caches completed accumulation, rebuilds open runs, a
     assert.equal(service.getAggregateStats().totalOutputTokens, 40,
       'authoritative finalized snapshot bridges until persistence catches up');
     assert.equal(service.getAggregateStats().lastRun?.endedAt, finalizedAt);
-    assert.deepEqual(service.getAggregateStats().lastRun?.outcome, finalized.outcome);
 
     completedRuns = [completedRuns[0]!, finalized];
     pendingCompletedRuns = [];
@@ -735,17 +716,14 @@ test('AggregateStatsService pending finalized snapshots override stale persisted
     const at = new Date().toISOString();
     const stale = {
       ...validSnapshot('same-run', at),
-      status: 'closed_unscored',
-      scored: false,
+      status: 'closed',
       finalizedAt: at,
       outputTokens: 10,
     } as RunSnapshot;
     const scored = {
       ...stale,
-      status: 'scored',
-      scored: true,
+      status: 'closed',
       outputTokens: 20,
-      outcome: { resolution: 'resolved', satisfaction: 5 },
       updatedAt: new Date(Date.parse(at) + 1_000).toISOString(),
       finalizedAt: new Date(Date.parse(at) + 1_000).toISOString(),
     } as RunSnapshot;
@@ -754,7 +732,7 @@ test('AggregateStatsService pending finalized snapshots override stale persisted
       statsService: {
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => ({
-          completedRuns: [stale], openRuns: [], outcomes: [], agentReviews: [],
+          completedRuns: [stale], openRuns: [],
         }),
         getOpenRuns: () => [],
         getPendingCompletedRuns: () => [scored],
@@ -770,8 +748,6 @@ test('AggregateStatsService pending finalized snapshots override stale persisted
     await recomputeAggregate(service);
     assert.equal(service.getAggregateStats().runCount, 1, 'same runId is not double counted');
     assert.equal(service.getAggregateStats().totalOutputTokens, 20, 'pending scored snapshot replaces stale tokens');
-    assert.deepEqual(service.getAggregateStats().lastRun?.outcome, scored.outcome,
-      'pending scored outcome replaces closed_unscored persisted state');
   });
 });
 
@@ -782,9 +758,7 @@ test('AggregateStatsService buckets a bridged completion by its finalized timest
     const staleOpen = validSnapshot('midnight-run', beforeMidnight.toISOString());
     const finalized = {
       ...staleOpen,
-      status: 'scored',
-      scored: true,
-      outcome: { resolution: 'resolved', satisfaction: 5 },
+      status: 'closed',
       finalizedAt: afterMidnight.toISOString(),
       updatedAt: afterMidnight.toISOString(),
       outputTokens: 42,
@@ -794,7 +768,7 @@ test('AggregateStatsService buckets a bridged completion by its finalized timest
       statsService: {
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => ({
-          completedRuns: [], openRuns: [], outcomes: [], agentReviews: [],
+          completedRuns: [], openRuns: [],
         }),
         getOpenRuns: () => [],
         getPendingCompletedRuns: () => [finalized],
@@ -812,7 +786,6 @@ test('AggregateStatsService buckets a bridged completion by its finalized timest
     assert.equal(service.getAggregateStats().todayRunCount, 1);
     assert.equal(service.getAggregateStats().todayOutputTokens, 42);
     assert.equal(service.getAggregateStats().lastRun?.endedAt, afterMidnight.toISOString());
-    assert.deepEqual(service.getAggregateStats().lastRun?.outcome, finalized.outcome);
   });
 });
 
@@ -845,7 +818,7 @@ test('AggregateStatsService pricing signature invalidates completed cost accumul
         getStorageDir: () => root,
         queryPersistedRunAnalytics: async () => {
           persistedQueries += 1;
-          return { completedRuns: [completed], openRuns: [], outcomes: [], agentReviews: [] };
+          return { completedRuns: [completed], openRuns: [] };
         },
         getOpenRuns: () => [],
         getPendingCompletedRuns: () => [],
@@ -887,7 +860,7 @@ test('AggregateStatsService preserves references for equal/live-only refreshes a
       statsService: {
         getStorageDir: () => storageDir,
         queryPersistedRunAnalytics: async () => ({
-          completedRuns: [], openRuns: [], outcomes: [], agentReviews: [],
+          completedRuns: [], openRuns: [],
         }),
         getOpenRuns: () => openRuns,
         getPendingCompletedRuns: () => [],
@@ -1128,15 +1101,15 @@ test('prunes JSONL when line limit is exceeded but byte limit is not', async () 
     await storage.start();
     const t = new Date(nowMs).toISOString();
     for (let i = 1; i <= 5; i += 1) {
-      storage.schedulePersist(undefined, outcome(`r${i}`, t));
+      storage.schedulePersist(validSnapshot(`r${i}`, t));
     }
     await storage.flush();
 
-    const raw = await fs.readFile(path.join(storage.getStorageDir(), 'outcome-history.jsonl'), 'utf8');
+    const raw = await fs.readFile(path.join(storage.getStorageDir(), 'run-snapshots.jsonl'), 'utf8');
     const lines = raw.trim().split('\n');
     assert.equal(lines.length, 2, 'only newest two records retained when line limit is exceeded');
-    assert.equal(JSON.parse(lines[0]!).runId, 'r4');
-    assert.equal(JSON.parse(lines[1]!).runId, 'r5');
+    assert.equal(JSON.parse(lines[0]!).run.runId, 'r4');
+    assert.equal(JSON.parse(lines[1]!).run.runId, 'r5');
   });
 });
 
@@ -1236,15 +1209,15 @@ test('retains the newest records in chronological order', async () => {
     });
     await storage.start();
     for (let i = 1; i <= 5; i += 1) {
-      storage.schedulePersist(undefined, outcome(`r${i}`, new Date(nowMs + i).toISOString()));
+      storage.schedulePersist(validSnapshot(`r${i}`, new Date(nowMs + i).toISOString()));
     }
     await storage.flush();
 
-    const raw = await fs.readFile(path.join(storage.getStorageDir(), 'outcome-history.jsonl'), 'utf8');
+    const raw = await fs.readFile(path.join(storage.getStorageDir(), 'run-snapshots.jsonl'), 'utf8');
     const lines = raw.trim().split('\n');
     assert.equal(lines.length, 2);
-    assert.equal(JSON.parse(lines[0]!).runId, 'r4');
-    assert.equal(JSON.parse(lines[1]!).runId, 'r5');
+    assert.equal(JSON.parse(lines[0]!).run.runId, 'r4');
+    assert.equal(JSON.parse(lines[1]!).run.runId, 'r5');
   });
 });
 
@@ -1267,14 +1240,14 @@ test('history retention scans each under-limit file once and tracks later append
     await storage.start();
 
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
-    assert.equal(historyReads, 3, 'the first pass establishes metadata for all history files');
+    assert.equal(historyReads, 1, 'the first pass establishes metadata for the history file');
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
-    assert.equal(historyReads, 3, 'unchanged under-limit files are not read again');
+    assert.equal(historyReads, 1, 'unchanged under-limit file is not read again');
 
     const t = new Date().toISOString();
-    storage.schedulePersist(validSnapshot('tracked-append', t), outcome('tracked-append', t));
+    storage.schedulePersist(validSnapshot('tracked-append', t));
     await storage.flush();
-    assert.equal(historyReads, 3, 'known valid appends update retention metadata without rescanning files');
+    assert.equal(historyReads, 1, 'known valid appends update retention metadata without rescanning files');
     await storage.dispose();
   });
 });
@@ -1298,20 +1271,26 @@ test('a partially written failed append invalidates retention metadata before th
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
 
     const t = new Date().toISOString();
-    const chunk = `${JSON.stringify(outcome('partial-1', t))}\n${JSON.stringify(outcome('partial-2', t))}\n`;
+    const envelope = (runId: string) => ({
+      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+      kind: 'run_snapshot' as const,
+      recordedAt: t,
+      run: validSnapshot(runId, t),
+    });
+    const chunk = `${JSON.stringify(envelope('partial-1'))}\n${JSON.stringify(envelope('partial-2'))}\n`;
     await assert.rejects(
       (storage as unknown as {
         appendHistoryChunk(fileName: string, chunk: string, entryCount: number): Promise<void>;
-      }).appendHistoryChunk('outcome-history.jsonl', chunk, 2),
+      }).appendHistoryChunk('run-snapshots.jsonl', chunk, 2),
       /append acknowledgement lost/,
     );
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
 
-    const retained = (await fs.readFile(path.join(storage.getStorageDir(), 'outcome-history.jsonl'), 'utf8'))
+    const retained = (await fs.readFile(path.join(storage.getStorageDir(), 'run-snapshots.jsonl'), 'utf8'))
       .trim()
       .split('\n');
     assert.equal(retained.length, 1);
-    assert.equal(JSON.parse(retained[0]!).runId, 'partial-2');
+    assert.equal(JSON.parse(retained[0]!).run.runId, 'partial-2');
     await storage.dispose();
   });
 });
@@ -1361,46 +1340,15 @@ test('schema-invalid newest records are rejected by the same coercers as canonic
     await storage.start();
     const t = new Date().toISOString();
     const dir = storage.getStorageDir();
-    const validReview = {
-      schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
-      kind: 'agent_review',
-      recordedAt: t,
-      sessionPath: '/session/valid-review',
-      runId: 'valid-review',
-      taskGroupId: 'task-valid-review',
-      done: true,
-      rating: 5,
-      completion: 'fully',
-      reason: 'done',
-      evaluatedAt: t,
-      reviewerBuckets: ['reviewer'],
-      reviewerCount: 1,
-    };
-    await Promise.all([
-      fs.writeFile(path.join(dir, 'run-snapshots.jsonl'), [
-        JSON.stringify({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, kind: 'run_snapshot', recordedAt: t, run: validSnapshot('valid-snapshot', t) }),
-        JSON.stringify({ kind: 'run_snapshot', run: { runId: 'schema-invalid-snapshot' } }),
-      ].join('\n') + '\n', 'utf8'),
-      fs.writeFile(path.join(dir, 'outcome-history.jsonl'), [
-        JSON.stringify(outcome('valid-outcome', t)),
-        JSON.stringify({ kind: 'run_outcome', runId: 'schema-invalid-outcome' }),
-      ].join('\n') + '\n', 'utf8'),
-      fs.writeFile(path.join(dir, 'agent-reviews.jsonl'), [
-        JSON.stringify(validReview),
-        JSON.stringify({ kind: 'agent_review', runId: 'schema-invalid-review' }),
-      ].join('\n') + '\n', 'utf8'),
-    ]);
+    await fs.writeFile(path.join(dir, 'run-snapshots.jsonl'), [
+      JSON.stringify({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, kind: 'run_snapshot', recordedAt: t, run: validSnapshot('valid-snapshot', t) }),
+      JSON.stringify({ kind: 'run_snapshot', run: { runId: 'schema-invalid-snapshot' } }),
+    ].join('\n') + '\n', 'utf8');
 
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
 
-    const [snapshotRaw, outcomeRaw, reviewRaw] = await Promise.all([
-      fs.readFile(path.join(dir, 'run-snapshots.jsonl'), 'utf8'),
-      fs.readFile(path.join(dir, 'outcome-history.jsonl'), 'utf8'),
-      fs.readFile(path.join(dir, 'agent-reviews.jsonl'), 'utf8'),
-    ]);
+    const snapshotRaw = await fs.readFile(path.join(dir, 'run-snapshots.jsonl'), 'utf8');
     assert.equal(JSON.parse(snapshotRaw).run.runId, 'valid-snapshot');
-    assert.equal(JSON.parse(outcomeRaw).runId, 'valid-outcome');
-    assert.equal(JSON.parse(reviewRaw).runId, 'valid-review');
     await storage.dispose();
   });
 });
@@ -1418,14 +1366,14 @@ test('mandatory-newest exception selects a valid record behind an oversized malf
     });
     await storage.start();
     const t = new Date().toISOString();
-    const filePath = path.join(storage.getStorageDir(), 'outcome-history.jsonl');
-    await fs.writeFile(filePath, `${JSON.stringify(outcome('valid-newest', t))}\n${'x'.repeat(500)}\n`, 'utf8');
+    const filePath = path.join(storage.getStorageDir(), 'run-snapshots.jsonl');
+    await fs.writeFile(filePath, `${JSON.stringify({ schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION, kind: 'run_snapshot', recordedAt: t, run: validSnapshot('valid-newest', t) })}\n${'x'.repeat(500)}\n`, 'utf8');
 
     await (storage as unknown as { pruneHistoryIfNeeded(): Promise<void> }).pruneHistoryIfNeeded();
 
     const retained = (await fs.readFile(filePath, 'utf8')).trim().split('\n');
     assert.equal(retained.length, 1);
-    assert.equal(JSON.parse(retained[0]!).runId, 'valid-newest');
+    assert.equal(JSON.parse(retained[0]!).run.runId, 'valid-newest');
     await storage.dispose();
   });
 });

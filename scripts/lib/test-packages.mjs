@@ -32,6 +32,7 @@ export const PACKAGE_DIRECTIVES = [
   { id: 'session-changes', dir: 'extensions/session-changes' },
   { id: 'deferred-triggers', dir: 'extensions/deferred-triggers' },
   { id: 'computer-use', dir: 'extensions/computer-use' },
+  { id: 'image-context-guard', dir: 'extensions/image-context-guard' },
 ];
 
 /** All valid package ids (matches `node scripts/run-tests.mjs --list`). */

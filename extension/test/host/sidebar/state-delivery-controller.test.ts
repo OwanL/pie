@@ -139,6 +139,72 @@ test('one unsettled or uncommitted post coalesces many host changes to the lates
   assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
 });
 
+test('renderer block retires a stale acceptance only when newer host state is coalesced', async () => {
+  const h = harness(() => true);
+  h.controller.markDirty();
+  await settle();
+  const generation = h.controller.getDebugState().viewGeneration;
+
+  h.controller.transcriptCommitBlocked({
+    revision: 1,
+    viewGeneration: generation,
+    reason: 'leaf_mismatch',
+  });
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [1]);
+
+  h.controller.markDirty();
+  h.controller.transcriptCommitBlocked({
+    revision: 1,
+    viewGeneration: generation,
+    reason: 'leaf_mismatch',
+  });
+  await settle();
+
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 2]);
+  assert.deepEqual(h.controller.getDebugState().acceptedRevisions, [2]);
+  assert.ok(h.telemetry.some((event) => event.kind === 'commit-blocked'));
+  assert.equal(h.recoveries.length, 0);
+});
+
+test('renderer block with no newer host state retains bounded commit-timeout recovery', async () => {
+  const h = harness(() => true, { commitTimeoutMs: 100 });
+  h.controller.markDirty();
+  await settle();
+  const generation = h.controller.getDebugState().viewGeneration;
+
+  h.controller.transcriptCommitBlocked({
+    revision: 1,
+    viewGeneration: generation,
+    reason: 'structure_mismatch',
+  });
+  h.clock.advance(99);
+  assert.equal(h.recoveries.length, 0);
+  h.clock.advance(1);
+
+  assert.equal(h.recoveries[0]?.reason, 'commit-timeout');
+  assert.equal(h.recoveries[0]?.revision, 1);
+});
+
+test('renderer block racing post settlement is replayed against the accepted revision', async () => {
+  const pending = deferred<boolean>();
+  const h = harness(() => pending.promise);
+  h.controller.markDirty();
+  h.controller.markDirty();
+  const generation = h.controller.getDebugState().viewGeneration;
+
+  h.controller.transcriptCommitBlocked({
+    revision: 1,
+    viewGeneration: generation,
+    reason: 'leaf_missing',
+  });
+  pending.resolve(true);
+  await settle();
+
+  assert.deepEqual(h.builds.map((build) => build.desiredGeneration), [1, 2]);
+  assert.equal(h.posts.length, 2);
+});
+
 test('false, reject, never-settling timeout, and late true retry autonomously without raw error telemetry', async () => {
   const hung = deferred<boolean>();
   let call = 0;

@@ -2,17 +2,14 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type {
-  AgentReviewCompletion,
   HistoricalSessionAttribution,
-  HistoricalSessionReview,
   HistoricalSessionSourceSummary,
-  LegacySessionReviewSource,
+  SessionReviewV2IngestionDiagnostics,
   SessionReviewV2Source,
   ThinkingLevel,
   TranscriptSourceProvenance,
 } from './contracts.ts';
-import { sessionPathHash } from './hash.ts';
-import { coerceSessionReviewV2 } from './review-analytics.ts';
+import { inspectSessionReviewV2 } from './review-analytics.ts';
 
 interface JsonRecord { [key: string]: unknown }
 
@@ -26,7 +23,6 @@ interface TranscriptNode {
 export interface TranscriptDiscoveryOptions {
   legacySessionsDir: string;
   configuredSessionsDir?: string;
-  reviewSidecarPath?: string;
 }
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -253,7 +249,6 @@ export function summarizeTranscriptJsonl(
     terminalStatus,
     mixedModel: new Set(attributions.map((row) => row.modelId)).size > 1,
     sourceProvenance: [...new Set(provenance)].sort(),
-    review: null,
   };
 }
 
@@ -276,92 +271,63 @@ async function listJsonlFiles(root: string): Promise<string[]> {
   return files.sort();
 }
 
-function coerceReview(value: unknown): { path: string; review: HistoricalSessionReview; orderAt: number } | null {
-  if (!isRecord(value) || value.selfClose === true || typeof value.sessionPath !== 'string') return null;
-  if (typeof value.done !== 'boolean' || typeof value.rating !== 'number' || !Number.isFinite(value.rating)) return null;
-  if (value.completion !== 'fully' && value.completion !== 'partial' && value.completion !== 'setback') return null;
-  const evaluatedAt = optionalTimestamp(value.evaluatedAt);
-  const recordedAt = optionalTimestamp(value.recordedAt);
-  if (!evaluatedAt && !recordedAt) return null;
-  const reviewerBuckets = Array.isArray(value.reviewerBuckets)
-    ? value.reviewerBuckets.filter((item): item is string => typeof item === 'string')
-    : [];
-  const reviewerCount = typeof value.reviewerCount === 'number' && Number.isFinite(value.reviewerCount)
-    ? Math.max(0, Math.trunc(value.reviewerCount))
-    : reviewerBuckets.length;
+function emptyReviewDiagnostics(): SessionReviewV2IngestionDiagnostics {
   return {
-    path: normalizeSessionPath(value.sessionPath),
-    orderAt: Math.max(Date.parse(evaluatedAt ?? '') || 0, Date.parse(recordedAt ?? '') || 0),
-    review: {
-      rating: value.rating,
-      completion: value.completion as AgentReviewCompletion,
-      done: value.done,
-      evaluatedAt: evaluatedAt ?? recordedAt!,
-      reviewerBuckets,
-      reviewerCount,
+    rawProductionCount: 0,
+    acceptedCount: 0,
+    rejectedCount: 0,
+    rejectedByReason: {
+      unsupported_schema: 0,
+      unsupported_rubric: 0,
+      unsupported_index: 0,
+      invalid_identity: 0,
+      invalid_payload: 0,
     },
   };
 }
 
-export interface MixedSessionReviewSidecar {
-  legacy: LegacySessionReviewSource[];
-  productionV2: SessionReviewV2Source[];
+export interface SessionReviewV2Sidecar {
+  reviews: SessionReviewV2Source[];
+  diagnostics: SessionReviewV2IngestionDiagnostics;
 }
 
-/** Read mixed V1/V2 storage without coercing either cohort into the other. */
-export async function readMixedSessionReviews(sidecarPath?: string): Promise<MixedSessionReviewSidecar> {
-  const latest = new Map<string, { review: HistoricalSessionReview; orderAt: number; line: number }>();
+/** Read only canonical V2 production reviews. Non-production lines are ignored. */
+export async function readSessionReviewsV2(sidecarPath?: string): Promise<SessionReviewV2Sidecar> {
   const production = new Map<string, SessionReviewV2Source>();
-  if (!sidecarPath) return { legacy: [], productionV2: [] };
+  const diagnostics = emptyReviewDiagnostics();
+  if (!sidecarPath) return { reviews: [], diagnostics };
   let raw: string;
   try {
     raw = await fs.readFile(sidecarPath, 'utf8');
   } catch {
-    return { legacy: [], productionV2: [] };
+    return { reviews: [], diagnostics };
   }
-  raw.split(/\r?\n/).forEach((line, index) => {
-    if (!line.trim()) return;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
     try {
       const parsed: unknown = JSON.parse(line);
-      const v2 = coerceSessionReviewV2(parsed);
-      if (v2) {
-        const previous = production.get(v2.sessionId);
-        if (!previous || v2.reviewedAt > previous.reviewedAt
-          || (v2.reviewedAt === previous.reviewedAt && v2.reviewId > previous.reviewId)) production.set(v2.sessionId, v2);
-        return;
+      if (!isRecord(parsed) || parsed.kind !== 'production') continue;
+      diagnostics.rawProductionCount += 1;
+      const result = inspectSessionReviewV2(parsed);
+      if (!result.review) {
+        diagnostics.rejectedCount += 1;
+        diagnostics.rejectedByReason[result.rejectionReason] += 1;
+        continue;
       }
-      const coerced = coerceReview(parsed);
-      if (!coerced) return;
-      const previous = latest.get(coerced.path);
-      if (!previous || coerced.orderAt > previous.orderAt || (coerced.orderAt === previous.orderAt && index > previous.line)) {
-        latest.set(coerced.path, { review: coerced.review, orderAt: coerced.orderAt, line: index });
-      }
+      diagnostics.acceptedCount += 1;
+      const review = result.review;
+      // Append-only canonical policy is consistent across the writer, host, and
+      // analytics: the first valid production review for a session wins.
+      if (!production.has(review.sessionId)) production.set(review.sessionId, review);
     } catch {
-      // Malformed sidecar lines do not invalidate other reviews.
+      // The review sidecar is V2-only, so every malformed non-empty line is a
+      // rejected production-record candidate rather than invisible data loss.
+      diagnostics.rawProductionCount += 1;
+      diagnostics.rejectedCount += 1;
+      diagnostics.rejectedByReason.invalid_payload += 1;
     }
-  });
-  return {
-    legacy: [...latest].map(([normalizedSessionPath, value]) => ({
-      ...value.review,
-      cohort: 'legacy_v1',
-      sessionId: sessionPathHash(normalizedSessionPath),
-      normalizedSessionPath,
-      identityFallback: true,
-    })),
-    productionV2: [...production.values()],
-  };
-}
-
-export async function readLatestSessionReviews(sidecarPath?: string): Promise<Map<string, HistoricalSessionReview>> {
-  const mixed = await readMixedSessionReviews(sidecarPath);
-  return new Map(mixed.legacy.map((review) => [review.normalizedSessionPath, {
-    rating: review.rating,
-    completion: review.completion,
-    done: review.done,
-    evaluatedAt: review.evaluatedAt,
-    reviewerBuckets: review.reviewerBuckets,
-    reviewerCount: review.reviewerCount,
-  }]));
+  }
+  return { reviews: [...production.values()], diagnostics };
 }
 
 /** Discover legacy + configured local transcripts, deduplicating overlapping roots. */
@@ -381,15 +347,11 @@ export async function discoverHistoricalSessions(options: TranscriptDiscoveryOpt
     }
   }
 
-  const reviews = await readLatestSessionReviews(options.reviewSidecarPath);
   const summaries: HistoricalSessionSourceSummary[] = [];
   for (const { filePath, provenance } of discovered.values()) {
     try {
       const summary = summarizeTranscriptJsonl(await fs.readFile(filePath, 'utf8'), filePath, [...provenance]);
-      if (summary) {
-        summary.review = reviews.get(summary.normalizedSessionPath) ?? null;
-        summaries.push(summary);
-      }
+      if (summary) summaries.push(summary);
     } catch {
       // A missing/unreadable transcript does not prevent loading the remaining history.
     }
@@ -422,8 +384,6 @@ export function coerceHistoricalSessionSummaries(value: unknown): HistoricalSess
         ? row.attributedTokens / attributedTokenTotal
         : attributedTurnTotal > 0 ? row.successfulAssistantTurns / attributedTurnTotal : 0;
     }
-    const reviewValue = isRecord(entry.review) ? entry.review : null;
-    const review = reviewValue ? coerceReview({ ...reviewValue, sessionPath: entry.normalizedSessionPath })?.review ?? null : null;
     const terminalStatus = entry.terminalStatus === 'success' || entry.terminalStatus === 'error' || entry.terminalStatus === 'aborted'
       ? entry.terminalStatus : 'none';
     summaries.push({
@@ -446,7 +406,6 @@ export function coerceHistoricalSessionSummaries(value: unknown): HistoricalSess
       terminalStatus,
       mixedModel: entry.mixedModel === true,
       sourceProvenance: ['portable-export'],
-      review,
     });
   }
   return summaries;

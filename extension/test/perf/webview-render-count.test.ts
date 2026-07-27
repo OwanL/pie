@@ -73,6 +73,7 @@ import {
 } from '../../src/webview/panel/transcript/message-item';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../../src/webview/panel/transcript/types';
 import { useComposerIndicators } from '../../src/webview/panel/composer/use-composer-indicators';
+import { buildSessionUsageSnapshot } from '../../src/shared/session-usage';
 
 type IndicatorsInputs = Parameters<typeof useComposerIndicators>[0];
 
@@ -482,6 +483,32 @@ test('Part B (busy, idle transcript): all indicator walks are independent of del
     tracker.distinct('sessionCostIndicator'),
     1,
     `sessionCostIndicator (completed-cost summary + subagent walk now bailing) must be stable — got ${tracker.distinct('sessionCostIndicator')}`,
+  );
+});
+
+test('Part B: fresh structured-cloned whole-session usage does not reopen transcript cost walks', () => {
+  const { Probe, tracker } = makeIndicatorsProbe();
+  const base = buildTranscriptWithSubagentCall();
+  const durableUsage = buildSessionUsageSnapshot(base);
+  const contextUsage: ContextWindowUsage = { tokens: 40_000, contextWindow: 200_000, percent: 20 };
+
+  for (let tick = 0; tick <= DELTAS; tick += 1) {
+    act(() => {
+      render(h(Probe, {
+        inputs: stableInputs({
+          transcript: structuredClone(base),
+          sessionUsage: structuredClone(durableUsage),
+          busy: true,
+          contextUsage,
+        }),
+      }), container);
+    });
+  }
+
+  assert.equal(
+    tracker.distinct('sessionCostIndicator'),
+    1,
+    'equal whole-session accounting clones must not trigger recursive transcript/subagent cost walks',
   );
 });
 

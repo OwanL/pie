@@ -43,15 +43,6 @@ test('review-auto-close: explicit pending action is claimed on the first refresh
   assert.ok(result.next.claimedActionIds.has('a'));
 });
 
-test('review-auto-close: review done status without an explicit action never closes', () => {
-  const result = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {
-    incoming: [{ path: '/legacy', done: true } as never],
-    openTabPaths: ['/legacy'],
-    runningPaths: [],
-  });
-  assert.deepEqual(result.attempts, []);
-});
-
 test('review-auto-close: claimed action is not attempted twice', () => {
   const close = action('a');
   const first = computeReviewAutoCloseClosures(INITIAL_REVIEW_AUTO_CLOSE_STATE, {

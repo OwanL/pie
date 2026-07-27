@@ -15,14 +15,20 @@ import type { TokenRateIndicatorState } from '../../../shared/token-rate';
 import { buildContextWindowBreakdown } from '../context-window/breakdown';
 import { buildContextWindowIndicatorState } from '../context-window/indicator';
 import {
-  buildCompletedCostSummary,
-  extractSubagentCostSummary,
+  buildCompletedCostSummaryFromSnapshot,
+  extractSubagentCostSummaryFromSnapshot,
   buildLiveSessionCostEstimate,
   buildSessionCostIndicator,
   buildSessionTokenIndicator,
-  buildSessionTokenUsage,
+  buildSessionTokenUsageFromSnapshot,
   type TokenPricing,
 } from '../session-tabs/token-usage';
+import {
+  buildSessionUsageSnapshot,
+  mergeSessionUsageSnapshots,
+  sessionUsageSignature,
+  type SessionUsageSnapshot,
+} from '../../../shared/session-usage';
 import {
   streamingContentSignature,
   subagentCostSignature,
@@ -43,6 +49,7 @@ export function useComposerIndicators({
   systemPrompts,
   transcript,
   transcriptWindow,
+  sessionUsage,
   pruningResult,
   busy,
   sessionPath,
@@ -57,6 +64,7 @@ export function useComposerIndicators({
   systemPrompts: SystemPromptEntry[];
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
+  sessionUsage?: SessionUsageSnapshot | null;
   pruningResult: PruningResult | null;
   busy: boolean;
   sessionPath: string | null;
@@ -165,7 +173,18 @@ export function useComposerIndicators({
       ? buildContextWindowIndicatorState(contextBreakdown.summary)
       : null
   ), [contextBreakdown]);
-  const sessionTokenUsage = useMemo(() => buildSessionTokenUsage(transcript), [sessionPath, usageSig]);
+  // `sessionUsage` is structured-cloned with every host snapshot. Fingerprint
+  // its flat samples so equal-content clones do not reopen the recursive
+  // transcript/subagent accounting walk on every streaming tick.
+  const durableUsageSig = useMemo(() => sessionUsageSignature(sessionUsage), [sessionUsage]);
+  const effectiveSessionUsage = useMemo(
+    () => mergeSessionUsageSnapshots(sessionUsage, buildSessionUsageSnapshot(transcript)),
+    [sessionPath, durableUsageSig, usageSig, subagentSig, pruningResult],
+  );
+  const sessionTokenUsage = useMemo(
+    () => buildSessionTokenUsageFromSnapshot(effectiveSessionUsage),
+    [effectiveSessionUsage],
+  );
   const sessionTokenIndicator = useMemo(
     () => buildSessionTokenIndicator(sessionTokenUsage),
     [sessionTokenUsage],
@@ -191,12 +210,12 @@ export function useComposerIndicators({
   // final cost indicator on these memoized refs keeps the per-delta recompute
   // O(1) (arithmetic + formatting) instead of re-walking the transcript.
   const completedCostSummary = useMemo(
-    () => buildCompletedCostSummary(sessionTokenUsage, transcript, fallbackPricing, resolvePricing),
-    [sessionTokenUsage, fallbackPricing, resolvePricing],
+    () => buildCompletedCostSummaryFromSnapshot(effectiveSessionUsage, fallbackPricing, resolvePricing),
+    [effectiveSessionUsage, fallbackPricing, resolvePricing],
   );
   const subagentCostSummary = useMemo(
-    () => extractSubagentCostSummary(transcript, resolvePricing),
-    [sessionPath, subagentSig, resolvePricing],
+    () => extractSubagentCostSummaryFromSnapshot(effectiveSessionUsage, resolvePricing),
+    [effectiveSessionUsage, resolvePricing],
   );
   const sessionCostIndicator = useMemo(
     () => buildSessionCostIndicator(
@@ -210,8 +229,9 @@ export function useComposerIndicators({
       liveCostEstimate,
       selectedModel,
       selectedProvider,
+      effectiveSessionUsage,
     ),
-    [sessionTokenUsage, fallbackPricing, selectedModelInfo?.name, completedCostSummary, subagentCostSummary, pruningResult, resolvePricing, liveCostEstimate, selectedModel, selectedProvider],
+    [sessionTokenUsage, fallbackPricing, selectedModelInfo?.name, completedCostSummary, subagentCostSummary, pruningResult, resolvePricing, liveCostEstimate, selectedModel, selectedProvider, effectiveSessionUsage],
   );
 
   const tokenRateIndicator = useTokenRateIndicator({ sessionPath, tokenRateBySession });

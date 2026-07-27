@@ -3,7 +3,7 @@
 
 import type { ComponentChildren, RefObject } from 'preact';
 
-import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput } from '../../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput, InlineEditDraft } from '../../../../shared/protocol';
 import { cx } from '../../utils/cx';
 import { InlineEditor } from '../inline-editor';
 import { CompactionSummary } from '../compaction-summary';
@@ -104,6 +104,7 @@ interface MessageItemInnerProps {
   isCurrentlyStreaming: boolean;
   capturedHeight: number | null;
   initialInputs: ComposerInput[];
+  editingDraft?: InlineEditDraft | null;
   pruningHeaderState: PruningHeaderState | undefined;
   pruningExpanded: boolean;
   setPruningExpanded: (fn: (v: boolean) => boolean) => void;
@@ -137,6 +138,7 @@ export function MessageItemInner({
   isCurrentlyStreaming,
   capturedHeight,
   initialInputs,
+  editingDraft,
   pruningHeaderState,
   pruningExpanded,
   setPruningExpanded,
@@ -206,8 +208,8 @@ export function MessageItemInner({
 
       {isEditing ? (
         <InlineEditor
-          initialText={message.markdown}
-          initialInputs={initialInputs}
+          initialText={editingDraft?.messageId === message.id ? editingDraft.text : message.markdown}
+          initialInputs={editingDraft?.messageId === message.id ? editingDraft.inputs : initialInputs}
           capturedHeight={capturedHeight}
           onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs, message.status === 'queued')}
           onCancel={onEditCancel}

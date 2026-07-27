@@ -5,11 +5,7 @@ import { atomicWriteText } from '../shared/atomic-write';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
-  coerceAgentReviewEntry,
-  coerceOutcomeHistoryLogEntry,
   coerceRunSnapshot,
-  type AgentReviewEntry,
-  type OutcomeHistoryLogEntry,
   type RunSnapshot,
 } from './index';
 import { readOptionalText } from '../shared/checkpoint-io';
@@ -24,12 +20,6 @@ import {
 export interface RunAnalyticsQueryResult {
   completedRuns: RunSnapshot[];
   openRuns: RunSnapshot[];
-  outcomes: OutcomeHistoryLogEntry[];
-  /** Agent-authored session reviews (one per scored review), persisted to
-   *  `agent-reviews.jsonl`. Joined to runs by `runId` / `sessionPath` on the
-   *  read side. Empty when no reviews have been recorded (or for stores
-   *  predating the field — the file is simply absent). */
-  agentReviews: AgentReviewEntry[];
 }
 
 export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult, GlobalSideChannels {
@@ -78,10 +68,8 @@ async function readJsonlObjects(filePath: string): Promise<unknown[]> {
 }
 
 export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAnalyticsQueryResult> {
-  const [snapshotLines, outcomeLines, reviewLines, checkpoint] = await Promise.all([
+  const [snapshotLines, checkpoint] = await Promise.all([
     readJsonlObjects(path.join(storageDir, 'run-snapshots.jsonl')),
-    readJsonlObjects(path.join(storageDir, 'outcome-history.jsonl')),
-    readJsonlObjects(path.join(storageDir, 'agent-reviews.jsonl')),
     readCheckpointSlots(storageDir).then((resolved) => resolved.checkpoint),
   ]);
 
@@ -97,7 +85,7 @@ export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAna
     latestCompletedRuns.set(snapshot.runId, snapshot);
   }
 
-  // The checkpoint's lastRun is the recovery source for a scored run whose
+  // The checkpoint's lastRun is the recovery source for a closed run whose
   // JSONL append was lost: merge it in as a fallback, only when the JSONL is
   // missing the runId or the checkpoint holds a strictly newer snapshot for it.
   for (const sessionState of Object.values(checkpoint?.sessions ?? {})) {
@@ -111,22 +99,6 @@ export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAna
     }
   }
 
-  const outcomes: OutcomeHistoryLogEntry[] = [];
-  for (const line of outcomeLines) {
-    const entry = coerceOutcomeHistoryLogEntry(line);
-    if (entry) {
-      outcomes.push(entry);
-    }
-  }
-
-  const agentReviews: AgentReviewEntry[] = [];
-  for (const line of reviewLines) {
-    const entry = coerceAgentReviewEntry(line);
-    if (entry) {
-      agentReviews.push(entry);
-    }
-  }
-
   const openRuns = Object.values(checkpoint?.sessions ?? {})
     .map((sessionState) => sessionState.currentRun)
     .filter((run): run is RunSnapshot => run !== null);
@@ -134,8 +106,6 @@ export async function queryRunAnalyticsStore(storageDir: string): Promise<RunAna
   return {
     completedRuns: [...latestCompletedRuns.values()],
     openRuns,
-    outcomes,
-    agentReviews,
   };
 }
 

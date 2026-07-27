@@ -226,6 +226,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         pendingAssistantModelId={derived.pendingAssistantModelId}
         pendingAssistantThinkingLevel={derived.pendingAssistantThinkingLevel}
         editingMessageId={viewState.editingMessageId}
+        editingDraft={viewState.editingDraft}
         workspaceCwd={viewState.workspaceCwd}
         openTabPaths={viewState.openTabPaths}
         onCancelPrepass={handlers.handleInterrupt}
@@ -254,6 +255,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         systemPrompts={viewState.systemPrompts}
         transcript={viewState.transcript}
         transcriptWindow={viewState.transcriptWindow}
+        sessionUsage={viewState.sessionUsage}
         draftRestore={draftRestore}
         draftText={viewState.draftText}
         sendRetryDraftRef={sendRetryDraftRef}

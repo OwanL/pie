@@ -3,8 +3,10 @@ import test from 'node:test';
 
 import {
   compactDurableMessageDetails,
+  compactSubagentResultPreview,
   compactToolCallDetail,
   findDurableDetail,
+  SUBAGENT_PREVIEW_MAX_BYTES,
 } from '../../../src/shared/lazy-details';
 import type { ChatMessage } from '../../../src/shared/protocol';
 
@@ -14,7 +16,14 @@ function durableMessage(): ChatMessage {
   const reasoning = 'reasoning '.repeat(4_000);
   const result = {
     details: {
-      results: [{ agent: 'worker', exitCode: 0, messages: [{ role: 'assistant', content: 'x'.repeat(32_000) }] }],
+      results: [{
+        agent: 'worker',
+        task: 'Inspect the long session',
+        exitCode: 0,
+        model: 'preview-model',
+        streamingText: 'preview tail',
+        messages: [{ role: 'assistant', content: 'x'.repeat(32_000) }],
+      }],
     },
   };
   return {
@@ -51,7 +60,11 @@ test('initial durable projection contains compact metadata but no large reasonin
   assert.equal(reasoning?.kind, 'reasoning');
   assert.ok(reasoning?.kind === 'reasoning' && reasoning.detailRef);
   assert.ok((reasoning?.kind === 'reasoning' ? reasoning.text.length : 0) < 200);
-  assert.equal(tool?.result, undefined);
+  const preview = tool?.result as { details?: { results?: Array<Record<string, unknown>> } } | undefined;
+  assert.equal(preview?.details?.results?.[0]?.agent, 'worker');
+  assert.equal(preview?.details?.results?.[0]?.model, 'preview-model');
+  assert.equal(preview?.details?.results?.[0]?.streamingText, 'preview tail');
+  assert.deepEqual(preview?.details?.results?.[0]?.messages, []);
   assert.equal(tool?.detailRef?.kind, 'tool-result');
   assert.equal(tool?.detailRef?.childCount, 1);
   assert.equal(tool?.detailRef?.sizeBytes && tool.detailRef.sizeBytes > 32_000, true);
@@ -67,9 +80,37 @@ test('live recursive previews expose bounded child metadata without traversing c
     sessionPath: '/session.jsonl', messageId: 'message', source: 'live',
     sourceRevision: 2, sizeBytes: 100_000,
   });
-  assert.equal(compacted.result, undefined);
+  const preview = compacted.result as { kind?: string; children?: unknown[] } | undefined;
+  assert.equal(preview?.kind, 'subagent');
+  assert.equal(preview?.children?.length, 2);
   assert.equal(compacted.detailRef?.summary, '2 subagent children');
   assert.equal(compacted.detailRef?.childCount, 2);
+});
+
+test('subagent preview preserves every top-level card while bounding recursive history', () => {
+  const messages = Array.from({ length: 50 }, (_, index) => ({
+    role: 'assistant',
+    content: `history-${index}-${'x'.repeat(4_000)}`,
+  }));
+  const preview = compactSubagentResultPreview({
+    details: {
+      mode: 'parallel',
+      results: Array.from({ length: 12 }, (_, index) => ({
+        agent: `worker-${index}`,
+        task: `Task ${index} ${'t'.repeat(4_000)}`,
+        exitCode: index === 0 ? -1 : 0,
+        model: 'model',
+        streamingText: `${'s'.repeat(16_000)}-tail-${index}`,
+        messages,
+      })),
+    },
+  }) as { details?: { results?: Array<Record<string, unknown>> } };
+
+  assert.equal(preview.details?.results?.length, 12);
+  assert.equal(preview.details?.results?.[0]?.agent, 'worker-0');
+  assert.equal(JSON.stringify(preview).includes('history-0-'), false);
+  assert.equal(JSON.stringify(preview).includes('-tail-0'), true);
+  assert.equal(Buffer.byteLength(JSON.stringify(preview), 'utf8') <= SUBAGENT_PREVIEW_MAX_BYTES, true);
 });
 
 test('full durable details are resolved only through their compact retrieval identity', () => {

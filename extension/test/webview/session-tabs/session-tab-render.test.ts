@@ -49,9 +49,9 @@ test('tab omits run and review badges', () => {
     cwd: '/workspace',
     modifiedAt: '2026-01-01T00:00:00.000Z',
     messageCount: 1,
-    done: true,
-    rating: 5,
-    completion: 'fully',
+    reviewed: true,
+    reviewId: 'review-1',
+    reviewedAt: '2026-01-01T01:00:00.000Z',
   };
   const html = renderToString(h(SessionTab, {
     tabPath,

@@ -1,6 +1,8 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
-import type { ToolPreview } from '../live-pipeline-protocol.js';
+import type { LiveTurnCheckpoint, ToolPreview } from '../live-pipeline-protocol.js';
+import type { SessionUsageSnapshot } from '../session-usage.js';
+export type { SessionUsageSnapshot } from '../session-usage.js';
 import type {
   SessionAnalyticsFactors,
   SessionContextFileFactor,
@@ -14,36 +16,6 @@ export type {
   SessionSkillFactor,
   SessionToolSnippetFactor,
 };
-
-/** Agent-assigned task-completion classification for a session review.
- *  - `fully`: the session's task was completed.
- *  - `partial`: work was done but the task is not fully resolved.
- *  - `setback`: the session left things worse than it found them (regression /
- *    failed approach that should be revisited). */
-export type SessionCompletion = 'fully' | 'partial' | 'setback';
-
-/** V1 agent review record. Kept readable as a separate legacy view; V2
- *  production reviews are keyed by stable session-header ID and are never
- *  coerced into this 1–5 shape. */
-export interface SessionReview {
-  sessionPath: string;
-  done: boolean;
-  rating: number;
-  completion: SessionCompletion;
-  reason: string;
-  evaluatedAt: string;
-  /** Sub-agent buckets whose judgments fed the rating (e.g. ['medium','small'])
-   *  — captures the multi-reviewer process so agent reviews can be
-   *  distinguished from single-shot/user outcomes in analytics. Optional for
-   *  backward compat; older records have no field. */
-  reviewerBuckets?: string[];
-  /** Number of sub-agent reviewers that fed the rating. Optional for backward
-   *  compat; older records have no field. */
-  reviewerCount?: number;
-  /** Legacy V1 self-close marker. Retained for read compatibility only; V2
-   *  hosts do not interpret it as a closure command. */
-  selfClose?: boolean;
-}
 
 /** Filename of the append-only closure-action outbox beside reviews.jsonl. */
 export const REVIEW_CLOSURE_ACTIONS_FILE = 'closure-actions.jsonl';
@@ -83,40 +55,17 @@ export interface SessionSummary {
    */
   isPlaceholder?: boolean;
   /** Stable ID from the session JSONL header. Falls back to the normalized
-   *  path hash only for legacy/malformed sessions. */
+   *  path hash only when the header is missing or malformed. */
   sessionId?: string;
   identityFallback?: boolean;
-  /** True when a canonical V2 production review exists, or when a resolved V1
-   *  review reserves this session at cutover. */
+  /** True when a canonical V2 production review exists. */
   reviewed?: boolean;
-  /** Canonical V2 production review identity. Absent for reserved V1 reviews. */
+  /** Canonical V2 production review identity. */
   reviewId?: string;
   reviewedAt?: string;
-  /** The reviewed status came from a V1 record, which remains in legacy form. */
-  legacyReview?: boolean;
   /** Current explicit closure-action outbox records targeting this session.
    *  The host drains only pending/retrying actions. */
   closureActions?: ClosureAction[];
-  /** Legacy V1 agent review: whether the session's task is marked done. Merged from the
-   *  session-review sidecar by the backend; preserved across backend list
-   *  refreshes by `mergeSessionSummaryPreservingLocalName`. */
-  done?: boolean;
-  /** Legacy V1 agent review: 1–5 quality rating. */
-  rating?: number;
-  /** Legacy V1 agent review: task-completion classification. */
-  completion?: SessionCompletion;
-  /** Legacy V1 agent review: free-text reason for the rating/completion. */
-  reviewReason?: string;
-  /** Legacy V1 review timestamp. */
-  evaluatedAt?: string;
-  /** Legacy V1 agent review: sub-agent buckets whose judgments fed the rating (e.g.
-   *  ['medium','small']) — captures the multi-reviewer process so agent
-   *  reviews can be distinguished from single-shot/user outcomes in analytics. */
-  reviewerBuckets?: string[];
-  /** Legacy V1 agent review: number of sub-agent reviewers that fed the rating. */
-  reviewerCount?: number;
-  /** Legacy V1 self-close marker; metadata only in V2 hosts. */
-  selfClose?: boolean;
   /** True when this tab is pinned (browser-style pinned tab). Populated by
    *  the host when pushing open-tab summaries so the `session_review` tool's
    *  listOpen can show which tabs are pinned and skip them during review. */
@@ -198,6 +147,11 @@ export interface SessionOpenedPayload {
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
+  /** Atomic recovery snapshot for a busy session. A tab open must not depend
+   * on the host having received every earlier streaming event: this checkpoint
+   * reconstructs the complete in-progress assistant/tool turn. When absent,
+   * the backend keeps the durable assistant tail visible as a fail-safe. */
+  liveTurnCheckpoint?: LiveTurnCheckpoint;
   selectionToken?: string;
   /** When true, `transcript`/`transcriptWindow` are NOT authoritative — the
    *  host already holds the loaded transcript and must keep its existing
@@ -211,6 +165,8 @@ export interface SessionOpenedPayload {
   modelSettings?: ModelSettings;
   availableModels?: ModelInfo[];
   contextUsage?: ContextWindowUsage;
+  /** Complete durable billable usage for the branch, independent of the loaded transcript window. */
+  sessionUsage?: SessionUsageSnapshot;
 }
 
 /** How much transcript the host wants in a `session.open` response.
@@ -517,4 +473,3 @@ export interface FileChangeEntry {
   additions?: number;
   deletions?: number;
 }
-

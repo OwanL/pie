@@ -39,6 +39,7 @@ export interface PanelMainProps {
   pendingAssistantModelId: string;
   pendingAssistantThinkingLevel: ThinkingLevel;
   editingMessageId: ViewState['editingMessageId'];
+  editingDraft: ViewState['editingDraft'];
   workspaceCwd: ViewState['workspaceCwd'];
   openTabPaths: ViewState['openTabPaths'];
   /** Wired to the agent-reply pruning chip's Cancel button (Brief F). */
@@ -89,6 +90,7 @@ export const PanelMain = memo(function PanelMain({
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
   editingMessageId,
+  editingDraft,
   workspaceCwd,
   openTabPaths,
   onCancelPrepass,
@@ -144,6 +146,7 @@ export const PanelMain = memo(function PanelMain({
           pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
           workingDirectory={activeSession?.cwd ?? workspaceCwd}
           editingId={editingMessageId}
+          editingDraft={editingDraft}
           onEditRequest={handlers.handleEditRequest}
           onEditConfirm={handlers.handleEditSend}
           onEditCancel={handlers.handleCancelEdit}

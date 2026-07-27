@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import { mean, meanDifferenceInterval, meanInterval, wilsonInterval } from '../site/chart-stats.ts';
 
 describe('chart statistics helpers', () => {
-  it('computes bounded t confidence intervals for satisfaction means', () => {
+  it('computes bounded t confidence intervals for bounded means', () => {
     const estimate = meanInterval([3, 4, 5, 5], { min: 1, max: 5 });
 
     assert.equal(estimate?.n, 4);

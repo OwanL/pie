@@ -3,6 +3,10 @@ import { formatToolResult } from '../../../shared/tool-result-format';
 import { getRenderableSubagentResult, type RawMessage } from '../../../shared/subagent-result';
 import { estimateTextTokens } from '../system-prompt-tokens';
 import {
+  assistantUsageFromSample,
+  type SessionUsageSnapshot,
+} from '../../../shared/session-usage';
+import {
   formatTokens as formatReadableTokens,
   formatCompactTokens,
   formatCost as formatCostUsd,
@@ -28,6 +32,20 @@ export interface SessionTokenUsageSummary {
 }
 
 export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenUsageSummary {
+  return buildSessionTokenUsageFromSnapshot({
+    samples: transcript
+      .filter((message) => message.role === 'assistant' && message.usage)
+      .map((message) => ({
+        sourceId: `assistant:${message.durableEntryId ?? message.id}`,
+        kind: 'assistant' as const,
+        modelId: message.modelId,
+        provider: message.provider,
+        ...message.usage!,
+      })),
+  });
+}
+
+export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapshot): SessionTokenUsageSummary {
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
@@ -37,9 +55,9 @@ export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenU
   let reportedTurnCount = 0;
   let lastTurn: AssistantUsage | null = null;
 
-  for (const message of transcript) {
-    if (message.role !== 'assistant' || !message.usage) continue;
-    const usage = message.usage;
+  for (const sample of snapshot.samples) {
+    if (sample.kind !== 'assistant') continue;
+    const usage = assistantUsageFromSample(sample);
     inputTokens += usage.inputTokens;
     outputTokens += usage.outputTokens;
     cacheReadTokens += usage.cacheReadTokens;
@@ -609,6 +627,51 @@ function addCompletedUsageCost(
   );
 }
 
+export function buildCompletedCostSummaryFromSnapshot(
+  snapshot: SessionUsageSnapshot,
+  fallbackPricing: TokenPricing | undefined,
+  pricingForModel: TokenPricingResolver | undefined,
+): CompletedCostSummary {
+  const completed = emptyCompletedCostSummary();
+  for (const sample of snapshot.samples) {
+    if (sample.kind !== 'assistant') continue;
+    const pricing = sample.modelId
+      ? pricingForModel ? pricingForModel(sample.modelId, sample.provider) : fallbackPricing
+      : fallbackPricing;
+    addCompletedUsageCost(
+      completed,
+      assistantUsageFromSample(sample),
+      pricing,
+      sample.modelId,
+      sample.provider,
+    );
+  }
+  return completed;
+}
+
+export function extractSubagentCostSummaryFromSnapshot(
+  snapshot: SessionUsageSnapshot,
+  pricingForModel?: TokenPricingResolver,
+): SubagentCostSummary {
+  const summary = emptySubagentCostSummary();
+  for (const sample of snapshot.samples) {
+    if (sample.kind !== 'subagent') continue;
+    const pricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
+    const usage = assistantUsageFromSample(sample);
+    const cost = sample.reportedCostUsd ?? (pricing ? costFromUsage(usage, pricing) : 0);
+    const hasKnownCost = sample.reportedCostUsd !== undefined || pricing !== undefined;
+    summary.totalCost += cost;
+    summary.directCost += cost;
+    summary.directResultCount += 1;
+    const modelId = normalizeModelId(
+      sample.modelId && sample.provider ? `${sample.provider}/${sample.modelId}` : sample.modelId,
+      'Unknown subagent model',
+    );
+    addModelCost(summary.modelCosts, modelId, usage, cost, hasKnownCost, hasKnownCost ? 0 : usage.totalTokens);
+  }
+  return summary;
+}
+
 export function buildCompletedCostSummary(
   usageSummary: SessionTokenUsageSummary,
   transcript: ChatMessage[],
@@ -651,6 +714,7 @@ export function buildSessionCostIndicator(
   liveEstimate?: LiveSessionCostEstimate | null,
   selectedModelId?: string,
   selectedProvider?: string,
+  sessionUsage?: SessionUsageSnapshot,
 ): SessionCostIndicatorState | null {
   const labelModel = modelName ?? 'Selected model';
   // Key the in-flight live-turn estimate by the selected model's *id* (not its
@@ -660,15 +724,40 @@ export function buildSessionCostIndicator(
     ? { ...emptySubagentCostSummary(), totalCost: subagentCostOrSummary, directCost: subagentCostOrSummary }
     : subagentCostOrSummary;
   const prepass = buildPruningPrepassSummary(pruningDetails, pricingForModel);
+  const prepassModelCosts = new Map<string, ModelCostBreakdown>();
+  let prepassCost = prepass.cost;
+  let prepassHasUsage = prepass.hasUsage;
+  let prepassHasKnownCost = prepass.hasKnownCost;
+  if (sessionUsage) {
+    prepassCost = 0;
+    prepassHasUsage = false;
+    prepassHasKnownCost = false;
+    for (const sample of sessionUsage.samples) {
+      if (sample.kind !== 'skill_pruning_prepass') continue;
+      const samplePricing = sample.modelId ? pricingForModel?.(sample.modelId, sample.provider) : undefined;
+      const usage = assistantUsageFromSample(sample);
+      const cost = sample.reportedCostUsd ?? (samplePricing ? costFromUsage(usage, samplePricing) : 0);
+      const hasKnownCost = sample.reportedCostUsd !== undefined || samplePricing !== undefined;
+      const modelId = normalizeModelId(
+        sample.modelId && sample.provider ? `${sample.provider}/${sample.modelId}` : sample.modelId,
+        'Unknown pruning prepass model',
+      );
+      prepassCost += cost;
+      prepassHasUsage ||= usage.totalTokens > 0;
+      prepassHasKnownCost ||= hasKnownCost;
+      addModelCost(prepassModelCosts, modelId, usage, cost, hasKnownCost, hasKnownCost ? 0 : usage.totalTokens);
+    }
+  }
   const liveCost = pricing && liveEstimate ? costFromUsage(liveEstimate, pricing) : 0;
   const mainCost = completed.totalCost;
-  const totalCost = mainCost + liveCost + subagents.totalCost + prepass.cost;
+  const totalCost = mainCost + liveCost + subagents.totalCost + prepassCost;
 
-  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepass.hasUsage && !prepass.hasKnownCost) return null;
+  if (summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0 && !prepassHasUsage && !prepassHasKnownCost) return null;
 
   const modelCosts = new Map<string, ModelCostBreakdown>();
   mergeModelCosts(modelCosts, completed.modelCosts);
   mergeModelCosts(modelCosts, subagents.modelCosts);
+  mergeModelCosts(modelCosts, prepassModelCosts);
   if (numericSubagentCost && subagents.totalCost > 0) {
     addModelCost(
       modelCosts,
@@ -692,7 +781,7 @@ export function buildSessionCostIndicator(
       hasKnownLiveCost ? liveEstimate.unclassifiedContextTokens : liveEstimate.totalTokens,
     );
   }
-  if (prepass.modelId && (prepass.hasUsage || prepass.hasKnownCost)) {
+  if (!sessionUsage && prepass.modelId && (prepass.hasUsage || prepass.hasKnownCost)) {
     addModelCost(
       modelCosts,
       prepass.modelId,

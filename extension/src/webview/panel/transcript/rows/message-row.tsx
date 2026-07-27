@@ -11,6 +11,7 @@ function renderMessage({
   prefs,
   workingDirectory,
   editingId,
+  editingDraft,
   isLastRow,
   onEditRequest,
   onEditConfirm,
@@ -44,6 +45,7 @@ function renderMessage({
       readonly={busy && row.message.status !== 'queued'}
       workingDirectory={workingDirectory}
       editingId={editingId}
+      editingDraft={editingDraft}
       onEditRequest={onEditRequest}
       onEditConfirm={onEditConfirm}
       onEditCancel={onEditCancel}

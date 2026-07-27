@@ -4,7 +4,7 @@
 import { memo } from 'preact/compat';
 import { useMemo, useState } from 'preact/hooks';
 
-import type { ChatMessage, ChatPrefs, ComposerInput } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft } from '../../../shared/protocol';
 import type { PruningHeaderState } from './pruning';
 import type { TurnActivityState } from './activity';
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
@@ -23,6 +23,7 @@ export interface MessageItemProps {
   readonly?: boolean;
   workingDirectory: string | null;
   editingId: string | null;
+  editingDraft?: InlineEditDraft | null;
   onEditRequest: (messageId: string) => void;
   onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
   onEditCancel: () => void;
@@ -57,6 +58,7 @@ export function MessageItemView({
   readonly,
   workingDirectory: _workingDirectory,
   editingId,
+  editingDraft,
   onEditRequest,
   onEditConfirm,
   onEditCancel,
@@ -130,6 +132,7 @@ export function MessageItemView({
         isCurrentlyStreaming={derived.isCurrentlyStreaming}
         capturedHeight={capturedHeight}
         initialInputs={initialInputs}
+        editingDraft={editingDraft}
         pruningHeaderState={pruningHeaderState}
         pruningExpanded={pruningExpanded}
         setPruningExpanded={setPruningExpanded}
@@ -195,6 +198,7 @@ export function areMessageItemPropsEqual(prev: MessageItemProps, next: MessageIt
     prev.readonly === next.readonly &&
     prev.workingDirectory === next.workingDirectory &&
     prev.editingId === next.editingId &&
+    prev.editingDraft === next.editingDraft &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&
     prev.requestCreatedAt === next.requestCreatedAt &&
     prev.sessionKey === next.sessionKey &&

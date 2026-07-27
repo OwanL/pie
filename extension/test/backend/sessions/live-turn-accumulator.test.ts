@@ -192,7 +192,11 @@ test('durable terminal envelope replaces large tool and reasoning bodies with re
   const tool = terminal.durableMessage.parts?.[1]?.kind === 'toolCall'
     ? terminal.durableMessage.parts[1].toolCall
     : undefined;
-  assert.equal(tool?.result, undefined);
+  assert.equal(
+    ((tool?.result as { details?: { results?: Array<{ agent?: string }> } } | undefined)
+      ?.details?.results?.[0]?.agent),
+    'worker',
+  );
   assert.equal(tool?.detailRef?.childCount, 1);
   assert.ok(terminal.durableMessage.parts?.[0]?.kind === 'reasoning'
     && terminal.durableMessage.parts[0].detailRef);

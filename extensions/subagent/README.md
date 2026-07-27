@@ -102,6 +102,51 @@ Model selection still reads `<pi-config>/model-profiles.yaml` (`.json`
 fallback) for thinking-level support lookups — the shared registry, also
 consumed by pie's model picker.
 
+### Optional hard model requirements
+
+A subagent call may declare a hard `modelRequirements` constraint so an
+image-producing flow never lands on a text-only model:
+
+```json
+{
+  "agent": "scout",
+  "task": "Inspect the latest screenshot and report whether the button is positioned correctly.",
+  "bucket": "small",
+  "modelRequirements": { "inputKinds": ["image"] }
+}
+```
+
+`modelRequirements.inputKinds: ["image"]` is a **hard requirement**. Only a
+provider-qualified model whose runtime `input` includes `image` may serve the
+child. The normal requested-bucket, nested-bucket, provider-toggle,
+thinking-level, capacity, and exclusion rules still apply, but no text-only
+model may ever be chosen — including via cheaper-bucket walking, the
+active-parent fallback, the "always use parent model" short-circuit, the
+nested-bucket exhaustion fallback, or any provider retry. An incompatible parent
+produces a local selection error rather than a silent text-only dispatch.
+
+- Capability comes from `modelRegistry.getAvailable()` (the runtime `Model.input`
+  array). `SimpleModelConfig` remains responsible for thinking/cost metadata
+  only and is **not** treated as a capability source.
+- Duplicate model ids exposed by multiple providers are resolved by
+  provider-qualified capability: capability on one provider must not make an
+  incompatible duplicate eligible. A disabled provider is never reintroduced to
+  satisfy a requirement.
+- The object and `inputKinds` field are optional. An absent or empty requirement
+  preserves current selection behaviour.
+
+If no enabled model satisfies all constraints, the subagent fails **before**
+creating or prompting a child session, with a bounded diagnostic and recovery
+actions, for example:
+
+```text
+No enabled image-capable model is available for the requested "small" subagent bucket.
+Add an image-capable model to an eligible bucket, enable its provider, choose another bucket,
+or remove modelRequirements.inputKinds=["image"].
+```
+
+The selector never silently falls back to a text-only model.
+
 ### Runtime provenance
 
 Every dispatched child result exposes audit metadata directly on its
@@ -116,6 +161,12 @@ Every dispatched child result exposes audit metadata directly on its
   then a provider-qualified runtime registry declaration; its deterministic
   fallback is the effective model id, or `unknown` if no model was observable.
 - `parentToolCallId` is the immediate parent session's subagent tool-call id.
+- `requestedModelRequirements` records the requested hard model requirements
+  (e.g. `{ inputKinds: ["image"] }`) when one was made. `modelRequirementsSatisfied`
+  is `true` when the resolved effective model satisfied it, or `false` (with a
+  bounded `requirementDiagnostic`) when selection failed before dispatching a
+  child. These fields are retained on running, terminal, retried, and compacted
+  results; they never duplicate image bytes in the parent transcript.
 
 The immutable call fields are reattached to progress, terminal, retried, and
 force-settled details. Effective model/provider/family track the final serving
@@ -149,7 +200,7 @@ parent model", which takes precedence (and skips bucket selection) when enabled.
 
 ## Removed parameters and routes
 
-The public schema is `{ agent, task, userContext?, cwd?, bucket?, thinkingLevel?, confirmProjectAgents? }`.
+The public schema is `{ agent, task, userContext?, cwd?, bucket?, thinkingLevel?, confirmProjectAgents?, modelRequirements? }`.
 
 - `agentScope` was removed; discovery always covers user and project agent directories. `prepareArguments` strips this legacy field.
 - `tasks` and `chain` batch routes were removed. Old one-item batches are migrated by `prepareArguments`; multi-item batches fail schema validation with guidance to use sibling calls or later turns.

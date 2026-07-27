@@ -108,6 +108,40 @@ function profileRefKey(ref, providersById) {
   return providers.length === 1 ? identityKey(providers[0], ref) : undefined;
 }
 
+/** Validate the per-model image policy (see extensions/image-context-guard/README.md).
+ *
+ *  - A model whose `input` includes `image` MUST declare a positive integer
+ *    `maxImagesPerRequest`. This includes `overrideOnly` entries: an override
+ *    that claims image input must carry its own maximum rather than relying on
+ *    the upstream built-in catalog (the SDK Model type does not retain this
+ *    field, so the runtime image-context guard reads it from the generated
+ *    catalog).
+ *  - A text-only model (no `image` in `input`, or `input` absent) MUST NOT
+ *    declare a positive `maxImagesPerRequest` — its effective maximum is zero.
+ */
+function validateImagePolicy(providerName, model) {
+  const input = Array.isArray(model.input) ? model.input : [];
+  const acceptsImages = input.includes('image');
+  const hasMax = model.maxImagesPerRequest !== undefined;
+  const identity = `${providerName}/${model.id}`;
+  if (acceptsImages) {
+    if (!hasMax) {
+      throw new Error(
+        `image-capable model '${identity}' must declare maxImagesPerRequest (positive integer)`,
+      );
+    }
+    if (!Number.isInteger(model.maxImagesPerRequest) || model.maxImagesPerRequest < 1) {
+      throw new Error(
+        `model '${identity}' has invalid maxImagesPerRequest=${model.maxImagesPerRequest} (must be a positive integer)`,
+      );
+    }
+  } else if (hasMax) {
+    throw new Error(
+      `text-only model '${identity}' must not declare maxImagesPerRequest (effective image maximum is zero)`,
+    );
+  }
+}
+
 /** Hand-written cross-field checks the JSON Schema can't easily express. */
 function validateExtra(source) {
   const allModels = new Set();
@@ -120,6 +154,7 @@ function validateExtra(source) {
       const providers = providersById.get(model.id) ?? [];
       providers.push(providerName);
       providersById.set(model.id, providers);
+      validateImagePolicy(providerName, model);
     }
   }
 
@@ -166,6 +201,7 @@ const MJ_FIELD_ORDER = [
   'reasoning',
   'family',
   'input',
+  'maxImagesPerRequest',
   'contextWindow',
   'maxTokens',
   'thinkingLevelMap',

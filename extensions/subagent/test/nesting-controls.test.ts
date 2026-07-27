@@ -7,10 +7,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { subagentRuntime, getMaxDepth, getMaxTreeSessions, consumeTreeSlot, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TREE_SESSIONS } from "../runner.js";
-import { disallowedByCanSpawn, execute } from "../src/execute.js";
+import { disallowedByCanSpawn, execute, resolveTreeSubagentProviderToggles } from "../src/execute.js";
 import { MAX_DEPTH } from "../src/helpers.js";
 
-const ENV_KEYS = ["PIE_SUBAGENT_MAX_DEPTH", "PIE_SUBAGENT_MAX_TREE_SESSIONS"] as const;
+const ENV_KEYS = [
+	"PIE_SUBAGENT_MAX_DEPTH",
+	"PIE_SUBAGENT_MAX_TREE_SESSIONS",
+	"PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON",
+	"PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON",
+] as const;
 const snapshot: Record<string, string | undefined> = {};
 
 test.before(() => {
@@ -129,6 +134,36 @@ test("consumeTreeSlot: under cap returns undefined; over cap returns error messa
 	assert.ok(err, "3rd slot must exceed the cap");
 	assert.match(err!, /tree session limit reached/i);
 	assert.match(err!, /max 2/);
+});
+
+// ============================================================
+// Nested provider-policy inheritance
+// ============================================================
+
+test("nested calls inherit the root chat's effective subagent provider policy", () => {
+	process.env.PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON = JSON.stringify({
+		"openai-codex": false,
+		umans: true,
+	});
+	process.env.PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON = JSON.stringify({
+		"C:\\sessions\\root.jsonl": { "openai-codex": true, umans: false },
+	});
+	const runtime = { depth: 0, trail: [] };
+	assert.deepEqual(
+		resolveTreeSubagentProviderToggles(runtime, "c:/sessions/root.jsonl"),
+		{ "openai-codex": true, umans: false },
+	);
+
+	// A nested AgentSession has an in-memory session manager and may run after
+	// the environment changes. Its tree policy must remain the root snapshot.
+	process.env.PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON = JSON.stringify({
+		"openai-codex": true,
+		umans: true,
+	});
+	assert.deepEqual(
+		resolveTreeSubagentProviderToggles(runtime, undefined),
+		{ "openai-codex": true, umans: false },
+	);
 });
 
 // ============================================================

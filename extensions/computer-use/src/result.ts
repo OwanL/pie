@@ -50,9 +50,27 @@ export function modelAcceptsImages(model: unknown): boolean {
   return Array.isArray(input) && input.includes('image');
 }
 
+function unavailableImageNotice(artifact: string): string {
+  return [
+    'image_delivery: unavailable',
+    'reason: active_model_does_not_accept_image_input',
+    `artifact: ${artifact}`,
+    '',
+    'Do not infer the image contents. Use available textual/accessibility evidence, switch models,',
+    'or delegate the artifact with modelRequirements.inputKinds=["image"].',
+  ].join('\n');
+}
+
 export async function buildToolResult(action: string, result: RuntimeResponse, includeImage: boolean) {
+  let text = renderComputerText(action, result);
+  if (!includeImage && result.displayImagePath) {
+    // Keep omission explicit even though no image part reaches the aggregate
+    // context guard. Prefix the bounded notice so a large accessibility tree
+    // cannot truncate the safety guidance from the tool result.
+    text = truncateUtf8(`${unavailableImageNotice(result.displayImagePath)}\n\n${text}`).text;
+  }
   const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: 'image/png' }> = [
-    { type: 'text', text: renderComputerText(action, result) },
+    { type: 'text', text },
   ];
   if (includeImage && result.displayImagePath) {
     content.push({ type: 'image', data: (await readFile(result.displayImagePath)).toString('base64'), mimeType: 'image/png' });

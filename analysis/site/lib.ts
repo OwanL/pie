@@ -33,7 +33,6 @@ export interface FilterState {
   experimentAssignment: string;
   subagentParentModel: string;
   pruningMode: string;
-  scoredOnly: boolean;
   pureOnly: boolean;
 }
 
@@ -189,20 +188,12 @@ export function uniqueNonEmpty(values: Array<string | null | undefined>): string
   )];
 }
 
-export function scoredRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
-  return runs.filter((run) => run.satisfaction !== null);
-}
-
 export function completedRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
   return runs.filter((run) => run.status !== 'open');
 }
 
 export function selectedCompletedRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
   return completedRuns(runs);
-}
-
-export function selectedScoredCompletedRuns(runs: PreparedRunRow[]): PreparedRunRow[] {
-  return scoredRuns(selectedCompletedRuns(runs));
 }
 
 export function selectedRunIds(runs: PreparedRunRow[]): Set<string> {
