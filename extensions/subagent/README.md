@@ -77,7 +77,9 @@ env var (set by the pie host on startup and on every change).
 - Models whose provider is toggled off in pie are filtered out of the pool at
   selection time. A disabled provider is never reintroduced by the active-model
   fallback; an unresolved model falls back only when that caller model remains
-  available under the current provider toggles.
+  available under the current provider toggles. The root chat's effective
+  subagent-provider policy is inherited by the entire nested tree, including
+  children created through independently loaded AgentSession extensions.
 - **Route around busy providers** is an opt-in, default-off setting. When enabled,
   bucket selection softly excludes a model only when every enabled/configured
   provider offering it is paused or has no immediately claimable ProviderGate

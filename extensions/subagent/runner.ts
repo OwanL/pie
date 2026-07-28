@@ -218,7 +218,30 @@ export interface SubagentRuntimeContext {
 	processPermitScope?: ProcessPermitScope;
 }
 
-export const subagentRuntime = new AsyncLocalStorage<SubagentRuntimeContext>();
+// Pi loads every AgentSession's extensions through a fresh jiti instance with
+// `moduleCache: false`. A module-local AsyncLocalStorage therefore splits the
+// parent and nested copies of this extension: descendants lose depth, budget,
+// root-session provider overrides, and the process-permit scope. Keep the async
+// context on globalThis so independently loaded copies share one tree context.
+// This remains concurrency-safe because AsyncLocalStorage scopes values to the
+// active async call chain; only the storage container is process-global.
+const SUBAGENT_RUNTIME_KEY = Symbol.for("pie.subagent-runtime-context.v1");
+
+function subagentRuntimeHost(): Record<PropertyKey, unknown> {
+	return globalThis as unknown as Record<PropertyKey, unknown>;
+}
+
+function sharedSubagentRuntime(): AsyncLocalStorage<SubagentRuntimeContext> {
+	const existing = subagentRuntimeHost()[SUBAGENT_RUNTIME_KEY];
+	if (existing instanceof AsyncLocalStorage) {
+		return existing as AsyncLocalStorage<SubagentRuntimeContext>;
+	}
+	const created = new AsyncLocalStorage<SubagentRuntimeContext>();
+	subagentRuntimeHost()[SUBAGENT_RUNTIME_KEY] = created;
+	return created;
+}
+
+export const subagentRuntime = sharedSubagentRuntime();
 
 /** Read current runtime context, falling back to legacy env vars for outermost call. */
 export function readRuntimeContext(): SubagentRuntimeContext {
