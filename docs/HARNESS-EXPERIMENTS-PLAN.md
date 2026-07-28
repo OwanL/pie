@@ -1,6 +1,6 @@
-# Draft plan: agent-operated harness experiments
+# Agent-operated harness experiments: design record
 
-> **Status:** draft; no implementation started.
+> **Status:** implemented. The command suite lives under `scripts/experiments/`, its npm entry points are `experiment:*`, and the operational workflow is documented in `skills/harness-experiments/SKILL.md`. This document is retained as the detailed design and threat-model record; future-tense passages describe the intended contract, not unimplemented work.
 >
 > **Purpose:** let agents propose, implement, run, resume, and report controlled experiments against pie's harness without relying on one conversation's context and without allowing benchmark target processes to use the maintainer's other configured providers.
 

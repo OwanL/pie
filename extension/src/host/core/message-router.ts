@@ -39,6 +39,24 @@ export interface SessionServiceLike {
 }
 
 /**
+ * Inbound message types whose routing failures must NOT raise a user notice.
+ * These are machine-generated transport/render evidence, handshake traffic and
+ * webview log forwarding — a notice for them would be noise, not signal.
+ */
+const SILENT_ROUTE_FAILURE_TYPES: ReadonlySet<WebviewToHostMessage['type']> = new Set([
+  'ready',
+  'refreshState',
+  'requestSnapshot',
+  'stateReceived',
+  'appCommitted',
+  'transcriptCommitted',
+  'transcriptCommitBlocked',
+  'paintObserved',
+  'renderFailure',
+  'log',
+]);
+
+/**
  * Routes incoming {@link WebviewToHostMessage} instances to the appropriate
  * handler logic. Each `type` case is a private method; the public {@link handle}
  * dispatches to it.
@@ -70,6 +88,13 @@ export class MessageRouter {
       // User-initiated send/edit: surface a notice so the failure isn't silent.
       if (msg?.type === 'send' || msg?.type === 'editMessage') {
         this.dispatchEvent({ kind: 'NoticeShown', notice: 'Failed to process your message. See the pie log for details.' });
+      } else if (!SILENT_ROUTE_FAILURE_TYPES.has(msg?.type as WebviewToHostMessage['type'])) {
+        // Every other route is user-initiated too (interrupt, openSession,
+        // requestDetail, setModel, addPaths, ...). Without a notice the UI
+        // simply does nothing and the user has no signal that the action
+        // failed. Transport/render-evidence and log messages are excluded:
+        // they are machine-generated and a notice would be pure noise.
+        this.dispatchEvent({ kind: 'NoticeShown', notice: 'That action could not be completed. See the pie log for details.' });
       }
     }
   }

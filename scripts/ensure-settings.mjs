@@ -9,9 +9,11 @@ export function repoRoot() {
 }
 
 /**
- * Seed the machine-local Pi settings file on first use. Existing settings are
- * never merged or rewritten: after creation, settings.json belongs entirely to
- * the machine on which it lives.
+ * Seed the Pi settings file when it is missing (for example, a checkout where
+ * settings.json was deleted). Existing settings are never merged or rewritten:
+ * this is a no-op when the file is already present. Note that `sync-models`
+ * separately regenerates the model-owned fields of settings.json, while chat
+ * and pruning selections remain user-owned.
  */
 export function ensureSettings(root = repoRoot()) {
   const settingsPath = path.join(root, 'settings.json');
@@ -34,6 +36,6 @@ function isMain() {
 if (isMain()) {
   const result = ensureSettings();
   console.log(result.created
-    ? `Created machine-local settings.json from settings.defaults.json.`
-    : `Machine-local settings.json already exists; left unchanged.`);
+    ? `Created settings.json from settings.defaults.json.`
+    : `settings.json already exists; left unchanged.`);
 }

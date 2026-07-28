@@ -22,9 +22,11 @@ export function createSidebarSyncState(hostInstanceId: string): SidebarSyncState
 /** Measure the final wire envelope only for opt-in stream diagnostics. */
 function measureSnapshotBytes(message: Extract<HostToWebviewMessage, { type: 'state' }>): number {
   try {
-    // `snapshotBytes` is itself serialized, so settle its digit width before
-    // reporting the final UTF-8 size. Two passes cover any practical boundary.
-    for (let pass = 0; pass < 2; pass += 1) {
+    // `snapshotBytes` is itself serialized, so its own digit width feeds back
+    // into the measured size. Iterate to a fixed point (bounded, so a
+    // pathological oscillation can never spin) rather than assuming two passes
+    // converge: a digit-width rollover (e.g. 7 -> 8 digits) needs a third pass.
+    for (let pass = 0; pass < 8; pass += 1) {
       const bytes = Buffer.byteLength(JSON.stringify(message), 'utf8');
       if (message.snapshotBytes === bytes) return bytes;
       message.snapshotBytes = bytes;

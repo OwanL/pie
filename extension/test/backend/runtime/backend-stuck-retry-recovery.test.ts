@@ -349,3 +349,49 @@ test('server shutdown invalidates every session manager fence', async () => {
   assert.deepEqual(a.calls, []);
   assert.deepEqual(b.calls, []);
 });
+
+test('shutdown disposes every context even when one runtime rejects', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const disposed: string[] = [];
+  server.sessionContexts.set('/a', {
+    sessionPath: '/a',
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => { throw new Error('runtime A teardown exploded'); } },
+  } as unknown as SessionContext);
+  server.sessionContexts.set('/b', {
+    sessionPath: '/b',
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => { disposed.push('/b'); } },
+  } as unknown as SessionContext);
+
+  await server.dispose();
+
+  assert.deepEqual(disposed, ['/b'], 'a rejecting runtime must not strand the remaining contexts');
+  assert.equal(server.sessionContexts.size, 0);
+});
+
+test('shutdown isolates every best-effort cleanup step within a context', async () => {
+  const server = new BackendServer({ sdkPath: '/unused', cwd: '/repo' }) as any;
+  const calls: string[] = [];
+  server.sessionContexts.set('/a', {
+    sessionPath: '/a',
+    willRetryWatchdogClear: () => { calls.push('watchdog'); throw new Error('watchdog cleanup exploded'); },
+    uiBridge: { dispose: () => { calls.push('bridge'); throw new Error('bridge cleanup exploded'); } },
+    unsubscribe: () => { calls.push('unsubscribe'); throw new Error('unsubscribe exploded'); },
+    sessionManagerFence: { invalidate: () => { calls.push('fence'); throw new Error('fence cleanup exploded'); } },
+    runtime: { dispose: async () => { calls.push('runtime-a'); } },
+  } as unknown as SessionContext);
+  server.sessionContexts.set('/b', {
+    sessionPath: '/b',
+    unsubscribe: () => undefined,
+    runtime: { dispose: async () => { calls.push('runtime-b'); } },
+  } as unknown as SessionContext);
+
+  await server.dispose();
+
+  assert.deepEqual(
+    calls,
+    ['watchdog', 'bridge', 'unsubscribe', 'fence', 'runtime-a', 'runtime-b'],
+    'each cleanup runs even when every preceding cleanup throws',
+  );
+});

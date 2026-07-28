@@ -18,7 +18,7 @@ smoke matrix. Run `cd extension && npm run test` (1709+ tests) as the gate.
 |---|---|---|
 | Paste-image clear/restore (Brief C) | app-smoke | `app-smoke.test.ts` |
 | Second-send rejection (Brief E) | app-smoke | `app-smoke.test.ts` (in-repo) |
-| Prepass chip phase render (Brief F) | app-smoke + reducer | `prepass-status-chip.test.ts`, `arch-reducer.test.ts` |
+| Prepass chip phase render (Brief F) | app-smoke + reducer | `pruning-prepass-chip.test.ts`, `arch-reducer.test.ts` |
 | Revision-discard / host-instance rebase (Brief D) | app-smoke | `app-smoke.test.ts` |
 | NoticeBanner action buttons render + post the right message (Brief H) | app-smoke | `app-smoke.test.ts` |
 | Retry re-sends the LIVE draft; disablePruning restores (Brief H) | app-smoke + effect-runner + reducer | `app-smoke.test.ts`, `arch-effect-runner.test.ts`, `arch-reducer.test.ts` |

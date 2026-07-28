@@ -11,9 +11,51 @@ import {
   abortOnProcessSignals,
   killProcessTree,
   resolveChildProcessTimeoutMs,
+  snapshotProcessTree,
   watchChildProcess,
   withProcessTreeIsolation,
 } from '../lib/process-watchdog.mjs';
+
+/**
+ * Read the grandchild pid the fixture publishes, then wait until the OS
+ * actually reports it as a descendant of `rootPid`.
+ *
+ * The fixture writes the pid as soon as `spawn()` returns, but the process
+ * table does not necessarily expose the parent link yet. `terminateProcessTree`
+ * captures ownership via `snapshotProcessTree`, so arming the watchdog before
+ * that link is visible makes ownership capture race process creation — which
+ * surfaced as intermittent "grandchild was captured as owned" failures on
+ * loaded runs. Waiting on the real precondition removes the race rather than
+ * widening a timeout.
+ *
+ * The wait is tiered because `snapshotProcessTree` shells out to a process
+ * enumeration on every call: cheap checks (pid file, liveness probe) poll
+ * fast, and the expensive tree enumeration is retried on a slow cadence so
+ * this stays affordable under coverage instrumentation.
+ */
+async function waitForVisibleGrandchild(pidFile, rootPid, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let grandchildPid = 0;
+
+  // Tier 1 (cheap): the fixture has published a pid and the process is live.
+  while (Date.now() < deadline) {
+    if (!(grandchildPid > 0)) {
+      try { grandchildPid = Number(await readFile(pidFile, 'utf8')); } catch { /* not published yet */ }
+    }
+    if (grandchildPid > 0) {
+      try { process.kill(grandchildPid, 0); break; } catch { /* not scheduled yet */ }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!(grandchildPid > 0)) return 0;
+
+  // Tier 2 (expensive): the parent link is visible to process enumeration.
+  while (Date.now() < deadline) {
+    if (snapshotProcessTree(rootPid).some((entry) => entry.pid === grandchildPid)) return grandchildPid;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return 0;
+}
 
 function fakeChild(pid = 1234) {
   return {
@@ -179,7 +221,7 @@ test('abortOnProcessSignals converts SIGINT into an AbortSignal and cleans handl
   assert.equal(target.listenerCount('SIGTERM'), 0);
 });
 
-test('abort kills a real uniquely-owned child and grandchild but preserves an unrelated sentinel', { timeout: 20_000 }, async () => {
+test('abort kills a real uniquely-owned child and grandchild but preserves an unrelated sentinel', { timeout: 60_000 }, async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-process-abort-'));
   const pidFile = path.join(tempDir, 'grandchild.pid');
   const rootCode = `const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
@@ -189,11 +231,7 @@ test('abort kills a real uniquely-owned child and grandchild but preserves an un
   const rootClosed = new Promise((resolve) => root.once('close', resolve));
   let watchdog;
   try {
-    let grandchildPid;
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      try { grandchildPid = Number(await readFile(pidFile, 'utf8')); if (grandchildPid > 0) break; } catch {}
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    const grandchildPid = await waitForVisibleGrandchild(pidFile, root.pid);
     assert.ok(grandchildPid > 0);
     watchdog = watchChildProcess(root, { timeoutMs: 0, signal: controller.signal });
     controller.abort(new Error('test cancellation'));
@@ -243,16 +281,13 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
   let watchdog;
 
   try {
-    let grandchildPid;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        grandchildPid = Number(await readFile(pidFile, 'utf8'));
-        if (grandchildPid > 0) break;
-      } catch {
-        // Root has not written the pid yet.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    // Upper bounds below are deliberately generous: each bounds an *eventual*
+    // outcome, so a healthy run still finishes in ~3s. This test runs
+    // alongside other packages, where Windows spawn + `taskkill /T` teardown
+    // can be scheduled far past a tight deadline; tight budgets produced
+    // false "root tree did not close" failures under load while the test
+    // passed in isolation.
+    const grandchildPid = await waitForVisibleGrandchild(pidFile, root.pid);
     assert.ok(grandchildPid > 0, 'root process must publish its grandchild pid');
     watchdog = watchChildProcess(root, { timeoutMs: 500, label: 'integration tree' });
 
@@ -261,7 +296,7 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
       await Promise.race([
         rootClosed,
         new Promise((_, reject) => {
-          closeTimer = setTimeout(() => reject(new Error('root tree did not close')), 5000);
+          closeTimer = setTimeout(() => reject(new Error('root tree did not close')), 60_000);
         }),
       ]);
     } finally {
@@ -271,7 +306,7 @@ test('Windows watchdog kills a real grandchild process tree', { skip: process.pl
     assert.equal(watchdog.timedOut, true);
 
     let alive = true;
-    for (let attempt = 0; attempt < 100 && alive; attempt += 1) {
+    for (let attempt = 0; attempt < 1000 && alive; attempt += 1) {
       try {
         process.kill(grandchildPid, 0);
         await new Promise((resolve) => setTimeout(resolve, 10));

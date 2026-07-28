@@ -1297,12 +1297,25 @@ export class BackendServer {
     this.stopProviderIncidentObserver = undefined;
     this.providerAttemptOwners.clear();
 
+    // Teardown is best-effort per context: one cleanup that throws or rejects
+    // must not strand this context's remaining cleanup or any later context.
+    const runCleanup = (label: string, action: () => void): void => {
+      try {
+        action();
+      } catch (err) {
+        log(`${label} failed: ${String(err)}`);
+      }
+    };
     for (const context of contexts) {
-      context.willRetryWatchdogClear?.();
-      context.uiBridge?.dispose();
-      context.unsubscribe();
-      context.sessionManagerFence?.invalidate();
-      await context.runtime.dispose();
+      runCleanup('session retry-watchdog cleanup', () => context.willRetryWatchdogClear?.());
+      runCleanup('session UI bridge dispose', () => context.uiBridge?.dispose());
+      runCleanup('session event unsubscribe', () => context.unsubscribe());
+      runCleanup('session manager fence invalidation', () => context.sessionManagerFence?.invalidate());
+      try {
+        await context.runtime.dispose();
+      } catch (err) {
+        log(`session runtime dispose failed: ${String(err)}`);
+      }
     }
   }
 }

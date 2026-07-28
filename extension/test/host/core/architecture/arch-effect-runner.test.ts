@@ -106,6 +106,24 @@ test('EffectRunner serializes rapid system-prompt toggle snapshots per session',
   ], 'the final picker snapshot is applied last');
 });
 
+test('a failed system-prompt toggle persist surfaces a notice instead of failing silently', async () => {
+  const dispatched: Event[] = [];
+  const { deps } = makeEffectRunnerDeps({
+    dispatchEvent: (event) => { dispatched.push(event); },
+    serviceOverrides: {
+      async setSystemPromptToggles() { throw new Error('EACCES: settings.json is read-only'); },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({ kind: 'SetSystemPromptTogglesRpc', corrId: 'toggle-fail', sessionPath: '/a', disabledEntries: ['harness'] });
+  await settle();
+
+  const notices = dispatched.filter((event) => event.kind === 'NoticeShown');
+  assert.equal(notices.length, 1, 'the user must be told their toggle did not persist');
+  assert.match((notices[0] as { notice: string }).notice, /Failed to save the system-prompt setting/);
+});
+
 test('EffectRunner routes CompactRpc through the target session queue', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);

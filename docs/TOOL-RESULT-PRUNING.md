@@ -403,9 +403,12 @@ restate or re-own it.
    rules are worth shipping and whether any starved the agent.
 4. **Benchmark on real sessions** — intuition about "noise" will be wrong in
    spots (sometimes the agent *does* want the timestamp).
-5. **Config — RESOLVED & SHIPPED:** `toolResultPruning: { enabled, profile,
-   rules: { ansi, whitespace, blankRun, jsonMinify, lsLong, gitLog, grepGroup } }` block in `settings.json`,
-   sibling to `pruning` (do not overload that flag). Tier-1 (lossless) always on
+5. **Config — RESOLVED & SHIPPED:** a `toolResultPruning: { enabled, profile }`
+   block in `settings.json`,
+   sibling to `pruning` (do not overload that flag). Individual rule toggles
+   (`ansi`, `whitespace`, `blankRun`, `jsonMinify`, `lsLong`, `gitLog`,
+   `grepGroup`) are defaulted in code (`extensions/tool-result-pruner/config.ts`)
+   and may be overridden via an optional `rules` object. Tier-1 (lossless) always on
    by default; each rule independently toggleable. Tier-2 will be
    profile-selectable (`default` runs lossy; `security` keeps
    permissions/columns) when the lossy tier ships. A settings UI mirrors the
@@ -447,7 +450,9 @@ restate or re-own it.
   root `package.json` (`extensions:typecheck` / `extensions:test`), and
   `scripts/run-tests.mjs` (package `tool-result-pruner`, 98% lines gate).
 - `settings.json` carries the default `toolResultPruning` block
-  (`{ enabled, profile, rules }`).
+  (`{ enabled, profile }`); per-rule defaults live in
+  `extensions/tool-result-pruner/config.ts` and are only present in settings
+  when explicitly overridden.
 - Settings UI: mirrors the skill-pruner settings flow — host persistence
   (`tool-result-pruning-settings{,-persistence}.ts`), service set/load, arch
   state, events/commands/reducer/effect-runner/projection/message-router,

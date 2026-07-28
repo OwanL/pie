@@ -614,6 +614,11 @@ export class EffectRunner {
         await this.deps.service.setSystemPromptToggles(effect.sessionPath, effect.disabledEntries);
       } catch (err) {
         this.deps.log.log('warn', 'setSystemPromptToggles failed', { scope: 'system-prompt-toggles', error: toErrorMessage(err), sessionPath: effect.sessionPath });
+        // The user just clicked a toggle. Persisting it can fail (EACCES /
+        // ENOSPC in the toggle store's writeFileSync); without a notice the
+        // optimistic UI keeps the new value while the setting silently
+        // reverts on the next backend read.
+        this.deps.dispatchEvent({ kind: 'NoticeShown', notice: 'Failed to save the system-prompt setting. See the pie log for details.' });
       }
     });
   }

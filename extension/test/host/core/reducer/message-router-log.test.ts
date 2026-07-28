@@ -215,6 +215,92 @@ test('replayed close interaction IDs are deduplicated before command dispatch', 
   assert.equal(events.filter((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'CloseSession').length, 1);
 });
 
+test('an unexpected route failure on a non-send message surfaces a notice', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [] } } as never),
+    {
+      loadDetail: async () => { throw new Error('detail backend exploded'); },
+    } as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  const originalError = console.error;
+  console.error = () => undefined;
+  try {
+    await router.handle({ type: 'requestDetail', sessionPath: '/s', ref: { key: 'k' } } as never);
+  } finally {
+    console.error = originalError;
+  }
+
+  const notices = events.filter((event) => (event as { kind?: string }).kind === 'NoticeShown');
+  assert.equal(notices.length, 1, 'a failed requestDetail must not fail silently');
+  assert.match(
+    (notices[0] as { notice: string }).notice,
+    /could not be completed/,
+    'the generic route-failure notice is surfaced',
+  );
+});
+
+test('a route failure on a send message keeps the original send-specific notice', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => {
+      events.push(event);
+      if ((event as { cmd?: { kind?: string } }).cmd?.kind === 'Send') throw new Error('dispatch exploded');
+    },
+    () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [], sessions: [] }, composer: { pendingComposerInputsBySession: {} } } as never),
+    { notifyUserInput: () => undefined } as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  const originalError = console.error;
+  console.error = () => undefined;
+  try {
+    await router.handle({ type: 'send', sessionPath: '/s', text: 'hello' } as never);
+  } finally {
+    console.error = originalError;
+  }
+
+  const notices = events.filter((event) => (event as { kind?: string }).kind === 'NoticeShown');
+  assert.equal(notices.length, 1);
+  assert.match((notices[0] as { notice: string }).notice, /Failed to process your message/);
+});
+
+test('transport-evidence route failures stay silent (no notice noise)', async () => {
+  const events: unknown[] = [];
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => { throw new Error('state read exploded'); },
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    () => false,
+  );
+
+  const originalError = console.error;
+  console.error = () => undefined;
+  try {
+    await router.handle({ type: 'requestSnapshot' } as never);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(
+    events.filter((event) => (event as { kind?: string }).kind === 'NoticeShown').length,
+    0,
+    'machine-generated handshake/evidence traffic must not raise user notices',
+  );
+});
+
 test('webview `log` message with error level is routed through appendPieLog at error', async () => {
   const router = newRouter();
 

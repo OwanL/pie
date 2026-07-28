@@ -57,29 +57,32 @@ const PACKAGE_CONFIGS = [
     id: 'cwd-skills',
     cwd: repoRoot,
     testGlobs: ['extensions/cwd-skills/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/cwd-skills/**/*.ts'],
+    coverageIncludes: ['extensions/cwd-skills/index.ts'],
     thresholds: { lines: 95, branches: 95 },
   },
   {
     id: 'safeguard',
     cwd: repoRoot,
     testGlobs: ['extensions/safeguard/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/safeguard/**/*.ts'],
+    coverageIncludes: ['extensions/safeguard/*.ts'],
     thresholds: { lines: 85, branches: 80 },
   },
   {
     id: 'skill-pruner',
     cwd: repoRoot,
     testGlobs: ['extensions/skill-pruner/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/skill-pruner/**/*.ts'],
+    coverageIncludes: ['extensions/skill-pruner/*.ts', 'extensions/skill-pruner/src/**/*.ts'],
     thresholds: { lines: 91, branches: 79 },
   },
   {
     id: 'subagent',
     cwd: repoRoot,
     testGlobs: ['extensions/subagent/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/subagent/**/*.ts'],
-    thresholds: { lines: 90, branches: 80 },
+    coverageIncludes: ['extensions/subagent/*.ts', 'extensions/subagent/src/**/*.ts'],
+    // Source-only coverage excludes the previously counted test files. Much of
+    // runner.ts is real-SDK registration/session glue; keep its honest baseline
+    // gated without restoring the inflated all-TypeScript metric.
+    thresholds: { lines: 60, branches: 80 },
     // schema.ts imports runtime values (`StringEnum`, `Type`) from the pi
     // SDK's typebox via the legacy `@mariozechner/pi-ai` import. pi's loader
     // aliases that at runtime; plain tsx cannot resolve it (the SDK is nested
@@ -92,14 +95,14 @@ const PACKAGE_CONFIGS = [
     id: 'ask-user',
     cwd: repoRoot,
     testGlobs: ['extensions/ask-user/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/ask-user/**/*.ts'],
+    coverageIncludes: ['extensions/ask-user/index.ts', 'extensions/ask-user/src/**/*.ts'],
     thresholds: { lines: 100, branches: 100 },
   },
   {
     id: 'warm-bash',
     cwd: repoRoot,
     testGlobs: ['extensions/warm-bash/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/warm-bash/**/*.ts'],
+    coverageIncludes: ['extensions/warm-bash/index.ts', 'extensions/warm-bash/src/**/*.ts'],
     // warm-pool tests spawn real bash and are environment-dependent; the
     // classifier (pure logic) carries the coverage backbone. Remaining branch
     // gaps are defensive empty catch blocks + the untestable cross-platform
@@ -117,7 +120,7 @@ const PACKAGE_CONFIGS = [
     id: 'web-access-compat',
     cwd: repoRoot,
     testGlobs: ['extensions/web-access-compat/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/web-access-compat/**/*.ts'],
+    coverageIncludes: ['extensions/web-access-compat/*.ts'],
     // env-glue (resolvePackageRoot / the factory wrapper) is not unit-testable
     // portably; the rewrite/patch/repair logic it delegates to is fully covered.
     thresholds: { lines: 82, branches: 78 },
@@ -126,7 +129,7 @@ const PACKAGE_CONFIGS = [
     id: 'tool-result-pruner',
     cwd: repoRoot,
     testGlobs: ['extensions/tool-result-pruner/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/tool-result-pruner/**/*.ts'],
+    coverageIncludes: ['extensions/tool-result-pruner/*.ts'],
     // MVP: the lossless rules + pipeline guards are pure functions; the
     // index.ts factory is env-glue (registers a pi.on handler) and is not
     // unit-testable without the pi runtime. Types-global.d.ts is ambient only.
@@ -136,7 +139,7 @@ const PACKAGE_CONFIGS = [
     id: 'session-reviewer',
     cwd: repoRoot,
     testGlobs: ['extensions/session-reviewer/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/session-reviewer/**/*.ts'],
+    coverageIncludes: ['extensions/session-reviewer/index.ts', 'extensions/session-reviewer/src/**/*.ts'],
     // transcript.ts (the JSONL parser) is the unit-testable core; index.ts is
     // env-glue (registers the `session_review` tool) and store.ts is fs I/O,
     // neither of which is unit-testable without the pi runtime / a real disk.
@@ -147,7 +150,7 @@ const PACKAGE_CONFIGS = [
     id: 'session-changes',
     cwd: repoRoot,
     testGlobs: ['extensions/session-changes/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/session-changes/**/*.ts'],
+    coverageIncludes: ['extensions/session-changes/index.ts', 'extensions/session-changes/src/**/*.ts'],
     // session-jsonl.ts (the JSONL reader + toolCall↔toolResult join), render.ts
     // (TSV/minified-diff renderers), and diff.ts's pure minify/synthetic paths
     // are the unit-testable core; index.ts is env-glue (registers the
@@ -160,7 +163,7 @@ const PACKAGE_CONFIGS = [
     id: 'deferred-triggers',
     cwd: repoRoot,
     testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/deferred-triggers/**/*.ts'],
+    coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],
     // store.ts (replay + sidecar I/O) is the unit-testable core; index.ts is
     // env-glue (registers the `defer_trigger` tool) and needs the pi runtime.
     // types-global.d.ts is ambient only.

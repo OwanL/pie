@@ -20,7 +20,7 @@ Use this skill only for work on the `pie` repository. **pie** is the VS Code sid
 | `analysis/` | Local DuckDB and static-site run analytics workspace |
 | `scripts/` | Repository build, test, model-sync, install, and experiment orchestration |
 | `settings.defaults.json` | Tracked portable defaults; model-owned fields are generated from `models.yaml` |
-| `settings.json` | Git-ignored, machine-local Pi runtime preferences; seeded from defaults when absent |
+| `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
 | `APPEND_SYSTEM.md` | Personal additions to Pi's system prompt |
 
 Start with [`README.md`](../../README.md) for setup, storage, and repository-wide workflows. Use [`docs/INDEX.md`](../../docs/INDEX.md) rather than scanning `docs/`.
@@ -37,7 +37,7 @@ Start with [`README.md`](../../README.md) for setup, storage, and repository-wid
 
 ### Model configuration
 
-Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.defaults.json`. Do not directly edit generated model files. The git-ignored `settings.json` is machine-owned and must never be overwritten during synchronization; create it when absent with `npm run settings:init`. For provider work, also load the `add-provider` skill.
+Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
 
 ### Context-lean terminology
 
