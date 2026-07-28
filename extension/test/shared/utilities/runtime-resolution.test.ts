@@ -5,6 +5,8 @@ import path from 'node:path';
 import { resolveCommandInvocation } from '../../../src/shared/command-invocation';
 import { createCommandExecutor } from '../../../src/shared/exec-command';
 import {
+  minimumNodeVersionFromEngine,
+  resolveCompatibleNodePath,
   resolveNodePath,
   resolveSdkPath,
 } from '../../../src/shared/runtime-resolution';
@@ -110,6 +112,70 @@ test('resolveNodePath rejects missing configured and environment paths and error
       exists: () => false,
     }),
     /Could not find a standalone Node\.js runtime/,
+  );
+});
+
+test('minimumNodeVersionFromEngine reads the SDK lower bound and rejects unknown range shapes', () => {
+  assert.equal(minimumNodeVersionFromEngine('>=22.19.0'), '22.19.0');
+  assert.equal(minimumNodeVersionFromEngine(undefined), undefined);
+  assert.throws(
+    () => minimumNodeVersionFromEngine('20 || >=22'),
+    /Unsupported PI SDK Node engine range/,
+  );
+});
+
+test('resolveCompatibleNodePath skips an older PATH runtime and selects a compatible one', async () => {
+  const oldNode = path.join('C:/old', 'node.exe');
+  const compatibleNode = path.join('D:/current', 'node.exe');
+
+  const nodePath = await resolveCompatibleNodePath({
+    env: { PATH: 'C:/old;D:/current' },
+    platform: 'win32',
+    minimumVersion: '22.19.0',
+    exists: (filePath) => filePath === oldNode || filePath === compatibleNode,
+    exec: async (command) => ({
+      stdout: command === oldNode ? 'v20.19.0\n' : 'v24.16.0\n',
+      stderr: '',
+      exitCode: 0,
+    }),
+  });
+
+  assert.equal(nodePath, compatibleNode);
+});
+
+test('resolveCompatibleNodePath rejects an incompatible explicit runtime', async () => {
+  await assert.rejects(
+    () => resolveCompatibleNodePath({
+      configuredPath: 'C:/configured/node.exe',
+      env: { PATH: 'D:/compatible' },
+      platform: 'win32',
+      minimumVersion: '22.19.0',
+      exists: () => true,
+      exec: async () => ({ stdout: 'v20.19.0\n', stderr: '', exitCode: 0 }),
+    }),
+    /Configured PI nodePath uses Node v20\.19\.0, but the PI SDK requires Node >=22\.19\.0/,
+  );
+});
+
+test('resolveCompatibleNodePath reports every incompatible PATH runtime', async () => {
+  await assert.rejects(
+    () => resolveCompatibleNodePath({
+      env: { PATH: '/node20:/node18' },
+      platform: 'linux',
+      minimumVersion: '22.19.0',
+      exists: (filePath) => filePath === '/node20/node' || filePath === '/node18/node',
+      exec: async (command) => ({
+        stdout: command === '/node20/node' ? 'v20.19.0\n' : 'v18.20.0\n',
+        stderr: '',
+        exitCode: 0,
+      }),
+    }),
+    (error: Error) => {
+      assert.match(error.message, /Could not find Node >=22\.19\.0/);
+      assert.match(error.message, /\/node20\/node \(v20\.19\.0\)/);
+      assert.match(error.message, /\/node18\/node \(v18\.20\.0\)/);
+      return true;
+    },
   );
 });
 

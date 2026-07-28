@@ -95,7 +95,7 @@
         "pie.nodePath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the standalone Node.js executable used to run the PI backend."
+          "description": "Absolute path to the standalone Node.js executable used to run the PI backend. It must satisfy the installed PI SDK's declared Node engine requirement; when empty, Pie selects the first compatible Node executable on PATH."
         },
         "pie.sdkPath": {
           "type": "string",

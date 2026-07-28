@@ -8,7 +8,12 @@ import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/re
 import { normalizeStoredTabPaths } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
 
-import { resolveNodePath, resolveSdkPath } from '../../shared/runtime-resolution';
+import {
+  minimumNodeVersionFromEngine,
+  resolveCompatibleNodePath,
+  resolveNodePath,
+  resolveSdkPath,
+} from '../../shared/runtime-resolution';
 import { resolveAgentDir } from '../../shared/agent-dir-resolution';
 import { buildRuntimePrefsPayload } from '../../shared/protocol';
 import type { ChatPrefs, SessionSummary } from '../../shared/protocol';
@@ -193,17 +198,32 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
       ? options.context.globalState.get<string>(SDK_PATH_CACHE_KEY)
       : undefined;
 
-    const nodePath = resolveNodePath({
-      configuredPath: configuredNodePath,
-      env: process.env as NodeJS.ProcessEnv,
-    });
+    const exec = createCommandExecutor();
     const sdkPath = await resolveSdkPath({
       configuredPath: configuredSdkPath,
       cachedPath: cachedSdkPath,
       localCandidatePath,
       env: process.env as NodeJS.ProcessEnv,
-      exec: createCommandExecutor(),
+      exec,
     });
+    const sdkPackage = JSON.parse(
+      readFileSync(path.join(sdkPath, 'package.json'), 'utf8'),
+    ) as { engines?: { node?: unknown } };
+    const sdkNodeEngine = typeof sdkPackage.engines?.node === 'string'
+      ? sdkPackage.engines.node
+      : undefined;
+    const minimumNodeVersion = minimumNodeVersionFromEngine(sdkNodeEngine);
+    const nodePath = minimumNodeVersion
+      ? await resolveCompatibleNodePath({
+          configuredPath: configuredNodePath,
+          env: process.env as NodeJS.ProcessEnv,
+          exec,
+          minimumVersion: minimumNodeVersion,
+        })
+      : resolveNodePath({
+          configuredPath: configuredNodePath,
+          env: process.env as NodeJS.ProcessEnv,
+        });
     // Only persist the resolved path when we actually had to discover it via
     // the cache/npm-root fallback. The local candidate is re-discovered
     // cheaply on every start and would go stale if the repo is relocated.
@@ -307,6 +327,7 @@ async function startBackendWithLogging(
     bootLog('session-startup', 'backend.starting', {
       backendPath,
       cwd: workspaceCwd,
+      nodePath,
       restoredStartupPath,
     });
     const spawnStart = Date.now();

@@ -18,6 +18,11 @@ export interface ResolveNodePathOptions extends CommonOptions {
   configuredPath?: string;
 }
 
+export interface ResolveCompatibleNodePathOptions extends ResolveNodePathOptions {
+  exec: CommandExecutor;
+  minimumVersion: string;
+}
+
 export interface ResolveSdkPathOptions extends CommonOptions {
   configuredPath?: string;
   cachedPath?: string;
@@ -57,13 +62,16 @@ function ensureExistingPath(
   return filePath;
 }
 
-function splitPathEnv(envPath: string | undefined): string[] {
+function splitPathEnv(
+  envPath: string | undefined,
+  platform: NodeJS.Platform,
+): string[] {
   if (!envPath) {
     return [];
   }
 
   return envPath
-    .split(path.delimiter)
+    .split(platform === 'win32' ? ';' : ':')
     .map((entry) => entry.trim())
     .filter(Boolean);
 }
@@ -74,6 +82,7 @@ function findOnPath(
   platform: NodeJS.Platform,
   exists: (filePath: string) => boolean,
 ): string | undefined {
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
   const names =
     platform === 'win32'
       ? [
@@ -84,9 +93,9 @@ function findOnPath(
         ]
       : [executableName];
 
-  for (const dir of splitPathEnv(envPath)) {
+  for (const dir of splitPathEnv(envPath, platform)) {
     for (const name of names) {
-      const candidate = path.join(dir, name);
+      const candidate = pathApi.join(dir, name);
       if (exists(candidate)) {
         return candidate;
       }
@@ -94,6 +103,150 @@ function findOnPath(
   }
 
   return undefined;
+}
+
+function findAllOnPath(
+  executableName: string,
+  envPath: string | undefined,
+  platform: NodeJS.Platform,
+  exists: (filePath: string) => boolean,
+): string[] {
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const names =
+    platform === 'win32'
+      ? [
+          executableName,
+          `${executableName}.exe`,
+          `${executableName}.cmd`,
+          `${executableName}.bat`,
+        ]
+      : [executableName];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  for (const dir of splitPathEnv(envPath, platform)) {
+    for (const name of names) {
+      const candidate = pathApi.join(dir, name);
+      const identity = platform === 'win32' ? candidate.toLowerCase() : candidate;
+      if (exists(candidate) && !seen.has(identity)) {
+        seen.add(identity);
+        candidates.push(candidate);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+interface NodeVersion {
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+function parseNodeVersion(value: string): NodeVersion | undefined {
+  const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!match) {
+    return undefined;
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function compareNodeVersions(left: NodeVersion, right: NodeVersion): number {
+  return left.major - right.major
+    || left.minor - right.minor
+    || left.patch - right.patch;
+}
+
+/**
+ * Extract the lower bound from the SDK's supported engine form (`>=x.y.z`).
+ * Fail closed for other range shapes so a future SDK engine change cannot
+ * silently put Pie back on an unsupported runtime.
+ */
+export function minimumNodeVersionFromEngine(nodeEngine: string | undefined): string | undefined {
+  if (!nodeEngine) {
+    return undefined;
+  }
+  const match = nodeEngine.trim().match(/^>=\s*v?(\d+\.\d+\.\d+)$/);
+  if (!match) {
+    throw new Error(
+      `Unsupported PI SDK Node engine range "${nodeEngine}". Set pie.nodePath to a compatible Node executable.`,
+    );
+  }
+  return match[1];
+}
+
+async function probeNodeVersion(
+  nodePath: string,
+  exec: CommandExecutor,
+): Promise<{ raw: string; parsed?: NodeVersion }> {
+  const result = await exec(nodePath, ['--version']);
+  const raw = (result.stdout || result.stderr).trim();
+  return {
+    raw: raw || `exit ${result.exitCode}`,
+    parsed: result.exitCode === 0 ? parseNodeVersion(raw) : undefined,
+  };
+}
+
+/**
+ * Resolve a Node executable that satisfies the pinned SDK's declared minimum.
+ * Explicit setting/environment overrides remain authoritative and fail with an
+ * actionable compatibility error. PATH discovery probes every candidate in
+ * order instead of blindly choosing an older runtime that happens to appear
+ * first (common with nvm/proto shims on Windows).
+ */
+export async function resolveCompatibleNodePath(
+  options: ResolveCompatibleNodePathOptions,
+): Promise<string> {
+  const exists = options.exists ?? defaultExists;
+  const platform = options.platform ?? process.platform;
+  const required = parseNodeVersion(options.minimumVersion);
+  if (!required) {
+    throw new Error(`Invalid PI SDK minimum Node version: ${options.minimumVersion}`);
+  }
+
+  const configuredPath = ensureExistingPath(
+    'Configured PI nodePath',
+    options.configuredPath,
+    exists,
+  );
+  const envPath = ensureExistingPath('PI_NODE_PATH', options.env.PI_NODE_PATH, exists);
+  const explicit = configuredPath
+    ? { path: configuredPath, label: 'Configured PI nodePath' }
+    : envPath
+      ? { path: envPath, label: 'PI_NODE_PATH' }
+      : undefined;
+
+  if (explicit) {
+    const version = await probeNodeVersion(explicit.path, options.exec);
+    if (version.parsed && compareNodeVersions(version.parsed, required) >= 0) {
+      return explicit.path;
+    }
+    throw new Error(
+      `${explicit.label} uses Node ${version.raw}, but the PI SDK requires Node >=${options.minimumVersion}. `
+      + 'Install a compatible Node release or update pie.nodePath.',
+    );
+  }
+
+  const candidates = findAllOnPath('node', options.env.PATH, platform, exists);
+  const detected: string[] = [];
+  for (const candidate of candidates) {
+    const version = await probeNodeVersion(candidate, options.exec);
+    detected.push(`${candidate} (${version.raw})`);
+    if (version.parsed && compareNodeVersions(version.parsed, required) >= 0) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `Could not find Node >=${options.minimumVersion} required by the PI SDK on PATH. `
+    + `${detected.length > 0 ? `Detected: ${detected.join(', ')}. ` : ''}`
+    + 'Set pie.nodePath or PI_NODE_PATH to a compatible Node executable.',
+  );
 }
 
 function isValidSdkPath(sdkPath: string, exists: (filePath: string) => boolean): boolean {
