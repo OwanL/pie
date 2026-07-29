@@ -1499,6 +1499,14 @@ export async function runSingleAgent(
 	const cleanupOwnedSession = (): void => {
 		if (sessionCleanedUp) return;
 		sessionCleanedUp = true;
+		// Publish terminal lifecycle state before teardown. Parallel siblings can
+		// keep the enclosing tool call live, so the webview cannot rely on the
+		// durability-gated tool result to learn that this child has finished.
+		try {
+			if (currentResult.exitCode !== -1) emitUpdate();
+		} catch {
+			// A parent update consumer must not prevent session/permit cleanup.
+		}
 		// Stop attempt-owned publication before teardown or a fallback attempt can
 		// begin. This clears any trailing throttled update from the old attempt.
 		emitUpdate.close();

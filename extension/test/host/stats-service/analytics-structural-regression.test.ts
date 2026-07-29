@@ -13,7 +13,7 @@ import {
 } from '../../../src/host/run-analytics';
 import { MAX_INTRADAY_CHART_POINTS } from '../../../src/host/stats-service/aggregate-stats';
 import { RunAnalyticsStorage } from '../../../src/host/stats-service/storage';
-import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../../src/shared/protocol/aggregate-stats';
+import { EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol/aggregate-stats';
 
 const RUN_COUNT = 2_000;
 const STORAGE_CEILING_BYTES = 8_000_000;
@@ -147,7 +147,6 @@ test('analytics fixed fixture stays structurally bounded in CI', async () => {
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => agentDir,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       onAccumulatorBuilt: (scope) => { if (scope === 'completed') completedBuilds += 1; },

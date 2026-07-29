@@ -406,6 +406,7 @@ test('EffectRunner runs PersistTabs synchronously without queueing', async () =>
     openTabPaths: ['/a', '/b'],
     activeSessionPath: '/a',
     pinnedTabPaths: [],
+    pinnedTabGroups: [],
   });
   await settle();
 
@@ -419,6 +420,7 @@ test('EffectRunner runs PersistTabs synchronously without queueing', async () =>
     openTabPaths: ['/a', '/b'],
     active: '/a',
     pinnedTabPaths: [],
+    pinnedTabGroups: [],
   });
   assert.equal(events.length, 1);
   assert.equal(events[0]?.kind, 'PersistTabsResult');

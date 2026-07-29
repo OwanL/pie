@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { HISTORY_COMPACTION_ENV } from '../../../src/shared/protocol';
+import {
+  HISTORY_COMPACTION_ENV,
+  type HistoryCompactionSettings,
+} from '../../../src/shared/protocol';
 import {
   applySdkHistoryCompactionRuntimePatch,
   shouldRunHistoryCompaction,
 } from '../../../src/backend/sdk';
 
-const config = {
+const config: HistoryCompactionSettings = {
   enabled: true,
   thresholdMode: 'tokens' as const,
   softThreshold: 1_000,
@@ -181,6 +184,185 @@ test('silent stop and length overflows delegate to pi overflow recovery', async 
     assert.equal(stopOverflow.originalChecks, 1);
     assert.deepEqual(stopOverflow.compactions, []);
   });
+});
+
+test('compaction customization refuses an SDK shape that cannot install the model override', () => {
+  const AgentSession = createFakeSessionClass();
+  const result = applySdkHistoryCompactionRuntimePatch({
+    AgentSession: AgentSession as never,
+    prepareCompaction: () => ({ firstKeptEntryId: 'kept', tokensBefore: 5_000 }),
+    compact: async () => ({
+      summary: 'summary',
+      firstKeptEntryId: 'kept',
+      tokensBefore: 5_000,
+    }),
+  } as never);
+
+  assert.equal(result, 'unsupported-shape');
+});
+
+test('compaction customization refuses a runtime without an extension runner', () => {
+  class MissingExtensionRunnerSession extends createFakeSessionClass() {
+    constructor() {
+      super();
+      this._buildRuntime();
+    }
+
+    _buildRuntime(): void {}
+  }
+
+  const result = applySdkHistoryCompactionRuntimePatch({
+    AgentSession: MissingExtensionRunnerSession as never,
+    prepareCompaction: () => ({ firstKeptEntryId: 'kept', tokensBefore: 5_000 }),
+    compact: async () => ({
+      summary: 'summary',
+      firstKeptEntryId: 'kept',
+      tokensBefore: 5_000,
+    }),
+  } as never);
+
+  assert.equal(result, 'patched');
+  assert.throws(
+    () => new MissingExtensionRunnerSession(),
+    /history-compaction patch failed: extension runner unavailable/i,
+  );
+});
+
+test('configured summary model never falls back to the active model when unavailable', async () => {
+  await withConfig(async () => {
+    let compactCalls = 0;
+    class MissingSummaryModelSession extends createFakeSessionClass() {
+      model = { provider: 'chat', id: 'expensive', contextWindow: 10_000 };
+      settingsManager = {
+        getCompactionSettings: () => ({ enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 }),
+      };
+      _modelRegistry = { find: () => undefined };
+      _extensionRunner = {
+        hasHandlers: (_eventType: string) => false,
+        emit: async (_event: unknown) => undefined as unknown,
+      };
+
+      constructor() {
+        super();
+        this._buildRuntime();
+      }
+
+      _buildRuntime(): void {
+        this._extensionRunner = {
+          hasHandlers: (_eventType: string) => false,
+          emit: async (_event: unknown) => undefined as unknown,
+        };
+      }
+
+      async _getCompactionRequestAuth() {
+        return { apiKey: 'active-model-key' };
+      }
+    }
+
+    const sdk = {
+      AgentSession: MissingSummaryModelSession as never,
+      prepareCompaction: () => ({ firstKeptEntryId: 'kept', tokensBefore: 5_000 }),
+      compact: async () => {
+        compactCalls += 1;
+        throw new Error('compact must not run with the active model');
+      },
+    };
+    assert.equal(applySdkHistoryCompactionRuntimePatch(sdk as never), 'patched');
+    const session = new MissingSummaryModelSession();
+    const result = await session._extensionRunner.emit({
+      type: 'session_before_compact',
+      preparation: { firstKeptEntryId: 'native', tokensBefore: 5_000 },
+      branchEntries: [{ type: 'message' }],
+      reason: 'threshold',
+      willRetry: false,
+      signal: new AbortController().signal,
+    }) as { cancel?: boolean } | undefined;
+
+    assert.deepEqual(result, { cancel: true });
+    assert.equal(compactCalls, 0);
+  }, {
+    ...config,
+    summaryModel: { provider: 'summary', id: 'cheap' },
+  });
+});
+
+test('request failure blocks configured-model fallback but preserves explicit active-model fallback', async () => {
+  const compactedModels: string[] = [];
+  class FailingSummaryRequestSession extends createFakeSessionClass() {
+    model = { provider: 'chat', id: 'expensive', contextWindow: 10_000 };
+    settingsManager = {
+      getCompactionSettings: () => ({ enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 }),
+    };
+    _modelRegistry = {
+      find: (provider: string, id: string) => ({ provider, id, contextWindow: 10_000 }),
+    };
+    _extensionRunner = {
+      hasHandlers: (_eventType: string) => false,
+      emit: async (_event: unknown) => undefined as unknown,
+    };
+
+    constructor() {
+      super();
+      this._buildRuntime();
+    }
+
+    _buildRuntime(): void {
+      this._extensionRunner = {
+        hasHandlers: (_eventType: string) => false,
+        emit: async (_event: unknown) => undefined as unknown,
+      };
+    }
+
+    async _getCompactionRequestAuth() {
+      return { apiKey: 'summary-model-key' };
+    }
+  }
+
+  const sdk = {
+    AgentSession: FailingSummaryRequestSession as never,
+    prepareCompaction: () => ({ firstKeptEntryId: 'kept', tokensBefore: 5_000 }),
+    compact: async (_preparation: unknown, model: { id: string }) => {
+      compactedModels.push(model.id);
+      throw new Error('summary provider failed');
+    },
+  };
+  applySdkHistoryCompactionRuntimePatch(sdk as never);
+  const emitCompaction = async () => {
+    const session = new FailingSummaryRequestSession();
+    return await session._extensionRunner.emit({
+      type: 'session_before_compact',
+      preparation: { firstKeptEntryId: 'native', tokensBefore: 5_000 },
+      branchEntries: [{ type: 'message' }],
+      reason: 'threshold',
+      willRetry: false,
+      signal: new AbortController().signal,
+    }) as { cancel?: boolean } | undefined;
+  };
+
+  await withConfig(async () => {
+    assert.deepEqual(await emitCompaction(), { cancel: true });
+    assert.deepEqual(compactedModels, ['cheap']);
+  }, {
+    ...config,
+    summaryModel: { provider: 'summary', id: 'cheap' },
+  });
+
+  compactedModels.length = 0;
+  await withConfig(async () => {
+    assert.equal(await emitCompaction(), undefined);
+    assert.deepEqual(compactedModels, ['expensive']);
+  });
+
+  compactedModels.length = 0;
+  const previous = process.env[HISTORY_COMPACTION_ENV];
+  process.env[HISTORY_COMPACTION_ENV] = '{invalid';
+  try {
+    assert.deepEqual(await emitCompaction(), { cancel: true });
+    assert.deepEqual(compactedModels, []);
+  } finally {
+    if (previous === undefined) delete process.env[HISTORY_COMPACTION_ENV];
+    else process.env[HISTORY_COMPACTION_ENV] = previous;
+  }
 });
 
 test('before-compact customization applies retention, instructions, thinking and model overrides', async () => {

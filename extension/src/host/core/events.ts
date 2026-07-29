@@ -684,6 +684,9 @@ export interface OpenTabsChangedEvent {
   kind: 'OpenTabsChanged';
   openTabPaths: string[];
   pinnedTabPaths?: string[];
+  /** Pinned-session groups to restore (optional — when omitted, existing
+   *  groups are reconciled against the new open/pinned tabs). */
+  pinnedTabGroups?: string[][];
 }
 
 /**

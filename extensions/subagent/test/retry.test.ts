@@ -649,6 +649,70 @@ test("provider-aware failover excludes every configured model of the failed prov
 	assert.equal(response.details.results[0].retryCount, 1);
 });
 
+test("provider-aware failover preserves a qualified duplicate on another provider", async () => {
+	const models = [
+		{ id: "gpt-5.4", provider: "github-copilot" },
+		{ id: "gpt-5.4", provider: "openai-codex" },
+	];
+	const attempts: string[] = [];
+	const response: any = await execSingle(
+		{ agent: "worker", task: "do work", bucket: "medium" },
+		makeCtx(models),
+		makeAgents(),
+		() => undefined,
+		{ depth: 0, trail: [] },
+		noOpDetails,
+		undefined,
+		noSignal(),
+		selCtx({
+			alwaysParentModel: false,
+			fallbackOnProviderFailure: true,
+			bucketAssignments: {
+				small: [],
+				medium: ["github-copilot/gpt-5.4", "openai-codex/gpt-5.4"],
+				frontier: [],
+			},
+			allowedModelIds: new Set([
+				"github-copilot/gpt-5.4",
+				"openai-codex/gpt-5.4",
+				"gpt-5.4",
+			]),
+			registryModels: models,
+		}),
+		"t-qualified-duplicate",
+		undefined,
+		undefined,
+		undefined,
+		{
+			clock: new ImmediateClock(),
+			runAttempt: (resolved: any) => {
+				const spec = resolved.modelOverride as string;
+				attempts.push(spec);
+				const provider = spec.slice(0, spec.indexOf("/"));
+				const first = attempts.length === 1;
+				return Promise.resolve(syntheticResult({
+					exitCode: first ? 1 : 0,
+					stopReason: first ? "error" : "completed",
+					selectedModel: spec,
+					model: "gpt-5.4",
+					provider,
+					retryable: first,
+					replaySafety: "safe",
+					failureClass: first ? "timeout" : undefined,
+				}));
+			},
+		},
+	);
+
+	assert.equal(response.isError, undefined);
+	assert.equal(attempts.length, 2);
+	assert.deepEqual(new Set(attempts), new Set([
+		"github-copilot/gpt-5.4",
+		"openai-codex/gpt-5.4",
+	]));
+	assert.equal(response.details.results[0].model, "gpt-5.4");
+});
+
 test("auth failures are never retried", async () => {
 	const models = [
 		{ id: "model-a", provider: "provider-a" },

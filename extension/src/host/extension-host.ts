@@ -23,8 +23,8 @@ import { SidebarViewProvider } from './sidebar/provider';
 import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
-import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
-import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY } from './session-service/state';
+import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
+import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY } from './session-service/state';
 import { StatsService } from './stats-service';
 import { toErrorMessage } from './util/error-message';
 import type { WebviewToHostMessage, ViewState, SessionSummary } from '../shared/protocol';
@@ -165,9 +165,6 @@ export class PieExtension implements vscode.Disposable {
       statsService: this.statsService,
       tokenRateService: this.tokenRateService,
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
-      fetchWarmBashStats: () => this.backend
-        .request<WarmBashStats>('warm_bash.stats', undefined, { timeoutMs: 2000 })
-        .catch(() => EMPTY_WARM_BASH_STATS),
       fetchProviderGateStats: () => this.backend
         .request<ProviderGateStats>('provider_gate.metrics', undefined, { timeoutMs: 2000 })
         .catch(() => EMPTY_PROVIDER_GATE_STATS),
@@ -240,7 +237,7 @@ export class PieExtension implements vscode.Disposable {
         // post-reorder state) rather than re-reading the service's internal
         // state; session names are looked up from the current archState solely
         // to enrich the persisted { path, name } objects.
-        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths) => {
+        persistTabs: async (openTabPaths, activeSessionPath, pinnedTabPaths, pinnedTabGroups) => {
           const sessions = this.archState.sessions.sessions;
           const tabObjects = openTabPaths
             .filter((p) => !isPendingTabPath(p))
@@ -258,11 +255,19 @@ export class PieExtension implements vscode.Disposable {
           // to drop any pending path that slipped through (a pending tab can
           // be pinned while it resolves — never persist the transient path).
           const persistedPinnedTabPaths = pinnedTabPaths.filter((p) => !isPendingTabPath(p));
+          // Pinned groups persist as nested path arrays, filtered to drop any
+          // pending-member group (a pending tab can be a group member while it
+          // resolves). Groups with only pending members collapse to empty and
+          // are dropped.
+          const persistedPinnedTabGroups = pinnedTabGroups
+            .map((group) => group.filter((p) => !isPendingTabPath(p)))
+            .filter((group) => group.length > 0);
           try {
             await Promise.all([
               context.globalState.update(OPEN_TABS_STORAGE_KEY, tabObjects),
               context.globalState.update(ACTIVE_SESSION_STORAGE_KEY, persistedActiveSessionPath),
               context.globalState.update(PINNED_TABS_STORAGE_KEY, persistedPinnedTabPaths),
+              context.globalState.update(PINNED_TAB_GROUPS_STORAGE_KEY, persistedPinnedTabGroups),
             ]);
           } catch (err) {
             appendPieLog('warn', 'globalState', 'tab persistence failed', {

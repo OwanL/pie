@@ -154,6 +154,8 @@ export interface PersistTabsCommand extends CommandBase {
   activeSessionPath: string | null;
   /** Pinned tab paths, persisted alongside open tabs. */
   pinnedTabPaths: string[];
+  /** Pinned-session groups, persisted alongside pinned tabs. */
+  pinnedTabGroups: string[][];
 }
 
 /** Add a composer input draft (file attachment) to a session. */
@@ -325,7 +327,11 @@ export type Command =
   | SetToolResultPruningSettingsCommand
   | DuplicateSessionCommand
   | MoveSessionTabCommand
+  | MovePinnedItemCommand
   | TogglePinTabCommand
+  | GroupPinnedTabCommand
+  | MergePinnedGroupsCommand
+  | UngroupPinnedTabCommand
   | SetFileChangesExpandedCommand
   | SetFileReadCommand
   | SetSystemPromptTogglesCommand;
@@ -420,4 +426,47 @@ export interface MoveSessionTabCommand extends CommandBase {
 export interface TogglePinTabCommand extends CommandBase {
   kind: 'TogglePinTab';
   sessionPath: string;
+}
+
+/** Group a pinned tab with a target (Discord-style "drag onto"). `sourcePath`
+ *  is the dragged pinned tab; `targetPath` is any member of the target group
+ *  (or a standalone pinned tab to start a new group with). The source leaves
+ *  its old group (dissolving it below 2) and joins the target's group. Pure
+ *  state mutation + `PersistTabs` effect; no backend RPC. */
+export interface GroupPinnedTabCommand extends CommandBase {
+  kind: 'GroupPinnedTab';
+  sourcePath: string;
+  targetPath: string;
+}
+
+/** Merge two pinned groups (Discord-style "drag group chip onto group chip"):
+ *  target members then source members form one group. `sourcePath` /
+ *  `targetPath` are any member of their group. Pure state mutation +
+ *  `PersistTabs` effect; no backend RPC. */
+export interface MergePinnedGroupsCommand extends CommandBase {
+  kind: 'MergePinnedGroups';
+  sourcePath: string;
+  targetPath: string;
+}
+
+/** Remove a pinned tab from its group and reposition it as a standalone pinned
+ *  tab at `toItemIndex` (item-space, relative to the pinned strip after the
+ *  source is removed). The old group dissolves below 2. Used when a dropdown
+ *  member is dragged to a pinned-strip gap. Pure state mutation +
+ *  `PersistTabs` effect; no backend RPC. */
+export interface UngroupPinnedTabCommand extends CommandBase {
+  kind: 'UngroupPinnedTab';
+  sourcePath: string;
+  toItemIndex: number;
+}
+
+/** Reorder a pinned item (standalone chip or group block) horizontally within
+ *  the pinned strip. `sourcePath` is any member of the moved item; `toItemIndex`
+ *  is the target gap in item-space (after the source item is removed). Group
+ *  membership is unchanged — a group block moves as a unit. Pure state
+ *  mutation + `PersistTabs` effect; no backend RPC. */
+export interface MovePinnedItemCommand extends CommandBase {
+  kind: 'MovePinnedItem';
+  sourcePath: string;
+  toItemIndex: number;
 }

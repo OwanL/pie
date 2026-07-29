@@ -1,7 +1,12 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, UiDensity } from '../../../shared/protocol';
+import {
+  COMPOSER_INITIAL_ROWS_MAX,
+  COMPOSER_INITIAL_ROWS_MIN,
+  type ChatPrefs,
+  type UiDensity,
+} from '../../../shared/protocol';
 import { DENSITY_OPTIONS, UI_THEME_PRESETS, matchUiThemePreset, uiThemePresetToPrefs } from './settings-menu-helpers';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -292,6 +297,25 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
           aria-label="Message width"
         />
         <div class="toolbar-settings-item-hint">Max width of chat bubbles. Narrow view scales up to keep content readable.</div>
+      </div>
+      <div class="toolbar-settings-ui-control">
+        <div class="toolbar-settings-ui-control-head">
+          <span class="toolbar-settings-ui-control-label">Initial composer rows</span>
+          <span class="toolbar-settings-ui-control-value">
+            {prefs.composerInitialRows} {prefs.composerInitialRows === 1 ? 'row' : 'rows'}
+          </span>
+        </div>
+        <input
+          type="range"
+          class="toolbar-settings-slider toolbar-settings-ui-slider"
+          min={COMPOSER_INITIAL_ROWS_MIN}
+          max={COMPOSER_INITIAL_ROWS_MAX}
+          step="1"
+          value={prefs.composerInitialRows}
+          onInput={(e) => onSetPrefs({ composerInitialRows: Number((e.target as HTMLInputElement).value) })}
+          aria-label="Initial composer rows"
+        />
+        <div class="toolbar-settings-item-hint">Rows available for typing before the composer starts expanding.</div>
       </div>
       <div class="toolbar-settings-ui-control">
         <div class="toolbar-settings-ui-control-head">

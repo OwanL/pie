@@ -36,16 +36,22 @@ import { useTabContextMenu } from './drag-and-drop/context-menu';
 export function useTabDragAndDrop({
   openTabPaths,
   pinnedTabPaths,
+  pinnedTabGroups,
   onMove,
+  onMovePinnedItem,
   onSelect,
   onClose,
   onDuplicate,
   onTogglePin,
+  onGroupPinnedTab,
+  onMergePinnedGroups,
+  onUngroupPinnedTab,
   onRunAction,
   stripRef,
 }: UseTabDragAndDropOptions): UseTabDragAndDropResult {
   const openTabPathsRef = useRef(openTabPaths);
   const pinnedTabPathsRef = useRef(pinnedTabPaths);
+  const pinnedTabGroupsRef = useRef(pinnedTabGroups);
   const dragCandidateRef = useRef<TabDragCandidate | null>(null);
   const dragStateRef = useRef<SessionTabDragState | null>(null);
   const pointerPositionRef = useRef<{ x: number; y: number } | null>(null);
@@ -62,6 +68,7 @@ export function useTabDragAndDrop({
 
   openTabPathsRef.current = openTabPaths;
   pinnedTabPathsRef.current = pinnedTabPaths;
+  pinnedTabGroupsRef.current = pinnedTabGroups;
 
   const pointerMoveListener = useCallback((event: PointerEvent) => {
     pointerMoveHandlerRef.current(event);
@@ -100,7 +107,7 @@ export function useTabDragAndDrop({
   }, [pointerMoveListener, pointerUpListener, pointerCancelListener, windowBlurListener, stopAutoScrollLoop]);
 
   const syncDragFromPointer = useCallback((clientX: number, clientY: number) => {
-    runSyncDragFromPointer(clientX, clientY, dragStateRef, stripRef, setDragState, pinnedTabPathsRef);
+    runSyncDragFromPointer(clientX, clientY, dragStateRef, stripRef, setDragState, pinnedTabPathsRef, pinnedTabGroupsRef);
   }, []);
 
   // Drive the floating ghost's transform imperatively from the pointermove
@@ -124,8 +131,15 @@ export function useTabDragAndDrop({
   }, [endTracking]);
 
   const commitDrag = useCallback(() => {
-    runCommitDrag(dragStateRef, openTabPathsRef, onMove, onSelect, resetDrag);
-  }, [onMove, onSelect, resetDrag]);
+    runCommitDrag(dragStateRef, openTabPathsRef, pinnedTabPathsRef, pinnedTabGroupsRef, {
+      onMove,
+      onMovePinnedItem,
+      onGroupPinnedTab,
+      onMergePinnedGroups,
+      onUngroupPinnedTab,
+      onSelect,
+    }, resetDrag);
+  }, [onMove, onMovePinnedItem, onGroupPinnedTab, onMergePinnedGroups, onUngroupPinnedTab, onSelect, resetDrag]);
 
   autoScrollTickRef.current = () => {
     runAutoScrollTick(
@@ -191,7 +205,22 @@ export function useTabDragAndDrop({
   });
 
   const onPointerDown = useCallback((event: PointerEvent, sourceIndex: number, sourcePath: string) => {
-    runPointerDown(event, sourceIndex, sourcePath, openTabPaths, dragCandidateRef, pointerPositionRef, beginTracking);
+    runPointerDown(event, sourceIndex, sourcePath, openTabPaths, false, false, dragCandidateRef, pointerPositionRef, beginTracking);
+  }, [beginTracking, openTabPaths.length]);
+
+  /** Pointer-down on a pinned group chip or a dropdown member. The source is
+   *  identified by any member path; `sourceIsGroupChip` marks a whole-group
+   *  drag (merge/reorder-block) and `sourceFromDropdown` marks a dropdown
+   *  member drag (ungroup on gap-drop). `itemIndex` seeds the initial drop
+   *  gap (overwritten on the first pointermove). */
+  const onPinnedItemPointerDown = useCallback((
+    event: PointerEvent,
+    sourcePath: string,
+    sourceIsGroupChip: boolean,
+    sourceFromDropdown: boolean,
+    itemIndex: number,
+  ) => {
+    runPointerDown(event, itemIndex, sourcePath, openTabPaths, sourceIsGroupChip, sourceFromDropdown, dragCandidateRef, pointerPositionRef, beginTracking);
   }, [beginTracking, openTabPaths.length]);
 
   const onClick = useCallback((tabPath: string) => {
@@ -203,6 +232,7 @@ export function useTabDragAndDrop({
     tabContextMenu,
     setTabContextMenu,
     onPointerDown,
+    onPinnedItemPointerDown,
     onClick,
     onContextMenu,
     onContextAction,

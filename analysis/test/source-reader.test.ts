@@ -267,13 +267,6 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
     subagentCallCount: 1,
     subagentTaskCount: 2,
     subagentAgentNames: ['planner', 2],
-    subagentScoredTaskCount: 1.2,
-    subagentTaskScores: {
-      precision: { sum: 3.8, count: 2.2, max: 5.7 },
-      creativity: null,
-      reasoning: { sum: -1, count: 3, max: 4 },
-      thoroughness: { sum: 4, count: 2, max: 5 },
-    },
   };
 
   run.fileExtensions = {
@@ -308,9 +301,6 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   assert.equal(coerced?.toolUsage.failureSamples[0]?.errorExcerpt, '');
   assert.deepEqual(coerced?.toolUsage.failureSamples[0]?.verificationKinds, ['test', 'build']);
   assert.deepEqual(coerced?.toolUsage.subagentAgentNames, ['planner']);
-  assert.equal(coerced?.toolUsage.subagentTaskScores.precision.sum, 3);
-  assert.equal(coerced?.toolUsage.subagentTaskScores.creativity.sum, 0);
-  assert.equal(coerced?.toolUsage.subagentTaskScores.reasoning.sum, 0);
   assert.equal(coerced?.toolUsage.subagentInputTokens, 0);
   assert.equal(coerced?.toolUsage.subagentOutputTokens, 0);
   assert.equal(coerced?.toolUsage.subagentCacheReadTokens, 0);

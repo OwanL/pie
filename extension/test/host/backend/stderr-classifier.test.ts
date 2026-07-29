@@ -59,7 +59,6 @@ test('legacy fallback: error keyword → warn', () => {
 });
 
 test('legacy fallback: chatty poll/RPC/timing substrings → debug', () => {
-  assert.equal(classifyBackendStderrLine('[pie:backend] warm_bash.stats {...}'), 'debug');
   assert.equal(classifyBackendStderrLine('[pie:backend] provider_gate.metrics {...}'), 'debug');
   assert.equal(classifyBackendStderrLine('[pie:backend] backend-request received'), 'debug');
   assert.equal(classifyBackendStderrLine('[pie:backend] backend-timing op.completed'), 'debug');

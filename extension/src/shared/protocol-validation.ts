@@ -34,6 +34,7 @@ import type {
   WebviewToHostMessage,
 } from './protocol';
 import { isThinkingLevel, THINKING_LEVEL_SET } from './thinking-level.js';
+import { COMPOSER_INITIAL_ROWS_MAX, COMPOSER_INITIAL_ROWS_MIN } from './protocol/settings.js';
 
 export type ValidationResult<T> =
   | { ok: true; value: T }
@@ -313,6 +314,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     bashDefaultTimeout: [1, 600],
     uiBaseFontSize: [10, 24],
     uiComposerFontSize: [11, 28],
+    composerInitialRows: [COMPOSER_INITIAL_ROWS_MIN, COMPOSER_INITIAL_ROWS_MAX],
     expandedSectionFontSize: [8, 32],
     expandedSectionMaxHeight: [80, 1600],
     uiMessageWidth: [40, 100],
@@ -320,6 +322,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     activityTailLines: [1, 12],
     uiMessageRailSize: [8, 40],
   };
+  const integerNumericKeys = new Set(['composerInitialRows']);
   const stringKeys: Array<keyof ChatPrefs> = [
     'uiFontSans',
     'uiFontMono',
@@ -367,7 +370,12 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     } else {
       const range = numericRanges[key];
       if (!range) return false;
-      if (v !== undefined && (!isFiniteNumber(v) || (v as number) < range[0] || (v as number) > range[1])) return false;
+      if (v !== undefined && (
+        !isFiniteNumber(v)
+        || (v as number) < range[0]
+        || (v as number) > range[1]
+        || (integerNumericKeys.has(key) && !Number.isInteger(v))
+      )) return false;
     }
   }
   return true;
@@ -541,6 +549,18 @@ export function validateWebviewToHostMessage(
       if (!isOptionalString(value.sessionPath)) return fail('moveSessionTab: bad `sessionPath`');
       if (!isFiniteNumber(value.fromIndex)) return fail('moveSessionTab: missing `fromIndex`');
       if (!isFiniteNumber(value.toIndex)) return fail('moveSessionTab: missing `toIndex`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'groupPinnedTab':
+    case 'mergePinnedGroups':
+      if (!isString(value.sourcePath) || value.sourcePath.length === 0) return fail(`${type}: invalid \`sourcePath\``);
+      if (!isString(value.targetPath) || value.targetPath.length === 0) return fail(`${type}: invalid \`targetPath\``);
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'ungroupPinnedTab':
+    case 'movePinnedItem':
+      if (!isString(value.sourcePath) || value.sourcePath.length === 0) return fail(`${type}: invalid \`sourcePath\``);
+      if (!isNonNegativeSafeInteger(value.toItemIndex)) return fail(`${type}: invalid \`toItemIndex\``);
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'loadOlderTranscript':

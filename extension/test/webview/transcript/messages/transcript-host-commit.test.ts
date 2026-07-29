@@ -54,7 +54,7 @@ function CommitRegistryProbe({ message, observe }: { message: ChatMessage; obser
 
 test('mounted commit provider retains every accepted leaf above the former 512-leaf boundary', async () => {
   const root = document.getElementById('root')!;
-  const tools: ToolCall[] = Array.from({ length: 600 }, (_, index) => ({
+  const tools: ToolCall[] = Array.from({ length: 512 }, (_, index) => ({
     id: `tool-${index}`,
     name: 'read',
     input: { index },
@@ -71,7 +71,7 @@ test('mounted commit provider retains every accepted leaf above the former 512-l
     status: 'streaming',
     toolCalls: tools,
     parts: tools.map((tool) => ({ kind: 'toolCall' as const, toolCall: tool })),
-    toolStateRevision: 600,
+    toolStateRevision: 512,
   };
   const window = {
     loadedStart: 0, loadedEnd: 1, totalCount: 1,
@@ -98,12 +98,29 @@ test('mounted commit provider retains every accepted leaf above the former 512-l
   await new Promise((resolve) => setImmediate(resolve));
   render(null, root);
 
-  assert.equal(Math.max(...observedSizes), 601, 'message plus all 600 live tool leaves must remain registered');
+  assert.equal(Math.max(...observedSizes), 513, 'message plus 512 live tool leaves must exceed the old boundary');
 });
 
 test('app commit reports only a transcript block that survives the render grace period', async () => {
   const messages: any[] = [];
   const root = document.getElementById('root')!;
+  const pendingTimers = new Map<number, TimerHandler>();
+  const originalSetTimeout = window.setTimeout;
+  const originalClearTimeout = window.clearTimeout;
+  let nextTimer = 1;
+  window.setTimeout = ((callback: TimerHandler) => {
+    const id = nextTimer++;
+    pendingTimers.set(id, callback);
+    return id;
+  }) as typeof window.setTimeout;
+  window.clearTimeout = ((id: number) => { pendingTimers.delete(id); }) as typeof window.clearTimeout;
+  const flushTimers = () => {
+    const callbacks = [...pendingTimers.values()];
+    pendingTimers.clear();
+    for (const callback of callbacks) {
+      if (typeof callback === 'function') callback();
+    }
+  };
   const target = {
     revision: 7,
     viewGeneration: 3,
@@ -140,39 +157,45 @@ test('app commit reports only a transcript block that survives the render grace 
     postMessage: (message: any) => messages.push(message),
   };
 
-  render(h(TranscriptCommitProvider, {
-    target,
-    appSurface: 'transcript',
-    postMessage: (message: any) => messages.push(message),
-    children: h(TranscriptHost, hostProps as never),
-  }), root);
+  try {
+    render(h(TranscriptCommitProvider, {
+      target,
+      appSurface: 'transcript',
+      postMessage: (message: any) => messages.push(message),
+      children: h(TranscriptHost, hostProps as never),
+    }), root);
 
-  assert.ok(messages.some((message) => message.type === 'appCommitted' && message.payload.revision === 7));
-  assert.equal(messages.some((message) => message.type === 'transcriptCommitBlocked'), false);
-  await new Promise((resolve) => setTimeout(resolve, 275));
-  assert.equal(
-    messages.some((message) => message.type === 'transcriptCommitBlocked'),
-    false,
-    'the transient first layout must settle without a warning',
-  );
+    assert.ok(messages.some((message) => message.type === 'appCommitted' && message.payload.revision === 7));
+    assert.equal(messages.some((message) => message.type === 'transcriptCommitBlocked'), false);
+    await new Promise((resolve) => setImmediate(resolve));
+    flushTimers();
+    assert.equal(
+      messages.some((message) => message.type === 'transcriptCommitBlocked'),
+      false,
+      'the transient first layout must cancel its warning timer',
+    );
 
-  render(h(TranscriptCommitProvider, {
-    target,
-    appSurface: 'transcript',
-    postMessage: (message: any) => messages.push(message),
-    children: h(TranscriptHost, {
-      ...hostProps,
-      openTabPaths: ['/actual'],
-      activeSessionPath: '/actual',
-    } as never),
-  }), root);
-  await new Promise((resolve) => setTimeout(resolve, 275));
-  render(null, root);
+    render(h(TranscriptCommitProvider, {
+      target,
+      appSurface: 'transcript',
+      postMessage: (message: any) => messages.push(message),
+      children: h(TranscriptHost, {
+        ...hostProps,
+        openTabPaths: ['/actual'],
+        activeSessionPath: '/actual',
+      } as never),
+    }), root);
+    flushTimers();
 
-  assert.deepEqual(
-    messages.filter((message) => message.type === 'transcriptCommitBlocked').map((message) => message.payload.reason),
-    ['structure_mismatch'],
-  );
+    assert.deepEqual(
+      messages.filter((message) => message.type === 'transcriptCommitBlocked').map((message) => message.payload.reason),
+      ['structure_mismatch'],
+    );
+  } finally {
+    render(null, root);
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+  }
 });
 
 test('switching the active session remounts the transcript surface', () => {

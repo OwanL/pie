@@ -4,7 +4,7 @@
 import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
 
-import type { AggregateStats, AggregateLastRun, DeferredTriggerView, WarmBashStats, ProviderGateStats, AggregateSeriesPoint } from '../../../shared/protocol';
+import type { AggregateStats, AggregateLastRun, DeferredTriggerView, ProviderGateStats, AggregateSeriesPoint } from '../../../shared/protocol';
 import { formatCompactTokens } from '../utils/format-tokens';
 import { cx } from '../utils/cx';
 import { Tooltip } from '../components/tooltip';
@@ -17,14 +17,14 @@ import { Num } from './num';
  * Thin status strip anchored at the bottom of the panel (below the composer).
  * Focused on **recent + current** activity over long-term totals:
  *
- *   today $X · wk $Y · tok/s (live while a session is running) · N tabs
+ *   today $X · wk $Y · tok/s (rolling recent output) · N tabs
  *
  * Each segment's tooltip is a **rich** tooltip (JSX rendered into an
  * out-of-tree host via the `Tooltip` component's `contentNode`): the numeric
  * segments (today/week cost, tokens, throughput, last run, sessions) carry a
  * small timeseries graph — a stacked-area chart with per-provider bands and a
  * per-model breakdown on hover — while the live-state segments (provider gate,
- * warm bash, deferred) use richly-formatted text. Custom tooltips are used
+ * deferred) use richly-formatted text. Custom tooltips are used
  * instead of native `title` because the strip re-renders ~7×/sec during
  * streaming — native `title` tooltips close on every re-render and flicker.
  *
@@ -51,11 +51,11 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     lastRun,
   } = stats;
 
-  // The inline rate is strictly live. Historical means remain available in
-  // the tooltip, but showing one while idle makes it look like work is active.
+  // This is a host-computed 30-second wall-clock rolling aggregate. It remains
+  // visible through tools and briefly after completion, then decays to zero.
   const running = runningSessionCount > 0;
-  const headlineRate = running ? liveTokensPerSecond : 0;
-  const rateSource = running ? 'live' : 'none';
+  const headlineRate = liveTokensPerSecond;
+  const rateSource = liveTokensPerSecond > 0 ? 'rolling' : 'none';
 
   return (
     <div
@@ -84,7 +84,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
       <Sep />
       <Tooltip contentNode={throughputTooltipNode(stats, rateSource)} placement="top" freezeWhileVisible>
         <span class="aggregate-strip-seg">
-          {rateSource === 'live' && <span class="aggregate-strip-live-tag">live</span>}
+          {rateSource === 'rolling' && <span class="aggregate-strip-live-tag">30s</span>}
           {rateSource === 'none'
             ? <span class="aggregate-strip-rate aggregate-strip-num" style="min-width:4ch">—</span>
             : <Num value={headlineRate} format={formatRate} width={4} class="aggregate-strip-rate" />}
@@ -122,20 +122,6 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
                   {p.queuedRequests > 0 && <span class="aggregate-strip-provider-queued">+{p.queuedRequests}</span>}
                 </span>
               ))}
-            </span>
-          </Tooltip>
-        </>
-      )}
-      {stats.warmBash.enabled && (
-        <>
-          <Sep />
-          <Tooltip contentNode={warmBashTooltipNode(stats.warmBash)} placement="top" freezeWhileVisible>
-            <span class="aggregate-strip-seg aggregate-strip-warm">
-              <span class="aggregate-strip-warm-label">warm</span>
-              <span class="aggregate-strip-warm-counts">{stats.warmBash.ready}/{stats.warmBash.poolSize}</span>
-              {stats.warmBash.warming > 0 && (
-                <span class="aggregate-strip-warm-warming" aria-hidden="true">↑{stats.warmBash.warming}</span>
-              )}
             </span>
           </Tooltip>
         </>
@@ -229,9 +215,6 @@ function statsSignature(s: AggregateStats): string {
     s.tokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.todayTokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.lastRun ? `${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.turnSeries.length}` : '',
-    s.warmBash.enabled, s.warmBash.poolSize, s.warmBash.ready, s.warmBash.warming,
-    s.warmBash.fastPathEnabled, s.warmBash.totalFastPath, s.warmBash.totalWarm,
-    s.warmBash.totalFallback, s.warmBash.totalWarmupFailures,
     s.providerGate.enabled,
     s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.paused}`).join(','),
   ].join('|');
@@ -386,12 +369,13 @@ function tokensTooltipNode(s: AggregateStats): JSX.Element {
   );
 }
 
-function throughputTooltipNode(s: AggregateStats, source: 'live' | 'today' | 'all-time' | 'none'): JSX.Element {
+function throughputTooltipNode(s: AggregateStats, source: 'rolling' | 'today' | 'all-time' | 'none'): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
   const lines: string[] = [];
-  if (s.runningSessionCount > 0) {
-    lines.push(`Live ${formatRate(s.liveTokensPerSecond)} tok/s · ${s.runningSessionCount} running`);
+  if (s.liveTokensPerSecond > 0) {
+    lines.push(`Last 30 seconds ${formatRate(s.liveTokensPerSecond)} tok/s`);
   }
+  if (s.runningSessionCount > 0) lines.push(`${s.runningSessionCount} running`);
   if (s.todayTokensPerSecond > 0) lines.push(`Today ${formatRate(s.todayTokensPerSecond)} tok/s`);
   if (s.tokensPerSecond > 0) lines.push(`All-time ${formatRate(s.tokensPerSecond)} tok/s`);
   if (lines.length === 0) lines.push(source === 'none' ? 'No throughput recorded yet.' : 'Measuring…');
@@ -399,7 +383,7 @@ function throughputTooltipNode(s: AggregateStats, source: 'live' | 'today' | 'al
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
         <span>Throughput</span>
-        <span class="rich-tooltip-head-value">{formatRate(source === 'live' ? s.liveTokensPerSecond : (s.todayTokensPerSecond > 0 ? s.todayTokensPerSecond : s.tokensPerSecond))} tok/s</span>
+        <span class="rich-tooltip-head-value">{formatRate(source === 'rolling' ? s.liveTokensPerSecond : (s.todayTokensPerSecond > 0 ? s.todayTokensPerSecond : s.tokensPerSecond))} tok/s</span>
       </div>
       <div class="rich-tooltip-sub">{lines.join('\n')}</div>
       <StackedAreaChart points={s.todayThroughputSeries} mode="rate" formatY={(n) => formatRate(n)} formatX={formatTimeOfDay} unit="tok/s"
@@ -422,26 +406,6 @@ function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
       <div class="rich-tooltip-sub">{formatDuration(r.durationMs)}  ·  ↓{formatCompactTokens(r.inputTokens)} in  ↑{formatCompactTokens(r.outputTokens)} out</div>
       <Sparkline data={r.turnSeries.map((t) => ({ ms: t.ms, value: t.outputTokens }))} />
       <div class="rich-tooltip-sub">{[modelLine, `${r.startedAt} → ${r.endedAt}`].join('\n')}</div>
-    </div>
-  );
-}
-
-function warmBashTooltipNode(w: WarmBashStats): JSX.Element {
-  const lines: string[] = [
-    `Pool ${w.poolSize}  ·  ${w.ready} ready  ·  ${w.warming} warming`,
-    `Fast path: ${w.fastPathEnabled ? 'on' : 'off'}`,
-  ];
-  const totalExecs = w.totalFastPath + w.totalWarm + w.totalFallback;
-  if (totalExecs > 0) {
-    lines.push(`Executions: ${totalExecs} total`);
-    lines.push(`  ${w.totalFastPath} fast path  ·  ${w.totalWarm} warm  ·  ${w.totalFallback} fallback`);
-  }
-  if (w.totalWarmupFailures > 0) lines.push(`Warmup failures: ${w.totalWarmupFailures}`);
-  lines.push('Tune in Settings → Bash (idle target, fast path, timeouts).');
-  return (
-    <div class="rich-tooltip">
-      <div class="rich-tooltip-head"><span>Warm bash</span><span class="rich-tooltip-head-value">{w.ready}/{w.poolSize}</span></div>
-      <div class="rich-tooltip-sub">{lines.join('\n')}</div>
     </div>
   );
 }

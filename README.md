@@ -195,30 +195,24 @@ See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local sta
 ### Run repo-wide tests
 
 ```bash
-# from repo root; parallel unit suite, no coverage instrumentation
-npm run test
+# canonical development command: dependency-aware affected tests
+npm test
+
+# full unit suite without coverage (normally only needed for runner changes)
+npm run test:all
 
 # coverage gates used by the release verification workflow
 npm run test:coverage
 
-# opt-in real-SDK and real-shell integration tests
+# opt-in real-SDK, real-Git, and real-shell integration tests
 npm run test:integration
-
-# tight loop: run only named files
-npm run test:file -- extension/test/webview/transcript/activity/activity-tail.test.ts
-
-# run fast suites for packages touched in the working tree
-npm run test:changed
-
-# fast package loop (parallel files, no coverage instrumentation)
-npm run test:fast -- --package extension
 
 # coverage verification scoped to one package
 npm run test:coverage -- --package extension
 npm run test:coverage -- --package subagent
 ```
 
-`npm run test` is the canonical unit runner. A successful repo-wide run is content-addressed by Node version, Git HEAD, tracked changes, and untracked source content; unchanged reruns complete in under 30 seconds (normally about 1–2 seconds). Slow tests that require real SDK sessions, child processes, Git repositories, or shell pools live behind `npm run test:integration`; coverage collection remains available through `npm run test:coverage`. `npm run check` combines generated-config drift, parallel incremental typechecks, lint, and changed-package tests; `npm run verify` performs the full local release gate (including coverage) and reuses its completed typecheck during the build. Use `test:file` while iterating and the appropriate scoped or repo-wide command before finishing a change.
+`npm test` is the one development command to remember. It traces changed files through static relative imports and file-URL fixtures, runs affected test files concurrently, and conservatively falls back to a package suite when a changed source has no dependency edge. Test-runner or global shared-infrastructure changes trigger the full fast suite. Slow tests that require real SDK sessions, process trees, Git repositories, or shell pools live behind `npm run test:integration`. Pre-push `npm run verify` runs the full fast suite; the slower coverage release gate remains available as `npm run verify:release` or `npm run test:coverage`.
 
 Test and typecheck children have a 20-minute watchdog that kills the complete process tree on timeout or runner interruption (including `taskkill /T /F` on Windows). Override it with `PIE_TEST_PROCESS_TIMEOUT_MS`; set `0` only to disable it explicitly.
 

@@ -132,6 +132,7 @@ test('groupFilesByPackage retains repo-relative script paths for execution', () 
   }]);
   assert.deepEqual(buildTsxArgs(groups[0]), [
     '--test',
+    '--test-force-exit',
     'scripts/test/run-test-files.test.mjs',
   ]);
 });
@@ -162,7 +163,7 @@ test('groupFilesByPackage collects all classification errors before throwing', (
 test('buildTsxArgs is fast/no-coverage and prefixes --tsconfig before files', () => {
   assert.deepEqual(
     buildTsxArgs({ files: ['test/a.test.ts'] }),
-    ['--test', 'test/a.test.ts'],
+    ['--test', '--test-force-exit', 'test/a.test.ts'],
   );
   assert.deepEqual(
     buildTsxArgs({
@@ -171,6 +172,7 @@ test('buildTsxArgs is fast/no-coverage and prefixes --tsconfig before files', ()
     }),
     [
       '--test',
+      '--test-force-exit',
       '--tsconfig=extensions/subagent/tsconfig.json',
       'extensions/subagent/test/a.test.ts',
       'extensions/subagent/test/b.test.ts',

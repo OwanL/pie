@@ -5,7 +5,7 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
-import { normalizeStoredTabPaths } from '../../shared/tab-behavior';
+import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
 
 import {
@@ -84,6 +84,12 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
   const storedRawPinned = options.context.globalState.get<unknown[]>('pinnedTabPaths') ?? [];
   const storedPinned = normalizeStoredTabPaths(storedRawPinned);
   const restoredPinnedTabs = storedPinned.filter((p) => restoredTabs.includes(p));
+  // Pinned groups are stored as nested path arrays. Normalize defensively
+  // (drop non-array/non-string/pending/dup entries); the reducer reconciles
+  // them against the restored pinned tabs (drops invalid members, dissolves
+  // <2, restores contiguity) when OpenTabsChanged is dispatched.
+  const storedRawGroups = options.context.globalState.get<unknown>('pinnedTabGroups');
+  const storedGroups = normalizeStoredPinnedTabGroups(storedRawGroups);
   const restoredSessionPlan = buildRestoredSessionPlan(restoredTabs, preferredStartupPath);
   const { startupPath: restoredStartupPath, preloadPaths } = restoredSessionPlan;
   return {
@@ -96,11 +102,12 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
     preloadPaths,
     storedPinned,
     restoredPinnedTabs,
+    storedGroups,
   };
 }
 
-function applyRestoredTabPaths(options: StartSessionBackendOptions, restoredTabs: string[], restoredPinnedTabs: string[]): void {
-  options.dispatchArch({ kind: 'OpenTabsChanged', openTabPaths: restoredTabs, pinnedTabPaths: restoredPinnedTabs });
+function applyRestoredTabPaths(options: StartSessionBackendOptions, restoredTabs: string[], restoredPinnedTabs: string[], restoredGroups: string[][]): void {
+  options.dispatchArch({ kind: 'OpenTabsChanged', openTabPaths: restoredTabs, pinnedTabPaths: restoredPinnedTabs, pinnedTabGroups: restoredGroups });
 }
 
 function persistIfTabStateChanged(
@@ -110,14 +117,20 @@ function persistIfTabStateChanged(
   preferredStartupPath: string | null,
   restoredStartupPath: string | null,
   storedPinned: string[],
-  restoredPinnedTabs: string[],
+  reconciledPinnedTabs: string[],
+  storedGroups: string[][],
+  reconciledGroups: string[][],
 ): void {
   const tabsChanged =
     rawTabs.length !== storedRawTabs.length
     || preferredStartupPath !== (restoredStartupPath ?? undefined);
   const pinnedChanged =
-    restoredPinnedTabs.length !== storedPinned.length
-    || restoredPinnedTabs.some((p, i) => p !== storedPinned[i]);
+    reconciledPinnedTabs.length !== storedPinned.length
+    || reconciledPinnedTabs.some((p, i) => p !== storedPinned[i]);
+  const groupsChanged =
+    reconciledGroups.length !== storedGroups.length
+    || reconciledGroups.some((g, i) =>
+      g.length !== storedGroups[i].length || g.some((m, j) => m !== storedGroups[i][j]));
   if (tabsChanged) {
     void Promise.resolve(options.context.globalState.update('openTabPaths', rawTabs)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for openTabPaths', { error: toErrorMessage(error) });
@@ -127,8 +140,13 @@ function persistIfTabStateChanged(
     });
   }
   if (pinnedChanged) {
-    void Promise.resolve(options.context.globalState.update('pinnedTabPaths', restoredPinnedTabs)).catch((error) => {
+    void Promise.resolve(options.context.globalState.update('pinnedTabPaths', reconciledPinnedTabs)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for pinnedTabPaths', { error: toErrorMessage(error) });
+    });
+  }
+  if (groupsChanged) {
+    void Promise.resolve(options.context.globalState.update('pinnedTabGroups', reconciledGroups)).catch((error) => {
+      appendPieLog('warn', 'startup', 'globalState.update failed for pinnedTabGroups', { error: toErrorMessage(error) });
     });
   }
 }
@@ -458,10 +476,26 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     preloadPaths,
     storedPinned,
     restoredPinnedTabs,
+    storedGroups,
   } = computeRestorePlan(options);
 
-  applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs);
-  persistIfTabStateChanged(options, storedRawTabs, rawTabs, preferredStartupPath, restoredStartupPath, storedPinned, restoredPinnedTabs);
+  applyRestoredTabPaths(options, restoredTabs, restoredPinnedTabs, storedGroups);
+
+  // The reducer reconciles pinned tabs + groups against the restored open
+  // tabs (drops invalid members, dissolves <2, restores group contiguity).
+  // Persist the reconciled values so globalState matches archState exactly.
+  const reconciled = options.getArchState().sessions;
+  persistIfTabStateChanged(
+    options,
+    storedRawTabs,
+    rawTabs,
+    preferredStartupPath,
+    restoredStartupPath,
+    storedPinned,
+    reconciled.pinnedTabPaths,
+    storedGroups,
+    reconciled.pinnedTabGroups,
+  );
 
   const cachedSessions = buildRestoredSessionSummaries(rawTabs, restoredTabs, workspaceCwd, new Date().toISOString());
   if (cachedSessions.length > 0) {

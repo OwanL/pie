@@ -92,6 +92,13 @@ export interface SessionsState {
   openTabPaths: string[];
   /** Pinned tab paths (browser-style: clustered at the far left, icon-only). */
   pinnedTabPaths: string[];
+  /** Pinned-session groups (Discord-style clustering). Each inner array is an
+   *  unnamed group of pinned tab paths in insertion order; any member path
+   *  identifies its group. Groups ⊆ `pinnedTabPaths`, a path is in at most one
+   *  group, a group's members are contiguous in `pinnedTabPaths` (in group
+   *  order), and groups with < 2 members are dissolved. Persisted to
+   *  globalState alongside `pinnedTabPaths`. */
+  pinnedTabGroups: string[][];
   /** Session paths currently streaming a response. */
   runningSessionPaths: string[];
   /** Sessions that finished while not the active tab. */
@@ -451,6 +458,7 @@ export function createInitialArchState(): ArchState {
       sessions: [],
       openTabPaths: [],
       pinnedTabPaths: [],
+      pinnedTabGroups: [],
       runningSessionPaths: [],
       unreadFinishedSessionPaths: [],
       activeSessionPath: null,

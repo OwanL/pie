@@ -9,7 +9,6 @@
 #
 # Field flow (see docs/internal/centralized-model-config.md §4):
 #   pricing:{input,output,cacheRead,cacheWrite} -> models.json cost:{...} (USD/M-token)
-#   costRank:N            -> model-profiles.yaml cost:N (0-30 fallback ranking)
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
 #   input/maxImagesPerRequest -> models.json provider-qualified request policy
@@ -136,7 +135,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Too small for agentic work
-        costRank: 8
       - id: llama3.2-3b-pi:latest
         name: "Ollama Local: Llama 3.2 3B (Pi, 4K ctx)"
         contextWindow: 4096
@@ -150,7 +148,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Too small for agentic work
-        costRank: 4
       - id: gemma4-e2b-pi:latest
         name: "Ollama Local: Gemma 4 E2B (Pi, 4K ctx)"
         contextWindow: 4096
@@ -164,7 +161,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Too small for agentic work
-        costRank: 4
       - id: qwen2.5:7b-instruct
         name: "Ollama Local: Qwen 2.5 7B Instruct (8K ctx)"
         contextWindow: 8192
@@ -178,7 +174,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Local model; not for general agentic use
-        costRank: 8
       - id: qwen3.5:9b
         name: "Ollama Local: Qwen 3.5 9B (8K ctx)"
         contextWindow: 8192
@@ -192,7 +187,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Local model; reserved for pruning prepass
-        costRank: 8
       - id: llama3.1:8b
         name: "Ollama Local: Llama 3.1 8B (8K ctx)"
         contextWindow: 8192
@@ -206,7 +200,6 @@ providers:
         thinking:
           - minimal
         disabledReason: Local model; reserved for pruning prepass
-        costRank: 8
       - id: deepseek-v4-flash:cloud
         name: "Ollama Cloud: DeepSeek V4 Flash"
         reasoning: true
@@ -223,7 +216,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 6
       - id: deepseek-v4-pro:cloud
         name: "Ollama Cloud: DeepSeek V4 Pro"
         reasoning: true
@@ -240,7 +232,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 11
       - id: gemini-3-flash-preview:cloud
         name: "Ollama Cloud: Gemini 3 Flash Preview"
         reasoning: true
@@ -264,7 +255,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 9
       - id: gemma4:31b-cloud
         name: "Ollama Cloud: Gemma 4 31B"
         reasoning: true
@@ -285,7 +275,6 @@ providers:
           - low
           - medium
         disabledReason: null
-        costRank: 9
       - id: glm-4.7:cloud
         name: "Ollama Cloud: GLM 4.7"
         reasoning: true
@@ -301,7 +290,6 @@ providers:
           - low
           - medium
         disabledReason: null
-        costRank: 9
       - id: glm-5:cloud
         name: "Ollama Cloud: GLM 5"
         reasoning: true
@@ -318,7 +306,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
       - id: glm-5.1:cloud
         name: "Ollama Cloud: GLM 5.1"
         reasoning: true
@@ -336,7 +323,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
       - id: glm-5.2:cloud
         name: "Ollama Cloud: GLM 5.2"
         reasoning: true
@@ -357,7 +343,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: gpt-oss:120b-cloud
         name: "Ollama Cloud: GPT OSS 120B"
         reasoning: true
@@ -374,7 +359,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 18
       - id: gpt-oss:20b-cloud
         name: "Ollama Cloud: GPT OSS 20B"
         reasoning: true
@@ -391,7 +375,6 @@ providers:
           - low
           - medium
         disabledReason: Superseded by gpt-oss:120b
-        costRank: 7
       - id: kimi-k2.5:cloud
         name: "Ollama Cloud: Kimi K2.5"
         reasoning: true
@@ -412,7 +395,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 9
       - id: kimi-k2.6:cloud
         name: "Ollama Cloud: Kimi K2.6"
         reasoning: true
@@ -434,7 +416,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 9
       - id: kimi-k2.7-code:cloud
         name: "Ollama Cloud: Kimi K2.7 Code"
         reasoning: true
@@ -456,7 +437,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 9
       - id: minimax-m2.1:cloud
         name: "Ollama Cloud: MiniMax M2.1"
         contextWindow: 196608
@@ -470,7 +450,6 @@ providers:
         thinking:
           - minimal
         disabledReason: null
-        costRank: 5
       - id: minimax-m2.5:cloud
         name: "Ollama Cloud: MiniMax M2.5"
         reasoning: true
@@ -487,7 +466,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 5
       - id: minimax-m2.7:cloud
         name: "Ollama Cloud: MiniMax M2.7"
         reasoning: true
@@ -504,7 +482,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 5
       - id: nemotron-3-super:cloud
         name: "Ollama Cloud: Nemotron 3 Super"
         reasoning: true
@@ -522,7 +499,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 6
       - id: qwen3-coder-next:cloud
         name: "Ollama Cloud: Qwen3 Coder Next"
         contextWindow: 262144
@@ -536,7 +512,6 @@ providers:
         thinking:
           - minimal
         disabledReason: null
-        costRank: 3
       - id: qwen3.5:397b-cloud
         name: "Ollama Cloud: Qwen 3.5 397B"
         reasoning: true
@@ -557,7 +532,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 7
       - id: qwen3.5:cloud
         name: "Ollama Cloud: Qwen 3.5"
         reasoning: true
@@ -578,7 +552,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 7
       - id: nemotron-3-ultra:cloud
         name: "Ollama Cloud: Nemotron 3 Ultra"
         reasoning: true
@@ -596,7 +569,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 6
       - id: minimax-m3:cloud
         name: "Ollama Cloud: MiniMax M3"
         reasoning: true
@@ -618,7 +590,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 7
       - id: qwen3-coder:480b-cloud
         name: "Ollama Cloud: Qwen3 Coder 480B"
         reasoning: true
@@ -633,7 +604,6 @@ providers:
         thinking:
           - minimal
         disabledReason: null
-        costRank: 10
   github-copilot:
     apiKey: copilot
     headers:
@@ -685,7 +655,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 30
       - id: claude-opus-4.8-fast
         name: "Copilot: Claude Opus 4.8 (fast mode)"
         api: anthropic-messages
@@ -726,7 +695,6 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-        costRank: 25
       - id: claude-opus-4.8
         name: "Copilot: Claude Opus 4.8"
         api: anthropic-messages
@@ -762,7 +730,6 @@ providers:
         thinking:
           - medium
         disabledReason: null
-        costRank: 30
       - id: claude-opus-5
         name: "Copilot: Claude Opus 5"
         api: anthropic-messages
@@ -803,7 +770,6 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-        costRank: 25
       - id: claude-sonnet-4.6
         name: "Copilot: Claude Sonnet 4.6"
         api: anthropic-messages
@@ -841,7 +807,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: claude-sonnet-5
         name: "Copilot: Claude Sonnet 5"
         api: anthropic-messages
@@ -880,7 +845,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: gemini-3.1-pro-preview
         name: "Copilot: Gemini 3.1 Pro"
         api: openai-completions
@@ -917,7 +881,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: gpt-5.3-codex
         name: "Copilot: GPT-5.3-Codex"
         api: openai-responses
@@ -945,7 +908,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
       - id: gpt-5.6-luna
         name: "Copilot: GPT-5.6 Luna"
         api: openai-responses
@@ -984,7 +946,6 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-        costRank: 6
       - id: gpt-5.6-sol
         name: "Copilot: GPT-5.6 Sol"
         api: openai-responses
@@ -1023,7 +984,6 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-        costRank: 25
       - id: gpt-5.6-terra
         name: "Copilot: GPT-5.6 Terra"
         api: openai-responses
@@ -1062,7 +1022,6 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-        costRank: 10
       - id: gpt-5-mini
         name: "Copilot: GPT-5 mini"
         api: openai-responses
@@ -1088,7 +1047,6 @@ providers:
           - low
           - medium
         disabledReason: repeated tool failures in subagent mode
-        costRank: 0
       - id: claude-sonnet-4.5
         name: "Copilot: Claude Sonnet 4.5"
         api: anthropic-messages
@@ -1112,7 +1070,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
       - id: claude-opus-4.5
         name: "Copilot: Claude Opus 4.5"
         api: anthropic-messages
@@ -1136,7 +1093,6 @@ providers:
           - high
           - xhigh
         disabledReason: Superseded by opus-4.6/4.7
-        costRank: 18
   umans:
     baseUrl: https://api.code.umans.ai/v1
     api: openai-completions
@@ -1147,10 +1103,14 @@ providers:
     concurrency:
       maxConcurrentRequests: 2
       afterburnSeconds: 15
-      queueWaitSeconds: 30
-      # Umans has repeatedly accepted connections without returning response
-      # headers. Fail fast enough to recover without holding all user slots.
-      headerWaitSeconds: 30
+      # Slow in-flight Umans requests can occupy both provider slots for well
+      # over 30s. Let queued work wait rather than fail while those requests are
+      # still making legitimate progress.
+      queueWaitSeconds: 300
+      # Umans often needs substantially longer than 30s to begin a useful
+      # response. Keep the header phase bounded, but avoid repeatedly aborting
+      # healthy slow starts before the provider can return any work.
+      headerWaitSeconds: 120
     compat:
       supportsReasoningEffort: true
       # Send `x-session-affinity` (from the session id) on every umans request so
@@ -1187,7 +1147,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: umans-flash
         name: "Umans: Flash"
         reasoning: true
@@ -1216,7 +1175,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: umans-kimi-k2.7
         name: "Umans: Kimi K2.7 Code"
         reasoning: true
@@ -1245,7 +1203,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 9
       - id: umans-kimi-k2.6
         name: "Umans: Kimi K2.6"
         reasoning: true
@@ -1274,7 +1231,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 9
       - id: umans-glm-5.1
         name: "Umans: GLM 5.1"
         reasoning: true
@@ -1303,7 +1259,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
       - id: umans-glm-5.2
         name: "Umans: GLM 5.2"
         reasoning: true
@@ -1331,7 +1286,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: umans-qwen3.6-35b-a3b
         name: "Umans: Qwen 3.6 35B A3B"
         reasoning: true
@@ -1359,7 +1313,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 7
   openai-codex:
     # ChatGPT Plus/Pro Codex subscription (OAuth token in auth.json).
     # The SDK provides the built-in model catalog (api/contextWindow/reasoning/etc).
@@ -1402,7 +1355,6 @@ providers:
           - xhigh
           - max
         disabledReason: null
-        costRank: 25
       - id: gpt-5.6-terra
         name: GPT-5.6 Terra
         overrideOnly: true
@@ -1430,7 +1382,6 @@ providers:
           - xhigh
           - max
         disabledReason: null
-        costRank: 10
       - id: gpt-5.6-luna
         name: GPT-5.6 Luna
         overrideOnly: true
@@ -1458,7 +1409,6 @@ providers:
           - xhigh
           - max
         disabledReason: null
-        costRank: 6
       - id: gpt-5.5
         name: GPT-5.5
         overrideOnly: true
@@ -1479,7 +1429,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 25
       - id: gpt-5.4
         name: GPT-5.4
         overrideOnly: true
@@ -1501,7 +1450,6 @@ providers:
           - high
           - xhigh
         disabledReason: null
-        costRank: 10
       - id: gpt-5.4-mini
         name: GPT-5.4 Mini
         overrideOnly: true
@@ -1517,7 +1465,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 3
       - id: gpt-5.3-codex-spark
         name: GPT-5.3 Codex Spark
         overrideOnly: true
@@ -1532,7 +1479,6 @@ providers:
           - medium
           - high
         disabledReason: null
-        costRank: 10
 # Retired/historical model pricing catalog.
 #
 # Models that have been removed from `providers` (and `profileOrder`) but still

@@ -43,7 +43,7 @@ function modelSignature(m: ModelInfo): string {
   const sub = m.subagent;
   const pricing = sub?.pricing;
   const subSig = sub
-    ? `${sub.eligible ? 1 : 0}|${sub.aggregate}|${sub.disabledReason ?? ''}|${sub.normalizedCost ?? ''}|${
+    ? `${sub.eligible ? 1 : 0}|${sub.disabledReason ?? ''}|${
         pricing ? `${pricing.input}:${pricing.output}:${pricing.cacheRead}:${pricing.cacheWrite}` : ''
       }`
     : '';

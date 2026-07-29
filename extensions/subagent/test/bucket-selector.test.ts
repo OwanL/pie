@@ -117,7 +117,6 @@ describe("selectModel", () => {
       eligible: true,
       thinking: m.thinking ?? ["minimal", "low", "medium", "high", "xhigh"],
       disabled_reason: null,
-      cost: 1,
     }));
   }
 
@@ -158,6 +157,51 @@ describe("selectModel", () => {
     }
 
     assert.deepEqual([...counts.values()], [10, 10, 10]);
+  });
+
+  it("treats provider-qualified duplicate ids as distinct fair-selection identities", () => {
+    const specs = [
+      "github-copilot/gpt-5.4",
+      "openai-codex/gpt-5.4",
+    ];
+    const assignments: BucketAssignments = { small: [], medium: specs, frontier: [] };
+    const counts = new Map(specs.map((spec) => [spec, 0]));
+
+    for (let i = 0; i < 20; i++) {
+      const result = selectModel(
+        "medium",
+        "high",
+        assignments,
+        makeConfig([{ id: "gpt-5.4", thinking: ["high"] }]),
+        new Set([...specs, "gpt-5.4"]),
+        undefined,
+        ACTIVE_MODEL,
+      );
+      counts.set(result.modelId, counts.get(result.modelId)! + 1);
+    }
+
+    assert.deepEqual([...counts.values()], [10, 10]);
+  });
+
+  it("applies provider toggles and hard requirements to exact qualified duplicates", () => {
+    const assignments: BucketAssignments = {
+      small: [],
+      medium: ["github-copilot/gpt-5.4", "openai-codex/gpt-5.4", "gpt-5.4"],
+      frontier: [],
+    };
+    const result = selectModel(
+      "medium",
+      undefined,
+      assignments,
+      [],
+      new Set(["openai-codex/gpt-5.4", "gpt-5.4"]),
+      undefined,
+      ACTIVE_MODEL,
+      undefined,
+      new Set(["openai-codex/gpt-5.4", "gpt-5.4"]),
+    );
+
+    assert.deepEqual(result.pool, ["openai-codex/gpt-5.4", "gpt-5.4"]);
   });
 
   it("returns fallback (active model) when bucket is empty", () => {
@@ -481,8 +525,8 @@ describe("loadModelConfig", () => {
       const configPath = path.join(dir, "model-profiles.json");
       fs.writeFileSync(configPath, JSON.stringify({
         profiles: [
-          { id: "m1", eligible: true, thinking: ["low", "medium"], disabled_reason: null, cost: 1 },
-          { id: "m2", eligible: false, thinking: ["high"], disabled_reason: "deprecated", cost: 2 },
+          { id: "m1", eligible: true, thinking: ["low", "medium"], disabled_reason: null },
+          { id: "m2", eligible: false, thinking: ["high"], disabled_reason: "deprecated" },
         ],
       }));
 
@@ -541,7 +585,6 @@ profiles:
       - low
       - medium
     disabled_reason: null
-    cost: 0.5
 `);
 
       // Pass .json path — loadModelConfig replaces .json → .yaml internally
@@ -552,7 +595,6 @@ profiles:
       if (result.length === 1) {
         assert.equal(result[0].id, "yaml-model");
         assert.deepEqual(result[0].thinking, ["low", "medium"]);
-        assert.equal(result[0].cost, 0.5);
       }
       // If yaml module not available, the function tries the .json path,
       // which doesn't exist, so it throws — that's expected behavior too.
@@ -689,14 +731,17 @@ describe("getAllowedModelIdsForProviders", () => {
     const disabled = new Set(["anthropic"]);
     const result = getAllowedModelIdsForProviders(models, disabled);
     assert.ok(result);
-    assert.deepEqual(result, new Set(["gpt-4o", "gemini-pro"]));
+    assert.deepEqual(result, new Set([
+      "gpt-4o", "openai/gpt-4o",
+      "gemini-pro", "google/gemini-pro",
+    ]));
   });
 
   it("excludes models from multiple disabled providers", () => {
     const disabled = new Set(["openai", "google"]);
     const result = getAllowedModelIdsForProviders(models, disabled);
     assert.ok(result);
-    assert.deepEqual(result, new Set(["claude-3.5"]));
+    assert.deepEqual(result, new Set(["claude-3.5", "anthropic/claude-3.5"]));
   });
 
   it("returns empty set when all providers are disabled", () => {
@@ -736,6 +781,20 @@ describe("parseBucketConfig", () => {
       JSON.stringify({ small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] }),
     );
     assert.deepEqual(result, { small: ["haiku"], medium: ["sonnet"], frontier: ["opus"] });
+  });
+
+  it("keeps qualified duplicates and de-duplicates only identical specs", () => {
+    const result = parseBucketConfig(JSON.stringify({
+      medium: [
+        "github-copilot/gpt-5.4",
+        "openai-codex/gpt-5.4",
+        "github-copilot/gpt-5.4",
+      ],
+    }));
+    assert.deepEqual(result.medium, [
+      "github-copilot/gpt-5.4",
+      "openai-codex/gpt-5.4",
+    ]);
   });
 
   it("returns empty buckets for undefined input", () => {

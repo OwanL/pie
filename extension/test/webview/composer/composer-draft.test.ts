@@ -74,6 +74,7 @@ function TestHarness({ sessionPath, draftText, postMessage }: TestHarnessProps) 
     onSend: () => {},
     onRetrySend: () => {},
     pendingComposerInputsLength: 0,
+    initialRows: 1,
     sessionPath,
     draftText,
     postMessage,

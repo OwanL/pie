@@ -172,33 +172,6 @@ function coerceCountRecord(value: unknown): Record<string, number> {
   return result;
 }
 
-function coerceSubagentTaskScores(value: unknown): ToolUsageRollup['subagentTaskScores'] {
-  if (!isRecord(value)) {
-    return {
-      precision:    { sum: 0, count: 0, max: 0 },
-      creativity:   { sum: 0, count: 0, max: 0 },
-      reasoning:    { sum: 0, count: 0, max: 0 },
-      thoroughness: { sum: 0, count: 0, max: 0 },
-    };
-  }
-
-  const coerceDim = (dim: unknown): { sum: number; count: number; max: number } => {
-    if (!isRecord(dim)) return { sum: 0, count: 0, max: 0 };
-    return {
-      sum:   toNonNegativeInteger(dim.sum),
-      count: toNonNegativeInteger(dim.count),
-      max:   toNonNegativeInteger(dim.max),
-    };
-  };
-
-  return {
-    precision:    coerceDim(value.precision),
-    creativity:   coerceDim(value.creativity),
-    reasoning:    coerceDim(value.reasoning),
-    thoroughness: coerceDim(value.thoroughness),
-  };
-}
-
 function createEmptyToolUsageRollup(): ToolUsageRollup {
   return {
     totalCount: 0,
@@ -223,13 +196,6 @@ function createEmptyToolUsageRollup(): ToolUsageRollup {
     subagentCallCount: 0,
     subagentTaskCount: 0,
     subagentAgentNames: [],
-    subagentScoredTaskCount: 0,
-    subagentTaskScores: {
-      precision:    { sum: 0, count: 0, max: 0 },
-      creativity:   { sum: 0, count: 0, max: 0 },
-      reasoning:    { sum: 0, count: 0, max: 0 },
-      thoroughness: { sum: 0, count: 0, max: 0 },
-    },
     subagentInputTokens: 0,
     subagentOutputTokens: 0,
     subagentCacheReadTokens: 0,
@@ -554,8 +520,6 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     subagentCallCount: toNonNegativeInteger(value.subagentCallCount),
     subagentTaskCount: toNonNegativeInteger(value.subagentTaskCount),
     subagentAgentNames: coerceStringArray(value.subagentAgentNames),
-    subagentScoredTaskCount: toNonNegativeInteger(value.subagentScoredTaskCount),
-    subagentTaskScores: coerceSubagentTaskScores(value.subagentTaskScores),
     subagentInputTokens: toNonNegativeInteger(value.subagentInputTokens),
     subagentOutputTokens: toNonNegativeInteger(value.subagentOutputTokens),
     subagentCacheReadTokens: toNonNegativeInteger(value.subagentCacheReadTokens),

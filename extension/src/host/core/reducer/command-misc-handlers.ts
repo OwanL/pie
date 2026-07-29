@@ -1,7 +1,7 @@
 import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
-import { mergePruningSettings, mergeToolResultPruningSettings, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
+import { mergePruningSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBuckets, type ChatPrefs, type ComposerInput } from '../../../shared/protocol.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
@@ -460,6 +460,9 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
     // undefined and crash the webview BucketModelsEditor.
     ...(cmd.prefs.subagentBuckets !== undefined && {
       subagentBuckets: normalizeSubagentBuckets(cmd.prefs.subagentBuckets),
+    }),
+    ...(cmd.prefs.composerInitialRows !== undefined && {
+      composerInitialRows: normalizeComposerInitialRows(cmd.prefs.composerInitialRows),
     }),
     // Normalize subagentNestedAllowedBuckets so ArchState always holds a
     // complete {small,medium,frontier} object (missing keys default to true)

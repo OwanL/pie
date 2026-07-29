@@ -21,9 +21,7 @@ import {
 } from './mutation';
 import {
   classifyVerificationCommandKindsFromInput,
-  createEmptySubagentTaskScoreRollup,
   extractSubagentUsage,
-  type SubagentTaskScoreRollup,
 } from './verification';
 import type {
   ToolFailureKind,
@@ -37,7 +35,7 @@ export type {
   TreatmentChangeKind,
   VerificationCommandKind,
 } from '../../../../shared/tool-analysis-kinds.js';
-export type { FileMutationDelta, SubagentTaskScoreRollup, FileExtensionAnalysis };
+export type { FileMutationDelta, FileExtensionAnalysis };
 export {
   countTextLines,
   normalizeToolCallName,
@@ -51,7 +49,6 @@ export {
   getFileExtensionFromToolCall,
   mergeFileMutationDelta,
   createEmptyFileMutationDelta,
-  createEmptySubagentTaskScoreRollup,
 };
 
 export interface ToolFailureDetails {
@@ -73,8 +70,6 @@ export interface ToolCallAnalysis {
   subagentCallCount: number;
   subagentTaskCount: number;
   subagentAgentNames: string[];
-  subagentScoredTaskCount: number;
-  subagentTaskScores: SubagentTaskScoreRollup;
   /** Cumulative input tokens consumed by spawned sub-agent sessions (0 when none). */
   subagentInputTokens: number;
   /** Cumulative output tokens consumed by spawned sub-agent sessions (0 when none). */
@@ -266,7 +261,7 @@ export function analyzeToolCall(toolCall: ToolCall): ToolCallAnalysis {
   const verificationKinds = classifyVerificationCommandKindsFromInput(toolCall.input);
   const subagentUsage = normalizedToolName === 'subagent'
     ? extractSubagentUsage(toolCall.input, toolCall.result)
-    : { taskCount: 0, agents: [] as string[], scoredTaskCount: 0, taskScores: createEmptySubagentTaskScoreRollup(), inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    : { taskCount: 0, agents: [] as string[], inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   const fileMutation = getFileMutationFromToolCall(toolCall);
   const fileExtension = getFileExtensionFromToolCall(toolCall);
   const { failure, resultIssue } = classifyToolOutcome(toolCall, verificationKinds);
@@ -277,8 +272,6 @@ export function analyzeToolCall(toolCall: ToolCall): ToolCallAnalysis {
     subagentCallCount: normalizedToolName === 'subagent' ? 1 : 0,
     subagentTaskCount: subagentUsage.taskCount,
     subagentAgentNames: subagentUsage.agents,
-    subagentScoredTaskCount: subagentUsage.scoredTaskCount,
-    subagentTaskScores: subagentUsage.taskScores,
     subagentInputTokens: subagentUsage.inputTokens,
     subagentOutputTokens: subagentUsage.outputTokens,
     subagentCacheReadTokens: subagentUsage.cacheReadTokens,

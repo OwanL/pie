@@ -56,8 +56,12 @@ function parseRequestClass(value: string | undefined | null): ProviderGateReques
 export interface ProviderConcurrencyConfig {
 	/** Provider name (matches the `providers.<name>` key in models.json). */
 	provider: string;
-	/** Base URL prefix to match outbound requests (e.g. `https://api.code.umans.ai/v1`). */
-	baseUrl: string;
+	/** Base URL prefix declared in models.json. Optional for built-in providers:
+	 * their effective URLs are registered from the SDK model registry after a
+	 * runtime is created (including credential-specific OAuth endpoints). */
+	baseUrl?: string;
+	/** Additional effective model URL prefixes discovered at runtime. */
+	baseUrls?: string[];
 	/** Max concurrent in-flight LLM requests to this provider. */
 	maxConcurrentRequests: number;
 	/** Per-session sticky-slot window in seconds (0 = disabled). When a
@@ -647,7 +651,7 @@ export class ProviderGateTransportCircuitOpenError extends Error {
 export class ProviderGate {
 	private static instance: ProviderGate | null = null;
 	private originalFetch: typeof globalThis.fetch | null = null;
-	private pools = new Map<string, { pool: ProviderPool; baseUrl: string; headerWaitMs: number }>();
+	private pools = new Map<string, { pool: ProviderPool; headerWaitMs: number }>();
 	private configs: ProviderConcurrencyConfig[] = [];
 	private idleTimeoutMs: number;
 	private defaultHeaderWaitMs: number;
@@ -778,7 +782,7 @@ export class ProviderGate {
 			const headerWaitMs = (cfg.headerWaitSeconds ?? 0) > 0
 				? cfg.headerWaitSeconds! * 1000
 				: this.defaultHeaderWaitMs;
-			this.pools.set(cfg.provider, { pool, baseUrl: cfg.baseUrl, headerWaitMs });
+			this.pools.set(cfg.provider, { pool, headerWaitMs });
 		}
 		for (const [provider, entry] of oldPools) {
 			if (!this.pools.has(provider)) entry.pool.dispose();
@@ -876,16 +880,49 @@ export class ProviderGate {
 		return snapshot;
 	}
 
-	/** Match a request URL to a configured provider and return its pool. */
+	/** Register effective model URLs from the SDK registry. This closes the gap
+	 * between static models.json configuration and built-in/OAuth providers whose
+	 * URL is supplied or rewritten by pi-ai at runtime (notably GitHub Copilot,
+	 * including enterprise endpoints). Existing prefixes are retained because
+	 * concurrently-open runtimes may legitimately use different account URLs. */
+	registerModelBaseUrls(models: ReadonlyArray<{ provider?: unknown; baseUrl?: unknown }>): void {
+		const discovered = new Map<string, Set<string>>();
+		for (const model of models) {
+			if (typeof model.provider !== 'string' || typeof model.baseUrl !== 'string') continue;
+			const baseUrl = model.baseUrl.trim();
+			if (!baseUrl || !this.pools.has(model.provider)) continue;
+			let urls = discovered.get(model.provider);
+			if (!urls) {
+				urls = new Set<string>();
+				discovered.set(model.provider, urls);
+			}
+			urls.add(baseUrl);
+		}
+		if (discovered.size === 0) return;
+		this.configs = this.configs.map((cfg) => {
+			const urls = discovered.get(cfg.provider);
+			if (!urls) return cfg;
+			const merged = [...new Set([
+				...(cfg.baseUrl ? [cfg.baseUrl] : []),
+				...(cfg.baseUrls ?? []),
+				...urls,
+			])];
+			return { ...cfg, baseUrls: merged };
+		});
+	}
+
+	/** Match a request URL to a configured provider and return its pool. Longest
+	 * prefix wins so overlapping gateway roots route deterministically. */
 	private matchProvider(url: string): { pool: ProviderPool; config: ProviderConcurrencyConfig; headerWaitMs: number } | null {
+		let best: { pool: ProviderPool; config: ProviderConcurrencyConfig; headerWaitMs: number; prefixLength: number } | null = null;
 		for (const cfg of this.configs) {
-			// Match by baseUrl prefix — handles path-style URLs.
-			if (url.startsWith(cfg.baseUrl)) {
+			for (const prefix of new Set([...(cfg.baseUrl ? [cfg.baseUrl] : []), ...(cfg.baseUrls ?? [])])) {
+				if (!prefix || !url.startsWith(prefix) || prefix.length <= (best?.prefixLength ?? -1)) continue;
 				const entry = this.pools.get(cfg.provider);
-				if (entry) return { pool: entry.pool, config: cfg, headerWaitMs: entry.headerWaitMs };
+				if (entry) best = { pool: entry.pool, config: cfg, headerWaitMs: entry.headerWaitMs, prefixLength: prefix.length };
 			}
 		}
-		return null;
+		return best && { pool: best.pool, config: best.config, headerWaitMs: best.headerWaitMs };
 	}
 
 	/** Extract session ID from request headers (x-session-affinity). */
@@ -1400,9 +1437,10 @@ export class ProviderGate {
 	}
 
 	/** Resolve concurrency config from the on-disk models.json. Each provider
-	 *  entry may have a `concurrency` field (generated from models.yaml
-	 *  `providers.<p>.concurrency`). Providers without a concurrency block are
-	 *  not gated (direct, unthrottled). */
+	 * entry may have a `concurrency` field (generated from models.yaml
+	 * `providers.<p>.concurrency`). A provider does not need a static baseUrl:
+	 * built-in and OAuth URLs are registered later from the SDK model registry.
+	 * Providers without a concurrency block are not gated (direct, unthrottled). */
 	static resolveConfigs(
 		modelsJson: {
 			providers?: Record<string, {
@@ -1419,12 +1457,11 @@ export class ProviderGate {
 		const configs: ProviderConcurrencyConfig[] = [];
 		const providers = modelsJson.providers ?? {};
 		for (const [name, entry] of Object.entries(providers)) {
-			if (!entry.baseUrl) continue;
 			const cc = entry.concurrency;
 			if (!cc || typeof cc.maxConcurrentRequests !== 'number' || cc.maxConcurrentRequests <= 0) continue;
 			configs.push({
 				provider: name,
-				baseUrl: entry.baseUrl,
+				...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
 				maxConcurrentRequests: cc.maxConcurrentRequests,
 				afterburnSeconds: cc.afterburnSeconds ?? 0,
 				queueWaitSeconds: cc.queueWaitSeconds ?? 30,

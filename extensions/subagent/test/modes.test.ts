@@ -262,7 +262,7 @@ test("transient provider timeout retries on another model in the same bucket", a
 			{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 			() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
 			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
-			"t-retry", undefined, undefined, { clock },
+			"t-retry", undefined, undefined, undefined, { clock },
 		);
 
 		assert.equal(response.isError, undefined);
@@ -327,7 +327,7 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 			() => undefined, { depth: 0, trail: [] }, noOpDetails,
 			(update: any) => publishedModels.push(update.details.results[0]?.selectedModel), noSignal(),
 			selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["model-a", "model-b"], frontier: [] }, registryModels: models }),
-			"t-retry-terminal-fence", undefined, undefined, { clock: new FakeClock() },
+			"t-retry-terminal-fence", undefined, undefined, undefined, { clock: new FakeClock() },
 		);
 		assert.equal(response.isError, undefined);
 		assert.equal(attempts, 2);
@@ -366,7 +366,7 @@ test("exhausted bucket does not fall back outside the bucket or report an unstar
 		{ agent: "worker", task: "do work", bucket: "medium" }, ctx, makeAgents(),
 		() => undefined, { depth: 0, trail: [] }, noOpDetails, undefined, noSignal(),
 		selCtx({ alwaysParentModel: false, fallbackOnProviderFailure: true, bucketAssignments: { small: [], medium: ["bucket-model"], frontier: [] }, registryModels: models }),
-		"t-exhausted", undefined, undefined, { clock: new FakeClock() },
+		"t-exhausted", undefined, undefined, undefined, { clock: new FakeClock() },
 	);
 	assert.equal(response.isError, true);
 	assert.equal(attempts, 1);

@@ -130,6 +130,7 @@ export interface PersistTabsEffect extends EffectBase {
   openTabPaths: string[];
   activeSessionPath: string | null;
   pinnedTabPaths: string[];
+  pinnedTabGroups: string[][];
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';

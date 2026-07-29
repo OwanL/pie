@@ -8,7 +8,9 @@ const jitiUrl = pathToFileURL(fileURLToPath(
 )).href;
 const runnerPath = fileURLToPath(new URL("../runner.ts", import.meta.url));
 
-test("nested AgentSession loaders inherit the root tree runtime context", () => {
+const integrationTest = process.env.PIE_RUN_INTEGRATION_TESTS === "1" ? test : test.skip;
+
+integrationTest("nested AgentSession loaders inherit the root tree runtime context", () => {
 	// Run the real cache-disabled jiti boundary in a child process. Keeping that
 	// duplicate module load outside the coverage process prevents its source map
 	// from replacing runner.ts's ordinary unit-coverage record.

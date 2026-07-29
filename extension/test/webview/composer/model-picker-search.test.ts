@@ -177,6 +177,9 @@ test('a query with no matches shows an empty state and no rows', () => {
   const empty = dropdown.querySelector('.model-picker-empty');
   assert.ok(empty, 'empty state should render when nothing matches');
   assert.match(empty!.textContent ?? '', /No models match/);
+
+  keydown(input, 'Tab');
+  assert.equal(document.querySelector('.model-picker-dropdown'), null, 'Tab should close an empty result list');
 });
 
 test('Enter selects the top filtered match', () => {

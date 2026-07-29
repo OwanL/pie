@@ -136,25 +136,6 @@
   50% { opacity: 1; }
 }
 
-.aggregate-strip-warm {
-  color: var(--panel-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.aggregate-strip-warm-label {
-  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
-}
-
-.aggregate-strip-warm-counts {
-  color: color-mix(in srgb, var(--panel-foreground) 70%, var(--panel-muted));
-  font-variant-numeric: tabular-nums;
-}
-
-.aggregate-strip-warm-warming {
-  color: var(--panel-accent);
-  font-weight: 600;
-}
-
 .aggregate-strip-providers {
   display: inline-flex;
   align-items: center;

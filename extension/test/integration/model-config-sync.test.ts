@@ -289,7 +289,7 @@ test('validation rejects an image-capable model without maxImagesPerRequest', as
     p: [{
       id: 'vision-model', name: 'Vision', input: ['text', 'image'],
       pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+      eligible: true, thinking: ['medium'], disabledReason: null,
     }],
   }));
   try {
@@ -308,7 +308,7 @@ test('validation rejects a text-only model that declares maxImagesPerRequest', a
     p: [{
       id: 'text-model', name: 'Text', input: ['text'], maxImagesPerRequest: 1,
       pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+      eligible: true, thinking: ['medium'], disabledReason: null,
     }],
   }));
   try {
@@ -327,7 +327,7 @@ test('validation rejects an overrideOnly image-capable entry without maxImagesPe
     p: [{
       id: 'override-vision', name: 'Override', overrideOnly: true, input: ['text', 'image'],
       pricing: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
-      eligible: true, thinking: ['medium'], disabledReason: null, costRank: 1,
+      eligible: true, thinking: ['medium'], disabledReason: null,
     }],
   }));
   try {

@@ -165,13 +165,14 @@ export interface SingleResult {
 	 * exposing them makes a slow/unreliable provider observable rather than
 	 * falsely looking crashed. */
 	inactivityBudgetMs?: number;
-	/** The model actually chosen by bucket selection. */
+	/** The model spec chosen by bucket selection. Canonical `provider/id` for
+	 * qualified bucket entries; a bare id for legacy entries/fallbacks. */
 	selectedModel?: string;
 	/** Thinking level applied to this run. */
 	thinkingLevel?: ThinkingLevel;
 	/** Bucket used for selection ("small", "medium", "frontier"). */
 	bucket?: string;
-	/** The models that were candidates in the selected bucket. */
+	/** The model specs that were candidates in the selected bucket. */
 	selectionPool?: string[];
 	/** Whether the active model fallback was used. */
 	fallback?: boolean;

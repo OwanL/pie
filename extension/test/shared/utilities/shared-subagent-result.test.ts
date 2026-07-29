@@ -192,16 +192,6 @@ test('running tool call with no result synthesizes a single placeholder from age
   });
 });
 
-test('running tool call carries taskScores onto the synthesized placeholder when present', () => {
-  const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
-    input: { agent: 'scout', task: 't', taskScores: { scout: 0.9 } },
-    status: 'running',
-    result: undefined,
-  };
-  const out = getRenderableSubagentResultFromToolCall(toolCall)!;
-  assert.deepEqual(out.results[0]!.taskScores, { scout: 0.9 });
-});
-
 test('running tool call with input.tasks synthesizes a parallel placeholder per task', () => {
   const toolCall: Pick<ToolCall, 'input' | 'result' | 'status'> = {
     input: {

@@ -79,10 +79,12 @@ export async function getChangedFiles(repoRoot) {
   if (!trackedResult.ok) {
     // No HEAD yet (fresh repo with no commits): treat all tracked files as changed.
     const allTracked = await gitOutput(repoRoot, ['ls-files', '-z']);
-    tracked = allTracked.ok ? splitNull(allTracked.stdout) : [];
+    if (!allTracked.ok) throw new Error(`Cannot inspect tracked files in ${repoRoot}`);
+    tracked = splitNull(allTracked.stdout);
   }
   const untrackedResult = await gitOutput(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
-  const untracked = untrackedResult.ok ? splitNull(untrackedResult.stdout) : [];
+  if (!untrackedResult.ok) throw new Error(`Cannot inspect untracked files in ${repoRoot}`);
+  const untracked = splitNull(untrackedResult.stdout);
 
   const seen = new Set();
   const merged = [];

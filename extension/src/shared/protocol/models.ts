@@ -24,12 +24,8 @@ export type ModelInputKind = 'text' | 'image';
 export interface ModelSubagentInfo {
   /** True when the model is allowed as a subagent target (profile `eligible`). */
   eligible: boolean;
-  /** Sum of precision+creativity+thoroughness+reasoning (0-20). Used as overall rating. */
-  aggregate: number;
   /** Optional human-readable reason recorded in the profile when ineligible. */
   disabledReason?: string;
-  /** Normalized selector cost on the 0–30+ scale, derived from real token pricing when available. */
-  normalizedCost?: number;
   /** Real token pricing in USD per 1M tokens, when known. */
   pricing?: {
     input: number;

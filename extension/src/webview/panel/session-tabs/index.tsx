@@ -5,9 +5,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { memo } from 'preact/compat';
 
 import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionSummary } from '../../../shared/protocol';
+import { derivePinnedItems, findPinnedGroupIndex } from '../../../shared/tab-behavior';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
 import { SessionTab } from './session-tab';
+import { PinnedTabGroup } from './pinned-tab-group';
 import { SessionTabContextMenu } from './session-tab-context-menu';
 import type { SessionTabRunAction } from './run-state';
 import { useTabDragAndDrop } from './use-drag-and-drop.js';
@@ -16,6 +18,7 @@ interface SessionTabsProps {
   sessions: SessionSummary[];
   openTabPaths: string[];
   pinnedTabPaths: string[];
+  pinnedTabGroups: string[][];
   runningSessionPaths: string[];
   startingModelSessionPaths: string[];
   unreadFinishedSessionPaths: string[];
@@ -27,9 +30,13 @@ interface SessionTabsProps {
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
   onMove: (sessionPath: string | undefined, fromIndex: number, toIndex: number) => void;
+  onMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
   onNew: () => void;
   onDuplicate: (path: string) => void;
   onTogglePin: (path: string) => void;
+  onGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
+  onMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
+  onUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
   /** Session paths that own a pending deferred trigger. Tabs in this set have
    *  their close × greyed out with an explanatory tooltip (the trigger must be
@@ -49,6 +56,11 @@ function hasPendingRequest(
 
 function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function pinnedTabGroupsEqual(left: readonly string[][], right: readonly string[][]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((group, index) => stringArraysEqual(group, right[index]));
 }
 
 function openSessionNamesEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
@@ -87,12 +99,17 @@ function areSessionTabsPropsEqual(
     && previous.onSelect === next.onSelect
     && previous.onClose === next.onClose
     && previous.onMove === next.onMove
+    && previous.onMovePinnedItem === next.onMovePinnedItem
     && previous.onNew === next.onNew
     && previous.onDuplicate === next.onDuplicate
     && previous.onTogglePin === next.onTogglePin
+    && previous.onGroupPinnedTab === next.onGroupPinnedTab
+    && previous.onMergePinnedGroups === next.onMergePinnedGroups
+    && previous.onUngroupPinnedTab === next.onUngroupPinnedTab
     && previous.onRunAction === next.onRunAction
     && stringArraysEqual(previous.openTabPaths, next.openTabPaths)
     && stringArraysEqual(previous.pinnedTabPaths, next.pinnedTabPaths)
+    && pinnedTabGroupsEqual(previous.pinnedTabGroups, next.pinnedTabGroups)
     && stringArraysEqual(previous.runningSessionPaths, next.runningSessionPaths)
     && stringArraysEqual(previous.startingModelSessionPaths, next.startingModelSessionPaths)
     && stringArraysEqual(previous.unreadFinishedSessionPaths, next.unreadFinishedSessionPaths)
@@ -108,6 +125,7 @@ function SessionTabsView({
   sessions,
   openTabPaths,
   pinnedTabPaths,
+  pinnedTabGroups,
   runningSessionPaths,
   startingModelSessionPaths,
   unreadFinishedSessionPaths,
@@ -119,14 +137,25 @@ function SessionTabsView({
   onSelect,
   onClose,
   onMove,
+  onMovePinnedItem,
   onNew,
   onDuplicate,
   onTogglePin,
+  onGroupPinnedTab,
+  onMergePinnedGroups,
+  onUngroupPinnedTab,
   onRunAction,
   deferredSessionPaths,
   deferredTimerSessionPaths,
 }: SessionTabsProps) {
   const stripRef = useRef<HTMLDivElement>(null);
+  const [openGroupPath, setOpenGroupPath] = useState<string | null>(null);
+  // Snapshot of the currently-open group's members, kept in sync while the
+  // open group stays valid. When the open group's identifier drops out of its
+  // group (dissolved, merged away, or its first member dragged out), this
+  // snapshot lets the dropdown re-associate with the surviving group (the one
+  // sharing the most former members) instead of closing.
+  const openGroupMembersRef = useRef<string[]>([]);
 
   // Optimistic active-tab highlight. `onSelect` (click / keyboard) only posts
   // `openSession` and waits for the host round-trip to confirm via the next
@@ -155,6 +184,7 @@ function SessionTabsView({
     dragState,
     tabContextMenu,
     onPointerDown,
+    onPinnedItemPointerDown,
     onClick,
     onContextMenu,
     onContextAction,
@@ -162,11 +192,16 @@ function SessionTabsView({
   } = useTabDragAndDrop({
     openTabPaths,
     pinnedTabPaths,
+    pinnedTabGroups,
     onMove,
+    onMovePinnedItem,
     onSelect: selectTab,
     onClose,
     onDuplicate,
     onTogglePin,
+    onGroupPinnedTab,
+    onMergePinnedGroups,
+    onUngroupPinnedTab,
     onRunAction,
     stripRef,
   });
@@ -220,20 +255,40 @@ function SessionTabsView({
     [deferredTimerSessionPaths],
   );
 
-  // Re-resolve the dragged index from the source path each render so a tab
-  // closing or being inserted elsewhere mid-drag doesn't float the wrong tab.
+  // Re-resolve the dragged source each render so a tab closing or being
+  // inserted elsewhere mid-drag doesn't float the wrong tab. Pinned sources
+  // hide their chip (standalone or group block) from the pinned items;
+  // dropdown-member drags keep the group chip in place. Unpinned sources hide
+  // their tab from the unpinned region.
+  const pinnedItems = useMemo(
+    () => derivePinnedItems(pinnedTabPaths, pinnedTabGroups),
+    [pinnedTabPaths, pinnedTabGroups],
+  );
   const draggedSourcePath = dragState?.sourcePath ?? null;
-  const draggedSourceIndex = draggedSourcePath !== null ? openTabPaths.indexOf(draggedSourcePath) : -1;
-  const draggedPath = draggedSourceIndex >= 0 ? draggedSourcePath : null;
-  const renderedTabPaths = draggedSourceIndex >= 0
-    ? openTabPaths.filter((_, index) => index !== draggedSourceIndex)
-    : openTabPaths;
+  const dragSourceFromDropdown = dragState?.sourceFromDropdown ?? false;
+  const dragSourceIsGroupChip = dragState?.sourceIsGroupChip ?? false;
+  const sourceIsPinnedDrag = draggedSourcePath !== null && pinnedPathSet.has(draggedSourcePath);
+  const renderedPinnedItems = (draggedSourcePath !== null && !dragSourceFromDropdown)
+    ? pinnedItems.filter((item) =>
+      item.kind === 'group' ? !item.members.includes(draggedSourcePath) : item.path !== draggedSourcePath)
+    : pinnedItems;
+  const renderedUnpinnedPaths = (draggedSourcePath !== null && !sourceIsPinnedDrag)
+    ? openTabPaths.filter((p) => p !== draggedSourcePath && !pinnedPathSet.has(p))
+    : openTabPaths.filter((p) => !pinnedPathSet.has(p));
+  const draggedPath = draggedSourcePath;
   const dragGapWidth = dragState
     ? Math.max(18, Math.min(34, Math.round(dragState.tabWidth * 0.22)))
     : 0;
   // Primitives for the memoized DropGap: only `dropIndex` (and the static
   // geometry) reach it, so it skips re-render until the drop target changes.
-  const activeDropIndex = dragState?.dropIndex ?? null;
+  // Gap indices are zone-specific: pinned-item-space for a pinned source,
+  // unpinned-gap-space for an unpinned source. A group/merge center-hit
+  // (dropOnPath) suppresses the gap indicator.
+  const isPinnedDrag = !!dragState && pinnedPathSet.has(dragState.sourcePath);
+  const hasCenterHit = dragState?.dropOnPath != null;
+  const activePinnedGap = (dragState && isPinnedDrag && !hasCenterHit) ? dragState.dropIndex : null;
+  const activeUnpinnedGap = (dragState && !isPinnedDrag && !hasCenterHit) ? dragState.dropIndex : null;
+  const dropOnPath = dragState?.dropOnPath ?? null;
   const dropTabHeight = dragState?.tabHeight ?? 0;
 
   // Tabs-1: scroll the active tab into view when the active session changes
@@ -356,6 +411,65 @@ function SessionTabsView({
     targetTab?.querySelector<HTMLElement>('[role="tab"]')?.focus();
   }, [dragState, onClose, selectTab, deferredPathSet]);
 
+  // Pinned-group dropdown management. Only one group dropdown is open at a
+  // time; `openGroupPath` stores its first-member identifier. Selecting a
+  // member leaves the dropdown open (per spec); outside pointerdown / Escape
+  // closes it (handled inside PinnedTabGroup).
+  const onToggleGroupOpen = useCallback((firstMemberPath: string) => {
+    setOpenGroupPath((prev) => (prev === firstMemberPath ? null : firstMemberPath));
+  }, []);
+  const onCloseGroup = useCallback(() => setOpenGroupPath(null), []);
+  const onSelectGroupMember = useCallback((path: string) => {
+    selectTab(path);
+    // Member select leaves the dropdown open (per spec).
+  }, [selectTab]);
+  const onChipPointerDown = useCallback((event: PointerEvent, sourcePath: string, itemIndex: number) => {
+    onPinnedItemPointerDown(event, sourcePath, true, false, itemIndex);
+  }, [onPinnedItemPointerDown]);
+  const onMemberPointerDown = useCallback((event: PointerEvent, sourcePath: string) => {
+    onPinnedItemPointerDown(event, sourcePath, false, true, 0);
+  }, [onPinnedItemPointerDown]);
+
+  // Keep the open dropdown valid across pinned-group mutations. While the open
+  // group's identifier is still a member of a group, refresh the member
+  // snapshot. When it is no longer in any group (dissolved, merged away, or its
+  // former first member was dragged out), re-associate the dropdown with the
+  // surviving group — the one sharing the most former members — so the dropdown
+  // stays open across a first-member removal. If no surviving group with ≥2
+  // former members remains, the group truly dissolved: close the dropdown so it
+  // never points at a stale group.
+  useEffect(() => {
+    if (openGroupPath === null) {
+      openGroupMembersRef.current = [];
+      return;
+    }
+    const groupIdx = findPinnedGroupIndex(pinnedTabGroups, openGroupPath);
+    if (groupIdx !== -1) {
+      openGroupMembersRef.current = [...pinnedTabGroups[groupIdx]];
+      return;
+    }
+    const formerMembers = openGroupMembersRef.current;
+    let bestGroup: string[] | null = null;
+    let bestOverlap = 0;
+    for (const group of pinnedTabGroups) {
+      let overlap = 0;
+      for (const member of group) {
+        if (formerMembers.includes(member)) overlap += 1;
+      }
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestGroup = group;
+      }
+    }
+    if (bestGroup !== null && bestOverlap >= 2) {
+      openGroupMembersRef.current = [...bestGroup];
+      setOpenGroupPath(bestGroup[0]);
+    } else {
+      openGroupMembersRef.current = [];
+      setOpenGroupPath(null);
+    }
+  }, [pinnedTabGroups, openGroupPath]);
+
   const stripClass = `session-tabs-strip${fadeLeft ? ' fade-left' : ''}${fadeRight ? ' fade-right' : ''}`;
 
   return (
@@ -367,8 +481,53 @@ function SessionTabsView({
         aria-label="Sessions"
         onKeyDown={(event) => onTabListKeyDown(event as KeyboardEvent)}
       >
-        {renderedTabPaths.map((tabPath, index) => [
-          <DropGap key={`drop-gap:${index}`} index={index} dropIndex={activeDropIndex} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />,
+        {renderedPinnedItems.map((item, itemIndex) => [
+          <DropGap key={`drop-gap-pinned:${itemIndex}`} index={itemIndex} dropIndex={activePinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />,
+          item.kind === 'group' ? (
+            <PinnedTabGroup
+              key={`group:${item.members[0]}`}
+              members={item.members}
+              itemIndex={itemIndex}
+              sessionByPath={sessionByPath}
+              runningPathSet={runningPathSet}
+              startingModelPathSet={startingModelPathSet}
+              unreadFinishedPathSet={unreadFinishedPathSet}
+              deferredTimerPathSet={deferredTimerPathSet}
+              activePath={effectiveActivePath}
+              isDropTarget={dropOnPath !== null && item.members.includes(dropOnPath)}
+              open={openGroupPath !== null && item.members.includes(openGroupPath)}
+              onToggleOpen={onToggleGroupOpen}
+              onClose={onCloseGroup}
+              onSelectMember={onSelectGroupMember}
+              onChipPointerDown={onChipPointerDown}
+              onMemberPointerDown={onMemberPointerDown}
+            />
+          ) : (
+            <SessionTab
+              key={item.path}
+              tabPath={item.path}
+              index={itemIndex}
+              sessionByPath={sessionByPath}
+              openIndexByPath={openIndexByPath}
+              runningPathSet={runningPathSet}
+              startingModelPathSet={startingModelPathSet}
+              unreadFinishedPathSet={unreadFinishedPathSet}
+              activePath={effectiveActivePath}
+              hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, item.path)}
+              isPinned
+              isDropTarget={dropOnPath !== null && item.path === dropOnPath}
+              hasDeferredTriggers={deferredPathSet.has(item.path)}
+              hasDeferredTimer={deferredTimerPathSet.has(item.path)}
+              onContextMenu={onContextMenu}
+              onPointerDown={onPointerDown}
+              onClick={onClick}
+              onClose={onClose}
+            />
+          ),
+        ])}
+        <DropGap index={renderedPinnedItems.length} dropIndex={activePinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
+        {renderedUnpinnedPaths.map((tabPath, index) => [
+          <DropGap key={`drop-gap-unpinned:${index}`} index={index} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />,
           <SessionTab
             key={tabPath}
             tabPath={tabPath}
@@ -380,7 +539,8 @@ function SessionTabsView({
             unreadFinishedPathSet={unreadFinishedPathSet}
             activePath={effectiveActivePath}
             hasPendingExtensionUIRequest={hasPendingRequest(pendingExtensionUIRequestsBySession, tabPath)}
-            isPinned={pinnedPathSet.has(tabPath)}
+            isPinned={false}
+            isDropTarget={false}
             hasDeferredTriggers={deferredPathSet.has(tabPath)}
             hasDeferredTimer={deferredTimerPathSet.has(tabPath)}
             onContextMenu={onContextMenu}
@@ -389,7 +549,7 @@ function SessionTabsView({
             onClose={onClose}
           />,
         ])}
-        <DropGap index={renderedTabPaths.length} dropIndex={activeDropIndex} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
+        <DropGap index={renderedUnpinnedPaths.length} dropIndex={activeUnpinnedGap} tabHeight={dropTabHeight} dragGapWidth={dragGapWidth} />
       </div>
       <div class="session-tabs-actions">
         <button
@@ -415,6 +575,9 @@ function SessionTabsView({
           runningPathSet={runningPathSet}
           activeSession={activeSession}
           isPinned={pinnedPathSet.has(draggedPath)}
+          draggedMembers={dragSourceIsGroupChip
+            ? pinnedItems.find((it): it is { kind: 'group'; members: string[] } => it.kind === 'group' && it.members.includes(draggedPath))?.members
+            : undefined}
           ghostRef={ghostElementRef}
         />
       )}

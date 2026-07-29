@@ -133,7 +133,7 @@
     "model": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "pricing", "eligible", "thinking", "disabledReason", "costRank"],
+      "required": ["id", "name", "pricing", "eligible", "thinking", "disabledReason"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string" },
@@ -169,8 +169,7 @@
             { "type": "string" },
             { "type": "null" }
           ]
-        },
-        "costRank": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "historicalModel": {

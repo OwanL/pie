@@ -59,13 +59,6 @@ function thinkingLevels(model: DiscoveredCopilotModel): string[] {
   return levels.length > 0 ? levels : ['minimal'];
 }
 
-function defaultCostRank(model: DiscoveredCopilotModel): number {
-  if (model.cost.input <= 0.5) return 3;
-  if (model.cost.input <= 2) return 6;
-  if (model.cost.input <= 3) return 10;
-  return 25;
-}
-
 function pricing(model: DiscoveredCopilotModel): Record<string, unknown> {
   return {
     input: model.cost.input,
@@ -120,7 +113,6 @@ export function toCatalogModel(
     eligible: existing?.eligible ?? false,
     thinking: existing?.thinking ?? thinkingLevels(model),
     disabledReason: existing ? (existing.disabledReason ?? null) : AUTO_DISABLED_REASON,
-    costRank: existing?.costRank ?? defaultCostRank(model),
   };
 }
 

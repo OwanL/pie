@@ -527,6 +527,16 @@ export class BackendServer {
           : undefined,
       });
 
+      // Runtime model registries contain the effective request URLs after
+      // built-in defaults and credential-specific OAuth rewrites are applied.
+      // Feed those URLs into the already-installed gate so configured providers
+      // without a static models.json baseUrl (and providers whose URL changes at
+      // runtime) are gated and reported like ordinary custom providers.
+      const modelRegistry = runtime.services?.modelRegistry;
+      ProviderGate.getInstance()?.registerModelBaseUrls(
+        modelRegistry?.getAll?.() ?? modelRegistry?.getAvailable?.() ?? [],
+      );
+
       const session = runtime.session;
       const sessionPath = this.resolveSessionPath(session);
       if (!sessionPath) {

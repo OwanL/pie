@@ -3,7 +3,7 @@
 
 import { DEFAULT_PRUNING_SETTINGS, type ChatPrefs, type ModelInfo, type PruningSettings, type PruningMode, type ThinkingLevel } from '../../../shared/protocol';
 import { toggleChatPref } from '../chat-prefs';
-import { orderModelsForPicker } from './model-list';
+import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ModelPicker } from '../components/model-picker';
 import { PRUNING_MODE_OPTIONS, THINKING_LEVEL_OPTIONS } from './settings-menu-helpers';
 import { AlwaysKeepPicker } from '../components/always-keep-picker';
@@ -21,8 +21,13 @@ interface SkillPrunerSettingsProps {
 }
 
 export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, availableModels, skillCatalog, toolCatalog, onSetPrefs, onSetPruningSettings }: SkillPrunerSettingsProps) {
+  const selectedModelSpec = pruningSettings.provider && pruningSettings.model
+    ? formatModelSpec({ provider: pruningSettings.provider, id: pruningSettings.model })
+    : pruningSettings.model;
   const modelLabel =
-    modelEntries.find((e) => e.model.id === pruningSettings.model)?.selectedLabel
+    modelEntries.find((entry) =>
+      entry.model.id === pruningSettings.model
+      && (!pruningSettings.provider || entry.model.provider === pruningSettings.provider))?.label
     || pruningSettings.model
     || 'Select model…';
   const autoSkipBelowTokens = pruningSettings.autoSkipBelowTokens === undefined
@@ -105,17 +110,14 @@ export function SkillPrunerSettings({ prefs, pruningSettings, modelEntries, avai
         <ModelPicker
           compact
           dropdownDirection="down"
-          value={pruningSettings.model}
+          value={selectedModelSpec}
           label={modelLabel}
           ariaLabel="Pruning prepass model"
           title="Select prepass model"
           entries={modelEntries}
           onChange={(spec) => {
-            // ModelPicker emits provider/id; split into the separate model +
-            // provider fields the pruning config stores.
-            const slash = spec.indexOf('/');
-            const id = slash === -1 ? spec : spec.substring(slash + 1);
-            const provider = slash === -1 ? undefined : spec.substring(0, slash);
+            // Persist the shared picker identity in the config's separate fields.
+            const { id, provider } = parseModelSpec(spec);
             const selected = availableModels.find((m) => m.id === id && (!provider || m.provider === provider));
             if (selected) {
               onSetPruningSettings({ model: selected.id, provider: selected.provider });

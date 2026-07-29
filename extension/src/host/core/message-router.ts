@@ -178,6 +178,14 @@ export class MessageRouter {
 
       case 'togglePinTab':
         return this.onTogglePinTab(msg as Extract<WebviewToHostMessage, { type: 'togglePinTab' }>);
+      case 'groupPinnedTab':
+        return this.onGroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>);
+      case 'mergePinnedGroups':
+        return this.onMergePinnedGroups(msg as Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>);
+      case 'ungroupPinnedTab':
+        return this.onUngroupPinnedTab(msg as Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>);
+      case 'movePinnedItem':
+        return this.onMovePinnedItem(msg as Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>);
 
       case 'loadOlderTranscript':
         return await this.onLoadOlderTranscript(msg as Extract<WebviewToHostMessage, { type: 'loadOlderTranscript' }>);
@@ -601,6 +609,81 @@ export class MessageRouter {
     this.dispatchEvent({
       kind: 'Command',
       cmd: { kind: 'TogglePinTab', corrId, sessionPath: msg.sessionPath },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private isNonEmptyString(value: unknown): value is string {
+    return typeof value === 'string' && value.length > 0;
+  }
+
+  /** A finite, nonnegative integer — the only acceptable `toItemIndex` for a
+   *  pinned-item gap drop. Rejects NaN, ±Infinity, negatives, and fractions
+   *  before they reach the reducer (the helpers clamp defensively, but a
+   *  malformed index from a stale/out-of-sync webview is a protocol defect). */
+  private isNonNegativeInteger(value: unknown): value is number {
+    return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+  }
+
+  private onGroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'groupPinnedTab' }>): void {
+    // Pure state mutation — the reducer joins the source pinned tab to the
+    // target's group (creating one if the target is standalone) and emits a
+    // PersistTabs effect. No backend RPC.
+    if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonEmptyString(msg.targetPath)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: groupPinnedTab arrived without a sourcePath or targetPath.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'GroupPinnedTab', corrId, sourcePath: msg.sourcePath, targetPath: msg.targetPath },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private onMergePinnedGroups(msg: Extract<WebviewToHostMessage, { type: 'mergePinnedGroups' }>): void {
+    // Pure state mutation — the reducer merges the source group into the
+    // target group (target members then source members) and emits a
+    // PersistTabs effect. No backend RPC.
+    if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonEmptyString(msg.targetPath)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: mergePinnedGroups arrived without a sourcePath or targetPath.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'MergePinnedGroups', corrId, sourcePath: msg.sourcePath, targetPath: msg.targetPath },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private onUngroupPinnedTab(msg: Extract<WebviewToHostMessage, { type: 'ungroupPinnedTab' }>): void {
+    // Pure state mutation — the reducer removes the source from its group
+    // (dissolving it below 2) and repositions it as a standalone pinned tab.
+    // No backend RPC.
+    if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonNegativeInteger(msg.toItemIndex)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: ungroupPinnedTab arrived with an invalid sourcePath or toItemIndex.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'UngroupPinnedTab', corrId, sourcePath: msg.sourcePath, toItemIndex: msg.toItemIndex },
+    });
+    this.sidebarProvider.postState();
+  }
+
+  private onMovePinnedItem(msg: Extract<WebviewToHostMessage, { type: 'movePinnedItem' }>): void {
+    // Pure state mutation — the reducer reorders a pinned item (standalone
+    // chip or group block) within the pinned strip. No backend RPC.
+    if (!this.isNonEmptyString(msg.sourcePath) || !this.isNonNegativeInteger(msg.toItemIndex)) {
+      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: movePinnedItem arrived with an invalid sourcePath or toItemIndex.' });
+      return;
+    }
+    const corrId = crypto.randomUUID();
+    this.dispatchEvent({
+      kind: 'Command',
+      cmd: { kind: 'MovePinnedItem', corrId, sourcePath: msg.sourcePath, toItemIndex: msg.toItemIndex },
     });
     this.sidebarProvider.postState();
   }

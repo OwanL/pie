@@ -946,8 +946,8 @@
       "concurrency": {
         "maxConcurrentRequests": 2,
         "afterburnSeconds": 15,
-        "queueWaitSeconds": 30,
-        "headerWaitSeconds": 30
+        "queueWaitSeconds": 300,
+        "headerWaitSeconds": 120
       },
       "models": [
         {

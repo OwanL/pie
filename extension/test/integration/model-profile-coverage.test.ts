@@ -17,10 +17,6 @@ interface RawProfileEntry {
   provider?: string;
   id?: string;
   eligible?: unknown;
-  precision?: number;
-  creativity?: number;
-  thoroughness?: number;
-  reasoning?: number;
   disabled_reason?: string;
 }
 
@@ -54,11 +50,6 @@ function loadYaml(filePath: string): RawProfileConfig {
     }
     if (!current) continue;
 
-    const numMatch = line.match(/^\s+(precision|creativity|thoroughness|reasoning):\s+(-?[\d.]+)/);
-    if (numMatch) {
-      (current as Record<string, unknown>)[numMatch[1]] = Number(numMatch[2]);
-      continue;
-    }
     const boolMatch = line.match(/^\s+eligible:\s+(true|false)/);
     if (boolMatch) {
       current.eligible = boolMatch[1] === 'true';
@@ -238,26 +229,4 @@ test('no non-local cloud model has silently-zero pricing in models.json', () => 
 
   assert.deepEqual(suspiciousZeroModels, [],
     `Cloud/Copilot models with all-zero pricing (should have real pricing or be listed as known-unknown): ${suspiciousZeroModels.join(', ')}`);
-});
-
-test('all profile capability scores are non-negative integers', () => {
-  const repoRoot = path.resolve(__dirname, '..', '..', '..');
-  const profiles = readConfig(repoRoot);
-
-  const dims = ['precision', 'creativity', 'thoroughness', 'reasoning'] as const;
-  const invalidProfiles: string[] = [];
-
-  for (const profile of (Array.isArray(profiles.profiles) ? profiles.profiles : [])) {
-    if (typeof profile.id !== 'string') continue;
-    for (const dim of dims) {
-      const v = profile[dim];
-      if (typeof v === 'number' && (!Number.isFinite(v) || v < 0 || !Number.isInteger(v))) {
-        invalidProfiles.push(`${profile.id}.${dim}=${v}`);
-      }
-      // Skip profiles without scores (they'll be flagged by the coverage test instead)
-    }
-  }
-
-  assert.deepEqual(invalidProfiles, [],
-    `Profiles with invalid capability scores: ${invalidProfiles.join(', ')}`);
 });

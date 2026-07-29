@@ -174,10 +174,21 @@ test('subagent header labels inherited context and its tooltip shows the exact i
   assert.equal(label?.textContent, 'context latest');
   const trigger = label?.closest<HTMLElement>('.pie-tooltip-trigger');
   assert.ok(trigger);
-  await act(async () => {
-    trigger.dispatchEvent(new MouseEvent('mouseenter'));
-    await new Promise((resolve) => setTimeout(resolve, 400));
-  });
+  const originalSetTimeout = window.setTimeout;
+  let showTooltip: TimerHandler | undefined;
+  window.setTimeout = ((callback: TimerHandler) => {
+    showTooltip = callback;
+    return 1;
+  }) as typeof window.setTimeout;
+  try {
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('mouseenter'));
+      if (typeof showTooltip === 'function') showTooltip();
+      await Promise.resolve();
+    });
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
   const tooltip = Array.from(document.querySelectorAll<HTMLElement>('.pie-tooltip-host'))
     .find((host) => host.textContent?.includes('Keep the public API.'));
   assert.ok(tooltip, 'context tooltip should render the exact inherited packet');

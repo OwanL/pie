@@ -7,6 +7,7 @@
  */
 
 import type { ModelProviderRef } from "./provider-toggles.js";
+import { parseModelSpec, qualifiedModelSpec } from "./bucket-config.js";
 import type { SingleResult, SubagentAttemptPhase, SubagentAttemptRecord, UsageStats } from "../types.js";
 
 /** Cancelable timer handle returned by {@link RetryClock.setTimer}. */
@@ -202,13 +203,18 @@ export function abortableDelay(ms: number, signal: AbortSignal | undefined, cloc
 	});
 }
 
-/** Resolve the provider that owns a model id from the registry mapping. */
+/** Resolve the provider that owns a model spec. Qualified specs are exact;
+ * legacy bare ids retain the historical registry lookup. */
 export function providerForModel(modelId: string, registryModels: ModelProviderRef[] | undefined): string | undefined {
+	const spec = parseModelSpec(modelId);
+	if (spec.provider) return spec.provider;
 	if (!registryModels) return undefined;
-	return registryModels.find((m) => m.id === modelId)?.provider;
+	return registryModels.find((m) => m.id === spec.id)?.provider;
 }
 
-/** Add every configured model from a provider to an exclusion set. */
+/** Add every configured model from a provider to an exclusion set. Both forms
+ * are recorded: bare ids preserve legacy retry semantics, while exact specs
+ * prevent one failed provider from excluding a qualified duplicate elsewhere. */
 export function excludeProviderModels(
 	provider: string,
 	registryModels: ModelProviderRef[] | undefined,
@@ -216,7 +222,9 @@ export function excludeProviderModels(
 ): void {
 	if (!registryModels) return;
 	for (const model of registryModels) {
-		if (model.provider === provider) excludeModels.add(model.id);
+		if (model.provider !== provider) continue;
+		excludeModels.add(model.id);
+		excludeModels.add(qualifiedModelSpec(model.provider, model.id));
 	}
 }
 

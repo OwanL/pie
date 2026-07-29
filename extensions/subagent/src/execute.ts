@@ -35,7 +35,6 @@ import {
 	PROVIDER_TOGGLES_ENV,
 	SUBAGENT_PROVIDER_DEFAULTS_ENV,
 	SUBAGENT_PROVIDER_TOGGLES_ENV,
-	getAllowedModelIdsForProviders,
 	getDisabledProviders,
 	loadModelConfig,
 	parseProviderToggles,
@@ -43,6 +42,7 @@ import {
 	resolveSubagentProviderToggles,
 	readBucketAssignments,
 	readNestedAllowedBuckets,
+	qualifiedModelSpec,
 	downgradeBucketForNested,
 	selectModel,
 } from "../bucket-selector.js";
@@ -496,16 +496,15 @@ function setupModelSelection(
 	const subagentDisabled = getDisabledProviders(subagentProviderToggles);
 	for (const provider of subagentDisabled) disabledProviders.add(provider);
 	const availableModels = ctx.modelRegistry.getAvailable();
+	const enabledModels = availableModels.filter((m) => !disabledProviders.has(m.provider));
 	const allowedModelIds = new Set<string>(
-		availableModels
-			.filter((m) => !disabledProviders.has(m.provider))
-			.map((m) => m.id),
+		enabledModels.flatMap((m) => [m.id, qualifiedModelSpec(m.provider, m.id)]),
 	);
 
 	// Hard model requirement snapshot. Capability comes from the runtime
 	// `Model.input` array on `modelRegistry.getAvailable()` — `SimpleModelConfig`
-	// remains responsible for thinking/cost metadata only and is NOT treated as
-	// a capability source. A model id is requirement-qualified when at least one
+	// remains responsible for profile eligibility and thinking metadata only and
+	// is NOT treated as a capability source. A model id is requirement-qualified when at least one
 	// enabled provider-qualified declaration satisfies the requirement; this set
 	// is the hard filter applied by `selectModel` so duplicate ids exposed by an
 	// incompatible provider can never become eligible. Undefined (no filtering)
@@ -513,15 +512,12 @@ function setupModelSelection(
 	const requirementActive = requirementIsActive(modelRequirements);
 	const requirementQualifiedModelIds = requirementActive
 		? new Set<string>(
-				availableModels
-					.filter((m) =>
-						!disabledProviders.has(m.provider)
-						&& modelInputSatisfiesRequirement(
-							(m as { input?: ReadonlyArray<string> }).input,
-							modelRequirements,
-						),
-					)
-					.map((m) => m.id),
+				enabledModels
+					.filter((m) => modelInputSatisfiesRequirement(
+						(m as { input?: ReadonlyArray<string> }).input,
+						modelRequirements,
+					))
+					.flatMap((m) => [m.id, qualifiedModelSpec(m.provider, m.id)]),
 			)
 		: undefined;
 

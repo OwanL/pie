@@ -129,7 +129,7 @@ function makeHarness() {
 test('setPrefs persists prefs without dispatching a recursive SetPrefs command', async () => {
   const { service, dispatched, context } = makeHarness();
 
-  await service.setPrefs({ autoExpandReasoning: true });
+  await service.setPrefs({ autoExpandReasoning: true, composerInitialRows: 4 });
 
   const setPrefsCommands = dispatched.filter(
     (e) => e.kind === 'Command' && e.cmd.kind === 'SetPrefs',
@@ -143,6 +143,7 @@ test('setPrefs persists prefs without dispatching a recursive SetPrefs command',
 
   const persisted = context.globalState.get('chatPrefs');
   assert.equal(persisted?.autoExpandReasoning, true);
+  assert.equal(persisted?.composerInitialRows, 4);
 });
 
 test('setPrefs no longer dispatches UnreadFinishedSessionsChanged (reducer owns the clear)', async () => {

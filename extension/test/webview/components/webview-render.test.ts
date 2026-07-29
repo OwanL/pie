@@ -300,7 +300,7 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
     toolCall: toolCall({
       id: 'sub-1',
       name: 'subagent',
-      input: { agent: 'reviewer', task: 'Inspect regression', taskScores: { precision: 4, reasoning: 5 } },
+      input: { agent: 'reviewer', task: 'Inspect regression' },
       result: {
         details: {
           mode: 'single',
@@ -313,7 +313,6 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
             stderr: '',
             usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.001, contextTokens: 50, turns: 1 },
             selectedModel: 'claude-sonnet-4-5:cloud',
-            taskScores: { precision: 4, reasoning: 5 },
             thinkingLevel: 'high',
           }],
         },
@@ -327,7 +326,6 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   }));
 
   assert.match(subagentHtml, /subagent-agent-name/);
-  assert.match(subagentHtml, /subagent-scores/);
   assert.match(subagentHtml, /subagent-model-label/);
   assert.match(subagentHtml, /claude-sonnet-4-5/);
   assert.doesNotMatch(subagentHtml, /subagent-model-tag/);
@@ -432,7 +430,6 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
             model: 'gpt-5.4',
             messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Done.' }], model: 'gpt-5.4' }],
             selectedModel: 'claude-opus-4.6',
-            taskScores: { precision: 4, reasoning: 5 },
             thinkingLevel: 'high',
             startedAt: 1_000,
             completedAt: 66_000,
@@ -478,7 +475,6 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
             exitCode: 0,
             messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Done.' }] }],
             selectedModel: 'claude-sonnet-4-5:cloud',
-            taskScores: { precision: 4 },
             thinkingLevel: 'high',
           }],
         },
@@ -495,7 +491,6 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   assert.match(collapsedHtml, /subagent-live-preview/);
   assert.match(collapsedHtml, /Inspect regression/);
   assert.doesNotMatch(collapsedHtml, /reviewer: Inspect regression/);
-  assert.match(collapsedHtml, /Creativity: 2\/5 \(default\)/);
   assert.doesNotMatch(collapsedHtml, /subagent-secondary-meta/);
   assert.doesNotMatch(collapsedHtml, /subagent-model-tag/);
   assert.doesNotMatch(collapsedHtml, /subagent-thinking-tag/);

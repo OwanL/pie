@@ -5,6 +5,7 @@ import {
 	requirementIsActive,
 } from "./src/selection.js";
 import type { ModelRequirements } from "./types.js";
+import { parseModelSpec } from "./src/bucket-config.js";
 
 export interface ModelRegistryLike {
 	getAvailable(): Model<any>[];
@@ -21,8 +22,9 @@ export interface ResolvedExecutionModel {
 /**
  * Resolve the requested subagent model against the registry.
  *
- * - When a requested model id is present, prefer the caller's provider when that
- *   provider exposes the same id.
+ * - A canonical `provider/id` request resolves only through the exact
+ *   `registry.find(provider, id)` entry.
+ * - A legacy bare id preserves caller-provider preference and registry fallback.
  * - When the requested model cannot be found (or only exists on disabled
  *   providers), fall back to the caller model when possible and emit a diagnostic.
  * - When no requested model is present, inherit the caller model.
@@ -57,6 +59,28 @@ export function resolveExecutionModel(
 	if (requestedModel) {
 		const availableModels = modelRegistry.getAvailable();
 		const allModels = modelRegistry.getAll();
+		const requestedSpec = parseModelSpec(requestedModel);
+
+		if (requestedSpec.provider) {
+			const exact = modelRegistry.find(requestedSpec.provider, requestedSpec.id);
+			if (exact && exact.provider === requestedSpec.provider && exact.id === requestedSpec.id
+				&& isProviderEnabled(exact.provider) && satisfies(exact)) {
+				return { resolvedModel: exact, actualModelId: exact.id };
+			}
+			if (exact && !isProviderEnabled(requestedSpec.provider)) {
+				diagnostic = `Requested model "${requestedModel}" is available only from disabled provider "${requestedSpec.provider}". Falling back to caller/default model.`;
+			} else if (requirementActive) {
+				resolvedModel = undefined;
+				diagnostic = `Requested model "${requestedModel}" has no enabled provider-qualified declaration satisfying modelRequirements.inputKinds=["${(modelRequirements?.inputKinds ?? []).join(",")}"].`;
+			} else {
+				diagnostic = `Requested model "${requestedModel}" not found in registry. Falling back to caller/default model.`;
+			}
+			return {
+				resolvedModel,
+				actualModelId: resolvedModel?.id,
+				diagnostic,
+			};
+		}
 
 		const availableMatches = availableModels.filter(
 			(model) => model.id === requestedModel && isProviderEnabled(model.provider) && satisfies(model),

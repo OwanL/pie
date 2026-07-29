@@ -243,31 +243,13 @@ Cache usage is still captured for token accounting and the context-window indica
 
 ---
 
-## Normalization Baseline
-
-For the normalized cost calculation (`estimateNormalizedCost()`), the baseline is:
-
-- **Baseline model**: `claude-sonnet-4.6` (via Copilot)
-- **Baseline pricing**: $3.00/M input, $15.00/M output
-- **Blended baseline** (3:1 input:output ratio): `(3 * 3.00 + 1 * 15.00) / 4 = $6.00 / 1M`
-- **Normalized baseline**: $6.00/1M maps to `cost ≈ 10` on the legacy selector scale
-- **Formula**: `normalizedCost = 10 * sqrt(blendedUsdPer1M / 6.00)`
-- **Legacy `cost=10` maps to**: ~$6.00/1M blended (sonnet-4.6 tier)
-
-This baseline was chosen because:
-1. Sonnet 4.6 already has `cost: 10` in model-profiles.yaml as the established baseline
-2. $3/$15 per 1M is officially published by GitHub Copilot
-3. The 3:1 token ratio is representative of agentic coding workloads
-
----
-
 ## Gap Analysis
 
 Models in `model-profiles.yaml` without pricing in this evidence document:
 
 | Model ID | Reason |
 |---|---|
-| grok-code-fast-1 | No official token pricing published by GitHub Copilot. Only multiplier-based pricing exists in the old premium-request model. Use legacy `cost: 13` in model-profiles.yaml until token pricing is published. |
+| grok-code-fast-1 | No official token pricing published by GitHub Copilot; cost remains unavailable until a real token rate is published. |
 
 No models remain at `unknown` confidence as of 2026-06-19:
 - `gemini-3-flash-preview:cloud` — previously range-only; now priced via OpenRouter (`google/gemini-3-flash-preview`).

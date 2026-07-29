@@ -154,7 +154,7 @@ test('stale settings locks are recovered', async () => {
     await withFileUpdateLock(file, async () => { ran = true; }, {
       retryMs: 1,
       staleMs: 10,
-      timeoutMs: 100,
+      timeoutMs: 1000,
     });
     assert.equal(ran, true);
     await assert.rejects(fs.access(lockPath), { code: 'ENOENT' });

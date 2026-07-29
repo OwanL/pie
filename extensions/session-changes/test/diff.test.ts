@@ -1,185 +1,146 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
+import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { computeFileDiff } from '../src/diff';
-import type { DiffInput } from '../src/diff';
+import { computeFileDiff, type DiffDependencies, type DiffInput } from '../src/diff';
 
+const integrationTest = process.env.PIE_RUN_INTEGRATION_TESTS === '1' ? test : test.skip;
 const execFileP = promisify(execFile);
 
-async function git(dir: string, args: string[]): Promise<{ stdout: string; code: number }> {
-  try {
-    const { stdout } = await execFileP('git', args, { cwd: dir, maxBuffer: 1024 * 1024 });
-    return { stdout, code: 0 };
-  } catch (e) {
-    const err = e as { code?: number | string; stdout?: string };
-    if (typeof err.code === 'number') return { stdout: err.stdout ?? '', code: err.code };
-    throw e;
-  }
+function input(absPath: string, kind: DiffInput['kind'], context = 0): DiffInput {
+  return { relPath: path.basename(absPath), absPath, kind, context };
 }
 
-async function initRepo(dir: string): Promise<void> {
-  await git(dir, ['init', '-q']);
-  await git(dir, ['config', 'user.email', 'test@example.com']);
-  await git(dir, ['config', 'user.name', 'Test']);
-  await git(dir, ['config', 'commit.gpgsign', 'false']);
+function dependencies(overrides: Partial<DiffDependencies> = {}): DiffDependencies {
+  return {
+    isTrackedByGit: async () => false,
+    resolveBaselineRef: async () => 'baseline-sha',
+    execGit: async () => ({ stdout: '', code: 0 }),
+    ...overrides,
+  };
 }
 
-async function commit(dir: string, message: string): Promise<string> {
-  await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-q', '-m', message]);
-  const { stdout } = await git(dir, ['rev-parse', 'HEAD']);
-  return stdout.trim();
-}
-
-async function withTempRepo(run: (dir: string) => Promise<void>): Promise<void> {
+async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-diff-'));
   try {
-    await initRepo(dir);
     await run(dir);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
-function input(absPath: string, kind: DiffInput['kind'], relPath?: string, context = 0): DiffInput {
-  return { relPath: relPath ?? absPath, absPath, kind, context };
-}
-
-// ─── created: full content as additions (no git baseline needed) ────────────
-
-test('computeFileDiff: created file → synthetic all-additions body, baseline=(new file)', async () => {
-  await withTempRepo(async (dir) => {
+test('created files render a synthetic all-additions patch without resolving a baseline', async () => {
+  await withTempDir(async (dir) => {
     const file = path.join(dir, 'new.ts');
     await fs.writeFile(file, 'a\nb\nc');
-    const out = await computeFileDiff(input(file, 'created', 'new.ts'));
+    let resolvedBaseline = false;
+    const out = await computeFileDiff(input(file, 'created'), dependencies({
+      resolveBaselineRef: async () => { resolvedBaseline = true; return 'unused'; },
+    }));
+
     assert.equal(out.kind, 'created');
     assert.equal(out.baseline, '(new file)');
     assert.equal(out.body, '@@ -0,0 +1,3 @@\n+a\n+b\n+c');
+    assert.equal(resolvedBaseline, false);
   });
 });
 
-test('computeFileDiff: created file missing on disk → note, empty body', async () => {
-  await withTempRepo(async (dir) => {
-    const out = await computeFileDiff(input(path.join(dir, 'gone.ts'), 'created', 'gone.ts'));
-    assert.equal(out.body, '');
-    assert.match(out.note!, /no longer exists on disk/);
+test('a created file missing on disk returns an actionable note', async () => {
+  const out = await computeFileDiff(input(path.join(os.tmpdir(), `missing-${process.pid}.ts`), 'created'), dependencies());
+  assert.equal(out.body, '');
+  assert.match(out.note ?? '', /no longer exists on disk/);
+});
+
+test('a tracked write is treated as a modification against the resolved baseline', async () => {
+  const out = await computeFileDiff(input('/repo/f.ts', 'created'), dependencies({
+    isTrackedByGit: async () => true,
+    resolveBaselineRef: async () => 'before-write',
+    execGit: async () => ({
+      code: 1,
+      stdout: 'diff --git a/f.ts b/f.ts\nindex 1..2 100644\n--- a/f.ts\n+++ b/f.ts\n@@ -1 +1 @@\n-v1\n+v2\n',
+    }),
+  }));
+
+  assert.equal(out.kind, 'modified');
+  assert.equal(out.baseline, 'before-write');
+  assert.equal(out.body, '@@ -1 +1 @@\n-v1\n+v2');
+});
+
+test('modified diffs forward the requested context and retain only the unified body', async () => {
+  const calls: string[][] = [];
+  const deps = dependencies({
+    execGit: async (_dir, args) => {
+      calls.push(args);
+      return {
+        code: 1,
+        stdout: 'diff --git a/f.ts b/f.ts\nindex 1..2 100644\n--- a/f.ts\n+++ b/f.ts\n@@ -1,3 +1,3 @@\n same\n-old\n+new\n',
+      };
+    },
+  });
+
+  const withoutContext = await computeFileDiff(input('/repo/f.ts', 'modified', 0), deps);
+  const withContext = await computeFileDiff(input('/repo/f.ts', 'modified', 3), deps);
+  assert.ok(calls[0]?.includes('--unified=0'));
+  assert.ok(calls[1]?.includes('--unified=3'));
+  assert.doesNotMatch(withoutContext.body, /diff --git|\+\+\+/);
+  assert.match(withContext.body, /^ same$/m);
+});
+
+test('deleted files preserve deletion lines from the git diff', async () => {
+  const out = await computeFileDiff(input('/repo/f.ts', 'deleted'), dependencies({
+    execGit: async () => ({
+      code: 1,
+      stdout: 'diff --git a/f.ts b/f.ts\ndeleted file mode 100644\n--- a/f.ts\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-v1\n-v2\n',
+    }),
+  }));
+  assert.match(out.body, /-v1/);
+  assert.match(out.body, /-v2/);
+});
+
+test('bad git baselines fail closed with the no-baseline note', async () => {
+  const out = await computeFileDiff(input('/repo/f.ts', 'modified'), dependencies({
+    execGit: async () => ({ stdout: '', code: 128 }),
+  }));
+  assert.equal(out.baseline, 'HEAD');
+  assert.equal(out.body, '');
+  assert.match(out.note ?? '', /no git baseline/);
+});
+
+test('an empty git diff reports no changes rather than claiming a baseline failure', async () => {
+  const out = await computeFileDiff(input('/repo/untracked.ts', 'modified'), dependencies());
+  assert.equal(out.baseline, 'baseline-sha');
+  assert.equal(out.body, '');
+  assert.match(out.note ?? '', /no changes vs baseline/);
+});
+
+test('git and filesystem failures are converted to bounded fallback output', async () => {
+  const out = await computeFileDiff(input('/repo/f.ts', 'modified'), dependencies({
+    resolveBaselineRef: async () => { throw new Error('git unavailable'); },
+  }));
+  assert.deepEqual(out, {
+    kind: 'modified', path: 'f.ts', additions: 0, deletions: 0,
+    baseline: 'HEAD', body: '', note: 'no git baseline; use read to view',
   });
 });
 
-test('computeFileDiff: created-but-git-tracked file (an overwrite) diffs against the baseline, not as all-additions', async () => {
-  // The derivation marks a `write` tool as `created` from the tool NAME alone —
-  // it cannot prove the file is new. At diff time we verify the claim against
-  // git: a tracked file existed before the session, so an overwrite is a
-  // modification, not a creation. The diff must show the delta (-old/+new),
-  // not the whole file as additions.
-  await withTempRepo(async (dir) => {
+integrationTest('real git integration recognizes a tracked write as a modification', async () => {
+  await withTempDir(async (dir) => {
+    await execFileP('git', ['init', '-q'], { cwd: dir });
+    await execFileP('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await execFileP('git', ['config', 'user.name', 'Test'], { cwd: dir });
     const file = path.join(dir, 'f.ts');
     await fs.writeFile(file, 'v1\n');
-    await commit(dir, 'initial');
-    await fs.writeFile(file, 'v2\n'); // overwrite (write tool → kind 'created')
-
-    const out = await computeFileDiff(input(file, 'created', 'f.ts'));
-    assert.equal(out.kind, 'modified', 'a tracked overwrite is a modification');
-    assert.match(out.body, /-v1/);
-    assert.match(out.body, /\+v2/);
-    assert.ok(!out.body.includes('@@ -0,0'), 'must not be a synthetic all-additions patch');
-  });
-});
-
-// ─── modified: diff against the pre-change baseline (not bare HEAD) ─────────
-
-test('computeFileDiff: modified committed change → diff vs pre-change baseline', async () => {
-  await withTempRepo(async (dir) => {
-    const file = path.join(dir, 'f.ts');
-    await fs.writeFile(file, 'v1\n');
-    const initial = await commit(dir, 'initial');
+    await execFileP('git', ['add', 'f.ts'], { cwd: dir });
+    await execFileP('git', ['commit', '-q', '-m', 'initial'], { cwd: dir });
     await fs.writeFile(file, 'v2\n');
-    await commit(dir, 'agent change'); // working tree clean (== HEAD)
 
-    const out = await computeFileDiff(input(file, 'modified', 'f.ts'));
-    assert.equal(out.baseline, initial);
+    const out = await computeFileDiff(input(file, 'created'));
+    assert.equal(out.kind, 'modified');
     assert.match(out.body, /-v1/);
     assert.match(out.body, /\+v2/);
-    // The 4-line preamble is dropped (minified).
-    assert.ok(!out.body.includes('diff --git'));
-    assert.ok(!out.body.includes('+++ '));
-  });
-});
-
-test('computeFileDiff: context=0 by default (changes-only)', async () => {
-  await withTempRepo(async (dir) => {
-    const file = path.join(dir, 'f.ts');
-    await fs.writeFile(file, 'l1\nl2\nl3\nl4\nl5\n');
-    await commit(dir, 'initial');
-    await fs.writeFile(file, 'l1\nl2\nCHANGED\nl4\nl5\n');
-    await commit(dir, 'agent change');
-
-    const out = await computeFileDiff(input(file, 'modified', 'f.ts', 0));
-    // context=0 → no leading ' ' unchanged lines around the change.
-    assert.ok(!out.body.split('\n').some((l) => l.startsWith(' ')));
-  });
-});
-
-test('computeFileDiff: context=3 keeps surrounding unchanged lines', async () => {
-  await withTempRepo(async (dir) => {
-    const file = path.join(dir, 'f.ts');
-    await fs.writeFile(file, 'l1\nl2\nl3\nl4\nl5\n');
-    await commit(dir, 'initial');
-    await fs.writeFile(file, 'l1\nl2\nCHANGED\nl4\nl5\n');
-    await commit(dir, 'agent change');
-
-    const out = await computeFileDiff(input(file, 'modified', 'f.ts', 3));
-    assert.ok(out.body.split('\n').some((l) => l.startsWith(' ')), 'expected context lines');
-  });
-});
-
-// ─── deleted: old content as deletions ─────────────────────────────────────
-
-test('computeFileDiff: deleted committed file → old content as deletions', async () => {
-  await withTempRepo(async (dir) => {
-    const file = path.join(dir, 'f.ts');
-    await fs.writeFile(file, 'v1\nv2\n');
-    const content = await commit(dir, 'initial');
-    await fs.rm(file);
-    await commit(dir, 'agent deletes'); // working tree clean, file absent
-
-    const out = await computeFileDiff(input(file, 'deleted', 'f.ts'));
-    assert.equal(out.baseline, content);
-    assert.match(out.body, /-v1/);
-    assert.match(out.body, /-v2/);
-  });
-});
-
-// ─── no-baseline fallback (never errors) ────────────────────────────────────
-
-test('computeFileDiff: repo with no commits (unborn HEAD) → no-git-baseline note', async () => {
-  // A fresh repo with no commits has an unborn HEAD: `git log` exits 128 →
-  // resolveBaselineRef returns 'HEAD', then `git diff HEAD` exits 128 (bad
-  // revision) → the noBaseline fallback. Reliable (own .git, no ancestor walk).
-  await withTempRepo(async (dir) => {
-    const file = path.join(dir, 'f.ts');
-    await fs.writeFile(file, 'x');
-    const out = await computeFileDiff(input(file, 'modified', 'f.ts'));
-    assert.equal(out.body, '');
-    assert.match(out.note!, /no git baseline; use read to view/);
-  });
-});
-
-test('computeFileDiff: untracked file in a committed repo → no-changes note', async () => {
-  // kind=modified but the file is untracked → `git diff HEAD -- <file>` is empty
-  // (untracked files aren't in HEAD's diff) → "no changes vs baseline" note.
-  await withTempRepo(async (dir) => {
-    await fs.writeFile(path.join(dir, 'seed.txt'), 'seed');
-    await commit(dir, 'seed'); // give HEAD a commit so `git diff HEAD` resolves
-    const file = path.join(dir, 'untracked.ts');
-    await fs.writeFile(file, 'x');
-    const out = await computeFileDiff(input(file, 'modified', 'untracked.ts'));
-    assert.equal(out.body, '');
-    assert.match(out.note!, /no changes vs baseline/);
   });
 });

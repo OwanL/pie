@@ -196,6 +196,7 @@ test('loadSdk imports allowed ESM SDK modules that satisfy the contract', async 
       export const VERSION = 'test-sdk';
       export class AgentSession {
         _installAgentNextTurnRefresh() {}
+        _buildRuntime() {}
         async _checkCompaction() { return false; }
       }
       export const getAgentDir = () => '/agent';

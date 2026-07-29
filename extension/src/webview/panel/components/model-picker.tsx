@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
-import type { ModelPickerEntry } from '../composer/model-list';
+import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
 import { CollapsibleChevron } from './chevron';
 import { Tooltip } from './tooltip';
 
@@ -23,6 +23,8 @@ interface ModelPickerProps {
   onChange: (modelSpec: string) => void;
   /** Optional compact width for use inside settings rows. */
   compact?: boolean;
+  /** Disable the trigger and prevent the dropdown from opening. */
+  disabled?: boolean;
   /** Which direction the dropdown opens. Default 'up'. */
   dropdownDirection?: 'up' | 'down';
 }
@@ -245,13 +247,15 @@ function useListKeyDown(
 ) {
   return useCallback(
     (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
-      if (entries.length === 0) return;
       const action = resolveListKeyAction(e.key);
       if (!action) return;
+      // Tab must close even when the current search has no results; otherwise
+      // focus leaves while the portaled dropdown remains visibly stranded.
       if (action === 'close') {
         setOpen(false);
         return;
       }
+      if (entries.length === 0) return;
       e.preventDefault();
       switch (action) {
         case 'next':
@@ -268,7 +272,7 @@ function useListKeyDown(
           break;
         case 'select': {
           const entry = entries[activeIndex];
-          if (entry) handleSelect(`${entry.model.provider}/${entry.model.id}`);
+          if (entry) handleSelect(formatModelSpec(entry.model));
           break;
         }
       }
@@ -301,7 +305,7 @@ function useModelPicker({
   // prefix (lets callers disambiguate duplicate ids across providers), falling
   // back to a bare-id match.
   const selectedIndex = entries.findIndex(
-    (e) => `${e.model.provider}/${e.model.id}` === value || e.model.id === value,
+    (e) => formatModelSpec(e.model) === value || e.model.id === value,
   );
 
   const filteredEntries = useMemo(() => {
@@ -370,6 +374,7 @@ interface ModelPickerTriggerProps {
   title: string;
   label: string;
   open: boolean;
+  disabled?: boolean;
   onClick: () => void;
   onKeyDown: (e: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => void;
 }
@@ -381,6 +386,7 @@ function ModelPickerTrigger({
   title,
   label,
   open,
+  disabled,
   onClick,
   onKeyDown,
 }: ModelPickerTriggerProps) {
@@ -397,6 +403,7 @@ function ModelPickerTrigger({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
+        disabled={disabled}
         onClick={onClick}
         onKeyDown={onKeyDown}
       >
@@ -428,7 +435,7 @@ function ModelPickerRow({
 }: ModelPickerRowProps) {
   return (
     <div
-      key={`${entry.model.provider}/${entry.model.id}`}
+      key={formatModelSpec(entry.model)}
       id={optionId}
       ref={setItemRef}
       class={getRowClass(isSelected, isActive, entry.ineligible)}
@@ -526,12 +533,12 @@ function ModelPickerDropdown({
           <div class="model-picker-empty">{`No models match "${query}"`}</div>
         ) : (
           entries.map((entry, i) => {
-            const isSelected = `${entry.model.provider}/${entry.model.id}` === value || entry.model.id === value;
+            const isSelected = formatModelSpec(entry.model) === value || entry.model.id === value;
             const isActive = i === activeIndex;
             const optionId = `${idBase}-option-${entry.model.provider}-${entry.model.id}`;
             return (
               <ModelPickerRow
-                key={`${entry.model.provider}/${entry.model.id}`}
+                key={formatModelSpec(entry.model)}
                 entry={entry}
                 isSelected={isSelected}
                 isActive={isActive}
@@ -541,7 +548,7 @@ function ModelPickerDropdown({
                 onMouseDown={(e) => {
                   // prevent focus loss so the item is clicked properly
                   e.preventDefault();
-                  handleSelect(`${entry.model.provider}/${entry.model.id}`);
+                  handleSelect(formatModelSpec(entry.model));
                 }}
               />
             );
@@ -564,6 +571,7 @@ export function ModelPicker({
   entries,
   onChange,
   compact,
+  disabled,
   dropdownDirection = 'up',
 }: ModelPickerProps) {
   const state = useModelPicker({ value, entries, onChange, dropdownDirection });
@@ -606,7 +614,10 @@ export function ModelPicker({
         title={title}
         label={label}
         open={state.open}
-        onClick={() => state.setOpen((o) => !o)}
+        disabled={disabled}
+        onClick={() => {
+          if (!disabled) state.setOpen((o) => !o);
+        }}
         onKeyDown={state.onTriggerKeyDown}
       />
       {dropdown && (usePortal ? createPortal(dropdown, document.body) : dropdown)}

@@ -225,6 +225,21 @@ test('a search with no matches shows an empty-state message', () => {
 // Continuous (non-boolean) settings like font size, corner radius, and other
 // appearance settings are surfaced as search jump entries so they're never
 // reported as "no matches" — a regression here would reintroduce the original search gap.
+test('search finds the initial composer rows setting', () => {
+  mount();
+  const menu = openMenu();
+  const input = menu.querySelector('.toolbar-settings-search-input') as HTMLInputElement;
+
+  act(() => {
+    input.value = 'composer rows';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  const body = menu.querySelector('.toolbar-settings-menu-body')!;
+  assert.match(body.textContent!, /Initial composer rows/);
+  assert.match(body.textContent!, /Appearance/);
+});
+
 test('search finds continuous settings by name and offers a jump to their tab', () => {
   mount();
   const menu = openMenu();

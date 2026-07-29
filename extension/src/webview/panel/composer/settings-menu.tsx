@@ -158,7 +158,7 @@ const NESTED_LABELS: { key: 'small' | 'medium' | 'frontier'; label: string }[] =
 const APPEARANCE_SETTING_LABELS = [
   'Theme', 'Background color', 'Text color', 'Border color', 'Accent color',
   'Muted text color', 'Link color', 'Corner radius', 'Density', 'Message width',
-  'Expanded section height', 'Activity preview rows', 'Message rail markers',
+  'Initial composer rows', 'Expanded section height', 'Activity preview rows', 'Message rail markers',
   'Base text size', 'Composer text size', 'Expanded section text size',
   'Sans-serif font', 'Monospace font',
 ];

@@ -92,7 +92,7 @@ test('DuplicateSession inserts the placeholder copy summary, opens the tab adjac
   assert.equal(out.state.composer.activeRunSummaryBySession[PENDING], null);
   // Effects: PersistTabs (post-open tabs + new active) then the thin RPC effect.
   assert.deepEqual(out.effects, [
-    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, PENDING], activeSessionPath: PENDING, pinnedTabPaths: [] },
+    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, PENDING], activeSessionPath: PENDING, pinnedTabPaths: [], pinnedTabGroups: [] },
     { kind: 'DuplicateSession', corrId: 'c1', sessionPath: PENDING, sourceSessionPath: OLD, selectionToken: 'tok' },
   ]);
 });

@@ -1660,6 +1660,16 @@ test('reducer: SetPrefs with suppressCompletionNotifications=true clears unreadF
   }
 });
 
+test('reducer: SetPrefs normalizes malformed composer row counts before exposing prefs to the webview', () => {
+  const result = reducer(initialArchState, {
+    kind: 'Command',
+    cmd: { kind: 'SetPrefs', corrId: 'c-composer-rows', prefs: { composerInitialRows: 0 } },
+  });
+
+  assert.equal(result.state.settings.prefs.composerInitialRows, 1);
+  assert.equal(result.effects[0]?.kind, 'SetPrefsRpc');
+});
+
 test('reducer: SetPrefs not touching suppressCompletionNotifications leaves unreadFinishedSessionPaths unchanged', () => {
   const state: ArchState = {
     ...initialArchState,

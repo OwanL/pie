@@ -9,7 +9,7 @@ import { useMemo } from 'preact/hooks';
 import { ToolbarChip, ToolbarIndicatorChip, ToolbarRunStatusChip, ToolbarSelectChip } from '../components/panel-chip';
 import { ModelPicker } from '../components/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
-import { orderModelsForPicker } from './model-list';
+import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
@@ -98,26 +98,21 @@ export function ComposerToolbar({
   const fallbackModelLabel = modelEntries[0]?.selectedLabel ?? '';
   const selectedModelLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
   return (
-    <div class="flex w-full flex-nowrap items-center gap-1.5 [container-name:toolbar] [container-type:inline-size]">
-      <div class="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5">
+    <>
+      <div class="composer-controls">
         <ComposerSettingsMenu prefs={prefs} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} onSetPrefs={onSetPrefs} onSetPruningSettings={onSetPruningSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
 
         {filteredModels.length > 0 ? (
           <ModelPicker
             label={selectedModelLabel}
-            value={selectedProvider ? `${selectedProvider}/${selectedModel}` : selectedModel}
+            value={selectedProvider ? formatModelSpec({ provider: selectedProvider, id: selectedModel }) : selectedModel}
             ariaLabel="Model"
             title="Select model"
             entries={modelEntries}
             onChange={(spec) => {
-              // The picker emits provider/id from the clicked entry so the
-              // backend resolves the exact provider even when the same model id
-              // exists under multiple providers (e.g. gpt-5.5 under both
-              // github-copilot and openai-codex). Split it back into a bare id +
-              // provider and forward them as separate fields.
-              const slash = spec.indexOf('/');
-              const provider = slash === -1 ? undefined : spec.substring(0, slash);
-              const id = slash === -1 ? spec : spec.substring(slash + 1);
+              // The picker emits the shared provider-qualified identity so the
+              // backend resolves the exact provider for duplicate model ids.
+              const { id, provider } = parseModelSpec(spec);
               onModelChange(id, provider, selectedLevel);
             }}
           />
@@ -143,8 +138,6 @@ export function ComposerToolbar({
           </ToolbarSelectChip>
         )}
 
-        <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
-
         <SubagentProviderMenu
           sessionPath={sessionPath}
           prefs={prefs}
@@ -152,13 +145,15 @@ export function ComposerToolbar({
           onSetPrefs={onSetPrefs}
         />
 
+        <SystemPromptToggleMenu prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
+
         <CompactionButton
           availability={!sessionPath ? 'no-session' : busy ? 'busy' : 'available'}
           onCompact={onCompact}
         />
       </div>
 
-      <div class="ml-auto flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-1.5">
+      <div class="composer-indicators">
         {/* Cumulative cost, then live stats; context window pinned rightmost. */}
         {sessionCostIndicator && !prefs.hideSessionCost && (
           <ToolbarIndicatorChip
@@ -201,6 +196,6 @@ export function ComposerToolbar({
           />
         )}
       </div>
-    </div>
+    </>
   );
 }

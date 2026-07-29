@@ -3,6 +3,7 @@ import {
   type ProviderCapacitySnapshot,
 } from "../../../shared/provider-capacity-bridge.js";
 import type { ModelProviderRef } from "./provider-toggles.js";
+import { qualifiedModelSpec } from "./bucket-config.js";
 
 export const SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV =
   "PIE_SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS";
@@ -22,10 +23,10 @@ export function readAlwaysParentModelFromEnv(): boolean {
 }
 
 /**
- * Build the soft model-id capacity allowlist used after normal bucket/provider
- * filtering. A model stays eligible when any enabled registry provider has an
- * immediate slot OR has no capacity entry (unknown state fails open). Only a
- * model whose every enabled provider is explicitly unavailable is excluded.
+ * Build the soft capacity allowlist used after normal bucket/provider
+ * filtering. Qualified specs are evaluated against their exact provider;
+ * legacy bare ids stay eligible when any enabled provider has an immediate
+ * slot or no capacity entry (unknown state fails open).
  */
 export function getCapacityAvailableModelIds(
   models: ModelProviderRef[],
@@ -47,13 +48,17 @@ export function getCapacityAvailableModelIds(
   }
 
   const available = new Set<string>();
+  for (const model of enabledModels) {
+    const state = snapshot[model.provider];
+    if (state === undefined || state.immediatelyClaimable) {
+      available.add(qualifiedModelSpec(model.provider, model.id));
+    }
+  }
   for (const [modelId, providers] of providersByModel) {
     if ([...providers].some((provider) => {
       const state = snapshot[provider];
       return state === undefined || state.immediatelyClaimable;
-    })) {
-      available.add(modelId);
-    }
+    })) available.add(modelId);
   }
   return available;
 }

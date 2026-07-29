@@ -2,7 +2,7 @@ import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray, addToArray } from './helpers.js';
-import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix } from '../../../shared/tab-behavior.js';
+import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../shared/tab-behavior.js';
 
 export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind: 'OpenSession' }>): ReducerResult {
   const { sessionPath, placeholderSummary, selectionToken } = cmd;
@@ -39,7 +39,7 @@ export function handleOpenSession(state: ArchState, cmd: Extract<Command, { kind
   return {
     state: nextState,
     effects: [
-      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths },
+      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
       { kind: 'OpenSession', corrId: cmd.corrId, sessionPath, selectionToken },
     ],
   };
@@ -89,7 +89,7 @@ export function handleCreateSession(state: ArchState, cmd: Extract<Command, { ki
   return {
     state: nextState,
     effects: [
-      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths },
+      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
       { kind: 'CreateSession', corrId: cmd.corrId, sessionPath, cwd, selectionToken },
     ],
   };
@@ -128,6 +128,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       openTabPaths: state.sessions.openTabPaths,
       activeSessionPath: state.sessions.activeSessionPath,
       pinnedTabPaths: state.sessions.pinnedTabPaths,
+      pinnedTabGroups: state.sessions.pinnedTabGroups,
     };
     if (state.sessions.runningSessionPaths.includes(sessionPath)) {
       // A review-closure retry may land here after a crash left the tab already
@@ -197,6 +198,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     // handshake does not resurrect a tab the reviewer intentionally closed.
     const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
+    const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
     const nextReviewClosedRunningPaths = cmd.reviewClosure
       ? addToArray(state.sessions.reviewClosedRunningPaths, sessionPath)
       : state.sessions.reviewClosedRunningPaths;
@@ -206,6 +208,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,
         pinnedTabPaths: nextPinnedTabPaths,
+        pinnedTabGroups: nextPinnedTabGroups,
         activeSessionPath: nextActivePath,
         reviewClosedRunningPaths: nextReviewClosedRunningPaths,
       },
@@ -218,6 +221,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
         openTabPaths: nextOpenTabPaths,
         activeSessionPath: nextActivePath,
         pinnedTabPaths: nextPinnedTabPaths,
+        pinnedTabGroups: nextPinnedTabGroups,
       }],
     };
   }
@@ -235,7 +239,7 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   return {
     state: nextState,
     effects: [
-      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextState.sessions.openTabPaths, activeSessionPath: nextActivePath, pinnedTabPaths: nextState.sessions.pinnedTabPaths },
+      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextState.sessions.openTabPaths, activeSessionPath: nextActivePath, pinnedTabPaths: nextState.sessions.pinnedTabPaths, pinnedTabGroups: nextState.sessions.pinnedTabGroups },
       { kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath },
     ],
   };
@@ -305,7 +309,7 @@ export function handleDuplicateSession(state: ArchState, cmd: Extract<Command, {
   return {
     state: nextState,
     effects: [
-      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths },
+      { kind: 'PersistTabs', corrId: cmd.corrId, openTabPaths: nextOpenTabPaths, activeSessionPath: sessionPath, pinnedTabPaths: state.sessions.pinnedTabPaths, pinnedTabGroups: state.sessions.pinnedTabGroups },
       { kind: 'DuplicateSession', corrId: cmd.corrId, sessionPath, sourceSessionPath, selectionToken },
     ],
   };
@@ -359,6 +363,7 @@ export function handleMoveSessionTab(state: ArchState, cmd: Extract<Command, { k
         openTabPaths: newOrder,
         activeSessionPath: state.sessions.activeSessionPath,
         pinnedTabPaths,
+        pinnedTabGroups: state.sessions.pinnedTabGroups,
       },
     ],
   };

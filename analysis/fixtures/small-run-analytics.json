@@ -149,30 +149,7 @@
         "failureSamples": [],
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,
-        "probeFailureCount": 0,
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "probeFailureCount": 0
       },
       "fileMutation": {
         "writeCount": 0,
@@ -365,30 +342,7 @@
         ],
         "subagentCallCount": 0,
         "subagentTaskCount": 0,
-        "subagentAgentNames": [],
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "subagentAgentNames": []
       },
       "fileMutation": {
         "writeCount": 1,
@@ -531,29 +485,6 @@
           "reviewer",
           "verifier"
         ],
-        "subagentScoredTaskCount": 2,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 8,
-            "count": 2,
-            "max": 5
-          },
-          "creativity": {
-            "sum": 7,
-            "count": 2,
-            "max": 4
-          },
-          "reasoning": {
-            "sum": 9,
-            "count": 2,
-            "max": 5
-          },
-          "thoroughness": {
-            "sum": 8,
-            "count": 2,
-            "max": 4
-          }
-        },
         "failureCountsByKind": {
           "unavailable_tool": 0,
           "invalid_tool_arguments": 0,
@@ -677,30 +608,7 @@
         "failureSamples": [],
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,
-        "probeFailureCount": 0,
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "probeFailureCount": 0
       },
       "fileMutation": {
         "writeCount": 0,
@@ -877,30 +785,7 @@
         ],
         "subagentCallCount": 0,
         "subagentTaskCount": 0,
-        "subagentAgentNames": [],
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "subagentAgentNames": []
       },
       "fileMutation": {
         "writeCount": 1,
@@ -996,30 +881,7 @@
         "failureSamples": [],
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,
-        "probeFailureCount": 0,
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "probeFailureCount": 0
       },
       "fileMutation": {
         "writeCount": 2,
@@ -1119,29 +981,6 @@
         "subagentCallCount": 0,
         "subagentTaskCount": 0,
         "subagentAgentNames": [],
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        },
         "failureCountsByNameAndKind": {},
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,
@@ -1254,30 +1093,7 @@
         "failureSamples": [],
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,
-        "probeFailureCount": 0,
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        }
+        "probeFailureCount": 0
       },
       "fileMutation": {
         "writeCount": 0,
@@ -1371,29 +1187,6 @@
         "subagentCallCount": 0,
         "subagentTaskCount": 0,
         "subagentAgentNames": [],
-        "subagentScoredTaskCount": 0,
-        "subagentTaskScores": {
-          "precision": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "creativity": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "reasoning": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          },
-          "thoroughness": {
-            "sum": 0,
-            "count": 0,
-            "max": 0
-          }
-        },
         "failureCountsByNameAndKind": {},
         "executionFailureCount": 0,
         "verificationProjectFailureCount": 0,

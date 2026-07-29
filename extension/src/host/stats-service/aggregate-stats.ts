@@ -27,7 +27,7 @@ import type {
   AggregateStats,
   AggregateSubagentLifecycleStats,
 } from '../../shared/protocol';
-import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../shared/protocol/aggregate-stats';
+import { EMPTY_PROVIDER_GATE_STATS } from '../../shared/protocol/aggregate-stats';
 import type { TokenRateIndicatorState } from '../../shared/token-rate';
 import type { RunSnapshot } from '../run-analytics';
 
@@ -1622,7 +1622,6 @@ export function finalizeAggregateStats(
     runCount: acc.runCount,
     sessionCount: acc.sessionPaths.size,
     lastRun: acc.lastRun,
-    warmBash: EMPTY_WARM_BASH_STATS,
     providerGate: EMPTY_PROVIDER_GATE_STATS,
     ready: true,
   };

@@ -100,11 +100,10 @@ test('shared collapsed-header typography is defined in transcript.css', async ()
   assert.match(css, /\.transcript-header-command-details\s*\{/);
 });
 
-test('subagent headers keep score badges ahead of summary text without extra model or thinking chrome', async () => {
+test('subagent headers keep primary metadata ahead of summary text without extra model or thinking chrome', async () => {
   const css = await readToolCallCss();
   const subagentSummaryRule = css.match(/\.subagent-header-summary\s*\{[\s\S]*?\n\}/);
   const primaryMetaRule = css.match(/\.subagent-primary-meta\s*\{[\s\S]*?\n\}/);
-  const scoresRule = css.match(/\.subagent-scores\s*\{[\s\S]*?\n\}/);
 
   assert.ok(subagentSummaryRule, 'expected subagent summary rule in tool-call.css');
   assert.match(subagentSummaryRule[0], /flex:\s*1 1 auto;/);
@@ -113,9 +112,6 @@ test('subagent headers keep score badges ahead of summary text without extra mod
   assert.match(primaryMetaRule[0], /display:\s*inline-flex;/);
   assert.match(primaryMetaRule[0], /align-items:\s*center;/);
   assert.match(primaryMetaRule[0], /flex:\s*0 0 auto;/);
-
-  assert.ok(scoresRule, 'expected score bar rule in tool-call.css');
-  assert.match(scoresRule[0], /flex-shrink:\s*0;/);
 
   assert.ok(!css.includes('.subagent-secondary-meta'), 'subagent secondary-meta chrome should be removed');
   assert.ok(!css.includes('.subagent-model-tag'), 'subagent model badges should be removed');

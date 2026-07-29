@@ -135,14 +135,13 @@ test('maps endpoint metadata to a full catalog entry with conservative profile d
   assert.deepEqual((entry.pricing as { tiers: unknown[] }).tiers, discovered.cost.tiers);
 });
 
-test('catalog mapper preserves review policy and handles capability/cost defaults', () => {
+test('catalog mapper preserves review policy and capability defaults', () => {
   const discovered = toDiscoveredCopilotModel(gpt56)!;
   const existing = {
     id: discovered.id,
     eligible: true,
     thinking: ['high'],
     disabledReason: null,
-    costRank: 17,
     reasoning: true,
     compat: { supportsStore: true },
     thinkingLevelMap: { high: 'high' },
@@ -151,17 +150,12 @@ test('catalog mapper preserves review policy and handles capability/cost default
   assert.equal(preserved.eligible, true);
   assert.deepEqual(preserved.thinking, ['high']);
   assert.equal(preserved.disabledReason, null);
-  assert.equal(preserved.costRank, 17);
   assert.equal(preserved.reasoning, true);
   assert.deepEqual(preserved.compat, { supportsStore: true });
   assert.deepEqual(preserved.thinkingLevelMap, { high: 'high' });
 
   const noReasoning = { ...discovered, reasoning: false, thinkingLevelMap: undefined, cost: { ...discovered.cost, tiers: undefined } };
   assert.deepEqual(toCatalogModel(noReasoning).thinking, ['minimal']);
-  assert.equal(toCatalogModel({ ...noReasoning, cost: { ...noReasoning.cost, input: 0.1 } }).costRank, 3);
-  assert.equal(toCatalogModel({ ...noReasoning, cost: { ...noReasoning.cost, input: 1 } }).costRank, 6);
-  assert.equal(toCatalogModel({ ...noReasoning, cost: { ...noReasoning.cost, input: 2.5 } }).costRank, 10);
-  assert.equal(toCatalogModel({ ...noReasoning, cost: { ...noReasoning.cost, input: 5 } }).costRank, 25);
   assert.deepEqual(
     toCatalogModel({ ...noReasoning, thinkingLevelMap: { low: null } }).thinking,
     ['minimal'],
@@ -175,7 +169,6 @@ test('catalog mapper preserves an existing maxImagesPerRequest for image-capable
     eligible: true,
     thinking: ['high'],
     disabledReason: null,
-    costRank: 17,
     maxImagesPerRequest: 7,
   };
   const preserved = toCatalogModel(discovered, existing);
@@ -220,7 +213,6 @@ providers:
         eligible: true
         thinking: [low, medium, high]
         disabledReason: null
-        costRank: 10
 `;
   const result = reconcileCatalogText(input, [terra]);
   const source = parse(result.text) as {
@@ -267,7 +259,6 @@ providers:
         eligible: true
         thinking: [minimal]
         disabledReason: null
-        costRank: 1
   openai-codex:
     apiKey: oauth
     models:

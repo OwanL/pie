@@ -102,15 +102,6 @@ export interface SessionAnalyticsFactors {
   activeExtensions: string[];
 }
 
-// ─── Subagent task scoring ──────────────────────────────────────────────────
-
-export interface SubagentTaskScoreRollup {
-  precision:    { sum: number; count: number; max: number };
-  creativity:   { sum: number; count: number; max: number };
-  reasoning:    { sum: number; count: number; max: number };
-  thoroughness: { sum: number; count: number; max: number };
-}
-
 // ─── Run-analytics snapshot types ───────────────────────────────────────────
 
 export type TaskBoundaryIntent = 'new_task' | 'continue_task' | null;
@@ -380,8 +371,6 @@ export interface ToolUsageRollup {
   subagentCallCount: number;
   subagentTaskCount: number;
   subagentAgentNames: string[];
-  subagentScoredTaskCount: number;
-  subagentTaskScores: SubagentTaskScoreRollup;
   /**
    * Cumulative input tokens consumed by spawned sub-agent sessions (rolled up
    * from each subagent result's `usage`). Default 0 for runs recorded before

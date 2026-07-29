@@ -2,7 +2,7 @@
  * Bug-finding tests for the agents module.
  *
  * Original tests: basic formatAgentList (re-implemented locally) and type contracts.
- * Added: parseDefaultScores edge cases, file-system-level loadAgentsFromDir behavior,
+ * Added: file-system-level loadAgentsFromDir behavior,
  * discoverAgents dedup/symlink behavior, boundary values for formatAgentList.
  */
 
@@ -637,20 +637,6 @@ body
 	const result = discoverAgents(tmpDir, "project");
 	assert.equal(result.agents.length, 1);
 	assert.equal(result.agents[0].bucket, undefined);
-});
-
-test("loadAgentsFromDir: no defaultScores in repo-level agents", async () => {
-	// Enforce that repo-level agent .md files do not use the deprecated defaultScores field
-	const { discoverAgents } = await import("../agents.js");
-	// Resolve the repo root from the test file location
-	const repoRoot = path.resolve(import.meta.dirname ?? __dirname, "..", "..", "..");
-	const result = discoverAgents(repoRoot, "project");
-	for (const agent of result.agents) {
-		// Read the raw frontmatter to check for defaultScores
-		const content = fs.readFileSync(agent.filePath, "utf-8");
-		const hasDefaultScores = /^defaultScores:/m.test(content);
-		assert.ok(!hasDefaultScores, `Agent "${agent.name}" at ${agent.filePath} must not use deprecated defaultScores field`);
-	}
 });
 
 test("loadAgentsFromDir: an explicit empty canSpawn list blocks all delegation", async (t) => {

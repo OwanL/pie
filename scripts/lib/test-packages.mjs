@@ -55,6 +55,9 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'scripts/run-tests.mjs',
   'scripts/run-test-files.mjs',
   'scripts/run-changed-tests.mjs',
+  'scripts/run-affected-tests.mjs',
+  'scripts/run-fast-extension-tests.mjs',
+  'scripts/run-fast-batched-tests.mjs',
   'scripts/test-reporter.mjs',
   'package.json',
   'package-lock.json',
@@ -126,7 +129,7 @@ export function mapFilesToPackages(files) {
       ids.add(id);
     } else if (file.startsWith('scripts/') && file.endsWith('.mjs')) {
       // Root maintenance scripts (typecheck/model sync/install/doctor/etc.)
-      // are exercised by the scripts package. The four cross-package test
+      // are exercised by the scripts package. The cross-package test
       // runners and scripts/lib were already promoted to selectAll above.
       ids.add('scripts');
     }

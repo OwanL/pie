@@ -136,9 +136,9 @@ test('SubagentSection add-model selects list only models not already in their bu
   // The "small" bucket already has haiku; the medium/frontier buckets are empty
   // so every model is selectable there. At minimum the add-model options exist.
   assert.match(html, /Add model…</);
-  // GPT-5 is never selected, so it must appear as an addable option.
-  // (The option label is now provider-prefixed: "openai · GPT-5".)
-  assert.match(html, /<option[^>]*value="gpt-5"[^>]*>[^<]*GPT-5</);
+  // Every bucket uses the shared searchable model picker rather than a native select.
+  assert.match(html, /aria-label="Add model to Small bucket"/);
+  assert.doesNotMatch(html, /<select/);
   // The two empty buckets (medium, frontier) each show an empty-bucket warning;
   // the populated small bucket does not.
   const warnCount = (html.match(/falls back to the parent model/g) ?? []).length;
@@ -195,12 +195,36 @@ test('SubagentSection add-model options exclude disabled-provider models (Compos
     }),
   );
 
-  // anthropic models (haiku, sonnet, opus) must not be offered as addable options.
-  assert.doesNotMatch(html, /<option[^>]*value="haiku"/);
-  assert.doesNotMatch(html, /<option[^>]*value="sonnet"/);
-  assert.doesNotMatch(html, /<option[^>]*value="opus"/);
-  // The openai model (gpt-5) is still addable.
-  assert.match(html, /<option[^>]*value="gpt-5"/);
+  // The filtered entry list still leaves the shared picker enabled for GPT-5.
+  assert.match(html, /aria-label="Add model to Small bucket"/);
+  assert.doesNotMatch(html, /aria-label="Add model to Small bucket"[^>]*disabled/);
+  assert.doesNotMatch(html, /<select/);
+});
+
+test('SubagentSection keeps same-id models from different providers as distinct bucket chips', () => {
+  const duplicateModels: ModelInfo[] = [
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 SOL', provider: 'github-copilot', reasoning: true, inputKinds: ['text'] },
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 SOL', provider: 'openai-codex', reasoning: true, inputKinds: ['text'] },
+  ];
+  const html = renderToString(
+    h(SubagentSection, {
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [],
+          medium: ['github-copilot/gpt-5.6-sol', 'openai-codex/gpt-5.6-sol'],
+          frontier: [],
+        },
+      }),
+      onSetPrefs: () => undefined,
+      availableModels: duplicateModels,
+      modelEntries: orderModelsForPicker(duplicateModels),
+    }),
+  );
+
+  assert.match(html, /github-copilot · GPT-5\.6 SOL/);
+  assert.match(html, /openai-codex · GPT-5\.6 SOL/);
+  assert.match(html, /Remove github-copilot · GPT-5\.6 SOL from Medium/);
+  assert.match(html, /Remove openai-codex · GPT-5\.6 SOL from Medium/);
 });
 
 test('SubagentSection still labels a selected bucket chip whose provider is disabled (via full availableModels)', () => {

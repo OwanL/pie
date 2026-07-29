@@ -39,6 +39,7 @@ export function useComposerInput({
   onSend,
   onRetrySend,
   pendingComposerInputsLength,
+  initialRows,
   sessionPath,
   draftText,
   postMessage,
@@ -57,6 +58,8 @@ export function useComposerInput({
    *  in AppBody so the NoticeBanner's Retry button can re-send the live draft). */
   onRetrySend: (text: string, disablePruning?: boolean) => void;
   pendingComposerInputsLength: number;
+  /** Empty-composer row count; changing it re-fits any existing inline height. */
+  initialRows: number;
   sessionPath: string | null;
   draftText: string;
   postMessage: (msg: WebviewToHostMessage) => void;
@@ -115,7 +118,7 @@ export function useComposerInput({
     if (textarea) {
       resizeComposerTextarea(textarea);
     }
-  }, [text]);
+  }, [text, initialRows]);
 
   // Latch that suppresses a second submit between the moment we post a send
   // and when the host round-trip flips `busy` to true (or clears pending

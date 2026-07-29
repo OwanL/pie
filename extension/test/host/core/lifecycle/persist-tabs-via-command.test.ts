@@ -31,9 +31,10 @@ test('PersistTabs Command handler emits a PersistTabs Effect with the command ar
   const openTabPaths = ['/workspace/a.jsonl', '/workspace/b.jsonl'];
   const activeSessionPath = '/workspace/b.jsonl';
   const pinnedTabPaths = ['/workspace/a.jsonl'];
+  const pinnedTabGroups = [['/workspace/a.jsonl', '/workspace/b.jsonl']];
   const archState: ArchState = {
     ...base,
-    sessions: { ...base.sessions, openTabPaths, pinnedTabPaths, activeSessionPath },
+    sessions: { ...base.sessions, openTabPaths, pinnedTabPaths, pinnedTabGroups, activeSessionPath },
   };
 
   const result = reducer(archState, {
@@ -44,6 +45,7 @@ test('PersistTabs Command handler emits a PersistTabs Effect with the command ar
       openTabPaths,
       activeSessionPath,
       pinnedTabPaths,
+      pinnedTabGroups,
     },
   });
 
@@ -60,6 +62,7 @@ test('PersistTabs Command handler emits a PersistTabs Effect with the command ar
       openTabPaths,
       activeSessionPath,
       pinnedTabPaths,
+      pinnedTabGroups,
     },
   );
 });

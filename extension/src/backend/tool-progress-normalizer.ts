@@ -113,12 +113,8 @@ function normalizeSubagent(value: unknown): ToolPreview {
       transcriptCompacted: typeof child.transcriptCompacted === 'boolean' ? child.transcriptCompacted : undefined,
       contextWindow: numberField(child, 'contextWindow'),
       usage: normalizeUsage(child.usage),
-      taskScores: normalizeNumberRecord(child.taskScores),
       selectionPool: Array.isArray(child.selectionPool)
         ? child.selectionPool.filter((model): model is string => typeof model === 'string').slice(0, 20).map((model) => boundedHead(model, 256))
-        : undefined,
-      selectionFitScores: Array.isArray(child.selectionFitScores)
-        ? child.selectionFitScores.filter((score): score is number => typeof score === 'number' && Number.isFinite(score)).slice(0, 20)
         : undefined,
       retryCount: numberField(child, 'retryCount'),
       stopReason: boundedOptional(stringField(child, ['stopReason']), 256),
@@ -137,15 +133,6 @@ function normalizeSubagent(value: unknown): ToolPreview {
     }
   }
   return normalized;
-}
-
-function normalizeNumberRecord(value: unknown): Record<string, number> | undefined {
-  const record = asRecord(value);
-  if (!record) return undefined;
-  return Object.fromEntries(Object.entries(record).filter((entry): entry is [string, number] => (
-    !['__proto__', 'prototype', 'constructor'].includes(entry[0])
-    && typeof entry[1] === 'number' && Number.isFinite(entry[1])
-  )));
 }
 
 function normalizeUsage(value: unknown): SubagentChildPreview['usage'] {

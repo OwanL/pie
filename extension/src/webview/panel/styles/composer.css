@@ -19,8 +19,173 @@
   font-size: var(--panel-composer-font-size, 13px);
 }
 
-.composer-rail {
+.composer-shell {
+  container-name: composer-shell;
+  container-type: inline-size;
+}
+
+.composer-bottom-bar {
+  display: flex;
+  align-items: center;
   width: 100%;
+  min-width: 0;
+  gap: 4px;
+}
+
+.composer-controls,
+.composer-indicators,
+.composer-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-width: 0;
+  gap: 2px;
+}
+
+.composer-controls {
+  flex: 1 1 auto;
+}
+
+.composer-controls > * {
+  flex: 0 0 auto;
+}
+
+.composer-controls .model-picker {
+  flex: 0 1 auto;
+}
+
+/* Blend resting controls into the input surface. Hover/open/focus rules below
+   restore a bounded surface so interactive hitboxes remain easy to discover. */
+.composer-bottom-bar :is(
+  .toolbar-settings-trigger,
+  .system-prompt-toggle-trigger,
+  .model-picker-trigger,
+  .panel-chip-toolbar
+) {
+  background: transparent;
+}
+
+/* panel-chip.css loads before this file, so restate its interactive surface at
+   higher specificity instead of letting the transparent resting rule win. */
+.composer-bottom-bar .panel-chip-toolbar:hover,
+.composer-bottom-bar .panel-chip-toolbar:focus-visible {
+  border-color: var(--panel-border-subtle);
+  background: var(--panel-control-hover);
+}
+
+/* Keep textual controls visually small while their pseudo-elements and
+   overlaid selects preserve a 26px pointer target. The 1px extension avoids
+   invisible hitboxes overlapping now that adjacent controls are only 2px apart. */
+.composer-bottom-bar .model-picker-trigger,
+.composer-bottom-bar .panel-chip-toolbar {
+  height: 24px;
+}
+
+.composer-bottom-bar :is(
+  .toolbar-settings-trigger,
+  .model-picker-trigger,
+  .panel-chip-toolbar
+)::before,
+.composer-bottom-bar .panel-chip-toolbar.panel-chip-select select {
+  inset: -1px;
+}
+
+.composer-bottom-bar .model-picker-trigger {
+  max-width: 180px;
+  padding-inline: 6px;
+}
+
+.composer-bottom-bar .panel-chip-toolbar.panel-chip-select {
+  gap: 4px;
+  padding-left: 6px;
+  padding-right: 20px;
+}
+
+.composer-bottom-bar .panel-chip-select-caret {
+  right: 6px;
+}
+
+.composer-bottom-bar .panel-chip-reasoning-select {
+  min-width: 58px;
+  max-width: 96px;
+}
+
+.composer-indicators {
+  flex: 0 1 auto;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.composer-indicators .panel-chip-toolbar {
+  min-width: 0;
+  max-width: 140px;
+  padding-inline: 6px;
+}
+
+.composer-actions {
+  flex: 0 0 auto;
+  margin-left: 0;
+  padding-left: 4px;
+  border-left: 1px solid var(--panel-border-subtle);
+}
+
+.composer-actions .composer-action-icon {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: var(--panel-muted);
+  box-shadow: none;
+}
+
+.composer-actions .composer-action-icon:hover:not(:disabled),
+.composer-actions .composer-action-icon:focus-visible {
+  border-color: var(--panel-border-subtle);
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+  box-shadow: none;
+}
+
+.composer-actions .composer-action-icon:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 1px;
+}
+
+.composer-actions .composer-action-icon:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.composer-actions .composer-action-stop {
+  border-color: transparent;
+  background: transparent;
+  color: var(--panel-danger);
+}
+
+.composer-actions .composer-action-stop:hover:not(:disabled),
+.composer-actions .composer-action-stop:focus-visible {
+  border-color: color-mix(in srgb, var(--panel-danger) 28%, var(--panel-border));
+  background: var(--panel-danger-surface);
+  color: var(--panel-danger);
+}
+
+.composer-actions .composer-action-submit {
+  background: transparent;
+  color: var(--panel-accent-strong);
+}
+
+.composer-actions .composer-action-submit:hover:not(:disabled),
+.composer-actions .composer-action-submit:focus-visible {
+  border-color: color-mix(in srgb, var(--panel-accent) 32%, var(--panel-border));
+  background: var(--panel-accent-surface);
+  color: var(--panel-accent-strong);
+}
+
+.composer-actions .composer-action-icon svg {
+  pointer-events: none;
 }
 
 @media (max-width: 720px) {
@@ -57,21 +222,66 @@
   color: var(--panel-danger);
 }
 
-/* Progressive hide as toolbar narrows. Indicator DOM order (left→right):
-   cost · speed · run-status · context — hide priority keeps the most
-   important (context window) visible longest, dropping cost first.
-   1st hidden (340px): cost estimate
-   2nd hidden (300px): context window indicator (rightmost, kept longest)
-   Never hidden: token-rate (speed) and run-status — live stats. */
-@container toolbar (max-width: 340px) {
+/* The bottom bar now carries controls, indicators, and primary actions in one
+   row. Shed secondary indicators progressively before allowing the controls or
+   Send/Queue/Stop affordances to be squeezed. Context remains visible longest. */
+@container composer-shell (max-width: 760px) {
   .session-cost-indicator {
     display: none;
   }
 }
 
-@container toolbar (max-width: 300px) {
+@container composer-shell (max-width: 660px) {
+  .panel-chip-run-status {
+    display: none;
+  }
+}
+
+@container composer-shell (max-width: 560px) {
+  .panel-chip-indicator-speed {
+    display: none;
+  }
+}
+
+@container composer-shell (max-width: 460px) {
   .context-window-indicator {
     display: none;
+  }
+}
+
+/* Preserve every control in very narrow sidebars. The icon actions stay on the
+   first row while they fit and wrap as a group only when the full busy-state
+   toolbar would otherwise overlap. */
+@container composer-shell (max-width: 380px) {
+  .composer-bottom-bar {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .composer-controls {
+    flex: 1 1 230px;
+  }
+
+  .composer-bottom-bar .model-picker-trigger {
+    min-width: 64px;
+    max-width: 120px;
+  }
+
+  .composer-bottom-bar .panel-chip-reasoning-select {
+    min-width: 52px;
+  }
+
+  .composer-actions {
+    margin-left: auto;
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@container composer-shell (max-width: 240px) {
+  .composer-controls {
+    flex-basis: 100%;
+    flex-wrap: wrap;
   }
 }
 
@@ -574,6 +784,14 @@
   white-space: nowrap;
 }
 
+.toolbar-settings-inline-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--panel-gap-sm);
+}
+
 .toolbar-settings-select {
   background: var(--panel-control-surface);
   color: inherit;
@@ -1008,15 +1226,30 @@
   color: var(--panel-accent);
 }
 
-/* Keep the subagent provider trigger compact beside the system-prompt picker. */
+/* Match the subagent provider trigger to the other bottom-bar icon controls. */
 .subagent-provider-trigger {
   justify-content: center;
-  width: 24px;
+  width: 26px;
   padding: 0;
 }
 
 .subagent-provider-icon {
   flex: none;
+}
+
+/* Provider filtering is already explained by the tooltip. Keep that state
+   quiet in the resting toolbar instead of turning this one icon into an
+   orange/accent focal point among otherwise-muted controls. */
+.subagent-provider-trigger.has-disabled {
+  border-color: transparent;
+  color: var(--panel-muted);
+}
+
+.subagent-provider-trigger.has-disabled:hover,
+.subagent-provider-trigger.has-disabled:focus-visible,
+.subagent-provider-trigger.has-disabled.open {
+  border-color: var(--panel-border-subtle);
+  color: var(--panel-foreground);
 }
 
 .system-prompt-toggle-badge {

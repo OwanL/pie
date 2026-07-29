@@ -12,7 +12,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-    cost: 25
   - provider: github-copilot
     id: claude-opus-5
     eligible: false
@@ -24,7 +23,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-    cost: 25
   - provider: github-copilot
     id: claude-fable-5
     eligible: true
@@ -34,14 +32,12 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 30
   - provider: github-copilot
     id: claude-opus-4.8
     eligible: true
     thinking:
       - medium
     disabled_reason: null
-    cost: 30
   - provider: github-copilot
     id: claude-sonnet-5
     eligible: true
@@ -51,7 +47,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: github-copilot
     id: claude-sonnet-4.6
     eligible: true
@@ -61,7 +56,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: github-copilot
     id: claude-sonnet-4.5
     eligible: true
@@ -70,7 +64,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: github-copilot
     id: claude-opus-4.5
     eligible: false
@@ -79,7 +72,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: Superseded by opus-4.6/4.7
-    cost: 18
   - provider: github-copilot
     id: gpt-5.6-sol
     eligible: false
@@ -91,7 +83,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-    cost: 25
   - provider: github-copilot
     id: gpt-5.6-terra
     eligible: false
@@ -103,7 +94,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-    cost: 10
   - provider: github-copilot
     id: gpt-5.6-luna
     eligible: false
@@ -115,7 +105,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-    cost: 6
   - provider: openai-codex
     id: gpt-5.6-sol
     eligible: true
@@ -127,7 +116,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: null
-    cost: 25
   - provider: openai-codex
     id: gpt-5.6-terra
     eligible: true
@@ -139,7 +127,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: null
-    cost: 10
   - provider: openai-codex
     id: gpt-5.6-luna
     eligible: true
@@ -151,7 +138,6 @@ profiles:
       - xhigh
       - max
     disabled_reason: null
-    cost: 6
   - provider: openai-codex
     id: gpt-5.5
     eligible: true
@@ -160,7 +146,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 25
   - provider: openai-codex
     id: gpt-5.4
     eligible: true
@@ -170,7 +155,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: openai-codex
     id: gpt-5.4-mini
     eligible: true
@@ -180,7 +164,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 3
   - provider: github-copilot
     id: gpt-5.3-codex
     eligible: true
@@ -189,7 +172,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: openai-codex
     id: gpt-5.3-codex-spark
     eligible: true
@@ -198,7 +180,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: github-copilot
     id: gpt-5-mini
     eligible: false
@@ -206,7 +187,6 @@ profiles:
       - low
       - medium
     disabled_reason: repeated tool failures in subagent mode
-    cost: 0
   - provider: github-copilot
     id: gemini-3.1-pro-preview
     eligible: true
@@ -215,7 +195,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: ollama
     id: deepseek-v4-pro:cloud
     eligible: true
@@ -224,7 +203,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 11
   - provider: ollama
     id: deepseek-v4-flash:cloud
     eligible: true
@@ -233,7 +211,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 6
   - provider: ollama
     id: gemini-3-flash-preview:cloud
     eligible: true
@@ -244,7 +221,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: gemma4:31b-cloud
     eligible: true
@@ -253,7 +229,6 @@ profiles:
       - low
       - medium
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: qwen3.5:397b-cloud
     eligible: true
@@ -262,7 +237,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 7
   - provider: ollama
     id: qwen3.5:cloud
     eligible: true
@@ -271,21 +245,18 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 7
   - provider: ollama
     id: qwen3-coder-next:cloud
     eligible: true
     thinking:
       - minimal
     disabled_reason: null
-    cost: 3
   - provider: ollama
     id: qwen3-coder:480b-cloud
     eligible: true
     thinking:
       - minimal
     disabled_reason: null
-    cost: 10
   - provider: ollama
     id: kimi-k2.6:cloud
     eligible: true
@@ -294,7 +265,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: kimi-k2.7-code:cloud
     eligible: true
@@ -303,7 +273,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: kimi-k2.5:cloud
     eligible: true
@@ -312,7 +281,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: nemotron-3-super:cloud
     eligible: true
@@ -322,7 +290,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 6
   - provider: ollama
     id: nemotron-3-ultra:cloud
     eligible: true
@@ -332,7 +299,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 6
   - provider: ollama
     id: glm-4.7:cloud
     eligible: true
@@ -340,7 +306,6 @@ profiles:
       - low
       - medium
     disabled_reason: null
-    cost: 9
   - provider: ollama
     id: glm-5:cloud
     eligible: true
@@ -349,7 +314,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: ollama
     id: glm-5.1:cloud
     eligible: true
@@ -358,7 +322,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: ollama
     id: glm-5.2:cloud
     eligible: true
@@ -368,7 +331,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: ollama
     id: gpt-oss:120b-cloud
     eligible: true
@@ -377,7 +339,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 18
   - provider: ollama
     id: gpt-oss:20b-cloud
     eligible: false
@@ -386,14 +347,12 @@ profiles:
       - low
       - medium
     disabled_reason: Superseded by gpt-oss:120b
-    cost: 7
   - provider: ollama
     id: minimax-m2.1:cloud
     eligible: true
     thinking:
       - minimal
     disabled_reason: null
-    cost: 5
   - provider: ollama
     id: minimax-m2.5:cloud
     eligible: true
@@ -402,7 +361,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 5
   - provider: ollama
     id: minimax-m2.7:cloud
     eligible: true
@@ -411,7 +369,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 5
   - provider: ollama
     id: minimax-m3:cloud
     eligible: true
@@ -421,7 +378,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 7
   - provider: umans
     id: umans-glm-5.1
     eligible: true
@@ -430,7 +386,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 10
   - provider: umans
     id: umans-glm-5.2
     eligible: true
@@ -440,7 +395,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: umans
     id: umans-kimi-k2.6
     eligible: true
@@ -449,7 +403,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 9
   - provider: umans
     id: umans-kimi-k2.7
     eligible: true
@@ -458,7 +411,6 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 9
   - provider: umans
     id: umans-coder
     eligible: true
@@ -468,7 +420,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: umans
     id: umans-flash
     eligible: true
@@ -478,7 +429,6 @@ profiles:
       - high
       - xhigh
     disabled_reason: null
-    cost: 10
   - provider: umans
     id: umans-qwen3.6-35b-a3b
     eligible: true
@@ -487,46 +437,39 @@ profiles:
       - medium
       - high
     disabled_reason: null
-    cost: 7
   - provider: ollama
     id: mistral-7b-pi:latest
     eligible: false
     thinking:
       - minimal
     disabled_reason: Too small for agentic work
-    cost: 8
   - provider: ollama
     id: llama3.2-3b-pi:latest
     eligible: false
     thinking:
       - minimal
     disabled_reason: Too small for agentic work
-    cost: 4
   - provider: ollama
     id: gemma4-e2b-pi:latest
     eligible: false
     thinking:
       - minimal
     disabled_reason: Too small for agentic work
-    cost: 4
   - provider: ollama
     id: qwen3.5:9b
     eligible: false
     thinking:
       - minimal
     disabled_reason: Local model; reserved for pruning prepass
-    cost: 8
   - provider: ollama
     id: qwen2.5:7b-instruct
     eligible: false
     thinking:
       - minimal
     disabled_reason: Local model; not for general agentic use
-    cost: 8
   - provider: ollama
     id: llama3.1:8b
     eligible: false
     thinking:
       - minimal
     disabled_reason: Local model; reserved for pruning prepass
-    cost: 8

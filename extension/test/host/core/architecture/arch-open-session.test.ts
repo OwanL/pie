@@ -89,7 +89,7 @@ test('OpenSession inserts the placeholder summary, opens + selects the tab, leav
   assert.deepEqual(out.state.composer.activeRunSummaryBySession, { [OLD]: STALE_RUN_SUMMARY });
   // Effects: PersistTabs (post-open tabs + new active) then the thin RPC effect.
   assert.deepEqual(out.effects, [
-    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, NEW], activeSessionPath: NEW, pinnedTabPaths: [] },
+    { kind: 'PersistTabs', corrId: 'c1', openTabPaths: [OLD, NEW], activeSessionPath: NEW, pinnedTabPaths: [], pinnedTabGroups: [] },
     { kind: 'OpenSession', corrId: 'c1', sessionPath: NEW, selectionToken: 'tok' },
   ]);
 });

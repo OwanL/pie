@@ -259,6 +259,41 @@ test("resolveExecutionModel: multiple disabled matches listed in diagnostic", ()
 // DUPLICATE MODEL IDs ACROSS PROVIDERS
 // ============================================================
 
+test("resolveExecutionModel: qualified duplicate resolves the exact configured provider", () => {
+	const models = [
+		model("github-copilot", "gpt-5.4"),
+		model("openai-codex", "gpt-5.4"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("github-copilot", "caller-model"),
+		"openai-codex/gpt-5.4",
+	);
+
+	assert.equal(result.resolvedModel?.provider, "openai-codex");
+	assert.equal(result.actualModelId, "gpt-5.4");
+	assert.equal(result.diagnostic, undefined);
+});
+
+test("resolveExecutionModel: qualified request never falls through to a duplicate provider", () => {
+	const models = [
+		model("github-copilot", "gpt-5.4"),
+		model("openai-codex", "gpt-5.4"),
+	];
+
+	const result = resolveExecutionModel(
+		registry(models),
+		model("caller", "caller-model"),
+		"github-copilot/gpt-5.4",
+		new Set(["github-copilot"]),
+	);
+
+	assert.equal(result.resolvedModel?.provider, "caller");
+	assert.notEqual(result.resolvedModel?.provider, "openai-codex");
+	assert.match(result.diagnostic ?? "", /github-copilot/);
+});
+
 test("resolveExecutionModel: prefers caller's provider when model id exists there", () => {
 	const models = [
 		model("provider-a", "shared-model"),

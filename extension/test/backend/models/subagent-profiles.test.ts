@@ -18,17 +18,17 @@ test('loadSubagentProfiles parses YAML content and skips invalid profile entries
   const agentDir = makeAgentDir({
     'model-profiles.yaml': JSON.stringify({
       profiles: [
-        { id: 'good', precision: 4, creativity: 5, thoroughness: 4, reasoning: 5, eligible: true },
-        { id: 'zeroed', precision: 'bad', creativity: null, thoroughness: {}, reasoning: 3, eligible: 'yes', disabled_reason: '' },
+        { id: 'good', eligible: true },
+        { id: 'disabled', eligible: 'yes', disabled_reason: '' },
         null,
-        { id: '', precision: 1, creativity: 1, thoroughness: 1, reasoning: 1, eligible: true },
+        { id: '', eligible: true },
       ],
     }),
   });
 
   const profiles = loadSubagentProfiles(agentDir);
-  assert.deepEqual(profiles.get('good'), { eligible: true, aggregate: 18 });
-  assert.deepEqual(profiles.get('zeroed'), { eligible: false, aggregate: 3 });
+  assert.deepEqual(profiles.get('good'), { eligible: true });
+  assert.deepEqual(profiles.get('disabled'), { eligible: false });
   assert.equal(profiles.size, 2);
 });
 
@@ -36,8 +36,8 @@ test('loadSubagentProfiles keeps same-id profiles isolated by provider', () => {
   const agentDir = makeAgentDir({
     'model-profiles.yaml': JSON.stringify({
       profiles: [
-        { provider: 'github-copilot', id: 'gpt-shared', precision: 1, eligible: false, disabled_reason: 'not vetted' },
-        { provider: 'openai-codex', id: 'gpt-shared', precision: 5, creativity: 5, thoroughness: 5, reasoning: 5, eligible: true },
+        { provider: 'github-copilot', id: 'gpt-shared', eligible: false, disabled_reason: 'not vetted' },
+        { provider: 'openai-codex', id: 'gpt-shared', eligible: true },
       ],
     }),
   });
@@ -45,12 +45,10 @@ test('loadSubagentProfiles keeps same-id profiles isolated by provider', () => {
   const profiles = loadSubagentProfiles(agentDir);
   assert.deepEqual(findSubagentProfile(profiles, 'github-copilot', 'gpt-shared'), {
     eligible: false,
-    aggregate: 1,
     disabledReason: 'not vetted',
   });
   assert.deepEqual(findSubagentProfile(profiles, 'openai-codex', 'gpt-shared'), {
     eligible: true,
-    aggregate: 20,
   });
   assert.equal(findSubagentProfile(profiles, 'other-provider', 'gpt-shared'), undefined);
 });
@@ -58,10 +56,10 @@ test('loadSubagentProfiles keeps same-id profiles isolated by provider', () => {
 test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when needed', () => {
   const yamlPreferredDir = makeAgentDir({
     'model-profiles.yaml': JSON.stringify({
-      profiles: [{ id: 'from-yaml', precision: 5, creativity: 5, thoroughness: 5, reasoning: 5, eligible: true }],
+      profiles: [{ id: 'from-yaml', eligible: true }],
     }),
     'model-profiles.json': JSON.stringify({
-      profiles: [{ id: 'from-json', precision: 1, creativity: 1, thoroughness: 1, reasoning: 1, eligible: true }],
+      profiles: [{ id: 'from-json', eligible: true }],
     }),
   });
   const yamlProfiles = loadSubagentProfiles(yamlPreferredDir);
@@ -70,11 +68,11 @@ test('loadSubagentProfiles prefers YAML over JSON and falls back to .yml when ne
 
   const ymlFallbackDir = makeAgentDir({
     'model-profiles.yml': JSON.stringify({
-      profiles: [{ id: 'from-yml', precision: 2, creativity: 2, thoroughness: 2, reasoning: 2, eligible: false }],
+      profiles: [{ id: 'from-yml', eligible: false }],
     }),
   });
   const ymlProfiles = loadSubagentProfiles(ymlFallbackDir);
-  assert.deepEqual(ymlProfiles.get('from-yml'), { eligible: false, aggregate: 8 });
+  assert.deepEqual(ymlProfiles.get('from-yml'), { eligible: false });
 });
 
 test('loadSubagentProfiles tolerates malformed YAML without throwing', () => {
@@ -87,14 +85,14 @@ test('loadSubagentProfiles falls back to JSON when no YAML exists', () => {
   const agentDir = makeAgentDir({
     'model-profiles.json': JSON.stringify({
       profiles: [
-        { id: 'good', precision: 4, creativity: 5, thoroughness: 4, reasoning: 5, eligible: true },
-        { id: 'bad', precision: 3, creativity: 3, thoroughness: 3, reasoning: 3, eligible: false, disabled_reason: 'incompatible API' },
+        { id: 'good', eligible: true },
+        { id: 'bad', eligible: false, disabled_reason: 'incompatible API' },
       ],
     }),
   });
   const profiles = loadSubagentProfiles(agentDir);
-  assert.deepEqual(profiles.get('good'), { eligible: true, aggregate: 18 });
-  assert.deepEqual(profiles.get('bad'), { eligible: false, aggregate: 12, disabledReason: 'incompatible API' });
+  assert.deepEqual(profiles.get('good'), { eligible: true });
+  assert.deepEqual(profiles.get('bad'), { eligible: false, disabledReason: 'incompatible API' });
 });
 
 test('loadSubagentProfiles returns an empty map for malformed JSON, empty agent dirs, and empty input paths', () => {
@@ -110,7 +108,7 @@ test('loadSubagentProfiles reuses cached maps until the file changes and clears 
   const fileName = 'model-profiles.json';
   const agentDir = makeAgentDir({
     [fileName]: JSON.stringify({
-      profiles: [{ id: 'cached', precision: 1, creativity: 1, thoroughness: 1, reasoning: 1, eligible: true }],
+      profiles: [{ id: 'cached', eligible: true }],
     }),
   });
   const filePath = path.join(agentDir, fileName);
@@ -118,25 +116,25 @@ test('loadSubagentProfiles reuses cached maps until the file changes and clears 
   const first = loadSubagentProfiles(agentDir);
   const second = loadSubagentProfiles(agentDir);
   assert.equal(second, first);
-  assert.equal(second.get('cached')?.aggregate, 4);
+  assert.equal(second.get('cached')?.eligible, true);
 
   fs.rmSync(filePath);
   const emptied = loadSubagentProfiles(agentDir);
   assert.equal(emptied.size, 0);
 
   fs.writeFileSync(filePath, JSON.stringify({
-    profiles: [{ id: 'cached', precision: 5, creativity: 5, thoroughness: 5, reasoning: 5, eligible: false }],
+    profiles: [{ id: 'cached', eligible: false }],
   }));
   const future = new Date(Date.now() + 5000);
   fs.utimesSync(filePath, future, future);
   const reloaded = loadSubagentProfiles(agentDir);
-  assert.deepEqual(reloaded.get('cached'), { eligible: false, aggregate: 20 });
+  assert.deepEqual(reloaded.get('cached'), { eligible: false });
 });
 
 test('loadSubagentProfiles tolerates stat and read races without throwing', () => {
   const agentDir = makeAgentDir({
     'model-profiles.json': JSON.stringify({
-      profiles: [{ id: 'race', precision: 1, creativity: 1, thoroughness: 1, reasoning: 1, eligible: true }],
+      profiles: [{ id: 'race', eligible: true }],
     }),
   });
 

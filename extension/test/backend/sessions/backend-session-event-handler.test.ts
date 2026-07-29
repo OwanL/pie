@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   handleSdkSessionEvent as handleSdkSessionEventImpl,
+  resolveProviderSemanticInactivityMs,
   summarizeToolResult,
   type BackendSessionEventHandlerDeps,
 } from '../../../src/backend/session-event-handler';
@@ -1404,6 +1405,23 @@ test('concurrent semantic tool starts carry one stable parallel group into live 
   assert.equal(starts[1]?.parallelGroupId, starts[0]?.parallelGroupId);
   assert.equal(accumulator.checkpoint().tools[0]?.parallelGroupId, starts[0]?.parallelGroupId);
   assert.equal(accumulator.checkpoint().tools[1]?.parallelGroupId, starts[0]?.parallelGroupId);
+});
+
+test('semantic inactivity budget gives slow Umans responses more time without weakening other providers', () => {
+  const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
+  delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
+  try {
+    assert.equal(resolveProviderSemanticInactivityMs('umans'), 15 * 60_000);
+    assert.equal(resolveProviderSemanticInactivityMs('UMANS'), 15 * 60_000);
+    assert.equal(resolveProviderSemanticInactivityMs('openai-codex'), 360_000);
+    assert.equal(resolveProviderSemanticInactivityMs(undefined), 360_000);
+
+    process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '1234';
+    assert.equal(resolveProviderSemanticInactivityMs('umans'), 1234, 'operator override remains authoritative');
+  } finally {
+    if (previous === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
+    else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previous;
+  }
 });
 
 test('pre-first-semantic inactivity retires and replaces a runtime even when abort never settles', async () => {

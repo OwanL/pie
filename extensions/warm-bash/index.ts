@@ -31,7 +31,6 @@ import { createWarmBashOperations, createWarmBashMetrics } from "./src/operation
 import { probeGnuGrep } from "./src/auto-prune.js";
 import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./src/logger.js";
 import { WarmBashPool } from "./src/warm-pool.js";
-import { registerWarmBashStats, type WarmBashStats } from "./src/stats.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
 import type { BashOperations } from "./src/types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./src/shared-state.js";
@@ -175,7 +174,6 @@ export default function (pi: ExtensionAPI) {
       });
       shared.poolCfg = cfg;
       shared.generation++;
-      registerGlobalStats();
       return;
     }
 
@@ -203,36 +201,6 @@ export default function (pi: ExtensionAPI) {
     tools.clear();
     toolOpsCfg.clear();
     toolPoolGeneration.clear();
-  }
-
-  /** Register exactly one process-wide stats provider. */
-  function registerGlobalStats(): void {
-    if (shared.unregisterStats) return;
-    shared.unregisterStats = registerWarmBashStats('__warm-bash-global__', (): WarmBashStats => {
-      const state = getSharedWarmBashState();
-      const ps = state.pool?.getStats() ?? null;
-      const enabled = !!ps && !ps.disposed;
-      let totalFastPath = 0;
-      let totalWarm = 0;
-      let totalFallback = 0;
-      for (const m of state.metrics.values()) {
-        totalFastPath += m.totalFastPath;
-        totalWarm += m.totalWarm;
-        totalFallback += m.totalFallback;
-      }
-      return {
-        enabled,
-        activeSessions: enabled ? state.activeSessions.size : 0,
-        poolSize: ps ? ps.poolSize : 0,
-        ready: ps ? ps.ready : 0,
-        warming: ps ? ps.warming : 0,
-        fastPathEnabled: fastPathEnabled(),
-        totalFastPath,
-        totalWarm,
-        totalFallback,
-        totalWarmupFailures: ps ? ps.totalWarmupFailures : 0,
-      };
-    });
   }
 
   function getTool(sessionId: string, cwd: string): ReturnType<typeof createBashTool> {
@@ -326,8 +294,8 @@ export default function (pi: ExtensionAPI) {
     const id = ctx.sessionManager.getSessionId();
     const m = shared.metrics.get(id);
     const cfg = globalOpsCfg;
-    // Persist the session's cumulative routing counters + config context BEFORE
-    // removing the per-session metrics (the global stats provider sums them).
+    // Persist the session's cumulative routing counters + config context before
+    // removing the per-session metrics.
     // Only sessions that actually invoked bash have metrics (getTool created them).
     if (m && cfg) {
       const ps = shared.pool?.getStats() ?? null;

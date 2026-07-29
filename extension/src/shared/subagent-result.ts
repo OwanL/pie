@@ -96,16 +96,12 @@ export interface SubagentSingleResult {
   completedAt?: number;
   lastProgressAt?: number;
   inactivityBudgetMs?: number;
-  /** The model chosen by scored selection. */
+  /** The model chosen for this run. */
   selectedModel?: string;
   /** Thinking level applied to this run. */
   thinkingLevel?: string;
-  /** Merged task scores used for selection. */
-  taskScores?: Record<string, number>;
   /** Top-K candidate models. */
   selectionPool?: string[];
-  /** Fit scores for each pool candidate. */
-  selectionFitScores?: number[];
   /** Number of model retries before success. */
   retryCount?: number;
   /** Terminal model-attempt diagnostics emitted by the subagent extension. */
@@ -183,7 +179,6 @@ function subagentSingleResultFallbackMarkdown(result: SubagentSingleResult): str
 function placeholderSingleResult(
   agent: unknown,
   task: unknown,
-  taskScores?: unknown,
   activity: Pick<SubagentSingleResult, 'activityPhase' | 'activityDetail'> = {
     activityPhase: 'preparing',
     activityDetail: 'waiting for subagent runtime status',
@@ -201,7 +196,6 @@ function placeholderSingleResult(
     exitCode: -1,
     messages: [],
     ...activity,
-    ...(isRecord(taskScores) ? { taskScores: taskScores as Record<string, number> } : {}),
   };
 }
 
@@ -210,7 +204,7 @@ function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | un
     return undefined;
   }
 
-  const single = placeholderSingleResult(input.agent, input.task, input.taskScores);
+  const single = placeholderSingleResult(input.agent, input.task);
   if (single) {
     return {
       mode: 'single',
@@ -223,7 +217,6 @@ function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | un
       .map((task) => (isRecord(task) ? placeholderSingleResult(
         task.agent,
         task.task,
-        task.taskScores ?? input.taskScores,
         { activityPhase: 'queued', activityDetail: 'waiting for parallel task dispatch' },
       ) : undefined))
       .filter((task): task is SubagentSingleResult => Boolean(task));
@@ -238,7 +231,7 @@ function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | un
 
   if (Array.isArray(input.chain) && input.chain.length > 0) {
     const firstStep = input.chain[0];
-    const result = isRecord(firstStep) ? placeholderSingleResult(firstStep.agent, firstStep.task, firstStep.taskScores ?? input.taskScores) : undefined;
+    const result = isRecord(firstStep) ? placeholderSingleResult(firstStep.agent, firstStep.task) : undefined;
     if (result) {
       return {
         mode: 'chain',
@@ -384,9 +377,7 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         ...(typeof candidate.transcriptCompacted === 'boolean' ? { transcriptCompacted: candidate.transcriptCompacted } : {}),
         ...(typeof candidate.contextWindow === 'number' ? { contextWindow: candidate.contextWindow } : {}),
         ...(isRecord(candidate.usage) ? { usage: candidate.usage as unknown as SubagentUsageSummary } : {}),
-        ...(isRecord(candidate.taskScores) ? { taskScores: candidate.taskScores as Record<string, number> } : {}),
         ...(Array.isArray(candidate.selectionPool) ? { selectionPool: candidate.selectionPool.filter((model): model is string => typeof model === 'string') } : {}),
-        ...(Array.isArray(candidate.selectionFitScores) ? { selectionFitScores: candidate.selectionFitScores.filter((score): score is number => typeof score === 'number') } : {}),
         ...(typeof candidate.retryCount === 'number' ? { retryCount: candidate.retryCount } : {}),
         ...(typeof candidate.stopReason === 'string' ? { stopReason: candidate.stopReason } : {}),
         ...(typeof candidate.errorMessage === 'string' ? { errorMessage: candidate.errorMessage } : {}),

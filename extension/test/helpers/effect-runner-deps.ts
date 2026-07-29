@@ -33,7 +33,7 @@ export type Call =
   | { kind: 'lifecycle' }
   | { kind: 'session'; sessionPath: string }
   | { kind: 'request'; method: string; params: unknown }
-  | { kind: 'persistTabs'; openTabPaths: string[]; active: string | null; pinnedTabPaths: string[] }
+  | { kind: 'persistTabs'; openTabPaths: string[]; active: string | null; pinnedTabPaths: string[]; pinnedTabGroups: string[][] }
   | { kind: 'log'; level: string; message: string }
   | { kind: 'showWarningModal'; message: string; confirmChoice: string }
   | { kind: 'bumpEpoch'; sessionPath: string }
@@ -185,8 +185,8 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     backend,
     queues,
     tabs: {
-      async persistTabs(openTabPaths: string[], active: string | null, pinnedTabPaths: string[]) {
-        calls.push({ kind: 'persistTabs', openTabPaths, active, pinnedTabPaths });
+      async persistTabs(openTabPaths: string[], active: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][]) {
+        calls.push({ kind: 'persistTabs', openTabPaths, active, pinnedTabPaths, pinnedTabGroups });
       },
     },
     log: {

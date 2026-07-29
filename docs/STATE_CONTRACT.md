@@ -163,8 +163,14 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 - **derived UI telemetry** — FPS counters, render-timing buffers. (Token-rate measurement is no longer webview-local: it runs host-side in `TokenRateService`, which ticks every running session — including ones that are not the active/selected tab — using the transcripts the host already holds, and posts the per-session states as `ViewState.tokenRateBySession`. The webview just displays the active session's pre-computed state.)
 - **per-keystroke draft buffer** inside an active input (the committed draft on blur/send/tab-switch is host state; the live keystroke buffer is not). An actively edited transcript row is pinned in the virtualizer, so scrolling and streaming snapshots cannot unmount that local buffer; after submitted-edit rollback, the host projects the submitted text and attachments into a newly reopened inline editor.
 - **optimistic user message overlay** — pending user messages shown instantly before the host confirms them. The webview generates a `localId`, sends it with the `send` protocol message, and displays the message in the transcript immediately. When the host state arrives containing a message with that `localId`, the optimistic overlay entry is reconciled away. On `sendRejected`, the overlay entry is removed and the draft is restored.
+- **pinned-group dropdown open state** — which pinned-group chip (if any) has its member dropdown open (`openGroupPath`, keyed by a member path). Transient local UI only: it stays open across member selection and active-session change, re-associates with the surviving group when its former first member is dragged out, and closes on outside pointerdown / Escape / host replacement (a group dissolving below 2 or merging away with no surviving ≥2 group closes it).
 
 All other state (editing, draft content, session selection, model settings, prefs) lives in the host store and reaches the webview via ViewState snapshots.
+
+## Pinned-Tab Groups
+
+- Pinned-tab group **membership and strip order are host-owned and persistent**: `pinnedTabPaths` (flat order) and `pinnedTabGroups` (the partition) live in the host store and are persisted via `PersistTabs`. A group is unnamed and identified by any member path; its members appear contiguously in `pinnedTabPaths` in group order, and groups with fewer than 2 members are dissolved. The webview derives the renderable pinned items (standalone chips + group chips) from these two host-owned fields and never mutates them locally.
+- The open **dropdown is the only allowlisted local transient** for groups (see Webview-Local State): it is keyed by a member path, remains open across member selection and active-session change, re-associates with the surviving group when its former first member is dragged out, and closes on outside pointerdown / Escape / host replacement (dissolution/merge with no surviving ≥2 group).
 
 ## Extension UI Requests
 

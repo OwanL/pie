@@ -25,10 +25,6 @@ import {
   type SubagentResult,
   type SubagentSingleResult,
 } from './subagent';
-import {
-  DISPLAY_SCORE_DIMS,
-  normalizeTaskScoresForDisplay,
-} from './subagent-score-display';
 import { StatusChip } from './status-chip';
 import { ToolCallCard } from './tool-call-card';
 import { TranscriptMessageList } from './transcript-message-list';
@@ -164,29 +160,6 @@ function subagentErrorDetail(result: SubagentSingleResult): string | undefined {
   return parts.join(': ');
 }
 
-/** Compact score bar: always shows the full effective requirement vector. */
-function ScoreBar({ scores }: { scores: Record<string, number> | undefined }) {
-  const normalized = normalizeTaskScoresForDisplay(scores);
-  if (!normalized) return null;
-
-  return (
-    <span class="subagent-scores">
-      {DISPLAY_SCORE_DIMS.map(({ key, label, full }) => {
-        const val = normalized[key];
-        const isDefaulted = scores?.[key] == null;
-        return (
-          <span
-            key={key}
-            class="subagent-score-dim"
-            data-score={val}
-            title={`${full}: ${val}/5${isDefaulted ? ' (default)' : ''}`}
-          >{label}{val}</span>
-        );
-      })}
-    </span>
-  );
-}
-
 /** Compact model label shown in the subagent header. */
 function ModelLabel({ result }: { result: SubagentSingleResult }) {
   const model = result.selectedModel ?? result.model;
@@ -284,14 +257,12 @@ function ContextHandoffLabel({ result, requestedMode }: { result: SubagentSingle
 
 /** High-priority metadata that should remain visible before summary text. */
 function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
-  const hasScores = !!normalizeTaskScoresForDisplay(result.taskScores);
   const hasModel = !!(result.selectedModel ?? result.model);
-  if (!hasScores && !hasModel) return null;
+  if (!hasModel) return null;
 
   return (
     <span class="subagent-primary-meta">
       <ModelLabel result={result} />
-      {hasScores && <ScoreBar scores={result.taskScores} />}
     </span>
   );
 }
@@ -522,12 +493,10 @@ function SubagentMessages({
             <span class="subagent-model-selection-title">Model selection</span>
             <div class="subagent-model-selection-pool">
               {singleResult.selectionPool.map((candidate, idx) => {
-                const fitScore = singleResult.selectionFitScores?.[idx];
                 const isChosen = candidate === (singleResult.selectedModel ?? singleResult.model);
                 return (
                   <span key={idx} class={`subagent-pool-candidate${isChosen ? ' chosen' : ''}`}>
                     <span class="subagent-pool-name">{candidate.includes('/') ? candidate.split('/').pop() : candidate}</span>
-                    {fitScore != null && <span class="subagent-pool-score">{fitScore.toFixed(1)}</span>}
                   </span>
                 );
               })}

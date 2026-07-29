@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test, { after } from 'node:test';
 
-import { buildDuckDbDatabase, runNamedDuckDbQuery, runDuckDbQuery } from '../scripts/duckdb.ts';
+import { buildDuckDbDatabase, openDuckDbQuerySession, runNamedDuckDbQuery, runDuckDbQuery } from '../scripts/duckdb.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import type { PreparedToolResultIssueRow } from '../scripts/contracts.ts';
 import { loadFixture } from './helpers.ts';
@@ -23,17 +23,19 @@ await buildDuckDbDatabase({
   exportsDir,
   prepared,
 });
+const sharedDb = await openDuckDbQuerySession(sharedDbPath);
 
 after(async () => {
+  await sharedDb.close();
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 
 test('DuckDB build and named queries work against the fixture', async () => {
-  const modelQualityRows = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
-  const sessionReviewRows = await runNamedDuckDbQuery(sharedDbPath, 'session_review_quality');
-  const toolUsageRows = await runNamedDuckDbQuery(sharedDbPath, 'tool_usage');
-  const toolFailureRows = await runNamedDuckDbQuery(sharedDbPath, 'tool_failures');
-  const timelineRows = await runNamedDuckDbQuery(sharedDbPath, 'timeline');
+  const modelQualityRows = await sharedDb.queryNamed('model_quality');
+  const sessionReviewRows = await sharedDb.queryNamed('session_review_quality');
+  const toolUsageRows = await sharedDb.queryNamed('tool_usage');
+  const toolFailureRows = await sharedDb.queryNamed('tool_failures');
+  const timelineRows = await sharedDb.queryNamed('timeline');
 
   assert.ok(modelQualityRows.length >= 3);
   assert.ok(Array.isArray(sessionReviewRows));
@@ -43,10 +45,10 @@ test('DuckDB build and named queries work against the fixture', async () => {
 });
 
 test('DuckDB exposes only V2 review quality tables and metrics', async () => {
-  const rows = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
+  const rows = await sharedDb.queryNamed('model_quality');
   assert.ok(rows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
 
-  const tables = await runDuckDbQuery(sharedDbPath, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'");
+  const tables = await sharedDb.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'");
   const tableNames = new Set(tables.map((row) => String(row['table_name'])));
   assert.ok(tableNames.has('session_reviews_v2'));
   assert.ok(tableNames.has('review_criteria_v2'));
@@ -54,17 +56,17 @@ test('DuckDB exposes only V2 review quality tables and metrics', async () => {
   assert.ok(tableNames.has('review_reviewers_v2'));
   assert.equal(tableNames.has('agent_reviews'), false);
 
-  const runColumns = await runDuckDbQuery(sharedDbPath, "SELECT column_name FROM information_schema.columns WHERE table_name = 'runs'");
+  const runColumns = await sharedDb.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'runs'");
   const runColumnNames = new Set(runColumns.map((row) => String(row['column_name'])));
   for (const removed of ['scored', 'resolution', 'satisfaction', 'outcome_source', 'first_attempt_success']) {
     assert.equal(runColumnNames.has(removed), false, `${removed} must not remain in runs`);
   }
 
-  const views = await runDuckDbQuery(sharedDbPath, "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'");
+  const views = await sharedDb.query("SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'");
   assert.equal(views.some((row) => row['view_name'] === 'outcomes'), false);
 
   const leaderboardSql = await fs.readFile(new URL('../queries/model_leaderboard.sql', import.meta.url), 'utf8');
-  const leaderboardRows = await runDuckDbQuery(sharedDbPath, leaderboardSql);
+  const leaderboardRows = await sharedDb.query(leaderboardSql);
   assert.ok(leaderboardRows.every((row) => 'v2_review_count' in row && 'mean_quality_index_v1' in row));
 });
 
@@ -74,7 +76,7 @@ test('V2 review mass flows through model quality and leaderboard SQL', async () 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-v2-review-'));
   try {
     const dbPath = path.join(dir, 'usage.duckdb');
-    await fs.copyFile(sharedDbPath, dbPath);
+    await buildDuckDbDatabase({ dbPath, exportsDir: path.join(dir, 'exports'), prepared });
     const runId = base.runId.replaceAll("'", "''");
     await runDuckDbQuery(dbPath, `UPDATE runs SET session_id = 'v2-review-sql-session', identity_fallback = FALSE WHERE run_id = '${runId}'`);
     await runDuckDbQuery(dbPath, `
@@ -137,8 +139,7 @@ test('model leaderboard SQL uses one latest stable run per task group for proces
 });
 
 test('DuckDB runs expose aggregate tool timing coverage', async () => {
-  const rows = await runDuckDbQuery(
-    sharedDbPath,
+  const rows = await sharedDb.query(
     'SELECT tool_duration_ms, timed_tool_call_count FROM runs ORDER BY run_id LIMIT 1',
   );
 
@@ -171,19 +172,19 @@ test('DuckDB accepts unsigned Windows native exit codes', async () => {
 });
 
 test('cost columns are surfaced in core_runs, model_quality, and timeline', async () => {
-  const coreRunsRows = await runNamedDuckDbQuery(sharedDbPath, 'core_runs');
+  const coreRunsRows = await sharedDb.queryNamed('core_runs');
   assert.ok(coreRunsRows.length > 0);
   assert.ok(coreRunsRows.every((row) => 'estimated_cost_usd' in row), 'core_runs must expose estimated_cost_usd');
   assert.ok(coreRunsRows.some((row) => row['estimated_cost_usd'] != null), 'at least one priced run');
 
-  const modelQualityRows2 = await runNamedDuckDbQuery(sharedDbPath, 'model_quality');
+  const modelQualityRows2 = await sharedDb.queryNamed('model_quality');
   assert.ok(
     modelQualityRows2.every((row) => 'average_estimated_cost_usd' in row && 'total_estimated_cost_usd' in row && 'priced_run_count' in row),
     'model_quality must expose cost columns',
   );
   assert.ok(modelQualityRows2.some((row) => row['average_estimated_cost_usd'] != null), 'at least one priced model cell');
 
-  const timelineRows2 = await runNamedDuckDbQuery(sharedDbPath, 'timeline');
+  const timelineRows2 = await sharedDb.queryNamed('timeline');
   assert.ok(
     timelineRows2.every((row) => 'total_estimated_cost_usd' in row && 'priced_run_count' in row),
     'timeline must expose cost columns',
@@ -191,7 +192,7 @@ test('cost columns are surfaced in core_runs, model_quality, and timeline', asyn
 });
 
 test('verification_impact buckets per-kind counts instead of the run total', async () => {
-  const rows = await runNamedDuckDbQuery(sharedDbPath, 'verification_impact');
+  const rows = await sharedDb.queryNamed('verification_impact');
   assert.ok(rows.length > 0, 'verification_impact should return rows');
 
   // The fixture has at least one run with multiple verification kinds; the
@@ -222,7 +223,7 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
   // producer captured them. This test enumerates PreparedRunRow fields and
   // asserts each (except an explicit excluded set of nested/complex fields) has
   // a matching runs-table column, so the gap cannot recur for a future field.
-  const rows = await runDuckDbQuery(sharedDbPath, 'SELECT * FROM runs LIMIT 1');
+  const rows = await sharedDb.query('SELECT * FROM runs LIMIT 1');
   assert.equal(rows.length, 1, 'fixture should produce at least one run row');
   const toCamel = (s: string): string => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
   const duckColumns = new Set(Object.keys(rows[0]).map(toCamel));
@@ -258,8 +259,7 @@ test('runs table maps every scalar PreparedRunRow field (no silent drops)', asyn
   // complete total must remain unknown rather than silently equal parent-only cost.
   // The fixture includes one measured retry on run-001. This also guards
   // against positional misalignment between the mapper and the schema.
-  const priced = await runDuckDbQuery(
-    sharedDbPath,
+  const priced = await sharedDb.query(
     "SELECT estimated_cost_usd, total_estimated_cost_usd, subagent_estimated_cost_usd, compaction_count, auto_retry_count FROM runs WHERE run_id = 'run-001'",
   );
   if (priced.length > 0) {
@@ -278,7 +278,7 @@ test('turn_throughput table maps every scalar PreparedTurnThroughputRow field (n
   // dropped from the DuckDB export. inputTokens/cacheReadTokens/cacheWriteTokens/
   // contextTokens were added to the prepared row but the DuckDB interface/mapper/
   // schema lagged; this test pins them so the gap cannot recur.
-  const rows = await runDuckDbQuery(sharedDbPath, 'SELECT * FROM turn_throughput LIMIT 1');
+  const rows = await sharedDb.query('SELECT * FROM turn_throughput LIMIT 1');
   assert.ok(rows.length >= 1, 'fixture should produce at least one turn_throughput row');
   const toCamel = (s: string): string => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
   const duckColumns = new Set(Object.keys(rows[0]).map(toCamel));
@@ -296,8 +296,7 @@ test('turn_throughput table maps every scalar PreparedTurnThroughputRow field (n
   // fixture samples that predate per-turn token reporting (0 / NULL). BIGINT is
   // JSON-serialized as a string ('0'), so coerce via Number() before the strict
   // equality check (the test module uses node:assert/strict).
-  const tokenCols = await runDuckDbQuery(
-    sharedDbPath,
+  const tokenCols = await sharedDb.query(
     'SELECT input_tokens, cache_read_tokens, cache_write_tokens, context_tokens FROM turn_throughput LIMIT 1',
   );
   assert.ok(tokenCols.length > 0);
@@ -462,7 +461,7 @@ test('turn_throughput table exposes per-turn provider and tool_usage exposes tim
 });
 
 test('retry_timing table and named query expose scheduled and measured timing', async () => {
-  const rows = await runNamedDuckDbQuery(sharedDbPath, 'retry_timing');
+  const rows = await sharedDb.queryNamed('retry_timing');
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.['source_id'], 'run-001-retry-1');
   assert.equal(rows[0]?.['scheduled_delay_ms'], '1000');
@@ -471,7 +470,7 @@ test('retry_timing table and named query expose scheduled and measured timing', 
 });
 
 test('latency_friction query preserves measured coverage and tool overlap', async () => {
-  const rows = await runNamedDuckDbQuery(sharedDbPath, 'latency_friction');
+  const rows = await sharedDb.queryNamed('latency_friction');
   const run = rows.find((row) => row['run_id'] === 'run-001');
   assert.equal(run?.['skill_pruning_prepass_duration_ms'], '350');
   assert.equal(run?.['median_provider_queue_ms'], 60);
@@ -481,7 +480,7 @@ test('latency_friction query preserves measured coverage and tool overlap', asyn
 });
 
 test('core_runs exposes model attribution, mixed config, and parent/subagent/total cost', async () => {
-  const rows = await runNamedDuckDbQuery(sharedDbPath, 'core_runs');
+  const rows = await sharedDb.queryNamed('core_runs');
   assert.ok(rows.length > 0, 'core_runs should return rows');
   for (const row of rows) {
     assert.ok('model_family' in row, 'core_runs must expose model_family');

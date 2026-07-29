@@ -7,14 +7,14 @@ import renderToString from 'preact-render-to-string';
 import { EMPTY_AGGREGATE_STATS } from '../../../src/shared/protocol';
 import { AggregateStatsStrip } from '../../../src/webview/panel/aggregate-stats-strip';
 
-function renderRate(runningSessionCount: number): string {
+function renderRate(runningSessionCount: number, rollingRate = runningSessionCount > 0 ? 25 : 0): string {
   return renderToString(h(AggregateStatsStrip, {
     stats: {
       ...EMPTY_AGGREGATE_STATS,
       ready: true,
       todayTokensPerSecond: 50,
       tokensPerSecond: 42,
-      liveTokensPerSecond: runningSessionCount > 0 ? 25 : 0,
+      liveTokensPerSecond: rollingRate,
       runningSessionCount,
     },
     deferredTriggers: [],
@@ -28,8 +28,14 @@ test('aggregate stats strip does not present historical throughput as live while
   assert.doesNotMatch(html, />50<\/span><span class="aggregate-strip-unit"> tok\/s/);
 });
 
-test('aggregate stats strip presents throughput while a session is running', () => {
+test('aggregate stats strip presents the 30-second rolling throughput while running', () => {
   const html = renderRate(1);
-  assert.match(html, /aggregate-strip-live-tag">live<\/span>/);
+  assert.match(html, /aggregate-strip-live-tag">30s<\/span>/);
   assert.match(html, />25<\/span><span class="aggregate-strip-unit"> tok\/s/);
+});
+
+test('aggregate stats strip retains recent throughput after the run becomes idle', () => {
+  const html = renderRate(0, 12);
+  assert.match(html, /aggregate-strip-live-tag">30s<\/span>/);
+  assert.match(html, />12<\/span><span class="aggregate-strip-unit"> tok\/s/);
 });

@@ -49,6 +49,7 @@ test('HistoryCompactionSection renders summary and retention controls', () => {
   assert.match(html, /Summary thinking level/);
   assert.match(html, /Summary model/);
   assert.match(html, /Active model/);
+  assert.match(html, /aria-haspopup="listbox"/);
 });
 
 test('HistoryCompactionSection shows active-model profile controls in token mode', () => {

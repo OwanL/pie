@@ -181,6 +181,7 @@ export function AppBody({ adapter }: AppBodyProps) {
           sessions={viewState.sessions}
           openTabPaths={viewState.openTabPaths}
           pinnedTabPaths={viewState.pinnedTabPaths}
+          pinnedTabGroups={viewState.pinnedTabGroups}
           runningSessionPaths={viewState.runningSessionPaths}
           startingModelSessionPaths={viewState.startingModelSessionPaths}
           unreadFinishedSessionPaths={viewState.unreadFinishedSessionPaths}
@@ -195,6 +196,10 @@ export function AppBody({ adapter }: AppBodyProps) {
           onNew={handlers.handleNewSession}
           onDuplicate={handlers.handleDuplicateTab}
           onTogglePin={handlers.handleTogglePinTab}
+          onGroupPinnedTab={handlers.handleGroupPinnedTab}
+          onMergePinnedGroups={handlers.handleMergePinnedGroups}
+          onUngroupPinnedTab={handlers.handleUngroupPinnedTab}
+          onMovePinnedItem={handlers.handleMovePinnedItem}
           onRunAction={handlers.handleTabRunAction}
           deferredSessionPaths={derived.deferredSessionPaths}
           deferredTimerSessionPaths={derived.deferredTimerSessionPaths}

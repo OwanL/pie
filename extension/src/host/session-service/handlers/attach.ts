@@ -217,6 +217,7 @@ function finalizeSessionOpening(
       openTabPaths: archState.sessions.openTabPaths,
       activeSessionPath: archState.sessions.activeSessionPath,
       pinnedTabPaths: archState.sessions.pinnedTabPaths,
+      pinnedTabGroups: archState.sessions.pinnedTabGroups,
     },
   });
   deps.scheduleRender();

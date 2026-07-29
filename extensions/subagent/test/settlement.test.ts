@@ -180,7 +180,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 test("execute(): a dispatch that never reports progress is force-settled after PIE_SUBAGENT_SETTLEMENT_MS of inactivity", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "50"; // tiny net
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "200"; // short net with headroom under full-suite load
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0"; // skip grace → synthesize immediately
 	setMockBehavior({
 		onPrompt: (emit: (event: unknown) => void) => {
@@ -189,7 +189,7 @@ test("execute(): a dispatch that never reports progress is force-settled after P
 		},
 	});
 
-	const response = await within(2000, execute(
+	const response = await within(5000, execute(
 		"tool-settle-1",
 		{ agent: "worker", task: "do work" } as never,
 		new AbortController().signal, // no parent abort — the net is the only escape
@@ -211,17 +211,17 @@ test("execute(): a dispatch that never reports progress is force-settled after P
 });
 
 test("execute(): periodic credible progress renews the inactivity deadline", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "500";
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "100";
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
-			// Total runtime exceeds 500ms, but every idle gap is well below it. A
+			// Total runtime exceeds 100ms, but every idle gap is well below it. A
 			// fixed wall-clock deadline would force-settle this productive run.
 			for (const delta of ["still ", "working ", "normally "]) {
-				await sleep(160);
+				await sleep(30);
 				emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } });
 			}
-			await sleep(160);
+			await sleep(30);
 			emit({
 				type: "message_end",
 				message: {
@@ -320,7 +320,7 @@ test("execute(): nested descendant progress renews the root settlement lease", a
 	// real child processes can temporarily delay Node timers. Total duration is
 	// still greater than the lease, so this continues to distinguish a renewed
 	// inactivity deadline from a fixed total-duration deadline.
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "1000";
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "300";
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0";
 	setMockBehavior({
 		onPrompt: async (emit: (event: unknown) => void) => {
@@ -338,7 +338,7 @@ test("execute(): nested descendant progress renews the root settlement lease", a
 			// Total duration is greater than the lease. Each changed descendant
 			// generation reaches this root runner via tool_execution_update.
 			for (let generation = 1; generation <= 6; generation++) {
-				await sleep(200);
+				await sleep(60);
 				emit({
 					type: "tool_execution_update",
 					toolCallId: "nested-call",

@@ -64,8 +64,13 @@ matching bucket's eligible model list. Every eligible model is used once per
 cycle, and each new cycle is reshuffled to avoid a fixed ordering bias.
 
 The bucket contents are **user-configured** in the pie settings UI
-(Extensions → subagent → "Model buckets"), where you add any number of model
-ids to each bucket. The config is persisted in `ChatPrefs.subagentBuckets` and
+(Extensions → subagent → "Model buckets"), where you add any number of models
+to each bucket. New entries use canonical `provider/id` specs, allowing the same
+bare id from multiple providers to coexist and participate independently in
+balanced selection, provider toggles, capacity routing, hard requirements, and
+provider-failure fallback. Legacy bare ids remain supported and retain their
+historical any-enabled-provider resolution. The config is persisted in
+`ChatPrefs.subagentBuckets` and
 mirrored to the in-process subagent extension via the `PIE_SUBAGENT_BUCKETS_JSON`
 env var (set by the pie host on startup and on every change).
 
@@ -89,7 +94,7 @@ env var (set by the pie host on startup and on every change).
   available provider over a saturated provider when one exists. Capacity checks
   are advisory rather than reservations: another request may claim the slot
   before the subagent starts, so the chosen provider can still queue.
-- A model id may appear in more than one bucket.
+- A model spec may appear in more than one bucket.
 - "Always use parent model" (same settings section) skips bucket and capacity
   selection entirely and runs every subagent on the caller's active model.
 - **Fallback on provider failure** is enabled by default. After the provider/SDK
@@ -128,8 +133,8 @@ nested-bucket exhaustion fallback, or any provider retry. An incompatible parent
 produces a local selection error rather than a silent text-only dispatch.
 
 - Capability comes from `modelRegistry.getAvailable()` (the runtime `Model.input`
-  array). `SimpleModelConfig` remains responsible for thinking/cost metadata
-  only and is **not** treated as a capability source.
+  array). `SimpleModelConfig` remains responsible for profile eligibility and
+  thinking metadata only and is **not** treated as a capability source.
 - Duplicate model ids exposed by multiple providers are resolved by
   provider-qualified capability: capability on one provider must not make an
   incompatible duplicate eligible. A disabled provider is never reintroduced to

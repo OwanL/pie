@@ -12,7 +12,7 @@ and one pairing (umans ↔ litellm) has no validation at all.
 | Surface | Path | Format | Owns | Readers |
 |---|---|---|---|---|
 | **models.json** | `./models.json` | JSON (24 KB) | provider wiring, real USD pricing, model registry | ~14 TS files (pricing loaders, subagent-profiles, agent-dir resolution, proxy-service via baseUrl match, startup) |
-| **model-profiles.yaml** | `./model-profiles.yaml` | YAML (9.5 KB) | eligibility flags, thinking-level allowlists, disabled reasons, 0–30 `cost` ranking (fallback only) | ~7 TS files (bucket-selector, subagent-profiles, pricing-core fallback) |
+| **model-profiles.yaml** | `./model-profiles.yaml` | YAML | eligibility flags, thinking-level allowlists, disabled reasons | subagent configuration and picker metadata |
 | **litellm_config.yaml** | `./proxy/litellm_config.yaml` | YAML (5.7 KB) | LiteLLM routing for umans: `model_list[]` + concurrency limits | **LiteLLM Python process only** (passed via `--config` path; no TS code parses it) |
 | **settings.json** | `./settings.json` | JSON (0.9 KB) | defaultModel, defaultProvider, defaultThinkingLevel, retry, pruning.model/provider/thinkingLevel | extension runtime |
 
@@ -21,12 +21,10 @@ and one pairing (umans ↔ litellm) has no validation at all.
 1. **umans model ids are hard-duplicated** between `models.json` (`providers.umans.models[]`)
    and `litellm_config.yaml` (`model_list[]`). Every umans model must appear in **both** or
    routing silently breaks. **No code or test validates this pairing.**
-2. **`cost` is a name collision with different semantics**: `models.json` `cost` = real USD/M-token
-   object; `model-profiles.yaml` `cost` = 0–30 relative ranking scalar. Confusing to edit.
-3. The only enforcement is `extension/test/integration/model-profile-coverage.test.ts` — 5 tests checking
+2. The only enforcement is `extension/test/integration/model-profile-coverage.test.ts` — tests checking
    models.json ↔ model-profiles.yaml id agreement (fail-only, no repair). It does **not** cover
    the litellm pairing.
-4. settings.json model fields (`defaultModel`, `pruning.model`, etc.) reference model ids that
+3. settings.json model fields (`defaultModel`, `pruning.model`, etc.) reference model ids that
    must exist in models.json — validated nowhere.
 
 ## 2. Target Architecture
@@ -66,7 +64,7 @@ and one pairing (umans ↔ litellm) has no validation at all.
 
 Lives at repo root. Contains **everything** model-related merged into one file, organized by
 concern. Every model entry carries both its `models.json` fields (provider/pricing/metadata)
-and its `model-profiles.yaml` fields (eligibility/thinking/costRank) in one place.
+and its `model-profiles.yaml` fields (eligibility/thinking) in one place.
 
 ### Annotated structure (excerpt — full file generated during migration)
 
@@ -112,8 +110,8 @@ proxy:
 
 # ── Providers & Models ───────────────────────────────────────────────
 # Each model entry carries BOTH its models.json fields (pricing, metadata,
-# API routing) AND its model-profiles.yaml fields (eligible, thinking,
-# costRank). The sync script splits them into the right derived files.
+# API routing) AND its model-profiles.yaml fields (eligible and thinking).
+# The sync script splits them into the right derived files.
 providers:
 
   ollama:
@@ -138,7 +136,6 @@ providers:
         eligible: false             # → model-profiles.yaml eligible
         thinking: [minimal]         # → model-profiles.yaml thinking
         disabledReason: Too small for agentic work   # → model-profiles.yaml disabled_reason
-        costRank: 8                 # → model-profiles.yaml cost (0–30 fallback ranking; NOT real pricing)
 
       - id: deepseek-v4-pro:cloud
         name: Ollama Cloud: DeepSeek V4 Pro
@@ -153,7 +150,6 @@ providers:
         eligible: true
         thinking: [medium, high, xhigh]
         disabledReason: null
-        costRank: 11
 
   github-copilot:
     apiKey: copilot
@@ -180,7 +176,6 @@ providers:
         eligible: true
         thinking: [minimal, low, medium]
         disabledReason: null
-        costRank: 3
 
       # Full model: has api + compat → models[] in models.json
       - id: claude-opus-4.8
@@ -206,7 +201,6 @@ providers:
         eligible: true
         thinking: [medium]
         disabledReason: null
-        costRank: 30
 
   umans:
     baseUrl: http://localhost:4000/v1   # points at local LiteLLM proxy, NOT upstream
@@ -249,15 +243,13 @@ providers:
         eligible: true
         thinking: [low, medium, high, xhigh]
         disabledReason: null
-        costRank: 10
 ```
 
-### Naming: resolving the `cost` collision
+### Derived-field naming
 
 | Source field (`models.yaml`) | models.json field | model-profiles.yaml field | Meaning |
 |---|---|---|---|
 | `pricing: {input, output, cacheRead, cacheWrite}` | `cost: {input, output, cacheRead, cacheWrite}` | — | Real USD per 1M tokens |
-| `costRank: N` | — | `cost: N` | 0–30 relative ranking (fallback only) |
 | `disabledReason` | — | `disabled_reason` | snake_case in derived YAML |
 | `overrideOnly` | (splits models[] vs modelOverrides) | — | routing flag, source-only |
 
@@ -314,7 +306,6 @@ exact generated structure so no reader changes are needed.
 | `providers.<p>.models[].eligible` | — | `profiles[].eligible` | — | — |
 | `providers.<p>.models[].thinking` | — | `profiles[].thinking` | — | — |
 | `providers.<p>.models[].disabledReason` | — | `profiles[].disabled_reason` | — | — |
-| `providers.<p>.models[].costRank` | — | `profiles[].cost` | — | — |
 
 ### litellm `model_list` generation rule
 
@@ -468,7 +459,7 @@ Each step is independently verifiable. Commit after each.
 
 2. **Hand-build `models.yaml`** from the current derived files:
    - Merge `models.json` providers/models + `model-profiles.yaml` profiles (join on `id`).
-   - Rename `cost` object → `pricing`, `cost` scalar → `costRank`, `disabled_reason` →
+   - Rename the `cost` pricing object → `pricing` and `disabled_reason` →
      `disabledReason`.
    - Mark github-copilot `modelOverrides` entries with `overrideOnly: true`.
    - Add `upstream` block to the umans provider (extracted from `litellm_config.yaml`).
@@ -590,9 +581,6 @@ only read derived files.
 - **Does not change any reader.** All ~14 TS reader files stay byte-identical. This is the
   codegen tradeoff: derived files still exist, just auto-synced. A future "runtime unification"
   phase can migrate readers to import `models.yaml` directly and eliminate 2 of 3 derived files.
-- **Does not change the pricing fallback chain.** `resolveModelCost` (pricing → costRank →
-  aggregate) stays as-is. The `costRank` vs `pricing` semantic tension for umans (subscription
-  models with $0 pricing but costRank: 10) is preserved, not resolved.
 - **Does not restructure the `modelOverrides` concept.** Preserved via `overrideOnly` flag.
 - **Does not touch non-model settings.json fields** (`packages`, `sessionDir`, `subagent`,
   `httpIdleTimeoutMs`, `lastChangelogVersion`, `pruning.tools`).

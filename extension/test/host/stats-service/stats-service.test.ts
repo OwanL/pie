@@ -767,8 +767,8 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
       name: 'subagent',
       input: {
         tasks: [
-          { agent: 'scout', task: 'Trace tool events', taskScores: { precision: 4, creativity: 3 } },
-          { agent: 'reviewer', task: 'Check analytics snapshot', taskScores: { precision: 5, reasoning: 4, thoroughness: 2 } },
+          { agent: 'scout', task: 'Trace tool events' },
+          { agent: 'reviewer', task: 'Check analytics snapshot' },
         ],
       },
       result: 'done',
@@ -828,16 +828,9 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
           subagentCallCount: number;
           subagentTaskCount: number;
           subagentAgentNames: string[];
-          subagentScoredTaskCount: number;
           totalDurationMs: number;
           timedCallCount: number;
           durationMsByName: Record<string, number>;
-          subagentTaskScores: {
-            precision:    { sum: number; count: number; max: number };
-            creativity:   { sum: number; count: number; max: number };
-            reasoning:    { sum: number; count: number; max: number };
-            thoroughness: { sum: number; count: number; max: number };
-          };
         };
         verification: {
           totalCount: number;
@@ -869,24 +862,11 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
     assert.equal(snapshotEntries[0].run.toolUsage.subagentCallCount, 1);
     assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskCount, 2);
     assert.deepEqual(snapshotEntries[0].run.toolUsage.subagentAgentNames, ['scout', 'reviewer']);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentScoredTaskCount, 2);
     assert.equal(snapshotEntries[0].run.toolUsage.totalDurationMs, 400);
     assert.equal(snapshotEntries[0].run.toolUsage.timedCallCount, 3);
     assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['bash'], 100);
     assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['subagent'], 250);
     assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['edit'], 50);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.precision.sum, 9);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.precision.count, 2);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.precision.max, 5);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.creativity.sum, 3);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.creativity.count, 1);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.creativity.max, 3);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.reasoning.sum, 4);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.reasoning.count, 1);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.reasoning.max, 4);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.thoroughness.sum, 2);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.thoroughness.count, 1);
-    assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskScores.thoroughness.max, 2);
     assert.equal(snapshotEntries[0].run.verification.totalCount, 1);
     assert.equal(snapshotEntries[0].run.verification.failureCount, 1);
     assert.equal(snapshotEntries[0].run.verification.countsByKind['test'], 1);

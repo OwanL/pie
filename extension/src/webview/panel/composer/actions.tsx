@@ -17,7 +17,33 @@ export interface ComposerActionsProps {
   onClearQueue: () => void;
   sendCurrentText: () => void;
   canSend: boolean;
-  onOpenFilePicker: () => void;
+}
+
+function ClearQueueIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2.5 4h6.5M2.5 8h5M2.5 12h4" />
+      <path d="m10 9.5 3.5 3.5M13.5 9.5 10 13" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+      <rect x="4.5" y="4.5" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function SubmitIcon({ queued }: { queued: boolean }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      {queued && <path d="M2.5 3.5h4M4.5 1.5v4" />}
+      <path d={queued ? 'M3 10h9' : 'M2.5 8h10'} />
+      <path d={queued ? 'm9 7 3 3-3 3' : 'm9.5 5 3 3-3 3'} />
+    </svg>
+  );
 }
 
 export function ComposerActions({
@@ -28,70 +54,53 @@ export function ComposerActions({
   onClearQueue,
   sendCurrentText,
   canSend,
-  onOpenFilePicker,
 }: ComposerActionsProps) {
+  const submitTitle = interrupting
+    ? 'Wait for the current stop to finish'
+    : busy
+      ? 'Queue message (Enter) — runs after the current turn'
+      : 'Send message (Enter)';
+  const submitLabel = interrupting ? 'Waiting for stop' : busy ? 'Queue message' : 'Send message';
+
   return (
-    <div class="composer-actions flex flex-wrap items-center gap-2">
-      <div class="composer-actions-left flex flex-wrap items-center gap-2">
+    <div class="composer-actions">
+      {hasQueuedMessages && (
         <button
-          class="action-btn icon-only"
+          class="action-btn composer-action-icon composer-action-clear"
           type="button"
-          title="Attach file or folder path"
-          onClick={onOpenFilePicker}
-          aria-label="Attach file or folder path"
+          title="Clear queued messages (does not stop the current turn)"
+          onClick={onClearQueue}
+          aria-label="Clear queued messages"
+          data-action="clear-queue"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
+          <ClearQueueIcon />
         </button>
-      </div>
-      <div class="composer-actions-right ml-auto flex flex-wrap items-center gap-2">
-        {hasQueuedMessages && (
-          <button
-            class="action-btn"
-            type="button"
-            title="Clear queued messages (does not stop the current turn)"
-            onClick={onClearQueue}
-            aria-label="Clear queued messages"
-          >
-            Clear queued
-          </button>
-        )}
-        {busy && (
-          interrupting ? (
-            <button
-              class="action-btn danger"
-              type="button"
-              title="Stopping…"
-              disabled
-              aria-label="Stopping response"
-              aria-busy="true"
-            >
-              Stopping…
-            </button>
-          ) : (
-            <button
-              class="action-btn danger"
-              type="button"
-              title="Interrupt"
-              onClick={onInterrupt}
-              aria-label="Interrupt response"
-            >
-              Stop
-            </button>
-          )
-        )}
+      )}
+      {busy && (
         <button
-          class="action-btn primary"
+          class={`action-btn danger composer-action-icon composer-action-stop${interrupting ? ' is-stopping' : ''}`}
           type="button"
-          title={interrupting ? 'Wait for the current stop to finish' : busy ? 'Queue (Enter) — runs after the current turn' : 'Send (Enter)'}
-          onClick={sendCurrentText}
-          disabled={!canSend || interrupting}
-          aria-label={interrupting ? 'Waiting for stop' : busy ? 'Queue message' : 'Send message'}
+          title={interrupting ? 'Stopping response…' : 'Interrupt response'}
+          onClick={interrupting ? undefined : onInterrupt}
+          disabled={interrupting}
+          aria-label={interrupting ? 'Stopping response' : 'Interrupt response'}
+          aria-busy={interrupting || undefined}
+          data-action="stop"
         >
-          {interrupting ? 'Waiting…' : busy ? 'Queue' : 'Send'}
+          <StopIcon />
         </button>
-      </div>
+      )}
+      <button
+        class={`action-btn primary composer-action-icon composer-action-submit${busy ? ' is-queue' : ''}${interrupting ? ' is-waiting' : ''}`}
+        type="button"
+        title={submitTitle}
+        onClick={sendCurrentText}
+        disabled={!canSend || interrupting}
+        aria-label={submitLabel}
+        data-action={busy ? 'queue' : 'send'}
+      >
+        <SubmitIcon queued={busy} />
+      </button>
     </div>
   );
 }

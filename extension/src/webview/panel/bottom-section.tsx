@@ -46,7 +46,7 @@ export interface BottomSectionProps {
   pendingComposerInputs: ViewState['pendingComposerInputs'];
   activeRunSummary: ViewState['activeRunSummary'];
   tokenRateBySession: ViewState['tokenRateBySession'];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleOpenFilePicker' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -126,7 +126,6 @@ export const BottomSection = memo(function BottomSection({
         onSend={handlers.handleSend}
         onRetrySend={handlers.handleRetrySend}
         onInterrupt={handlers.handleInterrupt}
-        onOpenFilePicker={handlers.handleOpenFilePicker}
         onAddInput={handlers.handleAddComposerInput}
         onRemoveInput={handlers.handleRemoveComposerInput}
         onModelChange={handlers.handleModelChange}

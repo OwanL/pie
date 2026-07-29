@@ -18,13 +18,15 @@ npm run typecheck  # type-check only
 npm run package    # produce .vsix
 ```
 
-From the repo root, focused tests should use the path-aware wrapper rather than
-calling `npx tsx` directly:
+Agents only need one development test command, run from the repo root:
 
 ```bash
-npm run test:file -- extension/test/path/to/example.test.ts
-npm run test -- --fast --package extension --test-name-pattern="pattern"
+npm test
 ```
+
+It resolves changed files to affected tests, runs package groups concurrently,
+and conservatively broadens the selection when dependency evidence is incomplete.
+Use `npm run test:coverage` only for the explicit release coverage gate.
 
 On Windows the harness `bash` tool is Git Bash, not PowerShell. Use `/dev/null`
 for shell redirection, never `NUL`; a literal `NUL` file breaks Windows ripgrep

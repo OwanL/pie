@@ -155,6 +155,24 @@ describe('ProviderGate — installation and passthrough', () => {
 		assert.equal(ProviderGate.getInstance(), gate);
 	});
 
+	test('runtime model URLs activate a configured built-in provider without a static baseUrl', async () => {
+		globalThis.fetch = async () => makeStallingResponse();
+		const gate = ProviderGate.install([{
+			provider: 'github-copilot',
+			maxConcurrentRequests: 2,
+			afterburnSeconds: 0,
+			queueWaitSeconds: 1,
+		}], 0);
+		gate.registerModelBaseUrls([
+			{ provider: 'github-copilot', baseUrl: 'https://api.individual.githubcopilot.com' },
+		]);
+
+		const response = await fetch('https://api.individual.githubcopilot.com/chat/completions', makeInit('copilot-session'));
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 1);
+		await response.body?.cancel();
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
+	});
+
 	test('uninstall restores the original fetch', async () => {
 		let called = false;
 		globalThis.fetch = async () => {
@@ -372,7 +390,7 @@ describe('ProviderGate — afterburn sticky slots', () => {
 			...BASE_CONFIG,
 			maxConcurrentRequests: 1,
 			afterburnSeconds: 0.02,
-			queueWaitSeconds: 0.2,
+			queueWaitSeconds: 1,
 		}], 0);
 
 		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
@@ -1446,6 +1464,23 @@ describe('ProviderGate — resolveConfigs from models.json', () => {
 		assert.equal(configs[0].baseUrl, 'https://api.code.umans.ai/v1');
 		assert.equal(configs[0].maxConcurrentRequests, 4);
 		assert.equal(configs[0].afterburnSeconds, 15);
+	});
+
+	test('keeps concurrency configs without a static baseUrl for runtime registry discovery', () => {
+		const configs = ProviderGate.resolveConfigs({
+			providers: {
+				'github-copilot': {
+					concurrency: { maxConcurrentRequests: 2, afterburnSeconds: 15 },
+				},
+			},
+		});
+		assert.deepEqual(configs, [{
+			provider: 'github-copilot',
+			maxConcurrentRequests: 2,
+			afterburnSeconds: 15,
+			queueWaitSeconds: 30,
+			headerWaitSeconds: undefined,
+		}]);
 	});
 
 	test('providers without concurrency block are not gated', () => {

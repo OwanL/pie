@@ -158,16 +158,31 @@ export function setProviderEnabled(prefs: ChatPrefs, provider: string, enabled: 
   };
 }
 
-/** Providers represented by at least one model in a configured subagent bucket. */
+/** Providers represented by at least one model in a configured subagent bucket.
+ * New values are canonical `provider/id` specs. Legacy bare ids are resolved
+ * against every matching catalog entry for backward compatibility. */
 export function getSubagentBucketProviders(prefs: ChatPrefs, availableModels: ModelInfo[]): string[] {
-  const bucketIds = new Set([
+  const specs = [
     ...prefs.subagentBuckets.small,
     ...prefs.subagentBuckets.medium,
     ...prefs.subagentBuckets.frontier,
-  ]);
-  return [...new Set(
-    availableModels.filter((model) => bucketIds.has(model.id)).map((model) => model.provider),
-  )].sort((a, b) => a.localeCompare(b));
+  ];
+  const providers = new Set<string>();
+  for (const spec of specs) {
+    const slash = spec.indexOf('/');
+    if (slash > 0 && slash < spec.length - 1) {
+      const provider = spec.substring(0, slash);
+      const id = spec.substring(slash + 1);
+      if (availableModels.some((model) => model.provider === provider && model.id === id)) {
+        providers.add(provider);
+      }
+      continue;
+    }
+    for (const model of availableModels) {
+      if (model.id === spec) providers.add(model.provider);
+    }
+  }
+  return [...providers].sort((a, b) => a.localeCompare(b));
 }
 
 /** Effective provider state in a session: explicit override → default → enabled. */
@@ -214,7 +229,7 @@ export function setSubagentProviderEnabled(
   };
 }
 
-/** Replace one bucket's model list, preserving the other two buckets. */
+/** Replace one bucket's provider-qualified model-spec list, preserving the other two buckets. */
 export function setBucketModels(
   prefs: ChatPrefs,
   bucket: 'small' | 'medium' | 'frontier',

@@ -52,10 +52,23 @@ test('DEFAULT_CHAT_PREFS shape', () => {
   assert.equal(DEFAULT_CHAT_PREFS.uiBaseFontSize, 13);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiComposerFontSize, 'number');
   assert.equal(DEFAULT_CHAT_PREFS.uiComposerFontSize, 13);
+  assert.equal(typeof DEFAULT_CHAT_PREFS.composerInitialRows, 'number');
+  assert.equal(DEFAULT_CHAT_PREFS.composerInitialRows, 1);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiMutedColor, 'string');
   assert.equal(DEFAULT_CHAT_PREFS.uiMutedColor, '');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiLinkColor, 'string');
   assert.equal(DEFAULT_CHAT_PREFS.uiLinkColor, '');
+});
+
+test('resolveChatPrefs preserves valid composer rows and defaults malformed stored values to one', () => {
+  assert.equal(resolveChatPrefs({ composerInitialRows: 6 }).composerInitialRows, 6);
+  for (const invalid of [0, 7, 1.5, Number.NaN, '3']) {
+    assert.equal(
+      resolveChatPrefs({ composerInitialRows: invalid as never }).composerInitialRows,
+      1,
+      `invalid stored composer row count ${String(invalid)} should use the default`,
+    );
+  }
 });
 
 test('resolveChatPrefs backfills subagent auto-expand from legacy tool-call prefs', () => {
@@ -135,6 +148,7 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       sessions: [],
       openTabPaths: [],
       pinnedTabPaths: [],
+      pinnedTabGroups: [],
       runningSessionPaths: [],
       startingModelSessionPaths: [],
       unreadFinishedSessionPaths: [],

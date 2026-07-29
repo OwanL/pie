@@ -7,6 +7,8 @@ export function runPointerDown(
   sourceIndex: number,
   sourcePath: string,
   openTabPaths: string[],
+  sourceIsGroupChip: boolean,
+  sourceFromDropdown: boolean,
   dragCandidateRef: { current: TabDragCandidate | null },
   pointerPositionRef: { current: { x: number; y: number } | null },
   beginTracking: () => void,
@@ -16,7 +18,7 @@ export function runPointerDown(
   }
 
   const currentTarget = event.currentTarget as HTMLElement | null;
-  const tabElement = currentTarget?.closest('.session-tab') as HTMLElement | null;
+  const tabElement = currentTarget?.closest('.session-tab, .pinned-tab-group') as HTMLElement | null;
   const rect = tabElement?.getBoundingClientRect() ?? currentTarget?.getBoundingClientRect();
   if (!rect) {
     return;
@@ -32,6 +34,8 @@ export function runPointerDown(
     tabWidth: rect.width,
     tabHeight: rect.height,
     tabTop: rect.top,
+    sourceIsGroupChip,
+    sourceFromDropdown,
   };
   pointerPositionRef.current = { x: event.clientX, y: event.clientY };
   beginTracking();
@@ -75,7 +79,14 @@ export function runPointerMove(
       tabWidth: candidate.tabWidth,
       tabHeight: candidate.tabHeight,
       tabTop: candidate.tabTop,
-      dropIndex: candidate.sourceIndex,
+      // No drop target yet — the first pointermove (which always follows,
+      // since the threshold was just crossed) recomputes it in the correct
+      // zone-specific space. Commit always re-syncs before reading it.
+      dropIndex: null,
+      dropOnPath: null,
+      dropOnIsGroup: false,
+      sourceIsGroupChip: candidate.sourceIsGroupChip,
+      sourceFromDropdown: candidate.sourceFromDropdown,
     };
     dragStateRef.current = nextState;
     setDragState(nextState);

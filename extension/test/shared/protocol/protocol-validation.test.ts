@@ -142,6 +142,20 @@ test('validateWebviewToHostMessage validates moveSessionTab', () => {
   );
 });
 
+test('validateWebviewToHostMessage validates pinned-group messages', () => {
+  for (const type of ['groupPinnedTab', 'mergePinnedGroups']) {
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', targetPath: '/b' }).ok, true);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '', targetPath: '/b' }).ok, false);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', targetPath: 42 }).ok, false);
+  }
+  for (const type of ['ungroupPinnedTab', 'movePinnedItem']) {
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', toItemIndex: 1 }).ok, true);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', toItemIndex: -1 }).ok, false);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '/a', toItemIndex: 1.5 }).ok, false);
+    assert.equal(validateWebviewToHostMessage({ type, sourcePath: '', toItemIndex: 0 }).ok, false);
+  }
+});
+
 test('validateWebviewToHostMessage validates paging messages with optional sessionPath', () => {
   for (const type of ['loadOlderTranscript', 'loadNewerTranscript', 'jumpToLatestTranscript']) {
     assert.equal(validateWebviewToHostMessage({ type }).ok, true, `${type} should validate without sessionPath`);
@@ -369,6 +383,23 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
     false,
     'activityTailLines below 1 should be rejected',
   );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { composerInitialRows: 1 } }).ok,
+    true,
+    'one initial composer row should validate',
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { composerInitialRows: 6 } }).ok,
+    true,
+    'six initial composer rows should validate',
+  );
+  for (const invalid of [0, 7, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(
+      validateWebviewToHostMessage({ type: 'setPrefs', prefs: { composerInitialRows: invalid } }).ok,
+      false,
+      `invalid initial composer row count ${invalid} should be rejected`,
+    );
+  }
   // ── New per-place font sizes ────────────────────────────────────────
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiBaseFontSize: 13 } }).ok,

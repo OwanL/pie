@@ -29,6 +29,7 @@ const PACKAGE_CONFIGS = [
     testGlobs: ['./test/**/*.test.ts'],
     coverageIncludes: ['src/**/*.ts', 'src/**/*.tsx'],
     thresholds: { lines: 80, branches: 75 },
+    fastRunner: path.join(repoRoot, 'scripts', 'run-fast-extension-tests.mjs'),
   },
   {
     id: 'analysis',
@@ -43,6 +44,7 @@ const PACKAGE_CONFIGS = [
     // (scripts/) is unit-gated.
     coverageIncludes: ['scripts/**/*.ts'],
     thresholds: { lines: 95, branches: 78 },
+    fastBatchMode: 'analysis',
   },
   {
     id: 'scripts',
@@ -90,6 +92,7 @@ const PACKAGE_CONFIGS = [
     // `paths` alias those to the bundled copy so the schema test resolves a
     // single TypeBox instance. See extensions/subagent/tsconfig.json.
     tsxConfig: 'extensions/subagent/tsconfig.json',
+    fastBatchMode: 'subagent',
   },
   {
     id: 'ask-user',
@@ -180,6 +183,7 @@ const PACKAGE_CONFIGS = [
     ],
     thresholds: { lines: 80, branches: 60 },
     tsxConfig: 'extensions/computer-use/tsconfig.json',
+    fastBatchMode: 'computer-use',
   },
   {
     id: 'image-context-guard',
@@ -339,14 +343,17 @@ export function groupFastPackageConfigs(configs) {
     const ids = group.members.map((member) => member.id);
     const isRootGroup = group.cwd === repoRoot && !group.tsxConfig;
     const fastConcurrency = group.id === 'extension' ? 8
-      : group.id === 'analysis' ? 4
-        : group.id === 'subagent' ? 2
-          : isRootGroup ? 4
-            : undefined;
+      : group.id === 'analysis' ? 2
+        : group.id === 'subagent' ? 4
+          : group.id === 'computer-use' ? 2
+            : group.id === 'image-context-guard' ? 1
+              : isRootGroup ? 3
+                : undefined;
     return {
       ...group,
       id: ids.length === 1 ? ids[0] : `${ids.length} root packages`,
       fastConcurrency,
+      fastBatchMode: isRootGroup && ids.length === 12 ? 'root' : group.fastBatchMode,
     };
   });
 }
@@ -491,7 +498,7 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     // Fast mode lets node:test parallelize independent test files, which is
     // substantially quicker for the 2k+ extension suite.
     ...(fast
-      ? (config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])
+      ? ['--test-force-exit', ...(config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])]
       : ['--test-concurrency=1']),
     ...(collectCoverage ? ['--experimental-test-coverage'] : []),
     `--test-reporter=${reporterSpecifier}`,
@@ -586,13 +593,16 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}) {
 }
 
 async function runPackage(config, fast = false, integration = false, testArgs = [], signal) {
-  const args = buildTestArgs(config, fast, testArgs);
+  const useFastRunner = fast && (config.fastRunner || config.fastBatchMode) && testArgs.length === 0;
+  const fastRunner = config.fastRunner ?? path.join(repoRoot, 'scripts', 'run-fast-batched-tests.mjs');
+  const fastRunnerArgs = config.fastBatchMode ? [config.fastBatchMode] : [];
+  const args = useFastRunner ? [] : buildTestArgs(config, fast, testArgs);
   // Invoke the package-local tsx CLI directly rather than routing through npx
   // and a platform shell. This preserves regexes/spaces in forwarded node:test
   // arguments and avoids command-resolution differences between cwd/shells.
   const rawResult = await runChildProcess(
     process.execPath,
-    [resolveLocalTsx(config.cwd), ...args],
+    useFastRunner ? [fastRunner, ...fastRunnerArgs] : [resolveLocalTsx(config.cwd), ...args],
     config.cwd,
     signal,
     integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
@@ -745,13 +755,21 @@ async function main() {
   const processAbort = abortOnProcessSignals();
   let results;
   try {
-    results = await Promise.all(executionConfigs.map((config) => runPackage(
-      config,
-      parsedArgs.fast,
-      parsedArgs.integration,
-      parsedArgs.testArgs,
-      processAbort.signal,
-    )));
+    const staggerFullFastSuite = parsedArgs.fast
+      && parsedArgs.selected.length === 0
+      && executionConfigs.some((config) => config.id === 'extension');
+    results = await Promise.all(executionConfigs.map(async (config) => {
+      if (staggerFullFastSuite && config.id !== 'extension') {
+        await new Promise((resolve) => setTimeout(resolve, 10_000));
+      }
+      return await runPackage(
+        config,
+        parsedArgs.fast,
+        parsedArgs.integration,
+        parsedArgs.testArgs,
+        processAbort.signal,
+      );
+    }));
   } finally {
     processAbort.dispose();
   }

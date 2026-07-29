@@ -3,9 +3,10 @@ import * as path from 'node:path';
 
 import { loadModelPricing } from '../backend/pricing';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
-import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats, type WarmBashStats } from '../shared/protocol/aggregate-stats';
+import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
+import { RollingAggregateRate } from './rolling-aggregate-rate';
 import type { StatsService } from './stats-service';
 import {
   accumulateAggregateStats,
@@ -51,10 +52,6 @@ export interface AggregateStatsServiceDeps {
   /** Resolve the agent dir containing `models.json`. Called each tick so a
    *  runtime `pie.agentDir` change is picked up. Returns null when unresolved. */
   getAgentDir: () => string | null;
-  /** Poll live warm-bash pool metrics from the backend (in-memory registry read
-   *  via the `warm_bash.stats` RPC). Resolves to {@link EMPTY_WARM_BASH_STATS}
-   *  on any failure so the strip hides the segment rather than freezing. */
-  fetchWarmBashStats: () => Promise<WarmBashStats>;
   /** Poll live provider-gate concurrency metrics from the backend
    *  (in-memory `ProviderGate` read via the `provider_gate.metrics` RPC).
    *  Resolves to {@link EMPTY_PROVIDER_GATE_STATS} on any failure so the
@@ -106,6 +103,7 @@ export class AggregateStatsService {
   private liveRunIds = new Set<string>();
   private liveRevision = 0;
   private lastFinalizedDate: string | null = null;
+  private readonly rollingRate = new RollingAggregateRate();
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
   private started = false;
@@ -143,13 +141,16 @@ export class AggregateStatsService {
    */
   refreshLive(): void {
     this.liveRevision += 1;
-    if (this.completedLayer === null || this.lastFinalizedDate === null) return;
-
     const archState = this.deps.getArchState();
-    const runningSessionPaths = archState.sessions.runningSessionPaths;
-    const openTabCount = archState.sessions.openTabPaths.length;
     const ratesBySession = this.deps.tokenRateService.getRates();
     const nowMs = (this.deps.now?.() ?? new Date()).getTime();
+    const openRuns = this.deps.statsService.getOpenRuns();
+    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
+    const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
+    if (this.completedLayer === null || this.lastFinalizedDate === null) return;
+
+    const runningSessionPaths = archState.sessions.runningSessionPaths;
+    const openTabCount = archState.sessions.openTabPaths.length;
     const currentDate = localDateString(nowMs);
     if (currentDate !== this.lastFinalizedDate) {
       void this.tick();
@@ -158,8 +159,6 @@ export class AggregateStatsService {
 
     const pricing = this.pricingCache?.map;
     if (!pricing) return;
-    const openRuns = this.deps.statsService.getOpenRuns();
-    const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const nextLiveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
     // A run that just moved pending → persisted is not in the cached completed
     // layer until the slow mtime refresh lands. Keep the last good aggregate
@@ -188,7 +187,7 @@ export class AggregateStatsService {
       ratesBySession,
       openTabCount,
     );
-    next.warmBash = this.cached.warmBash;
+    next.liveTokensPerSecond = rollingRate;
     next.providerGate = this.cached.providerGate;
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
@@ -227,6 +226,7 @@ export class AggregateStatsService {
     // the open run disappears. Use that snapshot as the persistence bridge so
     // status, outcome, finalizedAt, and day bucketing are never stale.
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
+    const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
 
     const storageDir = this.deps.statsService.getStorageDir();
     const dataSignature = await this.readDataSignature(storageDir);
@@ -279,15 +279,6 @@ export class AggregateStatsService {
     this.openAccumulator = nextOpenAccumulator;
     this.liveRunIds = liveRunIdSet(openRuns, pendingCompletedRuns);
 
-    let warmBash = this.cached.warmBash;
-    try {
-      warmBash = await this.deps.fetchWarmBashStats();
-    } catch (error) {
-      appendPieLog('warn', 'aggregate-stats', 'warm_bash.stats poll failed; retaining cached', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
     let providerGate = this.cached.providerGate;
     try {
       providerGate = await this.deps.fetchProviderGateStats();
@@ -318,17 +309,16 @@ export class AggregateStatsService {
         ratesBySession,
         openTabCount,
       );
-      next.warmBash = warmBash;
+      next.liveTokensPerSecond = rollingRate;
       next.providerGate = providerGate;
       this.lastFinalizedDate = currentDate;
     } else {
       // Live-only refresh: preserve every historical array/object reference.
       next = {
         ...this.cached,
-        liveTokensPerSecond: sumLiveRate(runningSessionPaths, ratesBySession),
+        liveTokensPerSecond: rollingRate,
         runningSessionCount: new Set(runningSessionPaths).size,
         openTabCount,
-        warmBash,
         providerGate,
       };
     }
@@ -344,6 +334,33 @@ export class AggregateStatsService {
       this.cached = next;
       this.deps.onChanged();
     }
+  }
+
+  private observeRollingRate(
+    nowMs: number,
+    openRuns: RunSnapshot[],
+    pendingCompletedRuns: RunSnapshot[],
+    ratesBySession: Record<string, TokenRateIndicatorState>,
+  ): number {
+    const byRun = new Map<string, {
+      runId: string;
+      reportedOutputTokens: number;
+      liveOutputTokens?: number;
+    }>();
+    for (const run of openRuns) {
+      byRun.set(run.runId, {
+        runId: run.runId,
+        reportedOutputTokens: run.outputTokens,
+        liveOutputTokens: ratesBySession[run.sessionPath]?.liveOutputTokens,
+      });
+    }
+    // A terminal snapshot is authoritative: it replaces a possibly-larger live
+    // estimate, while RollingAggregateRate's per-run high-water mark prevents
+    // that replacement from double-counting or making the cumulative rate fall.
+    for (const run of pendingCompletedRuns) {
+      byRun.set(run.runId, { runId: run.runId, reportedOutputTokens: run.outputTokens });
+    }
+    return this.rollingRate.observe(nowMs, [...byRun.values()]);
   }
 
   private buildOpenAccumulator(
@@ -443,32 +460,6 @@ export function mtimeMs(filePath: string): Promise<number> {
 function signaturesEqual(a: DataSignature | null, b: DataSignature | null): boolean {
   if (!a || !b) return false;
   return a.snapshotsMtimeMs === b.snapshotsMtimeMs;
-}
-
-/** Sum of live tok/s across currently-running sessions, counting ONLY sessions
- *  that are actively generating. A paused session's held rate is excluded so a
- *  long tool call does not inflate the aggregate — the same predicate as the
- *  live-rate loop in {@link finalizeAggregateStats}. The param is widened to
- *  {@link TokenRateIndicatorState} (from `TokenRateService.getRates()`) so the
- *  `state` field is available to filter on. Exported for unit testing. */
-export function sumLiveRate(
-  runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
-): number {
-  let sum = 0;
-  for (const sessionPath of new Set(runningSessionPaths)) {
-    const state = ratesBySession[sessionPath];
-    if (
-      state
-      && state.state === 'generating'
-      && typeof state.rate === 'number'
-      && Number.isFinite(state.rate)
-      && state.rate > 0
-    ) {
-      sum += state.rate;
-    }
-  }
-  return sum;
 }
 
 /** Complete structural equality for protocol aggregates and accumulator caches. */

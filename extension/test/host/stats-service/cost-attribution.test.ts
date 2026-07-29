@@ -28,8 +28,6 @@ function run(overrides: Partial<RunSnapshot>): RunSnapshot {
       resultIssueCountsByKind: {}, resultIssueCountsByNameAndKind: {}, resultIssueSamples: [],
       totalDurationMs: 0, timedCallCount: 0, durationMsByName: {},
       subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [],
-      subagentScoredTaskCount: 0,
-      subagentTaskScores: { scored: 0, total: 0, byAgent: {}, averageScore: null, scoreHistogram: {} },
     },
     fileMutation: { writeCount: 0, editCount: 0, deleteCount: 0, renameCount: 0,
       touchedFileCount: 0, lineAdditions: 0, lineDeletions: 0, lineModifications: 0,

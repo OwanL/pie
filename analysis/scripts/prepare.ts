@@ -346,21 +346,6 @@ function prepareRun(
     familyMap,
   );
 
-  const dims = ['precision', 'creativity', 'reasoning', 'thoroughness'] as const;
-  function meanForDim(dim: typeof dims[number]): number | null {
-    const s = run.toolUsage.subagentTaskScores[dim];
-    return s.count > 0 ? s.sum / s.count : null;
-  }
-  function maxForDim(dim: typeof dims[number]): number | null {
-    const s = run.toolUsage.subagentTaskScores[dim];
-    return s.count > 0 ? s.max : null;
-  }
-
-  const dimMeans = dims.map((d) => meanForDim(d)).filter((v): v is number => v !== null);
-  const compositeMean: number | null = dimMeans.length > 0
-    ? dimMeans.reduce((a, b) => a + b, 0) / dimMeans.length
-    : null;
-
   const subagentInputTokens = normalizeTokenCount(run.toolUsage.subagentInputTokens);
   const subagentOutputTokens = normalizeTokenCount(run.toolUsage.subagentOutputTokens);
   const subagentCacheReadTokens = normalizeTokenCount(run.toolUsage.subagentCacheReadTokens);
@@ -469,16 +454,6 @@ function prepareRun(
     subagentCallCount: run.toolUsage.subagentCallCount,
     subagentTaskCount: run.toolUsage.subagentTaskCount,
     subagentAgentCount: run.toolUsage.subagentAgentNames.length,
-    subagentScoredTaskCount: run.toolUsage.subagentScoredTaskCount,
-    subagentMeanPrecision: meanForDim('precision'),
-    subagentMeanCreativity: meanForDim('creativity'),
-    subagentMeanReasoning: meanForDim('reasoning'),
-    subagentMeanThoroughness: meanForDim('thoroughness'),
-    subagentMaxPrecision: maxForDim('precision'),
-    subagentMaxCreativity: maxForDim('creativity'),
-    subagentMaxReasoning: maxForDim('reasoning'),
-    subagentMaxThoroughness: maxForDim('thoroughness'),
-    subagentCompositeMean: compositeMean,
     subagentInputTokens,
     subagentOutputTokens,
     subagentCacheReadTokens,

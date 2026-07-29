@@ -189,49 +189,6 @@ export interface AggregateLastRun {
   turnSeries: AggregateLastRunTurn[];
 }
 
-/** Live warm-bash pool metrics, aggregated across all open sessions.
- *  Reported by the warm-bash extension (backend child process) via a
- *  `Symbol.for` globalThis registry and polled host-side each aggregate tick.
- *  `enabled` is false (and counts zero) when warm bash is disabled or no bash
- *  call has built a pool yet — the status strip hides the segment in that case. */
-export interface WarmBashStats {
-  /** Warm bash is active (the shared pool exists and is not disposed). */
-  enabled: boolean;
-  /** Count of sessions that have built a warm-bash tool (active users of the shared pool). */
-  activeSessions: number;
-  /** Configured idle target for the single shared warm pool. */
-  poolSize: number;
-  /** Idle warm workers ready to serve a command immediately. */
-  ready: number;
-  /** Workers currently warming (spawned but not yet ready). */
-  warming: number;
-  /** Fast-path toggle is on for at least one session. */
-  fastPathEnabled: boolean;
-  /** Commands run via the execFile fast path (no shell at all). */
-  totalFastPath: number;
-  /** Commands run via the warm pool (pre-warmed shell + marker protocol). */
-  totalWarm: number;
-  /** Commands run via the fresh-spawn fallback (today's exact path). */
-  totalFallback: number;
-  /** Warmup attempts that failed (timed out / shell unavailable). */
-  totalWarmupFailures: number;
-}
-
-/** Empty warm-bash stats (disabled, zero counts) used as the default before the
- *  first host poll lands and as the registry-empty fallback. Stable reference. */
-export const EMPTY_WARM_BASH_STATS: WarmBashStats = {
-  enabled: false,
-  activeSessions: 0,
-  poolSize: 0,
-  ready: 0,
-  warming: 0,
-  fastPathEnabled: false,
-  totalFastPath: 0,
-  totalWarm: 0,
-  totalFallback: 0,
-  totalWarmupFailures: 0,
-};
-
 /** Live per-provider concurrency-gate metrics, reported by the backend's
  *  host-side `ProviderGate` (wraps `globalThis.fetch`) via the
  *  `provider_gate.metrics` RPC. `enabled` is false (and `providers` empty) when
@@ -314,8 +271,8 @@ export interface AggregateStats {
 
   // ── Current: live / open ──
   /**
-   * Sum of live tok/s across currently-running sessions (from
-   * `TokenRateService.getRates()`). 0 when no session is generating.
+   * Aggregate output rate over the trailing 30 seconds of wall time. Includes
+   * every session and decays through tool calls, idle gaps, and run completion.
    */
   liveTokensPerSecond: number;
   /** Number of currently-running sessions. */
@@ -324,9 +281,6 @@ export interface AggregateStats {
   openTabCount: number;
   /** Terminal subagent lifecycle evidence across completed and open runs. */
   subagentLifecycle: AggregateSubagentLifecycleStats;
-  /** Live warm-bash pool metrics (ready/warming counts + execution breakdown),
-   *  polled from the backend. See {@link WarmBashStats}. */
-  warmBash: WarmBashStats;
   /** Live provider-gate concurrency metrics (active/queued + pause state),
    *  polled from the backend's host-side `ProviderGate`. See
    *  {@link ProviderGateStats}. */
@@ -381,7 +335,6 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   runningSessionCount: 0,
   openTabCount: 0,
   subagentLifecycle: EMPTY_SUBAGENT_LIFECYCLE_STATS,
-  warmBash: EMPTY_WARM_BASH_STATS,
   providerGate: EMPTY_PROVIDER_GATE_STATS,
   totalCost: 0,
   costByProvider: [],

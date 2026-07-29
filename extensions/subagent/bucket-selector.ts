@@ -25,6 +25,7 @@ import type {
   BucketAssignments,
   SimpleModelConfig,
 } from "./src/bucket-config.js";
+import { modelIdFromSpec } from "./src/bucket-config.js";
 
 export interface BucketSelection {
   modelId: string;
@@ -115,13 +116,15 @@ function selectFairly(pool: string[]): string {
  * @param thinkingLevel - Optional thinking level hint
  * @param assignments - User-configured bucket assignments (from env)
  * @param modelConfig - Simple model config for thinking support lookup
- * @param allowedModelIds - Models allowed by provider toggles
- * @param excludeModels - Models to exclude (e.g., previously failed)
+ * @param allowedModelIds - Legacy bare ids plus exact `provider/id` specs
+ *   allowed by provider toggles
+ * @param excludeModels - Bare ids or exact qualified specs to exclude
+ *   (e.g., previously failed)
  * @param activeModelId - The caller's active model (fallback)
  * @param capacityAvailableModelIds - Soft live-capacity allowlist. Applied only
  *   when it leaves at least one otherwise-eligible bucket candidate.
- * @param requirementQualifiedModelIds - Hard requirement allowlist: model ids
- *   with at least one enabled provider-qualified declaration satisfying a
+ * @param requirementQualifiedModelIds - Hard requirement allowlist: exact
+ *   qualified specs plus legacy ids with at least one enabled declaration satisfying a
  *   `modelRequirements.inputKinds` requirement. Undefined/absent preserves
  *   current selection behaviour. The fallback to the active model is NOT
  *   filtered here — the caller (`resolveModel`) checks the active model's own
@@ -142,7 +145,7 @@ export function selectModel(
   // Build thinking support lookup from model config.
   const thinkingSupport = new Map<string, ThinkingLevel[]>();
   for (const cfg of modelConfig) {
-    thinkingSupport.set(cfg.id, cfg.thinking);
+    thinkingSupport.set(modelIdFromSpec(cfg.id), cfg.thinking);
   }
 
   const filterBucket = (bucketPool: string[]): { pool: string[]; thinkingLevel: ThinkingLevel | undefined } => {
@@ -153,7 +156,7 @@ export function selectModel(
     // nearest level than the originally requested (but unavailable) tier.
     if (thinkingLevel && pool.length > 0) {
       const thinkingFiltered = pool.filter((id) => {
-        const supported = thinkingSupport.get(id);
+        const supported = thinkingSupport.get(modelIdFromSpec(id));
         // Models not in config are treated as supporting all levels.
         return !supported || supported.includes(thinkingLevel);
       });
@@ -163,13 +166,13 @@ export function selectModel(
       } else {
         const allSupported = new Set<ThinkingLevel>();
         for (const id of pool) {
-          const supported = thinkingSupport.get(id);
+          const supported = thinkingSupport.get(modelIdFromSpec(id));
           if (supported) for (const level of supported) allSupported.add(level);
         }
         const relaxed = nearestSupportedThinking(thinkingLevel, [...allSupported]);
         if (relaxed) {
           const relaxedPool = pool.filter((id) => {
-            const supported = thinkingSupport.get(id);
+            const supported = thinkingSupport.get(modelIdFromSpec(id));
             return !supported || supported.includes(relaxed);
           });
           if (relaxedPool.length > 0) {

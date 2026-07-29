@@ -102,6 +102,9 @@ export interface PruningCatalog {
 
 export type UiDensity = 'compact' | 'comfortable' | 'spacious';
 
+export const COMPOSER_INITIAL_ROWS_MIN = 1;
+export const COMPOSER_INITIAL_ROWS_MAX = 6;
+
 /** How proactive history-compaction thresholds are interpreted. */
 export type HistoryCompactionThresholdMode = 'percentage' | 'tokens';
 
@@ -312,9 +315,10 @@ export function resolveHistoryCompactionEffectiveSettings(
 
 /**
  * User-configured model buckets for subagent model selection. Each bucket is a
- * list of model ids; `selectModel` picks uniformly at random from the highest
- * eligible bucket at or below the request. Exhausting those buckets falls back
- * to the parent's active model. Mirrored to the in-process subagent extension
+ * list of canonical `provider/id` specs; legacy bare ids remain accepted for
+ * backward compatibility. `selectModel` uses the highest eligible bucket at or
+ * below the request. Exhausting those buckets falls back to the parent's active
+ * model. Mirrored to the in-process subagent extension
  * via {@link SUBAGENT_BUCKETS_ENV}.
  */
 export interface SubagentBuckets {
@@ -415,8 +419,8 @@ export interface ChatPrefs {
    *  The upstream SDK default is 600s; this caps the worst-case hang for a
    *  simple command. Range [1, 600]. Mirrored via PIE_BASH_DEFAULT_TIMEOUT. */
   bashDefaultTimeout: number;
-  /** User-configured model ids per bucket for subagent model selection. The
-   *  subagent tool picks uniformly at random from the highest eligible bucket at
+  /** User-configured provider-qualified model specs per bucket for subagent model selection. The
+   *  subagent tool picks from a balanced random cycle in the highest eligible bucket at
    *  or below the request; exhaustion falls back to the parent's active model.
    *  Mirrored to the in-process subagent extension via PIE_SUBAGENT_BUCKETS_JSON.
    *  Default: all empty. */
@@ -441,6 +445,9 @@ export interface ChatPrefs {
    *  --panel-composer-font-size, independent of the base size so the input can
    *  be sized for comfort without rescaling the transcript. Default 13. */
   uiComposerFontSize: number;
+  /** Minimum visible text rows in the empty composer before content-driven
+   *  auto-expansion begins. Default 1; range 1–6. */
+  composerInitialRows: number;
   /** Font size (px) for expanded collapsible sections — tool-call bodies,
    *  reasoning, system prompts, pruning raw output, and code blocks. Smaller
    *  than the 13px raw agent output since expanded text is lower priority. */
@@ -602,6 +609,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   completionSoundVolume: 50,
   uiBaseFontSize: 13,
   uiComposerFontSize: 13,
+  composerInitialRows: 1,
   expandedSectionFontSize: 12,
   expandedSectionMaxHeight: 240,
   uiFontSans: '',
@@ -773,7 +781,8 @@ export const EMPTY_TRANSCRIPT_WINDOW: TranscriptWindow = {
 
 /**
  * Coerce an unknown stored value into a valid {@link SubagentBuckets}, dropping
- * non-array / non-string entries. Used by {@link resolveChatPrefs} so a
+ * non-array / non-string entries. Canonical `provider/id` specs and legacy bare
+ * ids are both preserved. Used by {@link resolveChatPrefs} so a
  * malformed or partially-stored value (e.g. from an older version) can never
  * produce an ill-typed `subagentBuckets` at runtime.
  */
@@ -810,10 +819,20 @@ export function normalizeNestedAllowedBuckets(value: unknown): NestedAllowedBuck
   };
 }
 
+export function normalizeComposerInitialRows(value: unknown): number {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= COMPOSER_INITIAL_ROWS_MIN
+    && value <= COMPOSER_INITIAL_ROWS_MAX
+    ? value
+    : DEFAULT_CHAT_PREFS.composerInitialRows;
+}
+
 export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
   return {
     ...DEFAULT_CHAT_PREFS,
     ...prefs,
+    composerInitialRows: normalizeComposerInitialRows(prefs?.composerInitialRows),
     extensionToggles: {
       ...DEFAULT_CHAT_PREFS.extensionToggles,
       ...(prefs?.extensionToggles ?? {}),

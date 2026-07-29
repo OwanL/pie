@@ -54,12 +54,11 @@ function legacyClassifyStderrLine(trimmed: string): PieLogLevel {
     return 'warn';
   }
   // The poll / RPC / tool-execution chatter that floods the stream
-  // (warm_bash.stats polls every ~2s, backend-request received/handled,
+  // (provider_gate.metrics polls, backend-request received/handled,
   // backend-timing, tool execution start/end) is demoted to `debug` so it's
   // hidden at the default Info level but visible when the channel is widened.
   if (
-    trimmed.includes('warm_bash.stats')
-    || trimmed.includes('provider_gate.metrics')
+    trimmed.includes('provider_gate.metrics')
     || trimmed.includes('backend-request')
     || trimmed.includes('backend-timing')
     || trimmed.includes('tool_execution_start')

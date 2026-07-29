@@ -23,6 +23,8 @@ export interface SessionTabProps {
   activePath: string | null;
   hasPendingExtensionUIRequest: boolean;
   isPinned: boolean;
+  /** True when this pinned chip is the current group/merge drop target. */
+  isDropTarget: boolean;
   /** True when this session owns a pending deferred trigger — disables the
    *  close × with an explanatory tooltip (the trigger must be cancelled first,
    *  from the status strip). */
@@ -50,6 +52,7 @@ export const SessionTab = memo(function SessionTab({
   activePath,
   hasPendingExtensionUIRequest,
   isPinned,
+  isDropTarget,
   hasDeferredTriggers,
   hasDeferredTimer,
   onContextMenu,
@@ -86,6 +89,7 @@ export const SessionTab = memo(function SessionTab({
   if (isUnreadFinished) classBits.push('unread-finished');
   if (hasDeferredTimer) classBits.push('deferred-timer');
   if (isPinned) classBits.push('pinned');
+  if (isDropTarget) classBits.push('drop-target-on');
   if (isRunning) classBits.push('running');
 
   return (
@@ -94,6 +98,10 @@ export const SessionTab = memo(function SessionTab({
       class={classBits.join(' ')}
       data-drop-target-tab="true"
       data-tab-path={tabPath}
+      data-pinned-item={isPinned ? 'true' : undefined}
+      data-pinned-item-path={isPinned ? tabPath : undefined}
+      data-pinned-item-group={isPinned ? 'false' : undefined}
+      data-unpinned-tab={isPinned ? undefined : 'true'}
       onContextMenu={(event) => onContextMenu(event as MouseEvent, tabPath)}
     >
       <span class="session-tab-shell" aria-hidden="true" />

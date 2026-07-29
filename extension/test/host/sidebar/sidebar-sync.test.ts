@@ -13,7 +13,7 @@ import {
 } from '../../../src/shared/protocol';
 
 const baseViewState: ViewState = {
-  sessions: [], openTabPaths: [], pinnedTabPaths: [], runningSessionPaths: [], startingModelSessionPaths: [], unreadFinishedSessionPaths: [],
+  sessions: [], openTabPaths: [], pinnedTabPaths: [], pinnedTabGroups: [], runningSessionPaths: [], startingModelSessionPaths: [], unreadFinishedSessionPaths: [],
   activeSession: null, transcript: [],
   transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
   transcriptLoaded: false, pendingComposerInputs: [], activeRunSummary: null, runSummariesBySession: {}, tokenRateBySession: {},

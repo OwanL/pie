@@ -23,10 +23,35 @@ export interface SimpleModelConfig {
   eligible: boolean;
   thinking: ThinkingLevel[];
   disabled_reason: string | null;
-  cost: number;
 }
 
-/** Per-bucket lists of model ids, user-configured via the settings UI. */
+/** A parsed bucket model spec. Qualified specs use canonical
+ * `provider/id`; legacy specs contain only the bare model id. */
+export interface ParsedModelSpec {
+  provider?: string;
+  id: string;
+}
+
+/** Parse a canonical provider-qualified spec while preserving legacy bare ids.
+ * The first slash separates provider from id so model ids may themselves
+ * contain slashes. Empty provider/id components are treated as a legacy id. */
+export function parseModelSpec(spec: string): ParsedModelSpec {
+  const separator = spec.indexOf("/");
+  if (separator <= 0 || separator === spec.length - 1) return { id: spec };
+  return { provider: spec.slice(0, separator), id: spec.slice(separator + 1) };
+}
+
+/** Return the bare id used for model-profile/thinking lookups. */
+export function modelIdFromSpec(spec: string): string {
+  return parseModelSpec(spec).id;
+}
+
+/** Canonical provider-qualified identity used by selection and retry routing. */
+export function qualifiedModelSpec(provider: string, id: string): string {
+  return `${provider}/${id}`;
+}
+
+/** Per-bucket lists of legacy bare ids or canonical `provider/id` specs. */
 export interface BucketAssignments {
   small: string[];
   medium: string[];
@@ -83,7 +108,7 @@ export const SUBAGENT_BUCKETS_ENV = "PIE_SUBAGENT_BUCKETS_JSON";
  *  Value is JSON {@link NestedAllowedBuckets}. */
 export const NESTED_ALLOWED_BUCKETS_ENV = "PIE_SUBAGENT_NESTED_ALLOWED_BUCKETS_JSON";
 
-// --- YAML loading (same lazy-resolve pattern as old model-selection.ts) ---
+// --- YAML loading ---
 
 let _yamlParse: ((raw: string) => unknown) | null | undefined;
 function getYamlParse(): ((raw: string) => unknown) | undefined {
@@ -160,8 +185,9 @@ function emptyBuckets(): BucketAssignments {
  *
  * Accepts `{ small: string[], medium: string[], frontier: string[] }` — extra
  * keys are ignored and missing keys default to empty. Non-array values and
- * non-string / empty entries are dropped; duplicate model ids within a bucket
- * are de-duplicated (a model may legitimately appear in more than one bucket).
+ * non-string / empty entries are dropped; duplicate specs within a bucket are
+ * de-duplicated. Provider-qualified duplicates with the same bare id remain
+ * distinct (a spec may legitimately appear in more than one bucket).
  *
  * Returns empty assignments for undefined / malformed input so the caller
  * falls back to the active model. Never throws.

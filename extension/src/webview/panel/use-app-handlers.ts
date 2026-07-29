@@ -23,12 +23,15 @@ export interface AppHandlers {
    *  and input pickup are identical to a fresh send. */
   handleRetrySend: (text: string, disablePruning?: boolean) => void;
   handleInterrupt: () => void;
-  handleOpenFilePicker: () => void;
   handleOpenFile: (path: string) => void;
   handleNewSession: () => void;
   handleCloseTab: (path: string) => void;
   handleDuplicateTab: (path: string) => void;
   handleTogglePinTab: (path: string) => void;
+  handleGroupPinnedTab: (sourcePath: string, targetPath: string) => void;
+  handleMergePinnedGroups: (sourcePath: string, targetPath: string) => void;
+  handleUngroupPinnedTab: (sourcePath: string, toItemIndex: number) => void;
+  handleMovePinnedItem: (sourcePath: string, toItemIndex: number) => void;
   handleCancelDeferredTrigger: (sessionPath: string, triggerId?: string) => void;
   handleCancelEdit: () => void;
   handleSetPrefs: (partial: Partial<ChatPrefs>) => void;
@@ -104,7 +107,6 @@ export function useAppHandlers(
     postMessage({ type: 'interrupt', sessionPath });
   }, [postMessage, activeSessionPathRef, setInterrupting]);
 
-  const handleOpenFilePicker = useCallback(() => postMessage({ type: 'openFilePicker' }), [postMessage]);
   const handleOpenFile = useCallback((path: string) => postMessage({ type: 'openFile', path }), [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
   const handleCloseTab = useCallback((path: string) => postMessage({
@@ -112,6 +114,10 @@ export function useAppHandlers(
   }), [postMessage]);
   const handleDuplicateTab = useCallback((path: string) => postMessage({ type: 'duplicateSession', sessionPath: path }), [postMessage]);
   const handleTogglePinTab = useCallback((path: string) => postMessage({ type: 'togglePinTab', sessionPath: path }), [postMessage]);
+  const handleGroupPinnedTab = useCallback((sourcePath: string, targetPath: string) => postMessage({ type: 'groupPinnedTab', sourcePath, targetPath }), [postMessage]);
+  const handleMergePinnedGroups = useCallback((sourcePath: string, targetPath: string) => postMessage({ type: 'mergePinnedGroups', sourcePath, targetPath }), [postMessage]);
+  const handleUngroupPinnedTab = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'ungroupPinnedTab', sourcePath, toItemIndex }), [postMessage]);
+  const handleMovePinnedItem = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'movePinnedItem', sourcePath, toItemIndex }), [postMessage]);
   // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
   // (carried on the trigger itself), not necessarily the active session, so it
   // is passed explicitly rather than read from the ref. Omit `triggerId` to
@@ -247,12 +253,15 @@ export function useAppHandlers(
       handleSend,
       handleRetrySend,
       handleInterrupt,
-      handleOpenFilePicker,
       handleOpenFile,
       handleNewSession,
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
+      handleGroupPinnedTab,
+      handleMergePinnedGroups,
+      handleUngroupPinnedTab,
+      handleMovePinnedItem,
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,
@@ -279,12 +288,15 @@ export function useAppHandlers(
       handleSend,
       handleRetrySend,
       handleInterrupt,
-      handleOpenFilePicker,
       handleOpenFile,
       handleNewSession,
       handleCloseTab,
       handleDuplicateTab,
       handleTogglePinTab,
+      handleGroupPinnedTab,
+      handleMergePinnedGroups,
+      handleUngroupPinnedTab,
+      handleMovePinnedItem,
       handleCancelDeferredTrigger,
       handleCancelEdit,
       handleSetPrefs,

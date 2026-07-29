@@ -67,8 +67,8 @@ export interface TokenRateIndicatorState {
    * Numeric output tokens/sec (the generation-time-windowed rate), or
    * `undefined` when not measurable (idle, or measuring before
    * {@link MIN_RATE_SPAN_MS} of generation has elapsed). Consumed host-side by
-   * the aggregate-stats strip to sum live throughput across running sessions;
-   * the webview display ignores it (it renders {@link label}).
+   * per-session UI and diagnostics. The bottom-strip aggregate instead tracks
+   * high-water output totals per analytics run over its own wall-clock window.
    */
   rate?: number;
   /**

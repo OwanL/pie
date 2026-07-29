@@ -98,16 +98,6 @@ interface DuckDbRunRow {
   subagent_call_count: number;
   subagent_task_count: number;
   subagent_agent_count: number;
-  subagent_scored_task_count: number;
-  subagent_mean_precision: number | null;
-  subagent_mean_creativity: number | null;
-  subagent_mean_reasoning: number | null;
-  subagent_mean_thoroughness: number | null;
-  subagent_max_precision: number | null;
-  subagent_max_creativity: number | null;
-  subagent_max_reasoning: number | null;
-  subagent_max_thoroughness: number | null;
-  subagent_composite_mean: number | null;
   verification_total_count: number;
   verification_failure_count: number;
   verification_state: string;
@@ -471,16 +461,6 @@ function toDuckDbRunRow(row: PreparedRunRow): DuckDbRunRow {
     subagent_call_count: row.subagentCallCount,
     subagent_task_count: row.subagentTaskCount,
     subagent_agent_count: row.subagentAgentCount,
-    subagent_scored_task_count: row.subagentScoredTaskCount,
-    subagent_mean_precision: row.subagentMeanPrecision,
-    subagent_mean_creativity: row.subagentMeanCreativity,
-    subagent_mean_reasoning: row.subagentMeanReasoning,
-    subagent_mean_thoroughness: row.subagentMeanThoroughness,
-    subagent_max_precision: row.subagentMaxPrecision,
-    subagent_max_creativity: row.subagentMaxCreativity,
-    subagent_max_reasoning: row.subagentMaxReasoning,
-    subagent_max_thoroughness: row.subagentMaxThoroughness,
-    subagent_composite_mean: row.subagentCompositeMean,
     verification_total_count: row.verificationTotalCount,
     verification_failure_count: row.verificationFailureCount,
     verification_state: row.verificationState,
@@ -937,16 +917,6 @@ CREATE TABLE runs (
   subagent_call_count INTEGER,
   subagent_task_count INTEGER,
   subagent_agent_count INTEGER,
-  subagent_scored_task_count INTEGER,
-  subagent_mean_precision DOUBLE,
-  subagent_mean_creativity DOUBLE,
-  subagent_mean_reasoning DOUBLE,
-  subagent_mean_thoroughness DOUBLE,
-  subagent_max_precision INTEGER,
-  subagent_max_creativity INTEGER,
-  subagent_max_reasoning INTEGER,
-  subagent_max_thoroughness INTEGER,
-  subagent_composite_mean DOUBLE,
   verification_total_count INTEGER,
   verification_failure_count INTEGER,
   verification_state VARCHAR,
@@ -1386,16 +1356,48 @@ export async function readNamedQuerySql(name: NamedQuery): Promise<string> {
   return await fs.readFile(QUERY_FILE_BY_NAME[name], 'utf8');
 }
 
-export async function runDuckDbQuery(dbPath: string, sql: string): Promise<Array<Record<string, unknown>>> {
+export interface DuckDbQuerySession {
+  query(sql: string): Promise<Array<Record<string, unknown>>>;
+  queryNamed(name: NamedQuery): Promise<Array<Record<string, unknown>>>;
+  close(): Promise<void>;
+}
+
+/** Reuse one embedded DuckDB connection for a related query batch. */
+export async function openDuckDbQuerySession(dbPath: string): Promise<DuckDbQuerySession> {
   const { instance, connection } = await openDuckDb(dbPath);
-  try {
+  let closed = false;
+  const query = async (sql: string): Promise<Array<Record<string, unknown>>> => {
+    if (closed) throw new Error('DuckDB query session is closed');
     const reader = await connection.runAndReadAll(sql);
     return reader.getRowObjectsJson() as Array<Record<string, unknown>>;
+  };
+  return {
+    query,
+    async queryNamed(name) {
+      return await query(await readNamedQuerySql(name));
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await closeDuckDb(instance, connection);
+    },
+  };
+}
+
+export async function runDuckDbQuery(dbPath: string, sql: string): Promise<Array<Record<string, unknown>>> {
+  const session = await openDuckDbQuerySession(dbPath);
+  try {
+    return await session.query(sql);
   } finally {
-    await closeDuckDb(instance, connection);
+    await session.close();
   }
 }
 
 export async function runNamedDuckDbQuery(dbPath: string, name: NamedQuery): Promise<Array<Record<string, unknown>>> {
-  return await runDuckDbQuery(dbPath, await readNamedQuerySql(name));
+  const session = await openDuckDbQuerySession(dbPath);
+  try {
+    return await session.queryNamed(name);
+  } finally {
+    await session.close();
+  }
 }

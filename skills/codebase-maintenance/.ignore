@@ -18,7 +18,9 @@ node_modules/
 out/
 .vscode-test/
 coverage/
-git/
+.git/
+data/
+analysis/data/
 skills/codebase-maintenance/
 scripts/
 analysis/site/app.ts

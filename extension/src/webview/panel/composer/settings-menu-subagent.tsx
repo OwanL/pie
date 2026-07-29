@@ -12,8 +12,9 @@ import {
   setSubagentProviderDefaultEnabled,
   toggleChatPref,
 } from '../chat-prefs';
-import { orderModelsForPicker } from './model-list';
+import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
 import { PickerTag } from '../components/PickerTag';
+import { ModelPicker } from '../components/model-picker';
 import { UiGroupLabel } from './ui-appearance-settings';
 import type { OnSetPrefs } from './settings-menu-types';
 
@@ -47,46 +48,53 @@ interface BucketModelsEditorProps {
   selected: string[];
   availableModels: ModelInfo[];
   modelEntries: ReturnType<typeof orderModelsForPicker>;
-  onChange: (models: string[]) => void;
+  onChange: (modelSpecs: string[]) => void;
 }
 
 /**
  * Editor for a single bucket's model list. Selected models render as removable
- * chips (labelled with the model's display name); an "Add model…" select lists
- * every available model not already in the bucket. Reuses the AlwaysKeepPicker
- * styling (chips + select) for visual consistency, and its optimistic-pending
- * gate so a slow host round-trip can't double-add an item.
+ * chips labelled with provider-qualified model names. The shared searchable
+ * {@link ModelPicker} is the only model-selection surface, matching the main
+ * composer picker. Persisted values are canonical `provider/id` specs so two
+ * providers exposing the same model id remain independently selectable.
  *
- * A model id that is no longer in the registry (e.g. its provider was toggled
- * off) still renders as a chip labelled with the raw id, so the user can see and
- * remove stale entries — selection-time filtering in the subagent extension
- * drops unavailable models from the pool anyway.
+ * Legacy bare ids and models no longer in the registry still render as raw
+ * removable chips. Runtime selection keeps backward compatibility for those
+ * values, while every new choice is provider-qualified.
  */
 function BucketModelsEditor({ label, hint, selected, availableModels, modelEntries, onChange }: BucketModelsEditorProps) {
-  const labelFor = (id: string): string => availableModels.find((m) => m.id === id)?.name ?? id;
+  const labelFor = (spec: string): string => {
+    const parsed = parseModelSpec(spec);
+    const matches = availableModels.filter((model) =>
+      model.id === parsed.id && (!parsed.provider || model.provider === parsed.provider));
+    const model = matches[0];
+    if (!model) return spec;
+    return `${model.provider} · ${model.name}`;
+  };
+  const isSelected = (model: ModelInfo): boolean =>
+    selected.includes(formatModelSpec(model)) || selected.includes(model.id);
 
   const availableOptions = useMemo(
-    () => modelEntries.filter((entry) => !selected.includes(entry.model.id)),
+    () => modelEntries.filter((entry) => !isSelected(entry.model)),
     [modelEntries, selected],
   );
 
-  // Optimistic names just added but not yet reflected in the host-persisted
-  // `selected` prop (mirrors AlwaysKeepPicker). Without this gate the user can
-  // re-select an item before the host state arrives, firing a duplicate update.
+  // Optimistic specs just added but not yet reflected in the host-persisted
+  // `selected` prop. Without this gate a slow host round-trip can double-add.
   const [pending, setPending] = useState<string[]>([]);
   useEffect(() => {
     if (pending.length === 0) return;
-    const remaining = pending.filter((id) => !selected.includes(id));
+    const remaining = pending.filter((spec) => !selected.includes(spec));
     if (remaining.length !== pending.length) setPending(remaining);
   }, [selected, pending]);
 
-  const addModel = (id: string) => {
-    if (!id || selected.includes(id) || pending.includes(id)) return;
-    setPending((cur) => [...cur, id]);
-    onChange([...selected, id]);
-    window.setTimeout(() => setPending((cur) => cur.filter((x) => x !== id)), 2000);
+  const addModel = (spec: string) => {
+    if (!spec || selected.includes(spec) || pending.includes(spec)) return;
+    setPending((cur) => [...cur, spec]);
+    onChange([...selected, spec]);
+    window.setTimeout(() => setPending((cur) => cur.filter((x) => x !== spec)), 2000);
   };
-  const removeModel = (id: string) => onChange(selected.filter((x) => x !== id));
+  const removeModel = (spec: string) => onChange(selected.filter((x) => x !== spec));
 
   return (
     <div class="toolbar-settings-keep-picker">
@@ -94,13 +102,13 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
       <div class="toolbar-settings-item-hint">{hint}</div>
       {selected.length > 0 && (
         <div class="toolbar-settings-keep-chips">
-          {selected.map((id) => (
+          {selected.map((spec) => (
             <PickerTag
-              key={id}
-              value={id}
-              label={labelFor(id)}
-              removeLabel={`Remove ${labelFor(id)} from ${label}`}
-              onRemove={() => removeModel(id)}
+              key={spec}
+              value={spec}
+              label={labelFor(spec)}
+              removeLabel={`Remove ${labelFor(spec)} from ${label}`}
+              onRemove={() => removeModel(spec)}
             />
           ))}
         </div>
@@ -116,26 +124,17 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
         </div>
       )}
       <div class="toolbar-settings-keep-picker-wrap">
-        <select
-          class="toolbar-settings-select toolbar-settings-keep-select"
+        <ModelPicker
+          compact
+          dropdownDirection="down"
           value=""
-          aria-label={`Add model to ${label} bucket`}
+          label={availableOptions.length === 0 ? 'No models available' : 'Add model…'}
+          ariaLabel={`Add model to ${label} bucket`}
+          title={`Add model to ${label} bucket`}
+          entries={availableOptions}
           disabled={availableOptions.length === 0}
-          onChange={(e) => {
-            const id = (e.target as HTMLSelectElement).value;
-            if (id) {
-              addModel(id);
-              (e.target as HTMLSelectElement).value = '';
-            }
-          }}
-        >
-          <option value="">
-            {availableOptions.length === 0 ? 'No models available' : 'Add model…'}
-          </option>
-          {availableOptions.map((entry) => (
-            <option key={entry.model.id} value={entry.model.id}>{entry.label}</option>
-          ))}
-        </select>
+          onChange={addModel}
+        />
       </div>
     </div>
   );
@@ -313,7 +312,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
 
       <UiGroupLabel label="Model buckets" />
       <div class="toolbar-settings-item-hint">
-        Each bucket holds model ids you want eligible for that tier. When a subagent requests a bucket, one model is picked at random from its list. Empty buckets fall back to the parent's active model.
+        Each bucket holds provider-qualified models eligible for that tier. When a subagent requests a bucket, one model is picked from a balanced random cycle. Empty buckets fall back to the parent's active model.
       </div>
       {BUCKET_DEFS.map((def) => (
         <BucketModelsEditor

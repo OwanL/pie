@@ -63,6 +63,7 @@ function makeArchState(overrides: {
       sessions: [],
       openTabPaths: openTabs,
       pinnedTabPaths: [],
+      pinnedTabGroups: [],
       runningSessionPaths: running,
       unreadFinishedSessionPaths: [],
       activeSessionPath: overrides.active ?? null,

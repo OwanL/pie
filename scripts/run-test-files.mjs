@@ -171,7 +171,7 @@ export function groupFilesByPackage(repoRoot, inputs) {
  * @returns {string[]}
  */
 export function buildTsxArgs(group) {
-  const args = ['--test'];
+  const args = ['--test', '--test-force-exit'];
   if (group.tsxConfig) {
     // Must precede the positional test files.
     args.push(`--tsconfig=${group.tsxConfig}`);
@@ -287,7 +287,7 @@ async function main() {
   const failures = [];
   let completedGroups = 0;
   try {
-    for (const group of groups) {
+    await Promise.all(groups.map(async (group) => {
       const args = buildTsxArgs(group);
       const fileWord = group.files.length === 1 ? 'file' : 'files';
       console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
@@ -299,8 +299,7 @@ async function main() {
         console.log(`✖ ${group.id} (exit ${code})`);
         failures.push(group.id);
       }
-      if (processAbort.signal.aborted) break;
-    }
+    }));
   } finally {
     processAbort.dispose();
   }

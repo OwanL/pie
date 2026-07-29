@@ -84,7 +84,6 @@ interface ComposerProps {
    *  Invoked by the NoticeBanner's Retry button via `sendRetryDraftRef`. */
   onRetrySend: (text: string, disablePruning?: boolean) => void;
   onInterrupt: () => void;
-  onOpenFilePicker: () => void;
   onAddInput: (input: ComposerInputDraft) => void;
   onRemoveInput: (inputId: string) => void;
   onModelChange: (model: string, provider: string | undefined, thinkingLevel: ThinkingLevel) => void;
@@ -135,7 +134,6 @@ function ComposerView({
   onSend,
   onRetrySend,
   onInterrupt,
-  onOpenFilePicker,
   onAddInput,
   onRemoveInput,
   onModelChange,
@@ -192,6 +190,7 @@ function ComposerView({
     onSend,
     onRetrySend,
     pendingComposerInputsLength: pendingComposerInputs.length,
+    initialRows: prefs.composerInitialRows,
     sessionPath,
     draftText,
     postMessage,
@@ -268,40 +267,10 @@ function ComposerView({
 
   return (
     <div class="composer-area flex shrink-0 flex-col gap-1.5 border-t border-border/50 bg-surface px-3 py-2 pb-2.5" ref={composerAreaRef}>
-      <div class="composer-rail flex flex-col gap-1.5">
-      <ComposerToolbar
-        sessionPath={sessionPath}
-        busy={busy}
-        prefs={prefs}
-        pruningSettings={pruningSettings}
-        pruningCatalog={pruningCatalog}
-        pruningResult={pruningResult}
-        toolResultPruningSettings={toolResultPruningSettings}
-        providerGateStats={providerGateStats}
-        onSetPrefs={onSetPrefs}
-        onSetSystemPromptToggles={onSetSystemPromptToggles}
-        systemPrompts={systemPrompts}
-        onSetPruningSettings={onSetPruningSettings}
-        onSetToolResultPruningSettings={onSetToolResultPruningSettings}
-        availableExtensions={availableExtensions}
-        availableModels={availableModels}
-        selectedModel={selectedModel}
-        selectedProvider={selectedProvider}
-        selectedLevel={selectedLevel}
-        supportsReasoning={supportsReasoning}
-        contextIndicator={contextIndicatorProp}
-        contextBreakdown={contextBreakdown}
-        sessionCostIndicator={sessionCostIndicator}
-        tokenRateIndicator={tokenRateIndicator}
-        runStatus={runControls.status}
-        onModelChange={onModelChange}
-        onCompact={onCompact}
-      />
-
       <div
         ref={composerShellRef}
         class={cx(
-          'flex flex-col gap-1.5 rounded-xl border border-transparent bg-input px-2 py-1.5 pb-2 shadow-sm transition-[background,border-color,box-shadow] duration-150',
+          'composer-shell flex w-full flex-col gap-1.5 rounded-xl border border-transparent bg-input px-2 py-1.5 pb-2 shadow-sm transition-[background,border-color,box-shadow] duration-150',
           'focus-within:border-border-subtle/80 focus-within:shadow-md',
           'forced-colors:border forced-colors:border-[ButtonText] forced-colors:focus-within:outline-1 forced-colors:focus-within:outline-[Highlight]',
           isDragActive && 'border-accent/40 bg-accent/5 shadow-md',
@@ -341,8 +310,8 @@ function ComposerView({
         />
         <textarea
           ref={textareaRef}
-          class="composer-input-textarea max-h-[200px] min-h-10 w-full resize-none border-0 bg-transparent p-0 leading-normal text-foreground outline-none placeholder:text-muted"
-          rows={1}
+          class="composer-input-textarea max-h-[200px] w-full resize-none border-0 bg-transparent p-0 leading-normal text-foreground outline-none placeholder:text-muted"
+          rows={prefs.composerInitialRows}
           placeholder={composerPlaceholder}
           value={text}
           onInput={handleInput}
@@ -351,22 +320,50 @@ function ComposerView({
           onPaste={handlePaste}
           aria-label="Message composer"
         />
-        <ComposerActions
-          busy={busy}
-          interrupting={interrupting}
-          hasQueuedMessages={hasQueuedMessages}
-          onInterrupt={onInterrupt}
-          onClearQueue={onClearQueue}
-          sendCurrentText={sendCurrentText}
-          canSend={canSend}
-          onOpenFilePicker={onOpenFilePicker}
-        />
+        <div class="composer-bottom-bar">
+          <ComposerToolbar
+            sessionPath={sessionPath}
+            busy={busy}
+            prefs={prefs}
+            pruningSettings={pruningSettings}
+            pruningCatalog={pruningCatalog}
+            pruningResult={pruningResult}
+            toolResultPruningSettings={toolResultPruningSettings}
+            providerGateStats={providerGateStats}
+            onSetPrefs={onSetPrefs}
+            onSetSystemPromptToggles={onSetSystemPromptToggles}
+            systemPrompts={systemPrompts}
+            onSetPruningSettings={onSetPruningSettings}
+            onSetToolResultPruningSettings={onSetToolResultPruningSettings}
+            availableExtensions={availableExtensions}
+            availableModels={availableModels}
+            selectedModel={selectedModel}
+            selectedProvider={selectedProvider}
+            selectedLevel={selectedLevel}
+            supportsReasoning={supportsReasoning}
+            contextIndicator={contextIndicatorProp}
+            contextBreakdown={contextBreakdown}
+            sessionCostIndicator={sessionCostIndicator}
+            tokenRateIndicator={tokenRateIndicator}
+            runStatus={runControls.status}
+            onModelChange={onModelChange}
+            onCompact={onCompact}
+          />
+          <ComposerActions
+            busy={busy}
+            interrupting={interrupting}
+            hasQueuedMessages={hasQueuedMessages}
+            onInterrupt={onInterrupt}
+            onClearQueue={onClearQueue}
+            sendCurrentText={sendCurrentText}
+            canSend={canSend}
+          />
+        </div>
       </div>
 
       {attachmentError && (
         <div class="composer-hint composer-hint-error" role="status">{attachmentError}</div>
       )}
-      </div>
     </div>
   );
 }

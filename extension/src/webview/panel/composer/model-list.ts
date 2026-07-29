@@ -1,5 +1,19 @@
 import type { ModelInfo } from '../../../shared/protocol';
 
+/** Canonical identity used by every webview model picker. The first slash is
+ * the separator so model ids may contain additional slashes. */
+export function formatModelSpec(model: Pick<ModelInfo, 'provider' | 'id'>): string {
+  return `${model.provider}/${model.id}`;
+}
+
+/** Parse a canonical provider-qualified spec while retaining legacy bare ids. */
+export function parseModelSpec(spec: string): { provider?: string; id: string } {
+  const slash = spec.indexOf('/');
+  return slash > 0 && slash < spec.length - 1
+    ? { provider: spec.substring(0, slash), id: spec.substring(slash + 1) }
+    : { id: spec };
+}
+
 /**
  * Filter out models whose provider is toggled off. A provider is disabled when
  * `providerToggles[provider] === false` (absent or `true` → enabled).
@@ -25,7 +39,7 @@ export interface ModelPickerEntry {
   selectedLabel: string;
   /** True for models that are explicitly ineligible as subagent targets. */
   ineligible: boolean;
-  /** Tooltip text describing rating + ineligibility reason when applicable. */
+  /** Tooltip text describing pricing and ineligibility when applicable. */
   title: string;
   /** Token input price per 1M tokens, formatted for display (e.g. "$2.50"). */
   tokenInPrice: string;
@@ -34,8 +48,6 @@ export interface ModelPickerEntry {
   /** Whether the model supports image inputs. */
   supportsImages: boolean;
 }
-
-const RATING_MAX = 20;
 
 /**
  * Strip any leading provider/prefix from a model name for the compact closed-state
@@ -49,15 +61,10 @@ function stripProviderPrefix(name: string): string {
 /**
  * Order models for the picker:
  *   1. Eligible / unprofiled first, then ineligible (subagent-disabled).
- *   2. Within each group, sort by normalized cost descending (most expensive first).
- *   3. Tiebreak by aggregate subagent rating descending, then display name, then id.
- *
- * Unprofiled models (no normalizedCost) sort to the bottom of the eligible group
- * with cost=0 fallback since their pricing is unknown/typically free.
- * Models without a subagent profile also fall back to cost=0.
+ *   2. Within each group, sort by display name, then id.
  *
  * The returned entries carry display affordances (warning prefix, tooltip) so the
- * toolbar can render without re-deriving rating logic.
+ * toolbar can render without re-deriving eligibility logic.
  */
 export interface ModelPickerOrderOptions {
   /** Apply subagent eligibility warnings/demotion. Disable this for the parent
@@ -69,33 +76,24 @@ export function orderModelsForPicker(
   models: ModelInfo[],
   { useSubagentEligibility = true }: ModelPickerOrderOptions = {},
 ): ModelPickerEntry[] {
-  const decorated = models.map((model, index) => {
+  const decorated = models.map((model) => {
     const sub = model.subagent;
     const ineligible = useSubagentEligibility && sub?.eligible === false;
-    const aggregate = sub?.aggregate;
-    const cost = sub?.normalizedCost;
     return {
       model,
-      index,
       ineligible,
-      aggregate: typeof aggregate === 'number' ? aggregate : -1,
-      hasProfile: sub !== undefined,
-      cost: typeof cost === 'number' ? cost : 0,
     };
   });
 
   decorated.sort((a, b) => {
     if (a.ineligible !== b.ineligible) return a.ineligible ? 1 : -1;
-    if (a.cost !== b.cost) return b.cost - a.cost;
-    if (a.aggregate !== b.aggregate) return b.aggregate - a.aggregate;
     const byName = a.model.name.localeCompare(b.model.name);
     if (byName !== 0) return byName;
     return a.model.id.localeCompare(b.model.id);
   });
 
   return decorated.map((entry) => {
-    const { model, ineligible, aggregate, hasProfile } = entry;
-    const ratingText = hasProfile && aggregate >= 0 ? `${aggregate}/${RATING_MAX}` : 'unrated';
+    const { model, ineligible } = entry;
     const prefix = ineligible ? '⚠ ' : '';
 
     // Prefix the dropdown label with the provider id so models that exist under
@@ -105,13 +103,9 @@ export function orderModelsForPicker(
     const dropdownLabel = `${prefix}${model.provider} · ${model.name}`;
     const selectedLabel = `${prefix}${stripProviderPrefix(model.name)}`;
 
-    const titleParts = [`${model.name} — rating ${ratingText}`];
+    const titleParts = [model.name];
 
-    // Add cost info when available
     const sub = model.subagent;
-    if (sub?.normalizedCost !== undefined && sub.normalizedCost > 0) {
-      titleParts.push(`Cost: ${sub.normalizedCost.toFixed(1)} (${RATING_MAX} scale)`);
-    }
     if (sub?.pricing && (sub.pricing.input > 0 || sub.pricing.output > 0)) {
       titleParts.push(
         `Pricing: $${sub.pricing.input.toFixed(2)}/M in, $${sub.pricing.output.toFixed(2)}/M out`,

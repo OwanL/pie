@@ -109,13 +109,13 @@ test('analyzeToolCall classifies probe no-match and shell errors', () => {
   assert.equal(shell.failure?.exitCode, 127);
 });
 
-test('analyzeToolCall captures subagent usage details including task scores', () => {
+test('analyzeToolCall captures subagent usage details', () => {
   const analysis = analyzeToolCall(makeToolCall({
     name: 'subagent',
     input: {
       tasks: [
-        { agent: 'scout', task: 'Find prompt factor sources', taskScores: { precision: 4, creativity: 3, reasoning: 5 } },
-        { agent: 'reviewer', task: 'Check analytics diffs', taskScores: { precision: 3, thoroughness: 2 } },
+        { agent: 'scout', task: 'Find prompt factor sources' },
+        { agent: 'reviewer', task: 'Check analytics diffs' },
       ],
     },
   }));
@@ -123,51 +123,20 @@ test('analyzeToolCall captures subagent usage details including task scores', ()
   assert.equal(analysis.subagentCallCount, 1);
   assert.equal(analysis.subagentTaskCount, 2);
   assert.deepEqual(analysis.subagentAgentNames, ['scout', 'reviewer']);
-  assert.equal(analysis.subagentScoredTaskCount, 2);
-
-  const scores = analysis.subagentTaskScores;
-  assert.equal(scores.precision.sum, 7);
-  assert.equal(scores.precision.count, 2);
-  assert.equal(scores.precision.max, 4);
-  assert.equal(scores.creativity.sum, 3);
-  assert.equal(scores.creativity.count, 1);
-  assert.equal(scores.creativity.max, 3);
-  assert.equal(scores.reasoning.sum, 5);
-  assert.equal(scores.reasoning.count, 1);
-  assert.equal(scores.reasoning.max, 5);
-  assert.equal(scores.thoroughness.sum, 2);
-  assert.equal(scores.thoroughness.count, 1);
-  assert.equal(scores.thoroughness.max, 2);
 });
 
-test('analyzeToolCall captures single-mode task scores', () => {
+test('analyzeToolCall captures single-mode subagent usage', () => {
   const analysis = analyzeToolCall(makeToolCall({
     name: 'subagent',
     input: {
       agent: 'planner',
       task: 'Design the system architecture',
-      taskScores: { precision: 5, creativity: 4, reasoning: 5, thoroughness: 3 },
     },
   }));
 
   assert.equal(analysis.subagentCallCount, 1);
   assert.equal(analysis.subagentTaskCount, 1);
   assert.deepEqual(analysis.subagentAgentNames, ['planner']);
-  assert.equal(analysis.subagentScoredTaskCount, 1);
-
-  const scores = analysis.subagentTaskScores;
-  assert.equal(scores.precision.sum, 5);
-  assert.equal(scores.precision.count, 1);
-  assert.equal(scores.precision.max, 5);
-  assert.equal(scores.creativity.sum, 4);
-  assert.equal(scores.creativity.count, 1);
-  assert.equal(scores.creativity.max, 4);
-  assert.equal(scores.reasoning.sum, 5);
-  assert.equal(scores.reasoning.count, 1);
-  assert.equal(scores.reasoning.max, 5);
-  assert.equal(scores.thoroughness.sum, 3);
-  assert.equal(scores.thoroughness.count, 1);
-  assert.equal(scores.thoroughness.max, 3);
 });
 
 test('analyzeToolCall extracts mutation rollups from edit and patch tools', () => {
@@ -255,129 +224,6 @@ test('getToolCallSizeHint and summarizeSubagentToolCallInput stay aligned with t
   assert.equal(summary, 'planner: Capture prompt and tool metadata before transport lowering');
 });
 
-test('analyzeToolCall falls back to result.details.results for task scores when input has none', () => {
-  const analysis = analyzeToolCall(makeToolCall({
-    name: 'subagent',
-    input: {
-      agent: 'worker',
-      task: 'Refactor the analytics pipeline',
-    },
-    result: {
-      content: [{ type: 'text', text: 'Done' }],
-      details: {
-        mode: 'single',
-        results: [{
-          agent: 'worker',
-          task: 'Refactor the analytics pipeline',
-          exitCode: 0,
-          messages: [],
-          taskScores: { precision: 4, creativity: 2, reasoning: 3, thoroughness: 5 },
-        }],
-      },
-    },
-  }));
-
-  assert.equal(analysis.subagentCallCount, 1);
-  assert.equal(analysis.subagentTaskCount, 1);
-  assert.equal(analysis.subagentScoredTaskCount, 1);
-
-  const scores = analysis.subagentTaskScores;
-  assert.equal(scores.precision.sum, 4);
-  assert.equal(scores.precision.count, 1);
-  assert.equal(scores.precision.max, 4);
-  assert.equal(scores.creativity.sum, 2);
-  assert.equal(scores.creativity.count, 1);
-  assert.equal(scores.creativity.max, 2);
-  assert.equal(scores.reasoning.sum, 3);
-  assert.equal(scores.reasoning.count, 1);
-  assert.equal(scores.reasoning.max, 3);
-  assert.equal(scores.thoroughness.sum, 5);
-  assert.equal(scores.thoroughness.count, 1);
-  assert.equal(scores.thoroughness.max, 5);
-});
-
-test('analyzeToolCall merges result task scores across parallel tasks', () => {
-  const analysis = analyzeToolCall(makeToolCall({
-    name: 'subagent',
-    input: {
-      tasks: [
-        { agent: 'scout', task: 'Investigate prompt hashes' },
-        { agent: 'worker', task: 'Migrate the data pipeline' },
-      ],
-    },
-    result: {
-      content: [{ type: 'text', text: 'Done' }],
-      details: {
-        mode: 'parallel',
-        results: [
-          {
-            agent: 'scout',
-            task: 'Investigate prompt hashes',
-            exitCode: 0,
-            messages: [],
-            taskScores: { precision: 3, reasoning: 2 },
-          },
-          {
-            agent: 'worker',
-            task: 'Migrate the data pipeline',
-            exitCode: 0,
-            messages: [],
-            taskScores: { precision: 5, creativity: 4, thoroughness: 3 },
-          },
-        ],
-      },
-    },
-  }));
-
-  assert.equal(analysis.subagentTaskCount, 2);
-  assert.equal(analysis.subagentScoredTaskCount, 2);
-
-  const scores = analysis.subagentTaskScores;
-  assert.equal(scores.precision.sum, 8);  // 3 + 5
-  assert.equal(scores.precision.count, 2);
-  assert.equal(scores.precision.max, 5);
-  assert.equal(scores.creativity.sum, 4);
-  assert.equal(scores.creativity.count, 1);
-  assert.equal(scores.creativity.max, 4);
-  assert.equal(scores.reasoning.sum, 2);
-  assert.equal(scores.reasoning.count, 1);
-  assert.equal(scores.reasoning.max, 2);
-  assert.equal(scores.thoroughness.sum, 3);
-  assert.equal(scores.thoroughness.count, 1);
-  assert.equal(scores.thoroughness.max, 3);
-});
-
-test('analyzeToolCall prefers input task scores over result when input provides them', () => {
-  const analysis = analyzeToolCall(makeToolCall({
-    name: 'subagent',
-    input: {
-      agent: 'planner',
-      task: 'Design the system',
-      taskScores: { precision: 2, creativity: 2, reasoning: 2, thoroughness: 2 },
-    },
-    result: {
-      content: [{ type: 'text', text: 'Done' }],
-      details: {
-        mode: 'single',
-        results: [{
-          agent: 'planner',
-          task: 'Design the system',
-          exitCode: 0,
-          messages: [],
-          taskScores: { precision: 5, creativity: 5, reasoning: 5, thoroughness: 5 },
-        }],
-      },
-    },
-  }));
-
-  // Input scores are used, not result scores
-  assert.equal(analysis.subagentScoredTaskCount, 1);
-  assert.equal(analysis.subagentTaskScores.precision.sum, 2);
-  assert.equal(analysis.subagentTaskScores.creativity.sum, 2);
-  assert.equal(analysis.subagentTaskScores.reasoning.sum, 2);
-  assert.equal(analysis.subagentTaskScores.thoroughness.sum, 2);
-});
-
 test('analyzeToolCall handles subagent call without result gracefully', () => {
   const analysis = analyzeToolCall(makeToolCall({
     name: 'subagent',
@@ -390,8 +236,6 @@ test('analyzeToolCall handles subagent call without result gracefully', () => {
 
   assert.equal(analysis.subagentCallCount, 1);
   assert.equal(analysis.subagentTaskCount, 1);
-  assert.equal(analysis.subagentScoredTaskCount, 0);
-  assert.equal(analysis.subagentTaskScores.precision.sum, 0);
 });
 
 test('getToolCallSizeHint suppresses hints for failed tool calls', () => {

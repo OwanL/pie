@@ -449,20 +449,32 @@ test('downward manual scrolling is exposed so the anchor can yield', () => {
   assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'downward interaction signal should be active');
 });
 
-test('anchor yield survives a pause during a scrollbar or middle-button drag', async () => {
+test('anchor yield survives a pause during a scrollbar or middle-button drag', () => {
   mountProbe(false);
   settle();
 
-  scrollTopValue -= 240;
-  el.dispatchEvent(new Event('scroll'));
-  el.dispatchEvent(new MouseEvent('pointerdown', { button: 0 }));
-  scrollTopValue += 40;
-  el.dispatchEvent(new Event('scroll'));
+  let idleReset: TimerHandler | undefined;
+  const originalSetTimeout = window.setTimeout;
+  window.setTimeout = ((callback: TimerHandler) => {
+    idleReset = callback;
+    return 1;
+  }) as typeof window.setTimeout;
+  try {
+    scrollTopValue -= 240;
+    el.dispatchEvent(new Event('scroll'));
+    el.dispatchEvent(new MouseEvent('pointerdown', { button: 0 }));
+    scrollTopValue += 40;
+    el.dispatchEvent(new Event('scroll'));
 
-  await new Promise((resolve) => setTimeout(resolve, 220));
-  assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'an active pointer gesture must keep the anchor yielded');
+    assert.equal(capture.r!.isScrollingTowardBottomRef.current, true, 'an active pointer gesture must keep the anchor yielded');
+    assert.equal(idleReset, undefined, 'active pointer gestures must not arm the idle reset');
 
-  window.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
-  await new Promise((resolve) => setTimeout(resolve, 220));
-  assert.equal(capture.r!.isScrollingTowardBottomRef.current, false, 'anchoring resumes shortly after release');
+    window.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+    assert.equal(typeof idleReset, 'function', 'release arms the idle reset');
+    const runIdleReset = idleReset as TimerHandler | undefined;
+    if (typeof runIdleReset === 'function') runIdleReset();
+    assert.equal(capture.r!.isScrollingTowardBottomRef.current, false, 'anchoring resumes after the idle reset');
+  } finally {
+    window.setTimeout = originalSetTimeout;
+  }
 });

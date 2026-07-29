@@ -16,6 +16,8 @@ import {
   withProcessTreeIsolation,
 } from '../lib/process-watchdog.mjs';
 
+const integrationTest = process.env.PIE_RUN_INTEGRATION_TESTS === '1' ? test : test.skip;
+
 /**
  * Read the grandchild pid the fixture publishes, then wait until the OS
  * actually reports it as a descendant of `rootPid`.
@@ -221,7 +223,7 @@ test('abortOnProcessSignals converts SIGINT into an AbortSignal and cleans handl
   assert.equal(target.listenerCount('SIGTERM'), 0);
 });
 
-test('abort kills a real uniquely-owned child and grandchild but preserves an unrelated sentinel', { timeout: 60_000 }, async () => {
+integrationTest('abort kills a real uniquely-owned child and grandchild but preserves an unrelated sentinel', { timeout: 60_000 }, async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-process-abort-'));
   const pidFile = path.join(tempDir, 'grandchild.pid');
   const rootCode = `const{spawn}=require('node:child_process');const fs=require('node:fs');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid));setInterval(()=>{},1000)`;
@@ -259,7 +261,7 @@ test('spawn failure has no owned PID and cleanup settles', { timeout: 5_000 }, a
   assert.deepEqual(cleanup, { gone: true, survivors: [], ownedPids: [] });
 });
 
-test('Windows watchdog kills a real grandchild process tree', { skip: process.platform !== 'win32' }, async () => {
+integrationTest('Windows watchdog kills a real grandchild process tree', { skip: process.platform !== 'win32' }, async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-process-watchdog-'));
   const pidFile = path.join(tempDir, 'grandchild.pid');
   const rootCode = [

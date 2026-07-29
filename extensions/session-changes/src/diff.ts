@@ -53,9 +53,26 @@ export interface DiffOutput {
 
 const NO_GIT_NOTE = 'no git baseline; use read to view';
 
+type GitResult = Awaited<ReturnType<typeof execGit>>;
+
+export interface DiffDependencies {
+  isTrackedByGit(absPath: string): Promise<boolean>;
+  resolveBaselineRef(absPath: string): Promise<string>;
+  execGit(dir: string, args: string[], maxBuffer: number): Promise<GitResult>;
+}
+
+const defaultDependencies: DiffDependencies = {
+  isTrackedByGit,
+  resolveBaselineRef,
+  execGit,
+};
+
 /** Compute one file's diff output. Never throws — git/fs failures become a
  *  header + inline note, matching `resolveBaselineRef`'s own `'HEAD'` fallback. */
-export async function computeFileDiff(input: DiffInput): Promise<DiffOutput> {
+export async function computeFileDiff(
+  input: DiffInput,
+  dependencies: DiffDependencies = defaultDependencies,
+): Promise<DiffOutput> {
   const { relPath, absPath, context } = input;
   let kind = input.kind;
   const additions = input.additions ?? 0;
@@ -67,7 +84,7 @@ export async function computeFileDiff(input: DiffInput): Promise<DiffOutput> {
   // not a creation. Only treat as created (diff vs empty) when the file is NOT
   // git-tracked. This is the evidence check: we do not claim a file is
   // definitely created when git shows it already existed.
-  if (kind === 'created' && await isTrackedByGit(absPath)) {
+  if (kind === 'created' && await dependencies.isTrackedByGit(absPath)) {
     kind = 'modified';
   }
 
@@ -78,9 +95,9 @@ export async function computeFileDiff(input: DiffInput): Promise<DiffOutput> {
 
   // Modified / deleted: diff against the pre-change git baseline.
   try {
-    const baseline = await resolveBaselineRef(absPath);
+    const baseline = await dependencies.resolveBaselineRef(absPath);
     const dir = path.dirname(absPath);
-    const { stdout, code } = await execGit(
+    const { stdout, code } = await dependencies.execGit(
       dir,
       [
         'diff',

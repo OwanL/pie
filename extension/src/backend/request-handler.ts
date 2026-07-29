@@ -21,7 +21,6 @@ import {
   validateExtensionUiResponse,
   validateOpenTabsSet,
 } from './rpc';
-import { collectWarmBashStats } from './warm-bash-stats';
 import { ProviderGate, type ProviderGateMetrics } from './provider-gate';
 import { resolveActiveModel } from './session-metadata';
 import type { SdkModule, SdkSessionManager } from './sdk';
@@ -1259,16 +1258,6 @@ async function handleSettingsSet(
   }
 }
 
-async function handleWarmBashStats(
-  _deps: BackendRequestHandlerDeps,
-  _request: RequestEnvelope,
-): Promise<unknown> {
-  // In-memory read of the warm-bash extension's globalThis registry. The
-  // warm-bash extension registers per-session stats providers in the same
-  // backend process; this aggregates them for the host status strip.
-  return collectWarmBashStats();
-}
-
 async function handleLivePipelineTraceSetEnabled(
   _deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -1356,7 +1345,6 @@ const handlers: Record<string, RequestHandler> = {
   'settings.get': handleSettingsGet,
   'settings.set': handleSettingsSet,
   'systemPromptToggles.set': handleSystemPromptTogglesSet,
-  'warm_bash.stats': handleWarmBashStats,
   'provider_gate.metrics': handleProviderGateMetrics,
   'liveTurn.checkpoint': handleLiveTurnCheckpoint,
   'diagnostics.livePipeline.setEnabled': handleLivePipelineTraceSetEnabled,

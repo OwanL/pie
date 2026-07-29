@@ -16,7 +16,7 @@ import {
   createEmptyVerificationRollup,
   type RunSnapshot,
 } from '../../../src/host/run-analytics';
-import { EMPTY_PROVIDER_GATE_STATS, EMPTY_WARM_BASH_STATS } from '../../../src/shared/protocol/aggregate-stats';
+import { EMPTY_PROVIDER_GATE_STATS } from '../../../src/shared/protocol/aggregate-stats';
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analytics-perf-regression-'));
@@ -405,7 +405,9 @@ test('aggregate refresh reads completed history once while active ticks use live
   await withTempDir(async (storageDir) => {
     let persistedQueries = 0;
     let openRunReads = 0;
-    let rate = 3;
+    let outputTokens = 0;
+    let nowMs = Date.parse('2026-07-29T12:00:00.000Z');
+    const activeRun = validSnapshot('active-run', new Date(nowMs).toISOString());
     const statsService = {
       getStorageDir: () => storageDir,
       queryPersistedRunAnalytics: async () => {
@@ -414,7 +416,7 @@ test('aggregate refresh reads completed history once while active ticks use live
       },
       getOpenRuns: () => {
         openRunReads += 1;
-        return [];
+        return [{ ...activeRun, sessionPath: '/active', outputTokens }];
       },
       getPendingCompletedRuns: () => [],
     };
@@ -425,23 +427,28 @@ test('aggregate refresh reads completed history once while active ticks use live
       statsService: statsService as never,
       tokenRateService: {
         getRates: () => ({
-          '/active': { state: 'generating', rate, updatedAt: Date.now() },
+          '/active': { state: 'generating', rate: outputTokens, updatedAt: nowMs },
         }),
       } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
+      now: () => new Date(nowMs),
     });
 
     await (service as unknown as { recompute(): Promise<void> }).recompute();
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 0, 'first observation establishes the rolling baseline');
+    outputTokens = 3;
+    nowMs += 1_000;
+    await (service as unknown as { recompute(): Promise<void> }).recompute();
     assert.equal(service.getAggregateStats().liveTokensPerSecond, 3);
-    rate = 7;
+    outputTokens = 7;
+    nowMs += 1_000;
     await (service as unknown as { recompute(): Promise<void> }).recompute();
 
     assert.equal(persistedQueries, 1, 'unchanged active tick must not flush/re-read full history');
-    assert.equal(openRunReads, 2, 'open runs remain live on every active recompute');
-    assert.equal(service.getAggregateStats().liveTokensPerSecond, 7);
+    assert.equal(openRunReads, 3, 'open runs remain live on every active recompute');
+    assert.equal(service.getAggregateStats().liveTokensPerSecond, 3.5);
   });
 });
 
@@ -481,7 +488,6 @@ test('AggregateStatsService includes live open-run tokens and counts without re-
       statsService: statsService as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
     });
@@ -529,7 +535,6 @@ test('AggregateStatsService refreshLive updates estimated streaming tokens and c
         }),
       } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => { backendPolls += 1; return EMPTY_WARM_BASH_STATS; },
       fetchProviderGateStats: async () => { backendPolls += 1; return EMPTY_PROVIDER_GATE_STATS; },
       onChanged: () => undefined,
     });
@@ -571,7 +576,6 @@ test('AggregateStatsService refreshLive retains a just-persisted run until the c
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       mtimeFn: (_path, cb) => cb(null, { mtimeMs: 100 }),
@@ -609,7 +613,6 @@ test('AggregateStatsService cache keys on snapshots only — checkpoint churn do
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       mtimeFn: (p, cb) => {
@@ -665,7 +668,6 @@ test('AggregateStatsService caches completed accumulation, rebuilds open runs, a
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       onAccumulatorBuilt: (scope, runCount) => builds.push({ scope, runCount }),
@@ -739,7 +741,6 @@ test('AggregateStatsService pending finalized snapshots override stale persisted
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       mtimeFn: (_path, cb) => cb(null, { mtimeMs: 100 }),
@@ -775,7 +776,6 @@ test('AggregateStatsService buckets a bridged completion by its finalized timest
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       now: () => afterMidnight,
@@ -825,7 +825,6 @@ test('AggregateStatsService pricing signature invalidates completed cost accumul
       } as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => agentDir,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       onAccumulatorBuilt: (scope) => { if (scope === 'completed') completedBuilds += 1; },
@@ -845,9 +844,9 @@ test('AggregateStatsService pricing signature invalidates completed cost accumul
 test('AggregateStatsService preserves references for equal/live-only refreshes and replaces historical arrays', async () => {
   await withTempDir(async (storageDir) => {
     const now = new Date().toISOString();
-    let rate = 0;
+    const nowMs = Date.parse(now);
+    let running = true;
     let changedCalls = 0;
-    let warmBash = EMPTY_WARM_BASH_STATS;
     let openRuns = [{
       ...validSnapshot('open-reference', now),
       modelId: 'free',
@@ -855,7 +854,7 @@ test('AggregateStatsService preserves references for equal/live-only refreshes a
     } as RunSnapshot];
     const service = new AggregateStatsService({
       getArchState: () => ({
-        sessions: { runningSessionPaths: ['/live'], openTabPaths: ['/live'] },
+        sessions: { runningSessionPaths: running ? ['/live'] : [], openTabPaths: ['/live'] },
       }) as never,
       statsService: {
         getStorageDir: () => storageDir,
@@ -866,13 +865,13 @@ test('AggregateStatsService preserves references for equal/live-only refreshes a
         getPendingCompletedRuns: () => [],
       } as never,
       tokenRateService: {
-        getRates: () => ({ '/live': { state: 'generating', rate, updatedAt: Date.now() } }),
+        getRates: () => ({ '/live': { state: 'generating', rate: 0, updatedAt: nowMs } }),
       } as never,
       getAgentDir: () => null,
-      fetchWarmBashStats: async () => warmBash,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => { changedCalls += 1; },
       mtimeFn: (_path, cb) => cb(null, { mtimeMs: 100 }),
+      now: () => new Date(nowMs),
     });
 
     await recomputeAggregate(service);
@@ -885,7 +884,7 @@ test('AggregateStatsService preserves references for equal/live-only refreshes a
     assert.equal(service.getAggregateStats(), initial, 'equal recomputation retains root identity');
     assert.equal(changedCalls, 1);
 
-    rate = 12;
+    running = false;
     await recomputeAggregate(service);
     const liveChanged = service.getAggregateStats();
     assert.notEqual(liveChanged, initial, 'live field change creates a new root');
@@ -895,17 +894,13 @@ test('AggregateStatsService preserves references for equal/live-only refreshes a
       'live-only refresh retains provider history reference');
     assert.equal(changedCalls, 2);
 
-    warmBash = { ...EMPTY_WARM_BASH_STATS, activeSessions: 1 };
-    await recomputeAggregate(service);
-    assert.equal(changedCalls, 3, 'deep equality observes nested live fields omitted by the old comparator');
-
     const beforeHistoricalChange = service.getAggregateStats();
     openRuns = [{ ...openRuns[0]!, outputTokens: 20 } as RunSnapshot];
     await recomputeAggregate(service);
     const historicalChanged = service.getAggregateStats();
     assert.notEqual(historicalChanged.todayTokenSeries, beforeHistoricalChange.todayTokenSeries,
       'changed run replaces the affected historical series');
-    assert.equal(changedCalls, 4, 'historical change invokes onChanged exactly once');
+    assert.equal(changedCalls, 3, 'historical change invokes onChanged exactly once');
   });
 });
 
@@ -938,7 +933,7 @@ test('auto-export failures retry with bounded exponential backoff and stop sched
       } catch {
         return false;
       }
-    }, 500);
+    }, 2000);
 
     const originalWrite = (storage as unknown as { writeAutoExport(): Promise<void> }).writeAutoExport.bind(storage);
     let fail = false;

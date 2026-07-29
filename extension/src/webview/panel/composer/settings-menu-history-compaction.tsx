@@ -15,7 +15,8 @@ import {
   type ModelInfo,
 } from '../../../shared/protocol';
 import { THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
-import { orderModelsForPicker, type ModelPickerEntry } from './model-list';
+import { ModelPicker } from '../components/model-picker';
+import { formatModelSpec, orderModelsForPicker, parseModelSpec, type ModelPickerEntry } from './model-list';
 import type { OnSetPrefs } from './settings-menu-types';
 
 interface Props {
@@ -43,9 +44,9 @@ function resolveActiveModelKey(
   availableModels: ModelInfo[],
 ): string | null {
   if (!activeModel) return null;
-  if (activeModel.provider) return `${activeModel.provider}/${activeModel.id}`;
+  if (activeModel.provider) return formatModelSpec({ provider: activeModel.provider, id: activeModel.id });
   const matches = availableModels.filter((m) => m.id === activeModel.id);
-  if (matches.length === 1) return `${matches[0].provider}/${activeModel.id}`;
+  if (matches.length === 1) return formatModelSpec(matches[0]);
   return null;
 }
 
@@ -145,8 +146,15 @@ export function HistoryCompactionSection({
 
   const entries = modelEntriesProp ?? orderModelsForPicker(availableModels);
   const summaryModelValue = settings.summaryModel
-    ? `${settings.summaryModel.provider}/${settings.summaryModel.id}`
+    ? formatModelSpec(settings.summaryModel)
     : '';
+  const summaryModelEntry = settings.summaryModel
+    ? entries.find((entry) =>
+        entry.model.provider === settings.summaryModel?.provider
+        && entry.model.id === settings.summaryModel?.id)
+    : undefined;
+  const summaryModelLabel = summaryModelEntry?.label
+    ?? (settings.summaryModel ? summaryModelValue : 'Active model');
 
   const update = (next: HistoryCompactionSettings) => {
     onSetPrefs({ historyCompaction: resolveHistoryCompactionSettings(next) } satisfies Partial<ChatPrefs>);
@@ -187,10 +195,8 @@ export function HistoryCompactionSection({
       update({ ...settings, summaryModel: null });
       return;
     }
-    const slash = value.indexOf('/');
-    if (slash === -1) return;
-    const provider = value.substring(0, slash);
-    const id = value.substring(slash + 1);
+    const { provider, id } = parseModelSpec(value);
+    if (!provider) return;
     const selected = availableModels.find((m) => m.provider === provider && m.id === id);
     if (selected) {
       update({ ...settings, summaryModel: { provider: selected.provider, id: selected.id } });
@@ -351,20 +357,29 @@ export function HistoryCompactionSection({
 
         <div class="toolbar-settings-item toolbar-settings-mode-row">
           <span class="toolbar-settings-item-label">Summary model</span>
-          <select
-            class="toolbar-settings-select"
-            value={summaryModelValue}
-            disabled={!settings.enabled}
-            aria-label="Summary model"
-            onChange={(event) => updateSummaryModel((event.target as HTMLSelectElement).value)}
-          >
-            <option value="">Active model</option>
-            {entries.map((entry) => (
-              <option key={`${entry.model.provider}/${entry.model.id}`} value={`${entry.model.provider}/${entry.model.id}`}>
-                {entry.label}
-              </option>
-            ))}
-          </select>
+          <div class="toolbar-settings-inline-actions">
+            <ModelPicker
+              compact
+              dropdownDirection="down"
+              value={summaryModelValue}
+              label={summaryModelLabel}
+              ariaLabel="Summary model"
+              title="Select summary model"
+              entries={entries}
+              disabled={!settings.enabled}
+              onChange={updateSummaryModel}
+            />
+            {settings.summaryModel && (
+              <button
+                type="button"
+                class="toolbar-settings-stepper-btn"
+                disabled={!settings.enabled}
+                aria-label="Use active model for summaries"
+                title="Use active model"
+                onClick={() => updateSummaryModel('')}
+              >×</button>
+            )}
+          </div>
         </div>
 
         {settings.thresholdMode === 'tokens' && activeKey && (

@@ -314,7 +314,6 @@ export function generateModelProfilesYaml(source) {
       eligible: model.eligible,
       thinking: model.thinking,
       disabled_reason: model.disabledReason,
-      cost: model.costRank,
     });
   }
   const body = YAML.stringify({ profiles }, { sortMapEntries: false, indent: 2 });

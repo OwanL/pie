@@ -406,6 +406,7 @@ function projectViewState(state: ArchState): ViewState {
     sessions: sessions.sessions,
     openTabPaths: sessions.openTabPaths,
     pinnedTabPaths: sessions.pinnedTabPaths,
+    pinnedTabGroups: sessions.pinnedTabGroups,
     runningSessionPaths: sessions.runningSessionPaths,
     startingModelSessionPaths,
     unreadFinishedSessionPaths: sessions.unreadFinishedSessionPaths,

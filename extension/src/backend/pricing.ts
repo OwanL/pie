@@ -1,8 +1,8 @@
 /**
- * Minimal pricing parser / normalizer for the VS Code extension backend.
+ * Minimal pricing parser for the VS Code extension backend.
  *
- * The identical core (types, `parseModelPricing`, `estimateNormalizedCost`)
- * now lives in the shared `../../../shared/pricing-core.ts` module and is
+ * The identical core types and `parseModelPricing` implementation live in the
+ * shared `../../../shared/pricing-core.ts` module and are
  * re-exported here to preserve this module's public surface. Only the loader
  * (`loadModelPricing`) remains package-local.
  *
@@ -12,13 +12,6 @@
  * - `0` = genuinely free, local, or included.
  * - Missing `cost` field = unknown pricing (triggers fallback).
  * - Negative or non-finite prices are rejected.
- *
- * ## Normalization (see shared core)
- *
- *   blended = (3 × input + 1 × output) / 4
- *   normalized = 10 × √(blended / 6.00)
- *
- * Baseline ($6.00/1M blended) anchored to claude-sonnet-4.6.
  */
 
 import { parseModelPricing } from '../../../shared/pricing-core.js';
@@ -26,9 +19,8 @@ import type { ModelPricingRecord } from '../../../shared/pricing-core.js';
 import { parseJsonOrThrow } from '../shared/error-message';
 
 // Re-export the shared core under the original public names so existing
-// consumers (subagent-profiles.ts, extension/test/backend/models/pricing.test.ts,
-// extension/test/backend/models/backend-pricing-units.test.ts) keep working unchanged.
-export { estimateNormalizedCost, parseModelPricing } from '../../../shared/pricing-core.js';
+// consumers and tests keep working unchanged.
+export { parseModelPricing } from '../../../shared/pricing-core.js';
 export type { ModelPricingRecord, ModelTokenPricing } from '../../../shared/pricing-core.js';
 
 /**

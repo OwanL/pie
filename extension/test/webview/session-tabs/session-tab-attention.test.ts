@@ -53,6 +53,7 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     activePath: null,
     hasPendingExtensionUIRequest: false,
     isPinned: false,
+    isDropTarget: false,
     hasDeferredTriggers: false,
     hasDeferredTimer: false,
     onContextMenu: noop,
@@ -127,6 +128,7 @@ test('pinned tab renders an avatar instead of a label, hides the close button, a
     tabPath: '/sessions/alpha',
     activePath: alpha.path,
     isPinned: true,
+    isDropTarget: false,
   });
 
   assert.ok(classList(tab).includes('pinned'), 'pinned tab gets the pinned class');

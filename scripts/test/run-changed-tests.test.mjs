@@ -44,6 +44,15 @@ test('getChangedFiles returns repo-relative forward-slash paths from git', async
   }
 });
 
+test('getChangedFiles fails closed when git state cannot be inspected', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-no-git-'));
+  try {
+    await assert.rejects(getChangedFiles(directory), /Cannot inspect tracked files/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('planRuns maps package files to ids and de-duplicates', () => {
   const plan = planRuns([
     'extension/test/a.test.ts',

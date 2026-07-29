@@ -109,6 +109,10 @@ export interface ViewState {
   openTabPaths: string[];
   /** Pinned tab paths (browser-style: pinned tabs cluster at the left). */
   pinnedTabPaths: string[];
+  /** Pinned-session groups (Discord-style clustering). Each inner array is an
+   *  unnamed group of pinned tab paths in insertion order; any member path
+   *  identifies its group. Persisted across restarts. */
+  pinnedTabGroups: string[][];
   runningSessionPaths: string[];
   /** Session paths whose running turn is in the 'starting model' phase —
    *  pruning already succeeded but the model has not yet started streaming
@@ -339,6 +343,10 @@ type WebviewToHostMessagePayload =
   | { type: 'duplicateSession'; sessionPath: string }
   | { type: 'moveSessionTab'; sessionPath?: string; fromIndex: number; toIndex: number }
   | { type: 'togglePinTab'; sessionPath: string }
+  | { type: 'groupPinnedTab'; sourcePath: string; targetPath: string }
+  | { type: 'mergePinnedGroups'; sourcePath: string; targetPath: string }
+  | { type: 'ungroupPinnedTab'; sourcePath: string; toItemIndex: number }
+  | { type: 'movePinnedItem'; sourcePath: string; toItemIndex: number }
   | { type: 'loadOlderTranscript'; sessionPath?: string }
   | { type: 'loadNewerTranscript'; sessionPath?: string }
   | { type: 'jumpToLatestTranscript'; sessionPath?: string }

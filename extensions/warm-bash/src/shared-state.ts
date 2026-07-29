@@ -13,7 +13,6 @@ export interface SharedWarmBashState {
   generation: number;
   metrics: Map<string, WarmBashMetrics>;
   activeSessions: Set<string>;
-  unregisterStats: (() => void) | null;
   processCleanupInstalled: boolean;
 }
 
@@ -28,7 +27,6 @@ export function getSharedWarmBashState(): SharedWarmBashState {
       generation: 0,
       metrics: new Map(),
       activeSessions: new Set(),
-      unregisterStats: null,
       processCleanupInstalled: false,
     };
   }

@@ -443,7 +443,7 @@ export class SessionRunTracker {
     }
   }
 
-  /** Roll up sub-agent call/task counts, score dimensions, and usage attribution. */
+  /** Roll up sub-agent call/task counts and usage attribution. */
   private recordSubagentUsage(run: RunSnapshot, analysis: ToolCallAnalysis, toolCall: ToolCall): void {
     run.toolUsage.subagentCallCount += analysis.subagentCallCount;
     run.toolUsage.subagentTaskCount += analysis.subagentTaskCount;
@@ -451,15 +451,6 @@ export class SessionRunTracker {
       run.toolUsage.subagentAgentNames,
       analysis.subagentAgentNames,
     );
-    run.toolUsage.subagentScoredTaskCount += analysis.subagentScoredTaskCount;
-    const dims = ['precision', 'creativity', 'reasoning', 'thoroughness'] as const;
-    for (const dim of dims) {
-      const src = analysis.subagentTaskScores[dim];
-      const dst = run.toolUsage.subagentTaskScores[dim];
-      dst.sum   += src.sum;
-      dst.count += src.count;
-      dst.max   = Math.max(dst.max, src.max);
-    }
     // These are the canonical subagent totals. Aggregate accounting adds them
     // to parent-turn usage; auxiliary samples below only preserve the actual
     // child model and timestamp and must not be counted a second time.

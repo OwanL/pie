@@ -31,7 +31,9 @@ function createFakeSdk(options?: {
 }) {
 	const listeners: Array<(event: any) => void> = [];
 	let releasePrompt: (() => void) | undefined;
-	const state = { resourceReloadCalls: 0 };
+	const state: { resourceReloadCalls: number; createdModel?: { provider?: string; id?: string } } = {
+		resourceReloadCalls: 0,
+	};
 
 	const session = {
 		agent: { state: { model: { id: "session-model" } } },
@@ -59,7 +61,10 @@ function createFakeSdk(options?: {
 	};
 
 	const sdk = {
-		createSession: async () => ({ session }),
+		createSession: async (args: { model?: { provider?: string; id?: string } }) => {
+			state.createdModel = args.model;
+			return { session };
+		},
 		createResourceLoader: () => ({
 			reload: async () => { state.resourceReloadCalls++; },
 		}),
@@ -114,6 +119,57 @@ function successfulFakeSdk() {
 		},
 	});
 }
+
+test("runSingleAgent publishes its terminal lifecycle before a successful run settles", async () => {
+	const { sdk } = successfulFakeSdk();
+	const updates: any[] = [];
+
+	const result = await runFakeAgent(sdk, (update) => updates.push(structuredClone(update)));
+
+	assert.equal(result.activityPhase, "completed");
+	assert.equal(updates.at(-1)?.details.results[0]?.activityPhase, "completed");
+	assert.equal(updates.at(-1)?.details.results[0]?.exitCode, 0);
+});
+
+test("runSingleAgent executes a qualified bucket spec on its exact provider", async () => {
+	const github = { id: "gpt-5.4", provider: "github-copilot", contextWindow: 128_000 } as any;
+	const codex = { id: "gpt-5.4", provider: "openai-codex", contextWindow: 128_000 } as any;
+	const registry = {
+		getAvailable: () => [github, codex],
+		getAll: () => [github, codex],
+		find: (provider: string, id: string) => [github, codex].find((model) => model.provider === provider && model.id === id),
+	} as any;
+	const { sdk, state } = successfulFakeSdk();
+
+	await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"do work",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		registry,
+		github,
+		{
+			modelId: "openai-codex/gpt-5.4",
+			bucket: "medium",
+			pool: ["github-copilot/gpt-5.4", "openai-codex/gpt-5.4"],
+			fallback: false,
+		},
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any, timeoutMs: 0 },
+	);
+
+	assert.equal(state.createdModel?.provider, "openai-codex");
+	assert.equal(state.createdModel?.id, "gpt-5.4");
+});
 
 async function within<T>(promise: Promise<T>, ms = 1_000): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;

@@ -142,15 +142,11 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
   copy('stderr', boundedTail(value.stderr, 2048));
   copy('retryCount');
   copy('usage', compactUnknownPreview(value.usage, 2048));
-  copy('taskScores', compactUnknownPreview(value.taskScores, 1024));
   copy('runningTools', Array.isArray(value.runningTools)
     ? value.runningTools.slice(0, SUBAGENT_PREVIEW_LIST_ITEMS).map((item) => boundedStart(item, 256))
     : undefined);
   copy('selectionPool', Array.isArray(value.selectionPool)
     ? value.selectionPool.slice(0, SUBAGENT_PREVIEW_LIST_ITEMS).map((item) => boundedStart(item, 256))
-    : undefined);
-  copy('selectionFitScores', Array.isArray(value.selectionFitScores)
-    ? value.selectionFitScores.slice(0, SUBAGENT_PREVIEW_LIST_ITEMS)
     : undefined);
   copy('turnThroughputSamples', Array.isArray(value.turnThroughputSamples)
     ? value.turnThroughputSamples.slice(-1).map((item) => compactUnknownPreview(item, 1024))

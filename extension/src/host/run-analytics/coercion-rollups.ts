@@ -6,7 +6,7 @@
  * cross-package import complexity. Keep constants and logic synchronized.
  */
 
-import type { VerificationCommandKind, SubagentTaskScoreRollup, ToolFailureKind, ToolResultIssueKind } from '../../shared/tool-call-analysis';
+import type { VerificationCommandKind, ToolFailureKind, ToolResultIssueKind } from '../../shared/tool-call-analysis';
 import type {
   FileExtensionRollup,
   FileMutationRollup,
@@ -71,33 +71,6 @@ const TREATMENT_CHANGE_KINDS: TreatmentChangeKind[] = [
   'experimentAssignment',
   'extensions',
 ];
-
-function coerceSubagentTaskScores(value: unknown): SubagentTaskScoreRollup {
-  if (!isObjectRecord(value)) {
-    return {
-      precision:    { sum: 0, count: 0, max: 0 },
-      creativity:   { sum: 0, count: 0, max: 0 },
-      reasoning:    { sum: 0, count: 0, max: 0 },
-      thoroughness: { sum: 0, count: 0, max: 0 },
-    };
-  }
-
-  const coerceDim = (dim: unknown): { sum: number; count: number; max: number } => {
-    if (!isObjectRecord(dim)) return { sum: 0, count: 0, max: 0 };
-    return {
-      sum: toNonNegativeInteger(dim.sum),
-      count: toNonNegativeInteger(dim.count),
-      max: toNonNegativeInteger(dim.max),
-    };
-  };
-
-  return {
-    precision: coerceDim(value.precision),
-    creativity: coerceDim(value.creativity),
-    reasoning: coerceDim(value.reasoning),
-    thoroughness: coerceDim(value.thoroughness),
-  };
-}
 
 export function coerceTreatmentChangeKinds(value: unknown): TreatmentChangeKind[] {
   const kinds = new Set<TreatmentChangeKind>();
@@ -196,13 +169,6 @@ export function createEmptyToolUsageRollup(): ToolUsageRollup {
     subagentCallCount: 0,
     subagentTaskCount: 0,
     subagentAgentNames: [],
-    subagentScoredTaskCount: 0,
-    subagentTaskScores: {
-      precision:    { sum: 0, count: 0, max: 0 },
-      creativity:   { sum: 0, count: 0, max: 0 },
-      reasoning:    { sum: 0, count: 0, max: 0 },
-      thoroughness: { sum: 0, count: 0, max: 0 },
-    },
     subagentInputTokens: 0,
     subagentOutputTokens: 0,
     subagentCacheReadTokens: 0,
@@ -443,8 +409,6 @@ export function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
     subagentCallCount: toNonNegativeInteger(value.subagentCallCount),
     subagentTaskCount: toNonNegativeInteger(value.subagentTaskCount),
     subagentAgentNames: coerceStringArray(value.subagentAgentNames),
-    subagentScoredTaskCount: toNonNegativeInteger(value.subagentScoredTaskCount),
-    subagentTaskScores: coerceSubagentTaskScores(value.subagentTaskScores),
     subagentInputTokens: toNonNegativeInteger(value.subagentInputTokens),
     subagentOutputTokens: toNonNegativeInteger(value.subagentOutputTokens),
     subagentCacheReadTokens: toNonNegativeInteger(value.subagentCacheReadTokens),

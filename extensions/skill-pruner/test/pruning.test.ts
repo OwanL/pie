@@ -591,7 +591,7 @@ function modelRegistryStub(model: Record<string, unknown> = { id: "gpt-5-mini", 
 }
 
 test("runPruningPrepass: 500 then recovery on retry -> returns parsed pruned skills", async () => {
-	const cfg = config();
+	const cfg = config({ prepass: { transportBackoffBaseMs: 0 } });
 	let calls = 0;
 	const completeFn = async () => {
 		calls++;
@@ -657,7 +657,7 @@ test("runPruningPrepass: persistent malformed JSON retries once then fails open"
 });
 
 test("runPruningPrepass: persistent 500 -> terminal error surfaced (not swallowed)", async () => {
-	const cfg = config();
+	const cfg = config({ prepass: { transportBackoffBaseMs: 0 } });
 	let calls = 0;
 	const completeFn = async () => {
 		calls++;
@@ -680,7 +680,7 @@ test("runPruningPrepass: persistent 500 -> terminal error surfaced (not swallowe
 });
 
 test("runPruningPrepass: thrown transport error retried before failing open", async () => {
-	const cfg = config();
+	const cfg = config({ prepass: { transportBackoffBaseMs: 0 } });
 	let calls = 0;
 	const completeFn = async () => {
 		calls++;

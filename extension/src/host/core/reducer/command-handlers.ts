@@ -35,6 +35,10 @@ import {
   handleCloseTab,
   handlePersistTabs,
   handleTogglePinTab,
+  handleGroupPinnedTab,
+  handleMergePinnedGroups,
+  handleUngroupPinnedTab,
+  handleMovePinnedItem,
 } from './command-tab-handlers.js';
 import {
   handleHydrateModel,
@@ -222,6 +226,22 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'TogglePinTab': {
       return handleTogglePinTab(state, cmd);
+    }
+
+    case 'GroupPinnedTab': {
+      return handleGroupPinnedTab(state, cmd);
+    }
+
+    case 'MergePinnedGroups': {
+      return handleMergePinnedGroups(state, cmd);
+    }
+
+    case 'UngroupPinnedTab': {
+      return handleUngroupPinnedTab(state, cmd);
+    }
+
+    case 'MovePinnedItem': {
+      return handleMovePinnedItem(state, cmd);
     }
 
     default: {

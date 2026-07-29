@@ -41,7 +41,6 @@ import {
   createEmptyVerificationRollup,
 } from '../../src/host/run-analytics/coercion-rollups';
 import {
-  EMPTY_WARM_BASH_STATS,
   EMPTY_PROVIDER_GATE_STATS,
 } from '../../src/shared/protocol/aggregate-stats';
 import type { ArchState } from '../../src/host/core/arch-state';
@@ -390,7 +389,6 @@ async function main(): Promise<void> {
       statsService: statsService as never,
       tokenRateService: { getRates: () => ({}) } as never,
       getAgentDir: () => agentDir,
-      fetchWarmBashStats: async () => EMPTY_WARM_BASH_STATS,
       fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
       onChanged: () => undefined,
       onAccumulatorBuilt: (scope: 'completed' | 'open') => {

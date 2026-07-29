@@ -45,6 +45,7 @@ const prefs: ChatPrefs = {
   completionSoundVolume: 50,
   uiBaseFontSize: 13,
   uiComposerFontSize: 13,
+  composerInitialRows: 1,
   expandedSectionFontSize: 12,
   expandedSectionMaxHeight: 240,
   uiFontSans: '',
@@ -161,6 +162,7 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     completionSoundVolume: 50,
     uiBaseFontSize: 13,
     uiComposerFontSize: 13,
+    composerInitialRows: 1,
     expandedSectionFontSize: 12,
     expandedSectionMaxHeight: 240,
     uiFontSans: '',
@@ -231,6 +233,28 @@ test('subagent provider helpers only list bucket-backed providers and update def
   const patch = setSubagentProviderDefaultEnabled(configured, 'anthropic', false);
   assert.deepEqual(patch.subagentProviderDefaults, { anthropic: false });
   assert.deepEqual(configured.subagentProviderDefaults, {});
+});
+
+test('subagent provider helpers preserve providers from qualified duplicate-id bucket entries', () => {
+  const configured: ChatPrefs = {
+    ...prefs,
+    subagentBuckets: {
+      small: [],
+      medium: ['github-copilot/gpt-5.6-sol', 'openai-codex/gpt-5.6-sol'],
+      frontier: [],
+    },
+  };
+  const providers = getSubagentBucketProviders(configured, [
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 SOL', provider: 'github-copilot', reasoning: true, inputKinds: ['text'] },
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 SOL', provider: 'openai-codex', reasoning: true, inputKinds: ['text'] },
+  ]);
+  assert.deepEqual(providers, ['github-copilot', 'openai-codex']);
+
+  assert.deepEqual(
+    getSubagentBucketProviders(configured, []),
+    [],
+    'stale qualified entries must not create provider toggles',
+  );
 });
 
 test('setSubagentProviderEnabled scopes provider state to one session', () => {

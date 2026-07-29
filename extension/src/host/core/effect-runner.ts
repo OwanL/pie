@@ -84,7 +84,7 @@ export interface QueueRouter {
  * existing `globalState`-backed tab persistence helper.
  */
 export interface TabPersistenceSink {
-  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[]): Promise<void>;
+  persistTabs(openTabPaths: string[], activeSessionPath: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][]): Promise<void>;
 }
 
 /** Logger sink for `Log`. Matches the audit-log surface used elsewhere. */
@@ -362,7 +362,7 @@ export class EffectRunner {
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
       CloseSession: this.templateRow({ resultKind: 'CloseSessionResult', withSessionPath: true, call: (e, d) => d.service.closeSession(e.sessionPath, e.nextPath) }),
-      PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths) }),
+      PersistTabs: this.templateRow({ resultKind: 'PersistTabsResult', withSessionPath: false, call: (e, d) => d.tabs.persistTabs(e.openTabPaths, e.activeSessionPath, e.pinnedTabPaths, e.pinnedTabGroups) }),
     };
   }
 
@@ -402,6 +402,7 @@ export class EffectRunner {
       case 'PersistTabs':
         payload.openTabs = effect.openTabPaths.length;
         payload.pinnedTabs = effect.pinnedTabPaths.length;
+        payload.pinnedGroups = effect.pinnedTabGroups.length;
         payload.hasActiveSession = !!effect.activeSessionPath;
         break;
       case 'SetPrefsRpc':

@@ -118,6 +118,17 @@ test('AppearanceSection renders the message-width slider with the current value'
   assert.match(html, /<input[^>]*type="range"[^>]*min="40"[^>]*max="100"[^>]*step="2"[^>]*value="70"[^>]*aria-label="Message width"/);
 });
 
+test('AppearanceSection renders the initial composer rows control with the configured value', () => {
+  const html = renderToString(h(AppearanceSection, {
+    prefs: prefsWith({ composerInitialRows: 4 }),
+    onSetPrefs: () => undefined,
+  }));
+
+  assert.match(html, /Initial composer rows/);
+  assert.match(html, />4 rows</);
+  assert.match(html, /<input[^>]*type="range"[^>]*min="1"[^>]*max="6"[^>]*step="1"[^>]*value="4"[^>]*aria-label="Initial composer rows"/);
+});
+
 test('AppearanceSection renders the base-text and composer-text sliders with widened ranges', () => {
   const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({ uiBaseFontSize: 15, uiComposerFontSize: 17 }),

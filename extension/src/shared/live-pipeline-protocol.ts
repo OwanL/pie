@@ -100,9 +100,7 @@ export interface SubagentChildPreview {
     cost?: number;
     turns?: number;
   };
-  taskScores?: Record<string, number>;
   selectionPool?: string[];
-  selectionFitScores?: number[];
   retryCount?: number;
   stopReason?: string;
   errorMessage?: string;

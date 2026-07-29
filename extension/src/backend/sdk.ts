@@ -10,6 +10,7 @@ import {
   type HistoryCompactionSettings,
   type ThinkingLevel,
 } from '../shared/protocol';
+import { backendWarn } from './log';
 import type { SessionEntryLike } from './transcript';
 import type { MessageLike } from './transcript/types';
 
@@ -207,6 +208,13 @@ export interface SdkRuntime {
         input: Array<'text' | 'image'>;
         contextWindow?: number;
         maxTokens?: number;
+        baseUrl?: string;
+      }>;
+      /** Includes unavailable built-in models when supported by the pinned SDK. */
+      getAll?: () => Array<{
+        id: string;
+        provider: string;
+        baseUrl?: string;
       }>;
       find: (provider: string, modelId: string) => unknown;
     };
@@ -662,32 +670,69 @@ function mergeCompactionDetails(
   return { ...base, pieCompaction: pieDetails };
 }
 
+type CustomizedCompactionDecision =
+  | { compaction: SdkCompactionResult }
+  | { cancel: true };
+
+function blockActiveModelCompactionFallback(
+  settings: HistoryCompactionSettings,
+  activeModel: PatchableModel | undefined,
+  reason: string,
+): CustomizedCompactionDecision | undefined {
+  if (!settings.summaryModel) return undefined;
+  backendWarn('backend-history-compaction', 'configured-summary-model-fallback-blocked', {
+    reason,
+    configuredProvider: settings.summaryModel.provider,
+    configuredModelId: settings.summaryModel.id,
+    activeProvider: activeModel?.provider,
+    activeModelId: activeModel?.id,
+  });
+  return { cancel: true };
+}
+
 async function createCustomizedCompaction(
   sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
   session: PatchableAgentSession,
   event: BeforeCompactEvent,
-): Promise<SdkCompactionResult | undefined> {
+): Promise<CustomizedCompactionDecision | undefined> {
+  const activeModel = session.model;
   const settings = readLiveHistoryCompactionSettings();
+  if (!settings) {
+    backendWarn('backend-history-compaction', 'active-model-fallback-blocked', {
+      reason: 'history-compaction-policy-unavailable',
+      activeProvider: activeModel?.provider,
+      activeModelId: activeModel?.id,
+    });
+    return { cancel: true };
+  }
+
   const prepareCompaction = sdk.prepareCompaction;
   const compact = sdk.compact;
-  const activeModel = session.model;
   const nativeSettings = session.settingsManager?.getCompactionSettings();
-  if (!settings || !prepareCompaction || !compact || !activeModel || !nativeSettings) return undefined;
+  if (!prepareCompaction || !compact || !activeModel || !nativeSettings) {
+    return blockActiveModelCompactionFallback(settings, activeModel, 'custom-compactor-unavailable');
+  }
 
   const effective = effectiveHistoryCompactionSettings(settings, activeModel);
   const preparation = prepareCompaction(event.branchEntries, {
     ...nativeSettings,
     keepRecentTokens: effective.keepRecentTokens,
   });
-  if (!preparation) return undefined;
+  if (!preparation) {
+    return blockActiveModelCompactionFallback(settings, activeModel, 'custom-preparation-unavailable');
+  }
 
   let summaryModel = activeModel;
   if (settings.summaryModel) {
     const selected = session._modelRegistry?.find(settings.summaryModel.provider, settings.summaryModel.id);
-    if (!selected) return undefined;
+    if (!selected) {
+      return blockActiveModelCompactionFallback(settings, activeModel, 'configured-model-unavailable');
+    }
     summaryModel = selected;
   }
-  if (!session._getCompactionRequestAuth) return undefined;
+  if (!session._getCompactionRequestAuth) {
+    return blockActiveModelCompactionFallback(settings, activeModel, 'compaction-auth-unavailable');
+  }
 
   try {
     const auth = await session._getCompactionRequestAuth(summaryModel);
@@ -707,34 +752,38 @@ async function createCustomizedCompaction(
       auth.env,
     );
     return {
-      ...result,
-      details: mergeCompactionDetails(result.details, {
-        version: 1,
-        reason: event.reason,
-        modelId: summaryModel.id,
-        provider: summaryModel.provider,
-        thinkingLevel: thinkingLevel ?? 'off',
-        keepRecentTokens: effective.keepRecentTokens,
-        instructionsApplied: !!instructions,
-      }),
+      compaction: {
+        ...result,
+        details: mergeCompactionDetails(result.details, {
+          version: 1,
+          reason: event.reason,
+          modelId: summaryModel.id,
+          provider: summaryModel.provider,
+          thinkingLevel: thinkingLevel ?? 'off',
+          keepRecentTokens: effective.keepRecentTokens,
+          instructionsApplied: !!instructions,
+        }),
+      },
     };
   } catch {
-    // Returning no override delegates to pi's native compactor. This is
-    // especially important for provider-overflow recovery: a missing override
-    // model or failed custom summary must never suppress the built-in fallback.
-    return undefined;
+    // With an explicit summary model, fail closed: delegating would make pi
+    // silently issue the summary request to the active (potentially costly)
+    // chat model. Native fallback remains available only when the user chose
+    // "Active model" for summaries.
+    return blockActiveModelCompactionFallback(settings, activeModel, 'configured-model-request-failed');
   }
 }
 
 function installHistoryCompactionCustomization(
   sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
   session: PatchableAgentSession,
-): void {
+): boolean {
   const runner = session._extensionRunner;
-  if (!runner || runner.__pieHistoryCompactionCustomizationInstalled) return;
+  if (!runner) return false;
+  if (runner.__pieHistoryCompactionCustomizationInstalled) return true;
   const originalEmit = runner.emit;
   const originalHasHandlers = runner.hasHandlers;
-  if (typeof originalEmit !== 'function' || typeof originalHasHandlers !== 'function') return;
+  if (typeof originalEmit !== 'function' || typeof originalHasHandlers !== 'function') return false;
 
   // The SDK avoids constructing before-compact events unless at least one
   // extension handler exists. Advertise Pie's synthetic final handler so the
@@ -750,14 +799,15 @@ function installHistoryCompactionCustomization(
       const prior = existing as { cancel?: unknown; compaction?: unknown };
       if (prior.cancel || prior.compaction) return existing;
     }
-    const compaction = await createCustomizedCompaction(sdk, session, event);
-    return compaction ? { compaction } : existing;
+    const decision = await createCustomizedCompaction(sdk, session, event);
+    return decision ?? existing;
   };
   Object.defineProperty(runner, '__pieHistoryCompactionCustomizationInstalled', {
     value: true,
     enumerable: false,
     configurable: false,
   });
+  return true;
 }
 
 /**
@@ -780,14 +830,19 @@ export function applySdkHistoryCompactionRuntimePatch(
   const originalBuildRuntime = prototype._buildRuntime;
   const originalCheck = prototype._checkCompaction;
   if (typeof originalInstall !== 'function' || typeof originalCheck !== 'function') return 'unsupported-shape';
+  const hasCompactionCustomization = typeof sdk.prepareCompaction === 'function'
+    && typeof sdk.compact === 'function';
+  if (hasCompactionCustomization && typeof originalBuildRuntime !== 'function') return 'unsupported-shape';
 
-  if (typeof originalBuildRuntime === 'function' && sdk.prepareCompaction && sdk.compact) {
+  if (typeof originalBuildRuntime === 'function' && hasCompactionCustomization) {
     prototype._buildRuntime = function patchedBuildRuntime(
       this: PatchableAgentSession,
       ...args: unknown[]
     ): unknown {
       const result = (originalBuildRuntime as (...runtimeArgs: unknown[]) => unknown).apply(this, args);
-      installHistoryCompactionCustomization(sdk, this);
+      if (!installHistoryCompactionCustomization(sdk, this)) {
+        throw new Error('SDK history-compaction patch failed: extension runner unavailable.');
+      }
       return result;
     };
   }

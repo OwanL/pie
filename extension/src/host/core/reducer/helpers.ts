@@ -12,6 +12,7 @@ export { withIncrementedWindowCounts };
 
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../../shared/transcript-window.js';
 import type { Effect } from '../effects.js';
+import { cleanPinnedTabGroups } from '../../../shared/tab-behavior.js';
 
 // Re-export from arch-state for downstream consumers
 export type { ArchState, PendingOp, CurrentTurn } from '../arch-state.js';
@@ -248,6 +249,9 @@ export function evictSession(
   const nextPinnedPaths = removeTabs
     ? removeFromArray(state.sessions.pinnedTabPaths, sp)
     : state.sessions.pinnedTabPaths;
+  const nextPinnedGroups = removeTabs
+    ? cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedPaths)
+    : state.sessions.pinnedTabGroups;
   const nextUnreadPaths = removeTabs
     ? removeFromArray(state.sessions.unreadFinishedSessionPaths, sp)
     : state.sessions.unreadFinishedSessionPaths;
@@ -285,6 +289,7 @@ export function evictSession(
         sessions: nextSessions,
         openTabPaths: nextOpenTabPaths,
         pinnedTabPaths: nextPinnedPaths,
+        pinnedTabGroups: nextPinnedGroups,
         runningSessionPaths: nextRunningPaths,
         reviewClosedRunningPaths: nextReviewClosedRunningPaths,
         unreadFinishedSessionPaths: nextUnreadPaths,

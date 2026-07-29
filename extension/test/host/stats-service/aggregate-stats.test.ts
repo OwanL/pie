@@ -13,7 +13,6 @@ import {
   buildCumulativeSeries,
   MAX_INTRADAY_CHART_POINTS,
 } from '../../../src/host/stats-service/aggregate-stats';
-import { sumLiveRate } from '../../../src/host/aggregate-stats-service';
 import type { RunSnapshot } from '../../../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../../../shared/pricing-core';
 import type { AggregateSeriesSegment } from '../../../src/shared/protocol/aggregate-stats';
@@ -64,10 +63,6 @@ function makeRun(overrides: Partial<RunSnapshot>): RunSnapshot {
       resultIssueCountsByNameAndKind: {}, resultIssueSamples: [],
       totalDurationMs: 0, timedCallCount: 0, durationMsByName: {},
       subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [],
-      subagentScoredTaskCount: 0,
-      subagentTaskScores: {
-        scored: 0, total: 0, byAgent: {}, averageScore: null, scoreHistogram: {},
-      },
     },
     fileMutation: {
       writeCount: 0, editCount: 0, deleteCount: 0, renameCount: 0,
@@ -245,7 +240,7 @@ test('computeAggregateStats: today activity (tokens/tool-calls/files) sums today
   const today = isoLocal(2026, 7, 4, 10);
   const runs = [
     makeRun({ runId: 'r1', modelId: 'm', inputTokens: 100, outputTokens: 200, startedAt: today, updatedAt: today, finalizedAt: today,
-      toolUsage: { totalCount: 5, failureCount: 0, executionFailureCount: 0, verificationProjectFailureCount: 0, probeFailureCount: 0, resultIssueCount: 0, countsByName: {}, failureCountsByName: {}, failureCountsByKind: {}, failureCountsByNameAndKind: {}, failureSamples: [], resultIssueCountsByName: {}, resultIssueCountsByKind: {}, resultIssueCountsByNameAndKind: {}, resultIssueSamples: [], totalDurationMs: 0, timedCallCount: 0, durationMsByName: {}, subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [], subagentScoredTaskCount: 0, subagentTaskScores: { scored: 0, total: 0, byAgent: {}, averageScore: null, scoreHistogram: {} } } as any,
+      toolUsage: { totalCount: 5, failureCount: 0, executionFailureCount: 0, verificationProjectFailureCount: 0, probeFailureCount: 0, resultIssueCount: 0, countsByName: {}, failureCountsByName: {}, failureCountsByKind: {}, failureCountsByNameAndKind: {}, failureSamples: [], resultIssueCountsByName: {}, resultIssueCountsByKind: {}, resultIssueCountsByNameAndKind: {}, resultIssueSamples: [], totalDurationMs: 0, timedCallCount: 0, durationMsByName: {}, subagentCallCount: 0, subagentTaskCount: 0, subagentAgentNames: [] } as any,
       fileMutation: { writeCount: 0, editCount: 0, deleteCount: 0, renameCount: 0, touchedFileCount: 3, lineAdditions: 0, lineDeletions: 0, lineModifications: 0, editCountsByFile: {}, readCountsByFile: {} } as any,
     }),
   ];
@@ -383,18 +378,6 @@ test('computeAggregateStats: resuming after a tool call restores the session\'s 
   };
   const generatingStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], generatingRates, 1);
   assert.equal(generatingStats.liveTokensPerSecond, 200);
-});
-
-test('sumLiveRate: a paused entry (held rate) contributes 0 (widened predicate)', () => {
-  // sumLiveRate is the fast-path used when disk data is unchanged. Its param
-  // is widened to TokenRateIndicatorState so the same generating-only predicate
-  // applies — a paused entry with a held rate must not be summed.
-  const rates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
-    '/s/2': { label: '40 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 40 },
-  };
-  assert.equal(sumLiveRate(['/s/1', '/s/2'], rates), 40);
-  assert.equal(sumLiveRate(['/s/1'], rates), 0);
 });
 
 test('computeAggregateStats: week window excludes runs older than 7 days', () => {

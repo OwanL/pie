@@ -151,13 +151,6 @@ test('rollup coercers normalize invalid nested records and preserve valid values
     subagentCallCount: 1,
     subagentTaskCount: 2,
     subagentAgentNames: ['worker', 3],
-    subagentScoredTaskCount: 1.8,
-    subagentTaskScores: {
-      precision: { sum: 3.9, count: 2.2, max: 5.7 },
-      creativity: null,
-      reasoning: { sum: -1, count: 4, max: 5 },
-      thoroughness: { sum: 6, count: 2, max: 4 },
-    },
   });
 
   assert.equal(toolUsage.totalCount, 3);
@@ -179,10 +172,6 @@ test('rollup coercers normalize invalid nested records and preserve valid values
   assert.equal(toolUsage.timedCallCount, 2);
   assert.deepEqual(toolUsage.durationMsByName, { bash: 900 });
   assert.deepEqual(toolUsage.timedCallCountsByName, {});
-  assert.equal(toolUsage.subagentScoredTaskCount, 1);
-  assert.equal(toolUsage.subagentTaskScores.precision.sum, 3);
-  assert.equal(toolUsage.subagentTaskScores.creativity.sum, 0);
-  assert.equal(toolUsage.subagentTaskScores.reasoning.sum, 0);
 
   assert.deepEqual(coerceFileMutationRollup({ writeCount: 1.9, editCount: 2.1, deleteCount: 'x', renameCount: -1, touchedFileCount: 3.8, lineAdditions: 4.4, lineDeletions: 5.2, lineModifications: 6.7, readCountsByFile: { aaa: 2.5, bbb: -1 } }), {
     writeCount: 1,

@@ -7,7 +7,7 @@ import type { ReducerResult } from './helpers.js';
 import { addToArray, removeFromArray, removeMessage, restoreRemovedTail, upsertSessionSummary, evictSession, resolveAlias } from './helpers.js';
 import type { ChatMessage, SessionSummary } from '../../../shared/protocol.js';
 import { LIVE_PIPELINE_LIMITS } from '../../../shared/live-pipeline-protocol.js';
-import { reorderOpenTabsPinnedFirst } from '../../../shared/tab-behavior.js';
+import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../shared/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../session-opened-transcript.js';
 import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
 import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';
@@ -749,6 +749,15 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       )),
     ];
 
+    // Replace in pinnedTabGroups (dedupe). A pinned pending tab can be a group
+    // member, so the group entry must follow the resolved path too — otherwise
+    // the member silently leaves its group on resolve.
+    draft.sessions.pinnedTabGroups = replacePathInPinnedTabGroups(
+      draft.sessions.pinnedTabGroups,
+      oldPendingPath,
+      newSessionPath,
+    );
+
     // Move composer inputs
     const oldInputs = draft.composer.pendingComposerInputsBySession[oldPendingPath];
     if (oldInputs) {
@@ -844,14 +853,29 @@ export function handleOpenTabsChanged(state: ArchState, event: Extract<Event, { 
   // against the new openTabPaths (pruning dangling entries). Idempotent when
   // openTabPaths is already pinned-first with an empty pinned set.
   const incomingPinned = event.pinnedTabPaths ?? state.sessions.pinnedTabPaths;
-  const { openTabPaths, pinnedTabPaths } = reorderOpenTabsPinnedFirst(event.openTabPaths, incomingPinned);
+  const incomingGroups = event.pinnedTabGroups ?? state.sessions.pinnedTabGroups;
+  const { openTabPaths: pinnedFirstOpen, pinnedTabPaths: filteredPinned } = reorderOpenTabsPinnedFirst(
+    event.openTabPaths,
+    incomingPinned,
+  );
+  // Reconcile groups against the restored pinned tabs: drop members no longer
+  // pinned, dissolve groups below 2, and reorder the pinned prefix so each
+  // group's members are contiguous (restoring the contiguity invariant).
+  const { pinnedTabPaths: reconciledPinned, pinnedTabGroups } = reconcilePinnedGroups(
+    filteredPinned,
+    incomingGroups,
+  );
+  const pinnedSet = new Set(reconciledPinned);
+  const unpinned = pinnedFirstOpen.filter((p) => !pinnedSet.has(p));
+  const openTabPaths = [...reconciledPinned, ...unpinned];
   return {
     state: {
       ...state,
       sessions: {
         ...state.sessions,
         openTabPaths,
-        pinnedTabPaths,
+        pinnedTabPaths: reconciledPinned,
+        pinnedTabGroups,
         unreadFinishedSessionPaths: state.sessions.unreadFinishedSessionPaths.filter((p) =>
           openTabPaths.includes(p),
         ),

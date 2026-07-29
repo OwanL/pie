@@ -16,7 +16,7 @@ import type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
   SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
-  SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
+  ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
   VerificationRollup, RunSnapshot as BaseRunSnapshot, TaskBoundaryIntent,
 } from '../../shared/run-analytics-contracts.js';
@@ -25,7 +25,7 @@ export type {
   AssistantUsage, AuxiliaryLlmUsageKind, AuxiliaryLlmUsageSample, ActiveRunStatus, RunFinalizationReason, ThinkingLevel, PruningMode, InputKind,
   SessionContextFileFactor, SessionToolSnippetFactor,
   SessionSkillFactor, SessionAnalyticsFactors, FunctionalSettingsSnapshot,
-  SubagentTaskScoreRollup, ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
+  ToolFailureSample, ToolResultIssueSample, TurnThroughputStatus,
   TurnThroughputSample, RetryTimingSample, ToolUsageRollup, FileMutationRollup, FileExtensionRollup,
   VerificationRollup, TaskBoundaryIntent,
 };
@@ -309,16 +309,6 @@ export interface PreparedRunRow {
   subagentCallCount: number;
   subagentTaskCount: number;
   subagentAgentCount: number;
-  subagentScoredTaskCount: number;
-  subagentMeanPrecision: number | null;
-  subagentMeanCreativity: number | null;
-  subagentMeanReasoning: number | null;
-  subagentMeanThoroughness: number | null;
-  subagentMaxPrecision: number | null;
-  subagentMaxCreativity: number | null;
-  subagentMaxReasoning: number | null;
-  subagentMaxThoroughness: number | null;
-  subagentCompositeMean: number | null;
   /** Cumulative input tokens consumed by spawned sub-agent sessions (0 when none / untracked). */
   subagentInputTokens: number;
   /** Cumulative output tokens consumed by spawned sub-agent sessions (0 when none). */

@@ -75,17 +75,16 @@ providers:
         thinking:
           - minimal
         disabledReason: null
-        costRank: 10
 ```
 
 Important:
 
 - `baseUrl` is the real upstream endpoint, not a local proxy.
-- Every model must include the fields required by `models.schema.json`, including complete pricing, eligibility, thinking levels, `disabledReason`, and `costRank`.
+- Every model must include the fields required by `models.schema.json`, including complete pricing, eligibility, thinking levels, and `disabledReason`.
 - Use provider-level `compat` for shared behavior and model-level overrides only when a model differs.
 - `concurrency.maxConcurrentRequests` is the provider-wide cap. `afterburnSeconds` reserves a recently used slot for session affinity; `queueWaitSeconds` bounds waiting.
-- Add each new model ID exactly once to top-level `profileOrder` in the desired picker order.
-- Model IDs must be unique across all providers.
+- Add each new model identity exactly once to top-level `profileOrder` in the desired picker order; use `{ provider, id }` when the bare ID exists under multiple providers.
+- Model IDs must be unique within a provider; duplicate bare IDs across providers are supported through provider-qualified identity.
 
 For adding models to an existing provider, change only its `models` list and `profileOrder`; preserve its established auth, compatibility, and concurrency configuration unless the task explicitly changes them.
 

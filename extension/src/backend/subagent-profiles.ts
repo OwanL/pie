@@ -6,7 +6,7 @@ import { parse as parseYaml } from 'yaml';
 import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 
 import type { ModelSubagentInfo } from '../shared/protocol';
-import { estimateNormalizedCost, loadModelPricing } from './pricing';
+import { loadModelPricing } from './pricing';
 import { backendTrace } from './diag';
 
 /**
@@ -17,10 +17,6 @@ import { backendTrace } from './diag';
 interface RawSubagentProfile {
   provider?: unknown;
   id?: unknown;
-  precision?: unknown;
-  creativity?: unknown;
-  thoroughness?: unknown;
-  reasoning?: unknown;
   eligible?: unknown;
   disabled_reason?: unknown;
 }
@@ -32,10 +28,6 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
-
-function toNumber(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
-}
 
 function profileKey(provider: string | undefined, id: string): string {
   // Preserve legacy bare-id map keys. Provider-qualified entries use a JSON
@@ -64,14 +56,8 @@ function parseProfilesFromObject(raw: unknown): Map<string, ModelSubagentInfo> {
   const profiles = Array.isArray(cfg.profiles) ? cfg.profiles : [];
   for (const entry of profiles as RawSubagentProfile[]) {
     if (!entry || typeof entry.id !== 'string' || entry.id.length === 0) continue;
-    const aggregate =
-      toNumber(entry.precision) +
-      toNumber(entry.creativity) +
-      toNumber(entry.thoroughness) +
-      toNumber(entry.reasoning);
     const info: ModelSubagentInfo = {
       eligible: entry.eligible === true,
-      aggregate,
     };
     if (typeof entry.disabled_reason === 'string' && entry.disabled_reason.length > 0) {
       info.disabledReason = entry.disabled_reason;
@@ -159,7 +145,6 @@ export function loadSubagentProfiles(agentDir: string): Map<string, ModelSubagen
             ? records.find((record) => record.provider === identity.provider)
             : records.find((record) => record.pricing !== undefined));
           if (priced?.pricing) {
-            info.normalizedCost = estimateNormalizedCost(priced.pricing);
             info.pricing = { ...priced.pricing };
           }
         }

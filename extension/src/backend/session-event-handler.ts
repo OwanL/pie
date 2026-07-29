@@ -585,12 +585,24 @@ function emitLatestPruningResult(
 }
 
 // Some providers keep extended reasoning private, so a healthy response may be
-// semantically silent until the reasoning phase completes.
+// semantically silent until the reasoning phase completes. Umans is routinely
+// much slower than other providers and does not always expose reasoning deltas;
+// give it a provider-specific lease rather than weakening the stuck-session
+// guard for every provider. The environment override remains authoritative for
+// diagnostics and operators who need a different global policy.
 const PROVIDER_SEMANTIC_INACTIVITY_MS = 360_000;
+const UMANS_SEMANTIC_INACTIVITY_MS = 15 * 60_000;
 const TOOL_INACTIVITY_MS = 30 * 60_000;
 function configuredLeaseMs(envName: string, fallback: number): number {
   const value = Number(process.env[envName]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function resolveProviderSemanticInactivityMs(provider?: string): number {
+  const fallback = provider?.toLowerCase() === 'umans'
+    ? UMANS_SEMANTIC_INACTIVITY_MS
+    : PROVIDER_SEMANTIC_INACTIVITY_MS;
+  return configuredLeaseMs('PIE_PROVIDER_SEMANTIC_INACTIVITY_MS', fallback);
 }
 
 function clearSemanticLease(context: SessionContext): void {
@@ -603,7 +615,7 @@ function clearSemanticLease(context: SessionContext): void {
 function renewSemanticLease(
   deps: BackendSessionEventHandlerDeps,
   context: SessionContext,
-  budgetMs = configuredLeaseMs('PIE_PROVIDER_SEMANTIC_INACTIVITY_MS', PROVIDER_SEMANTIC_INACTIVITY_MS),
+  budgetMs = resolveProviderSemanticInactivityMs(context.activeRequest?.provider),
   leaseKind: 'provider' | 'tool' = 'provider',
 ): void {
   const active = context.activeRequest;

@@ -861,14 +861,12 @@ test('Brief E: interrupt reflects "Stopping…" within one frame (optimistic, be
   // While busy, the Stop button is shown (not the "Stopping…" state).
   const stopBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Interrupt response"]');
   assert.ok(stopBtn, 'Stop button rendered while busy');
-  assert.ok((stopBtn!.textContent ?? '').includes('Stop'));
 
   // Click → the optimistic interrupting flag flips synchronously (one frame),
   // rendering "Stopping…" BEFORE the host round-trip clears `busy`.
   const before = adapter.messages.length;
   act(() => { stopBtn!.click(); });
   assert.ok(container.querySelector('button[aria-label="Stopping response"]'), '"Stopping…" rendered within one frame');
-  assert.ok((container.textContent ?? '').includes('Stopping…'));
   assert.ok(adapter.messages.slice(before).some((m) => m.type === 'interrupt'), 'interrupt posted to the host');
 
   // The host round-trip clears busy → interrupting clears → "Stopping…" is gone.

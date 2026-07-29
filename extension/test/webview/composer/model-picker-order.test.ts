@@ -15,39 +15,36 @@ function model(id: string, overrides: Partial<ModelInfo> = {}): ModelInfo {
   };
 }
 
-test('orderModelsForPicker sorts by normalized cost descending and pushes ineligible models to the bottom', () => {
+test('orderModelsForPicker sorts by name and pushes ineligible models to the bottom', () => {
   const models: ModelInfo[] = [
-    model('cheap-eligible', { subagent: { eligible: true, aggregate: 8, normalizedCost: 2 } }),
-    model('ineligible-top', { subagent: { eligible: false, aggregate: 20, disabledReason: 'incompatible', normalizedCost: 0.5 } }),
-    model('pricey-eligible', { subagent: { eligible: true, aggregate: 18, normalizedCost: 8 } }),
-    model('ineligible-mid', { subagent: { eligible: false, aggregate: 12, normalizedCost: 3 } }),
-    model('unrated', {}),
-    model('mid-eligible', { subagent: { eligible: true, aggregate: 14, normalizedCost: 4 } }),
+    model('beta', { name: 'Beta', subagent: { eligible: true } }),
+    model('ineligible-zulu', { name: 'Zulu', subagent: { eligible: false, disabledReason: 'incompatible' } }),
+    model('alpha', { name: 'Alpha', subagent: { eligible: true } }),
+    model('unprofiled', { name: 'Charlie' }),
+    model('ineligible-delta', { name: 'Delta', subagent: { eligible: false } }),
   ];
 
-  // Eligible: most expensive first (cost 8, 4, 2, then 0 for unrated)
-  // Ineligible: most expensive first (3, then 0.5)
-  const ordered = orderModelsForPicker(models).map((e) => e.model.id);
-  assert.deepEqual(ordered, ['pricey-eligible', 'mid-eligible', 'cheap-eligible', 'unrated', 'ineligible-mid', 'ineligible-top']);
+  const ordered = orderModelsForPicker(models).map((entry) => entry.model.id);
+  assert.deepEqual(ordered, ['alpha', 'beta', 'unprofiled', 'ineligible-delta', 'ineligible-zulu']);
 });
 
 test('orderModelsForPicker decorates ineligible options with a warning prefix and reason in the tooltip', () => {
   const ordered = orderModelsForPicker([
-    model('bad', { name: 'Bad Model', subagent: { eligible: false, aggregate: 4, disabledReason: 'broken' } }),
-    model('good', { name: 'Good Model', subagent: { eligible: true, aggregate: 16 } }),
+    model('bad', { name: 'Bad Model', subagent: { eligible: false, disabledReason: 'broken' } }),
+    model('good', { name: 'Good Model', subagent: { eligible: true } }),
   ]);
-  const bad = ordered.find((e) => e.model.id === 'bad');
-  const good = ordered.find((e) => e.model.id === 'good');
+  const bad = ordered.find((entry) => entry.model.id === 'bad');
+  const good = ordered.find((entry) => entry.model.id === 'good');
   assert.ok(bad && good);
-  assert.equal(bad!.ineligible, true);
-  assert.match(bad!.label, /^⚠ /);
-  assert.equal(bad!.selectedLabel, '⚠ Bad Model');
-  assert.match(bad!.title, /rating 4\/20/);
-  assert.match(bad!.title, /Disabled for subagent use: broken/);
-  assert.equal(good!.ineligible, false);
-  assert.equal(good!.label, 'test · Good Model');
-  assert.equal(good!.selectedLabel, 'Good Model');
-  assert.match(good!.title, /rating 16\/20/);
+  assert.equal(bad.ineligible, true);
+  assert.match(bad.label, /^⚠ /);
+  assert.equal(bad.selectedLabel, '⚠ Bad Model');
+  assert.match(bad.title, /^Bad Model/);
+  assert.match(bad.title, /Disabled for subagent use: broken/);
+  assert.equal(good.ineligible, false);
+  assert.equal(good.label, 'test · Good Model');
+  assert.equal(good.selectedLabel, 'Good Model');
+  assert.equal(good.title, 'Good Model');
 });
 
 test('orderModelsForPicker does not treat subagent ineligibility as a parent-chat recommendation', () => {
@@ -55,16 +52,16 @@ test('orderModelsForPicker does not treat subagent ineligibility as a parent-cha
     model('shared', {
       provider: 'github-copilot',
       name: 'Copilot Model',
-      subagent: { eligible: false, aggregate: 0, disabledReason: 'not vetted', normalizedCost: 20 },
+      subagent: { eligible: false, disabledReason: 'not vetted' },
     }),
     model('shared', {
       provider: 'openai-codex',
       name: 'Codex Model',
-      subagent: { eligible: true, aggregate: 20, normalizedCost: 10 },
+      subagent: { eligible: true },
     }),
   ], { useSubagentEligibility: false });
 
-  assert.deepEqual(ordered.map((entry) => entry.model.provider), ['github-copilot', 'openai-codex']);
+  assert.deepEqual(ordered.map((entry) => entry.model.provider), ['openai-codex', 'github-copilot']);
   assert.ok(ordered.every((entry) => !entry.ineligible));
   assert.ok(ordered.every((entry) => !entry.label.startsWith('⚠')));
   assert.ok(ordered.every((entry) => !entry.title.includes('Disabled for subagent use')));
@@ -72,18 +69,17 @@ test('orderModelsForPicker does not treat subagent ineligibility as a parent-cha
 
 test('orderModelsForPicker strips provider text only from the compact selected label', () => {
   const [entry] = orderModelsForPicker([
-    model('deepseek', { name: 'Ollama Cloud: Deepseek V4 pro', subagent: { eligible: true, aggregate: 12 } }),
+    model('deepseek', { name: 'Ollama Cloud: Deepseek V4 pro', subagent: { eligible: true } }),
   ]);
   assert.equal(entry.label, 'test · Ollama Cloud: Deepseek V4 pro');
   assert.equal(entry.selectedLabel, 'Deepseek V4 pro');
 });
 
-test('orderModelsForPicker keeps deterministic name-based tiebreak when costs match', () => {
+test('orderModelsForPicker uses model id as deterministic tiebreak when names match', () => {
   const ordered = orderModelsForPicker([
-    model('b', { name: 'Beta', subagent: { eligible: true, aggregate: 8, normalizedCost: 5 } }),
-    model('a', { name: 'Alpha', subagent: { eligible: true, aggregate: 10, normalizedCost: 5 } }),
-  ]).map((e) => e.model.id);
-  // Same cost, so sort by aggregate desc: a (10) before b (8)
+    model('b', { name: 'Same', subagent: { eligible: true } }),
+    model('a', { name: 'Same', subagent: { eligible: true } }),
+  ]).map((entry) => entry.model.id);
   assert.deepEqual(ordered, ['a', 'b']);
 });
 
@@ -92,30 +88,24 @@ test('orderModelsForPicker includes pricing and image support in entries', () =>
     model('priced', {
       name: 'Priced Model',
       inputKinds: ['text', 'image'],
-      subagent: { eligible: true, aggregate: 10, normalizedCost: 5, pricing: { input: 2.5, output: 10, cacheRead: 0.25, cacheWrite: 0 } },
+      subagent: { eligible: true, pricing: { input: 2.5, output: 10, cacheRead: 0.25, cacheWrite: 0 } },
     }),
     model('free', {
       name: 'Free Model',
       inputKinds: ['text'],
-      subagent: { eligible: true, aggregate: 8, normalizedCost: 0 },
+      subagent: { eligible: true },
     }),
   ]);
 
-  // Priced (cost 5) sorts before free (cost 0) with descending cost order
-  assert.equal(ordered[0].model.id, 'priced');
-  assert.equal(ordered[1].model.id, 'free');
-
-  const priced = ordered.find((e) => e.model.id === 'priced');
-  const free = ordered.find((e) => e.model.id === 'free');
+  const priced = ordered.find((entry) => entry.model.id === 'priced');
+  const free = ordered.find((entry) => entry.model.id === 'free');
   assert.ok(priced && free);
-
-  assert.equal(priced!.tokenInPrice, '$2.50');
-  assert.equal(priced!.tokenOutPrice, '$10.00');
-  assert.equal(priced!.supportsImages, true);
-
-  assert.equal(free!.tokenInPrice, '');
-  assert.equal(free!.tokenOutPrice, '');
-  assert.equal(free!.supportsImages, false);
+  assert.equal(priced.tokenInPrice, '$2.50');
+  assert.equal(priced.tokenOutPrice, '$10.00');
+  assert.equal(priced.supportsImages, true);
+  assert.equal(free.tokenInPrice, '');
+  assert.equal(free.tokenOutPrice, '');
+  assert.equal(free.supportsImages, false);
 });
 
 test('filterEnabledProviders drops models whose provider is toggled off', () => {
@@ -126,15 +116,13 @@ test('filterEnabledProviders drops models whose provider is toggled off', () => 
   ];
 
   assert.deepEqual(
-    filterEnabledProviders(models, { anthropic: false }).map((m) => m.id),
+    filterEnabledProviders(models, { anthropic: false }).map((entry) => entry.id),
     ['a', 'c'],
   );
-  // Absent or true → enabled (nothing dropped).
-  assert.deepEqual(filterEnabledProviders(models, {}).map((m) => m.id), ['a', 'b', 'c']);
+  assert.deepEqual(filterEnabledProviders(models, {}).map((entry) => entry.id), ['a', 'b', 'c']);
   assert.deepEqual(
-    filterEnabledProviders(models, { openai: true, anthropic: true, google: true }).map((m) => m.id),
+    filterEnabledProviders(models, { openai: true, anthropic: true, google: true }).map((entry) => entry.id),
     ['a', 'b', 'c'],
   );
-  // All disabled → empty.
   assert.deepEqual(filterEnabledProviders(models, { openai: false, anthropic: false, google: false }), []);
 });

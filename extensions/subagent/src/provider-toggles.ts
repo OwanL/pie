@@ -6,6 +6,7 @@
  */
 
 import { parseJsonOrThrow } from "../../../shared/error-message.js";
+import { qualifiedModelSpec } from "./bucket-config.js";
 
 export const PROVIDER_TOGGLES_ENV = "PIE_PROVIDER_TOGGLES_JSON";
 export const SUBAGENT_PROVIDER_DEFAULTS_ENV = "PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON";
@@ -89,9 +90,8 @@ export function getAllowedModelIdsForProviders(
 ): Set<string> | undefined {
   if (disabledProviders.size === 0) return undefined;
 
+  const enabled = models.filter((model) => !disabledProviders.has(model.provider));
   return new Set(
-    models
-      .filter((model) => !disabledProviders.has(model.provider))
-      .map((model) => model.id),
+    enabled.flatMap((model) => [model.id, qualifiedModelSpec(model.provider, model.id)]),
   );
 }

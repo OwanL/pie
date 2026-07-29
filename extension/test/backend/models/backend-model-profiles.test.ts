@@ -8,8 +8,8 @@ import { BackendServer } from '../../../src/backend/index';
 
 const MODELS = [
   {
-    id: 'ranked-model',
-    name: 'Ranked Model',
+    id: 'profiled-model',
+    name: 'Profiled Model',
     provider: 'mock',
     reasoning: true,
     input: ['text'],
@@ -26,14 +26,14 @@ const MODELS = [
 
 const EXPECTED_MODELS = [
   {
-    id: 'ranked-model',
-    name: 'Ranked Model',
+    id: 'profiled-model',
+    name: 'Profiled Model',
     provider: 'mock',
     reasoning: true,
     inputKinds: ['text'],
     contextWindow: 1000,
     maxTokens: 100,
-    subagent: { eligible: true, aggregate: 18 },
+    subagent: { eligible: true },
   },
   {
     id: 'unprofiled-model',
@@ -51,11 +51,7 @@ function makeAgentDir(): string {
   fs.writeFileSync(path.join(agentDir, 'model-profiles.json'), JSON.stringify({
     profiles: [
       {
-        id: 'ranked-model',
-        precision: 5,
-        creativity: 4,
-        thoroughness: 5,
-        reasoning: 4,
+        id: 'profiled-model',
         eligible: true,
       },
     ],
@@ -123,7 +119,7 @@ test('session.opened carries whole-session usage even when its transcript payloa
       message: {
         role: 'assistant',
         content: [{ type: 'text', text: `answer ${index}` }],
-        model: 'ranked-model',
+        model: 'profiled-model',
         provider: 'mock',
         usage: { input: 1_000, output: 100, totalTokens: 1_100, cost: { total: 0.01 } },
       },

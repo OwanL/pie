@@ -1,8 +1,8 @@
 /**
  * Token-pricing loader for the analysis package.
  *
- * The identical core (`parseModelPricing`, `ModelTokenPricing`, and
- * `estimateNormalizedCost`) now lives in the shared `../../shared/pricing-core.ts`
+ * The identical core (`parseModelPricing` and `ModelTokenPricing`) lives in the
+ * shared `../../shared/pricing-core.ts`
  * module and is re-exported here. The package-local pieces that differ by
  * consumer policy remain here:
  *
@@ -29,9 +29,8 @@ import type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-export the shared core under the original public names so existing
 // consumers (analysis/scripts/prepare.ts, analysis/test/pricing.test.ts) keep
-// working unchanged. estimateNormalizedCost is the shared normalization helper,
-// re-exported for downstream reuse within the analysis package.
-export { estimateNormalizedCost, parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
+// working unchanged.
+export { parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
 export type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-exported so existing imports of `resolveModelsJsonPath` from `./pricing.ts`
