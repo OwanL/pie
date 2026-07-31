@@ -1,8 +1,13 @@
+# Keep the cross-platform source tree consistently LF by default. Explicit
+# Windows-only PowerShell overrides remain below.
+* text=auto eol=lf
+
 # Force LF line endings on shell scripts so they run on Linux/macOS even when
 # checked out on Windows with core.autocrlf=true (otherwise CRLF breaks bash:
 #   $'\r': command not found  /  syntax error near unexpected token).
 *.sh     text eol=lf
 install.sh text eol=lf
+.githooks/* text eol=lf
 
 # PowerShell scripts are fine with CRLF on Windows (the only platform that runs
 # them), but normalize to CRLF so they always work under Invoke-Expression /
