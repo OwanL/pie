@@ -1,7 +1,6 @@
 import type { AssistantUsage, ChatMessage, ContextWindowUsage, PruningDetails, ToolCall } from '../../../shared/protocol';
 import { formatToolResult } from '../../../shared/tool-result-format';
 import { getRenderableSubagentResult, type RawMessage } from '../../../shared/subagent-result';
-import { estimateTextTokens } from '../system-prompt-tokens';
 import { estimateLiveAssistantOutputTokens } from '../../../shared/token-rate';
 import {
   assistantUsageFromSample,

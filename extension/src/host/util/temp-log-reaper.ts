@@ -14,8 +14,8 @@ import { reapTempFiles, type ReapOptions, type ReapResult } from '../../../../sh
 
 const TEMP_LOG_PREFIXES = ['pi-bash-', 'pi-output-'] as const;
 
-export interface TempLogReapOptions extends ReapOptions {}
-export interface TempLogReapResult extends ReapResult {}
+export type TempLogReapOptions = ReapOptions;
+export type TempLogReapResult = ReapResult;
 
 /** Delete orphaned pi tool-output temp logs by age and total size.
  *  Never throws — best-effort. */
