@@ -1,13 +1,13 @@
 // Pure helpers that map repo-relative file paths to test package ids and to the
 // "global test-infrastructure/config" category. Shared by
 // scripts/run-test-files.mjs (file -> package classification) and
-// scripts/run-changed-tests.mjs (git-diff -> affected packages / select-all).
+// scripts/run-affected-tests.mjs (git-diff -> affected packages / select-all).
 //
 // The package<->directory mapping mirrors the PACKAGE_CONFIGS in
 // scripts/run-tests.mjs: each package owns exactly one top-level directory
 // (extension/, analysis/, or extensions/<id>/). The directory layout is the
 // stable, low-drift source of truth; the ids must match run-tests.mjs because
-// run-changed-tests.mjs forwards them as `--package <id>` flags.
+// run-affected-tests.mjs forwards them as `--package <id>` flags.
 
 /**
  * Each package and the repo-relative directory it owns.
@@ -30,7 +30,6 @@ export const PACKAGE_DIRECTIVES = [
   { id: 'tool-result-pruner', dir: 'extensions/tool-result-pruner' },
   { id: 'session-reviewer', dir: 'extensions/session-reviewer' },
   { id: 'session-changes', dir: 'extensions/session-changes' },
-  { id: 'deferred-triggers', dir: 'extensions/deferred-triggers' },
   { id: 'computer-use', dir: 'extensions/computer-use' },
   { id: 'image-context-guard', dir: 'extensions/image-context-guard' },
 ];
@@ -54,7 +53,6 @@ export const ALL_PACKAGE_IDS = PACKAGE_DIRECTIVES.map((entry) => entry.id);
 const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'scripts/run-tests.mjs',
   'scripts/run-test-files.mjs',
-  'scripts/run-changed-tests.mjs',
   'scripts/run-affected-tests.mjs',
   'scripts/run-fast-extension-tests.mjs',
   'scripts/run-fast-batched-tests.mjs',

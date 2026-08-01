@@ -10,6 +10,7 @@
 
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -138,10 +139,40 @@ describe('isSafe – scoped temp-directory cleanup', () => {
 		assert.equal(isSafe(`rm -rf "${target}"`, { cwd: '/repo' }), true);
 	});
 
+	test('allows cleanup through the canonical alias of the platform temp directory', async () => {
+		const { isSafe } = await loadSafeguard();
+		const target = path.join(realpathSync.native(tmpdir()), 'man-jump-fixed-rope').replace(/\\/g, '/');
+		const command = `dotnet run --project ${target}/update.csproj -- content/levels/prototypes/01-movement-lab.mjlevel && rm -rf ${target} && git status --short | head -80`;
+		assert.equal(isSafe(command, { cwd: 'C:/Users/example/Documents/personal/man_jump' }), true);
+	});
+
+	test('allows cleanup through an 8.3 alias when the platform temp root is long', async () => {
+		const { isSafe } = await loadSafeguard();
+		const shortTempRoot = tmpdir();
+		const longTempRoot = realpathSync.native(shortTempRoot);
+		if (process.platform !== 'win32' || shortTempRoot.toLowerCase() === longTempRoot.toLowerCase()) return;
+
+		const originalTemp = process.env.TEMP;
+		const originalTmp = process.env.TMP;
+		process.env.TEMP = longTempRoot;
+		process.env.TMP = longTempRoot;
+		try {
+			const target = path.join(shortTempRoot, 'pie-short-path-cleanup').replace(/\\/g, '/');
+			assert.equal(isSafe(`rm -rf ${target}`, { cwd: 'C:/repo' }), true);
+		} finally {
+			if (originalTemp === undefined) delete process.env.TEMP;
+			else process.env.TEMP = originalTemp;
+			if (originalTmp === undefined) delete process.env.TMP;
+			else process.env.TMP = originalTmp;
+		}
+	});
+
 	test('still prompts for temp roots, broad globs, and traversal outside temp', async () => {
 		const { isSafe } = await loadSafeguard();
 		assert.equal(isSafe('rm -rf /tmp', { cwd: '/repo' }), false);
 		assert.equal(isSafe('rm -rf /var/tmp', { cwd: '/repo' }), false);
+		assert.equal(isSafe(`rm -rf "${tmpdir().replace(/\\/g, '/')}"`, { cwd: '/repo' }), false);
+		assert.equal(isSafe(`rm -rf "${realpathSync.native(tmpdir()).replace(/\\/g, '/')}"`, { cwd: '/repo' }), false);
 		assert.equal(isSafe('rm -rf /tmp/*', { cwd: '/repo' }), false);
 		assert.equal(isSafe('rm -rf /tmp/build/../../home', { cwd: '/repo' }), false);
 	});

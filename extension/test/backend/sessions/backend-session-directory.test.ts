@@ -75,9 +75,9 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     assert.equal(result.sessionPath, path.join(configuredDir, 'created.jsonl'));
 
     assert.deepEqual(await server.handleRequest({ id: 'list-configured', method: 'session.list' }), []);
-    assert.deepEqual(listedDirs, [configuredDir, undefined]);
+    assert.deepEqual(listedDirs, [configuredDir]);
     assert.deepEqual(await server.handleRequest({ id: 'list-cached', method: 'session.list' }), []);
-    assert.deepEqual(listedDirs, [configuredDir, undefined], 'unchanged catalog must not rescan session files');
+    assert.deepEqual(listedDirs, [configuredDir], 'unchanged catalog must not rescan session files');
 
     const legacyPath = path.join(sdkFallbackDir, 'legacy.jsonl');
     const opened = await server.handleRequest({

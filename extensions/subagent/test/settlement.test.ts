@@ -180,7 +180,7 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 test("execute(): a dispatch that never reports progress is force-settled after PIE_SUBAGENT_SETTLEMENT_MS of inactivity", async () => {
-	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "200"; // short net with headroom under full-suite load
+	process.env.PIE_SUBAGENT_SETTLEMENT_MS = "500"; // short net with headroom for SDK setup under full-suite load
 	process.env.PIE_SUBAGENT_SETTLEMENT_GRACE_MS = "0"; // skip grace → synthesize immediately
 	setMockBehavior({
 		onPrompt: (emit: (event: unknown) => void) => {

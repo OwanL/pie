@@ -53,8 +53,6 @@ function baseProps(overrides: Partial<SessionTabsProps> = {}): SessionTabsProps 
     onMergePinnedGroups: noop,
     onUngroupPinnedTab: noop,
     onRunAction: noop,
-    deferredSessionPaths: [],
-    deferredTimerSessionPaths: [],
     ...overrides,
   };
 }

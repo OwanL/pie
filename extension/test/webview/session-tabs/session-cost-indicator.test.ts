@@ -18,6 +18,7 @@ import {
   buildSessionUsageSnapshot,
   mergeSessionUsageSnapshots,
 } from '../../../src/shared/session-usage';
+import { estimateTextTokens } from '../../../src/shared/tokenize';
 
 function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTokenUsageSummary {
   return {
@@ -750,6 +751,33 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
   assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000\*/);
   assert.match(result.tooltip, /Excludes 126,500 tokens pending billing details or pricing/);
   assert.match(result.ariaLabel, /some provider\/model usage is not yet priced/);
+});
+
+test('live session cost includes streaming tool-call output', () => {
+  const draft = '{"command":"echo generated output"}';
+  const transcript = [{
+    id: 'tool-draft',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: 'I will run this.',
+    thinking: 'Choosing a command.',
+    status: 'streaming' as const,
+    draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: draft },
+  }];
+
+  const estimate = buildLiveSessionCostEstimate(
+    transcript,
+    { tokens: 1_000, contextWindow: 100_000, percent: 1 },
+    true,
+  );
+  const expectedOutput = estimateTextTokens(transcript[0].markdown)
+    + estimateTextTokens(transcript[0].thinking)
+    + estimateTextTokens('bash')
+    + estimateTextTokens(draft);
+
+  assert.ok(estimate);
+  assert.equal(estimate.outputTokens, expectedOutput);
+  assert.equal(estimate.totalTokens, 1_000 + expectedOutput);
 });
 
 test('buildSessionCostIndicator does not present unpriced live usage as zero cost', () => {

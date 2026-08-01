@@ -63,7 +63,9 @@ async function readVisibleJsonlPaths(
   return [...direct, ...nested.flat()];
 }
 
-/** Cheap filename-only signature matching the canonical + SDK legacy scan shape. */
+/** Cheap filename-only signature matching the configured canonical scan shape
+ *  (the SDK default `<agentDir>/sessions` root is scanned only while nothing
+ *  is configured, so a configured store retires the perpetual legacy scan). */
 export async function readBackendSessionInventorySignature(
   agentDir: string,
   sessionDir: string | undefined,
@@ -78,8 +80,17 @@ export async function readBackendSessionInventorySignature(
       includeDirectFiles: includeDirectFiles || existing?.includeDirectFiles === true,
     });
   };
-  if (sessionDir) addRoot(sessionDir, true);
-  addRoot(path.join(agentDir, 'sessions'), false);
+  if (sessionDir) {
+    // Canonical-only: once a session directory is configured, the installer's
+    // verified migration is the authority for legacy content, so the legacy
+    // `<agentDir>/sessions` root is retired here. `npm run doctor` detects
+    // any newly stranded legacy sessions instead of scanning them forever.
+    addRoot(sessionDir, true);
+  } else {
+    // With nothing configured, the embedded SDK keeps its default
+    // `<agentDir>/sessions` store; scan that so cache invalidation tracks it.
+    addRoot(path.join(agentDir, 'sessions'), false);
+  }
 
   const files = (await Promise.all([...roots.values()]
     .map((root) => readVisibleJsonlPaths(root.path, root.includeDirectFiles, readDirectory))))

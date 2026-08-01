@@ -72,9 +72,13 @@ interface SubagentSessionEvent {
 		| string;
 	message?: SubagentEventMessage;
 	assistantMessageEvent?: {
-		type: "text_delta" | "thinking_delta" | string;
+		type: "text_delta" | "thinking_delta" | "toolcall_start" | "toolcall_delta" | string;
 		delta?: string;
 		thinking?: string;
+		contentIndex?: number;
+		partial?: {
+			content?: Array<{ type?: string; id?: string; name?: string }>;
+		};
 	};
 	toolCallId?: string;
 	toolName?: string;
@@ -646,6 +650,7 @@ function subscribeToSession(
 		if (!eventFence.accepting) return;
 		if (event.type === "message_start" && event.message?.role === "assistant") {
 			assistantMessageStartMs = event.message.timestamp ?? Date.now();
+			result.draftingToolCall = undefined;
 			return;
 		}
 		if (event.type === "message_update") {
@@ -729,11 +734,11 @@ function handleMessageUpdate(
 	const isToolCallGeneration = streamEvent?.type === "toolcall_start" || streamEvent?.type === "toolcall_delta";
 	if (isTextDelta || isThinkingDelta || isToolCallGeneration) {
 		if (isTextDelta || isThinkingDelta) markProviderReplayUnsafe(result, "partial_output");
-		// Any streamed provider content advances the visible lifecycle. Only text
-		// and reasoning deltas drive the token-rate clock; tool-call argument
-		// generation is active work but does not expose countable output tokens.
+		// Any streamed provider content advances the visible lifecycle and the
+		// token-rate clock. Tool-call drafts are captured separately so the host's
+		// modern cumulative counter can tokenize their name and JSON arguments.
 		stageRef.value = "streaming";
-		result.streaming = isTextDelta || isThinkingDelta;
+		result.streaming = true;
 		if (!setActivity(result, "streaming", undefined)) markProgress(result);
 		if (isTextDelta) {
 			streamingTextRef.value += streamEvent.delta!;
@@ -748,6 +753,22 @@ function handleMessageUpdate(
 			// until `message_end` clears them.
 			streamingReasoningRef.value += streamEvent.delta ?? streamEvent.thinking ?? "";
 			result.streamingReasoning = streamingReasoningRef.value;
+		}
+		if (isToolCallGeneration) {
+			const contentIndex = streamEvent.contentIndex;
+			const content = contentIndex === undefined ? undefined : streamEvent.partial?.content?.[contentIndex];
+			const existing = result.draftingToolCall;
+			const id = content?.type === "toolCall" ? content.id : existing?.id;
+			const name = content?.type === "toolCall" ? content.name : existing?.name;
+			if (id && name) {
+				result.draftingToolCall = {
+					id,
+					name,
+					argumentsText: streamEvent.type === "toolcall_start"
+						? ""
+						: `${existing?.id === id ? existing.argumentsText : ""}${streamEvent.delta ?? ""}`,
+				};
+			}
 		}
 		emitUpdate(false);
 	}
@@ -776,6 +797,7 @@ function handleMessageEnd(
 		result.streamingText = undefined;
 		streamingReasoningRef.value = "";
 		result.streamingReasoning = undefined;
+		result.draftingToolCall = undefined;
 	}
 	result.streaming = false;
 	const transitioned = (result.runningTools?.length ?? 0) > 0
@@ -970,6 +992,7 @@ function clearLiveState(result: SingleResult): void {
 	result.runningTools = [];
 	result.streamingText = undefined;
 	result.streamingReasoning = undefined;
+	result.draftingToolCall = undefined;
 	result.streaming = false;
 }
 

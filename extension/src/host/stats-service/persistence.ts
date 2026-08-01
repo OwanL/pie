@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 
 import type { RunCheckpoint } from '../run-analytics';
-import { atomicWriteText } from '../shared/atomic-write';
+import { atomicWriteText } from '../../shared/atomic-write';
 import type { CheckpointSlot } from '../shared/checkpoint-slots';
 
 export async function writeCheckpointToDisk(

@@ -113,7 +113,8 @@ function classifyVerificationSegment(segment: string): VerificationCommandKind[]
 
   if (
     kinds.size === 0 && (
-      /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:check|verify|validate)\b/.test(segment)
+      /\bgh(?:\.exe)?\s+pr\s+checks\b/.test(segment)
+      || /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:check|verify|validate)\b/.test(segment)
       || /\bcargo\s+check\b/.test(segment)
       || /\bgradle(?:w)?\s+check\b/.test(segment)
       || /\bmvn(?:w)?\s+verify\b/.test(segment)

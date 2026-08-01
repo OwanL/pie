@@ -259,7 +259,8 @@ export function runCommitDrag(
     } else if (!current.sourceIsGroupChip) {
       // Standalone / dropdown member onto a pinned item → group/append.
       // (Group chip onto a standalone is intentionally a no-op.)
-      if (sourceGroupIdx !== targetGroupIdx) {
+      const sameGroup = sourceGroupIdx !== -1 && sourceGroupIdx === targetGroupIdx;
+      if (!sameGroup) {
         callbacks.onGroupPinnedTab(sourcePath, current.dropOnPath);
       }
     }

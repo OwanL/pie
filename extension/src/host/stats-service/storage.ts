@@ -3,7 +3,8 @@ import * as path from 'node:path';
 
 import { serializeJsonLine } from '../../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../../shared/error-message';
-import { atomicWriteText as atomicWriteTextImpl } from '../shared/atomic-write';
+import { atomicWriteText as atomicWriteTextImpl } from '../../shared/atomic-write';
+import { withTransientFsRetry, defaultFsRetryDelay, type FsRetryDelay } from '../../shared/fs-retry';
 import { readOptionalText } from '../shared/checkpoint-io';
 import { appendPieError, appendPieLog } from '../util/pie-log';
 import { workspaceHash } from './helpers';
@@ -19,6 +20,7 @@ import {
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   coerceRunSnapshot,
+  runRecencyMs,
   type PersistedSessionRunState,
   type RunCheckpoint,
   type RunSnapshot,
@@ -57,6 +59,8 @@ interface RunAnalyticsStorageOptions {
   atomicWriteText?: (filePath: string, data: string) => Promise<void>;
   /** Test seam for startup freshness metadata reads. */
   stat?: typeof fs.stat;
+  /** Test seam for the delay between transient fs retry attempts. */
+  retryDelay?: FsRetryDelay;
 }
 
 export class RunAnalyticsStorage {
@@ -73,6 +77,7 @@ export class RunAnalyticsStorage {
   private readonly autoExportIntervalMs: number;
   private readonly appendFile: typeof fs.appendFile;
   private readonly readFile: typeof fs.readFile;
+  private readonly retryDelay: FsRetryDelay;
   private readonly historyMetadata = new Map<string, { bytes: number; validEntries: number }>();
   private readonly autoExportRetryBaseMs: number;
   private readonly autoExportRetryMaxMs: number;
@@ -141,6 +146,7 @@ export class RunAnalyticsStorage {
     this.autoExportIntervalMs = options.autoExportIntervalMs ?? 30_000;
     this.appendFile = options.appendFile ?? fs.appendFile;
     this.readFile = options.readFile ?? fs.readFile;
+    this.retryDelay = options.retryDelay ?? defaultFsRetryDelay;
     this.autoExportRetryBaseMs = options.autoExportRetryBaseMs ?? 1000;
     this.autoExportRetryMaxMs = options.autoExportRetryMaxMs ?? 60_000;
     this.autoExportSetTimeout = options.autoExportSetTimeout ?? setTimeout;
@@ -324,7 +330,10 @@ export class RunAnalyticsStorage {
 
   private async appendHistoryChunk(fileName: string, chunk: string, entryCount: number): Promise<void> {
     try {
-      await this.appendFile(path.join(this.storageDir, fileName), chunk, 'utf8');
+      await withTransientFsRetry(
+        () => this.appendFile(path.join(this.storageDir, fileName), chunk, 'utf8'),
+        { delay: this.retryDelay },
+      );
     } catch (error) {
       // An append can partially reach disk before rejecting. Its final size and
       // record count are therefore unknown; force the next retention pass to
@@ -391,24 +400,10 @@ export class RunAnalyticsStorage {
       const existing = this.pendingSnapshots.get(snapshotToAppend.runId);
       // Keep only the newest pending snapshot per runId; drop the older one
       // whether it is the incoming snapshot or the already-pending one.
-      if (!existing || this.snapshotRecencyMs(snapshotToAppend) >= this.snapshotRecencyMs(existing)) {
+      if (!existing || runRecencyMs(snapshotToAppend) >= runRecencyMs(existing)) {
         this.pendingSnapshots.set(snapshotToAppend.runId, snapshotToAppend);
       }
     }
-  }
-
-  private snapshotRecencyMs(snapshot: RunSnapshot): number {
-    const updatedAt = Date.parse(snapshot.updatedAt);
-    if (!Number.isNaN(updatedAt)) {
-      return updatedAt;
-    }
-    if (snapshot.finalizedAt) {
-      const finalizedAt = Date.parse(snapshot.finalizedAt);
-      if (!Number.isNaN(finalizedAt)) {
-        return finalizedAt;
-      }
-    }
-    return Date.parse(snapshot.startedAt);
   }
 
   private buildCheckpoint(seq: number): RunCheckpoint {
@@ -688,7 +683,10 @@ export class RunAnalyticsStorage {
 
     let raw: string;
     try {
-      raw = await this.readFile(filePath, 'utf8');
+      raw = await withTransientFsRetry(
+        () => this.readFile(filePath, 'utf8'),
+        { delay: this.retryDelay },
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.historyMetadata.set(fileName, { bytes: 0, validEntries: 0 });

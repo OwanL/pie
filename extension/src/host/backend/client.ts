@@ -139,7 +139,6 @@ export class BackendClient implements vscode.Disposable {
       agentDir: agentDirEnv,
       sessionDir: sessionDirEnv,
       reviewsDir: reviewsDirEnv,
-      triggersDir: triggersDirEnv,
     } = resolveHostSessionStoragePaths(
       process.env.PI_CODING_AGENT_DIR,
       process.env.PI_CODING_AGENT_SESSION_DIR,
@@ -147,15 +146,10 @@ export class BackendClient implements vscode.Disposable {
     // Session reviews live in a sibling of the sessions dir so the backend
     // (reader) and the session_review tool (writer) — same process — agree on
     // the sidecar location via `PIE_REVIEWS_DIR`.
-    // Deferred-trigger sidecar (sibling of sessions dir). The host registry
-    // (reader/fire-writer) and the `defer_trigger` tool (register/cancel
-    // writer) agree on the location through the shared session path resolver;
-    // the backend tool reads `PIE_TRIGGERS_DIR` set here.
     const backendEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PIE_EDITOR_VERSION: vscode.version,
       ...(reviewsDirEnv ? { PIE_REVIEWS_DIR: reviewsDirEnv } : {}),
-      ...(triggersDirEnv ? { PIE_TRIGGERS_DIR: triggersDirEnv } : {}),
       PIE_LIVE_PIPELINE_TRACE_KEY: getLivePipelineTraceHmacKey(),
       PIE_LIVE_PIPELINE_TRACE_RUN_ID: getLivePipelineTraceRunId(),
       ...trustedRootEnv,
@@ -186,7 +180,6 @@ export class BackendClient implements vscode.Disposable {
       agentDir: agentDirEnv ?? null,
       sessionDir: sessionDirEnv ?? null,
       reviewsDir: reviewsDirEnv ?? null,
-      triggersDir: triggersDirEnv ?? null,
     });
 
     this.proc = proc;

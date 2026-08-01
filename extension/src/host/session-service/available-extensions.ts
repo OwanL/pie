@@ -10,7 +10,6 @@ const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'skill-pruner', label: 'Skill Pruner', description: 'Score and prune skill descriptions by relevance' },
   { id: 'tool-result-pruner', label: 'Tool-result Pruner', description: 'Prune tool output bytes before they enter the model context' },
   { id: 'ask-user', label: 'Ask User', description: 'Ask the user a clarifying question with preset answers' },
-  { id: 'deferred-triggers', label: 'Deferred Triggers', description: 'Defer a task and auto-resume the session when a trigger fires' },
   { id: 'session-reviewer', label: 'Session Reviewer', description: 'List, read, and review the currently-open session transcripts' },
   { id: 'session-changes', label: 'Session Changes', description: 'Inspect the files a session changed (manifest + diffs)' },
   { id: 'warm-bash', label: 'Warm Bash', description: 'Speed up the bash tool with a pre-warmed shell pool' },

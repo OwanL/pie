@@ -154,16 +154,22 @@ test('canonical paths suppress transcript-only evidence', async () => {
   assert.equal('normalizedSessionPath' in historical, false);
 });
 
-test('configured and legacy discovery deduplicates overlapping paths and records provenance', async () => {
+test('configured discovery reads only the canonical root and records configured provenance', async () => {
   await withTempDir(async (dir) => {
+    const configured = path.join(dir, 'configured');
     const legacy = path.join(dir, 'sessions');
-    const configured = path.join(legacy, 'configured');
     await fs.mkdir(configured, { recursive: true });
-    await fs.writeFile(path.join(legacy, 'legacy.jsonl'), transcript([header('legacy')]));
-    await fs.writeFile(path.join(configured, 'shared.jsonl'), transcript([header('shared')]));
+    await fs.mkdir(legacy, { recursive: true });
+    await fs.writeFile(path.join(configured, 'canonical.jsonl'), transcript([header('canonical')]));
+    await fs.writeFile(path.join(legacy, 'stranded.jsonl'), transcript([header('stranded')]));
 
-    const summaries = await discoverHistoricalSessions({ legacySessionsDir: legacy, configuredSessionsDir: configured });
-    assert.equal(summaries.length, 2);
-    assert.deepEqual(summaries.find((row) => row.sessionId === 'shared')?.sourceProvenance, ['configured', 'legacy']);
+    const summaries = await discoverHistoricalSessions({ configuredSessionsDir: configured });
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0]?.sessionId, 'canonical');
+    assert.deepEqual(summaries[0]?.sourceProvenance, ['configured']);
   });
+});
+
+test('configured discovery returns no summaries when no canonical root is given', async () => {
+  assert.deepEqual(await discoverHistoricalSessions({}), []);
 });

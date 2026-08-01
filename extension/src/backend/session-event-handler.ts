@@ -651,6 +651,15 @@ function renewSemanticLease(
             ? `Last provider error: ${lastProviderError.slice(0, 4_096)}`
             : 'Last provider error: none was emitted before the response went silent.',
         ].join('\n');
+    logBackendDiagnostic('warn', 'semantic.inactivityTimeout', {
+      requestId,
+      sessionPath: context.sessionPath,
+      leaseKind,
+      budgetMs,
+      provider: current.provider ?? 'unknown',
+      modelId: current.modelId ?? 'unknown',
+      ...(lastProviderError ? { lastProviderError: lastProviderError.slice(0, 4_096) } : {}),
+    });
     deps.emit('operational-error', {
       code: leaseKind === 'tool' ? 'TOOL_INACTIVITY_TIMEOUT' : 'PROVIDER_SEMANTIC_TIMEOUT',
       message: reason,
@@ -764,15 +773,21 @@ export function handleSdkSessionEvent(
       }
       context.activeRequest.turnStartedAt = Date.now();
       context.activeRequest.providerTurnSequence = (context.activeRequest.providerTurnSequence ?? 0) + 1;
+      // message_start is too late to own provider hangs before the first
+      // assistant event (for example, no response headers after a tool result).
+      // Start the semantic lease at the SDK's provider-turn boundary and renew
+      // it again at message_start/semantic deltas.
+      const providerLeaseMs = resolveProviderSemanticInactivityMs(context.activeRequest.provider);
+      renewSemanticLease(deps, context, providerLeaseMs, 'provider');
       const liveSeq = context.activeRequest.liveTurnAccumulator?.currentSeq ?? 0;
       if (liveSeq === 0) {
         emitSemanticCandidate(deps, context, { kind: 'turn.started' }, context.activeRequest.turnStartedAt);
         emitSemanticCandidate(deps, context, {
-          kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: 120_000,
+          kind: 'turn.phase', phase: 'preparing', inactivityBudgetMs: providerLeaseMs,
         }, context.activeRequest.turnStartedAt);
       } else {
         emitSemanticCandidate(deps, context, {
-          kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: 120_000,
+          kind: 'turn.phase', phase: 'waiting_provider', inactivityBudgetMs: providerLeaseMs,
         }, context.activeRequest.turnStartedAt);
       }
       return;
@@ -1045,7 +1060,6 @@ export function handleSdkSessionEvent(
         return;
       }
 
-      clearSemanticLease(context);
       // Advance the turn-latency window origin to this tool's finish time. The
       // most recent `tool_execution_end` wins, so parallel/sequential batches
       // anchor on the last tool to finish.
@@ -1071,6 +1085,20 @@ export function handleSdkSessionEvent(
       }
 
       const timing = resolveToolTiming(context, toolCallId);
+      // A tool lease must never disappear while the agent prepares its next
+      // provider turn. Previously tool_execution_end only cleared the lease,
+      // leaving the post-tool/pre-message_start gap unbounded. If the provider
+      // then emitted no message_start, the session appeared to stop for no
+      // reason (or was eventually retired by a stale 30-minute tool lease).
+      // Parallel siblings retain the tool budget; the final tool switches to
+      // the shorter provider-semantic budget until message_start renews it.
+      const runningTools = context.activeRequest.toolStartTimes?.size ?? 0;
+      const nextLeaseKind = runningTools > 0 ? 'tool' as const : 'provider' as const;
+      const nextLeaseMs = nextLeaseKind === 'tool'
+        ? configuredLeaseMs('PIE_TOOL_INACTIVITY_MS', TOOL_INACTIVITY_MS)
+        : resolveProviderSemanticInactivityMs(context.activeRequest.provider);
+      renewSemanticLease(deps, context, nextLeaseMs, nextLeaseKind);
+
       const terminal: ToolFinishedPayload = {
         requestId: context.activeRequest.id,
         sessionPath: context.sessionPath,
@@ -1093,8 +1121,8 @@ export function handleSdkSessionEvent(
       // inter-turn preparation phase.
       emitSemanticCandidate(deps, context, {
         kind: 'turn.phase',
-        phase: (context.activeRequest.toolStartTimes?.size ?? 0) > 0 ? 'running_tool' : 'preparing',
-        inactivityBudgetMs: 120_000,
+        phase: runningTools > 0 ? 'running_tool' : 'preparing',
+        inactivityBudgetMs: nextLeaseMs,
       });
       // Publication is deliberately withheld until the SDK's persisted
       // toolResult message_end arrives with its stable sessionEntryId.
@@ -1389,8 +1417,7 @@ export function handleSdkSessionEvent(
       // transient error, before the backoff sleep + retry turn). Finalizing
       // here would clear `activeRequest` — breaking the retry turn's streaming,
       // since `message_start` / `message_end` are gated on it — and flicker
-      // `busy` false (then true again on the retry's `agent_start`), which
-      // also prematurely fires `session_finished` deferred triggers. Skip
+      // `busy` false (then true again on the retry's `agent_start`). Skip
       // finalization on a will-retry `agent_end`; the final `agent_end`
       // (`willRetry: false`) performs the normal idle cleanup below.
       if (event.willRetry) {
@@ -1480,10 +1507,6 @@ export function handleSdkSessionEvent(
       // available; `activeRequest` is intentionally NOT re-armed (compaction
       // emits no message_start/message_end, which require it). `compaction_end`
       // (or a continuation turn's `agent_start`) restores idle.
-      //
-      // `session_finished` deferred triggers are unaffected: they already
-      // fired at `agent_end`'s busy=false; the `compaction_end` re-fire is a
-      // no-op (`DeferredTriggerRegistry.fire` is idempotent once consumed).
       //
       // Capture the start time so `compaction_end` can compute `durationMs`
       // for the `pie.compaction-metrics` sidecar. Cleared on `compaction_end`

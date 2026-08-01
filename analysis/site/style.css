@@ -121,14 +121,99 @@ code {
   margin-bottom: 14px;
 }
 
-.filters h2 {
-  margin: 0 0 12px;
+/* Sticky section jump-links (desktop + mobile). */
+.section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: rgba(11, 13, 18, 0.9);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.section-nav-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.section-nav-list a {
+  display: inline-block;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.section-nav-list a:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: rgba(255,255,255,0.05);
+}
+
+.section-nav-list a:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Collapsible filters: summary is the mobile toggle; hidden on desktop where
+   the panel is always open (set via JS matchMedia). */
+.filters-summary {
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 2px 10px;
+  color: var(--text-muted);
   font-size: 0.78rem;
   font-weight: 760;
   letter-spacing: 0.13em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  list-style: none;
 }
+
+.filters-summary::-webkit-details-marker { display: none; }
+
+.filters-summary::before {
+  content: "▸";
+  display: inline-block;
+  transition: transform 140ms ease;
+}
+
+.filters-panel[open] > .filters-summary::before {
+  transform: rotate(90deg);
+}
+
+.filters-active-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent2);
+  color: #07140b;
+  font-size: 0.68rem;
+  font-weight: 780;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.filters-active-count[hidden] { display: none; }
 
 .filters-grid {
   display: grid;
@@ -141,6 +226,22 @@ label {
   gap: 5px;
   min-width: 0;
   font-size: 0.86rem;
+}
+
+/* Friendly unmatched-reason labels expose their precise meaning on hover/focus. */
+.join-reason {
+  cursor: help;
+  text-decoration: underline dotted rgba(255,255,255,0.35);
+  text-underline-offset: 2px;
+}
+
+/* Keep anchored sections clear of the sticky section-nav. */
+#main,
+#overview-cards,
+.dashboard-section,
+.dashboard-section h2,
+.diagnostic-block {
+  scroll-margin-top: 72px;
 }
 
 label > span {
@@ -436,16 +537,6 @@ button:hover {
   white-space: nowrap;
 }
 
-.leaderboard-table-shell {
-  margin-top: 14px;
-  max-height: 360px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(0,0,0,0.16);
-  scrollbar-color: var(--border-strong) transparent;
-}
-
 .data-table {
   width: 100%;
   min-width: 1380px;
@@ -612,10 +703,306 @@ button:hover {
   letter-spacing: 0.04em;
 }
 
+/* Skip link (accessibility) */
+.skip-link {
+  position: absolute;
+  top: -60px;
+  left: 12px;
+  z-index: 100;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--accent2);
+  color: #07140b;
+  font-weight: 760;
+  transition: top 140ms ease;
+}
+.skip-link:focus {
+  top: 12px;
+}
+
+main#main {
+  display: block;
+}
+
+/* What to do differently — insight cards */
+.insights-section {
+  margin-bottom: 14px;
+}
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.insight-card {
+  position: relative;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)), var(--panel);
+  box-shadow: var(--shadow);
+}
+.insight-card.insight-actionable { border-left-color: var(--accent); }
+.insight-card.insight-caveat { border-left-color: var(--gold); }
+.insight-card.insight-reliability { border-left-color: var(--coral); }
+.insight-card.insight-no-recommendation { border-left-color: var(--coral); background: rgba(255,133,120,0.08); }
+.insight-tone {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 780;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.insight-actionable .insight-tone { color: var(--accent); }
+.insight-caveat .insight-tone { color: var(--gold); }
+.insight-reliability .insight-tone,
+.insight-no-recommendation .insight-tone { color: var(--coral); }
+.insight-card h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 740;
+  letter-spacing: -0.012em;
+}
+.insight-finding {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.insight-evidence {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+.insight-caveat {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+/* Evidence-reliability banner */
+.reliability-banner {
+  margin: 12px 2px 4px;
+}
+.reliability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+.reliability-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--coral);
+  border-radius: var(--radius-sm);
+  background: rgba(0,0,0,0.14);
+}
+.reliability-card h4 {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.reliability-figure {
+  margin: 0 0 4px;
+  color: var(--gold);
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  font-weight: 760;
+}
+.reliability-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+/* Responsive leaderboard cards */
+.leaderboard-cards-shell {
+  margin-top: 4px;
+}
+.lb-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
+}
+.lb-card {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent2);
+  border-radius: var(--radius-sm);
+  background: rgba(0,0,0,0.14);
+}
+.lb-card.review-backed { border-left-color: var(--accent2); }
+.lb-card.thin-review { border-left-color: var(--gold); }
+.lb-card.telemetry-only { border-left-color: var(--muted); }
+.lb-card.lb-card-uncertain { background: rgba(255, 212, 121, 0.06); }
+.lb-card-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.lb-rank {
+  flex: 0 0 auto;
+  color: var(--accent2);
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 780;
+}
+.lb-model {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 680;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lb-tier {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.lb-score-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.lb-stat {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.lb-stat strong {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  font-weight: 760;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lb-stat span {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.lb-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+.lb-providers {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+.lb-warning {
+  margin: 0;
+  color: var(--gold);
+  font-size: 0.72rem;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+}
+
+/* Collapsible diagnostics */
+.diagnostic-block {
+  margin: 18px 2px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.008)), var(--panel);
+}
+.diagnostic-block > summary {
+  cursor: pointer;
+  padding: 4px 0;
+  color: var(--accent2);
+  font-size: 0.82rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  list-style: none;
+}
+.diagnostic-block > summary::-webkit-details-marker { display: none; }
+.diagnostic-block > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 140ms ease;
+}
+.diagnostic-block[open] > summary::before {
+  transform: rotate(90deg);
+}
+.diagnostic-intro {
+  margin: 8px 0 4px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+.review-details {
+  margin-bottom: 8px;
+}
+.review-details > summary {
+  cursor: pointer;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 680;
+  list-style: none;
+}
+.review-details > summary::-webkit-details-marker { display: none; }
+.review-details > summary::before {
+  content: "▸";
+  margin-right: 6px;
+}
+.review-details[open] > summary::before { content: "▾"; }
+
+/* Desktop: filters are always open and the collapsible summary is hidden. */
+@media (min-width: 721px) {
+  .filters-summary {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .shell {
     width: min(100% - 18px, 1480px);
     padding-top: 10px;
+  }
+
+  .section-nav {
+    padding: 6px 8px;
+    border-radius: 11px;
+  }
+
+  .section-nav-list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .section-nav-list a {
+    flex: 0 0 auto;
   }
 
   .header,
@@ -630,7 +1017,13 @@ button:hover {
   .cards,
   .filters-grid,
   .meta,
-  .coverage-metrics {
+  .coverage-metrics,
+  .insight-grid,
+  .reliability-grid,
+  .lb-card-grid {
+    grid-template-columns: 1fr;
+  }
+  .lb-score-row {
     grid-template-columns: 1fr;
   }
 

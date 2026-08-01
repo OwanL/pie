@@ -5,6 +5,7 @@ import {
   completedRuns,
   estimatedRunCostUsd,
   median,
+  modelColorScale,
   modelFamilyKey,
   selectedRunIds,
   sortNatural,
@@ -474,9 +475,7 @@ function renderBusyFragmentation(ctx: ChartContext) {
         type: 'nominal' as const,
         title: 'Model',
         sort: models,
-        scale: {
-          range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.accent2, CHART_COLORS.gold, CHART_COLORS.success],
-        },
+        scale: modelColorScale(models),
         legend: { orient: 'bottom' as const },
       },
       tooltip: [
@@ -492,6 +491,7 @@ function renderBusyFragmentation(ctx: ChartContext) {
     spec,
     'No completed runs with busy-time data match the current filters.',
     ctx.renderToken,
+    'canvas',
   );
 }
 

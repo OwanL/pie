@@ -17,8 +17,6 @@ function renderRate(runningSessionCount: number, rollingRate = runningSessionCou
       liveTokensPerSecond: rollingRate,
       runningSessionCount,
     },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => undefined,
   }));
 }
 
@@ -28,14 +26,14 @@ test('aggregate stats strip does not present historical throughput as live while
   assert.doesNotMatch(html, />50<\/span><span class="aggregate-strip-unit"> tok\/s/);
 });
 
-test('aggregate stats strip presents the 30-second rolling throughput while running', () => {
+test('aggregate stats strip presents the rolling throughput without a window label while running', () => {
   const html = renderRate(1);
-  assert.match(html, /aggregate-strip-live-tag">30s<\/span>/);
+  assert.doesNotMatch(html, />30s<\/span>/);
   assert.match(html, />25<\/span><span class="aggregate-strip-unit"> tok\/s/);
 });
 
-test('aggregate stats strip retains recent throughput after the run becomes idle', () => {
+test('aggregate stats strip retains recent throughput without a window label after the run becomes idle', () => {
   const html = renderRate(0, 12);
-  assert.match(html, /aggregate-strip-live-tag">30s<\/span>/);
+  assert.doesNotMatch(html, />30s<\/span>/);
   assert.match(html, />12<\/span><span class="aggregate-strip-unit"> tok\/s/);
 });

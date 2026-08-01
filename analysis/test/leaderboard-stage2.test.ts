@@ -25,7 +25,7 @@ test('stage-2 family leaderboard includes transcript-only families but does not 
   fixture.historicalSessions = [matched, opus];
 
   const leaderboard = createModelLeaderboard(prepareSourceAnalytics(fixture));
-  assert.equal(leaderboard.schemaVersion, 6);
+  assert.equal(leaderboard.schemaVersion, 7);
   const opusRow = leaderboard.rows.find((row) => row.modelId === 'claude-opus-4.8');
   assert.ok(opusRow, 'transcript-only Opus family appears');
   assert.equal(opusRow.thinkingLevel, '(all)');

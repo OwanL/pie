@@ -18,7 +18,7 @@ import {
   toggleChatPref,
   toggleChatPrefForContext,
 } from '../../../src/webview/panel/chat-prefs';
-import type { ChatPrefs } from '../../../src/shared/protocol';
+import type { ChatPrefs, ModelInfo } from '../../../src/shared/protocol';
 
 const prefs: ChatPrefs = {
   autoExpandReasoning: false,
@@ -252,8 +252,35 @@ test('subagent provider helpers preserve providers from qualified duplicate-id b
 
   assert.deepEqual(
     getSubagentBucketProviders(configured, []),
-    [],
-    'stale qualified entries must not create provider toggles',
+    ['github-copilot', 'openai-codex'],
+    'qualified bucket assignments keep their provider toggles during a temporary catalog contraction',
+  );
+});
+
+test('subagent provider helpers preserve explicit routes for legacy bare-id buckets', () => {
+  const configured: ChatPrefs = {
+    ...prefs,
+    subagentBuckets: {
+      small: [],
+      medium: ['gpt-5.6-sol'],
+      frontier: [],
+    },
+    subagentProviderDefaults: { 'openai-codex': true, anthropic: false },
+    subagentProviderTogglesBySession: {
+      '/session/a.jsonl': { ollama: true, umans: false },
+    },
+  };
+  const contractedCatalog: ModelInfo[] = [
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 SOL', provider: 'github-copilot', reasoning: true, inputKinds: ['text'] },
+  ];
+
+  assert.deepEqual(
+    getSubagentBucketProviders(configured, contractedCatalog),
+    ['anthropic', 'github-copilot', 'openai-codex'],
+  );
+  assert.deepEqual(
+    getSubagentBucketProviders(configured, contractedCatalog, '/session/a.jsonl'),
+    ['anthropic', 'github-copilot', 'ollama', 'openai-codex', 'umans'],
   );
 });
 

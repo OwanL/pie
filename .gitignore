@@ -55,6 +55,7 @@ out-tsc/
 .parcel-cache/
 .eslintcache
 .skylos/
+.bench-tmp/
 
 # Stale TypeScript emit alongside source (build outputs to /extension/out/)
 extension/src/**/*.js

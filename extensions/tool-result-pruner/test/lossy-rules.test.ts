@@ -334,6 +334,47 @@ extension/src/b.ts:30:const y = 2
   });
 });
 
+describe('CRLF external output', () => {
+  let mod: LossyModule;
+  test.before(async () => {
+    mod = (await import(lossyUrl)) as LossyModule;
+  });
+
+  // These invoke lossy rules directly rather than relying on the lossless
+  // trailing-whitespace rule to normalize the external command output first.
+  test('ls-long normalizes CRLF before parsing', () => {
+    const out = rule('ls-long', mod).run(LS_L_OUTPUT.replaceAll('\n', '\r\n'), bash('ls -l'));
+    assert.equal(out?.text, 'src/\nreadme.md\nlink -> target\n');
+  });
+
+  test('git-log normalizes CRLF before parsing', () => {
+    const out = rule('git-log', mod).run(GIT_LOG_OUTPUT.replaceAll('\n', '\r\n'), bash('git log'));
+    assert.equal(
+      out?.text,
+      'a1b2c3d Fix the widget renderer (HEAD -> main, origin/main)\n' +
+        'f6e5d4c Initial commit\n',
+    );
+  });
+
+  test('grep-group normalizes CRLF before grouping', () => {
+    const output = `extension/src/a.ts:6:foo\r\nextension/src/a.ts:14:bar\r\n`;
+    const out = rule('grep-group', mod).run(output, bash('rg foo'));
+    assert.equal(out?.text, 'extension/src/a.ts\n  6: foo\n  14: bar\n');
+  });
+
+  test('duplicate-collapse normalizes CRLF before collapsing', () => {
+    const input = 'building module A\r\n'.repeat(3) + 'done\r\n';
+    const out = rule('duplicate-collapse', mod).run(input, bash('npm run build'));
+    assert.equal(out?.text, 'building module A\n  (... 2 identical lines)\ndone\n');
+  });
+
+  test('progress-noise normalizes CRLF before removing noise', () => {
+    const input = '⠋ Fetching packages\r\n⠙ Fetching packages\r\nDone\r\n';
+    const out = rule('progress-noise', mod).run(input, bash('npm install'));
+    assert.equal(out?.text, 'Done\n');
+  });
+});
+
 describe('duplicate-collapse rule', () => {
   let mod: LossyModule;
   test.before(async () => {

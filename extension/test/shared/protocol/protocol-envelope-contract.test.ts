@@ -94,7 +94,6 @@ function emptyViewState(): ViewState {
     editingMessageId: null,
     pendingExtensionUIRequestsBySession: {},
     pendingExtensionUIRequest: null,
-    deferredTriggers: [],
     startingModelSessionPaths: [],
   };
 }

@@ -323,7 +323,7 @@ test('listSessions derives names from SDK metadata without rereading the transcr
   assert.equal(sessions[0]?.isPlaceholder, false);
 });
 
-test('listSessions merges configured and legacy SDK roots without hiding history', async () => {
+test('listSessions lists only the configured canonical root and does not scan the SDK legacy default', async () => {
   const configuredDir = path.resolve('/configured/sessions');
   const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
   const legacyPath = path.resolve('/sdk-default/sessions/legacy.jsonl');
@@ -349,7 +349,9 @@ test('listSessions merges configured and legacy SDK roots without hiding history
 
   const sessions = await listSessions(sdk, configuredDir);
 
-  assert.deepEqual(sessions.map((session) => session.path), [canonicalPath, legacyPath]);
+  // The legacy SDK-default root is retired once a canonical root is configured;
+  // its sessions are migrated by the installer and surfaced by `npm run doctor`.
+  assert.deepEqual(sessions.map((session) => session.path), [canonicalPath]);
 });
 
 test('listSessions de-duplicates paths using platform filesystem semantics', async () => {
@@ -365,9 +367,9 @@ test('listSessions de-duplicates paths using platform filesystem semantics', asy
   });
   const sdk = {
     SessionManager: {
-      listAll: async (sessionDir?: string) => [
-        sessionDir ? info(canonicalPath, 'Canonical') : info(duplicatePath, 'Legacy duplicate'),
-      ],
+      listAll: async (sessionDir?: string) => sessionDir
+        ? [info(canonicalPath, 'Canonical'), info(duplicatePath, 'Duplicate')]
+        : [],
     },
   } as Pick<SdkModule, 'SessionManager'> as SdkModule;
 

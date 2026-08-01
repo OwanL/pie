@@ -50,8 +50,6 @@ function props(): SessionTabsProps {
     onMergePinnedGroups: noop,
     onUngroupPinnedTab: noop,
     onRunAction: noop,
-    deferredSessionPaths: [],
-    deferredTimerSessionPaths: [],
   };
 }
 
@@ -68,8 +66,6 @@ function cloneHostSnapshot(value: SessionTabsProps): SessionTabsProps {
     activeSession: value.activeSession ? structuredClone(value.activeSession) : null,
     pendingExtensionUIRequestsBySession: structuredClone(value.pendingExtensionUIRequestsBySession),
     runSummariesBySession: structuredClone(value.runSummariesBySession),
-    deferredSessionPaths: [...value.deferredSessionPaths],
-    deferredTimerSessionPaths: [...value.deferredTimerSessionPaths],
   };
 }
 

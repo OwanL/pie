@@ -7,7 +7,7 @@ import { parseJsonOrThrow, toErrorMessage } from '../shared/error-message';
 
 import type { ModelSubagentInfo } from '../shared/protocol';
 import { loadModelPricing } from './pricing';
-import { backendTrace } from './diag';
+import { backendTrace } from './log';
 
 /**
  * Raw profile shape as stored in `<agentDir>/model-profiles.{yaml,json}`.

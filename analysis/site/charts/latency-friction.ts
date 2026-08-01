@@ -107,7 +107,7 @@ async function renderToolTimeOverlap(ctx: ChartContext): Promise<void> {
     'tool-time-overlap-note',
     rows.length === 0
       ? 'No runs with critical-path tool timing match the current filters; historical absence is not treated as zero overlap.'
-      : `${runCount} measured runs across ${modelCount} models. Grouped bars compare independent medians; parallel overlap is computed per run as cumulative minus critical path before aggregation.`,
+      : `${runCount} measured runs across ${modelCount} models. Stacked bars show critical path + parallel overlap, which sum to cumulative tool time (overlap = cumulative − critical path, computed per run before aggregation).`,
     ctx.renderToken,
   );
   const models = [...new Set(rows.map((row) => row.model))];
@@ -115,14 +115,17 @@ async function renderToolTimeOverlap(ctx: ChartContext): Promise<void> {
     width: 'container',
     height: categoricalHeight(models.length),
     data: { values: rows },
+    // Cumulative = critical path + parallel overlap, so showing all three as
+    // independent grouped bars double-counts. Stack the two parts instead; their
+    // total equals cumulative (kept in the tooltip as a reference).
+    transform: [{ filter: 'datum.component !== "Cumulative"' }],
     mark: { type: 'bar' as const, cornerRadiusEnd: 2, opacity: 0.86 },
     encoding: {
       y: { field: 'model', type: 'nominal' as const, sort: models, title: null, axis: { labelLimit: 260 } },
-      yOffset: { field: 'component', sort: ['Cumulative', 'Critical path', 'Parallel overlap'] },
-      x: { field: 'medianMs', type: 'quantitative' as const, title: 'Median tool time component (ms)', axis: { format: ',.0f' } },
+      x: { field: 'medianMs', type: 'quantitative' as const, title: 'Median tool time (ms) — critical path + overlap = cumulative', axis: { format: ',.0f' } },
       color: {
         field: 'component', type: 'nominal' as const, title: 'Tool time',
-        scale: { domain: ['Cumulative', 'Critical path', 'Parallel overlap'], range: [CHART_COLORS.muted, CHART_COLORS.accent, CHART_COLORS.gold] },
+        scale: { domain: ['Critical path', 'Parallel overlap'], range: [CHART_COLORS.accent, CHART_COLORS.gold] },
         legend: { orient: 'bottom' as const },
       },
       tooltip: [

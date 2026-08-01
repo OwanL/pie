@@ -91,10 +91,46 @@ test('analyzeToolCall classifies failed verification separately from tool-use er
   assert.match(badEdit.failure?.errorExcerpt ?? '', /D:\/Users\/example\/project\/src\/app\.ts/);
 });
 
+test('analyzeToolCall classifies gh pr checks exit code 8 as pending', () => {
+  const pending = analyzeToolCall(makeToolCall({
+    input: { command: 'gh pr checks 123' },
+    result: { exitCode: 8, content: [{ type: 'text', text: 'Some checks are still pending' }] },
+    status: 'failed',
+  }));
+  const nativePending = analyzeToolCall(makeToolCall({
+    input: { command: 'gh.exe pr checks 123' },
+    result: { exitCode: 8 },
+    status: 'failed',
+  }));
+  const failedChecks = analyzeToolCall(makeToolCall({
+    input: { command: 'gh pr checks 123' },
+    result: { exitCode: 1 },
+    status: 'failed',
+  }));
+
+  assert.equal(pending.failure, null);
+  assert.equal(pending.resultIssue?.kind, 'verification_pending');
+  assert.equal(pending.resultIssue?.exitCode, 8);
+  assert.deepEqual(pending.resultIssue?.verificationKinds, ['other']);
+  assert.equal(nativePending.resultIssue?.kind, 'verification_pending');
+  assert.deepEqual(nativePending.resultIssue?.verificationKinds, ['other']);
+  assert.equal(failedChecks.resultIssue?.kind, 'verification_failure');
+});
+
 test('analyzeToolCall classifies probe no-match and shell errors', () => {
   const probe = analyzeToolCall(makeToolCall({
     input: { command: 'rg "missing" src' },
     result: '(no output)\n\nCommand exited with code 1',
+    status: 'failed',
+  }));
+  const statsProbe = analyzeToolCall(makeToolCall({
+    input: { command: 'rg --stats "missing" src' },
+    result: '0 matches\n0 matched lines\n1 file searched\nwarning: hidden files were skipped\n\nCommand exited with code 1',
+    status: 'failed',
+  }));
+  const grepError = analyzeToolCall(makeToolCall({
+    input: { command: 'grep -E "[" package.json' },
+    result: 'grep: Invalid regular expression\n\nCommand exited with code 2',
     status: 'failed',
   }));
   const shell = analyzeToolCall(makeToolCall({
@@ -105,6 +141,12 @@ test('analyzeToolCall classifies probe no-match and shell errors', () => {
 
   assert.equal(probe.failure, null);
   assert.equal(probe.resultIssue?.kind, 'probe_no_match');
+  assert.equal(statsProbe.failure, null);
+  assert.equal(statsProbe.resultIssue?.kind, 'probe_no_match');
+  assert.equal(statsProbe.resultIssue?.exitCode, 1);
+  assert.equal(grepError.failure?.kind, 'nonzero_exit');
+  assert.equal(grepError.failure?.exitCode, 2);
+  assert.equal(grepError.resultIssue, null);
   assert.equal(shell.failure?.kind, 'shell_command_error');
   assert.equal(shell.failure?.exitCode, 127);
 });

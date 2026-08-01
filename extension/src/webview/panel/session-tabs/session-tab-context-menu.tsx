@@ -12,9 +12,6 @@ export interface SessionTabContextMenuProps {
   sessionByPath: Map<string, SessionSummary>;
   runSummary: ActiveRunSummary | null;
   isPinned: boolean;
-  /** True when this tab's session owns a pending deferred trigger — greys out
-   *  the Close Tab item with an explanatory tooltip. */
-  hasDeferredTriggers: boolean;
   onContextAction: (action: SessionTabContextAction, tabPath: string) => void;
 }
 
@@ -23,7 +20,6 @@ export function SessionTabContextMenu({
   sessionByPath,
   runSummary,
   isPinned,
-  hasDeferredTriggers,
   onContextAction,
 }: SessionTabContextMenuProps) {
   const ctxSession = sessionByPath.get(tabContextMenu.tabPath);
@@ -73,8 +69,6 @@ export function SessionTabContextMenu({
       <button
         class="context-menu-item"
         type="button"
-        disabled={hasDeferredTriggers}
-        title={hasDeferredTriggers ? 'Pending deferred trigger(s) — cancel from the status bar first.' : undefined}
         onClick={() => onContextAction('close', tabContextMenu.tabPath)}
       >
         <CloseIcon />

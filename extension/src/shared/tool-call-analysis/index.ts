@@ -176,18 +176,27 @@ function isProbeNoMatch(command: string, text: string, exitCode: number | null):
     return false;
   }
   const normalizedCommand = command.trim().toLowerCase();
-  if (!/(^|\s)(rg|grep|find|ps|test|\[)(\s|$)/.test(normalizedCommand)) {
+  // grep-family tools use exit code 1 for no matches even when they emit
+  // benign stats or advisory text (for example, `rg --stats`).
+  if (/(^|\s)(rg|ripgrep|rga|grep|egrep|fgrep)(\s|$)/.test(normalizedCommand)) {
+    return true;
+  }
+  if (!/(^|\s)(find|ps|test|\[)(\s|$)/.test(normalizedCommand)) {
     return false;
   }
   const normalizedText = text.replace(/Command exited with code\s+1/ig, '').replace(/\(no output\)/ig, '').trim();
   return normalizedText.length === 0;
 }
 
+function isGhPrChecksPending(command: string, exitCode: number | null): boolean {
+  return exitCode === 8 && /\bgh(?:\.exe)?\s+pr\s+checks(?:\s|$)/i.test(command);
+}
+
 /**
  * Classify a failed tool call into exactly one of:
  *  - an execution `failure` (the tool could not do its job), or
  *  - a `resultIssue` (the tool ran fine but reported a non-success result:
- *    a failing test/build/lint, or an empty search).
+ *    a failing test/build/lint, a pending check, or an empty search).
  *
  * A failed call is never both. `timeout` is treated as an execution failure
  * even for verification commands, because a killed command did not produce a
@@ -217,6 +226,15 @@ function classifyToolOutcome(
   }
   if (/command timed out|timed out after|timeout/i.test(resultText)) {
     return { failure: { kind: 'timeout', exitCode, errorExcerpt }, resultIssue: null };
+  }
+
+  // `gh pr checks` uses exit code 8 while checks are still pending. This is a
+  // neutral result issue, not a failed verification or a failed probe.
+  if (isGhPrChecksPending(command, exitCode)) {
+    return {
+      failure: null,
+      resultIssue: { kind: 'verification_pending', exitCode, errorExcerpt, verificationKinds },
+    };
   }
 
   // Non-success results — the tool ran fine but the outcome was not success.

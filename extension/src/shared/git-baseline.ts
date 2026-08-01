@@ -12,12 +12,12 @@ import { toErrorMessage } from './error-message';
 // `shared/` module must not reach into `host/`). Fallback diagnostics go to
 // `process.stderr` (captured by the host's BackendClient.logStderrLine → the
 // "pie (backend)" OutputChannel when run in the backend, and by the host
-// process stderr otherwise) — mirroring `backend/diag.ts`'s `backendTrace`.
+// process stderr otherwise) — mirroring `backend/log.ts`'s `backendTrace`.
 
 /** Write a structured diagnostic JSON line to stderr. Shared/pure-node so it
  *  must not reach into `host/util/pie-log` (a `shared/` → `host/` smell);
  *  stderr is captured by the host's OutputChannel the same way backend lines
- *  are. Mirrors `backend/diag.ts`'s `backendTrace` shape. */
+ *  are. Mirrors `backend/log.ts`'s `backendTrace` shape. */
 function traceDebug(scope: string, event: string, payload: Record<string, unknown>): void {
   process.stderr.write(`[pie] ${JSON.stringify({
     ts: new Date().toISOString(),

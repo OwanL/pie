@@ -12,7 +12,7 @@ Use this skill only for work on the `pie` repository. **pie** is the VS Code sid
 | Path | Purpose |
 |---|---|
 | `extension/` | TypeScript VS Code extension: host, embedded Pi backend, Preact webview, and tests |
-| `extensions/` | Reusable Pi extensions/tools such as subagents, skill pruning, safeguards, session review, and deferred triggers |
+| `extensions/` | Reusable Pi extensions/tools such as subagents, skill pruning, safeguards, session review, and computer-use |
 | `agents/` | Specialized subagent definitions |
 | `skills/` | On-demand workflows, including this one |
 | `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |

@@ -8,7 +8,7 @@ import test from 'node:test';
 import { AggregateStatsService } from '../../../src/host/aggregate-stats-service';
 import { RunAnalyticsStorage } from '../../../src/host/stats-service/storage';
 import { workspaceHash } from '../../../src/host/stats-service/helpers';
-import { atomicWriteText as atomicWriteTextImpl } from '../../../src/host/shared/atomic-write';
+import { atomicWriteText as atomicWriteTextImpl } from '../../../src/shared/atomic-write';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   createEmptyFileMutationRollup,

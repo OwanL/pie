@@ -12,7 +12,6 @@ import type { OnSessionCompleted, ScheduleRender } from './types';
 import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 import { SessionServiceState } from './state';
-import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onRetryStuck, onCompaction, onAuxiliaryLlmUsage } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
@@ -28,7 +27,6 @@ interface SessionServiceEventsOptions {
   state: SessionServiceState;
   dispatchArch: (event: Event) => void;
   getArchState: () => ArchState;
-  triggers: DeferredTriggerRegistry;
 }
 
 export class SessionServiceEvents {
@@ -41,7 +39,6 @@ export class SessionServiceEvents {
   private exitDisposable?: vscode.Disposable;
   private readonly dispatchArch: (event: Event) => void;
   private readonly getArchState: () => ArchState;
-  private readonly triggers: DeferredTriggerRegistry;
 
   constructor(options: SessionServiceEventsOptions) {
     this.context = options.context;
@@ -51,7 +48,6 @@ export class SessionServiceEvents {
     this.dispatchArch = options.dispatchArch;
     this.state = options.state;
     this.getArchState = options.getArchState;
-    this.triggers = options.triggers;
   }
 
   attach(backend: BackendClient): void {
@@ -200,15 +196,6 @@ export class SessionServiceEvents {
         state: this.state,
       },
     );
-
-    // A session finishing streaming fires any `session_finished` deferred
-    // triggers watching it. `busy=false` covers both normal completion AND
-    // interrupts (Stop) — an interrupted session is no longer running, so it
-    // counts as "finished". The registry excludes the watcher's own session
-    // so a deferring turn's completion never self-wakes.
-    if (!payload.busy) {
-      this.triggers.onSessionFinished(sessionPath);
-    }
   }
 
   private requireEventSessionPath(eventName: string, sessionPath: string | undefined): string | null {

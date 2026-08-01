@@ -83,8 +83,6 @@ function newRouter(): import('../../../../src/host/core/message-router').Message
       setPrefs: () => undefined,
       setPruningSettings: async () => undefined,
       setToolResultPruningSettings: async () => undefined,
-      notifyUserInput: () => undefined,
-      cancelDeferredTrigger: () => undefined,
     } as never,
     { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined } as never,
     () => undefined, // scheduleRender
@@ -254,7 +252,7 @@ test('a route failure on a send message keeps the original send-specific notice'
       if ((event as { cmd?: { kind?: string } }).cmd?.kind === 'Send') throw new Error('dispatch exploded');
     },
     () => ({ sessions: { activeSessionPath: '/s', openTabPaths: ['/s'], runningSessionPaths: [], sessions: [] }, composer: { pendingComposerInputsBySession: {} } } as never),
-    { notifyUserInput: () => undefined } as never,
+    {} as never,
     { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
     () => undefined,
     (text: string) => ({ name: text, isPlaceholder: false }),

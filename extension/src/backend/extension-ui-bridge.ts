@@ -3,7 +3,7 @@ import * as crypto from 'node:crypto';
 import type { ExtensionUIRequestPayload, ExtensionUIResponsePayload, ReviewHumanVerificationMetadata } from '../shared/protocol';
 
 interface PendingRequest {
-  resolve: (response: ExtensionUIResponsePayload) => void;
+  settle: (response: ExtensionUIResponsePayload, deferContinuation?: boolean) => void;
   subagentCallId?: string;
 }
 
@@ -83,7 +83,12 @@ export class ExtensionUIBridge {
   resolveRequest(response: ExtensionUIResponsePayload): boolean {
     const pending = this.pending.get(response.id);
     if (!pending) return false;
-    pending.resolve(response);
+    // Claim and clean up the request synchronously, but resume the extension on
+    // the next event-loop turn. Resolving its promise here can let the resumed
+    // extension perform long synchronous work before the backend writes the RPC
+    // acknowledgement. The host then times out, restores an already-consumed
+    // prompt, and every retry fails with UI_REQUEST_NOT_PENDING.
+    pending.settle(response, true);
     return true;
   }
 
@@ -92,7 +97,7 @@ export class ExtensionUIBridge {
   cancelSubagent(subagentCallId: string): void {
     for (const [id, pending] of this.pending) {
       if (pending.subagentCallId !== subagentCallId) continue;
-      pending.resolve({ id, cancelled: true });
+      pending.settle({ id, cancelled: true });
     }
   }
 
@@ -101,7 +106,7 @@ export class ExtensionUIBridge {
    */
   cancelAll(): void {
     for (const [id, pending] of this.pending) {
-      pending.resolve({ id, cancelled: true });
+      pending.settle({ id, cancelled: true });
     }
     this.pending.clear();
   }
@@ -128,22 +133,26 @@ export class ExtensionUIBridge {
     }
     return new Promise<ExtensionUIResponsePayload>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const onAbort = () => finish({ id, cancelled: true });
-      const finish = (response: ExtensionUIResponsePayload) => {
-        if (!this.pending.delete(id)) return;
+      let settled = false;
+      const onAbort = () => settle({ id, cancelled: true });
+      const settle = (response: ExtensionUIResponsePayload, deferContinuation = false) => {
+        if (settled) return;
+        settled = true;
+        this.pending.delete(id);
         if (timer) clearTimeout(timer);
         opts?.signal?.removeEventListener('abort', onAbort);
-        resolve(response);
+        if (deferContinuation) setImmediate(() => resolve(response));
+        else resolve(response);
       };
 
-      this.pending.set(id, { resolve: finish, subagentCallId: payload.subagentCallId });
+      this.pending.set(id, { settle, subagentCallId: payload.subagentCallId });
       if (opts?.signal?.aborted) {
-        finish({ id, cancelled: true });
+        settle({ id, cancelled: true });
         return;
       }
       opts?.signal?.addEventListener('abort', onAbort, { once: true });
       if (opts?.timeout && opts.timeout > 0) {
-        timer = setTimeout(() => finish({ id, cancelled: true }), opts.timeout);
+        timer = setTimeout(() => settle({ id, cancelled: true }), opts.timeout);
         timer.unref?.();
       }
       this.emit('extension_ui.request', payload);

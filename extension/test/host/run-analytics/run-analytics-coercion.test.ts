@@ -483,6 +483,36 @@ test('coerceToolUsageRollup preserves per-tool timed call counts and unknown cri
   assert.equal(measured.criticalPathDurationMs, 0, 'an explicit measured zero remains distinct from legacy absence');
 });
 
+test('coerceToolUsageRollup preserves verification-pending result issues without failure counters', () => {
+  const toolUsage = coerceToolUsageRollup({
+    failureCount: 0,
+    executionFailureCount: 0,
+    verificationProjectFailureCount: 0,
+    probeFailureCount: 0,
+    resultIssueCount: 1,
+    resultIssueCountsByKind: { verification_pending: 1 },
+    resultIssueCountsByName: { bash: 1 },
+    resultIssueCountsByNameAndKind: { bash: { verification_pending: 1 } },
+    resultIssueSamples: [{
+      toolName: 'bash',
+      resultIssueKind: 'verification_pending',
+      exitCode: 8,
+      errorExcerpt: '',
+      verificationKinds: ['other'],
+      occurredAt: '2026-01-03T00:00:00.000Z',
+    }],
+  });
+
+  assert.equal(toolUsage.failureCount, 0);
+  assert.equal(toolUsage.executionFailureCount, 0);
+  assert.equal(toolUsage.verificationProjectFailureCount, 0);
+  assert.equal(toolUsage.probeFailureCount, 0);
+  assert.equal(toolUsage.resultIssueCount, 1);
+  assert.equal(toolUsage.resultIssueCountsByKind.verification_pending, 1);
+  assert.equal(toolUsage.resultIssueCountsByNameAndKind.bash?.verification_pending, 1);
+  assert.equal(toolUsage.resultIssueSamples[0]?.resultIssueKind, 'verification_pending');
+});
+
 test('coerceToolUsageRollup remaps legacy failure kinds into result-issue rollups', () => {
   // Pre-split data: verification_project_failure and probe_no_match were counted
   // under the failure rollups, and no resultIssue* fields existed.

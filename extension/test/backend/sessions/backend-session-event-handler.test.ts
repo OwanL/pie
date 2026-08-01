@@ -1424,6 +1424,47 @@ test('semantic inactivity budget gives slow Umans responses more time without we
   }
 });
 
+test('final tool completion guards the post-tool provider wait with the provider semantic lease', async () => {
+  const previousProvider = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
+  const previousTool = process.env.PIE_TOOL_INACTIVITY_MS;
+  process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '5';
+  process.env.PIE_TOOL_INACTIVITY_MS = '1000';
+  try {
+    const { deps, emitted } = createDeps();
+    const recoveries: Array<{ context: SessionContext; reason: string }> = [];
+    deps.recoverStuckSession = (context, reason) => recoveries.push({ context, reason });
+    const context = createContext({
+      activeRequest: {
+        id: 'req-post-tool-timeout', messageIndex: 1, aborted: false,
+        provider: 'openai-codex', modelId: 'gpt-test',
+        lastAssistantMessageId: 'req-post-tool-timeout:1',
+      },
+    });
+
+    handleSdkSessionEvent(deps, context, {
+      type: 'tool_execution_start', toolCallId: 'tool-finished', toolName: 'bash', args: {},
+    });
+    handleSdkSessionEvent(deps, context, {
+      type: 'tool_execution_end', toolCallId: 'tool-finished', toolName: 'bash', result: { ok: true }, isError: false,
+    });
+    handleSdkSessionEvent(deps, context, { type: 'turn_start' });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(recoveries.length, 1, 'a silent provider after the final tool must be recovered promptly');
+    assert.equal(recoveries[0]?.context, context);
+    assert.match(recoveries[0]?.reason ?? '', /provider stopped producing semantic response events/i);
+    assert.equal(
+      (emitted.find((entry) => entry.event === 'operational-error')?.payload as { code?: string } | undefined)?.code,
+      'PROVIDER_SEMANTIC_TIMEOUT',
+    );
+  } finally {
+    if (previousProvider === undefined) delete process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
+    else process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = previousProvider;
+    if (previousTool === undefined) delete process.env.PIE_TOOL_INACTIVITY_MS;
+    else process.env.PIE_TOOL_INACTIVITY_MS = previousTool;
+  }
+});
+
 test('pre-first-semantic inactivity retires and replaces a runtime even when abort never settles', async () => {
   const previous = process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS;
   process.env.PIE_PROVIDER_SEMANTIC_INACTIVITY_MS = '5';

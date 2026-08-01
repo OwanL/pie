@@ -11,6 +11,7 @@ import { interruptionCharts } from './interruptions.ts';
 import { inputCharts } from './inputs.ts';
 import { throughputCharts } from './throughput.ts';
 import { latencyFrictionCharts } from './latency-friction.ts';
+import { outcomeCharts } from './outcomes.ts';
 
 /**
  * Registry of all analytics charts added in the gap-analysis pass.
@@ -34,4 +35,5 @@ export const newCharts: ChartEntry[] = [
   ...fileTypeCharts,
   ...interruptionCharts,
   ...inputCharts,
+  ...outcomeCharts,
 ];

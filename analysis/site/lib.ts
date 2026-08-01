@@ -13,12 +13,15 @@
  */
 import type {
   BackendErrorData,
+  EvidenceReliabilityData,
   FileExtensionData,
+  OutcomeCorrelationData,
   PreparedRetryTimingRow,
   PreparedRunRow,
   PreparedToolUsageRow,
   PreparedTurnThroughputRow,
   PruningImpactData,
+  ReviewJoinUnmatchedReason,
 } from '../scripts/contracts.ts';
 import { meanDifferenceInterval, meanInterval, wilsonInterval } from './chart-stats.ts';
 import { toErrorMessage } from '../../shared/error-message.js';
@@ -36,11 +39,14 @@ export interface FilterState {
   pureOnly: boolean;
 }
 
+export type ChartRenderer = 'svg' | 'canvas';
+
 export type RenderSpecFn = (
   targetId: string,
   spec: Record<string, unknown> | null,
   emptyMessage: string,
   renderToken: number,
+  renderer?: ChartRenderer,
 ) => Promise<void>;
 
 export type SetNoteFn = (id: string, text: string, renderToken: number) => void;
@@ -60,6 +66,10 @@ export interface ChartContext {
   pruning: PruningImpactData;
   backendErrors: BackendErrorData;
   fileExtensions: FileExtensionData;
+  /** Observational qualityIndexV1 associations across reviewed sessions (cohort-level). */
+  outcomeCorrelations: OutcomeCorrelationData | null;
+  /** Evidence-reliability diagnostics that qualify qualityIndexV1-based recommendations. */
+  evidenceReliability: EvidenceReliabilityData | null;
   /** Render a Vega-Lite spec into a slot (single-sourced in app.ts). */
   renderSpec: RenderSpecFn;
   /** Set a chart's note caption (single-sourced in app.ts). */
@@ -83,6 +93,40 @@ export const CHART_COLORS = {
   muted: '#b9b1a3',
   grid: 'rgba(255,255,255,0.05)',
 };
+
+/**
+ * Extended categorical palette for model-family color scales. The first five
+ * entries are the brand accents; the rest are supplementary distinguishable
+ * hues so charts with more than five model families no longer collide. All
+ * entries are light/bright enough for readable contrast on the dark panels.
+ */
+export const MODEL_PALETTE = [
+  '#8de3ff', // accent (cyan)
+  '#c0ff72', // accent2 (green)
+  '#ffd479', // gold
+  '#ff8578', // coral
+  '#59e17f', // success
+  '#b9a3ff', // violet
+  '#ff9ec7', // pink
+  '#7fd4ff', // sky
+  '#ffe08a', // pale gold
+  '#a3ffeb', // mint
+  '#ffac6b', // orange
+  '#d4b3ff', // lavender
+];
+
+/**
+ * A categorical color scale for model-family series. Uses the extended brand
+ * palette so more than five families remain distinguishable; falls back to a
+ * 20-color scheme only when a cohort exceeds the palette (rare).
+ */
+export function modelColorScale(models?: readonly string[]): { range: string[] } | { scheme: string } {
+  const count = models?.length ?? 0;
+  if (count > MODEL_PALETTE.length) {
+    return { scheme: 'tableau20' };
+  }
+  return { range: MODEL_PALETTE };
+}
 
 export const THINKING_LEVEL_ORDER = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 
@@ -229,7 +273,7 @@ export function categoricalHeight(rowCount: number, rowHeight = 30, min = 260, m
   return Math.min(max, Math.max(min, rowCount * rowHeight));
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -239,20 +283,92 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * Run a sequence of chart entries, isolating failures so one bad chart doesn't
- * abort the rest of the render pass.
+ * Concise friendly label + precise description for a review↔run unmatched
+ * reason. The label is what the user sees; the description retains the exact
+ * meaning (why the review could not be joined) and is exposed via a `title`
+ * attribute in the rendered HTML. The underlying data identifiers
+ * (`no_run_for_identity` / `identity_conflict_at_path`) are never shown raw.
+ */
+export interface JoinUnmatchedReasonLabel {
+  label: string;
+  description: string;
+}
+
+/** Canonical display order for the two unmatched reasons. */
+export const JOIN_UNMATCHED_REASONS: readonly ReviewJoinUnmatchedReason[] = [
+  'no_run_for_identity',
+  'identity_conflict_at_path',
+];
+
+const JOIN_UNMATCHED_REASON_LABELS: Record<ReviewJoinUnmatchedReason, JoinUnmatchedReasonLabel> = {
+  no_run_for_identity: {
+    label: 'No run found',
+    description: 'No run in the export carries the review\u2019s stable session identity, and no run sits at the review\u2019s exact normalized session path \u2014 the reviewed session is absent from this export.',
+  },
+  identity_conflict_at_path: {
+    label: 'Identity conflict',
+    description: 'A run exists at the review\u2019s exact normalized session path but is attributed to a different session identity; joining would risk a false attribution, so the review is deliberately left unmatched.',
+  },
+};
+
+/** Friendly label + precise description for an unmatched reason. */
+export function joinUnmatchedReasonLabel(reason: ReviewJoinUnmatchedReason): JoinUnmatchedReasonLabel {
+  return JOIN_UNMATCHED_REASON_LABELS[reason];
+}
+
+/**
+ * Render the unmatched-by-reason breakdown as accessible HTML: each reason
+ * shows a concise friendly label with its precise meaning exposed via the
+ * `title` attribute (hover/focus tooltip). Counts are data and are unchanged.
+ */
+export function renderJoinUnmatchedReasonsHtml(
+  unmatchedByReason: Record<ReviewJoinUnmatchedReason, number>,
+): string {
+  return JOIN_UNMATCHED_REASONS.map((reason) => {
+    const { label, description } = joinUnmatchedReasonLabel(reason);
+    return `<abbr class="join-reason" title="${escapeHtml(description)}">${escapeHtml(label)}</abbr>: ${unmatchedByReason[reason]}`;
+  }).join(' \u00b7 ');
+}
+
+/**
+ * Plain-text rendering of the same breakdown (for contexts that escape their
+ * output and cannot carry HTML, e.g. insight-card evidence lines). Uses the
+ * friendly labels; the precise per-reason meaning remains available in the
+ * parallel HTML reliability card and the contracts.
+ */
+export function renderJoinUnmatchedReasonsText(
+  unmatchedByReason: Record<ReviewJoinUnmatchedReason, number>,
+): string {
+  return JOIN_UNMATCHED_REASONS.map((reason) => {
+    const { label } = joinUnmatchedReasonLabel(reason);
+    return `${label}: ${unmatchedByReason[reason]}`;
+  }).join(' \u00b7 ');
+}
+
+/**
+ * Run chart entries with bounded concurrency, isolating failures so one bad
+ * chart doesn't abort the rest of the render pass. Bounded parallelism keeps
+ * the dashboard responsive on cohorts with many charts without spiking memory
+ * by embedding every Vega view at once.
  */
 export async function renderChartEntries(entries: ChartEntry[], ctx: ChartContext): Promise<void> {
-  for (const entry of entries) {
-    try {
-      await entry.render(ctx);
-    } catch (error) {
-      const target = document.getElementById(entry.id);
-      if (target) {
-        const message = toErrorMessage(error);
-        target.innerHTML = `<div class="chart-empty">Unable to render chart: ${escapeHtml(message)}</div>`;
+  const concurrency = Math.min(6, Math.max(1, entries.length));
+  let cursor = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (cursor < entries.length) {
+      const entry = entries[cursor]!;
+      cursor += 1;
+      try {
+        await entry.render(ctx);
+      } catch (error) {
+        const target = document.getElementById(entry.id);
+        if (target) {
+          const message = toErrorMessage(error);
+          target.innerHTML = `<div class="chart-empty">Unable to render chart: ${escapeHtml(message)}</div>`;
+        }
+        console.warn(`[pie-analysis] chart ${entry.id} failed:`, error);
       }
-      console.warn(`[pie-analysis] chart ${entry.id} failed:`, error);
     }
-  }
+  });
+  await Promise.all(workers);
 }

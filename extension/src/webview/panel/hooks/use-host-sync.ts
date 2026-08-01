@@ -52,7 +52,6 @@ export const EMPTY_VIEW_STATE: ViewState = {
   runSummariesBySession: {},
   tokenRateBySession: {},
   aggregateStats: EMPTY_AGGREGATE_STATS,
-  deferredTriggers: [],
   busy: false,
   retryStatus: null,
   liveTurnPhase: null,

@@ -762,8 +762,19 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
     stats.onToolStarted(sessionPath, { ...failedVerificationTool, result: undefined, status: 'running' });
     stats.onToolFinished(sessionPath, failedVerificationTool);
 
-    const subagentTool = {
+    const pendingChecksTool = {
       id: 'tool-2',
+      name: 'bash',
+      input: { command: 'gh pr checks 123' },
+      result: { exitCode: 8 },
+      status: 'failed' as const,
+      durationMs: 50,
+    };
+    stats.onToolStarted(sessionPath, { ...pendingChecksTool, result: undefined, status: 'running' });
+    stats.onToolFinished(sessionPath, pendingChecksTool);
+
+    const subagentTool = {
+      id: 'tool-3',
       name: 'subagent',
       input: {
         tasks: [
@@ -779,7 +790,7 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
     stats.onToolFinished(sessionPath, subagentTool);
 
     const mutationTool = {
-      id: 'tool-3',
+      id: 'tool-4',
       name: 'edit',
       input: {
         path: '/workspace/src/main.ts',
@@ -845,31 +856,35 @@ test('StatsService rolls up tool usage, verification commands, subagents, and fi
     }>;
 
     assert.equal(snapshotEntries.length, 1);
-    assert.equal(snapshotEntries[0].run.toolUsage.totalCount, 3);
+    assert.equal(snapshotEntries[0].run.toolUsage.totalCount, 4);
     assert.equal(snapshotEntries[0].run.toolUsage.failureCount, 0);
     assert.equal(snapshotEntries[0].run.toolUsage.executionFailureCount, 0);
     assert.equal(snapshotEntries[0].run.toolUsage.verificationProjectFailureCount, 1);
     assert.equal(snapshotEntries[0].run.toolUsage.probeFailureCount, 0);
-    assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCount, 1);
-    assert.equal(snapshotEntries[0].run.toolUsage.countsByName['bash'], 1);
+    assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCount, 2);
+    assert.equal(snapshotEntries[0].run.toolUsage.countsByName['bash'], 2);
     assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCountsByKind['verification_failure'], 1);
+    assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCountsByKind['verification_pending'], 1);
     assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCountsByNameAndKind['bash']?.['verification_failure'], 1);
+    assert.equal(snapshotEntries[0].run.toolUsage.resultIssueCountsByNameAndKind['bash']?.['verification_pending'], 1);
     assert.equal(snapshotEntries[0].run.toolUsage.failureSamples.length, 0);
     assert.equal(snapshotEntries[0].run.toolUsage.resultIssueSamples[0]?.toolName, 'bash');
     assert.equal(snapshotEntries[0].run.toolUsage.resultIssueSamples[0]?.resultIssueKind, 'verification_failure');
+    assert.equal(snapshotEntries[0].run.toolUsage.resultIssueSamples[1]?.resultIssueKind, 'verification_pending');
     assert.equal(snapshotEntries[0].run.toolUsage.resultIssueSamples[0]?.exitCode, 1);
     assert.deepEqual(snapshotEntries[0].run.toolUsage.resultIssueSamples[0]?.verificationKinds, ['test']);
     assert.equal(snapshotEntries[0].run.toolUsage.subagentCallCount, 1);
     assert.equal(snapshotEntries[0].run.toolUsage.subagentTaskCount, 2);
     assert.deepEqual(snapshotEntries[0].run.toolUsage.subagentAgentNames, ['scout', 'reviewer']);
-    assert.equal(snapshotEntries[0].run.toolUsage.totalDurationMs, 400);
-    assert.equal(snapshotEntries[0].run.toolUsage.timedCallCount, 3);
-    assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['bash'], 100);
+    assert.equal(snapshotEntries[0].run.toolUsage.totalDurationMs, 450);
+    assert.equal(snapshotEntries[0].run.toolUsage.timedCallCount, 4);
+    assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['bash'], 150);
     assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['subagent'], 250);
     assert.equal(snapshotEntries[0].run.toolUsage.durationMsByName['edit'], 50);
-    assert.equal(snapshotEntries[0].run.verification.totalCount, 1);
+    assert.equal(snapshotEntries[0].run.verification.totalCount, 2);
     assert.equal(snapshotEntries[0].run.verification.failureCount, 1);
     assert.equal(snapshotEntries[0].run.verification.countsByKind['test'], 1);
+    assert.equal(snapshotEntries[0].run.verification.countsByKind['other'], 1);
     assert.equal(snapshotEntries[0].run.fileMutation.editCount, 1);
     assert.equal(snapshotEntries[0].run.fileMutation.lineModifications, 2);
   });

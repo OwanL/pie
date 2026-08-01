@@ -119,12 +119,21 @@ export interface SingleResult {
 	 *  "Generating…" placeholder). Cleared on `message_end` alongside
 	 *  {@link streamingText}. */
 	streamingReasoning?: string;
+	/** In-progress tool-call output from the current assistant turn. Captured
+	 * from toolcall_start/toolcall_delta events and cleared on message_end so the
+	 * host can include generated tool names/arguments in the modern live counter. */
+	draftingToolCall?: {
+		id: string;
+		name: string;
+		argumentsText: string;
+	};
 	/** True while the subagent's model is actively generating output for the
-	 *  in-progress assistant turn (set on the first text/thinking delta, cleared
-	 *  on `message_end`). The host's token-rate clock reads this to keep
-	 *  advancing through mid-stream stalls AND reasoning-only streams while
-	 *  PAUSING during the subagent's own tool calls, between turns, and before
-	 *  the first token — mirroring the main session's clock semantics. Without
+	 *  in-progress assistant turn (set on the first text, thinking, or tool-call
+	 *  draft event; cleared on `message_end`). The host's token-rate clock reads
+	 *  this to keep advancing through mid-stream stalls, reasoning-only streams,
+	 *  and tool-call argument drafting while PAUSING during tool execution,
+	 *  between turns, and before the first token — mirroring the main session's
+	 *  clock semantics. Without
 	 *  it the clock used a sticky "has ever produced" predicate that kept
 	 *  advancing (collapsing the rate to 0) while a nested scout sat in
 	 *  read/grep/bash calls. */

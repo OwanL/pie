@@ -151,7 +151,8 @@ function normalizeUsage(value: unknown): SubagentChildPreview['usage'] {
 
 /**
  * Live cumulative output tokens for a child: provider-reported completed output
- * plus the tokens still streaming in the current (not-yet-reported) turn. A
+ * plus text, reasoning, and tool-call output still streaming in the current
+ * (not-yet-reported) turn. A
  * pre-computed `cumulativeOutputTokens` (set by the transport compactor) is
  * reused as-is so high-frequency progress deltas do not re-tokenize the
  * complete stream on every update.
@@ -164,7 +165,13 @@ export function estimateCumulativeSubagentTokens(child: Record<string, unknown>)
   const reportedOutput = numberField(usage, 'output') ?? 0;
   const streamingText = typeof child.streamingText === 'string' ? child.streamingText : '';
   const streamingReasoning = typeof child.streamingReasoning === 'string' ? child.streamingReasoning : '';
-  const streamedTokens = estimatePossiblyLongTextTokens(streamingText) + estimatePossiblyLongTextTokens(streamingReasoning);
+  const draftingToolCall = asRecord(child.draftingToolCall);
+  const draftingToolName = stringField(draftingToolCall, ['name']) ?? '';
+  const draftingToolArguments = stringField(draftingToolCall, ['argumentsText']) ?? '';
+  const streamedTokens = estimatePossiblyLongTextTokens(streamingText)
+    + estimatePossiblyLongTextTokens(streamingReasoning)
+    + estimatePossiblyLongTextTokens(draftingToolName)
+    + estimatePossiblyLongTextTokens(draftingToolArguments);
   return Math.max(0, reportedOutput + streamedTokens);
 }
 

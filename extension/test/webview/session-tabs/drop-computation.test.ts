@@ -221,6 +221,22 @@ test('a dropdown member center-drop onto a standalone commits a group (group/app
   assert.equal(resetCalls, 1);
 });
 
+test('a standalone pinned chip center-drop onto another standalone commits a new group', () => {
+  const { calls, callbacks } = makeCallbacks();
+  let resetCalls = 0;
+  runCommitDrag(
+    { current: baseDragState({ sourcePath: '/b', dropOnPath: '/c', dropIndex: null }) },
+    { current: ['/b', '/c'] },
+    { current: ['/b', '/c'] },
+    { current: [] },
+    callbacks,
+    () => { resetCalls += 1; },
+  );
+  assert.deepEqual(calls.onGroupPinnedTab, [['/b', '/c']]);
+  assert.deepEqual(calls.onMergePinnedGroups, []);
+  assert.equal(resetCalls, 1);
+});
+
 test('a group chip center-drop onto another group commits a merge', () => {
   const { calls, callbacks } = makeCallbacks();
   let resetCalls = 0;

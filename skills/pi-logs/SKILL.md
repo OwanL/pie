@@ -89,11 +89,14 @@ python "<skill-directory>/pi_logs.py" session --last 20               # limit to
 python "<skill-directory>/pi_logs.py" session --cwd /some/project     # pick session for a different cwd
 ```
 
-**Session directory resolution:** `summary` and `session` read from the sessions
-directory resolved in this order: (1) `--sessions-dir <path>` flag; (2)
-`sessionDir` from `settings.json` (resolved relative to the settings file — e.g.
-`data/outcomes/sessions`); (3) `~/.pi/agent/sessions` (pi's default). Pass
-`--sessions-dir` to point at a different store.
+**Session directory resolution:** `summary` and `session` read the canonical
+sessions directory only, resolved in this order: (1) `--sessions-dir <path>`
+flag; (2) `sessionDir` from `settings.json` (resolved relative to the settings
+file — e.g. `data/outcomes/sessions`); (3) `~/.pi/agent/sessions` (pi's SDK
+default, only when `sessionDir` is unset). The runtime no longer scans legacy
+roots — if a session is missing here, run `npm run doctor` to detect sessions
+stranded in a legacy root without a canonical counterpart, then re-run the
+installer to migrate them. Pass `--sessions-dir` to point at a different store.
 
 Entry types: `session`, `message`, `model_change`, `thinking_level_change`, `compaction`,
 `branch_summary`, `custom`, `custom_message`, `label`, `session_info`.

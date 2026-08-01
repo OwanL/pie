@@ -329,7 +329,8 @@ export class SessionRunTracker {
         this.recordExecutionFailure(run, normalizedName, analysis);
       } else if (analysis.resultIssue) {
         // Non-success result: the tool ran fine but reported a non-success outcome
-        // (a failing test/build/lint, or an empty probe/search). Measured, not a failure.
+        // (a failing test/build/lint, a pending check, or an empty probe/search).
+        // Measured, not an execution failure.
         this.recordResultIssue(run, normalizedName, analysis);
       }
     }
@@ -422,7 +423,7 @@ export class SessionRunTracker {
 
     if (resultIssue.kind === 'verification_failure') {
       run.toolUsage.verificationProjectFailureCount += 1;
-    } else {
+    } else if (resultIssue.kind === 'probe_no_match') {
       run.toolUsage.probeFailureCount += 1;
     }
 
@@ -623,7 +624,7 @@ export class SessionRunTracker {
     for (const kind of analysis.verificationKinds) {
       run.verification.countsByKind[kind] += 1;
     }
-    if (toolCall.status === 'failed') {
+    if (toolCall.status === 'failed' && analysis.resultIssue?.kind !== 'verification_pending') {
       run.verification.failureCount += analysis.verificationKinds.length;
     }
   }

@@ -71,5 +71,5 @@ test('structural validator rejects stale schema before row fields', async () => 
   const data = deepClone(await bundle()) as any;
   data.manifest.schemaVersion = 2;
   delete data.modelLeaderboard.rows[0].reviewEvidenceMass;
-  assert.throws(() => validateSiteDataBundle(data), /schemaVersion mismatch: expected 6, got 2/);
+  assert.throws(() => validateSiteDataBundle(data), /schemaVersion mismatch: expected 7, got 2/);
 });

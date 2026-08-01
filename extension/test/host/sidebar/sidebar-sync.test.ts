@@ -17,7 +17,7 @@ const baseViewState: ViewState = {
   activeSession: null, transcript: [],
   transcriptWindow: { totalCount: 0, loadedStart: 0, loadedEnd: 0, hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false },
   transcriptLoaded: false, pendingComposerInputs: [], activeRunSummary: null, runSummariesBySession: {}, tokenRateBySession: {},
-  aggregateStats: EMPTY_AGGREGATE_STATS, deferredTriggers: [], draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
+  aggregateStats: EMPTY_AGGREGATE_STATS, draftText: '', busy: false, retryStatus: null, liveTurnPhase: null, notice: null,
   backendReady: true, workspaceCwd: '/workspace', systemPrompts: [], modelSettings: null, availableModels: [], contextUsage: null,
   prefs: DEFAULT_CHAT_PREFS, availableExtensions: [], fileChanges: [], fileChangesExpanded: false, readFilePaths: [], pruningResult: null,
   prepassPhase: 'idle', prepassStartedAt: null,

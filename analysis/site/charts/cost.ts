@@ -4,6 +4,7 @@ import {
   categoricalHeight,
   estimatedRunCostUsd,
   median,
+  modelColorScale,
   modelFamilyKey,
 } from '../lib.ts';
 import type { PreparedRunRow } from '../../scripts/contracts.ts';
@@ -310,25 +311,29 @@ export const costCharts: ChartEntry[] = [
       const providerCount = new Set(rows.map((r) => r.provider)).size;
       ctx.setNote(
         'cost-trend-by-provider-note',
-        `Daily estimated spend split by provider; ${providerCount} provider${providerCount === 1 ? '' : 's'} shown (top ${COST_TREND_BY_PROVIDER_TOP_N} by spend, remainder folded into 'Other'). Estimated via token usage × model pricing.`,
+        `Daily estimated spend split by provider; ${providerCount} provider${providerCount === 1 ? '' : 's'} shown (top ${COST_TREND_BY_PROVIDER_TOP_N} by spend, remainder folded into 'Other'). The line breaks into a gap on days a provider had no runs instead of plotting a fake $0. Estimated via token usage × model pricing.`,
         ctx.renderToken,
       );
+      const providers = [...new Set(rows.map((r) => r.provider))];
       const spec = rows.length === 0 ? null : {
         width: 'container',
         height: 240,
         data: { values: rows },
+        // A $0 point would conflate "free/no spend" with "no data". Null out
+        // days where a provider had zero runs so the line breaks into a gap
+        // instead of dropping to a fake zero; real $0 spend (runCount > 0,
+        // priced free usage) still plots as a true zero point.
+        transform: [{ calculate: 'datum.runCount > 0 ? datum.totalCostUsd : null', as: 'plottedCost' }],
         layer: [
           {
-            // One line per provider with $0 imputation for missing days and
-            // monotone interpolation to round the corners between days (fewer
-            // sharp spikes). Point markers still reveal the actual data points.
             mark: { type: 'line' as const, strokeWidth: 2, interpolate: 'monotone', point: { filled: true, size: 35, opacity: 0.55 }, opacity: 0.9 },
             encoding: {
               x: { field: 'day', type: 'temporal' as const, title: 'Day', timeUnit: 'yearmonthdate' },
-              y: { field: 'totalCostUsd', type: 'quantitative' as const, title: 'Estimated cost (USD)', axis: { format: '$.2f' } },
+              y: { field: 'plottedCost', type: 'quantitative' as const, title: 'Estimated cost (USD)', axis: { format: '$.2f' } },
               color: {
                 field: 'provider', type: 'nominal' as const, title: 'Provider',
-                scale: { range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.success, CHART_COLORS.gold, CHART_COLORS.accent2, CHART_COLORS.text, CHART_COLORS.muted] },
+                scale: modelColorScale(providers),
+                sort: providers,
                 legend: { orient: 'bottom', labelLimit: 180 },
               },
               tooltip: [

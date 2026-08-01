@@ -120,6 +120,52 @@ function successfulFakeSdk() {
 	});
 }
 
+test("runSingleAgent exposes tool-call drafts while the child model generates them", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_update",
+				assistantMessageEvent: {
+					type: "toolcall_start",
+					contentIndex: 0,
+					partial: { content: [{ type: "toolCall", id: "tool-1", name: "bash" }] },
+				},
+			});
+			emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: '{"command":' } });
+			emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: '"npm test"}' } });
+			await new Promise((resolve) => setTimeout(resolve, 75));
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tool-1", name: "bash", arguments: { command: "npm test" } }],
+					usage: { input: 1, output: 8, cacheRead: 0, cacheWrite: 0, totalTokens: 9, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "toolUse",
+				},
+			});
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+	const updates: any[] = [];
+
+	const result = await runFakeAgent(sdk, (update) => updates.push(structuredClone(update)));
+	const drafting = updates.find((update) => update.details.results[0]?.draftingToolCall?.argumentsText === '{"command":"npm test"}');
+
+	assert.equal(drafting?.details.results[0]?.draftingToolCall?.name, "bash");
+	assert.equal(drafting?.details.results[0]?.streaming, true);
+	assert.equal(result.draftingToolCall, undefined);
+});
+
 test("runSingleAgent publishes its terminal lifecycle before a successful run settles", async () => {
 	const { sdk } = successfulFakeSdk();
 	const updates: any[] = [];

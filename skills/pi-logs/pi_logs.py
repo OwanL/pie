@@ -52,12 +52,15 @@ DEBUG_LOG = AGENT_DIR / "pi-debug.log"
 TMP_DIR = Path(os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp")
 
 # --- Session directory resolution -------------------------------------------
-# pi's settings.json may set "sessionDir" (e.g. "data/outcomes/sessions"),
-# resolved relative to the settings file. Resolution order for the sessions dir:
+# pi's settings.json sets "sessionDir" (canonical: "data/outcomes/sessions"),
+# resolved relative to the settings file. The canonical sessionDir is the single
+# read authority — the runtime no longer scans legacy roots. Resolution order:
 #   1. --sessions-dir flag (per invocation)
 #   2. settings.json `sessionDir` (resolved relative to the settings file,
 #      found by walking up from this script's location)
-#   3. ~/.pi/agent/sessions (pi's default)
+#   3. ~/.pi/agent/sessions (pi's SDK default, only when sessionDir is unset)
+# `npm run doctor` detects any sessions stranded in a legacy root without a
+# canonical counterpart.
 DEFAULT_SESSIONS_DIR = AGENT_DIR / "sessions"
 
 

@@ -26,7 +26,7 @@ const PACKAGE_CONFIGS = [
   {
     id: 'extension',
     cwd: path.join(repoRoot, 'extension'),
-    testGlobs: ['./test/**/*.test.ts'],
+    testGlobs: ['./test/**/*.test.ts', './test/**/*.test.tsx'],
     coverageIncludes: ['src/**/*.ts', 'src/**/*.tsx'],
     thresholds: { lines: 80, branches: 75 },
     fastRunner: path.join(repoRoot, 'scripts', 'run-fast-extension-tests.mjs'),
@@ -160,16 +160,6 @@ const PACKAGE_CONFIGS = [
     // `session_changes` tool) and diff.ts's git exec is integration-only.
     // types-global.d.ts is ambient only. The shared derivation core + git-baseline
     // live in extension/src/shared/ and are covered by the extension suite.
-    thresholds: { lines: 80, branches: 70 },
-  },
-  {
-    id: 'deferred-triggers',
-    cwd: repoRoot,
-    testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],
-    // store.ts (replay + sidecar I/O) is the unit-testable core; index.ts is
-    // env-glue (registers the `defer_trigger` tool) and needs the pi runtime.
-    // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
   {
@@ -393,6 +383,19 @@ async function writeFastCache(fingerprint, totals) {
   await writeFile(fastCachePath, JSON.stringify({ fingerprint, totals }), 'utf8');
 }
 
+function delayUnlessAborted(delayMs, signal) {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, delayMs);
+    signal.addEventListener('abort', finish, { once: true });
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    }
+  });
+}
+
 function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
@@ -542,7 +545,7 @@ function indent(text, prefix = '  ') {
     .join('\n');
 }
 
-function runChildProcess(command, args, cwd, signal, envOverrides = {}) {
+function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCleanExit = false) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
@@ -578,7 +581,16 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}) {
       reject(error);
     });
     child.on('close', async (exitCode, closeSignal) => {
-      const cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
+      let cleanup;
+      if (closeSignal === null && !watchdog.terminationStarted && !verifyCleanExit) {
+        // A normally closed node:test parent has already joined its workers.
+        // Avoid an expensive Windows process-tree census for packages whose
+        // tests never spawn descendants; abort/timeout always verifies cleanup.
+        watchdog.cleanup();
+        cleanup = { gone: true, survivors: [] };
+      } else {
+        cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
+      }
       if (!cleanup.gone) stderr += `\nProcess-tree cleanup failed; surviving owned PIDs: ${cleanup.survivors.join(', ')}.\n`;
       resolve({
         exitCode: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (exitCode ?? 0),
@@ -606,6 +618,7 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
     config.cwd,
     signal,
     integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
+    config.id === 'extension' || integration,
   );
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
@@ -760,7 +773,10 @@ async function main() {
       && executionConfigs.some((config) => config.id === 'extension');
     results = await Promise.all(executionConfigs.map(async (config) => {
       if (staggerFullFastSuite && config.id !== 'extension') {
-        await new Promise((resolve) => setTimeout(resolve, 10_000));
+        // Let esbuild clear its initial CPU burst before starting the tsx
+        // batches. Their execution still overlaps, but transform workers no
+        // longer multiply into the suite's dominant oversubscription spike.
+        await delayUnlessAborted(7_250, processAbort.signal);
       }
       return await runPackage(
         config,

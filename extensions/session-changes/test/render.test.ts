@@ -67,6 +67,11 @@ test('minifyDiff: trims a trailing blank line', () => {
   assert.equal(minifyDiff(raw), '@@ -1 +1 @@\n+a');
 });
 
+test('minifyDiff: normalizes CRLF external diff output', () => {
+  const raw = 'diff --git a/f b/f\r\nindex 1..2\r\n--- a/f\r\n+++ b/f\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n';
+  assert.equal(minifyDiff(raw), '@@ -1 +1 @@\n-old\n+new');
+});
+
 // ─── syntheticCreatedDiff ───────────────────────────────────────────────────
 
 test('syntheticCreatedDiff: full content as additions with a creation hunk header', () => {
@@ -79,6 +84,13 @@ test('syntheticCreatedDiff: full content as additions with a creation hunk heade
 test('syntheticCreatedDiff: trailing newline does not inflate the line count', () => {
   assert.equal(
     syntheticCreatedDiff('a\nb\n'),
+    '@@ -0,0 +1,2 @@\n+a\n+b',
+  );
+});
+
+test('syntheticCreatedDiff: normalizes CRLF file content', () => {
+  assert.equal(
+    syntheticCreatedDiff('a\r\nb\r\n'),
     '@@ -0,0 +1,2 @@\n+a\n+b',
   );
 });

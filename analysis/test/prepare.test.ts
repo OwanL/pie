@@ -193,10 +193,10 @@ test('prepareSourceAnalytics exposes tool result issue rows separate from execut
   const fixture = deepClone(await loadFixture());
   const run = fixture.completedRuns[0] as any;
   run.toolUsage.resultIssueCountsByNameAndKind = {
-    bash: { verification_failure: 2, probe_no_match: 1 },
+    bash: { verification_failure: 2, probe_no_match: 1, verification_pending: 1 },
   };
-  run.toolUsage.resultIssueCountsByName = { bash: 3 };
-  run.toolUsage.resultIssueCount = 3;
+  run.toolUsage.resultIssueCountsByName = { bash: 4 };
+  run.toolUsage.resultIssueCount = 4;
   run.toolUsage.resultIssueSamples = [{
     toolName: 'bash',
     resultIssueKind: 'verification_failure',
@@ -208,13 +208,15 @@ test('prepareSourceAnalytics exposes tool result issue rows separate from execut
 
   const prepared = prepareSourceAnalytics(fixture);
   const rows = prepared.toolResultIssues.filter((row) => row.runId === run.runId);
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 3);
   const verificationRow = rows.find((row) => row.resultIssueKind === 'verification_failure')!;
   assert.equal(verificationRow.toolName, 'bash');
   assert.equal(verificationRow.count, 2);
   assert.equal(verificationRow.exitCode, 1);
   assert.equal(verificationRow.errorExcerpt, 'tests failed');
   assert.deepEqual(verificationRow.verificationKinds, ['test']);
+  const pendingRow = rows.find((row) => row.resultIssueKind === 'verification_pending')!;
+  assert.equal(pendingRow.count, 1);
 });
 
 test('prepareSourceAnalytics derives tool result issue rows from legacy samples when counts are missing', async () => {
@@ -485,16 +487,16 @@ test('prepareSourceAnalytics prices canonical subagent usage by child model with
   fixture.completedRuns.push(crossModel, unknownPricing, unreported, free, remainder);
   const byId = new Map(prepareSourceAnalytics(fixture).runs.map((run) => [run.runId, run]));
 
-  assert.equal(byId.get(crossModel.runId)!.subagentEstimatedCostUsd, 1.2, 'child usage uses the child model rate, not the free parent rate');
-  assert.equal(byId.get(crossModel.runId)!.totalEstimatedCostUsd, 1.2);
+  assert.equal(byId.get(crossModel.runId)!.subagentEstimatedCostUsd, 1.12, 'child usage uses the child model rate, not the free parent rate');
+  assert.equal(byId.get(crossModel.runId)!.totalEstimatedCostUsd, 1.12);
   assert.equal(byId.get(unknownPricing.runId)!.subagentEstimatedCostUsd, null);
   assert.equal(byId.get(unknownPricing.runId)!.totalEstimatedCostUsd, null, 'unknown child pricing makes the complete total unknown');
   assert.equal(byId.get(unreported.runId)!.subagentEstimatedCostUsd, null, 'calls without canonical token usage are unknown');
   assert.equal(byId.get(unreported.runId)!.totalEstimatedCostUsd, null);
   assert.equal(byId.get(free.runId)!.subagentEstimatedCostUsd, 0, 'reported usage on a known free child remains a priced $0');
   assert.equal(byId.get(free.runId)!.totalEstimatedCostUsd, 0);
-  assert.equal(byId.get(remainder.runId)!.subagentEstimatedCostUsd, 1.2, 'duplicate attribution is counted once and the positive remainder uses the parent rate');
-  assert.equal(byId.get(remainder.runId)!.totalEstimatedCostUsd, 1.2);
+  assert.equal(byId.get(remainder.runId)!.subagentEstimatedCostUsd, 1.12, 'duplicate attribution is counted once and the positive remainder uses the parent rate');
+  assert.equal(byId.get(remainder.runId)!.totalEstimatedCostUsd, 1.12);
 });
 
 test('prepareSourceAnalytics flattens functional settings into fs* columns', async () => {

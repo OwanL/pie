@@ -85,7 +85,6 @@ test('loadSourceAnalytics can query a storage-dir run store', async () => {
 function withoutLocalSessionDiscovery(dir: string) {
   return {
     configuredSessionsDir: path.join(dir, 'no-configured-sessions'),
-    legacySessionsDir: path.join(dir, 'no-legacy-sessions'),
     reviewSidecarPath: path.join(dir, 'no-reviews.jsonl'),
   };
 }
@@ -347,6 +346,33 @@ test('coerceRunSnapshot sanitizes nested rollups and optional fields', async () 
   assert.equal(fallback?.fileMutation.editCount, 0);
   assert.deepEqual(fallback?.fileExtensions.readCountsByExtension, {});
   assert.equal(fallback?.verification.totalCount, 0);
+});
+
+test('coerceRunSnapshot preserves neutral verification-pending result issues', async () => {
+  const fixture = await loadFixture();
+  const raw = deepClone(fixture.completedRuns[0]) as any;
+  raw.toolUsage.resultIssueCount = 1;
+  raw.toolUsage.resultIssueCountsByName = { bash: 1 };
+  raw.toolUsage.resultIssueCountsByKind = { verification_pending: 1 };
+  raw.toolUsage.resultIssueCountsByNameAndKind = { bash: { verification_pending: 1 } };
+  raw.toolUsage.resultIssueSamples = [{
+    toolName: 'bash',
+    resultIssueKind: 'verification_pending',
+    exitCode: 8,
+    errorExcerpt: 'checks are still pending',
+    verificationKinds: ['other'],
+    occurredAt: raw.startedAt,
+  }];
+
+  const coerced = coerceRunSnapshot(raw);
+  assert.equal(coerced?.toolUsage.failureCount, 0);
+  assert.equal(coerced?.toolUsage.executionFailureCount, 0);
+  assert.equal(coerced?.toolUsage.verificationProjectFailureCount, 0);
+  assert.equal(coerced?.toolUsage.probeFailureCount, 0);
+  assert.equal(coerced?.toolUsage.resultIssueCount, 1);
+  assert.equal(coerced?.toolUsage.resultIssueCountsByKind.verification_pending, 1);
+  assert.equal(coerced?.toolUsage.resultIssueCountsByNameAndKind.bash?.verification_pending, 1);
+  assert.equal(coerced?.toolUsage.resultIssueSamples[0]?.resultIssueKind, 'verification_pending');
 });
 
 test('coerceRunSnapshot remaps legacy failure kinds into result-issue rollups', async () => {

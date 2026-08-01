@@ -32,16 +32,15 @@ function canonicalSdk(calls: Array<string | undefined>): SdkModule {
 test('SessionCatalog scans once and overlays live session metadata', async () => {
   const configuredDir = path.resolve('/configured/sessions');
   const canonicalPath = path.join(configuredDir, 'canonical.jsonl');
-  const legacyPath = path.resolve('/legacy/session.jsonl');
   const calls: Array<string | undefined> = [];
   const sdk = {
     SessionManager: {
       listAll: async (sessionDir?: string) => {
         calls.push(sessionDir);
         return [{
-          path: sessionDir ? canonicalPath : legacyPath,
+          path: canonicalPath,
           cwd: '/repo',
-          name: sessionDir ? 'Canonical' : 'Legacy',
+          name: 'Canonical',
           modified: new Date('2026-01-01T00:00:00.000Z'),
           messageCount: 1,
         }];
@@ -50,15 +49,15 @@ test('SessionCatalog scans once and overlays live session metadata', async () =>
   } as Pick<SdkModule, 'SessionManager'> as SdkModule;
   const catalog = new SessionCatalog();
 
-  assert.equal((await catalog.list(sdk, configuredDir)).length, 2);
-  const livePath = process.platform === 'win32' ? legacyPath.toUpperCase() : legacyPath;
-  const live = summary(livePath, 'Live legacy', '2026-01-02T00:00:00.000Z');
+  assert.equal((await catalog.list(sdk, configuredDir)).length, 1);
+  const livePath = process.platform === 'win32' ? canonicalPath.toUpperCase() : canonicalPath;
+  const live = summary(livePath, 'Live canonical', '2026-01-02T00:00:00.000Z');
   const second = await catalog.list(sdk, configuredDir, [live]);
 
-  assert.deepEqual(calls, [configuredDir, undefined]);
-  assert.equal(second.length, 2, 'live metadata replaces the discovered path instead of duplicating it');
-  assert.equal(second[0]?.name, 'Live legacy');
-  assert.equal(second.filter((item) => item.name === 'Live legacy').length, 1);
+  assert.deepEqual(calls, [configuredDir]);
+  assert.equal(second.length, 1, 'live metadata replaces the discovered path instead of duplicating it');
+  assert.equal(second[0]?.name, 'Live canonical');
+  assert.equal(second.filter((item) => item.name === 'Live canonical').length, 1);
 });
 
 test('SessionCatalog invalidates only when the visible JSONL inventory changes', async () => {
@@ -103,7 +102,7 @@ test('SessionCatalog invalidates only when the visible JSONL inventory changes',
     );
     assert.equal(await catalog.invalidateIfInventoryChanged(agentDir, configuredDir), false);
     assert.deepEqual((await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name), ['Canonical']);
-    assert.deepEqual(calls, [configuredDir, undefined], 'unchanged inventory remains cache-fast');
+    assert.deepEqual(calls, [configuredDir], 'unchanged inventory remains cache-fast');
 
     await fs.appendFile(canonicalPath, '{"type":"message"}\n');
     assert.equal(
@@ -119,7 +118,7 @@ test('SessionCatalog invalidates only when the visible JSONL inventory changes',
       (await catalog.list(sdk, configuredDir, [], agentDir)).map((item) => item.name),
       ['External', 'Canonical'],
     );
-    assert.deepEqual(calls, [configuredDir, undefined, configuredDir, undefined]);
+    assert.deepEqual(calls, [configuredDir, configuredDir]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -145,7 +144,7 @@ test('SessionCatalog preserves its cached discovery when an inventory refresh ca
     (error: NodeJS.ErrnoException) => error.code === 'EACCES',
   );
   assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir, undefined], 'failed inventory reads must retain the last complete catalog');
+  assert.deepEqual(calls, [configuredDir], 'failed inventory reads must retain the last complete catalog');
 });
 
 test('SessionCatalog discovers through an initial signature failure and forces a refresh after recovery', async () => {
@@ -165,12 +164,12 @@ test('SessionCatalog discovers through an initial signature failure and forces a
   });
 
   assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir, undefined], 'signature failure must not block discovery');
+  assert.deepEqual(calls, [configuredDir], 'signature failure must not block discovery');
   assert.equal(
     await catalog.invalidateIfInventoryChanged(agentDir, configuredDir),
     true,
     'the first successful signature after an unknown baseline must force a safe refresh',
   );
   assert.equal((await catalog.list(sdk, configuredDir, [], agentDir)).length, 1);
-  assert.deepEqual(calls, [configuredDir, undefined, configuredDir, undefined]);
+  assert.deepEqual(calls, [configuredDir, configuredDir]);
 });

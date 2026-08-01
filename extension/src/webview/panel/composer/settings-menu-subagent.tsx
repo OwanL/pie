@@ -214,7 +214,7 @@ interface SubagentSettingsProps {
 export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentSettingsProps) {
   const subagentProviders = useMemo(
     () => getSubagentBucketProviders(prefs, availableModels),
-    [availableModels, prefs.subagentBuckets],
+    [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults],
   );
   const defaultEnabledCount = subagentProviders.filter(
     (provider) => isSubagentProviderEnabled(prefs, provider),
@@ -275,7 +275,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
 
       <UiGroupLabel label="Default providers" />
       <div class="toolbar-settings-item-hint">
-        Sets the initial selection in each chat's subagent provider selector. Per-chat changes override these defaults. Only providers assigned to a model bucket are listed.
+        Sets the initial selection in each chat's subagent provider selector. Per-chat changes override these defaults. Configured providers stay visible if a session's live model list is temporarily stale.
       </div>
       {subagentProviders.length === 0 && (
         <div class="toolbar-settings-item-hint">Add models to the buckets below to configure provider defaults.</div>

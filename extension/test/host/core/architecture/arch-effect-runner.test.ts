@@ -141,6 +141,31 @@ test('EffectRunner routes CompactRpc through the target session queue', async ()
   assert.deepEqual(events, [{ kind: 'CompactResult', corrId: 'compact-1', sessionPath: '/a', ok: true }]);
 });
 
+test('ExtensionUiResponseRpc treats an already-consumed backend request as terminal success', async () => {
+  const { deps, events } = makeEffectRunnerDeps({
+    requestImpl: async (method) => {
+      assert.equal(method, 'extension_ui.response');
+      throw new Error('The extension UI request is no longer pending.');
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'ExtensionUiResponseRpc',
+    corrId: 'ui-stale',
+    sessionPath: '/a',
+    response: { id: 'dialog-1', confirmed: true },
+  });
+  await settle();
+
+  assert.deepEqual(events, [{
+    kind: 'ExtensionUiResponseResult',
+    corrId: 'ui-stale',
+    sessionPath: '/a',
+    ok: true,
+  }]);
+});
+
 test('a slow session RPC cannot block creating another session', async () => {
   let releaseSend!: () => void;
   const slowSend = new Promise<void>((resolve) => { releaseSend = resolve; });

@@ -8,7 +8,6 @@ import {
   readBackendSessionInventorySignature,
   resolveBackendSessionDir,
 } from '../../../src/backend/session-directory';
-import { getDeferredTriggersDir } from '../../../src/shared/deferred-triggers-paths';
 import {
   resolveHostSessionStoragePaths,
   resolveSessionSidecarDirs,
@@ -34,27 +33,7 @@ test('relative session and sidecar directories share the same agent-dir authorit
   assert.equal(sessionDir, path.join(agentDir, 'data/outcomes/sessions'));
   assert.deepEqual(resolveSessionSidecarDirs(sessionDir), {
     reviewsDir: path.join(agentDir, 'data/outcomes/session-reviews'),
-    triggersDir: path.join(agentDir, 'data/outcomes/deferred-triggers'),
   });
-});
-
-test('host deferred-trigger lookup resolves a relative session directory from agentDir', () => {
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
-  const agentDir = path.resolve('/agent');
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  process.env.PI_CODING_AGENT_SESSION_DIR = 'data/outcomes/sessions';
-  try {
-    assert.equal(
-      getDeferredTriggersDir(),
-      path.join(agentDir, 'data/outcomes/deferred-triggers'),
-    );
-  } finally {
-    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-    if (previousSessionDir === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
-    else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir;
-  }
 });
 
 test('host storage authority bases an explicit relative session path on the SDK default agent directory', () => {
@@ -69,7 +48,6 @@ test('host storage authority bases an explicit relative session path on the SDK 
       agentDir,
       sessionDir,
       reviewsDir: path.join(agentDir, 'custom', 'session-reviews'),
-      triggersDir: path.join(agentDir, 'custom', 'deferred-triggers'),
     },
   );
 });
@@ -86,7 +64,6 @@ test('host storage authority resolves a relative agent once before applying the 
       agentDir,
       sessionDir,
       reviewsDir: path.join(agentDir, 'data', 'outcomes', 'session-reviews'),
-      triggersDir: path.join(agentDir, 'data', 'outcomes', 'deferred-triggers'),
     },
   );
 });
@@ -106,7 +83,7 @@ test('host storage authority expands tilde and preserves SDK defaults when no pa
   );
 });
 
-test('session inventory signature covers canonical flat/nested and legacy nested JSONL paths', async () => {
+test('session inventory signature covers canonical flat/nested JSONL paths and retires the legacy SDK root', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-inventory-'));
   try {
     const agentDir = path.join(root, 'agent');
@@ -128,7 +105,24 @@ test('session inventory signature covers canonical flat/nested and legacy nested
 
     assert.notEqual(flat, empty);
     assert.notEqual(nested, flat);
-    assert.notEqual(legacy, nested);
+    assert.equal(legacy, nested, 'the legacy SDK root is not scanned once a canonical root is configured');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('session inventory signature falls back to the SDK default root only when nothing is configured', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-inventory-fallback-'));
+  try {
+    const agentDir = path.join(root, 'agent');
+    const legacyNested = path.join(agentDir, 'sessions', '--legacy--');
+    await fs.mkdir(legacyNested, { recursive: true });
+
+    const empty = await readBackendSessionInventorySignature(agentDir, undefined);
+    await fs.writeFile(path.join(legacyNested, 'legacy.jsonl'), '');
+    const legacy = await readBackendSessionInventorySignature(agentDir, undefined);
+
+    assert.notEqual(legacy, empty, 'the unconfigured SDK default root is still scanned');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -48,12 +48,13 @@ export type ToolFailureKind =
 /**
  * Non-success results: the tool ran to completion and did its job correctly,
  * but the outcome it reported was not "success". These are measured signal
- * (a failing test, a breaking build, an empty search) — NOT tool failures —
- * and are counted under `resultIssueCount` / `resultIssueCountsByKind`.
+ * (a failing test/build, a pending check, or an empty search) — NOT tool
+ * failures — and are counted under `resultIssueCount` / `resultIssueCountsByKind`.
  */
 export type ToolResultIssueKind =
   | 'verification_failure'
-  | 'probe_no_match';
+  | 'probe_no_match'
+  | 'verification_pending';
 
 /**
  * Treatment change kinds: the dimensions of run configuration that can change

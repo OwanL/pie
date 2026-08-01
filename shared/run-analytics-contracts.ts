@@ -118,7 +118,7 @@ export interface ToolFailureSample {
 
 export interface ToolResultIssueSample {
   toolName: string;
-  /** Non-success result kind: a verification command that exposed project failures, or an empty probe/search. */
+  /** Non-success result kind: a verification failure, pending check, or empty probe/search. */
   resultIssueKind: ToolResultIssueKind;
   exitCode: number | null;
   errorExcerpt: string;

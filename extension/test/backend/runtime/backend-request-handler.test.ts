@@ -832,9 +832,7 @@ test('compaction_start/compaction_end re-arm busy so a compaction call stays int
   // agent_end already emitted busy=false (Stop button gone) before the SDK
   // runs its post-agent_end compaction. compaction_start must re-arm busy so
   // the Stop button stays visible (and the session stays interruptable) while
-  // compaction bills; compaction_end restores idle. session_finished deferred
-  // triggers already fired at agent_end — the compaction_end re-fire is a
-  // no-op (DeferredTriggerRegistry.fire is idempotent once consumed).
+  // compaction bills; compaction_end restores idle.
   const harness = createHarness();
 
   // The compaction handlers only call emitBusyChanged (which the harness deps

@@ -292,9 +292,9 @@ test("a retry attempt cannot receive a stale trailing update from the failed att
 		onPrompt: async (emit: any) => {
 			attempts++;
 			if (attempts === 1) {
-				// Tool-call argument generation is credible provider activity but not
-				// visible output or a side effect, so this transport failure remains
-				// replay-safe. The second burst schedules the 20fps trailing update.
+				// Tool-call argument generation is countable live output but not a side
+				// effect, so this transport failure remains replay-safe. The second
+				// burst schedules the 20fps trailing update.
 				emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta" } });
 				emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta" } });
 				throw Object.assign(new Error("provider timed out after retries exhausted"), { code: "ETIMEDOUT" });

@@ -569,7 +569,7 @@ derive umans routing info from models.json only (they do, per the scout). If an 
 script ever needs litellm routing, it should read `models.yaml`'s `upstream` block directly
 going forward.
 
-### 11.6 install.ps1 / install.sh
+### 11.6 install.bat / install.sh
 
 Scout reported these write only VS Code's `settings.json` (IDE settings), not pi's
 `models.json`/`settings.json`. Verify they don't reference model config files in a way that

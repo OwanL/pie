@@ -1001,7 +1001,20 @@ export class EffectRunner {
           await backend.request(rpcMethodFor(effect), rpcParamsFor(effect));
           dispatch(rpcResultFor(effect, { ok: true }));
         } catch (err) {
-          dispatch(rpcResultFor(effect, { ok: false, error: toErrorMessage(err) }));
+          const error = toErrorMessage(err);
+          // A response timeout can race a backend acknowledgement: the backend
+          // consumes the dialog response, the host restores it, then the retry
+          // receives UI_REQUEST_NOT_PENDING. That state is terminal rather than
+          // retryable—the dialog no longer has an owner—so reconcile it as
+          // success instead of restoring a permanently stale prompt.
+          if (
+            effect.kind === 'ExtensionUiResponseRpc'
+            && error === 'The extension UI request is no longer pending.'
+          ) {
+            dispatch(rpcResultFor(effect, { ok: true }));
+          } else {
+            dispatch(rpcResultFor(effect, { ok: false, error }));
+          }
         }
     });
   }

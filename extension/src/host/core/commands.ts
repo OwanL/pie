@@ -41,12 +41,9 @@ export interface SendCommand extends CommandBase {
    *  EffectRunner when the in-flight send resolves (commit / fire / pre-ack
    *  failure) so pruning returns to the user's prior mode for the next turn. */
   priorPruningMode?: PruningMode;
-  /** Host-side tag for synthetic (non-user-typed) sends. Currently set only
-   *  by the deferred-trigger registry's wake-up dispatch to `'deferred-trigger'`
-   *  so the webview can visually differentiate the auto-resume message from a
-   *  typed user message. NOT forwarded to the backend `message.send` RPC (the
-   *  SDK persists user messages without this metadata); on transcript reload
-   *  `mapUserMessage` re-derives the tag from the stable text prefix. */
+  /** Host-side tag for synthetic (non-user-typed) sends. NOT forwarded to
+   *  the backend `message.send` RPC (the SDK persists user messages without
+   *  this metadata). */
   customType?: string;
   /** Structured details for a synthetic send, keyed by `customType`. */
   customDetails?: unknown;

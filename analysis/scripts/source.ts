@@ -97,7 +97,7 @@ const TOOL_FAILURE_KINDS: ToolFailureKind[] = [
   'unknown',
 ];
 
-const TOOL_RESULT_ISSUE_KINDS: ToolResultIssueKind[] = ['verification_failure', 'probe_no_match'];
+const TOOL_RESULT_ISSUE_KINDS: ToolResultIssueKind[] = ['verification_failure', 'probe_no_match', 'verification_pending'];
 
 /**
  * Legacy failure-kind names (pre-split) that are now classified as non-success
@@ -108,13 +108,13 @@ const TOOL_RESULT_ISSUE_KINDS: ToolResultIssueKind[] = ['verification_failure', 
 const LEGACY_RESULT_ISSUE_KIND_MAP: Record<string, ToolResultIssueKind> = {
   verification_project_failure: 'verification_failure',
   probe_no_match: 'probe_no_match',
+  verification_pending: 'verification_pending',
 };
 
 export interface SourceSelection {
   exportPath?: string;
   storageDir?: string;
-  /** Test/embedding overrides for local transcript discovery. */
-  legacySessionsDir?: string;
+  /** Test/embedding override for the canonical local transcript root. */
   configuredSessionsDir?: string;
   /** Canonical V2 production-review JSONL sidecar. */
   reviewSidecarPath?: string;
@@ -280,6 +280,7 @@ function createEmptyToolResultIssueKindRecord(): Record<ToolResultIssueKind, num
   return {
     verification_failure: 0,
     probe_no_match: 0,
+    verification_pending: 0,
   };
 }
 
@@ -295,6 +296,7 @@ interface SplitFailureKinds {
   executionTotal: number;
   verificationTotal: number;
   probeTotal: number;
+  pendingTotal: number;
 }
 
 function splitRawFailureKindRecord(value: unknown): SplitFailureKinds {
@@ -303,8 +305,9 @@ function splitRawFailureKindRecord(value: unknown): SplitFailureKinds {
   let executionTotal = 0;
   let verificationTotal = 0;
   let probeTotal = 0;
+  let pendingTotal = 0;
   if (!isRecord(value)) {
-    return { execution, resultIssue, executionTotal, verificationTotal, probeTotal };
+    return { execution, resultIssue, executionTotal, verificationTotal, probeTotal, pendingTotal };
   }
   for (const [kind, rawCount] of Object.entries(value)) {
     if (typeof rawCount !== 'number' || !Number.isFinite(rawCount) || rawCount < 0) {
@@ -319,12 +322,14 @@ function splitRawFailureKindRecord(value: unknown): SplitFailureKinds {
       resultIssue[mapped] += count;
       if (mapped === 'verification_failure') {
         verificationTotal += count;
-      } else {
+      } else if (mapped === 'probe_no_match') {
         probeTotal += count;
+      } else {
+        pendingTotal += count;
       }
     }
   }
-  return { execution, resultIssue, executionTotal, verificationTotal, probeTotal };
+  return { execution, resultIssue, executionTotal, verificationTotal, probeTotal, pendingTotal };
 }
 
 function coerceToolResultIssueKindRecord(value: unknown): Record<ToolResultIssueKind, number> {
@@ -403,7 +408,7 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
   const countsByName = coerceCountRecord(value.countsByName);
   const failureCountsByName = coerceCountRecord(value.failureCountsByName);
 
-  // Split aggregate by-kind (handles legacy embedded verification/probe kinds).
+  // Split aggregate by-kind (handles legacy embedded result-issue kinds).
   const failureByKindSplit = splitRawFailureKindRecord(value.failureCountsByKind);
 
   // Split per-tool by-name-and-kind; collect derived result-issue-by-name for legacy data.
@@ -415,13 +420,13 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
       if (Object.values(split.execution).some((c) => c > 0)) {
         failureCountsByNameAndKind[toolName] = split.execution;
       }
-      const resultIssueTotal = split.verificationTotal + split.probeTotal;
+      const resultIssueTotal = split.verificationTotal + split.probeTotal + split.pendingTotal;
       if (resultIssueTotal > 0) {
         derivedResultIssueByNameAndKind[toolName] = split.resultIssue;
         // Recompute the per-tool failure count to execution-only: legacy data
-        // embedded verification/probe results in failureCountsByName, so subtract
+        // embedded result issues in failureCountsByName, so subtract
         // the result-issue count now attributed to this tool. (New-format data has
-        // no verification/probe in failureCountsByNameAndKind, so this is a no-op.)
+        // no result issues in failureCountsByNameAndKind, so this is a no-op.)
         if (typeof failureCountsByName[toolName] === 'number') {
           failureCountsByName[toolName] = Math.max(0, failureCountsByName[toolName] - resultIssueTotal);
         }
@@ -443,7 +448,7 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
   const resultIssueCountsByName = coerceCountRecord(value.resultIssueCountsByName);
 
   // Counts: new-format data carries execution-only failureCount + resultIssueCount;
-  // legacy data carries a total failureCount with verification/probe embedded, so recompute.
+  // legacy data carries a total failureCount with result issues embedded, so recompute.
   let failureCount: number;
   let resultIssueCount: number;
   let executionFailureCount: number;
@@ -460,7 +465,7 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
       || failureByKindSplit.verificationTotal;
     probeFailureCount = toNonNegativeInteger(value.probeFailureCount)
       || failureByKindSplit.probeTotal;
-    resultIssueCount = verificationProjectFailureCount + probeFailureCount;
+    resultIssueCount = verificationProjectFailureCount + probeFailureCount + failureByKindSplit.pendingTotal;
     executionFailureCount = toNonNegativeInteger(value.executionFailureCount)
       || failureByKindSplit.executionTotal;
     // Attribute the legacy total minus classified result-issues to execution
@@ -471,7 +476,7 @@ function coerceToolUsageRollup(value: unknown): ToolUsageRollup {
       : Math.max(0, toNonNegativeInteger(value.failureCount) - resultIssueCount);
   }
 
-  // Samples: split legacy samples (which may carry verification/probe kinds) into result-issue samples.
+  // Samples: split legacy samples (which may carry result-issue kinds) into result-issue samples.
   const failureSamples: ToolFailureSample[] = [];
   const resultIssueSamples: ToolResultIssueSample[] = [];
   if (Array.isArray(value.failureSamples)) {
@@ -1463,8 +1468,10 @@ async function configuredSessionsDir(selection: SourceSelection): Promise<string
     const settings = parseJsonOrThrow<unknown>(await fs.readFile(path.join(CONFIG_ROOT, 'settings.json'), 'utf8'), 'settings.json');
     if (isRecord(settings) && typeof settings.sessionDir === 'string' && settings.sessionDir.trim()) {
       if (path.isAbsolute(settings.sessionDir)) return settings.sessionDir;
-      // The runtime resolves sessionDir from the workspace/root location, not analysis/.
-      return path.resolve(CONFIG_ROOT, '..', settings.sessionDir);
+      // The runtime resolves sessionDir from the repo/workspace root (CONFIG_ROOT),
+      // not from analysis/, so a relative `data/outcomes/sessions` resolves to the
+      // canonical <repoRoot>/data/outcomes/sessions store the backend uses.
+      return path.resolve(CONFIG_ROOT, settings.sessionDir);
     }
   } catch {
     // Missing/invalid settings simply means no configured transcript root.
@@ -1476,7 +1483,6 @@ async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, sel
   const reviewSidecarPath = selection.reviewSidecarPath
     ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl');
   source.historicalSessions = await discoverHistoricalSessions({
-    legacySessionsDir: selection.legacySessionsDir ?? path.join(CONFIG_ROOT, 'sessions'),
     configuredSessionsDir: await configuredSessionsDir(selection),
   });
   const sidecar = await readSessionReviewsV2(reviewSidecarPath);

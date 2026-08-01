@@ -14,7 +14,6 @@ export interface HostSessionStoragePaths {
   agentDir?: string;
   sessionDir?: string;
   reviewsDir?: string;
-  triggersDir?: string;
 }
 
 function expandTilde(value: string, homeDir: string): string {
@@ -80,12 +79,10 @@ export function resolveHostSessionStoragePaths(
 
 export function resolveSessionSidecarDirs(sessionDir: string | undefined): {
   reviewsDir?: string;
-  triggersDir?: string;
 } {
   if (!sessionDir) return {};
   const parent = path.dirname(sessionDir);
   return {
     reviewsDir: path.join(parent, 'session-reviews'),
-    triggersDir: path.join(parent, 'deferred-triggers'),
   };
 }

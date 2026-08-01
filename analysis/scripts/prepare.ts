@@ -553,7 +553,7 @@ function prepareToolUsage(run: RunSnapshot): PreparedToolUsageRow[] {
   return [...toolNames]
     .map((toolName) => {
       const callCount = run.toolUsage.countsByName[toolName] ?? 0;
-      // Result-issue breakdown (verification failure / empty probe) now lives in
+      // Result-issue breakdown (verification failure / pending check / empty probe) now lives in
       // the result-issue rollup after the legacy remap; failureCountsByNameAndKind
       // is execution-only. failureCount is execution-only, so executionFailureCount
       // equals failureCount (the old failureCount − verification − probe subtraction
@@ -563,7 +563,7 @@ function prepareToolUsage(run: RunSnapshot): PreparedToolUsageRow[] {
       const probeFailureCount = resultIssueByKind?.probe_no_match ?? 0;
       const failureCount = run.toolUsage.failureCountsByName[toolName] ?? 0;
       const resultIssueCount = run.toolUsage.resultIssueCountsByName[toolName]
-        ?? (verificationProjectFailureCount + probeFailureCount);
+        ?? (verificationProjectFailureCount + probeFailureCount + (resultIssueByKind?.verification_pending ?? 0));
       const totalDurationMs = run.toolUsage.durationMsByName[toolName] ?? 0;
       const timedCallCount = run.toolUsage.timedCallCountsByName[toolName] ?? 0;
       const meanDurationMs = timedCallCount > 0 ? round3(totalDurationMs / timedCallCount) : null;
@@ -696,7 +696,7 @@ function prepareToolResultIssues(run: RunSnapshot): PreparedToolResultIssueRow[]
     });
   };
 
-  const kinds: ToolResultIssueKind[] = ['verification_failure', 'probe_no_match'];
+  const kinds: ToolResultIssueKind[] = ['verification_failure', 'probe_no_match', 'verification_pending'];
   for (const toolName of Object.keys(run.toolUsage.resultIssueCountsByNameAndKind)) {
     const countsByKind = run.toolUsage.resultIssueCountsByNameAndKind[toolName];
     if (!countsByKind) continue;
@@ -1120,6 +1120,16 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     matches.push(run);
     runsBySessionId.set(run.sessionId, matches);
   }
+  // Raw runs keyed by exact normalized session path, used to explain *why* a
+  // review could not be joined. Only exact path matches are considered — never
+  // heuristic/fuzzy similarity — so an unmatched reason is always sound.
+  const runsByNormalizedPath = new Map<string, RunSnapshot[]>();
+  for (const run of dedupedRuns) {
+    const normalizedPath = normalizeSessionPath(run.sessionPath);
+    const existing = runsByNormalizedPath.get(normalizedPath) ?? [];
+    existing.push(run);
+    runsByNormalizedPath.set(normalizedPath, existing);
+  }
   const sessionReviewsV2: PreparedSessionReviewV2Row[] = (source.sessionReviewsV2 ?? []).map((review) => {
     const matchedRuns = runsBySessionId.get(review.sessionId) ?? [];
     const attainment = deriveReviewAttainment(review.ledger);
@@ -1131,6 +1141,9 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
       sessionId: review.sessionId, identityFallback: review.identityFallback, rubricVersion: review.rubricVersion,
       indexVersion: 'v1', reviewedAt: review.reviewedAt, startedDay: review.reviewedAt.slice(0, 10),
       joinKey: matchedRuns.length ? (review.identityFallback ? 'path_fallback' : 'session_id') : 'unmatched',
+      unmatchedReason: matchedRuns.length === 0
+        ? (runsByNormalizedPath.has(normalizeSessionPath(review.sessionPathAtReview)) ? 'identity_conflict_at_path' : 'no_run_for_identity')
+        : null,
       runIds: matchedRuns.map((run) => run.runId).sort(),
       modelFamilies: [...new Set(matchedRuns.map((run) => run.modelFamily).filter((family): family is string => family !== null))].sort(),
       criteria: review.ledger.map((criterion) => ({
@@ -1167,6 +1180,23 @@ export function prepareSourceAnalytics(source: SourceAnalyticsPayload): Prepared
     warmBashSummaries,
     sessionReviewsV2,
     sessionReviewV2Diagnostics: source.sessionReviewV2Diagnostics,
+    reviewJoinCoverage: (() => {
+      const byJoinKey = { session_id: 0, path_fallback: 0, unmatched: 0 };
+      const unmatchedByReason = { no_run_for_identity: 0, identity_conflict_at_path: 0 };
+      for (const row of sessionReviewsV2) {
+        byJoinKey[row.joinKey] += 1;
+        if (row.joinKey === 'unmatched' && row.unmatchedReason) {
+          unmatchedByReason[row.unmatchedReason] += 1;
+        }
+      }
+      return {
+        totalReviews: sessionReviewsV2.length,
+        joinedCount: byJoinKey.session_id + byJoinKey.path_fallback,
+        unmatchedCount: byJoinKey.unmatched,
+        byJoinKey,
+        unmatchedByReason,
+      };
+    })(),
     historicalSessions,
   };
 }

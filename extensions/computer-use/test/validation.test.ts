@@ -48,6 +48,12 @@ test('action unions validate button/key vocab and incompatible combinations', ()
   invalid({ action: 'act', sessionId: 's', input: { kind: 'scroll', deltaX: 0, deltaY: 0 } }, /non-zero/);
 });
 
+test('key validation accepts historical top-row aliases while keeping numpad names distinct', () => {
+  for (const key of ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'digit0', 'digit1', 'digit2', 'digit3', 'digit4', 'digit5', 'digit6', 'digit7', 'digit8', 'digit9', 'Num0', 'NumPad0']) {
+    valid({ action: 'act', sessionId: 's', input: { kind: 'press', key } });
+  }
+});
+
 test('sequence v1 enforces nondecreasing times, serial duration budget, and exactly one source', () => {
   valid({ action: 'run_sequence', sessionId: 's', sequence: { version: 1, actions: [
     { atMs: 0, action: { kind: 'key_down', key: 'W' } },

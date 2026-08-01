@@ -225,13 +225,6 @@ export interface ChatMessage {
   durableEntryId?: string;
 }
 
-/** Details for a `deferred-trigger` custom user message (the wake-up text the
- *  host injects to resume a deferred session). Carries the human-readable fire
- *  reason so the webview can badge the bubble without re-parsing the text. */
-export interface DeferredTriggerDetails {
-  reason: string;
-}
-
 /** Custom-type tag for the durable compaction-metrics sidecar entry appended
  *  to the SDK SessionManager branch after a successful compaction. The sidecar
  *  is a non-context `custom` entry (produced by `appendCustomEntry`) — it never
@@ -274,7 +267,6 @@ export interface CompactionSummaryDetails {
  */
 export type CustomMessageDetails =
   | PruningDetails
-  | DeferredTriggerDetails
   | CompactionSummaryDetails
   | unknown;
 

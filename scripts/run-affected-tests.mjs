@@ -7,13 +7,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { planAffectedTests } from './lib/test-impact.mjs';
+import { getChangedFiles } from './lib/git-changed-files.mjs';
 import {
   abortOnProcessSignals,
   resolveChildProcessTimeoutMs,
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
-import { getChangedFiles } from './run-changed-tests.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 

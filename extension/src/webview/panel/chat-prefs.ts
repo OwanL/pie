@@ -160,8 +160,15 @@ export function setProviderEnabled(prefs: ChatPrefs, provider: string, enabled: 
 
 /** Providers represented by at least one model in a configured subagent bucket.
  * New values are canonical `provider/id` specs. Legacy bare ids are resolved
- * against every matching catalog entry for backward compatibility. */
-export function getSubagentBucketProviders(prefs: ChatPrefs, availableModels: ModelInfo[]): string[] {
+ * against every matching catalog entry for backward compatibility. Explicitly
+ * configured provider preferences are retained when a session's live model catalog
+ * temporarily contracts, so an authenticated provider does not disappear from
+ * the toggle surface merely because the active session has a stale snapshot. */
+export function getSubagentBucketProviders(
+  prefs: ChatPrefs,
+  availableModels: ModelInfo[],
+  sessionPath?: string | null,
+): string[] {
   const specs = [
     ...prefs.subagentBuckets.small,
     ...prefs.subagentBuckets.medium,
@@ -172,16 +179,33 @@ export function getSubagentBucketProviders(prefs: ChatPrefs, availableModels: Mo
     const slash = spec.indexOf('/');
     if (slash > 0 && slash < spec.length - 1) {
       const provider = spec.substring(0, slash);
-      const id = spec.substring(slash + 1);
-      if (availableModels.some((model) => model.provider === provider && model.id === id)) {
-        providers.add(provider);
-      }
+      // A qualified bucket assignment is itself authoritative configuration.
+      // Keep its provider visible even while that model is absent from the
+      // active session's auth-filtered/stale catalog snapshot.
+      providers.add(provider);
       continue;
     }
     for (const model of availableModels) {
       if (model.id === spec) providers.add(model.provider);
     }
   }
+
+  // Preserve explicit defaults/session overrides that were created
+  // while a legacy bare-id bucket resolved to this provider. Without this,
+  // duplicate ids such as GPT-5.6 can collapse to whichever provider remains
+  // in a stale session snapshot (for example Copilot), hiding Codex even though
+  // its persisted subagent route is still configured. Keep both enabled and
+  // disabled entries visible so toggling off never removes the route needed to
+  // turn that provider back on.
+  for (const provider of Object.keys(prefs.subagentProviderDefaults)) {
+    providers.add(provider);
+  }
+  if (sessionPath) {
+    for (const provider of Object.keys(prefs.subagentProviderTogglesBySession[sessionPath] ?? {})) {
+      providers.add(provider);
+    }
+  }
+
   return [...providers].sort((a, b) => a.localeCompare(b));
 }
 

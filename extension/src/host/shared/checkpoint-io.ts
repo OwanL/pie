@@ -9,6 +9,7 @@ import {
 } from '../run-analytics/types';
 import { MIGRATION_FAILED, migrateCheckpoint } from './checkpoint-migrations';
 import { parseJsonOrThrow, toErrorMessage } from '../../shared/error-message';
+import { withTransientFsRetry, type FsRetryDelay } from '../../shared/fs-retry';
 import { appendPieLog } from '../util/pie-log';
 
 // Import choice / cycle-avoidance:
@@ -30,9 +31,17 @@ function isTaskBoundaryIntent(value: unknown): value is Exclude<PersistedSession
   return value === 'new_task' || value === 'continue_task';
 }
 
-async function readOptionalText(filePath: string): Promise<string | null> {
+async function readOptionalText(
+  filePath: string,
+  options?: { readFile?: typeof fs.readFile; delay?: FsRetryDelay },
+): Promise<string | null> {
+  // Retry transient Windows sharing violations (EACCES/EBUSY/EPERM) that arise
+  // when a scanner/indexer/concurrent writer briefly holds the file open.
+  // ENOENT is not transient, so it still reaches the catch below and maps to
+  // null — callers' optional-read semantics are preserved exactly.
+  const readFile = options?.readFile ?? fs.readFile;
   try {
-    return await fs.readFile(filePath, 'utf8');
+    return await withTransientFsRetry(() => readFile(filePath, 'utf8'), { delay: options?.delay });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return null;

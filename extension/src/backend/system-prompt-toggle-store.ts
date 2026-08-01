@@ -3,7 +3,7 @@ import * as path from 'node:path';
 
 import { toErrorMessage } from '../shared/error-message';
 import { REVIEWS_DIR_ENV } from './session-review-store.js';
-import { backendTrace } from './diag.js';
+import { backendTrace } from './log.js';
 
 /**
  * Per-session system-prompt toggle persistence.

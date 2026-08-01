@@ -35,7 +35,7 @@ export type RunSnapshot = BaseRunSnapshot & { sessionId?: string };
 
 export { RUN_ANALYTICS_SCHEMA_VERSION } from '../../shared/run-analytics-contracts.js';
 
-export const SITE_DATA_SCHEMA_VERSION = 6;
+export const SITE_DATA_SCHEMA_VERSION = 7;
 export const DATA_MODE_LOCAL_DEFAULT = 'local-default';
 export const GENERATOR_VERSION = 'analysis-v2';
 
@@ -52,6 +52,8 @@ export const SITE_DATA_FILE_NAMES = [
   'pruning-impact.json',
   'tool-result-pruning-impact.json',
   'session-review-analytics.json',
+  'outcome-correlations.json',
+  'evidence-reliability.json',
   'backend-errors.json',
   'file-types.json',
   'token-throughput.json',
@@ -154,6 +156,31 @@ export interface SessionReviewV2IngestionDiagnostics {
   acceptedCount: number;
   rejectedCount: number;
   rejectedByReason: Record<SessionReviewV2RejectionReason, number>;
+}
+
+/**
+ * Why a review could not be joined to any run. Both reasons are derived from
+ * sound identity evidence only — no heuristic/fuzzy path matching is performed.
+ *
+ * - `no_run_for_identity`: no run in the export carries the review's stable
+ *   session identity, and no run sits at the review's exact normalized session
+ *   path. The reviewed session is simply absent from this export.
+ * - `identity_conflict_at_path`: a run exists at the review's exact normalized
+ *   session path but is attributed to a different session identity (a conflicting
+ *   stable header, or propagation from a different review). Joining would risk a
+ *   false attribution, so the review is deliberately left unmatched.
+ */
+export type ReviewJoinUnmatchedReason = 'no_run_for_identity' | 'identity_conflict_at_path';
+
+/** Aggregate review↔run join coverage for the session-review-analytics artifact. */
+export interface ReviewJoinCoverage {
+  totalReviews: number;
+  /** Reviews joined to at least one run (joinKey !== 'unmatched'). */
+  joinedCount: number;
+  /** Reviews that could not be joined to any run. */
+  unmatchedCount: number;
+  byJoinKey: { session_id: number; path_fallback: number; unmatched: number };
+  unmatchedByReason: { no_run_for_identity: number; identity_conflict_at_path: number };
 }
 
 export type TranscriptSourceProvenance = 'legacy' | 'configured' | 'portable-export';
@@ -738,6 +765,8 @@ export interface PreparedSessionReviewV2Row {
   reviewedAt: string;
   startedDay: string;
   joinKey: 'session_id' | 'path_fallback' | 'unmatched';
+  /** Why the review could not be joined; null unless `joinKey === 'unmatched'`. */
+  unmatchedReason: ReviewJoinUnmatchedReason | null;
   runIds: string[];
   modelFamilies: string[];
   criteria: PreparedSessionReviewCriterionRow[];
@@ -781,6 +810,8 @@ export interface PreparedAnalyticsData {
   warmBashSummaries: PreparedWarmBashSummaryRow[];
   sessionReviewsV2: PreparedSessionReviewV2Row[];
   sessionReviewV2Diagnostics: SessionReviewV2IngestionDiagnostics;
+  /** Aggregate review↔run join coverage, including unmatched reasons. */
+  reviewJoinCoverage: ReviewJoinCoverage;
   /** Privacy-safe historical transcript evidence used by the family-level leaderboard. */
   historicalSessions: PreparedHistoricalSessionSummary[];
 }
@@ -1159,6 +1190,7 @@ export interface SessionReviewAnalyticsData {
   indexVersion: 'v1';
   rows: PreparedSessionReviewV2Row[];
   diagnostics: SessionReviewV2IngestionDiagnostics;
+  joinCoverage: ReviewJoinCoverage;
   summary: {
     reviewCount: number;
     stableIdentityCount: number;
@@ -1235,6 +1267,106 @@ export interface RetryTimingData {
   notes: string[];
 }
 
+// ─── Outcome-correlation bundle (observational, not causal) ─────────────────
+
+/** Behavioral dimensions qualityIndexV1 is compared against. */
+export type OutcomeCorrelationDimensionName =
+  | 'verificationUsage'
+  | 'compaction'
+  | 'thinkingLevel'
+  | 'promptSizeBand'
+  | 'pruningMode'
+  | 'subagentParentModel';
+
+export interface OutcomeCorrelationGroup {
+  /** Behavioral group value (e.g. 'verified', 'high', 'auto', 'true'). */
+  value: string;
+  /** Reviewed sessions (n) in this group. */
+  sessionCount: number;
+  meanQualityIndexV1: number;
+  /** 95% Student-t confidence interval for the group mean; null when n < 2. */
+  meanCi95: { lower: number; upper: number; level: 0.95 } | null;
+}
+
+export interface OutcomeCorrelationDifference {
+  /** Reference group (largest tracked sample). */
+  referenceValue: string;
+  /** Comparison group. */
+  comparisonValue: string;
+  /** Comparison mean − reference mean. */
+  observedMeanDifference: number;
+  /** 95% Welch (unequal-variance) t confidence interval for the difference; null when either group has n < 2. */
+  differenceCi95: { lower: number; upper: number; level: 0.95 } | null;
+  referenceSessionCount: number;
+  comparisonSessionCount: number;
+}
+
+export interface OutcomeCorrelationDimension {
+  dimension: OutcomeCorrelationDimensionName;
+  /** How the behavior was derived (observational grouping, never a controlled treatment). */
+  description: string;
+  /** Reviewed sessions contributing a tracked (non-untracked) group value. */
+  includedSessionCount: number;
+  /** Reviewed sessions whose behavior was untracked for this dimension. */
+  untrackedSessionCount: number;
+  groups: OutcomeCorrelationGroup[];
+  /** Observed mean differences vs the reference group (largest tracked sample). Empty for <2 tracked groups. */
+  differences: OutcomeCorrelationDifference[];
+}
+
+export interface OutcomeCorrelationData {
+  schemaVersion: number;
+  cohortLabel: string;
+  /** Outcome metric under comparison. */
+  outcomeMetric: 'qualityIndexV1';
+  /** The canonical V2 quality formula is unchanged; this bundle only reads the index for observational grouping. */
+  outcomeSource: 'canonical_v2_qualityIndexV1_unchanged';
+  /** Unit of analysis: one reviewed session (latest review per stable identity) with a non-null qualityIndexV1 that joined at least one run. */
+  unitOfAnalysis: string;
+  /** Analyzable cohort: reviewed sessions with a non-null qualityIndexV1 that joined at least one run. */
+  analyzableSessionCount: number;
+  /** Reviewed sessions with a non-null qualityIndexV1 that joined no run (excluded from every dimension). */
+  unmatchedExcludedCount: number;
+  dimensions: OutcomeCorrelationDimension[];
+  notes: string[];
+}
+
+// ─── Evidence-reliability diagnostics ─────────────────────────────────────
+
+export interface EvidenceReliabilityFamilyShare {
+  family: string;
+  /** Fractional-summed reviewed-session mass attributed to this family (equal-split across a session's families). */
+  reviewedSessionCount: number;
+  /** Share of all attributed reviewed sessions (0–1). */
+  share: number;
+}
+
+export interface EvidenceReliabilityData {
+  schemaVersion: number;
+  cohortLabel: string;
+  /** Reviews with a non-null qualityIndexV1 (the cohort the diagnostics qualify). */
+  reviewedSessionCount: number;
+  /** Reviewed sessions attributed to at least one model family via joined runs. */
+  attributedSessionCount: number;
+  /** Reviewed sessions with no attributable family (unmatched or no family on joined runs). */
+  unattributedCount: number;
+  /** Distinct model families with at least one attributed reviewed session. */
+  effectiveReviewedFamilies: number;
+  /** Most-attributed family and its share of attributed reviewed sessions; null when nothing is attributed. */
+  dominantFamily: { family: string; share: number; reviewedSessionCount: number } | null;
+  ceilingSaturation: {
+    /** Share of reviewed sessions at the exact qualityIndexV1 ceiling (100). */
+    perfectRate: number;
+    /** Share in the top 'achieved' band ([85, 100]). */
+    achievedBandRate: number;
+    medianQualityIndexV1: number | null;
+    /** Distinct qualityIndexV1 values observed (1 means the index does not discriminate). */
+    distinctQualityIndexValues: number;
+  };
+  familyShares: EvidenceReliabilityFamilyShare[];
+  notes: string[];
+}
+
 export interface SiteDataBundle {
   manifest: SiteManifest;
   overview: OverviewData;
@@ -1252,4 +1384,6 @@ export interface SiteDataBundle {
   fileExtensions: FileExtensionData;
   tokenThroughput: TokenThroughputData;
   retryTiming: RetryTimingData;
+  outcomeCorrelations: OutcomeCorrelationData;
+  evidenceReliability: EvidenceReliabilityData;
 }

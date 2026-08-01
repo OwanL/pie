@@ -7,8 +7,9 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to content</a>
     <div class="shell">
-      <header class="header">
+      <header class="header" role="banner">
         <div><h1>Run Analytics</h1></div>
         <div class="meta">
           <div><span>Generated:</span> <strong id="generated-at">—</strong></div>
@@ -18,9 +19,26 @@
         </div>
       </header>
 
-      <section class="filters">
-        <h2>Filters</h2>
-        <form id="filters" class="filters-grid">
+      <nav class="section-nav" id="section-nav" aria-label="Page sections">
+        <ul class="section-nav-list">
+          <li><a href="#overview-cards">Overview</a></li>
+          <li><a href="#insights-heading">Insights</a></li>
+          <li><a href="#model-choice-heading">Models</a></li>
+          <li><a href="#outcomes-heading">Outcomes</a></li>
+          <li><a href="#cost-heading">Cost &amp; perf</a></li>
+          <li><a href="#diagnostics-runtime">Telemetry</a></li>
+          <li><a href="#diagnostics-pruning">Pruning &amp; files</a></li>
+          <li><a href="#diagnostics-reviews">Reviews</a></li>
+        </ul>
+      </nav>
+
+      <nav class="filters" aria-label="Cohort filters">
+        <details class="filters-panel" id="filters-panel">
+          <summary class="filters-summary">
+            <span>Filters</span>
+            <span class="filters-active-count" id="filters-active-count" aria-live="polite" hidden></span>
+          </summary>
+          <form id="filters" class="filters-grid">
           <label><span>Start date</span><input id="filter-start" type="date" /></label>
           <label><span>End date</span><input id="filter-end" type="date" /></label>
           <label><span>Model</span><select id="filter-model"><option value="">All models</option></select></label>
@@ -30,64 +48,112 @@
           <label><span>Pruning mode</span><select id="filter-pruning-mode"><option value="">All modes</option></select></label>
           <label class="toggle"><input id="filter-pure-only" type="checkbox" /><span>Pure treatments only</span></label>
           <button id="filter-reset" type="button" class="ghost-button">Reset filters</button>
-        </form>
+          </form>
+        </details>
+        <script>(function(){try{var d=document.getElementById('filters-panel');if(d){d.open=window.matchMedia('(min-width:721px)').matches;}}catch(e){}})();</script>
+      </nav>
+
+      <main id="main">
+      <section id="coverage-banner" class="coverage-banner" aria-live="polite"></section>
+      <section class="cards" id="overview-cards" aria-label="Overview metrics"></section>
+
+      <section class="dashboard-section insights-section" aria-labelledby="insights-heading">
+        <p class="section-kicker">What to do differently</p>
+        <h2 id="insights-heading">Actionable insights</h2>
+        <p>Observational associations between your behaviors and review outcomes, with sample sizes and uncertainty. These are cohort-level and cwd-agnostic. No recommendation is made when the evidence is too sparse or skewed.</p>
+        <div id="actionability-insights" aria-live="polite"></div>
       </section>
 
-      <section id="coverage-banner" class="coverage-banner" aria-live="polite"></section>
-      <section class="cards" id="overview-cards"></section>
+      <section class="dashboard-section" aria-labelledby="model-choice-heading">
+        <p class="section-kicker">Model choice</p>
+        <h2 id="model-choice-heading">Compare models using canonical V2 criterion evidence</h2>
+        <p>Ranks are provisional cohort-relative estimates. Sparse review evidence and overlapping rank intervals remain conspicuous while every available rank stays visible. Runtime telemetry is diagnostic and has zero ranking weight.</p>
+        <div class="charts">
+          <section class="chart span-2" aria-label="V2 model leaderboard"><h3>V2 model leaderboard <span class="note" id="leaderboard-note">—</span></h3><div id="chart-leaderboard" class="chart-slot" role="img" aria-label="V2 review-quality score per model family with 80% interval"></div></section>
+          <section class="chart span-2" aria-label="Leaderboard detail cards"><h3>Ranked families <span class="note">cards reflow on mobile</span></h3><div id="leaderboard-cards" class="leaderboard-cards-shell" aria-live="polite"></div></section>
+          <section class="chart span-2" aria-label="Quality versus cost"><h3>Quality vs cost <span class="note" id="quality-vs-cost-note">—</span></h3><div id="chart-quality-vs-cost" class="chart-slot" role="img" aria-label="V2 review quality against median cost per run"></div></section>
+        </div>
+      </section>
 
-      <div class="charts">
-        <header class="dashboard-section span-2">
-          <p class="section-kicker">V2 reviews &amp; model choice</p>
-          <h2>Compare models using canonical V2 criterion evidence</h2>
-          <p>Ranks are provisional cohort-relative estimates. Sparse review evidence and overlapping rank intervals remain conspicuous while every available rank stays visible. Runtime telemetry is diagnostic and has zero ranking weight.</p>
-        </header>
-        <section class="chart span-2"><h3>V2 model leaderboard <span class="note" id="leaderboard-note">—</span></h3><div id="chart-leaderboard" class="chart-slot"></div><div id="leaderboard-table" class="leaderboard-table-shell" aria-live="polite"></div></section>
-        <section class="chart span-2"><h3>V2 session review analytics <span class="note">cohort-level; independent of run filters</span></h3><div id="session-review-analytics" aria-live="polite"></div></section>
-        <section class="chart span-2"><h3>Runtime trend <span class="note" id="timeline-note">—</span></h3><div id="chart-timeline" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Model runtime efficiency <span class="note" id="model-efficiency-note">—</span></h3><div id="chart-model-efficiency" class="chart-slot"></div></section>
+      <section class="dashboard-section" aria-labelledby="outcomes-heading">
+        <p class="section-kicker">Behavior vs outcome</p>
+        <h2 id="outcomes-heading">How behaviors associate with review quality</h2>
+        <p>qualityIndexV1 grouped across six behavioral dimensions. Points are group means; bars are 95% confidence intervals. Differences use Welch intervals. Observational only — never implies causality and never alters the V2 quality formula.</p>
+        <div id="evidence-reliability-banner" class="reliability-banner" aria-live="polite"></div>
+        <div class="charts outcome-charts">
+          <section class="chart" aria-label="Verification usage vs outcome"><h3>Verification usage <span class="note" id="outcome-verificationUsage-note">—</span></h3><div id="chart-outcome-verificationUsage" class="chart-slot" role="img" aria-label="qualityIndexV1 by verification usage"></div></section>
+          <section class="chart" aria-label="Compaction vs outcome"><h3>History compaction <span class="note" id="outcome-compaction-note">—</span></h3><div id="chart-outcome-compaction" class="chart-slot" role="img" aria-label="qualityIndexV1 by compaction"></div></section>
+          <section class="chart" aria-label="Thinking level vs outcome"><h3>Thinking level <span class="note" id="outcome-thinkingLevel-note">—</span></h3><div id="chart-outcome-thinkingLevel" class="chart-slot" role="img" aria-label="qualityIndexV1 by thinking level"></div></section>
+          <section class="chart" aria-label="Prompt size vs outcome"><h3>Prompt size band <span class="note" id="outcome-promptSizeBand-note">—</span></h3><div id="chart-outcome-promptSizeBand" class="chart-slot" role="img" aria-label="qualityIndexV1 by prompt size band"></div></section>
+          <section class="chart" aria-label="Pruning mode vs outcome"><h3>Pruning mode <span class="note" id="outcome-pruningMode-note">—</span></h3><div id="chart-outcome-pruningMode" class="chart-slot" role="img" aria-label="qualityIndexV1 by pruning mode"></div></section>
+          <section class="chart" aria-label="Subagent parent model vs outcome"><h3>Subagent parent model <span class="note" id="outcome-subagentParentModel-note">—</span></h3><div id="chart-outcome-subagentParentModel" class="chart-slot" role="img" aria-label="qualityIndexV1 by subagent parent model"></div></section>
+        </div>
+      </section>
 
-        <header class="dashboard-section span-2"><p class="section-kicker">Cost &amp; performance</p><h2>Understand spend, token use, and throughput</h2><p>Operational views use the complete filtered runtime cohort.</p></header>
-        <section class="chart span-2"><h3>Cost by model <span class="note" id="cost-by-model-note">—</span></h3><div id="chart-cost-by-model" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Average cost per session by model <span class="note" id="cost-per-session-by-model-note">—</span></h3><div id="chart-cost-per-session-by-model" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Cost trend <span class="note" id="cost-trend-note">—</span></h3><div id="chart-cost-trend" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Cost trend by provider <span class="note" id="cost-trend-by-provider-note">—</span></h3><div id="chart-cost-trend-by-provider" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Subagent cost attribution <span class="note" id="subagent-cost-attribution-note">—</span></h3><div id="chart-subagent-cost-attribution" class="chart-slot"></div></section>
-        <section class="chart"><h3>Cost efficiency by model <span class="note" id="cost-efficiency-note">—</span></h3><div id="chart-cost-efficiency" class="chart-slot"></div></section>
-        <section class="chart"><h3>Cost per minute by model <span class="note" id="cost-per-minute-note">—</span></h3><div id="chart-cost-per-minute" class="chart-slot"></div></section>
-        <section class="chart"><h3>Cache hit by model <span class="note" id="cache-hit-by-model-note">—</span></h3><div id="chart-cache-hit-by-model" class="chart-slot"></div></section>
-        <section class="chart"><h3>Cache hit trend <span class="note" id="cache-hit-trend-note">—</span></h3><div id="chart-cache-hit-trend" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Token volume by model <span class="note" id="token-volume-note">—</span></h3><div id="chart-token-volume" class="chart-slot"></div></section>
-        <section class="chart"><h3>Token efficiency by model <span class="note" id="token-efficiency-by-model-note">—</span></h3><div id="chart-token-efficiency-by-model" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Token throughput over time <span class="note" id="throughput-over-time-note">—</span></h3><div id="chart-throughput-over-time" class="chart-slot"></div></section>
-        <section class="chart"><h3>Throughput by model <span class="note" id="throughput-by-model-note">—</span></h3><div id="chart-throughput-by-model" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Throughput vs concurrency <span class="note" id="throughput-vs-concurrency-note">—</span></h3><div id="chart-throughput-vs-concurrency" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Context-window growth <span class="note" id="context-growth-note">—</span></h3><div id="chart-context-growth" class="chart-slot"></div></section>
+      <section class="dashboard-section" aria-labelledby="cost-heading">
+        <p class="section-kicker">Cost &amp; performance</p>
+        <h2 id="cost-heading">Understand spend, token use, and throughput</h2>
+        <p>Operational views use the complete filtered runtime cohort.</p>
+        <div class="charts">
+          <section class="chart span-2" aria-label="Cost by model"><h3>Cost by model <span class="note" id="cost-by-model-note">—</span></h3><div id="chart-cost-by-model" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Average cost per session by model"><h3>Average cost per session by model <span class="note" id="cost-per-session-by-model-note">—</span></h3><div id="chart-cost-per-session-by-model" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Cost trend"><h3>Cost trend <span class="note" id="cost-trend-note">—</span></h3><div id="chart-cost-trend" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Cost trend by provider"><h3>Cost trend by provider <span class="note" id="cost-trend-by-provider-note">—</span></h3><div id="chart-cost-trend-by-provider" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Subagent cost attribution"><h3>Subagent cost attribution <span class="note" id="subagent-cost-attribution-note">—</span></h3><div id="chart-subagent-cost-attribution" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Cost efficiency by model"><h3>Cost efficiency by model <span class="note" id="cost-efficiency-note">—</span></h3><div id="chart-cost-efficiency" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Cost per minute by model"><h3>Cost per minute by model <span class="note" id="cost-per-minute-note">—</span></h3><div id="chart-cost-per-minute" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Cache hit by model"><h3>Cache hit by model <span class="note" id="cache-hit-by-model-note">—</span></h3><div id="chart-cache-hit-by-model" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Cache hit trend"><h3>Cache hit trend <span class="note" id="cache-hit-trend-note">—</span></h3><div id="chart-cache-hit-trend" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Token volume by model"><h3>Token volume by model <span class="note" id="token-volume-note">—</span></h3><div id="chart-token-volume" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Token efficiency by model"><h3>Token efficiency by model <span class="note" id="token-efficiency-by-model-note">—</span></h3><div id="chart-token-efficiency-by-model" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Token throughput over time"><h3>Token throughput over time <span class="note" id="throughput-over-time-note">—</span></h3><div id="chart-throughput-over-time" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Throughput by model"><h3>Throughput by model <span class="note" id="throughput-by-model-note">—</span></h3><div id="chart-throughput-by-model" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Throughput vs concurrency"><h3>Throughput vs concurrency <span class="note" id="throughput-vs-concurrency-note">—</span></h3><div id="chart-throughput-vs-concurrency" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Context-window growth"><h3>Context-window growth <span class="note" id="context-growth-note">—</span></h3><div id="chart-context-growth" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Runtime trend"><h3>Runtime trend <span class="note" id="timeline-note">—</span></h3><div id="chart-timeline" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Model runtime efficiency"><h3>Model runtime efficiency <span class="note" id="model-efficiency-note">—</span></h3><div id="chart-model-efficiency" class="chart-slot"></div></section>
+        </div>
+      </section>
 
-        <header class="dashboard-section span-2"><p class="section-kicker">Runtime telemetry</p><h2>Inspect latency, reliability, and workflow friction</h2><p>Measured-only timing excludes missing historical samples rather than presenting them as zero.</p></header>
-        <section class="chart span-2"><h3>Runtime friction timing <span class="note" id="runtime-friction-timing-note">—</span></h3><div id="chart-runtime-friction-timing" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Cumulative vs critical-path tool time <span class="note" id="tool-time-overlap-note">—</span></h3><div id="chart-tool-time-overlap" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Turn latency decomposition <span class="note" id="latency-decomposition-note">—</span></h3><div id="chart-latency-decomposition" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Tool execution time by tool <span class="note" id="tool-duration-note">—</span></h3><div id="chart-tool-duration" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Compaction &amp; retry friction <span class="note" id="compaction-retry-friction-note">—</span></h3><div id="chart-compaction-retry-friction" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Verification kind breakdown <span class="note" id="verification-kind-breakdown-note">—</span></h3><div id="chart-verification-kind-breakdown" class="chart-slot"></div></section>
-        <section class="chart"><h3>Net mutation by model <span class="note" id="net-mutation-note">—</span></h3><div id="chart-net-mutation" class="chart-slot"></div></section>
-        <section class="chart"><h3>Busy fragmentation <span class="note" id="busy-fragmentation-note">—</span></h3><div id="chart-busy-fragmentation" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Token coverage by model <span class="note" id="token-coverage-note">—</span></h3><div id="chart-token-coverage" class="chart-slot"></div></section>
-        <section class="chart"><h3>Interruption signals <span class="note" id="interruption-signals-note">—</span></h3><div id="chart-interruption-signals" class="chart-slot"></div></section>
-        <section class="chart"><h3>Image inputs by model <span class="note" id="multimodal-inputs-note">—</span></h3><div id="chart-multimodal-inputs" class="chart-slot"></div></section>
+      <details class="diagnostic-block" id="diagnostics-runtime">
+        <summary>Runtime telemetry diagnostics</summary>
+        <p class="diagnostic-intro">Measured-only timing excludes missing historical samples rather than presenting them as zero. Open runs are excluded.</p>
+        <div class="charts">
+          <section class="chart span-2" aria-label="Runtime friction timing"><h3>Runtime friction timing <span class="note" id="runtime-friction-timing-note">—</span></h3><div id="chart-runtime-friction-timing" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Cumulative vs critical-path tool time"><h3>Cumulative vs critical-path tool time <span class="note" id="tool-time-overlap-note">—</span></h3><div id="chart-tool-time-overlap" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Turn latency decomposition"><h3>Turn latency decomposition <span class="note" id="latency-decomposition-note">—</span></h3><div id="chart-latency-decomposition" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Tool execution time by tool"><h3>Tool execution time by tool <span class="note" id="tool-duration-note">—</span></h3><div id="chart-tool-duration" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Compaction and retry friction"><h3>Compaction &amp; retry friction <span class="note" id="compaction-retry-friction-note">—</span></h3><div id="chart-compaction-retry-friction" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Verification kind breakdown"><h3>Verification kind breakdown <span class="note" id="verification-kind-breakdown-note">—</span></h3><div id="chart-verification-kind-breakdown" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Net mutation by model"><h3>Net mutation by model <span class="note" id="net-mutation-note">—</span></h3><div id="chart-net-mutation" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Busy fragmentation"><h3>Busy fragmentation <span class="note" id="busy-fragmentation-note">—</span></h3><div id="chart-busy-fragmentation" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Token coverage by model"><h3>Token coverage by model <span class="note" id="token-coverage-note">—</span></h3><div id="chart-token-coverage" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Interruption signals"><h3>Interruption signals <span class="note" id="interruption-signals-note">—</span></h3><div id="chart-interruption-signals" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Image inputs by model"><h3>Image inputs by model <span class="note" id="multimodal-inputs-note">—</span></h3><div id="chart-multimodal-inputs" class="chart-slot"></div></section>
+        </div>
+      </details>
 
-        <header class="dashboard-section span-2"><p class="section-kicker">Pruning &amp; diagnostics</p><h2>Trace pruning, errors, and file activity</h2></header>
-        <section class="chart span-2"><h3>Pruning tokens saved <span class="note" id="pruning-tokens-trend-note">—</span></h3><div id="chart-pruning-tokens-trend" class="chart-slot"></div></section>
-        <section class="chart"><h3>Pruner latency <span class="note" id="pruning-latency-note">—</span></h3><div id="chart-pruning-latency" class="chart-slot"></div></section>
-        <section class="chart"><h3>Most pruned skills <span class="note" id="pruning-top-skills-note">—</span></h3><div id="chart-pruning-top-skills" class="chart-slot"></div></section>
-        <section class="chart"><h3>Most pruned tools <span class="note" id="pruning-top-tools-note">—</span></h3><div id="chart-pruning-top-tools" class="chart-slot"></div></section>
-        <section class="chart"><h3>Over-pruning signals <span class="note" id="pruning-recovery-rate-note">—</span></h3><div id="chart-pruning-recovery-rate" class="chart-slot"></div></section>
-        <section class="chart"><h3>Backend errors by code <span class="note" id="backend-errors-by-code-note">—</span></h3><div id="chart-backend-errors-by-code" class="chart-slot"></div></section>
-        <section class="chart"><h3>Backend errors trend <span class="note" id="backend-errors-trend-note">—</span></h3><div id="chart-backend-errors-trend" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>File-type activity <span class="note" id="file-type-activity-note">—</span></h3><div id="chart-file-type-activity" class="chart-slot"></div></section>
-        <section class="chart span-2"><h3>Files reviewed <span class="note" id="files-reviewed-note">—</span></h3><div id="chart-files-reviewed" class="chart-slot"></div></section>
-      </div>
+      <details class="diagnostic-block" id="diagnostics-pruning">
+        <summary>Pruning, errors &amp; file diagnostics</summary>
+        <div class="charts">
+          <section class="chart span-2" aria-label="Pruning tokens saved"><h3>Pruning tokens saved <span class="note" id="pruning-tokens-trend-note">—</span></h3><div id="chart-pruning-tokens-trend" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Pruner latency"><h3>Pruner latency <span class="note" id="pruning-latency-note">—</span></h3><div id="chart-pruning-latency" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Most pruned skills"><h3>Most pruned skills <span class="note" id="pruning-top-skills-note">—</span></h3><div id="chart-pruning-top-skills" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Most pruned tools"><h3>Most pruned tools <span class="note" id="pruning-top-tools-note">—</span></h3><div id="chart-pruning-top-tools" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Over-pruning signals"><h3>Over-pruning signals <span class="note" id="pruning-recovery-rate-note">—</span></h3><div id="chart-pruning-recovery-rate" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Backend errors by code"><h3>Backend errors by code <span class="note" id="backend-errors-by-code-note">—</span></h3><div id="chart-backend-errors-by-code" class="chart-slot"></div></section>
+          <section class="chart" aria-label="Backend errors trend"><h3>Backend errors trend <span class="note" id="backend-errors-trend-note">—</span></h3><div id="chart-backend-errors-trend" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="File-type activity"><h3>File-type activity <span class="note" id="file-type-activity-note">—</span></h3><div id="chart-file-type-activity" class="chart-slot"></div></section>
+          <section class="chart span-2" aria-label="Files reviewed"><h3>Files reviewed <span class="note" id="files-reviewed-note">—</span></h3><div id="chart-files-reviewed" class="chart-slot"></div></section>
+        </div>
+      </details>
+
+      <details class="diagnostic-block" id="diagnostics-reviews">
+        <summary>V2 review ingestion &amp; diagnostics</summary>
+        <p class="diagnostic-intro">Cohort-level review analytics; independent of run filters. Includes ingestion accounting, review↔run join coverage, criterion attainment, and reviewer diagnostics.</p>
+        <section class="chart span-2" aria-label="V2 session review analytics"><h3>V2 session review analytics <span class="note">cohort-level; independent of run filters</span></h3><div id="session-review-analytics" aria-live="polite"></div></section>
+      </details>
+      </main>
     </div>
     <noscript>This dashboard needs JavaScript enabled to load local JSON datasets.</noscript>
     <script type="module" src="./dist/app.js"></script>

@@ -22,7 +22,6 @@ const rootBatchDirs = [
   'extensions/tool-result-pruner/test',
   'extensions/session-reviewer/test',
   'extensions/session-changes/test',
-  'extensions/deferred-triggers/test',
 ];
 
 async function walk(directory, extensions, output) {
@@ -34,9 +33,10 @@ async function walk(directory, extensions, output) {
 }
 
 async function writeBatch(tempDir, index, files) {
-  const source = files.map((file) => `await import(${JSON.stringify(pathToFileURL(file).href)});`).join('\n');
+  const suites = files.map((file) =>
+    `describe(${JSON.stringify(file)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
   const batchPath = path.join(tempDir, `batch-${index}.mts`);
-  await writeFile(batchPath, source, 'utf8');
+  await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
   return batchPath;
 }
 

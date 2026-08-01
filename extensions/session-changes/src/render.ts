@@ -63,7 +63,7 @@ export function renderList(changes: FileChange[]): string {
  *  and the diff lines. Standard patch format; never worse than raw. */
 export function minifyDiff(rawGitDiff: string): string {
   if (!rawGitDiff) return '';
-  const lines = rawGitDiff.split('\n');
+  const lines = rawGitDiff.split(/\r?\n/);
   const out: string[] = [];
   for (const line of lines) {
     if (
@@ -85,9 +85,9 @@ export function minifyDiff(rawGitDiff: string): string {
  *  `@@ -0,0 +1,N @@` followed by `+`-prefixed lines. Standard patch format for
  *  a new file; avoids the `git diff --no-index /dev/null` portability trap. */
 export function syntheticCreatedDiff(content: string): string {
-  const text = content.endsWith('\n') ? content.slice(0, -1) : content;
+  const text = content.replace(/\r?\n$/, '');
   if (!text) return '';
-  const lines = text.split('\n');
+  const lines = text.split(/\r?\n/);
   return [`@@ -0,0 +1,${lines.length} @@`, ...lines.map((l) => `+${l}`)].join('\n');
 }
 
@@ -100,7 +100,7 @@ function capDiffBody(
   maxChars: number,
 ): { body: string; omittedHunks: number } {
   if (body.length <= maxChars) return { body, omittedHunks: 0 };
-  const lines = body.split('\n');
+  const lines = body.split(/\r?\n/);
   // Group into hunks: each starts at a `@@` line; preamble lines before the
   // first `@@` (none after minify, but defensive) form their own group.
   const hunks: string[][] = [];

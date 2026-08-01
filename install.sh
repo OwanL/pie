@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap the pie portable coding-agent configuration on macOS / Linux.
 #
-# Mirrors install.ps1: pins the toolchain and CLI, relocates credentials,
+# Mirrors install.bat (Windows) / the shared Node core: pins the toolchain and CLI, relocates credentials,
 # keeps sessions in a machine-local checkout store, restores packages, writes
 # VS Code settings, and builds/installs the extension when the code CLI exists.
 #
@@ -81,19 +81,27 @@ require_cmd() {
 require_cmd node "Install the exact version in .node-version from https://nodejs.org/"
 require_cmd npm  "npm ships with Node.js"
 
-pinned_node="$(tr -d '[:space:]v' < "$repo_root/.node-version")"
+# Pinned Node/npm/pi versions come from one shared source
+# (scripts/install/run.mjs pinned-versions -> scripts/toolchain.mjs) so the two
+# shell installers never drift on how they parse .node-version / package.json /
+# the extension lockfile. The comparison + install stays here (thin wrapper).
+if ! _pinned_output="$(node "$repo_root/scripts/install/run.mjs" pinned-versions)"; then
+  echo "ERROR: Could not resolve pinned toolchain versions (node/npm/pi)." >&2
+  exit 1
+fi
+pinned_node="$(printf '%s\n' "$_pinned_output" | sed -n 1p)"
+pinned_npm="$(printf '%s\n' "$_pinned_output" | sed -n 2p)"
+pinned_pi="$(printf '%s\n' "$_pinned_output" | sed -n 3p)"
 actual_node="$(node -p 'process.versions.node')"
 if [[ "$actual_node" != "$pinned_node" ]]; then
   echo "ERROR: Node.js $pinned_node required for reproducible installs, found $actual_node. Use .nvmrc/.node-version." >&2
   exit 1
 fi
-pinned_npm="$(node -p 'require(process.argv[1]).packageManager.replace(/^npm@/, "")' "$repo_root/package.json")"
 actual_npm="$(npm --version)"
 if [[ "$actual_npm" != "$pinned_npm" ]]; then
   echo "==> Installing pinned npm@$pinned_npm (found $actual_npm)"
   npm install -g "npm@$pinned_npm"
 fi
-pinned_pi="$(node "$repo_root/scripts/lib/sdk-version.mjs")"
 
 # Keep session history local to this checkout and migrate legacy stores safely.
 session_dir="$repo_root/data/outcomes/sessions"
@@ -122,65 +130,15 @@ node "$repo_root/scripts/migrate-local-sessions.mjs"
 # Rewrite absolute extension paths in settings.json that point into another
 # machine's npm global node_modules tree (settings.json is git-tracked, so a
 # committed C:/Users/<other-user>/... entry breaks pi update on a fresh box).
-repair_settings_extension_paths() {
-  local settings="$1"
-  [[ -f "$settings" ]] || return 0
-
-  npm prefix >/dev/null 2>&1 || { echo "WARN: 'npm prefix' failed; skipping settings.json extension path repair." >&2; return 0; }
-
-  node - "$settings" <<'NODE_SCRIPT'
-const fs = require('fs');
-const { execSync } = require('child_process');
-const p = process.argv[1];
-let src; try { src = fs.readFileSync(p, 'utf8'); } catch { process.exit(0); }
-let s; try { s = JSON.parse(src); } catch (e) { console.warn(`WARN: could not parse ${p}: ${e.message}`); process.exit(0); }
-if (!Array.isArray(s.extensions) || s.extensions.length === 0) process.exit(0);
-let prefix; try { prefix = execSync('npm config get prefix', { encoding: 'utf8' }).trim(); } catch { process.exit(0); }
-if (!prefix) process.exit(0);
-let changed = false;
-let missing = [];
-const norm = s.extensions.map((e) => {
-  if (typeof e !== 'string') return e;
-  const m = e.match(/[\\/]node_modules[\\/]+([^\\/]+)$/);
-  if (!m || !require('path').isAbsolute(e.replace(/\//g, require('path').sep))) return e;
-  // Only rewrite absolute paths that resolve into a node_modules tree.
-  const sep = process.platform === 'win32' ? '\\' : '/';
-  const candidate = `${prefix}${sep}node_modules${sep}${m[1]}`;
-  if (e.replace(/\\/g, '/').toLowerCase() === candidate.replace(/\\/g, '/').toLowerCase()) return e;
-  changed = true;
-  if (!fs.existsSync(candidate)) missing.push(m[1]);
-  return candidate;
-});
-if (!changed) process.exit(0);
-fs.copyFileSync(p, `${p}.extensions.${Date.now()}.bak`);
-s.extensions = norm;
-fs.writeFileSync(p, JSON.stringify(s, null, 2));
-console.log('==> Normalized extension paths in settings.json');
-console.log(`==> Backed up the previous settings.json to ${p}.extensions.*.bak`);
-missing.forEach((pkg) => console.warn(`WARN: extension package '${pkg}' not installed under the npm global prefix. Install with: npm i -g ${pkg}`));
-NODE_SCRIPT
-}
-
-repair_settings_extension_paths "$repo_root/settings.json"
+# Shared with install.bat via scripts/install/run.mjs repair-settings.
+node "$repo_root/scripts/install/run.mjs" repair-settings "$repo_root/settings.json"
 
 # Resolve the `pi` CLI: prefer PATH, then probe the npm global prefix/bin so a
 # freshly `npm i -g` installed pi is found before a new shell opens.
+# Shared with install.bat via scripts/install/run.mjs resolve-pi (manual PATH
+# search + npm-prefix probe; no `which` dependency).
 resolve_pi() {
-  if command -v pi >/dev/null 2>&1; then
-    command -v pi
-    return 0
-  fi
-  local prefix
-  prefix="$(npm config get prefix 2>/dev/null | tr -d '[:space:]')"
-  if [[ -n "$prefix" ]]; then
-    for cand in "$prefix/bin/pi" "$prefix/pi"; do
-      if [[ -x "$cand" ]]; then
-        echo "$cand"
-        return 0
-      fi
-    done
-  fi
-  return 1
+  node "$repo_root/scripts/install/run.mjs" resolve-pi
 }
 
 PI_BIN="$(resolve_pi)" || true
@@ -218,38 +176,9 @@ if [[ -f "$in_tree_auth" && -z "$auth_dir_env" ]]; then
   printf "    Move auth.json to the secure OS user-data directory? [Y/n] "
   read -r move_choice
   if [[ -z "$move_choice" || "$move_choice" =~ ^[Yy] ]]; then
-    mkdir -p "$target_auth_dir"
-    cp "$in_tree_auth" "$target_auth"
-
-    # Verify the copy. Resolve a SHA-256 command portably: `shasum -a 256` is
-    # macOS/BSD (a Perl script), `sha256sum` is the Linux coreutils default.
-    # Under `set -euo pipefail`, calling `shasum` on a Linux box without it
-    # would abort mid-flight (after the copy, before chmod/rm/breadcrumb), so
-    # resolve the command first and degrade gracefully if neither exists.
-    if command -v shasum >/dev/null 2>&1; then
-      sha_cmd=(shasum -a 256)
-    elif command -v sha256sum >/dev/null 2>&1; then
-      sha_cmd=(sha256sum)
-    else
-      sha_cmd=()
-    fi
-
-    hash_verified=1
-    if [[ ${#sha_cmd[@]} -gt 0 ]]; then
-      source_hash="$("${sha_cmd[@]}" "$in_tree_auth" | cut -d' ' -f1)"
-      dest_hash="$("${sha_cmd[@]}" "$target_auth" | cut -d' ' -f1)"
-      if [[ "$source_hash" != "$dest_hash" ]]; then
-        rm -f "$target_auth"
-        echo "WARN: Hash verification failed after copy. auth.json was NOT moved." >&2
-        hash_verified=0
-      fi
-    else
-      echo "WARN: Neither shasum nor sha256sum found; proceeding with the move WITHOUT integrity verification." >&2
-    fi
-
-    if [[ "$hash_verified" != "0" ]]; then
-      chmod 600 "$target_auth"
-
+    # Shared Node core performs a SHA-256-verified copy and applies mode 0600
+    # without depending on platform-specific shasum/sha256sum utilities.
+    if node "$repo_root/scripts/install/run.mjs" relocate-auth "$in_tree_auth" "$target_auth"; then
       # Remove the in-tree file and leave a breadcrumb
       rm -f "$in_tree_auth"
       printf 'Relocated to: %s\nSee: docs/internal/SECRET_AND_STORAGE_RELOCATION_PLAN.md\n' "$target_auth" \
@@ -272,12 +201,14 @@ if [[ -f "$in_tree_auth" && -z "$auth_dir_env" ]]; then
       esac
 
       echo "==> auth.json moved to '$target_auth' and PI_CODING_AGENT_AUTH_DIR set."
+    else
+      echo "WARN: Hash verification failed after copy. auth.json was NOT moved." >&2
     fi
   else
     echo "WARN: auth.json remains in the working tree. See SECURITY.md for recommended hardening." >&2
   fi
 elif [[ -f "$in_tree_auth" && -n "$auth_dir_env" ]]; then
-  # ── Merge split-brain auth.json ────────────────────────────────────────────
+  # ── Merge split-brain auth.json ────────────────────────────
   # This is the "401" painpoint: PI_CODING_AGENT_AUTH_DIR is already set to a
   # secure location, but a *new* in-tree auth.json appeared (typically because
   # `pi` was run in a shell that didn't inherit PI_CODING_AGENT_AUTH_DIR, so it
@@ -285,31 +216,11 @@ elif [[ -f "$in_tree_auth" && -n "$auth_dir_env" ]]; then
   # location, which is often empty {} → 401 "invalid api key".
   # Fix: merge the in-tree creds into the secure location (deep merge, in-tree
   # wins on conflict), then remove the in-tree copy.
+  # Shared with install.bat via scripts/install/run.mjs merge-auth (handles the
+  # empty/missing-secure copy case — with chmod 600 on POSIX — and the
+  # both-have-content deep merge, then removes the in-tree copy).
   secure_auth_path="$auth_dir_env/auth.json"
-  if [[ ! -f "$secure_auth_path" ]] || [[ $(wc -c < "$secure_auth_path") -le 2 ]]; then
-    # Secure location missing or empty {} — just copy the in-tree file.
-    mkdir -p "$auth_dir_env"
-    cp "$in_tree_auth" "$secure_auth_path"
-    chmod 600 "$secure_auth_path"
-    echo "==> auth.json copied from working tree to secure location '$secure_auth_path' (was empty/missing)"
-    rm -f "$in_tree_auth"
-  else
-    # Both have content — deep-merge with node (handles JSON robustly).
-    node -e '
-      const fs = require("fs");
-      const inTree = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      const secure = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-      let merged = 0;
-      for (const [provider, creds] of Object.entries(inTree)) {
-        if (JSON.stringify(secure[provider]) !== JSON.stringify(creds)) {
-          secure[provider] = creds;
-          merged++;
-        }
-      }
-      fs.writeFileSync(process.argv[2], JSON.stringify(secure, null, 2) + "\n", "utf8");
-      console.log("==> Merged " + merged + " provider(s) from working-tree auth.json into secure location");
-    ' "$in_tree_auth" "$secure_auth_path" && rm -f "$in_tree_auth"
-  fi
+  node "$repo_root/scripts/install/run.mjs" merge-auth "$in_tree_auth" "$secure_auth_path"
   echo "    (in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR)"
 fi
 
@@ -325,33 +236,9 @@ echo "==> Running 'pi update --extensions' to restore packages from settings.jso
 # models.json exists) until VS Code is fully restarted. Setting pie.agentDir
 # in VS Code's own settings.json makes the backend use the correct agent dir
 # on the very first reload after install.
-vs_settings_dirs=(
-  "$HOME/.config/Code/User"
-  "$HOME/Library/Application Support/Code/User"
-  "$HOME/.config/Code - OSS/User"
-)
-for vs_settings_dir in "${vs_settings_dirs[@]}"; do
-  vs_settings_path="$vs_settings_dir/settings.json"
-  if [[ -d "$vs_settings_dir" ]]; then
-    # Use node to merge pie.agentDir into the JSON (handles existing files).
-    # Pipe via heredoc to avoid fragile single-quote escaping in node -e.
-    # With --input-type=module -e, process.argv is [node, arg1, ...] (no script
-    # path), so use slice(1).
-    node --input-type=module -e '
-      import fs from "node:fs";
-      const [settingsPath, repoRoot] = process.argv.slice(1);
-      let settings = {};
-      try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
-      if (settings["pie.agentDir"] !== repoRoot) {
-        settings["pie.agentDir"] = repoRoot;
-        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf8");
-        console.log(`==> Set pie.agentDir to ${repoRoot} in VS Code User settings (${settingsPath})`);
-      } else {
-        console.log(`==> pie.agentDir already set in VS Code User settings (${settingsPath})`);
-      }
-    ' "$vs_settings_path" "$repo_root" || echo "WARN: could not write pie.agentDir to $vs_settings_path"
-  fi
-done
+# Shared with install.bat via scripts/install/run.mjs write-vscode-agent-dir,
+# which writes pie.agentDir into each existing VS Code User settings.json.
+node "$repo_root/scripts/install/run.mjs" write-vscode-agent-dir "$repo_root"
 
 # Build/package/install the extension from its tracked lockfile.
 echo "==> Building pie VS Code extension"
@@ -395,58 +282,18 @@ EOM
 # ── Post-install readiness check ─────────────────────────────────────
 # The app will start but cannot talk to any model without auth/provider keys.
 # Detect the gap and tell the user exactly what to do next.
+# Shared with install.bat via scripts/install/run.mjs readiness (auth content,
+# provider env, and split-brain checks with platform-appropriate advice).
 auth_dir_resolved="${PI_CODING_AGENT_AUTH_DIR:-$repo_root}"
 backend_auth_path="$auth_dir_resolved/auth.json"
 
-# Check if auth.json has REAL content (not just {}) using node
-auth_has_content=0
-auth_providers=""
-if [[ -f "$backend_auth_path" ]]; then
-  read -r auth_has_content auth_providers <<< "$(node -e '
-    const fs = require("fs");
-    try {
-      const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      const keys = Object.keys(d).filter(k => k);
-      console.log(keys.length > 0 ? "1" : "0", keys.join(","));
-    } catch { console.log("0", ""); }
-  ' "$backend_auth_path" 2>/dev/null)"
-fi
-provider_env_present=0
-for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY UMANS_API_KEY; do
-  if [[ -n "${!var:-}" ]]; then provider_env_present=1; break; fi
-done
-
 echo ""
 echo "==> Post-install verification:"
-
-# Check: Auth content
-if [[ "$auth_has_content" == "1" ]]; then
-  echo "  [✓] Auth credentials found ($auth_providers) at $backend_auth_path"
-elif [[ "$provider_env_present" == "1" ]]; then
-  echo "  [✓] Provider API key env var detected — pi will use it automatically."
-else
-  echo "  [!] No auth.json content and no provider API key env vars found."
-  echo "      The pie panel will start but will get 401 / 'invalid api key' until you authenticate."
-  echo "      Pick ONE:"
-  echo "        • Export a provider API key, e.g.:"
-  echo "            export ANTHROPIC_API_KEY=\"sk-ant-...\"   (add to ~/.zshrc or ~/.bashrc)"
-  echo "        • Or run pi once interactively (then re-run this installer to merge creds):"
-  echo "            pi --provider umans --model umans-glm-5.2 \"hello\""
-  echo "          (pi will prompt for an API key on first use and cache it in auth.json.)"
-  echo "      See README.md → Authentication for the full list of supported providers."
-fi
-
-# Check: Split-brain warning
-if [[ -f "$repo_root/auth.json" && "$auth_dir_resolved" != "$repo_root" ]]; then
-  in_tree_has_content=$(node -e '
-    const fs = require("fs");
-    try { const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); console.log(Object.keys(d).length > 0 ? "1" : "0"); } catch { console.log("0"); }
-  ' "$repo_root/auth.json" 2>/dev/null)
-  if [[ "$in_tree_has_content" == "1" ]]; then
-    echo "  [!] Split-brain: auth.json with real creds found in repo root, but backend reads from $auth_dir_resolved"
-    echo "      Re-run this installer to auto-merge, or copy manually: cp '$repo_root/auth.json' '$backend_auth_path'"
-  fi
-fi
+node "$repo_root/scripts/install/run.mjs" readiness \
+  --auth "$backend_auth_path" \
+  --in-tree-auth "$repo_root/auth.json" \
+  --auth-dir "$auth_dir_resolved" \
+  --repo-root "$repo_root"
 
 echo ""
 echo "==> Next steps:"

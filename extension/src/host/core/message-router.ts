@@ -31,11 +31,6 @@ export interface SessionServiceLike {
   setPrefs(prefs: Partial<ChatPrefs>): void;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
   setToolResultPruningSettings(updates: Partial<ToolResultPruningSettings>): Promise<void>;
-  /** Notify deferred triggers that the user sent a message in `sessionPath`. */
-  notifyUserInput(sessionPath: string): void;
-  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
-   *  omitted). Invoked by the webview's status-strip cancel affordance. */
-  cancelDeferredTrigger(sessionPath: string, triggerId?: string): void;
 }
 
 /**
@@ -269,9 +264,6 @@ export class MessageRouter {
       case 'retrySend':
         return await this.onRetrySend(msg as Extract<WebviewToHostMessage, { type: 'retrySend' }>);
 
-      case 'cancelDeferredTrigger':
-        return this.onCancelDeferredTrigger(msg as Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>);
-
       case 'log':
         return this.onLog(msg as Extract<WebviewToHostMessage, { type: 'log' }>);
 
@@ -386,12 +378,6 @@ export class MessageRouter {
       kind: 'Command',
       cmd: { kind: 'Send', corrId, sessionPath, text, inputs, composedText, localId, userParts, previousSummary, priorPruningMode: opts?.priorPruningMode, timestamp: Date.now() },
     });
-    // After the user's message is dispatched, fire any `user_input` deferred
-    // trigger for this session. The wake-up it injects lands as a follow-up
-    // (queued after the user's turn) rather than preempting the user's
-    // message. Synthetic wake-up sends bypass `onSend`, so this never
-    // self-triggers.
-    this.service.notifyUserInput(sessionPath);
   }
 
   private async onEditMessage(msg: Extract<WebviewToHostMessage, { type: 'editMessage' }>): Promise<void> {
@@ -975,19 +961,6 @@ export class MessageRouter {
       },
       priorPruningMode !== undefined ? { priorPruningMode } : undefined,
     );
-  }
-
-  /** `cancelDeferredTrigger` — cancel a deferred trigger (or all for the
-   *  session when `triggerId` is omitted) from the webview's status-strip
-   *  cancel affordance. Side-effect only (no reducer event): the registry
-   *  owns the in-memory set + sidecar op, and requests its own re-render. */
-  private onCancelDeferredTrigger(msg: Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>): void {
-    const sessionPath = typeof msg.sessionPath === 'string' ? msg.sessionPath : null;
-    if (!sessionPath) {
-      this.dispatchEvent({ kind: 'NoticeShown', notice: 'Protocol defect: cancelDeferredTrigger arrived without a sessionPath.' });
-      return;
-    }
-    this.service.cancelDeferredTrigger(sessionPath, msg.triggerId);
   }
 
   // ---------------------------------------------------------------------------

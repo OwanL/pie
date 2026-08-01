@@ -1,6 +1,176 @@
 {
   "models": [
     {
+      "provider": "ollama",
+      "id": "gemini-3-flash-preview:cloud",
+      "name": "Ollama Cloud: Gemini 3 Flash Preview",
+      "cost": {
+        "input": 0.5,
+        "output": 3,
+        "cacheRead": 0.05,
+        "cacheWrite": 0
+      },
+      "family": "gemini-3-flash-preview"
+    },
+    {
+      "provider": "ollama",
+      "id": "glm-4.7:cloud",
+      "name": "Ollama Cloud: GLM 4.7",
+      "cost": {
+        "input": 0.4,
+        "output": 1.75,
+        "cacheRead": 0.08,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "glm-5:cloud",
+      "name": "Ollama Cloud: GLM 5",
+      "cost": {
+        "input": 0.6,
+        "output": 1.92,
+        "cacheRead": 0.12,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "kimi-k2.5:cloud",
+      "name": "Ollama Cloud: Kimi K2.5",
+      "cost": {
+        "input": 0.375,
+        "output": 2.025,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "minimax-m2.1:cloud",
+      "name": "Ollama Cloud: MiniMax M2.1",
+      "cost": {
+        "input": 0.29,
+        "output": 0.95,
+        "cacheRead": 0.03,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "minimax-m2.5:cloud",
+      "name": "Ollama Cloud: MiniMax M2.5",
+      "cost": {
+        "input": 0.15,
+        "output": 0.9,
+        "cacheRead": 0.05,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "qwen3-coder-next:cloud",
+      "name": "Ollama Cloud: Qwen3 Coder Next",
+      "cost": {
+        "input": 0.11,
+        "output": 0.8,
+        "cacheRead": 0.07,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "ollama",
+      "id": "qwen3-coder:480b-cloud",
+      "name": "Ollama Cloud: Qwen3 Coder 480B",
+      "cost": {
+        "input": 0.22,
+        "output": 1.8,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "umans",
+      "id": "umans-coder",
+      "name": "Umans: Coder",
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "umans",
+      "id": "umans-flash",
+      "name": "Umans: Flash",
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
+      "provider": "umans",
+      "id": "umans-kimi-k2.7",
+      "name": "Umans: Kimi K2.7 Code",
+      "cost": {
+        "input": 0.74,
+        "output": 3.5,
+        "cacheRead": 0.15,
+        "cacheWrite": 0
+      },
+      "family": "kimi-k2.7-code"
+    },
+    {
+      "provider": "umans",
+      "id": "umans-kimi-k2.6",
+      "name": "Umans: Kimi K2.6",
+      "cost": {
+        "input": 0.67,
+        "output": 3.5,
+        "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "family": "kimi-k2.6"
+    },
+    {
+      "provider": "umans",
+      "id": "umans-glm-5.1",
+      "name": "Umans: GLM 5.1",
+      "cost": {
+        "input": 0.98,
+        "output": 3.08,
+        "cacheRead": 0.182,
+        "cacheWrite": 0
+      },
+      "family": "glm-5.1"
+    },
+    {
+      "provider": "umans",
+      "id": "umans-glm-5.2",
+      "name": "Umans: GLM 5.2",
+      "cost": {
+        "input": 1.2,
+        "output": 3.2,
+        "cacheRead": 0.2,
+        "cacheWrite": 0
+      },
+      "family": "glm-5.2"
+    },
+    {
+      "provider": "umans",
+      "id": "umans-qwen3.6-35b-a3b",
+      "name": "Umans: Qwen 3.6 35B A3B",
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      }
+    },
+    {
       "provider": "github-copilot",
       "id": "claude-haiku-4.5",
       "name": "Copilot: Claude Haiku 4.5",

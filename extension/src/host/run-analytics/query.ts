@@ -1,11 +1,12 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { atomicWriteText } from '../shared/atomic-write';
+import { atomicWriteText } from '../../shared/atomic-write';
 
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   coerceRunSnapshot,
+  runRecencyMs,
   type RunSnapshot,
 } from './index';
 import { readOptionalText } from '../shared/checkpoint-io';
@@ -30,21 +31,6 @@ export interface RunAnalyticsExportPayload extends RunAnalyticsQueryResult, Glob
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-/** Recency timestamp (ms) used to pick the newest snapshot for a runId: updatedAt, then finalizedAt, then startedAt. */
-function runRecencyMs(snapshot: RunSnapshot): number {
-  const updatedAt = Date.parse(snapshot.updatedAt);
-  if (!Number.isNaN(updatedAt)) {
-    return updatedAt;
-  }
-  if (snapshot.finalizedAt) {
-    const finalizedAt = Date.parse(snapshot.finalizedAt);
-    if (!Number.isNaN(finalizedAt)) {
-      return finalizedAt;
-    }
-  }
-  return Date.parse(snapshot.startedAt);
 }
 
 async function readJsonlObjects(filePath: string): Promise<unknown[]> {

@@ -1,4 +1,6 @@
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { win32 as win32Path } from "node:path";
 import {
 	collapseLeadingSlashes,
 	isUnderCwd,
@@ -208,13 +210,48 @@ function isRootDeleteTarget(target: string): boolean {
  * `/tmp` and `/var/tmp` are included explicitly because Windows-hosted Git Bash
  * exposes those virtual paths while Node reports a native `%TEMP%` path.
  */
+function canonicalizeExistingWindowsPathPrefix(target: string, cwd: string): string | undefined {
+	if (process.platform !== "win32") return undefined;
+	let existingPrefix = trimTrailingPathSeparatorForComparison(resolvePathForComparison(target, cwd));
+	if (!/^[a-z]:\//i.test(existingPrefix)) return undefined;
+	const missingSegments: string[] = [];
+
+	while (true) {
+		try {
+			const canonicalPrefix = realpathSync.native(existingPrefix);
+			const canonicalTarget = missingSegments.length > 0
+				? win32Path.join(canonicalPrefix, ...missingSegments)
+				: canonicalPrefix;
+			return trimTrailingPathSeparatorForComparison(resolvePathForComparison(canonicalTarget, cwd));
+		} catch {
+			const parent = win32Path.dirname(existingPrefix);
+			if (parent === existingPrefix) return undefined;
+			missingSegments.unshift(win32Path.basename(existingPrefix));
+			existingPrefix = parent;
+		}
+	}
+}
+
 function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
 	if (/[*?\[]/.test(target)) return false;
 	const normalizedTarget = trimTrailingPathSeparatorForComparison(resolvePathForComparison(target, cwd));
-	const tempRoots = ["/tmp", "/var/tmp", tmpdir()];
+	const canonicalTarget = canonicalizeExistingWindowsPathPrefix(target, cwd);
+	const normalizedTargets = canonicalTarget ? [normalizedTarget, canonicalTarget] : [normalizedTarget];
+	const platformTempRoot = tmpdir();
+	let canonicalPlatformTempRoot: string | undefined;
+	try {
+		// Windows may expose the same temp directory through an 8.3 path in
+		// TEMP/TMP while tools emit its long path (or vice versa).
+		canonicalPlatformTempRoot = realpathSync.native(platformTempRoot);
+	} catch {
+		// The lexical platform root remains useful if canonicalization fails.
+	}
+	const tempRoots = ["/tmp", "/var/tmp", platformTempRoot, canonicalPlatformTempRoot].filter(
+		(root): root is string => typeof root === "string",
+	);
 	return tempRoots.some((root) => {
 		const normalizedRoot = trimTrailingPathSeparatorForComparison(resolvePathForComparison(root, cwd));
-		return normalizedTarget.startsWith(`${normalizedRoot}/`);
+		return normalizedTargets.some((candidate) => candidate.startsWith(`${normalizedRoot}/`));
 	});
 }
 

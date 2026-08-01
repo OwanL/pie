@@ -27,10 +27,12 @@ import {
  * actively producing output. A rolling window of (generation-time,
  * cumulative-output-tokens) samples over the last {@link WINDOW_MS} of
  * *generation* time (not wall-clock) yields the displayed rate. Because the
- * time axis is generation-time, time spent in tool calls, between turns, and
- * before the first token (time-to-first-token, surfaced separately as an
+ * time axis is generation-time, time spent executing tools, between turns,
+ * and before the first token (time-to-first-token, surfaced separately as an
  * average) is excluded from both the numerator's token production and the
- * denominator's elapsed time automatically. Mid-stream output stalls (provider
+ * denominator's elapsed time automatically. Tool-call argument drafting is
+ * model output, so it is included just like reply text and reasoning.
+ * Mid-stream output stalls (provider
  * slow-downs) are NOT excluded: once the first token has arrived the clock
  * keeps running through stalls so the rate reflects the true experienced
  * throughput, not just the bursts of active token production.
@@ -114,6 +116,10 @@ export interface Accumulator {
    * across a tool-heavy turn.
    */
   lastContentTokensById: Map<string, number>;
+  /** Last estimated name + JSON tokens per live tool-call draft id. Kept
+   * separate from message content so clearing a draft cannot swallow reply
+   * text produced by a continuation of the same assistant message. */
+  draftingTokensById: Map<string, number>;
   /** Last estimated output tokens per running subagent result.
    *
    * Keyed by `${toolCallId}#${resultIndex}` rather than toolCallId alone: a
@@ -140,6 +146,7 @@ export function createAccumulator(now: number): Accumulator {
     samples: [],
     lastWall: now,
     lastContentTokensById: new Map(),
+    draftingTokensById: new Map(),
     subagentTokens: new Map(),
   };
 }
@@ -174,10 +181,45 @@ function hasRunningToolCall(message: ChatMessage | null): boolean {
   return message.toolCalls.some((tc) => tc.status === 'running');
 }
 
-/** Estimated output tokens for a message: text + reasoning, via the cl100k_base tokenizer. */
+/** Estimated visible output tokens for a message: text + reasoning. */
 function estimatedOutputTokens(message: ChatMessage | null): number {
   if (!message) return 0;
   return estimateTextTokens(message.markdown ?? '') + estimateTextTokens(message.thinking ?? '');
+}
+
+function estimatedDraftingToolCallTokens(message: ChatMessage | null): number {
+  const draft = message?.draftingToolCall;
+  return draft
+    ? estimateTextTokens(draft.name) + estimateTextTokens(draft.argumentsText)
+    : 0;
+}
+
+/** Estimated model output currently visible on a streaming assistant message.
+ * Includes reply text, reasoning, and the transient tool-call name/arguments so
+ * live rate, token-total, chart, and cost projections use the same numerator. */
+export function estimateLiveAssistantOutputTokens(message: ChatMessage | null): number {
+  return estimatedOutputTokens(message) + estimatedDraftingToolCallTokens(message);
+}
+
+/** Track model-generated tool-call name + JSON independently from reply content.
+ * `draftingToolCall` is transient and is replaced when tool execution starts;
+ * counting its growth by tool id includes it in live throughput without
+ * polluting the same-message continuation baseline. */
+function measureDraftingToolCall(
+  acc: Accumulator,
+  message: ChatMessage | null,
+): { tokens: number; delta: number } {
+  const draft = message?.draftingToolCall;
+  if (!draft) {
+    acc.draftingTokensById.clear();
+    return { tokens: 0, delta: 0 };
+  }
+
+  const tokens = estimatedDraftingToolCallTokens(message);
+  const previous = acc.draftingTokensById.get(draft.id) ?? 0;
+  acc.draftingTokensById.clear();
+  acc.draftingTokensById.set(draft.id, tokens);
+  return { tokens, delta: Math.max(0, tokens - previous) };
 }
 
 /**
@@ -512,8 +554,8 @@ function buildState(
         `Generation rate: ${num} tok/s`,
         `Average over the last ${windowSec}s of generation.`,
         `${acc.cumTokens} output tokens in ${genSec}s of generation time.`,
-        'Includes output from running subagents.',
-        'Clock pauses during tool calls, between turns, and before the first token.',
+        'Includes reply text, reasoning, tool-call arguments, and running subagent output.',
+        'Clock pauses during tool execution, between turns, and before the first token.',
       ]),
       state: 'generating',
       paused: false,
@@ -583,6 +625,7 @@ export function tickTokenRate(
   const streaming = findStreamingMessage(transcript);
   const toolBlocked = hasRunningToolCall(streaming);
   const currentTokens = estimatedOutputTokens(streaming);
+  const drafting = measureDraftingToolCall(acc, streaming);
   const streamingId = streaming?.id ?? null;
 
   let mainDelta = 0;
@@ -601,9 +644,9 @@ export function tickTokenRate(
 
   const subagentProjection = projectRunningSubagents(transcript, acc);
   const subagentDelta = computeSubagentDelta(acc, subagentProjection.counted);
-  const liveOutputTokens = currentTokens + subagentProjection.totalTokens;
+  const liveOutputTokens = currentTokens + drafting.tokens + subagentProjection.totalTokens;
 
-  const totalDelta = mainDelta + subagentDelta;
+  const totalDelta = mainDelta + drafting.delta + subagentDelta;
   if (totalDelta > 0) {
     acc.cumTokens += totalDelta;
   }
@@ -634,7 +677,7 @@ export function tickTokenRate(
   // main session. The previous sticky "has ever produced" predicate kept the
   // clock advancing for the whole tool call, collapsing the rate to 0 tok/s
   // while a nested scout was plainly active (its own tool calls excluded it).
-  const mainProducedOutput = currentTokens > 0;
+  const mainProducedOutput = currentTokens > 0 || drafting.tokens > 0;
   const subagentProducedOutput = subagentProjection.anyStreaming;
   const generating =
     totalDelta > 0

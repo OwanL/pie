@@ -76,7 +76,7 @@ function parseLsLongLine(line: string): string | null {
 /** Parse -l output into display entries. Returns null unless a strong majority
  *  of non-blank lines are -l-shaped (uncertain → keep). */
 function parseLsLong(text: string): { entries: string[] } | null {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   const entries: string[] = [];
   let matched = 0;
   let nonBlank = 0;
@@ -159,7 +159,7 @@ interface GitCommit {
 /** Parse verbose `git log` output into commit summaries. Lines that don't fit
  *  the commit-block shape are skipped; returns [] if no commits found. */
 function parseGitLog(text: string): GitCommit[] {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   const commits: GitCommit[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -277,8 +277,8 @@ function grepGroup(text: string, ctx: RuleContext): RuleResult | null {
   // Split without the trailing-"" artifact so we can rebuild the exact
   // trailing-newline shape. Internal blank lines are preserved verbatim.
   const hadTrailingNewline = text.endsWith("\n");
-  const body = hadTrailingNewline ? text.slice(0, -1) : text;
-  const lines = body.split("\n");
+  const body = hadTrailingNewline ? text.replace(/\r?\n$/, "") : text;
+  const lines = body.split(/\r?\n/);
 
   const parsed: { match: GrepMatch | null; raw: string }[] = [];
   let matched = 0;
@@ -359,8 +359,8 @@ function isSeverityLine(line: string): boolean {
 function collapseDuplicateLines(text: string, _ctx: RuleContext): RuleResult | null {
   if (!text.includes("\n")) return null;
   const hadTrailingNewline = text.endsWith("\n");
-  const body = hadTrailingNewline ? text.slice(0, -1) : text;
-  const lines = body.split("\n");
+  const body = hadTrailingNewline ? text.replace(/\r?\n$/, "") : text;
+  const lines = body.split(/\r?\n/);
 
   const out: string[] = [];
   let current = "";
@@ -437,8 +437,8 @@ function looksLikeProgressNoise(line: string): boolean {
 function removeProgressNoise(text: string, _ctx: RuleContext): RuleResult | null {
   if (!text.includes("\n")) return null;
   const hadTrailingNewline = text.endsWith("\n");
-  const body = hadTrailingNewline ? text.slice(0, -1) : text;
-  const lines = body.split("\n");
+  const body = hadTrailingNewline ? text.replace(/\r?\n$/, "") : text;
+  const lines = body.split(/\r?\n/);
 
   const out: string[] = [];
   let removed = 0;

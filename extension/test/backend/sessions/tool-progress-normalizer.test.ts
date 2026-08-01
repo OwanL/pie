@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { isBoundedToolPreview, normalizeToolProgress } from '../../../src/backend/tool-progress-normalizer';
+import { estimateTextTokens } from '../../../src/shared/tokenize';
 
 test('tool progress adapters emit typed bounded previews', () => {
   const command = normalizeToolProgress('bash', { command: 'npm test', output: 'x'.repeat(20_000) });
@@ -97,6 +98,28 @@ test('subagent previews retain full streaming text plus a cumulative counter inc
     assert.ok(
       (child.cumulativeOutputTokens ?? 0) > 10_000,
       'counter reflects the complete stream plus nested output, not only the bounded visible tail',
+    );
+  }
+});
+
+test('modern subagent counters include the in-progress tool-call draft', () => {
+  const argumentsText = '{"command":"npm test"}';
+  const preview = normalizeToolProgress('subagent', {
+    details: {
+      results: [{
+        agent: 'worker', task: 'test', exitCode: -1, streaming: true,
+        usage: { output: 120 },
+        draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText },
+      }],
+    },
+  });
+
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    const child = preview.children[0]!;
+    assert.equal(
+      child.cumulativeOutputTokens,
+      120 + estimateTextTokens('bash') + estimateTextTokens(argumentsText),
     );
   }
 });

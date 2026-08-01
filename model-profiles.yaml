@@ -196,6 +196,23 @@ profiles:
       - xhigh
     disabled_reason: null
   - provider: ollama
+    id: kimi-k3:cloud
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+  - provider: ollama
+    id: deepseek-v4-flash:0731-cloud
+    eligible: true
+    thinking:
+      - off
+      - high
+      - max
+    disabled_reason: null
+  - provider: ollama
     id: deepseek-v4-pro:cloud
     eligible: true
     thinking:
@@ -212,22 +229,54 @@ profiles:
       - high
     disabled_reason: null
   - provider: ollama
-    id: gemini-3-flash-preview:cloud
+    id: glm-5.2:cloud
     eligible: true
     thinking:
-      - minimal
       - low
       - medium
       - high
       - xhigh
     disabled_reason: null
   - provider: ollama
-    id: gemma4:31b-cloud
+    id: glm-5.1:cloud
     eligible: true
     thinking:
-      - minimal
       - low
       - medium
+      - high
+    disabled_reason: null
+  - provider: ollama
+    id: kimi-k2.7-code:cloud
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+    disabled_reason: null
+  - provider: ollama
+    id: kimi-k2.6:cloud
+    eligible: true
+    thinking:
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+  - provider: ollama
+    id: minimax-m3:cloud
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
+      - xhigh
+    disabled_reason: null
+  - provider: ollama
+    id: minimax-m2.7:cloud
+    eligible: true
+    thinking:
+      - low
+      - medium
+      - high
     disabled_reason: null
   - provider: ollama
     id: qwen3.5:397b-cloud
@@ -246,40 +295,13 @@ profiles:
       - high
     disabled_reason: null
   - provider: ollama
-    id: qwen3-coder-next:cloud
+    id: nemotron-3-ultra:cloud
     eligible: true
     thinking:
-      - minimal
-    disabled_reason: null
-  - provider: ollama
-    id: qwen3-coder:480b-cloud
-    eligible: true
-    thinking:
-      - minimal
-    disabled_reason: null
-  - provider: ollama
-    id: kimi-k2.6:cloud
-    eligible: true
-    thinking:
+      - low
       - medium
       - high
       - xhigh
-    disabled_reason: null
-  - provider: ollama
-    id: kimi-k2.7-code:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: ollama
-    id: kimi-k2.5:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
     disabled_reason: null
   - provider: ollama
     id: nemotron-3-super:cloud
@@ -291,23 +313,7 @@ profiles:
       - xhigh
     disabled_reason: null
   - provider: ollama
-    id: nemotron-3-ultra:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: ollama
-    id: glm-4.7:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-    disabled_reason: null
-  - provider: ollama
-    id: glm-5:cloud
+    id: nemotron-3-nano:30b-cloud
     eligible: true
     thinking:
       - low
@@ -315,21 +321,18 @@ profiles:
       - high
     disabled_reason: null
   - provider: ollama
-    id: glm-5.1:cloud
+    id: gemma4:31b-cloud
     eligible: true
     thinking:
+      - minimal
       - low
       - medium
-      - high
     disabled_reason: null
   - provider: ollama
-    id: glm-5.2:cloud
+    id: mistral-large-3:675b-cloud
     eligible: true
     thinking:
-      - low
-      - medium
-      - high
-      - xhigh
+      - minimal
     disabled_reason: null
   - provider: ollama
     id: gpt-oss:120b-cloud
@@ -347,96 +350,6 @@ profiles:
       - low
       - medium
     disabled_reason: Superseded by gpt-oss:120b
-  - provider: ollama
-    id: minimax-m2.1:cloud
-    eligible: true
-    thinking:
-      - minimal
-    disabled_reason: null
-  - provider: ollama
-    id: minimax-m2.5:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: ollama
-    id: minimax-m2.7:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: ollama
-    id: minimax-m3:cloud
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: umans
-    id: umans-glm-5.1
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: umans
-    id: umans-glm-5.2
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: umans
-    id: umans-kimi-k2.6
-    eligible: true
-    thinking:
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: umans
-    id: umans-kimi-k2.7
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
-  - provider: umans
-    id: umans-coder
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: umans
-    id: umans-flash
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-      - xhigh
-    disabled_reason: null
-  - provider: umans
-    id: umans-qwen3.6-35b-a3b
-    eligible: true
-    thinking:
-      - low
-      - medium
-      - high
-    disabled_reason: null
   - provider: ollama
     id: mistral-7b-pi:latest
     eligible: false

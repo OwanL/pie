@@ -31,7 +31,12 @@ Use `npm run test:coverage` only for the explicit release coverage gate.
 On Windows the harness `bash` tool is Git Bash, not PowerShell. Use `/dev/null`
 for shell redirection, never `NUL`; a literal `NUL` file breaks Windows ripgrep
 traversal. Native Windows programs may print `%TEMP%` paths even when Bash also
-exposes the same directory as `/tmp`; tools should accept either spelling.
+exposes the same directory as `/tmp`; tools should accept either spelling. Use
+native `C:/...` paths for Windows programs and Git-Bash `/c/...` paths for shell
+commands. For Node ESM imports from a Windows path, use
+`pathToFileURL(...).href` instead of importing a raw drive-letter path. Scope
+`MSYS2_ARG_CONV_EXCL` to the individual native command that needs it; never set
+it globally. When no ripgrep match is an acceptable result, use `rg ... || true`.
 
 ## Context-lean layers
 

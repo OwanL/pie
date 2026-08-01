@@ -12,12 +12,20 @@ import {
 
 import { withCatalogLock } from './src/catalog-lock.js';
 import { CopilotCatalogRefreshCoordinator } from './src/catalog-refresh.js';
+import { FileCatalogRefreshTiming } from './src/catalog-ttl.js';
 import { reconcileCatalogText, type CatalogReconciliation } from './src/catalog-sync.js';
 import { COPILOT_HEADERS, parseCopilotModelsResponse } from './src/copilot-models.js';
 
 const PROVIDER = 'github-copilot';
 const DISCOVERY_TIMEOUT_MS = 15_000;
 const execFileAsync = promisify(execFile);
+
+// A bounded, cross-process TTL gate avoids a network fetch, reconciliation, and
+// codegen on every session startup. The marker is shared across VS Code windows
+// through the agent directory; a missing or corrupt file is treated as stale.
+const timing = new FileCatalogRefreshTiming(
+  path.join(getAgentDir(), '.copilot-catalog-sync.json'),
+);
 
 async function atomicWrite(filePath: string, content: string): Promise<void> {
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
@@ -108,6 +116,7 @@ async function syncCopilotCatalog(registry: ExtensionContext['modelRegistry']): 
 
   const reconciliation = await commitCatalog(root, catalogPath, remoteModels);
   if (!reconciliation.changed) {
+    await timing.markRefreshed();
     console.info(`[copilot-model-discovery] Catalog current: ${remoteModels.length} selectable models`);
     return;
   }
@@ -116,18 +125,44 @@ async function syncCopilotCatalog(registry: ExtensionContext['modelRegistry']): 
     reconciliation.added.length > 0 ? `added ${reconciliation.added.join(', ')}` : '',
     reconciliation.removed.length > 0 ? `removed ${reconciliation.removed.join(', ')}` : '',
   ].filter(Boolean).join('; ');
+  // Cache only after the authoritative source and generated catalog commit.
+  // The coordinator refreshes each participating live registry after this
+  // function returns; future sessions load the committed catalog on creation.
+  await timing.markRefreshed();
   console.info(`[copilot-model-discovery] Catalog synchronized: ${summary}`);
 }
 
+// `markRefreshed` is invoked inside `syncCopilotCatalog` after a successful
+// commit, so a failed or not-yet-configured refresh is not cached.
 const coordinator = new CopilotCatalogRefreshCoordinator<ExtensionContext['modelRegistry']>(syncCopilotCatalog);
 
 export default function registerCopilotModelDiscovery(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     try {
+      // Skip the network/catalog work entirely when a recent refresh already
+      // verified the catalog. Each session's ModelRegistry loads the current
+      // models.json at creation, so no live-registry reload is needed here.
+      if (await timing.isFresh()) return;
       await coordinator.refresh(ctx.modelRegistry);
     } catch (error) {
       // A failure is not cached: the next session startup retries discovery.
       console.warn('[copilot-model-discovery] Catalog unchanged:', error instanceof Error ? error.message : error);
     }
+  });
+
+  // Explicit, user-initiated refresh that bypasses the TTL gate.
+  pi.registerCommand('copilot-sync-models', {
+    description: 'Force-refresh the GitHub Copilot model catalog now, bypassing the TTL cache',
+    handler: async (_args, ctx) => {
+      try {
+        await coordinator.refresh(ctx.modelRegistry);
+        ctx.ui.notify('Copilot catalog refreshed', 'info');
+      } catch (error) {
+        ctx.ui.notify(
+          `Copilot catalog refresh failed: ${error instanceof Error ? error.message : error}`,
+          'error',
+        );
+      }
+    },
   });
 }

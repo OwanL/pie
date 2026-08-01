@@ -1,6 +1,6 @@
 // Focused unit tests for scripts/lib/test-packages.mjs — the shared file→package
 // classification and global test-infrastructure detection used by both
-// run-test-files.mjs and run-changed-tests.mjs.
+// run-test-files.mjs and run-affected-tests.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -11,16 +11,16 @@ import {
   mapFilesToPackages,
 } from '../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers the 17 run-tests.mjs package ids', () => {
+test('PACKAGE_DIRECTIVES covers the 16 run-tests.mjs package ids', () => {
   const expected = [
     'extension', 'analysis', 'scripts',
     'cwd-skills', 'safeguard', 'skill-pruner', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-compat', 'tool-result-pruner',
-    'session-reviewer', 'session-changes', 'deferred-triggers', 'computer-use',
+    'session-reviewer', 'session-changes', 'computer-use',
     'image-context-guard',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  assert.equal(PACKAGE_DIRECTIVES.length, 17);
+  assert.equal(PACKAGE_DIRECTIVES.length, 16);
 });
 
 test('classifyFileToPackage maps a file under each package directory to its id', () => {
@@ -61,7 +61,6 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
   for (const p of [
     'scripts/run-tests.mjs',
     'scripts/run-test-files.mjs',
-    'scripts/run-changed-tests.mjs',
     'scripts/run-affected-tests.mjs',
     'scripts/run-fast-extension-tests.mjs',
     'scripts/run-fast-batched-tests.mjs',

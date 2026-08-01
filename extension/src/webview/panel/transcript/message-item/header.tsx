@@ -56,9 +56,8 @@ interface MessageItemHeaderProps {
   assistantMetaTooltip: string | null;
   requestCreatedAt?: string;
   actions: ComponentChildren;
-  /** Host-side synthetic-send tag. `'deferred-trigger'` surfaces an
-   *  "Auto-resume" label on the user bubble so the wake-up message is
-   *  visually differentiated from a typed message. */
+  /** Host-side synthetic-send tag. Surfaces a label on the user bubble
+   *  when the message is host-injected rather than typed. */
   customType?: string;
 }
 
@@ -72,10 +71,10 @@ export function MessageItemHeader({
   actions,
   customType,
 }: MessageItemHeaderProps) {
-  // User messages normally carry no header label. A deferred-trigger wake-up
-  // is a host-injected user message, so badge it with "Auto-resume" to make
-  // that visible while keeping it honest (still a user-role bubble).
-  const userLabel = customType === 'deferred-trigger' ? 'Auto-resume' : null;
+  // User messages normally carry no header label. A synthetic send (host-
+  // injected user message) is badged so it is visually differentiated from a
+  // typed message while keeping it honest (still a user-role bubble).
+  const userLabel = role === 'user' && customType !== undefined ? 'Auto-resume' : null;
   const requestTime = role === 'assistant' ? formatRequestTime(requestCreatedAt) : null;
   return (
     <MessageHeader

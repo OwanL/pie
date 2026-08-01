@@ -124,12 +124,66 @@ export function validateSiteDataBundleNumericFields(bundle: SiteDataBundle): voi
   assertNullableUnitInterval(reviewData.summary.criterionCoverage, 'session-review-analytics.json summary.criterionCoverage');
   assertNullableUnitInterval(reviewData.summary.externalBlockerRate, 'session-review-analytics.json summary.externalBlockerRate');
   if (reviewData.summary.meanQualityIndexV1 !== null && (!isFiniteNumber(reviewData.summary.meanQualityIndexV1) || reviewData.summary.meanQualityIndexV1 < 0 || reviewData.summary.meanQualityIndexV1 > 100)) throw new Error('session-review-analytics.json summary.meanQualityIndexV1 must be null or a finite number in [0, 100].');
+  const joinCoverage = reviewData.joinCoverage;
+  assertNonNegativeInteger(joinCoverage.totalReviews, 'session-review-analytics.json joinCoverage.totalReviews');
+  assertNonNegativeInteger(joinCoverage.joinedCount, 'session-review-analytics.json joinCoverage.joinedCount');
+  assertNonNegativeInteger(joinCoverage.unmatchedCount, 'session-review-analytics.json joinCoverage.unmatchedCount');
+  for (const field of ['session_id', 'path_fallback', 'unmatched'] as const) assertCountField(joinCoverage.byJoinKey[field], `session-review-analytics.json joinCoverage.byJoinKey.${field}`);
+  for (const field of ['no_run_for_identity', 'identity_conflict_at_path'] as const) assertCountField(joinCoverage.unmatchedByReason[field], `session-review-analytics.json joinCoverage.unmatchedByReason.${field}`);
   for (const [index, row] of reviewData.rows.entries()) {
     const prefix = `session-review-analytics.json row ${index}`;
     assertNullableUnitInterval(row.criterionCoverage, `${prefix}.criterionCoverage`);
     assertNullableUnitInterval(row.externalBlockerRate, `${prefix}.externalBlockerRate`);
     const qualityIndex = row.attainment.qualityIndexV1;
     if (qualityIndex !== null && (!isFiniteNumber(qualityIndex) || qualityIndex < 0 || qualityIndex > 100)) throw new Error(`${prefix}.attainment.qualityIndexV1 must be null or a finite number in [0, 100].`);
+    if (row.joinKey !== 'session_id' && row.joinKey !== 'path_fallback' && row.joinKey !== 'unmatched') throw new Error(`${prefix}.joinKey is invalid.`);
+    if (row.joinKey === 'unmatched') {
+      if (row.unmatchedReason !== 'no_run_for_identity' && row.unmatchedReason !== 'identity_conflict_at_path') throw new Error(`${prefix}.unmatchedReason is invalid.`);
+    } else if (row.unmatchedReason !== null) {
+      throw new Error(`${prefix}.unmatchedReason must be null when joined.`);
+    }
+  }
+
+  const correlations = bundle.outcomeCorrelations;
+  assertNonNegativeInteger(correlations.analyzableSessionCount, 'outcome-correlations.json analyzableSessionCount');
+  assertNonNegativeInteger(correlations.unmatchedExcludedCount, 'outcome-correlations.json unmatchedExcludedCount');
+  for (const [index, dimension] of correlations.dimensions.entries()) {
+    const prefix = `outcome-correlations.json dimension ${index}`;
+    assertNonNegativeInteger(dimension.includedSessionCount, `${prefix}.includedSessionCount`);
+    assertNonNegativeInteger(dimension.untrackedSessionCount, `${prefix}.untrackedSessionCount`);
+    for (const [groupIndex, group] of dimension.groups.entries()) {
+      const groupPrefix = `${prefix} group ${groupIndex}`;
+      assertCountField(group.sessionCount, `${groupPrefix}.sessionCount`);
+      if (!isFiniteNumber(group.meanQualityIndexV1) || group.meanQualityIndexV1 < 0 || group.meanQualityIndexV1 > 100) throw new Error(`${groupPrefix}.meanQualityIndexV1 must be a finite number in [0, 100].`);
+      if (group.meanCi95 !== null && (!isFiniteNumber(group.meanCi95.lower) || !isFiniteNumber(group.meanCi95.upper) || group.meanCi95.lower > group.meanCi95.upper)) throw new Error(`${groupPrefix}.meanCi95 is invalid.`);
+    }
+    for (const [diffIndex, difference] of dimension.differences.entries()) {
+      const diffPrefix = `${prefix} difference ${diffIndex}`;
+      assertCountField(difference.referenceSessionCount, `${diffPrefix}.referenceSessionCount`);
+      assertCountField(difference.comparisonSessionCount, `${diffPrefix}.comparisonSessionCount`);
+      if (!isFiniteNumber(difference.observedMeanDifference)) throw new Error(`${diffPrefix}.observedMeanDifference must be finite.`);
+      if (difference.differenceCi95 !== null && (!isFiniteNumber(difference.differenceCi95.lower) || !isFiniteNumber(difference.differenceCi95.upper) || difference.differenceCi95.lower > difference.differenceCi95.upper)) throw new Error(`${diffPrefix}.differenceCi95 is invalid.`);
+    }
+  }
+
+  const reliability = bundle.evidenceReliability;
+  assertNonNegativeInteger(reliability.reviewedSessionCount, 'evidence-reliability.json reviewedSessionCount');
+  assertNonNegativeInteger(reliability.attributedSessionCount, 'evidence-reliability.json attributedSessionCount');
+  assertNonNegativeInteger(reliability.unattributedCount, 'evidence-reliability.json unattributedCount');
+  assertNonNegativeInteger(reliability.effectiveReviewedFamilies, 'evidence-reliability.json effectiveReviewedFamilies');
+  if (reliability.dominantFamily !== null) {
+    if (!isFiniteNumber(reliability.dominantFamily.share) || reliability.dominantFamily.share < 0 || reliability.dominantFamily.share > 1) throw new Error('evidence-reliability.json dominantFamily.share must be in [0, 1].');
+    if (!isFiniteNumber(reliability.dominantFamily.reviewedSessionCount) || reliability.dominantFamily.reviewedSessionCount < 0) throw new Error('evidence-reliability.json dominantFamily.reviewedSessionCount is invalid.');
+  }
+  const ceiling = reliability.ceilingSaturation;
+  if (!isFiniteNumber(ceiling.perfectRate) || ceiling.perfectRate < 0 || ceiling.perfectRate > 1) throw new Error('evidence-reliability.json ceilingSaturation.perfectRate must be in [0, 1].');
+  if (!isFiniteNumber(ceiling.achievedBandRate) || ceiling.achievedBandRate < 0 || ceiling.achievedBandRate > 1) throw new Error('evidence-reliability.json ceilingSaturation.achievedBandRate must be in [0, 1].');
+  if (ceiling.medianQualityIndexV1 !== null && (!isFiniteNumber(ceiling.medianQualityIndexV1) || ceiling.medianQualityIndexV1 < 0 || ceiling.medianQualityIndexV1 > 100)) throw new Error('evidence-reliability.json ceilingSaturation.medianQualityIndexV1 must be null or in [0, 100].');
+  assertNonNegativeInteger(ceiling.distinctQualityIndexValues, 'evidence-reliability.json ceilingSaturation.distinctQualityIndexValues');
+  for (const [index, share] of reliability.familyShares.entries()) {
+    const prefix = `evidence-reliability.json familyShares[${index}]`;
+    if (!isFiniteNumber(share.share) || share.share < 0 || share.share > 1) throw new Error(`${prefix}.share must be in [0, 1].`);
+    if (!isFiniteNumber(share.reviewedSessionCount) || share.reviewedSessionCount < 0) throw new Error(`${prefix}.reviewedSessionCount is invalid.`);
   }
 
   for (const [index, row] of bundle.modelLeaderboard.rows.entries()) {

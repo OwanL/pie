@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from "./toolchain.mjs";
+import { collectEnvironmentDiagnostics } from "./doctor-environment.mjs";
+import { collectStrandedLegacySessions } from "./doctor-sessions.mjs";
 
 const ci = process.argv.includes("--ci");
 const skipModelCheck = process.argv.includes("--skip-model-check");
@@ -9,12 +11,32 @@ let failures = 0;
 const ok = (message) => console.log(`  [ok] ${message}`);
 const fail = (message) => { failures++; console.error(`  [FAIL] ${message}`); };
 const warn = (message) => console.warn(`  [warn] ${message}`);
+const info = (message) => console.log(`  [info] ${message}`);
 const normalize = (value) => path.resolve(value).replaceAll("\\", "/").toLowerCase();
 const run = (command, args, cwd = repoRoot) => process.platform === "win32"
   ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args], { cwd, encoding: "utf8" })
   : spawnSync(command, args, { cwd, encoding: "utf8" });
 
 console.log("pie multi-machine doctor");
+const diagnostics = collectEnvironmentDiagnostics();
+for (const { name, paths } of diagnostics.executables) {
+  if (paths.length === 0) {
+    warn(`${name}: unavailable`);
+  } else if (paths.length === 1) {
+    info(`${name}: ${paths[0]}`);
+  } else {
+    info(`${name}:`);
+    for (const resolved of paths) info(`    ${resolved}`);
+  }
+}
+const encoding = diagnostics.encoding;
+if ("codePage" in encoding) {
+  info(`captured output decoded as ${encoding.capturedOutputDecoding}; cmd code page ${encoding.codePage}`);
+} else {
+  info(`captured output decoded as ${encoding.capturedOutputDecoding}; LANG/LC_ALL ${encoding.locale}`);
+}
+for (const message of diagnostics.pathWarnings) warn(message);
+
 const pinnedNode = readPinnedNodeVersion();
 const pinnedNpm = readPinnedNpmVersion();
 const pinnedPi = readPinnedPiVersion();
@@ -37,6 +59,22 @@ const settings = JSON.parse(fs.readFileSync(path.join(repoRoot, "settings.json")
 settings.sessionDir === "data/outcomes/sessions" ? ok("sessions are configured as checkout-local runtime data") : fail("settings.sessionDir must be data/outcomes/sessions");
 const ignore = fs.readFileSync(path.join(repoRoot, ".gitignore"), "utf8");
 ignore.includes("/data/") && ignore.includes("auth.json") ? ok("auth and runtime data are git-ignored") : fail(".gitignore must exclude auth.json and /data/");
+
+// The runtime lists sessions from the canonical store only; legacy roots are
+// no longer scanned. Detect sessions stranded in a legacy root without a
+// canonical counterpart so the user can re-run the installer to migrate them
+// (no silent loss) instead of the app scanning legacy roots forever.
+const stranded = collectStrandedLegacySessions({ repoRoot });
+if (stranded.totalStranded > 0) {
+  warn(`${stranded.totalStranded} legacy session(s) stranded outside the canonical store (${stranded.canonical}):`);
+  for (const entry of stranded.roots) {
+    if (entry.stranded > 0) warn(`  ${entry.stranded} of ${entry.total} in ${entry.root}`);
+  }
+  warn(`  Re-run the installer (./install.sh or .\\install.bat) to migrate them into the canonical store.`);
+} else {
+  ok("no legacy sessions stranded outside the canonical store");
+}
+
 const inTreeAuth = path.join(repoRoot, "auth.json");
 if (!fs.existsSync(inTreeAuth)) ok("no credentials in working tree");
 else {

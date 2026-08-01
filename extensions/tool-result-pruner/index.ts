@@ -64,7 +64,7 @@ import { isExtensionDisabledByToggle, loadConfig } from "./config.js";
 import { recordPruning } from "./logger.js";
 import { runPipeline } from "./pipeline.js";
 import { reapPrunedRawStashes, reapSessionStashes } from "./reaper.js";
-import { countTokens } from "./tokenize.js";
+import { countTokens } from "../../shared/tokenize.js";
 
 function getSessionId(ctx: unknown): string {
   const ctxObj = ctx as Record<string, unknown> | undefined;

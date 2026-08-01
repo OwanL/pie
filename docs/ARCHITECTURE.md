@@ -141,9 +141,13 @@ See git history (commit `d581d83`) for historical context on the migration from 
 - The host normalizes one absolute agent/session storage authority and supplies
   it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; with neither
   configured, the embedded SDK keeps its own defaults. The backend uses the
-  canonical session root for create and fork. Listing caches a path-deduplicated
-  canonical + legacy compatibility inventory, overlays live sessions and fresh
-  reviews, and polls a cheap JSONL filename signature so external
+  canonical session root for create and fork, and listing reads it (plus its
+  per-cwd subdirectories) exclusively — the legacy `<agentDir>/sessions` root is
+  retired once a canonical root is configured. The installer's verified copy/merge
+  is the authority for legacy content, and `npm run doctor` detects any newly
+  stranded legacy sessions instead of the runtime scanning legacy roots forever.
+  Listing caches a path-deduplicated canonical inventory, overlays live sessions
+  and fresh reviews, and polls a cheap JSONL filename signature so external
   additions/removals invalidate the cache. Missing roots count as empty;
   inaccessible roots retain the last complete catalog until a safe refresh.
   Explicit resume/recovery paths remain migration-free.

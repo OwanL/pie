@@ -13,7 +13,7 @@ import {
 	setLogPathForTesting,
 	setMaxLogBytesForTesting,
 } from "../logger.js";
-import { tokenizerAvailable } from "../tokenize.js";
+import { tokenizerAvailable } from "../../../shared/tokenize.js";
 import type { PruningDecision } from "../types.js";
 
 function tempLogPath(): string {

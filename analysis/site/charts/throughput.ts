@@ -3,6 +3,7 @@ import {
   CHART_COLORS,
   categoricalHeight,
   median,
+  modelColorScale,
   modelFamilyKey,
   percentile,
   sortNatural,
@@ -55,7 +56,7 @@ function throughputOverTimeSpec(rows: ThroughputChartRow[], models: string[]) {
         type: 'nominal' as const,
         title: 'Model family',
         sort: models,
-        scale: { range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.accent2, CHART_COLORS.gold, CHART_COLORS.success] },
+        scale: modelColorScale(models),
         legend: { orient: 'bottom' as const },
       },
       tooltip: [
@@ -174,7 +175,7 @@ export function throughputVsConcurrencySpec(rows: ThroughputConcurrencyRow[], mo
             type: 'nominal' as const,
             title: 'Model family',
             sort: models,
-            scale: { range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.accent2, CHART_COLORS.gold, CHART_COLORS.success] },
+            scale: modelColorScale(models),
             legend: { orient: 'bottom' as const },
           },
           tooltip: [
@@ -210,7 +211,7 @@ export const throughputCharts: ChartEntry[] = [
         ctx.renderToken,
       );
       const spec = rows.length === 0 ? null : throughputOverTimeSpec(rows, models);
-      await ctx.renderSpec('chart-throughput-over-time', spec, 'No assistant turns with throughput data match the current filters.', ctx.renderToken);
+      await ctx.renderSpec('chart-throughput-over-time', spec, 'No assistant turns with throughput data match the current filters.', ctx.renderToken, 'canvas');
     },
   },
   {

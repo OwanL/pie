@@ -150,14 +150,14 @@ function timeoutFixture(options: {
 function controlledFixture() {
   const calls: Array<{ name: string; args: any }> = []; const inputs: string[] = [];
   const failedKeyReleases = new Set<number>(); const failedButtonReleases = new Set<number>();
-  let activeWindow = 99; let windowAvailable = true; let bringActivates = true; let bringThrows = false; let bringHangs = false; let nutFocusWindow = 99; let nativeFocusWindow = 99; let now = 0; let onType: (() => void) | undefined;
+  let activeWindow = 99; let windowAvailable = true; let bringActivates = true; let bringThrows = false; let bringHangs = false; let listHangs = false; let nutFocusWindow = 99; let nativeFocusWindow = 99; let now = 0; let onType: (() => void) | undefined;
   let nutRegion = { left: 100, top: 50, width: 400, height: 200 };
   const record = { pid: 10, window_id: 99, title: 'Editor', app_name: 'editor.exe', bounds: { x: 100, y: 50, width: 400, height: 200 }, minimized: false, is_on_screen: true };
   let windowList: any[] = [record];
   const driver = {
     async callTool(name: string, json: string) {
       const args = JSON.parse(json); calls.push({ name, args });
-      if (name === 'list_windows') return tool({ _legacy_windows: windowAvailable ? windowList : [] });
+      if (name === 'list_windows') { if (listHangs) return await new Promise(() => {}); return tool({ _legacy_windows: windowAvailable ? windowList : [] }); }
       if (name === 'bring_to_front') { if (bringHangs) return await new Promise(() => {}); if (bringThrows) throw new Error('bring_to_front failed'); if (bringActivates) activeWindow = Number(args.window_id); return tool({ active: true }); }
       if (name === 'get_screen_size') return tool({ width: 1000, height: 600 });
       if (name === 'get_window_state') return tool({ screenshot_width: 400, screenshot_height: 200, elements: [{ role: 'button', label: 'Go', frame: { x: 10, y: 10, w: 20, h: 10 } }] });
@@ -166,7 +166,7 @@ function controlledFixture() {
     async shutdown() { calls.push({ name: 'driver_shutdown', args: {} }); }, uniffiDestroy() {},
   };
   const nut = {
-    Key: { W: 1, A: 2 }, Button: { LEFT: 1, MIDDLE: 2, RIGHT: 3 },
+    Key: { W: 1, A: 2, Num0: 3, NumPad0: 4 }, Button: { LEFT: 1, MIDDLE: 2, RIGHT: 3 },
     keyboard: {
       config: {}, async pressKey(key: number) { inputs.push(`key_down:${key}`); }, async releaseKey(key: number) { inputs.push(`key_up:${key}`); if (failedKeyReleases.has(key)) throw new Error(`key release ${key} failed`); },
       async type(text: string) { inputs.push(`text:${text}`); onType?.(); },
@@ -182,11 +182,14 @@ function controlledFixture() {
   };
   return {
     backend: new ComputerBackend({
-      driver, nut, now: () => now, sleep: async (ms: number) => { now += ms; }, focusCuaCallTimeoutMs: 5,
+      driver, nut, now: () => now, sleep: async (ms: number, signal?: AbortSignal) => {
+        now += ms;
+        if (signal?.aborted) { const error = new Error('Computer request was cancelled.'); (error as any).code = 'CANCELLED'; throw error; }
+      }, focusCuaCallTimeoutMs: 5,
       nativeFocus: async () => { calls.push({ name: 'native_focus', args: { windowHandle: 99 } }); activeWindow = nativeFocusWindow; return activeWindow === 99; },
     }), calls, inputs,
     setActive(value: number) { activeWindow = value; }, setAvailable(value: boolean) { windowAvailable = value; },
-    setBringActivates(value: boolean) { bringActivates = value; }, setBringThrows(value: boolean) { bringThrows = value; }, setBringHangs(value: boolean) { bringHangs = value; }, setNutFocusWindow(value: number) { nutFocusWindow = value; }, setNativeFocusWindow(value: number) { nativeFocusWindow = value; }, setOnType(value: (() => void) | undefined) { onType = value; },
+    setBringActivates(value: boolean) { bringActivates = value; }, setBringThrows(value: boolean) { bringThrows = value; }, setBringHangs(value: boolean) { bringHangs = value; }, setListHangs(value: boolean) { listHangs = value; }, setNutFocusWindow(value: number) { nutFocusWindow = value; }, setNativeFocusWindow(value: number) { nativeFocusWindow = value; }, setOnType(value: (() => void) | undefined) { onType = value; },
     setRegion(value: { left: number; top: number; width: number; height: number }) { nutRegion = value; },
     replaceWindow(id: number) { windowList = [{ ...record, window_id: id }]; activeWindow = id; nutFocusWindow = id; nativeFocusWindow = id; },
     setWindows(list: any[]) { windowList = list; },
@@ -500,6 +503,80 @@ test('physical input safely reacquires the exact target when another window stol
     await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'safe' } });
     assert.deepEqual(fixture.inputs, ['text:safe']);
     assert.equal(fixture.calls.some(({ name }) => name === 'bring_to_front'), true);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('foreground acquisition bounds a hanging list_windows proof before physical input', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-list-windows-timeout-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    fixture.setActive(100); fixture.setListHangs(true);
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'blocked' } }),
+      (error: any) => error.code === 'STALE_TARGET' && error.retryable === true,
+    );
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('foreground loss immediately before input retries once after an exact revalidation without replaying input', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-retry-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    const activeWindowIs = fixture.backend.activeWindowIs.bind(fixture.backend); let checks = 0;
+    fixture.backend.activeWindowIs = async (current: any) => {
+      checks += 1;
+      if (checks === 2) { fixture.setActive(100); return false; }
+      return await activeWindowIs(current);
+    };
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'once' } });
+    assert.deepEqual(fixture.inputs, ['text:once']);
+    assert.equal(fixture.calls.filter(({ name }) => name === 'bring_to_front').length, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('foreground retry aborts during its backoff before physical input', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-retry-abort-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir); const controller = new AbortController();
+    const activeWindowIs = fixture.backend.activeWindowIs.bind(fixture.backend); let checks = 0;
+    fixture.backend.activeWindowIs = async (current: any) => {
+      checks += 1;
+      if (checks === 2) { fixture.setActive(100); controller.abort(); return false; }
+      return await activeWindowIs(current);
+    };
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'blocked' } }, controller.signal),
+      (error: any) => error.code === 'CANCELLED',
+    );
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('foreground retry fails closed when exact target revalidation finds a stale target', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-input-retry-stale-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    const activeWindowIs = fixture.backend.activeWindowIs.bind(fixture.backend); let checks = 0;
+    fixture.backend.activeWindowIs = async (current: any) => {
+      checks += 1;
+      if (checks === 2) { fixture.setActive(100); fixture.setAvailable(false); return false; }
+      return await activeWindowIs(current);
+    };
+    await assert.rejects(
+      () => fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'text', text: 'blocked' } }),
+      (error: any) => error.code === 'STALE_TARGET' && error.retryable === true,
+    );
+    assert.deepEqual(fixture.inputs, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('hotkeys normalize historical top-row aliases and deduplicate them without conflating numpad keys', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-key-aliases-'));
+  try {
+    const fixture = controlledFixture(); const target = await openControlled(fixture, dir);
+    await fixture.backend.act({ sessionId: 's', targetId: target.targetId, input: { kind: 'hotkey', keys: ['0', 'zero', 'digit0', 'Num0', 'NumPad0'] } });
+    assert.deepEqual(fixture.inputs, ['key_down:3', 'key_down:4', 'key_up:4', 'key_up:3']);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

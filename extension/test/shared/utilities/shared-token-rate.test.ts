@@ -72,6 +72,7 @@ test('createAccumulator returns a fresh accumulator with zeroed generation state
   assert.equal(acc.samples.length, 0);
   assert.equal(acc.lastWall, BASE_NOW);
   assert.equal(acc.lastContentTokensById.size, 0);
+  assert.equal(acc.draftingTokensById.size, 0);
   assert.equal(acc.subagentTokens.size, 0);
 });
 
@@ -203,6 +204,61 @@ test('cumTokens accumulates the per-tick deltas and one sample is pushed per gen
   assert.equal(acc.cumTokens, t3); // t2 + (t3 - t2)
   assert.equal(acc.samples.length, 3);
   assert.equal(acc.genMs, 3000);
+});
+
+test('streaming tool-call arguments count as generated output', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const firstDraft = tokenText(40);
+  const secondDraft = tokenText(100);
+  const toolNameTokens = estimateTextTokens('bash');
+  const firstTokens = toolNameTokens + estimateTextTokens(firstDraft);
+  const secondTokens = toolNameTokens + estimateTextTokens(secondDraft);
+
+  const first = tickTokenRate(acc, [streamingMessage({
+    draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: firstDraft },
+  })], BASE_NOW + 1_000);
+  const second = tickTokenRate(acc, [streamingMessage({
+    draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: secondDraft },
+  })], BASE_NOW + 2_000);
+
+  assert.equal(first.state, 'generating');
+  assert.equal(second.state, 'generating');
+  assert.equal(acc.cumTokens, secondTokens);
+  assert.equal(second.liveOutputTokens, secondTokens);
+  assert.equal(acc.genMs, 2_000);
+  assert.equal(second.rate, secondTokens - firstTokens);
+});
+
+test('tool execution pauses the clock without double-counting its draft or swallowing continuation text', () => {
+  const acc = createAccumulator(BASE_NOW);
+  const initialText = tokenText(100);
+  const continuedText = tokenText(120);
+  const draftText = tokenText(40);
+  const initialTokens = estimateTextTokens(initialText);
+  const continuedTokens = estimateTextTokens(continuedText);
+  const draftTokens = estimateTextTokens('bash') + estimateTextTokens(draftText);
+
+  tickTokenRate(acc, [streamingMessage({
+    markdown: initialText,
+    draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: draftText },
+  })], BASE_NOW + 1_000);
+  const generationBeforeTool = acc.genMs;
+
+  const blocked = tickTokenRate(acc, [streamingMessage({
+    markdown: initialText,
+    toolCalls: [{ id: 'tool-1', name: 'bash', input: { command: 'echo hi' }, status: 'running' }],
+  })], BASE_NOW + 2_000);
+
+  assert.equal(blocked.state, 'paused');
+  assert.equal(acc.genMs, generationBeforeTool);
+  assert.equal(acc.cumTokens, initialTokens + draftTokens);
+  assert.equal(acc.draftingTokensById.size, 0);
+
+  tickTokenRate(acc, [streamingMessage({
+    markdown: continuedText,
+    toolCalls: [{ id: 'tool-1', name: 'bash', input: { command: 'echo hi' }, status: 'completed' }],
+  })], BASE_NOW + 3_000);
+  assert.equal(acc.cumTokens, continuedTokens + draftTokens);
 });
 
 test('a continuation (same message id re-streaming) counts only its new output, not the whole message', () => {

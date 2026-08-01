@@ -91,7 +91,14 @@ test('confirm: forwards timeout and auto-cancels without a host response', async
   const { bridge, captured } = makeBridge();
   const pending = bridge.confirm('t', 'm', { timeout: 10 });
   assert.equal(captured[0].payload.timeout, 10);
-  assert.equal(await pending, false);
+  // Production dialog timers are unref'd so they cannot keep the backend alive.
+  // Keep this isolated test alive while exercising that timer.
+  const keepAlive = setTimeout(() => undefined, 100);
+  try {
+    assert.equal(await pending, false);
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('confirm: abort signal cancels the pending request', async () => {
@@ -223,6 +230,24 @@ test('resolveRequest: resolving the same id twice is safe (second is a no-op)', 
   // Second call reports the expired ownership and cannot change the result.
   assert.equal(bridge.resolveRequest({ id, confirmed: false }), false);
   assert.equal(await pending, true);
+});
+
+test('resolveRequest: defers the extension continuation so the RPC acknowledgement can run first', async () => {
+  const { bridge, captured } = makeBridge();
+  let extensionContinued = false;
+  const pending = bridge.confirm('t', 'm').then((confirmed) => {
+    extensionContinued = true;
+    return confirmed;
+  });
+
+  assert.equal(bridge.resolveRequest({ id: captured[0].payload.id, confirmed: true }), true);
+  // Backend request handling awaits once before writing its response. The UI
+  // waiter must remain paused through that microtask or resumed extension code
+  // can starve the acknowledgement and cause a false host timeout.
+  await Promise.resolve();
+  assert.equal(extensionContinued, false);
+  assert.equal(await pending, true);
+  assert.equal(extensionContinued, true);
 });
 
 // ─── cancelAll ───────────────────────────────────────────────────────────────

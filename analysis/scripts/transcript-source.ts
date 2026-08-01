@@ -21,7 +21,10 @@ interface TranscriptNode {
 }
 
 export interface TranscriptDiscoveryOptions {
-  legacySessionsDir: string;
+  /** Canonical configured session root. When absent, no local transcripts are
+   *  discovered — the installer's verified migration is the authority for any
+   *  legacy content, and `npm run doctor` detects newly stranded legacy
+   *  sessions instead of perpetually scanning legacy roots. */
   configuredSessionsDir?: string;
 }
 
@@ -330,21 +333,23 @@ export async function readSessionReviewsV2(sidecarPath?: string): Promise<Sessio
   return { reviews: [...production.values()], diagnostics };
 }
 
-/** Discover legacy + configured local transcripts, deduplicating overlapping roots. */
+/** Discover local transcripts from the canonical configured root only.
+ *
+ *  Legacy roots are no longer scanned at runtime: the installer's verified
+ *  copy/merge moved historical transcripts into the canonical store, so a
+ *  perpetual legacy scan would only re-surface stale or stranded copies.
+ *  `npm run doctor` detects sessions stranded in a legacy root without a
+ *  canonical counterpart. */
 export async function discoverHistoricalSessions(options: TranscriptDiscoveryOptions): Promise<HistoricalSessionSourceSummary[]> {
-  const roots: Array<{ root: string; provenance: TranscriptSourceProvenance }> = [
-    { root: options.legacySessionsDir, provenance: 'legacy' },
-  ];
-  if (options.configuredSessionsDir) roots.push({ root: options.configuredSessionsDir, provenance: 'configured' });
+  if (!options.configuredSessionsDir) return [];
 
   const discovered = new Map<string, { filePath: string; provenance: Set<TranscriptSourceProvenance> }>();
-  for (const { root, provenance } of roots) {
-    for (const filePath of await listJsonlFiles(root)) {
-      const normalized = normalizeSessionPath(path.resolve(filePath));
-      const existing = discovered.get(normalized);
-      if (existing) existing.provenance.add(provenance);
-      else discovered.set(normalized, { filePath: path.resolve(filePath), provenance: new Set([provenance]) });
-    }
+  for (const filePath of await listJsonlFiles(options.configuredSessionsDir)) {
+    const normalized = normalizeSessionPath(path.resolve(filePath));
+    discovered.set(normalized, {
+      filePath: path.resolve(filePath),
+      provenance: new Set<TranscriptSourceProvenance>(['configured']),
+    });
   }
 
   const summaries: HistoricalSessionSourceSummary[] = [];

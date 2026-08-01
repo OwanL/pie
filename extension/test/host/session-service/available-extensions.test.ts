@@ -7,7 +7,6 @@ test('deriveAvailableExtensions shows loaded extensions even when their tools we
   const extensions = deriveAvailableExtensions([
     'subagent',
     'ask-user',
-    'deferred-triggers',
     'session-reviewer',
     'safeguard',
   ]);
@@ -16,7 +15,6 @@ test('deriveAvailableExtensions shows loaded extensions even when their tools we
     'subagent',
     'safeguard',
     'ask-user',
-    'deferred-triggers',
     'session-reviewer',
   ]);
 });

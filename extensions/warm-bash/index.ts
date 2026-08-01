@@ -34,7 +34,7 @@ import { WarmBashPool } from "./src/warm-pool.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
 import type { BashOperations } from "./src/types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./src/shared-state.js";
-import { prependManagedBinDir } from "./src/managed-env.js";
+import { prependManagedBinDir, sanitizeProtoEnv } from "./src/managed-env.js";
 
 function idleTarget(): number {
   const raw = Number.parseInt(process.env.PIE_BASH_WARM_POOL ?? "", 10);
@@ -109,7 +109,18 @@ function isDisabledByToggle(): boolean {
 
 // Base built-in bash tool, spread for its schema / promptSnippet / rendering.
 // Its execute is overridden per call; the throwaway cwd never runs a command.
-const baseBashTool = createBashTool(process.cwd());
+// A spawnHook sanitizes proto activation out of the per-call env so the
+// warm-bash-DISABLED path (Settings toggle off) stays consistent with the
+// pool/fast/fallback envs. getShellEnv() already prepended the managed bin dir,
+// so we only strip + promote proto; command/cwd pass through unchanged (today's
+// exact execution mechanism, just with a proto-sanitized env).
+const baseBashTool = createBashTool(process.cwd(), {
+  spawnHook: ({ command, cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({
+    command,
+    cwd,
+    env: sanitizeProtoEnv(env, join(getAgentDir(), "bin")),
+  }),
+});
 
 interface OpsCfg {
   fastPath: boolean;
@@ -153,7 +164,13 @@ export default function (pi: ExtensionAPI) {
     // the SAME authoritative managed env here and pass it to the pool —
     // otherwise workers inherit a PATH missing <agentDir>/bin and rg/fd ENOENT
     // inside warm-bash even though the built-in fresh-spawn path finds them.
-    const managedEnv = prependManagedBinDir(process.env, join(getAgentDir(), "bin"));
+    // Then sanitize proto's per-project activation out of that env so the warm
+    // workers are not pinned to the proto activation live at spawn time: strip
+    // PROTO_*_VERSION/SHIM pins + direct PROTO_HOME/tools PATH entries and
+    // promote PROTO_HOME/shims+bin right after the managed bin so proto shims
+    // re-resolve node/npm/python/… per .prototools instead of a frozen version.
+    const managedBin = join(getAgentDir(), "bin");
+    const managedEnv = sanitizeProtoEnv(prependManagedBinDir(process.env, managedBin), managedBin);
 
     if (cfg.target <= 0) {
       if (shared.pool) {
@@ -255,10 +272,20 @@ export default function (pi: ExtensionAPI) {
         fallbackOps,
         metrics: m,
       });
-      // spawnHook overrides the baked cwd with the live per-session cwd on every call.
+      // spawnHook overrides the baked cwd with the live per-session cwd on every
+      // call, and sanitizes proto activation out of the per-call env so the fast
+      // path and fallback (which both consume this env) resolve tools via proto
+      // shims per .prototools, not a frozen spawn-time activation. The warm path
+      // ignores this env (it uses the pool env, sanitized at spawn above);
+      // sanitizing here covers fast + fallback. getShellEnv() already prepended
+      // the managed bin dir, so we only strip + promote proto.
       tool = createBashTool(entry.cwd, {
         operations,
-        spawnHook: ({ command, cwd: _cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({ command, cwd: entry!.cwd, env }),
+        spawnHook: ({ command, cwd: _cwd, env }: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({
+          command,
+          cwd: entry!.cwd,
+          env: sanitizeProtoEnv(env, join(getAgentDir(), "bin")),
+        }),
       });
       tools.set(sessionId, tool);
       toolOpsCfg.set(sessionId, opsCfgNow);

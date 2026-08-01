@@ -215,10 +215,7 @@ test('no non-local cloud model has silently-zero pricing in models.json', () => 
         (typeof c.output !== 'number' || c.output === 0);
 
       if (allZero) {
-        // Known exceptions: grok has no published token pricing. Umans models are
-        // subscription (unlimited tokens → $0 marginal cost) and are skipped above
-        // (not :cloud / github-copilot). gemini-3-flash-preview:cloud now has live
-        // OpenRouter pricing and is no longer an exception.
+        // Known exception: Grok has no published token pricing.
         const knownUnknowns = new Set(['grok-code-fast-1']);
         if (!knownUnknowns.has(model.id)) {
           suspiciousZeroModels.push(`${model.id} (${providerName})`);

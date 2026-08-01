@@ -18,7 +18,7 @@ test('site data generation writes the V2-only expected bundle and round-trips', 
     assert.deepEqual(names, [...SITE_DATA_FILE_NAMES].sort());
 
     const roundTrip = await readSiteDataBundle(dir);
-    assert.equal(roundTrip.manifest.schemaVersion, 6);
+    assert.equal(roundTrip.manifest.schemaVersion, 7);
     assert.equal(roundTrip.manifest.completedRunCount, 7);
     assert.equal(roundTrip.runSummary.rows.length, 8);
     assert.equal(roundTrip.sessionReviewAnalytics.cohort, 'v2_production');

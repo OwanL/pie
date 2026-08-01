@@ -384,10 +384,9 @@ export function appendLocalUserMessage(
    *  steering busy branch passes 'queued' so the message renders as a pending
    *  steering injection until `QueuedDelivered` promotes it. */
   status: ChatMessage['status'] = 'completed',
-  /** Host-side synthetic-send tag (e.g. `'deferred-trigger'` for the wake-up
-   *  message). Set on the optimistic message so the webview can differentiate
-   *  it from a typed user message. Not persisted by the backend; re-derived
-   *  from the text prefix on reload by `mapUserMessage`. */
+  /** Host-side synthetic-send tag. Set on the optimistic message so the
+   *  webview can differentiate it from a typed user message. Not persisted by
+   *  the backend. */
   customType?: string,
   customDetails?: unknown,
 ) {

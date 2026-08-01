@@ -121,6 +121,17 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
  *  `start()` is invoked more than once. */
 let backendFatalHandlersInstalled = false;
 const SESSION_CATALOG_POLL_INTERVAL_MS = 10_000;
+/** Grace bound for `runtime.dispose()` during replacement and shutdown. A
+ *  provider teardown can wedge an SDK runtime; disposal is bounded best-effort
+ *  so it can never block recovery or shutdown. Shared by `createSessionContext`
+ *  (replacement) and `dispose()` (shutdown) so the bound stays consistent.
+ *  `PIE_RUNTIME_DISPOSE_GRACE_MS` overrides the bound (mirroring
+ *  `PIE_WILLRETRY_WATCHDOG_GRACE_MS`) so disposal-bound tests need not wait the
+ *  full production window. */
+function resolveRuntimeDisposeGraceMs(): number {
+  const override = Number(process.env.PIE_RUNTIME_DISPOSE_GRACE_MS);
+  return Number.isFinite(override) && override > 0 ? override : 5_000;
+}
 
 /** Surface swallowed promise rejections and uncaught exceptions on stderr (the
  *  host captures backend stderr) instead of letting them die invisibly. We
@@ -184,6 +195,12 @@ export class BackendServer {
     turnSequence: number;
     retryId?: string;
   }>();
+
+  /** True once `dispose()` has begun. Suppresses stale events and payload
+   *  builds from in-flight async paths (recovery replacement emissions, catalog
+   *  polling, late SDK events) so a dying backend cannot push post-shutdown
+   *  state to a host that is already tearing it down. */
+  private disposed = false;
 
   constructor(options: { sdkPath: string; cwd: string }) {
     this.sdkPath = options.sdkPath;
@@ -490,7 +507,7 @@ export class BackendServer {
       }
       let disposeGraceTimer: ReturnType<typeof setTimeout> | undefined;
       const disposeGrace = new Promise<void>((resolve) => {
-        disposeGraceTimer = setTimeout(resolve, 5_000);
+        disposeGraceTimer = setTimeout(resolve, resolveRuntimeDisposeGraceMs());
         disposeGraceTimer.unref?.();
       });
       void Promise.race([dispose, disposeGrace])
@@ -986,12 +1003,22 @@ export class BackendServer {
   }
 
   private async emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void> {
-    if (!this.sessionContexts.has(sessionPath)) {
+    if (this.disposed || !this.sessionContexts.has(sessionPath)) {
       return;
     }
-
-    const payload = await this.buildSessionOpenedPayload(sessionPath, selectionToken);
-    this.emit('session.opened', payload);
+    // Rejection-safe: most callers fire-and-forget this (`void …`). A thrown
+    // payload build (transcript scan, context usage, system prompts) must log
+    // and swallow instead of becoming an unhandled rejection that leaves the
+    // host waiting on a `session.opened` that never arrives.
+    try {
+      const payload = await this.buildSessionOpenedPayload(sessionPath, selectionToken);
+      this.emit('session.opened', payload);
+    } catch (error) {
+      backendWarn('backend-session', 'emitSessionOpened.failed', {
+        sessionPath,
+        error: toErrorMessage(error),
+      });
+    }
   }
 
   private async buildSessionOpenedPayload(
@@ -1012,11 +1039,21 @@ export class BackendServer {
   }
 
   private async emitSessionListChanged(): Promise<void> {
-    const payload: SessionListChangedPayload = {
-      sessions: await this.listSessionSummaries(),
-      activeSessionPath: this.viewedSessionPath,
-    };
-    this.emit('session.list.changed', payload);
+    if (this.disposed) return;
+    // Rejection-safe: most callers fire-and-forget this (`void …`). A thrown
+    // session-list scan must log and swallow instead of becoming an unhandled
+    // rejection; the next catalog poll/emit refreshes the list opportunistically.
+    try {
+      const payload: SessionListChangedPayload = {
+        sessions: await this.listSessionSummaries(),
+        activeSessionPath: this.viewedSessionPath,
+      };
+      this.emit('session.list.changed', payload);
+    } catch (error) {
+      backendWarn('backend-session', 'emitSessionListChanged.failed', {
+        error: toErrorMessage(error),
+      });
+    }
   }
 
   private async listSessionSummaries(): Promise<SessionSummary[]> {
@@ -1064,6 +1101,10 @@ export class BackendServer {
   }
 
   private emit(event: string, payload?: unknown): void {
+    // After disposal begins, suppress every event so in-flight async paths
+    // (recovery replacement emissions, catalog polling, late SDK events) cannot
+    // push stale state to a host that is already tearing the backend down.
+    if (this.disposed) return;
     if (event === 'extension_ui.request' && payload && typeof payload === 'object') {
       const request = payload as { sessionPath?: unknown; id?: unknown };
       if (typeof request.sessionPath === 'string' && typeof request.id === 'string') {
@@ -1288,6 +1329,13 @@ export class BackendServer {
   }
 
   async dispose(): Promise<void> {
+    // Idempotent: stdin-end and host dispose (or a re-entrant call) must not
+    // run teardown twice. The flag also suppresses stale events from in-flight
+    // async paths via the `disposed` guard on `emit`/`emitSessionOpened`/
+    // `emitSessionListChanged`.
+    if (this.disposed) return;
+    this.disposed = true;
+
     const contexts = [...this.sessionContexts.values()];
     this.sessionContexts.clear();
 
@@ -1316,16 +1364,114 @@ export class BackendServer {
         log(`${label} failed: ${String(err)}`);
       }
     };
-    for (const context of contexts) {
+
+    // Clear every active-request/watchdog timer a context may still hold. These
+    // are `unref`'d so they do not keep the process alive, but a late fire
+    // would touch retired/freed state (prompt-safety abort, semantic-lease
+    // recovery, quota settlement, retry-stuck watchdog). The watchdog clear fn
+    // is the primary path; the direct handle clear is belt-and-suspenders for a
+    // missing or already-invoked clear fn.
+    const clearContextTimers = (context: SessionContext): void => {
       runCleanup('session retry-watchdog cleanup', () => context.willRetryWatchdogClear?.());
+      context.willRetryWatchdogClear = undefined;
+      if (context.willRetryWatchdogTimer) {
+        clearTimeout(context.willRetryWatchdogTimer);
+        context.willRetryWatchdogTimer = undefined;
+      }
+      const active = context.activeRequest;
+      if (active) {
+        if (active.promptSafetyTimer) {
+          clearTimeout(active.promptSafetyTimer);
+          active.promptSafetyTimer = undefined;
+        }
+        if (active.semanticLeaseTimer) {
+          clearTimeout(active.semanticLeaseTimer);
+          active.semanticLeaseTimer = undefined;
+        }
+        if (active.quotaSettlementTimer) {
+          clearTimeout(active.quotaSettlementTimer);
+          active.quotaSettlementTimer = undefined;
+        }
+        active.pendingDurableToolTerminals?.clear();
+      }
+    };
+
+    // Bound `runtime.dispose()` so a wedged provider teardown can never block
+    // shutdown. Mirrors the replacement-path grace in `createSessionContext`
+    // (resolveRuntimeDisposeGraceMs) so shutdown and recovery share one bound.
+    const disposeRuntimeBounded = (context: SessionContext): Promise<void> => {
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const grace = new Promise<void>((resolve) => {
+        graceTimer = setTimeout(resolve, resolveRuntimeDisposeGraceMs());
+        graceTimer.unref?.();
+      });
+      let dispose: Promise<void>;
+      try {
+        dispose = Promise.resolve(context.runtime.dispose());
+      } catch (error) {
+        backendWarn('backend-session', 'session runtime dispose threw', {
+          sessionPath: context.sessionPath,
+          error: toErrorMessage(error),
+        });
+        dispose = Promise.resolve();
+      }
+      return Promise.race([dispose, grace])
+        .catch((error) => {
+          backendWarn('backend-session', 'session runtime dispose failed', {
+            sessionPath: context.sessionPath,
+            error: toErrorMessage(error),
+          });
+        })
+        .finally(() => {
+          if (graceTimer) clearTimeout(graceTimer);
+        });
+    };
+
+    const teardownContext = async (context: SessionContext): Promise<void> => {
+      clearContextTimers(context);
       runCleanup('session UI bridge dispose', () => context.uiBridge?.dispose());
       runCleanup('session event unsubscribe', () => context.unsubscribe());
       runCleanup('session manager fence invalidation', () => context.sessionManagerFence?.invalidate());
-      try {
-        await context.runtime.dispose();
-      } catch (err) {
-        log(`session runtime dispose failed: ${String(err)}`);
-      }
+      await disposeRuntimeBounded(context);
+    };
+
+    for (const context of contexts) {
+      await teardownContext(context);
+    }
+
+    // Handle in-flight recovery replacement contexts. A retired context may
+    // have a replacement runtime being constructed asynchronously by
+    // `recoverStuckSession` (or the abort-replacement path in request-handler);
+    // the snapshot above predates that replacement (the map was cleared), so
+    // its freshly created runtime would otherwise leak and its post-replacement
+    // emissions would fire post-shutdown. Await each in-flight recovery
+    // (bounded) and tear down the replacement runtime too. The `disposed` guard
+    // on `emit`/`emitSessionOpened`/`emitSessionListChanged` makes the
+    // recovery's post-replacement emissions no-ops.
+    const inFlightRecoveries = contexts
+      .map((context) => context.recoveryPromise)
+      .filter((recovery): recovery is Promise<SessionContext> => Boolean(recovery));
+    if (inFlightRecoveries.length > 0) {
+      await Promise.allSettled(inFlightRecoveries.map(async (recovery) => {
+        let waitTimer: ReturnType<typeof setTimeout> | undefined;
+        const waitGrace = new Promise<SessionContext | null>((resolve) => {
+          waitTimer = setTimeout(() => resolve(null), resolveRuntimeDisposeGraceMs());
+          waitTimer.unref?.();
+        });
+        let replacement: SessionContext | null;
+        try {
+          replacement = await Promise.race([recovery, waitGrace]);
+        } catch {
+          // Recovery failed; its own .catch already surfaced the error (now
+          // suppressed by the `disposed` guard). Nothing left to tear down.
+          replacement = null;
+        } finally {
+          if (waitTimer) clearTimeout(waitTimer);
+        }
+        if (replacement) {
+          await teardownContext(replacement);
+        }
+      }));
     }
   }
 }

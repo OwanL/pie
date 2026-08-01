@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { createDisplayPng, pngDimensions } from './image.mjs';
+import { deduplicateCanonicalKeys, normalizeKeyAlias } from './keys.mjs';
 import { resolveLaunchExecutable } from './launch-resolve.mjs';
 import { abortableSleep, abortError, estimateSequenceDuration, runTimedSequence } from './sequence.mjs';
 import { focusWindowNative } from './win32-focus.mjs';
@@ -19,6 +20,7 @@ const FOCUS_TIMEOUT_MS = 6500;
 const FOCUS_PRIMARY_ATTEMPT_MS = 1500;
 const FOCUS_CUA_CALL_TIMEOUT_MS = 1000;
 const FOCUS_NATIVE_ATTEMPT_MS = 4000;
+const FOREGROUND_RETRY_BACKOFF_MS = 50;
 const GEOMETRY_TOLERANCE_PX = 1;
 const ACTION_KINDS = new Set(['move', 'mouse_down', 'mouse_up', 'click', 'double_click', 'right_click', 'drag', 'scroll', 'key_down', 'key_up', 'press', 'hotkey', 'text', 'wait', 'focus', 'release_all']);
 
@@ -100,11 +102,6 @@ function pixelFallbackError(error) {
   return /(?:uia|accessibility|provider|get_window_state)/i.test(message) && /(?:timed?\s*out|timeout|unavailable|not available)/i.test(message);
 }
 
-const KEY_ALIASES = {
-  ctrl: 'LeftControl', control: 'LeftControl', shift: 'LeftShift', alt: 'LeftAlt', meta: 'LeftSuper',
-  super: 'LeftSuper', win: 'LeftWin', cmd: 'LeftCmd', command: 'LeftCmd', enter: 'Enter',
-};
-
 export class ComputerBackend {
   constructor(options = {}) {
     this.driver = options.driver; this.nut = options.nut; this.sessions = new Map(); this.initialized = Boolean(this.driver && this.nut);
@@ -153,16 +150,21 @@ export class ComputerBackend {
     }
   }
 
-  async listWindows(signal, pid) {
-    const windows = windowRecords(await this.cua('list_windows', {}, signal));
+  async listWindows(signal, pid, timeoutMs) {
+    const payload = timeoutMs === undefined
+      ? await this.cua('list_windows', {}, signal)
+      : await this.boundedCua('list_windows', {}, signal, timeoutMs);
+    const windows = windowRecords(payload);
     return pid ? windows.filter((window) => Number(window.pid) === Number(pid)) : windows;
   }
 
-  async exactWindowRecord(target, signal) {
+  async exactWindowRecord(target, signal, deadline) {
     if (target.kind !== 'window') return undefined;
     if (!positiveInteger(target.pid) || !positiveInteger(target.windowId)) throw runtimeError('STALE_TARGET', 'The stored target lacks an exact positive PID/HWND; open it again.', true);
+    const remaining = deadline === undefined ? undefined : deadline - this.now();
+    if (remaining !== undefined && remaining <= 0) throw runtimeError('TARGET_NOT_FOREGROUND', 'Timed out while proving the exact target foreground.', true);
     let windows;
-    try { windows = await this.listWindows(signal, target.pid); }
+    try { windows = await this.listWindows(signal, target.pid, remaining === undefined ? undefined : Math.min(this.focusCuaCallTimeoutMs, remaining)); }
     catch (error) {
       if (cancellationError(error)) throw error;
       throw runtimeError('STALE_TARGET', 'Could not prove that the exact target PID/HWND still exists; open it again.', true);
@@ -207,24 +209,39 @@ export class ComputerBackend {
     return Boolean(active && sameHandle(active.windowHandle, target.windowId));
   }
 
-  async requireForeground(target, signal) {
+  async requireForeground(target, signal, deadline) {
     if (target.kind !== 'window') return undefined;
-    const record = await this.exactWindowRecord(target, signal);
+    const record = await this.exactWindowRecord(target, signal, deadline);
     if (!await this.activeWindowIs(target)) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND is not foreground; focus it and retry.', true);
     return record;
+  }
+
+  async acquireForeground(target, signal, deadline) {
+    try { return await this.requireForeground(target, signal, deadline); }
+    catch (error) {
+      if (error?.code !== 'TARGET_NOT_FOREGROUND') throw error;
+      await this.focusTarget(target, signal, deadline);
+    }
+    // Prove the exact PID/HWND again after focus. Focus is asynchronous and a
+    // handle may have vanished or been rebound while the focus request ran.
+    return await this.requireForeground(target, signal, deadline);
   }
 
   async deliver(target, signal, operation) {
     if (signal?.aborted) throw abortError();
     if (target.kind === 'window') {
-      try { await this.requireForeground(target, signal); }
-      catch (error) {
-        if (error?.code !== 'TARGET_NOT_FOREGROUND') throw error;
-        await this.focusTarget(target, signal);
-      }
+      const deadline = this.now() + FOCUS_TIMEOUT_MS;
+      await this.acquireForeground(target, signal, deadline);
       const current = await this.exactNutWindowRegion(target.windowId);
       if (!sameRegion(current, target.logicalBounds)) throw runtimeError('STALE_GEOMETRY', 'Window geometry changed since the latest open or observation; observe again before input.', true);
-      if (!await this.activeWindowIs(target)) await this.focusTarget(target, signal);
+      if (!await this.activeWindowIs(target)) {
+        const remaining = deadline - this.now();
+        if (remaining <= 0) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND lost foreground immediately before input.', true);
+        await this.sleep(Math.min(FOREGROUND_RETRY_BACKOFF_MS, remaining), signal);
+        // One retry only: revalidate the exact target before acquiring it again.
+        await this.exactWindowRecord(target, signal, deadline);
+        await this.acquireForeground(target, signal, deadline);
+      }
       if (!await this.activeWindowIs(target)) throw runtimeError('TARGET_NOT_FOREGROUND', 'The exact target HWND lost foreground immediately before input.', true);
     } else {
       if (!target.desktopForegroundWindowId) throw runtimeError('OBSERVATION_REQUIRED', 'Observe the desktop before physical input so its foreground window can be bound.', true);
@@ -554,8 +571,8 @@ export class ComputerBackend {
   }
 
   keyName(value) {
-    const alias = KEY_ALIASES[value.toLowerCase()]; if (alias) return alias;
-    const name = Object.keys(this.nut.Key).find((candidate) => Number.isNaN(Number(candidate)) && candidate.toLowerCase() === value.toLowerCase());
+    const normalized = normalizeKeyAlias(value);
+    const name = Object.keys(this.nut.Key).find((candidate) => Number.isNaN(Number(candidate)) && candidate.toLowerCase() === normalized.toLowerCase());
     if (!name) throw runtimeError('INVALID_KEY', `Unsupported NutJS key ${value}.`); return name;
   }
   buttonName(value) { return value === 'middle' ? this.nut.Button.MIDDLE : value === 'right' ? this.nut.Button.RIGHT : this.nut.Button.LEFT; }
@@ -581,11 +598,10 @@ export class ComputerBackend {
     return false;
   }
 
-  async focusTarget(target, signal) {
+  async focusTarget(target, signal, deadline = this.now() + FOCUS_TIMEOUT_MS) {
     if (target.kind !== 'window') return;
     const started = this.now();
-    const deadline = started + FOCUS_TIMEOUT_MS;
-    await this.exactWindowRecord(target, signal);
+    await this.exactWindowRecord(target, signal, deadline);
     try {
       await this.boundedCua('bring_to_front', { pid: target.pid, window_id: target.windowId }, signal, Math.min(this.focusCuaCallTimeoutMs, Math.max(1, deadline - this.now())));
       if (await this.waitForExactForeground(target, Math.min(deadline, started + FOCUS_PRIMARY_ATTEMPT_MS), signal)) return;
@@ -594,7 +610,7 @@ export class ComputerBackend {
     }
 
     if (this.now() <= deadline) {
-      await this.exactWindowRecord(target, signal);
+      await this.exactWindowRecord(target, signal, deadline);
       try {
         await this.nativeFocus({ pid: target.pid, windowId: target.windowId, signal, timeoutMs: Math.max(250, Math.min(3000, deadline - this.now())) });
       } catch (error) { if (cancellationError(error)) throw error; }
@@ -602,7 +618,7 @@ export class ComputerBackend {
     }
 
     if (this.now() <= deadline) {
-      await this.exactWindowRecord(target, signal);
+      await this.exactWindowRecord(target, signal, deadline);
       let matches = [];
       try {
         const windows = await this.nut.getWindows();
@@ -682,7 +698,7 @@ export class ComputerBackend {
         return;
       }
       case 'hotkey': {
-        const names = [...new Set(action.keys.map((key) => this.keyName(key)))];
+        const names = deduplicateCanonicalKeys(action.keys, (key) => this.keyName(key));
         const initiallyHeld = new Set(this.held(session).keys); const namesToPress = names.filter((name) => !initiallyHeld.has(name));
         for (const name of namesToPress) session.potentialKeys.add(name);
         let actionError;

@@ -283,30 +283,6 @@
   outline-offset: 2px;
 }
 
-/* ── Deferred-trigger wake-up bubble ───────────────────────────────────── */
-/* A host-injected user message that resumes a deferred session. It honestly
-   enters the transcript as a user turn (so it stays a right-aligned user
-   bubble), but the solid accent fill is swapped for a muted surface and a
-   dashed accent outline so it reads as system-injected rather than typed.
-   An "Auto-resume" header label (see message-item/header.tsx) completes the
-   differentiation. */
-.deferred-trigger-bubble {
-  background: color-mix(in srgb, var(--panel-subtle-surface) 55%, transparent);
-  border: 1px dashed color-mix(in srgb, var(--panel-accent) 42%, var(--panel-border-subtle));
-}
-
-.deferred-trigger-bubble:hover {
-  /* Keep the dashed outline; just deepen the fill slightly on hover so the
-     click-to-edit affordance still reads. */
-  background: color-mix(in srgb, var(--panel-subtle-surface) 80%, transparent);
-}
-
-@media (forced-colors: active) {
-  .deferred-trigger-bubble {
-    border-style: dashed;
-  }
-}
-
 /* ── User-message rail (jump-to-prompt minimap) ──────────────────────────── */
 /* A thin vertical strip of clickable markers rendered in the gap just to the
    left of the scrollbar. Each marker corresponds to a user message; clicking

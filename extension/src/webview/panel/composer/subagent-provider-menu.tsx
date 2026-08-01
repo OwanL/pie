@@ -22,8 +22,8 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
   const menuRef = useRef<HTMLDivElement>(null);
 
   const providers = useMemo(
-    () => getSubagentBucketProviders(prefs, availableModels),
-    [availableModels, prefs.subagentBuckets],
+    () => getSubagentBucketProviders(prefs, availableModels, sessionPath),
+    [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults, prefs.subagentProviderTogglesBySession, sessionPath],
   );
   const enabledCount = providers.filter((provider) => isSubagentProviderEnabled(prefs, provider, sessionPath)).length;
   const disabledCount = providers.length - enabledCount;

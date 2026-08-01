@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { findTestBash } from './test-shell.js';
 import { MarkerStripper } from '../src/warm-pool.js';
-import { prependManagedBinDir } from '../src/managed-env.js';
+import { prependManagedBinDir, sanitizeProtoEnv } from '../src/managed-env.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const poolUrl = pathToFileURL(path.resolve(__dirname, '../src/warm-pool.ts')).href;
@@ -215,6 +215,85 @@ describe('warm-bash pool (real bash round-trip)', {
     }
   });
 
+  test('warm worker inherits a proto-sanitized pool env (version pin stripped, tools/ gone, shims promoted)', async () => {
+    // Structural fake proto layout (NOT this machine's real proto): a PROTO_HOME
+    // with shims/bin/tools dirs, a direct version-pinned tools entry on PATH,
+    // and the activation vars proto sets. The pool is spawned with the SAME
+    // sanitized env recipe index.ts uses (prepend managed bin → sanitize
+    // proto); the warm worker inherits that spawn-time env (per-call env is
+    // ignored by runOnWorker). So the worker must NOT carry the version pin,
+    // must have shims promoted ahead of non-proto sources, and must have the
+    // pinned tools/ entry gone.
+    const protoHome = mkdtempSync(path.join(tmpdir(), 'warm-bash-proto-'));
+    const managedBin = mkdtempSync(path.join(tmpdir(), 'warm-bash-mgd2-'));
+    try {
+      mkdirSync(path.join(protoHome, 'shims'), { recursive: true });
+      mkdirSync(path.join(protoHome, 'bin'), { recursive: true });
+      mkdirSync(path.join(protoHome, 'tools', 'node', '22.22.3'), { recursive: true });
+      const key = Object.keys(process.env).find((k) => k.toLowerCase() === 'path') ?? 'PATH';
+      const toolsEntry = path.join(protoHome, 'tools', 'node', '22.22.3');
+      const nvmEntry = path.join(tmpdir(), 'nvm4w-fake');
+      const rawEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PROTO_HOME: protoHome,
+        PROTO_NODE_VERSION: '22.22.3',
+        PROTO_NPM_SHIM: path.join(protoHome, 'shims', 'npm'),
+        PROTO_SHIM_NAME: 'node',
+        PROTO_SHIM_PATH: path.join(protoHome, 'shims', 'node'),
+        PROTO_VERSION: '0.57.4',
+        [key]: [toolsEntry, path.join(protoHome, 'shims'), nvmEntry].join(path.delimiter),
+      };
+      const poolEnv = sanitizeProtoEnv(prependManagedBinDir(rawEnv, managedBin), managedBin);
+
+      // Pure-level sanity: the version pin + shim identity are gone; proto's own
+      // version + PROTO_HOME are kept.
+      assert.equal(poolEnv.PROTO_NODE_VERSION, undefined);
+      assert.equal(poolEnv.PROTO_NPM_SHIM, undefined);
+      assert.equal(poolEnv.PROTO_SHIM_NAME, undefined);
+      assert.equal(poolEnv.PROTO_SHIM_PATH, undefined);
+      assert.equal(poolEnv.PROTO_VERSION, '0.57.4');
+      assert.equal(poolEnv.PROTO_HOME, protoHome);
+
+      const pool = new Pool({ size: 1, shellPath: BASH, env: poolEnv });
+      try {
+        await pool.ready();
+        // One exec (a size-1 pool serves one command, then refills async) prints
+        // the three values the worker sees, delimited by '||' — absent from any
+        // PATH (MSYS uses ':', Windows uses ';') so the PATH field survives
+        // intact. PNV is empty when the version pin was stripped at pool spawn.
+        const { onData, text } = sink();
+        await pool.exec({
+          command: 'printf "%s||%s||%s" "$PROTO_NODE_VERSION" "$PROTO_VERSION" "$PATH"',
+          cwd: tmp,
+          env: process.env,
+          onData,
+        });
+        const parts = text().split('||');
+        const pnv = parts[0] ?? '';
+        const pv = parts[1] ?? '';
+        const pathText = parts[2] ?? '';
+        assert.equal(pnv, '', 'worker must not inherit the frozen PROTO_NODE_VERSION');
+        assert.equal(pv, '0.57.4', "proto's own PROTO_VERSION is preserved through to the worker");
+        // PATH: the version-pinned tools entry must be gone; shims promoted.
+        // Git Bash rewrites Windows paths to /c/... MSYS form, so assert on
+        // stable substrings/basenames rather than exact path strings.
+        assert.ok(!pathText.includes('22.22.3'), `tools/ version-pinned entry must be gone; got: ${pathText}`);
+        assert.ok(pathText.includes('shims'), `shims must be present (promoted); got: ${pathText}`);
+        const managedBasename = path.basename(managedBin);
+        assert.ok(pathText.includes(managedBasename), `managed bin present; got: ${pathText}`);
+        assert.ok(
+          pathText.indexOf(managedBasename) < pathText.indexOf('shims'),
+          `managed bin must precede shims (rg/fd win); got: ${pathText}`,
+        );
+      } finally {
+        pool.dispose();
+      }
+    } finally {
+      rmSync(protoHome, { recursive: true, force: true });
+      rmSync(managedBin, { recursive: true, force: true });
+    }
+  });
+
   test('operations: simple command fast-paths without a shell (echo in-process)', async () => {
     const classify = await loadClassify();
     const c = classify('echo ready');
@@ -281,8 +360,9 @@ describe('warm-bash pool (real bash round-trip)', {
     const metrics = { totalFastPath: 0, totalWarm: 0, totalFallback: 0 };
     let fallbackCalls = 0;
     const fallbackOps: AnyOps = {
-      exec: async () => {
+      exec: async (_command, _cwd, { onData }) => {
         fallbackCalls++;
+        onData(Buffer.from('fallback-only\n'));
         return { exitCode: 0 };
       },
     };
@@ -291,9 +371,11 @@ describe('warm-bash pool (real bash round-trip)', {
       let firstDone = false;
       const first = ops.exec('sleep 0.3 && echo warm', tmp, { onData: () => {} }).finally(() => { firstDone = true; });
       assert.equal(pool.getStats().ready, 0, 'the first call synchronously consumes the only warm worker');
-      await ops.exec('echo overflow | cat', tmp, { onData: () => {} });
+      const overflowOutput = sink();
+      await ops.exec('echo overflow | cat', tmp, { onData: overflowOutput.onData });
       assert.equal(firstDone, false, 'overflow must not wait for the warm command to finish');
       assert.equal(fallbackCalls, 1);
+      assert.equal(overflowOutput.text(), 'fallback-only\n', 'no-ready-worker stays internal and fallback output is returned');
       await first;
       assert.equal(metrics.totalWarm, 1);
       assert.equal(metrics.totalFallback, 1);
@@ -562,6 +644,22 @@ describe('warm-bash operations routing (shell-free)', () => {
     assert.equal(result.exitCode, 127);
     assert.equal(fallbackCommand, 'pie-clearly-missing-program argument');
     assert.deepEqual(metrics, { totalFastPath: 0, totalWarm: 0, totalFallback: 1 });
+  });
+
+  test('routes the per-call env through to the fallback unchanged (sanitized upstream by the spawnHook)', async () => {
+    // The spawnHook sanitizes the per-call env upstream; operations just routes
+    // it to whichever layer runs. This guards that the env ops.exec is given
+    // reaches the fallback verbatim — so proto-sanitization applied at the
+    // spawnHook is exactly what the fallback `bash -c` runs with.
+    const createOps = await loadOps();
+    const sanitized: NodeJS.ProcessEnv = { PATH: '/sanitized', PROTO_HOME: '/p', FOO: 'bar' };
+    let received: NodeJS.ProcessEnv | undefined;
+    const fallbackOps: AnyOps = {
+      exec: async (_command, _cwd, o) => { received = o.env; return { exitCode: 0 }; },
+    };
+    const ops = createOps({ pool: null, fastPathEnabled: false, fallbackOps });
+    await ops.exec('echo x | cat', process.cwd(), { onData: () => undefined, env: sanitized });
+    assert.equal(received, sanitized, 'fallback must receive the exact per-call env');
   });
 });
 

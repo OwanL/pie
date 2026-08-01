@@ -7,19 +7,29 @@ import {
   SITE_DATA_FILE_NAMES,
   SITE_DATA_SCHEMA_VERSION,
   type BackendErrorData,
+  type EvidenceReliabilityData,
+  type EvidenceReliabilityFamilyShare,
   type FileExtensionData,
   type ModelQualityAggregateRow,
   type ModelQualityData,
+  type OutcomeCorrelationData,
+  type OutcomeCorrelationDifference,
+  type OutcomeCorrelationDimension,
+  type OutcomeCorrelationDimensionName,
+  type OutcomeCorrelationGroup,
   type OverviewData,
   type PruningImpactData,
   type PreparedAnalyticsData,
   type PreparedRunRow,
+  type PreparedSessionReviewV2Row,
   type PreparedTurnThroughputRow,
+  type PruningMode,
   type RetryTimingData,
   type SessionReviewAnalyticsData,
   type SiteDataBundle,
   type SiteDataFileName,
   type SiteManifest,
+  type ThinkingLevel,
   type TimelineData,
   type TimelineRow,
   type TokenThroughputData,
@@ -35,6 +45,7 @@ import {
 import { ensureDir, writeJsonFile } from './fs-utils.ts';
 import { createModelLeaderboard } from './leaderboard.ts';
 import { parseJsonOrThrow } from '../../shared/error-message.js';
+import { meanConfidenceInterval95, welchDifference95 } from './stats.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -44,6 +55,16 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+/** Validates a nullable 95% confidence interval object shared by the actionability bundles. */
+function assertConfidenceInterval(value: unknown, label: string): void {
+  if (value === null) return;
+  assert(isRecord(value), `${label} must be null or an object.`);
+  assert(typeof value.lower === 'number' && Number.isFinite(value.lower), `${label}.lower is invalid.`);
+  assert(typeof value.upper === 'number' && Number.isFinite(value.upper), `${label}.upper is invalid.`);
+  assert(value.lower <= value.upper, `${label} must satisfy lower <= upper.`);
+  assert(value.level === 0.95, `${label}.level must be 0.95.`);
 }
 
 function round(value: number, digits = 3): number {
@@ -415,6 +436,7 @@ function buildSessionReviewAnalytics(prepared: PreparedAnalyticsData): SessionRe
     schemaVersion: SITE_DATA_SCHEMA_VERSION,
     cohort: 'v2_production', cohortLabel: 'V2 canonical production reviews', indexVersion: 'v1', rows,
     diagnostics: prepared.sessionReviewV2Diagnostics,
+    joinCoverage: prepared.reviewJoinCoverage,
     summary: {
       reviewCount: rows.length,
       stableIdentityCount: rows.filter((row) => !row.identityFallback).length,
@@ -545,6 +567,221 @@ function createTokenThroughput(prepared: PreparedAnalyticsData): TokenThroughput
   };
 }
 
+// ─── Outcome-correlation + evidence-reliability builders ────────────────────
+
+function round1(value: number): number {
+  return round(value, 1);
+}
+
+/** Latest run among a session's joined runs (tie-break by runId for determinism). */
+function representativeRun(runs: PreparedRunRow[]): PreparedRunRow | null {
+  return runs.reduce<PreparedRunRow | null>((latest, run) => {
+    if (!latest) return run;
+    return run.startedAt > latest.startedAt || (run.startedAt === latest.startedAt && run.runId > latest.runId)
+      ? run
+      : latest;
+  }, null);
+}
+
+/** Cohort tercile thresholds (33⅓ / 66⅔ percentile) for prompt-size banding. */
+function tercileThresholds(values: number[]): { p33: number; p67: number } | null {
+  if (values.length === 0) return null;
+  const p33 = percentile(values, 100 / 3, 0);
+  const p67 = percentile(values, 200 / 3, 0);
+  return p33 !== null && p67 !== null ? { p33, p67 } : null;
+}
+
+interface OutcomeSession {
+  quality: number;
+  verificationUsage: string;
+  compaction: string;
+  thinkingLevel: string;
+  promptSizeBand: string;
+  pruningMode: string;
+  subagentParentModel: string;
+}
+
+interface RawOutcomeSession {
+  quality: number;
+  verificationUsage: string;
+  compaction: string;
+  thinkingLevel: string;
+  promptChars: number | null;
+  pruningMode: string;
+  subagentParentModel: string;
+}
+
+function buildOutcomeDimension(
+  dimension: OutcomeCorrelationDimensionName,
+  description: string,
+  sessions: OutcomeSession[],
+  selector: (session: OutcomeSession) => string,
+  untrackedValues: Set<string>,
+): OutcomeCorrelationDimension {
+  const byValue = new Map<string, number[]>();
+  for (const session of sessions) {
+    const value = selector(session);
+    const existing = byValue.get(value) ?? [];
+    existing.push(session.quality);
+    byValue.set(value, existing);
+  }
+  const groups: OutcomeCorrelationGroup[] = [...byValue.entries()].map(([value, qualities]) => {
+    const interval = meanConfidenceInterval95(qualities);
+    return {
+      value,
+      sessionCount: interval.n,
+      meanQualityIndexV1: round1(interval.mean ?? 0),
+      meanCi95: interval.ci95 === null ? null : { lower: round1(interval.ci95.lower), upper: round1(interval.ci95.upper), level: 0.95 as const },
+    };
+  }).sort((left, right) => right.sessionCount - left.sessionCount || left.value.localeCompare(right.value));
+
+  const trackedGroups = groups.filter((group) => !untrackedValues.has(group.value));
+  const includedSessionCount = trackedGroups.reduce((sum, group) => sum + group.sessionCount, 0);
+  const untrackedSessionCount = groups.filter((group) => untrackedValues.has(group.value)).reduce((sum, group) => sum + group.sessionCount, 0);
+
+  const differences: OutcomeCorrelationDifference[] = [];
+  if (trackedGroups.length >= 2) {
+    // Reference = largest tracked sample; tie-break lexicographically for determinism.
+    const reference = trackedGroups.slice().sort((left, right) => right.sessionCount - left.sessionCount || left.value.localeCompare(right.value))[0]!;
+    const referenceValues = byValue.get(reference.value)!;
+    for (const comparison of trackedGroups) {
+      if (comparison.value === reference.value) continue;
+      const comparisonValues = byValue.get(comparison.value)!;
+      const diff = welchDifference95(comparisonValues, referenceValues);
+      differences.push({
+        referenceValue: reference.value,
+        comparisonValue: comparison.value,
+        observedMeanDifference: round1(diff.meanDifference ?? 0),
+        differenceCi95: diff.ci95 === null ? null : { lower: round1(diff.ci95.lower), upper: round1(diff.ci95.upper), level: 0.95 as const },
+        referenceSessionCount: diff.referenceN,
+        comparisonSessionCount: diff.comparisonN,
+      });
+    }
+  }
+
+  return { dimension, description, includedSessionCount, untrackedSessionCount, groups, differences };
+}
+
+export function createOutcomeCorrelations(prepared: PreparedAnalyticsData): OutcomeCorrelationData {
+  const runsByRunId = new Map(prepared.runs.map((run) => [run.runId, run]));
+  const rawSessions: RawOutcomeSession[] = [];
+  let unmatchedExcludedCount = 0;
+
+  for (const review of prepared.sessionReviewsV2) {
+    const quality = review.attainment.qualityIndexV1;
+    if (quality === null) continue;
+    const joinedRuns = review.runIds.map((id) => runsByRunId.get(id)).filter((run): run is PreparedRunRow => run !== undefined);
+    if (joinedRuns.length === 0) {
+      unmatchedExcludedCount += 1;
+      continue;
+    }
+    const representative = representativeRun(joinedRuns)!;
+    rawSessions.push({
+      quality,
+      verificationUsage: joinedRuns.some((run) => run.verificationTotalCount > 0) ? 'verified' : 'unverified',
+      compaction: joinedRuns.reduce((sum, run) => sum + run.compactionCount, 0) >= 1 ? 'compacted' : 'none',
+      thinkingLevel: representative.thinkingLevel ?? '(unspecified)',
+      promptChars: representative.initialUserMessageChars ?? null,
+      pruningMode: representative.fsPruningMode ?? '(untracked)',
+      subagentParentModel: representative.fsSubagentAlwaysParentModel === null ? '(untracked)' : String(representative.fsSubagentAlwaysParentModel),
+    });
+  }
+
+  // Prompt-size banding is relative (cohort terciles) so it stays cwd-agnostic.
+  const promptThresholds = tercileThresholds(rawSessions.map((session) => session.promptChars).filter((value): value is number => value !== null));
+  const sessions: OutcomeSession[] = rawSessions.map((session) => ({
+    ...session,
+    promptSizeBand: session.promptChars === null || promptThresholds === null
+      ? '(untracked)'
+      : session.promptChars <= promptThresholds.p33
+        ? 'low'
+        : session.promptChars <= promptThresholds.p67
+          ? 'medium'
+          : 'high',
+  }));
+
+  const untracked = new Set(['(untracked)']);
+  const dimensions: OutcomeCorrelationDimension[] = [
+    buildOutcomeDimension('verificationUsage', 'Whether the session ran any verification command (test/build/lint/typecheck/format).', sessions, (s) => s.verificationUsage, new Set()),
+    buildOutcomeDimension('compaction', 'Whether any history-compaction (/compact) call occurred across the session\'s runs.', sessions, (s) => s.compaction, new Set()),
+    buildOutcomeDimension('thinkingLevel', 'Thinking level of the session\'s representative (latest) run.', sessions, (s) => s.thinkingLevel, new Set(['(unspecified)'])),
+    buildOutcomeDimension('promptSizeBand', 'Ex-ante prompt size (initial user message chars) banded into cohort terciles.', sessions, (s) => s.promptSizeBand, untracked),
+    buildOutcomeDimension('pruningMode', 'Skill-pruning mode at the representative run\'s start.', sessions, (s) => s.pruningMode, untracked),
+    buildOutcomeDimension('subagentParentModel', 'Whether sub-agents were pinned to the parent model at the representative run\'s start.', sessions, (s) => s.subagentParentModel, untracked),
+  ];
+
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    cohortLabel: 'Observational qualityIndexV1 associations across reviewed sessions',
+    outcomeMetric: 'qualityIndexV1',
+    outcomeSource: 'canonical_v2_qualityIndexV1_unchanged',
+    unitOfAnalysis: 'one reviewed session (latest review per stable identity) with a non-null qualityIndexV1 that joined at least one run',
+    analyzableSessionCount: sessions.length,
+    unmatchedExcludedCount,
+    dimensions,
+    notes: [
+      'Associations are observational and cwd-agnostic: behaviors are grouping variables, not controlled treatments. A non-zero mean difference does not imply that the behavior caused the outcome.',
+      'The outcome is the canonical V2 qualityIndexV1, unchanged. This bundle only reads the index for grouping; it never recomputes or alters the quality formula.',
+      'Each group reports its sample count (n) and a 95% Student-t confidence interval for the mean; differences use a 95% Welch (unequal-variance) interval. Intervals widen honestly as n shrinks and are null when n < 2.',
+      'Unmatched reviews (no joinable run) are excluded from every dimension because their behavior cannot be attributed; they remain counted in evidence-reliability.json.',
+      'Prompt-size bands are relative cohort terciles, so band boundaries shift with the observed population — compare within a snapshot, not across snapshots with different cohorts.',
+    ],
+  };
+}
+
+export function createEvidenceReliability(prepared: PreparedAnalyticsData): EvidenceReliabilityData {
+  const reviewedWithQuality = prepared.sessionReviewsV2.filter((review) => review.attainment.qualityIndexV1 !== null);
+  const reviewedSessionCount = reviewedWithQuality.length;
+
+  // Attribute each reviewed session to its joined-run model families with equal
+  // fractional split (mirrors the leaderboard's fallback). Unmatched reviews, or
+  // reviews whose joined runs expose no family, contribute no family mass.
+  const familyMass = new Map<string, number>();
+  let attributedSessionCount = 0;
+  for (const review of reviewedWithQuality) {
+    if (review.modelFamilies.length === 0) continue;
+    const share = 1 / review.modelFamilies.length;
+    for (const family of review.modelFamilies) {
+      familyMass.set(family, (familyMass.get(family) ?? 0) + share);
+    }
+    attributedSessionCount += 1;
+  }
+  const totalMass = [...familyMass.values()].reduce((sum, value) => sum + value, 0);
+  const familyShares: EvidenceReliabilityFamilyShare[] = [...familyMass.entries()].map(([family, mass]) => ({
+    family,
+    reviewedSessionCount: round(mass, 4),
+    share: totalMass ? round(mass / totalMass, 4) : 0,
+  })).sort((left, right) => right.reviewedSessionCount - left.reviewedSessionCount || left.family.localeCompare(right.family));
+
+  const qualities = reviewedWithQuality.map((review) => review.attainment.qualityIndexV1!);
+  const perfectCount = qualities.filter((value) => value === 100).length;
+  const achievedCount = qualities.filter((value) => value >= 85).length;
+
+  return {
+    schemaVersion: SITE_DATA_SCHEMA_VERSION,
+    cohortLabel: 'V2 qualityIndexV1 evidence reliability',
+    reviewedSessionCount,
+    attributedSessionCount,
+    unattributedCount: reviewedSessionCount - attributedSessionCount,
+    effectiveReviewedFamilies: familyMass.size,
+    dominantFamily: familyShares.length
+      ? { family: familyShares[0]!.family, share: familyShares[0]!.share, reviewedSessionCount: familyShares[0]!.reviewedSessionCount }
+      : null,
+    ceilingSaturation: {
+      perfectRate: reviewedSessionCount ? round(perfectCount / reviewedSessionCount, 4) : 0,
+      achievedBandRate: reviewedSessionCount ? round(achievedCount / reviewedSessionCount, 4) : 0,
+      medianQualityIndexV1: percentile(qualities, 50, 1),
+      distinctQualityIndexValues: new Set(qualities).size,
+    },
+    familyShares,
+    notes: [
+      'These diagnostics qualify how much weight to place on qualityIndexV1-based recommendations: a dominant family, few effective reviewed families, or ceiling saturation all reduce how discriminating the evidence is.',
+      'Family attribution uses equal fractional split across a session\'s joined-run families (no transcript-only evidence); unmatched reviews are counted toward ceiling saturation but cannot be attributed to a family.',
+      'perfectRate is the share of reviewed sessions at the exact qualityIndexV1 ceiling (100); achievedBandRate is the share in the top \'achieved\' band ([85, 100]). High rates mean the index cannot distinguish good from great outcomes.',
+    ],
+  };
+}
+
 export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt = new Date()): SiteDataBundle {
   return {
     manifest: createManifest(prepared, generatedAt),
@@ -566,6 +803,8 @@ export function buildSiteDataBundle(prepared: PreparedAnalyticsData, generatedAt
     fileExtensions: createFileExtensions(prepared),
     tokenThroughput: createTokenThroughput(prepared),
     retryTiming: createRetryTiming(prepared),
+    outcomeCorrelations: createOutcomeCorrelations(prepared),
+    evidenceReliability: createEvidenceReliability(prepared),
   };
 }
 
@@ -587,6 +826,8 @@ export function siteDataFileMap(bundle: SiteDataBundle): Record<SiteDataFileName
     'file-types.json': bundle.fileExtensions,
     'token-throughput.json': bundle.tokenThroughput,
     'retry-timing.json': bundle.retryTiming,
+    'outcome-correlations.json': bundle.outcomeCorrelations,
+    'evidence-reliability.json': bundle.evidenceReliability,
   };
 }
 
@@ -852,6 +1093,24 @@ function validateSessionReviewAnalytics(data: unknown): asserts data is SessionR
   assert(typeof data.summary.notAssessableReviewCount === 'number', 'session-review-analytics.json summary is missing notAssessableReviewCount.');
   assert(data.summary.reviewCount === data.summary.qualityIndexCount + data.summary.notAssessableReviewCount, 'session-review-analytics.json summary reviewCount must equal qualityIndexCount + notAssessableReviewCount.');
   assert(data.summary.meanQualityIndexV1 === null || (typeof data.summary.meanQualityIndexV1 === 'number' && data.summary.meanQualityIndexV1 >= 0 && data.summary.meanQualityIndexV1 <= 100), 'session-review-analytics.json has an invalid meanQualityIndexV1.');
+  assert(isRecord(data.joinCoverage), 'session-review-analytics.json is missing joinCoverage.');
+  assert(typeof data.joinCoverage.totalReviews === 'number' && Number.isInteger(data.joinCoverage.totalReviews) && data.joinCoverage.totalReviews >= 0, 'session-review-analytics.json joinCoverage.totalReviews is invalid.');
+  assert(typeof data.joinCoverage.joinedCount === 'number' && Number.isInteger(data.joinCoverage.joinedCount) && data.joinCoverage.joinedCount >= 0, 'session-review-analytics.json joinCoverage.joinedCount is invalid.');
+  assert(typeof data.joinCoverage.unmatchedCount === 'number' && Number.isInteger(data.joinCoverage.unmatchedCount) && data.joinCoverage.unmatchedCount >= 0, 'session-review-analytics.json joinCoverage.unmatchedCount is invalid.');
+  assert(isRecord(data.joinCoverage.byJoinKey), 'session-review-analytics.json joinCoverage is missing byJoinKey.');
+  assert(isRecord(data.joinCoverage.unmatchedByReason), 'session-review-analytics.json joinCoverage is missing unmatchedByReason.');
+  const byJoinKey = data.joinCoverage.byJoinKey;
+  const unmatchedByReason = data.joinCoverage.unmatchedByReason;
+  assert(typeof byJoinKey.session_id === 'number' && Number.isInteger(byJoinKey.session_id) && byJoinKey.session_id >= 0, 'session-review-analytics.json joinCoverage.byJoinKey.session_id is invalid.');
+  assert(typeof byJoinKey.path_fallback === 'number' && Number.isInteger(byJoinKey.path_fallback) && byJoinKey.path_fallback >= 0, 'session-review-analytics.json joinCoverage.byJoinKey.path_fallback is invalid.');
+  assert(typeof byJoinKey.unmatched === 'number' && Number.isInteger(byJoinKey.unmatched) && byJoinKey.unmatched >= 0, 'session-review-analytics.json joinCoverage.byJoinKey.unmatched is invalid.');
+  assert(typeof unmatchedByReason.no_run_for_identity === 'number' && Number.isInteger(unmatchedByReason.no_run_for_identity) && unmatchedByReason.no_run_for_identity >= 0, 'session-review-analytics.json joinCoverage.unmatchedByReason.no_run_for_identity is invalid.');
+  assert(typeof unmatchedByReason.identity_conflict_at_path === 'number' && Number.isInteger(unmatchedByReason.identity_conflict_at_path) && unmatchedByReason.identity_conflict_at_path >= 0, 'session-review-analytics.json joinCoverage.unmatchedByReason.identity_conflict_at_path is invalid.');
+  assert(data.joinCoverage.totalReviews === byJoinKey.session_id + byJoinKey.path_fallback + byJoinKey.unmatched, 'session-review-analytics.json joinCoverage totalReviews must equal the byJoinKey sum.');
+  assert(data.joinCoverage.joinedCount === byJoinKey.session_id + byJoinKey.path_fallback, 'session-review-analytics.json joinCoverage joinedCount must equal session_id + path_fallback.');
+  assert(data.joinCoverage.unmatchedCount === byJoinKey.unmatched, 'session-review-analytics.json joinCoverage unmatchedCount must equal byJoinKey.unmatched.');
+  assert(unmatchedByReason.no_run_for_identity + unmatchedByReason.identity_conflict_at_path === data.joinCoverage.unmatchedCount, 'session-review-analytics.json joinCoverage unmatchedByReason must sum to unmatchedCount.');
+  assert(data.joinCoverage.totalReviews === data.summary.reviewCount, 'session-review-analytics.json joinCoverage.totalReviews must equal summary.reviewCount.');
   assert(isRecord(data.criteria) && typeof data.criteria.total === 'number', 'session-review-analytics.json is missing criterion diagnostics.');
   assert(isRecord(data.process), 'session-review-analytics.json is missing process diagnostics.');
   assert(isRecord(data.evidence), 'session-review-analytics.json is missing evidence diagnostics.');
@@ -862,7 +1121,93 @@ function validateSessionReviewAnalytics(data: unknown): asserts data is SessionR
     assert(typeof row.sessionId === 'string' && row.sessionId.length > 0, `session-review-analytics.json row ${index} is missing sessionId.`);
     assert(isRecord(row.attainment), `session-review-analytics.json row ${index} is missing attainment.`);
     assert(row.attainment.qualityIndexV1 === null || (typeof row.attainment.qualityIndexV1 === 'number' && row.attainment.qualityIndexV1 >= 0 && row.attainment.qualityIndexV1 <= 100), `session-review-analytics.json row ${index} has an invalid qualityIndexV1.`);
+    assert(row.joinKey === 'session_id' || row.joinKey === 'path_fallback' || row.joinKey === 'unmatched', `session-review-analytics.json row ${index} has an invalid joinKey.`);
+    if (row.joinKey === 'unmatched') {
+      assert(row.unmatchedReason === 'no_run_for_identity' || row.unmatchedReason === 'identity_conflict_at_path', `session-review-analytics.json row ${index} has an invalid unmatchedReason.`);
+    } else {
+      assert(row.unmatchedReason === null, `session-review-analytics.json row ${index} must have a null unmatchedReason when joined.`);
+    }
   }
+}
+
+function validateOutcomeCorrelations(data: unknown): asserts data is OutcomeCorrelationData {
+  assert(isRecord(data), 'outcome-correlations.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'outcome-correlations.json has an unexpected schemaVersion.');
+  assert(typeof data.cohortLabel === 'string', 'outcome-correlations.json is missing cohortLabel.');
+  assert(data.outcomeMetric === 'qualityIndexV1', 'outcome-correlations.json has an invalid outcomeMetric.');
+  assert(data.outcomeSource === 'canonical_v2_qualityIndexV1_unchanged', 'outcome-correlations.json has an invalid outcomeSource.');
+  assert(typeof data.unitOfAnalysis === 'string', 'outcome-correlations.json is missing unitOfAnalysis.');
+  assert(typeof data.analyzableSessionCount === 'number' && Number.isInteger(data.analyzableSessionCount) && data.analyzableSessionCount >= 0, 'outcome-correlations.json has an invalid analyzableSessionCount.');
+  assert(typeof data.unmatchedExcludedCount === 'number' && Number.isInteger(data.unmatchedExcludedCount) && data.unmatchedExcludedCount >= 0, 'outcome-correlations.json has an invalid unmatchedExcludedCount.');
+  assert(Array.isArray(data.dimensions), 'outcome-correlations.json is missing dimensions.');
+  assert(Array.isArray(data.notes) && data.notes.length > 0, 'outcome-correlations.json is missing notes.');
+  const dimensionNames = ['verificationUsage', 'compaction', 'thinkingLevel', 'promptSizeBand', 'pruningMode', 'subagentParentModel'];
+  for (const [index, dimension] of data.dimensions.entries()) {
+    const prefix = `outcome-correlations.json dimension ${index}`;
+    assert(isRecord(dimension), `${prefix} must be an object.`);
+    assert(dimensionNames.includes(String(dimension.dimension)), `${prefix} has an invalid dimension name.`);
+    assert(typeof dimension.description === 'string', `${prefix} is missing description.`);
+    assert(typeof dimension.includedSessionCount === 'number' && Number.isInteger(dimension.includedSessionCount) && dimension.includedSessionCount >= 0, `${prefix} has an invalid includedSessionCount.`);
+    assert(typeof dimension.untrackedSessionCount === 'number' && Number.isInteger(dimension.untrackedSessionCount) && dimension.untrackedSessionCount >= 0, `${prefix} has an invalid untrackedSessionCount.`);
+    assert(Array.isArray(dimension.groups), `${prefix} is missing groups.`);
+    assert(Array.isArray(dimension.differences), `${prefix} is missing differences.`);
+    for (const [groupIndex, group] of dimension.groups.entries()) {
+      const groupPrefix = `${prefix} group ${groupIndex}`;
+      assert(isRecord(group), `${groupPrefix} must be an object.`);
+      assert(typeof group.value === 'string' && group.value.length > 0, `${groupPrefix} is missing value.`);
+      assert(typeof group.sessionCount === 'number' && Number.isInteger(group.sessionCount) && group.sessionCount >= 0, `${groupPrefix} has an invalid sessionCount.`);
+      assert(typeof group.meanQualityIndexV1 === 'number' && Number.isFinite(group.meanQualityIndexV1) && group.meanQualityIndexV1 >= 0 && group.meanQualityIndexV1 <= 100, `${groupPrefix} has an invalid meanQualityIndexV1.`);
+      assertConfidenceInterval(group.meanCi95, `${groupPrefix}.meanCi95`);
+    }
+    for (const [diffIndex, difference] of dimension.differences.entries()) {
+      const diffPrefix = `${prefix} difference ${diffIndex}`;
+      assert(isRecord(difference), `${diffPrefix} must be an object.`);
+      assert(typeof difference.referenceValue === 'string', `${diffPrefix} is missing referenceValue.`);
+      assert(typeof difference.comparisonValue === 'string', `${diffPrefix} is missing comparisonValue.`);
+      assert(difference.referenceValue !== difference.comparisonValue, `${diffPrefix} reference and comparison must differ.`);
+      assert(typeof difference.observedMeanDifference === 'number' && Number.isFinite(difference.observedMeanDifference), `${diffPrefix} has an invalid observedMeanDifference.`);
+      assertConfidenceInterval(difference.differenceCi95, `${diffPrefix}.differenceCi95`);
+      assert(typeof difference.referenceSessionCount === 'number' && Number.isInteger(difference.referenceSessionCount) && difference.referenceSessionCount >= 0, `${diffPrefix} has an invalid referenceSessionCount.`);
+      assert(typeof difference.comparisonSessionCount === 'number' && Number.isInteger(difference.comparisonSessionCount) && difference.comparisonSessionCount >= 0, `${diffPrefix} has an invalid comparisonSessionCount.`);
+    }
+  }
+}
+
+function validateEvidenceReliability(data: unknown): asserts data is EvidenceReliabilityData {
+  assert(isRecord(data), 'evidence-reliability.json must contain an object.');
+  assert(data.schemaVersion === SITE_DATA_SCHEMA_VERSION, 'evidence-reliability.json has an unexpected schemaVersion.');
+  assert(typeof data.cohortLabel === 'string', 'evidence-reliability.json is missing cohortLabel.');
+  assert(typeof data.reviewedSessionCount === 'number' && Number.isInteger(data.reviewedSessionCount) && data.reviewedSessionCount >= 0, 'evidence-reliability.json has an invalid reviewedSessionCount.');
+  assert(typeof data.attributedSessionCount === 'number' && Number.isInteger(data.attributedSessionCount) && data.attributedSessionCount >= 0, 'evidence-reliability.json has an invalid attributedSessionCount.');
+  assert(typeof data.unattributedCount === 'number' && Number.isInteger(data.unattributedCount) && data.unattributedCount >= 0, 'evidence-reliability.json has an invalid unattributedCount.');
+  assert(data.reviewedSessionCount === data.attributedSessionCount + data.unattributedCount, 'evidence-reliability.json reviewedSessionCount must equal attributed + unattributed.');
+  assert(typeof data.effectiveReviewedFamilies === 'number' && Number.isInteger(data.effectiveReviewedFamilies) && data.effectiveReviewedFamilies >= 0, 'evidence-reliability.json has an invalid effectiveReviewedFamilies.');
+  if (data.dominantFamily !== null) {
+    assert(isRecord(data.dominantFamily), 'evidence-reliability.json dominantFamily must be null or an object.');
+    assert(typeof data.dominantFamily.family === 'string' && data.dominantFamily.family.length > 0, 'evidence-reliability.json dominantFamily.family is invalid.');
+    assert(typeof data.dominantFamily.share === 'number' && Number.isFinite(data.dominantFamily.share) && data.dominantFamily.share >= 0 && data.dominantFamily.share <= 1, 'evidence-reliability.json dominantFamily.share is invalid.');
+    assert(typeof data.dominantFamily.reviewedSessionCount === 'number' && Number.isFinite(data.dominantFamily.reviewedSessionCount) && data.dominantFamily.reviewedSessionCount >= 0, 'evidence-reliability.json dominantFamily.reviewedSessionCount is invalid.');
+  }
+  assert(isRecord(data.ceilingSaturation), 'evidence-reliability.json is missing ceilingSaturation.');
+  assert(typeof data.ceilingSaturation.perfectRate === 'number' && Number.isFinite(data.ceilingSaturation.perfectRate) && data.ceilingSaturation.perfectRate >= 0 && data.ceilingSaturation.perfectRate <= 1, 'evidence-reliability.json ceilingSaturation.perfectRate is invalid.');
+  assert(typeof data.ceilingSaturation.achievedBandRate === 'number' && Number.isFinite(data.ceilingSaturation.achievedBandRate) && data.ceilingSaturation.achievedBandRate >= 0 && data.ceilingSaturation.achievedBandRate <= 1, 'evidence-reliability.json ceilingSaturation.achievedBandRate is invalid.');
+  assert(data.ceilingSaturation.medianQualityIndexV1 === null || (typeof data.ceilingSaturation.medianQualityIndexV1 === 'number' && Number.isFinite(data.ceilingSaturation.medianQualityIndexV1) && data.ceilingSaturation.medianQualityIndexV1 >= 0 && data.ceilingSaturation.medianQualityIndexV1 <= 100), 'evidence-reliability.json ceilingSaturation.medianQualityIndexV1 is invalid.');
+  assert(typeof data.ceilingSaturation.distinctQualityIndexValues === 'number' && Number.isInteger(data.ceilingSaturation.distinctQualityIndexValues) && data.ceilingSaturation.distinctQualityIndexValues >= 0, 'evidence-reliability.json ceilingSaturation.distinctQualityIndexValues is invalid.');
+  assert(Array.isArray(data.familyShares), 'evidence-reliability.json is missing familyShares.');
+  assert(data.effectiveReviewedFamilies === data.familyShares.length, 'evidence-reliability.json effectiveReviewedFamilies must equal familyShares.length.');
+  for (const [index, share] of data.familyShares.entries()) {
+    const prefix = `evidence-reliability.json familyShares[${index}]`;
+    assert(isRecord(share), `${prefix} must be an object.`);
+    assert(typeof share.family === 'string' && share.family.length > 0, `${prefix}.family is invalid.`);
+    assert(typeof share.reviewedSessionCount === 'number' && Number.isFinite(share.reviewedSessionCount) && share.reviewedSessionCount >= 0, `${prefix}.reviewedSessionCount is invalid.`);
+    assert(typeof share.share === 'number' && Number.isFinite(share.share) && share.share >= 0 && share.share <= 1, `${prefix}.share is invalid.`);
+  }
+  if (data.familyShares.length > 0) {
+    assert(data.dominantFamily !== null && data.dominantFamily.family === data.familyShares[0].family, 'evidence-reliability.json dominantFamily must match the top familyShare.');
+  } else {
+    assert(data.dominantFamily === null, 'evidence-reliability.json dominantFamily must be null when there are no family shares.');
+  }
+  assert(Array.isArray(data.notes) && data.notes.length > 0, 'evidence-reliability.json is missing notes.');
 }
 
 function validateBackendErrors(data: unknown): asserts data is BackendErrorData {
@@ -935,6 +1280,8 @@ export function validateSiteDataBundle(bundle: SiteDataBundle): void {
   validatePruningImpact(bundle.pruningImpact);
   validateToolResultPruningImpact(bundle.toolResultPruningImpact);
   validateSessionReviewAnalytics(bundle.sessionReviewAnalytics);
+  validateOutcomeCorrelations(bundle.outcomeCorrelations);
+  validateEvidenceReliability(bundle.evidenceReliability);
   validateBackendErrors(bundle.backendErrors);
   validateFileExtensions(bundle.fileExtensions);
   validateTokenThroughput(bundle.tokenThroughput);
@@ -965,5 +1312,7 @@ export async function readSiteDataBundle(outputDir: string): Promise<SiteDataBun
     fileExtensions: files['file-types.json'] as SiteDataBundle['fileExtensions'],
     tokenThroughput: files['token-throughput.json'] as SiteDataBundle['tokenThroughput'],
     retryTiming: files['retry-timing.json'] as SiteDataBundle['retryTiming'],
+    outcomeCorrelations: files['outcome-correlations.json'] as SiteDataBundle['outcomeCorrelations'],
+    evidenceReliability: files['evidence-reliability.json'] as SiteDataBundle['evidenceReliability'],
   };
 }

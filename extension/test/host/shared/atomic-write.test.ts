@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renameWithTransientRetry } from '../../../src/host/shared/atomic-write';
+import { renameWithTransientRetry } from '../../../src/shared/atomic-write';
 
 function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });

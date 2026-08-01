@@ -5,6 +5,7 @@ import {
   categoricalHeight,
   completedRuns,
   estimatedRunCostUsd,
+  modelColorScale,
   modelFamilyKey,
   selectedRunIds,
   sortNatural,
@@ -200,7 +201,7 @@ const contextGrowthChart: ChartEntry = {
           type: 'nominal' as const,
           title: 'Model',
           sort: models,
-          scale: { range: [CHART_COLORS.accent, CHART_COLORS.coral, CHART_COLORS.accent2, CHART_COLORS.gold, CHART_COLORS.success] },
+          scale: modelColorScale(models),
           legend: { orient: 'bottom' as const },
         },
         tooltip: [
@@ -216,6 +217,7 @@ const contextGrowthChart: ChartEntry = {
       spec,
       'No turns with context-size data match the current filters (recorded only on recent runs).',
       ctx.renderToken,
+      'canvas',
     );
   },
 };

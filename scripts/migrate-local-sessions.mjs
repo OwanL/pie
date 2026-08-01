@@ -1,52 +1,78 @@
-import fs from "node:fs";
-import path from "node:path";
-import crypto from "node:crypto";
-import os from "node:os";
-import { repoRoot } from "./toolchain.mjs";
+#!/usr/bin/env node
+// Migrate (or merge) legacy session-history stores into this checkout's
+// machine-local data/outcomes/sessions store, preserving conflicting copies in
+// .conflict.*.bak backups.
+//
+// This is the shared session-migration runner for both shell installers:
+//   - install.sh:  `node scripts/migrate-local-sessions.mjs` (no args -> the
+//                  three default legacy locations, all recursive)
+//   - install.ps1: `node scripts/migrate-local-sessions.mjs --source <path>
+//                  [--flat-source <path>] --dest <path>` (explicit sources, so
+//                  the Windows installer can import from a configured sessionDir
+//                  non-recursively while keeping its settings.json orchestration)
+//
+// The file-merge core lives in scripts/install/lib/sessions.mjs (pure, tested).
+// When invoked with no sources, this runner preserves the original aggregate
+// one-line report so install.sh's output is unchanged. With explicit sources it
+// prints one line per source (matching install.ps1's per-import reporting).
 
-const destination = path.join(repoRoot, "data", "outcomes", "sessions");
-const sources = [path.join(os.homedir(), ".pi", "agent", "sessions"), path.join(repoRoot, "data", "sessions")];
-const hash = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-const filesUnder = (root) => {
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root, { recursive: true, withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-    .map((entry) => path.join(entry.parentPath ?? entry.path, entry.name));
-};
-const sessionInfo = (file) => {
-  let cwd;
-  let latest = fs.statSync(file).mtimeMs;
-  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      const value = JSON.parse(line);
-      if (value.type === "session" && value.cwd) cwd = value.cwd;
-      if (value.timestamp) latest = Math.max(latest, Date.parse(value.timestamp) || 0);
-    } catch { /* malformed legacy lines do not block migration */ }
-  }
-  return { bucket: cwd ? `--${cwd.replace(/^[\\/]+/, "").replace(/[\\/:]/g, "-")}--` : "--unknown--", latest };
-};
+import os from 'node:os';
+import path from 'node:path';
 
-let copied = 0, updated = 0, identical = 0, conflicts = 0;
-for (const sourceRoot of sources) {
-  if (path.resolve(sourceRoot) === path.resolve(destination)) continue;
-  for (const source of filesUnder(sourceRoot)) {
-    const sourceInfo = sessionInfo(source);
-    const targetDir = path.join(destination, sourceInfo.bucket);
-    const target = path.join(targetDir, path.basename(source));
-    fs.mkdirSync(targetDir, { recursive: true });
-    if (!fs.existsSync(target)) { fs.copyFileSync(source, target); copied++; continue; }
-    if (hash(source) === hash(target)) { identical++; continue; }
-    const targetInfo = sessionInfo(target);
-    const suffix = crypto.randomUUID().replaceAll("-", "");
-    if (sourceInfo.latest > targetInfo.latest) {
-      fs.copyFileSync(target, `${target}.conflict.${suffix}.bak`);
-      fs.copyFileSync(source, target);
-      updated++;
+import { repoRoot } from './toolchain.mjs';
+import { mergeLegacySessions } from './install/lib/sessions.mjs';
+
+function parseArgs(argv) {
+  const sources = [];
+  const flatSources = [];
+  let dest = '';
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--source') sources.push(argv[++i]);
+    else if (arg === '--flat-source') flatSources.push(argv[++i]);
+    else if (arg === '--dest') dest = argv[++i];
+    else if (arg === '--help' || arg === '-h') {
+      console.log('Usage: node scripts/migrate-local-sessions.mjs [--source <path>]... [--flat-source <path>]... [--dest <path>]');
+      console.log('  No --source: migrate the default legacy locations (~/.pi/agent/sessions, <repo>/data/sessions, <repo>/sessions), all recursive.');
+      process.exit(0);
     } else {
-      fs.copyFileSync(source, `${target}.conflict.${suffix}.incoming.bak`);
+      console.error(`Unknown argument: ${arg}`);
+      process.exit(2);
     }
-    conflicts++;
   }
+  return { sources, flatSources, dest };
 }
-console.log(`Session migration: ${copied} copied, ${updated} refreshed, ${identical} identical, ${conflicts} conflict backup(s).`);
+
+const { sources, flatSources, dest } = parseArgs(process.argv.slice(2));
+const destination = dest || path.join(repoRoot, 'data', 'outcomes', 'sessions');
+
+const explicit = sources.length + flatSources.length > 0;
+const sourceList = explicit
+  ? [
+      ...sources.map((p) => ({ path: p, recursive: true })),
+      ...flatSources.map((p) => ({ path: p, recursive: false })),
+    ]
+  : [
+      { path: path.join(os.homedir(), '.pi', 'agent', 'sessions'), recursive: true },
+      { path: path.join(repoRoot, 'data', 'sessions'), recursive: true },
+      { path: path.join(repoRoot, 'sessions'), recursive: true },
+    ];
+
+const { totals, perSource } = mergeLegacySessions({ sources: sourceList, destination });
+
+if (explicit) {
+  for (const entry of perSource) {
+    if (entry.skipped) continue;
+    const r = entry.result;
+    console.log(
+      `==> Imported ${r.copied} new session file(s); refreshed ${r.updated} newer file(s); ` +
+      `preserved ${r.conflicts} conflicting backup file(s); skipped ${r.identical} identical file(s) ` +
+      `from ${entry.path}`,
+    );
+  }
+} else {
+  console.log(
+    `Session migration: ${totals.copied} copied, ${totals.updated} refreshed, ` +
+    `${totals.identical} identical, ${totals.conflicts} conflict backup(s).`,
+  );
+}

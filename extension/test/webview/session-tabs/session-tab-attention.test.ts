@@ -54,8 +54,6 @@ function renderTab(overrides: Partial<SessionTabProps> = {}): HTMLElement {
     hasPendingExtensionUIRequest: false,
     isPinned: false,
     isDropTarget: false,
-    hasDeferredTriggers: false,
-    hasDeferredTimer: false,
     onContextMenu: noop,
     onPointerDown: noop,
     onClick: noop,
@@ -164,25 +162,6 @@ test('pending request wins title precedence over unread-finished', () => {
 
   const main = tab.querySelector('.session-tab-main') as HTMLElement;
   assert.equal(main.getAttribute('title'), 'Alpha (waiting for your answer)');
-});
-
-test('a pending deferred timer replaces the misleading finished indicator with an hourglass', () => {
-  const alpha = makeSession('/sessions/alpha', 'Alpha');
-  const tab = renderTab({
-    tabPath: '/sessions/alpha',
-    activePath: alpha.path,
-    unreadFinishedPathSet: new Set(['/sessions/alpha']),
-    hasDeferredTriggers: true,
-    hasDeferredTimer: true,
-  });
-
-  assert.ok(classList(tab).includes('deferred-timer'));
-  assert.ok(!classList(tab).includes('unread-finished'));
-  assert.ok(tab.querySelector('.session-tab-deferred-timer'), 'timer hourglass renders');
-  assert.ok(!tab.querySelector('.session-tab-finished'), 'green finished dot is suppressed');
-
-  const main = tab.querySelector('.session-tab-main') as HTMLElement;
-  assert.equal(main.getAttribute('title'), 'Alpha (waiting for deferred timer)');
 });
 
 test('a running tab in the starting-model phase renders the muted starting-model dot', () => {

@@ -1,5 +1,5 @@
 # Keep the cross-platform source tree consistently LF by default. Explicit
-# Windows-only PowerShell overrides remain below.
+# Windows-only batch (.bat) overrides remain below.
 * text=auto eol=lf
 
 # Force LF line endings on shell scripts so they run on Linux/macOS even when
@@ -9,8 +9,8 @@
 install.sh text eol=lf
 .githooks/* text eol=lf
 
-# PowerShell scripts are fine with CRLF on Windows (the only platform that runs
-# them), but normalize to CRLF so they always work under Invoke-Expression /
-# Set-ExecutionPolicy regardless of how they were committed.
-*.ps1    text eol=crlf
-*.psm1   text eol=crlf
+# Batch scripts are only ever run on Windows by cmd.exe. Normalize to CRLF so
+# they parse reliably (labels/goto/`set /p` are happiest with CRLF) regardless
+# of how they were committed or core.autocrlf.
+*.bat    text eol=crlf
+install.bat text eol=crlf

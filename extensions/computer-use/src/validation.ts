@@ -1,3 +1,4 @@
+import { normalizeKeyAlias } from './keys.mjs';
 import { estimateSequenceDuration } from './sequence.mjs';
 import {
   MAX_SEQUENCE_ACTIONS, MAX_SEQUENCE_MS,
@@ -22,8 +23,7 @@ const KEY_NAMES = [
   'AudioVolDown', 'AudioVolUp', 'AudioPlay', 'AudioStop', 'AudioPause', 'AudioPrev', 'AudioNext',
   'AudioRewind', 'AudioForward', 'AudioRepeat', 'AudioRandom',
 ];
-const KEY_ALIASES = ['ctrl', 'control', 'shift', 'alt', 'meta', 'super', 'win', 'cmd', 'command', 'enter'];
-const VALID_KEYS = new Set([...KEY_NAMES, ...KEY_ALIASES].map((key) => key.toLowerCase()));
+const VALID_KEYS = new Set(KEY_NAMES.map((key) => key.toLowerCase()));
 
 function fail(message: string): never { throw new ComputerValidationError(message); }
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -38,7 +38,7 @@ function nonempty(value: unknown, label: string): asserts value is string {
 }
 function key(value: unknown, label: string): asserts value is string {
   nonempty(value, label);
-  if (!VALID_KEYS.has(value.toLowerCase())) fail(`${label} is not a supported NutJS key: ${value}.`);
+  if (!VALID_KEYS.has(normalizeKeyAlias(value).toLowerCase())) fail(`${label} is not a supported NutJS key: ${value}.`);
 }
 function duration(value: unknown, label: string, required = false): void {
   if (value === undefined && !required) return;

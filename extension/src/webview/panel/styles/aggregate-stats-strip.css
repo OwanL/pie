@@ -89,17 +89,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.aggregate-strip-live-tag {
-  color: var(--panel-success);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 9px;
-  padding: 1px 3px;
-  border-radius: var(--panel-radius-sm);
-  background: color-mix(in srgb, var(--panel-success) 14%, transparent);
-}
-
 .aggregate-strip-counts {
   color: var(--panel-muted);
   padding-left: 6px;
@@ -172,38 +161,6 @@
 .aggregate-strip-provider--paused .aggregate-strip-provider-name,
 .aggregate-strip-provider--paused .aggregate-strip-provider-counts {
   color: var(--panel-danger);
-}
-
-/* Waiting deferred-trigger segment. A button (not a span) so it can open the
-   cancel popup; inherits the strip's help-cursor feel via pointer. */
-.aggregate-strip-deferred {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--panel-accent);
-  font: inherit;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  border-radius: var(--panel-radius-sm);
-  transition: background var(--panel-transition-fast), color var(--panel-transition-fast);
-}
-
-.aggregate-strip-deferred:hover {
-  background: color-mix(in srgb, var(--panel-accent) 12%, transparent);
-}
-
-.aggregate-strip-deferred-icon {
-  font-size: 11px;
-  line-height: 1;
-}
-
-.aggregate-strip-deferred-count {
-  font-size: inherit;
 }
 
 .aggregate-strip-sep {

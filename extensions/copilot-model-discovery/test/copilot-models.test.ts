@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { parse } from '../../../extension/node_modules/yaml/dist/index.js';
 
 import { withCatalogLock } from '../src/catalog-lock.js';
 import { CopilotCatalogRefreshCoordinator } from '../src/catalog-refresh.js';
+import { FileCatalogRefreshTiming } from '../src/catalog-ttl.js';
 import { reconcileCatalogText, toCatalogModel } from '../src/catalog-sync.js';
 import {
   isSelectableCopilotModel,
@@ -374,4 +375,43 @@ test('catalog reconciliation rejects malformed or incomplete source YAML', () =>
   const model = toDiscoveredCopilotModel(gpt56)!;
   assert.throws(() => reconcileCatalogText('providers: [', [model]), /Invalid models.yaml/);
   assert.throws(() => reconcileCatalogText('profileOrder: []\nproviders: {}\n', [model]), /missing github-copilot/);
+});
+
+test('TTL marker treats missing, corrupt, or non-numeric markers as stale', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pie-copilot-ttl-'));
+  const markerPath = path.join(directory, 'sync.json');
+  const timing = new FileCatalogRefreshTiming(markerPath, 1000);
+  try {
+    assert.equal(await timing.isFresh(), false, 'a missing marker is stale');
+
+    await writeFile(markerPath, 'not json', 'utf8');
+    assert.equal(await timing.isFresh(), false, 'an unparseable marker is stale');
+
+    await writeFile(markerPath, JSON.stringify({ lastRefreshMs: 'oops' }), 'utf8');
+    assert.equal(await timing.isFresh(), false, 'a non-numeric marker is stale');
+
+    // 1e309 parses to Infinity: a number that is not finite.
+    await writeFile(markerPath, '{"lastRefreshMs":1e309}', 'utf8');
+    assert.equal(await timing.isFresh(), false, 'a non-finite marker is stale');
+
+    await writeFile(markerPath, JSON.stringify({ lastRefreshMs: Date.now() + 60_000 }), 'utf8');
+    assert.equal(await timing.isFresh(), false, 'a future marker is stale');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('TTL marker is fresh within the window and stale once it elapses', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pie-copilot-ttl-'));
+  const markerPath = path.join(directory, 'sync.json');
+  const timing = new FileCatalogRefreshTiming(markerPath, 1000);
+  try {
+    await timing.markRefreshed();
+    assert.equal(await timing.isFresh(), true, 'a just-recorded marker is fresh');
+
+    await writeFile(markerPath, JSON.stringify({ lastRefreshMs: Date.now() - 2000 }), 'utf8');
+    assert.equal(await timing.isFresh(), false, 'a marker older than the TTL is stale');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

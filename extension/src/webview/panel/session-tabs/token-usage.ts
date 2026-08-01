@@ -2,6 +2,7 @@ import type { AssistantUsage, ChatMessage, ContextWindowUsage, PruningDetails, T
 import { formatToolResult } from '../../../shared/tool-result-format';
 import { getRenderableSubagentResult, type RawMessage } from '../../../shared/subagent-result';
 import { estimateTextTokens } from '../system-prompt-tokens';
+import { estimateLiveAssistantOutputTokens } from '../../../shared/token-rate';
 import {
   assistantUsageFromSample,
   type SessionUsageSnapshot,
@@ -325,8 +326,7 @@ export function buildLiveSessionCostEstimate(
   let outputTokens = 0;
   for (const message of transcript) {
     if (message.role !== 'assistant' || message.usage || message.status !== 'streaming') continue;
-    outputTokens += estimateTextTokens(message.markdown);
-    outputTokens += estimateTextTokens(message.thinking ?? '');
+    outputTokens += estimateLiveAssistantOutputTokens(message);
   }
 
   const totalTokens = unclassifiedContextTokens + outputTokens;

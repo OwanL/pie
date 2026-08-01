@@ -9,7 +9,7 @@ import { deepClone, loadFixture } from './helpers.ts';
 test('V2 model leaderboard is review-only and leaves runtime-only families unranked', async () => {
   const prepared = prepareSourceAnalytics(await loadFixture());
   const leaderboard = createModelLeaderboard(prepared);
-  assert.equal(leaderboard.schemaVersion, 6);
+  assert.equal(leaderboard.schemaVersion, 7);
   assert.deepEqual(leaderboard.sourceWeights, { review: 1, process: 0 });
   assert.deepEqual(leaderboard.shrinkage, { review: 8, process: 20 });
   assert.ok(leaderboard.rows.some((row) => row.modelId !== '(unknown)'));
@@ -145,6 +145,7 @@ function makeReview(run: PreparedRunRow, reviewId: string, qualityIndexV1: numbe
     cohort: 'v2_production', schemaVersion: 2, reviewId, sessionId: run.sessionId,
     identityFallback: false, rubricVersion: 'session-review-v2.1', indexVersion: 'v1',
     reviewedAt: '2026-07-24T10:00:00.000Z', startedDay: '2026-07-24', joinKey: 'session_id',
+    unmatchedReason: null,
     runIds: [run.runId], modelFamilies: [run.modelFamily!], criteria: [],
     attainment: {
       deliveredOverall: 'achieved', controllableOverall: 'achieved',

@@ -12,7 +12,7 @@
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 
 import { estimateTokens } from "../logger.js";
-import { countTokens } from "../tokenize.js";
+import { countTokens } from "../../../shared/tokenize.js";
 import type { PruningConfig, PruningDecision, PruningResult } from "../types.js";
 
 import type { PrepassUsage, SkillPruningResult, ToolPruningResult } from "./pruning-types.js";

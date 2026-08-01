@@ -33,10 +33,12 @@ The installers pin the optional standalone `pi` CLI to the exact SDK version res
 
 ### Windows
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-.\install.ps1
+```cmd
+.\install.bat
 ```
+
+(Double-clicking `install.bat` also works — it pauses at the end so the
+window doesn't close immediately.)
 
 ### macOS / Linux
 
@@ -56,7 +58,7 @@ Both installers are idempotent and safe to re-run. On each run they:
 5. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
 6. **Write `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
 7. **Repair extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
-8. **Migrate session history** from legacy `~/.pi/agent/sessions/` into the current checkout's local `data/outcomes/sessions/` store.
+8. **Migrate session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
 9. **Install dependencies with `npm ci`**, then build, package, and install the pie VS Code extension when the VS Code CLI is available.
 10. **Run post-install verification** for auth, paths, versions, and split-brain credentials.
 
@@ -82,9 +84,9 @@ The pie panel needs provider credentials to send messages. There are two ways to
 Set a provider API key as a persistent environment variable. The backend reads it automatically.
 
 **Windows:**
-```powershell
+```cmd
 setx UMANS_API_KEY "sk-..."
-# then open a NEW terminal for it to take effect
+REM then open a NEW terminal for it to take effect
 ```
 
 **macOS / Linux:**
@@ -134,13 +136,14 @@ pi --provider umans --model umans-glm-5.2 "hello"
 This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_AUTH_DIR`.
 
 **Fix:** Re-run the installer — it auto-merges the in-tree creds into the secure location:
-```powershell
-.\install.ps1   # or: ./install.sh
+```cmd
+.\install.bat
 ```
+(on macOS/Linux: `./install.sh`)
 
 Or merge manually (Windows):
-```powershell
-Copy-Item "$env:USERPROFILE\Documents\GitHub\pie\auth.json" "$env:LOCALAPPDATA\pie\auth.json" -Force
+```cmd
+copy "%USERPROFILE%\Documents\GitHub\pie\auth.json" "%LOCALAPPDATA%\pie\auth.json"
 ```
 
 ### Backend fails to start: "SDK path not allowed"
@@ -253,7 +256,7 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 
 - Session history is canonical JSONL under each checkout's `data/outcomes/sessions/`. Both installers pin `PI_CODING_AGENT_SESSION_DIR` to that machine-local path.
 - `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same session directory.
-- Both installers migrate legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`), prefer newer transcripts on conflict, and preserve the loser as `.conflict.*.bak`.
+- Both installers migrate legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/`), prefer newer transcripts on conflict, and preserve the loser as `.conflict.*.bak`.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations

@@ -13,7 +13,7 @@ import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { mergeReviewIntoSummary, readReviews } from './session-review-store';
-import { backendTrace } from './diag';
+import { backendTrace } from './log';
 import { backendSessionPathKey } from './session-directory';
 
 function textFromSessionMessageContent(content: unknown): string {
@@ -80,13 +80,22 @@ export async function discoverSessionSummaries(
         .filter((entry) => entry.isDirectory())
         .map((entry) => path.join(sessionDir, entry.name)));
     } catch {
-      // The SDK call below preserves its existing missing/unreadable-dir fallback.
+      // A missing/unreadable configured directory still lists its top-level
+      // path via listAll(sessionDir) below; canonical-only sources no longer
+      // fall back to the SDK default while a root is configured.
     }
   }
-  const sources = await Promise.all([
-    ...configuredDirs.map((dir) => sdk.SessionManager.listAll(dir)),
-    sdk.SessionManager.listAll(),
-  ]);
+  // Canonical-only listing: with a configured session directory, read it
+  // (plus its per-cwd subdirectories) exclusively — the installer's verified
+  // migration moved legacy sessions into the canonical store, and `npm run
+  // doctor` surfaces any newly stranded legacy sessions rather than scanning
+  // the legacy root forever. With nothing configured, the embedded SDK keeps
+  // its own default via the bare listAll().
+  const sources = await Promise.all(
+    configuredDirs.length > 0
+      ? configuredDirs.map((dir) => sdk.SessionManager.listAll(dir))
+      : [sdk.SessionManager.listAll()],
+  );
   const byPath = new Map<string, SdkSessionInfo>();
   for (const session of sources.flat()) {
     const key = backendSessionPathKey(session.path);
