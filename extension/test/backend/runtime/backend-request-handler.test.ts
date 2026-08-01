@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { handleBackendRequest, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
+import { formatInterruptWatchdogDuration, handleBackendRequest, type BackendRequestHandlerDeps } from '../../../src/backend/request-handler';
 import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../../../src/backend/session-event-handler';
 import { BackendError } from '../../../src/backend/server-io';
 import type { ModelSettings } from '../../../src/shared/protocol';
@@ -498,6 +498,12 @@ test('message.interrupt validates running state and reports abort failures', asy
   assert.equal(activeHarness.context.activeRequest?.aborted, true);
 });
 
+test('interrupt watchdog duration uses readable singular, plural, and millisecond labels', () => {
+  assert.equal(formatInterruptWatchdogDuration(5), '5ms');
+  assert.equal(formatInterruptWatchdogDuration(1000), '1 second');
+  assert.equal(formatInterruptWatchdogDuration(30_000), '30 seconds');
+});
+
 test('message.interrupt terminalizes locally and replaces runtime when remote teardown never settles', async () => {
   const previous = process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS;
   process.env.PIE_INTERRUPT_ABORT_WATCHDOG_MS = '5';
@@ -516,6 +522,14 @@ test('message.interrupt terminalizes locally and replaces runtime when remote te
     assert.equal(harness.context.activeRequest, undefined);
     assert.deepEqual(harness.busyEvents, [false]);
     assert.equal(harness.createCalls.length, 1);
+    const operationalErrors = harness.emitted.filter((entry) => entry.event === 'operational-error');
+    assert.equal(operationalErrors.length, 1, 'one stuck interrupt must surface one recovery notice');
+    assert.deepEqual(operationalErrors[0]?.payload, {
+      code: 'INTERRUPT_ABORT_STUCK',
+      message: 'Stop did not settle within 5ms, so Pie ended the turn locally and is refreshing the session runtime.',
+      requestId: 'req-stuck-abort',
+      sessionPath: harness.context.sessionPath,
+    });
     assert.equal(harness.emitted.some((entry) => entry.event === 'message.aborted'), true);
     assert.equal(await bridge.confirm('late', 'runtime request'), false);
     bridge.notify('late runtime notice');

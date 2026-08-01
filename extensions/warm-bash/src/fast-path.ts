@@ -47,6 +47,18 @@ function onDataEcho(args: string[], onData: (b: Buffer) => void): void {
   onData(Buffer.from(args.join(" ") + "\n"));
 }
 
+const EXIT_STDIO_IDLE_GRACE_MS = 100;
+
+/**
+ * Wait for the direct child, not every descendant that inherited its pipes.
+ *
+ * On Windows, launchers such as `cmd.exe /c start …` exit promptly but the
+ * program they launch can retain stdout/stderr. Node's `close` event then does
+ * not fire until that descendant exits, which used to leave the tool—and
+ * `session.abort()`—stuck indefinitely. After the direct child exits, keep
+ * collecting active output, but release quiet inherited handles after a short
+ * idle grace. This mirrors the SDK's fresh-bash executor.
+ */
 function execBinary(
   binary: string,
   args: string[],
@@ -67,41 +79,109 @@ function execBinary(
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
+    let settled = false;
+    let exited = false;
+    let exitCode: number | null = null;
     let timedOut = false;
-    let timer: NodeJS.Timeout | undefined;
-    const onAbort = () => killTree(child);
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let postExitTimer: NodeJS.Timeout | undefined;
+    let stdoutEnded = child.stdout === null;
+    let stderrEnded = child.stderr === null;
 
     const cleanup = () => {
-      if (timer) clearTimeout(timer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (postExitTimer) clearTimeout(postExitTimer);
       signal?.removeEventListener("abort", onAbort);
+      // Keep the one-shot error listener installed after local settlement.
+      // Abort/timeout can finalize before an asynchronous spawn error arrives;
+      // removing the final listener would turn that late error into an uncaught
+      // EventEmitter exception in the extension host. The child remains
+      // collectible with the listener attached.
+      child.removeListener("exit", onExit);
+      child.removeListener("close", onClose);
+      child.stdout?.removeListener("data", onStdoutData);
+      child.stderr?.removeListener("data", onStderrData);
+      child.stdout?.removeListener("end", onStdoutEnd);
+      child.stderr?.removeListener("end", onStderrEnd);
     };
 
-    if (signal) signal.addEventListener("abort", onAbort, { once: true });
-    if (timeout && timeout > 0) {
-      timer = setTimeout(() => {
-        timedOut = true;
-        killTree(child);
-      }, timeout * 1000);
-    }
-
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
-    child.on("error", (e) => {
+    const finalize = (code = exitCode) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      reject(new FastPathError(e.message));
-    });
-    child.on("close", (code) => {
-      cleanup();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       if (signal?.aborted) {
         reject(new Error("aborted"));
-        return;
-      }
-      if (timedOut) {
+      } else if (timedOut) {
         reject(new Error(`timeout:${timeout}`));
-        return;
+      } else {
+        resolveExec({ exitCode: code });
       }
-      resolveExec({ exitCode: code });
-    });
+    };
+
+    const armPostExitTimer = () => {
+      if (postExitTimer) clearTimeout(postExitTimer);
+      postExitTimer = setTimeout(() => finalize(), EXIT_STDIO_IDLE_GRACE_MS);
+    };
+
+    const maybeFinalizeAfterExit = () => {
+      if (exited && stdoutEnded && stderrEnded) finalize();
+    };
+
+    const onStdoutData = (data: Buffer) => {
+      onData(data);
+      if (exited) armPostExitTimer();
+    };
+    const onStderrData = (data: Buffer) => {
+      onData(data);
+      if (exited) armPostExitTimer();
+    };
+    const onStdoutEnd = () => {
+      stdoutEnded = true;
+      maybeFinalizeAfterExit();
+    };
+    const onStderrEnd = () => {
+      stderrEnded = true;
+      maybeFinalizeAfterExit();
+    };
+    const onError = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new FastPathError(error.message));
+    };
+    const onExit = (code: number | null) => {
+      exited = true;
+      exitCode = code;
+      maybeFinalizeAfterExit();
+      if (!settled) armPostExitTimer();
+    };
+    const onClose = (code: number | null) => finalize(code);
+    const onAbort = () => {
+      killTree(child);
+      // `close` may never fire when an already-exited launcher left inherited
+      // pipes behind. The kill attempt is best-effort; local cancellation is
+      // authoritative and must settle immediately.
+      finalize();
+    };
+
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+    child.stdout?.once("end", onStdoutEnd);
+    child.stderr?.once("end", onStderrEnd);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.once("close", onClose);
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    if (timeout && timeout > 0) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        killTree(child);
+        finalize();
+      }, timeout * 1000);
+    }
   });
 }
 

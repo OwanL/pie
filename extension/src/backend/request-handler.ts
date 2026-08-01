@@ -136,6 +136,11 @@ const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
  *  live-switching models (Bug 4). The healthy-abort path (settles promptly) is
  *  untouched — this only bounds the never-settles window. */
 const DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS = 30 * 1000;
+export function formatInterruptWatchdogDuration(watchdogMs: number): string {
+  if (watchdogMs < 1000 || watchdogMs % 1000 !== 0) return `${watchdogMs}ms`;
+  const seconds = watchdogMs / 1000;
+  return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
+}
 function resolveInterruptAbortWatchdogMs(): number {
   const raw = process.env[INTERRUPT_ABORT_WATCHDOG_ENV];
   if (raw === undefined || raw === '') return DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS;
@@ -954,7 +959,8 @@ async function handleMessageInterrupt(
   }
 
   if (outcome === 'timeout') {
-    const message = `Provider teardown did not settle within ${watchdogMs}ms. Pie interrupted the turn locally and is replacing the session runtime.`;
+    const watchdogLabel = formatInterruptWatchdogDuration(watchdogMs);
+    const message = `Stop did not settle within ${watchdogLabel}, so Pie ended the turn locally and is refreshing the session runtime.`;
     const active = context.activeRequest;
     context.retired = true;
     context.sessionManagerFence?.invalidate();
