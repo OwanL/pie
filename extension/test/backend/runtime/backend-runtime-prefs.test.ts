@@ -5,6 +5,7 @@ import { handleBackendRequest } from '../../../src/backend/request-handler';
 import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../../src/shared/protocol';
 import { validateRuntimePrefsSet } from '../../../src/backend/rpc';
 import { ProviderGate } from '../../../src/backend/provider-gate';
+import { AUTONOMOUS_MODE_ENV } from '../../../../shared/autonomous-mode.js';
 
 const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL';
 const SUBAGENT_MAX_DEPTH_ENV = 'PIE_SUBAGENT_MAX_DEPTH';
@@ -91,12 +92,37 @@ test('runtimePrefs.set mirrors provider and extension toggles into backend envir
     params: { providerToggles, extensionToggles },
   });
 
-  assert.deepEqual(result, { providerToggles, extensionToggles, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles, extensionToggles, autonomousMode: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[PROVIDER_TOGGLES_ENV], JSON.stringify(providerToggles));
   assert.equal(process.env[EXTENSION_TOGGLES_ENV], JSON.stringify(extensionToggles));
   // When the field is omitted, the env var must not be touched.
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], previousAlwaysParent);
   assert.equal(process.env[SUBAGENT_BUCKETS_ENV], previousBuckets);
+});
+
+test('runtimePrefs.set applies autonomous mode to live sessions and mirrors its environment flag', async (t) => {
+  const previous = process.env[AUTONOMOUS_MODE_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[AUTONOMOUS_MODE_ENV];
+    else process.env[AUTONOMOUS_MODE_ENV] = previous;
+  });
+  const applied: boolean[] = [];
+
+  const result = await handleBackendRequest({
+    setAutonomousMode: (enabled: boolean) => applied.push(enabled),
+  } as any, {
+    id: 'test-runtime-prefs-autonomous',
+    method: 'runtimePrefs.set',
+    params: { providerToggles: {}, extensionToggles: {}, autonomousMode: true },
+  }) as { autonomousMode?: boolean };
+
+  assert.equal(result.autonomousMode, true);
+  assert.deepEqual(applied, [true]);
+  assert.equal(process.env[AUTONOMOUS_MODE_ENV], '1');
+  assert.throws(
+    () => validateRuntimePrefsSet({ autonomousMode: 'yes' }),
+    /autonomousMode must be a boolean/,
+  );
 });
 
 test('runtimePrefs.set mirrors subagent provider defaults into the backend environment', async (t) => {
@@ -134,7 +160,7 @@ test('runtimePrefs.set writes the subagent always-parent-model env var when prov
     params: { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true },
   });
 
-  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+  assert.deepEqual(result, { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, subagentAlwaysParentModel: true, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
   assert.equal(process.env[SUBAGENT_ALWAYS_PARENT_MODEL_ENV], '1');
 });
 

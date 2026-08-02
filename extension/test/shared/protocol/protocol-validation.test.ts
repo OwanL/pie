@@ -268,6 +268,14 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
     false,
   );
   assert.equal(
+    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { autonomousMode: true } }).ok,
+    true,
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { autonomousMode: 'yes' } }).ok,
+    false,
+  );
+  assert.equal(
     validateWebviewToHostMessage({
       type: 'setPrefs',
       prefs: { unknownPref: true },

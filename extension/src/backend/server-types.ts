@@ -135,6 +135,10 @@ export interface SessionContext {
   /** Active tool set captured when the Tools prompt entry is switched off, so
    * re-enabling it restores provider-visible schemas and executions. */
   systemPromptToolsBeforeDisable?: string[];
+  /** Whether ask_user was active when autonomous mode removed it. Used to make
+   * disabling autonomous mode an exact restoration rather than enabling a tool
+   * that another owner had already hidden. */
+  autonomousModeAskUserWasActive?: boolean;
   /** Bug 6 watchdog: armed on `agent_end willRetry:true`, re-armed on
    *  `auto_retry_start` (delayMs + grace), cleared on `auto_retry_end` /
    *  `agent_end willRetry:false`. If it elapses, emits `operational-error` +

@@ -46,6 +46,7 @@ const {
 function installSdkResolverForTests(): void {
 	// Isolate from host extension-toggle state (see integration.test.ts).
 	delete process.env.PIE_EXTENSION_TOGGLES_JSON;
+	delete process.env.PIE_AUTONOMOUS_MODE;
 
 	const mockDir = mkdtempSync(path.join(tmpdir(), "skill-pruner-pruning-mock-"));
 	const sdkPath = path.join(mockDir, "pi-coding-agent.cjs");

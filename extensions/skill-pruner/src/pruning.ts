@@ -9,6 +9,7 @@ import {
 } from "./state.js";
 import { parseJsonOrThrow } from "../../../shared/error-message.js";
 import { isInSubagentContext } from "../../../shared/subagent-context.js";
+import { ASK_USER_TOOL_NAME, isAutonomousModeEnabled } from "../../../shared/autonomous-mode.js";
 
 export {
 	buildPruningPayload,
@@ -42,6 +43,7 @@ export {
 /** Re-exported so tests can drive the shared AsyncLocalStorage signal that
  * `shouldSkipPruning` reads (same module instance the subagent runner sets). */
 export { subagentContext } from "../../../shared/subagent-context.js";
+export { ASK_USER_TOOL_NAME, isAutonomousModeEnabled };
 
 /**
  * Locates the host-injected skills block in the system prompt so the pruner

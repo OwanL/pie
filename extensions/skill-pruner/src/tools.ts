@@ -6,7 +6,7 @@ import {
 	getPrunedTools,
 	recordLoadedSkill,
 } from "./state.js";
-import { getConfig, getSessionId } from "./pruning.js";
+import { ASK_USER_TOOL_NAME, getConfig, getSessionId, isAutonomousModeEnabled } from "./pruning.js";
 import { recordSkillRecovery, recordToolRecovery } from "../logger.js";
 
 function stripFrontmatter(content: string): string {
@@ -59,8 +59,10 @@ export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
 		const allTools = toolSeams.getAllTools();
 		const activeTools = toolSeams.getActiveTools();
 		const knownToolNames = new Set(allTools.map((tool) => tool.name));
+		const autonomousMode = isAutonomousModeEnabled();
 		const hiddenToolNames = [...getPrunedTools(sessionId)]
 			.filter((name) => knownToolNames.has(name) && !activeTools.includes(name))
+			.filter((name) => !autonomousMode || name !== ASK_USER_TOOL_NAME)
 			.sort();
 		const hiddenSkills = getHiddenSkills(sessionId);
 		const loadedSkills = getLoadedSkills(sessionId);
@@ -80,6 +82,9 @@ export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
 		}
 		if (capabilityType !== "tool" && capabilityType !== "skill") {
 			return { content: [{ type: "text" as const, text: "capabilityType must be 'tool' or 'skill'." }], isError: true };
+		}
+		if (autonomousMode && capabilityType === "tool" && capabilityName === ASK_USER_TOOL_NAME) {
+			return { content: [{ type: "text" as const, text: "ask_user is unavailable while autonomous mode is active." }], isError: true };
 		}
 
 		if (capabilityType === "skill") {

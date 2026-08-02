@@ -63,7 +63,10 @@ Use the V2 `session_review` actions:
   hashes, and limitations; do not substitute raw JSONL for the bundle.
 - `recordReview` — validate and atomically persist one complete canonical V2
   production record keyed by `sessionId`; duplicate writes return/reject with the
-  existing `reviewId`.
+  existing `reviewId`. Supply either inline `review` (object or JSON string) or,
+  for large records, an absolute `reviewPath` to one temporary UTF-8 JSON object.
+  The tool derives all three `frozenLedgerSha256` values with key-order-independent
+  canonical JSON hashing; never hand-author or precompute those hashes.
 - `closeReviewed` — enqueue/idempotently resume closure for a target using its
   persisted or existing `reviewId`.
 - `closeSelf` — enqueue reviewer-session closure only; it never writes a review.
@@ -181,13 +184,14 @@ user-constrained small + small. It must:
 - deduplicate equivalent criteria, resolve requirement boundaries, retain
   superseded requirements, and reject generic quality criteria unless necessary;
 - assign stable IDs and return one immutable definition-only `frozenLedger`;
-- hash exactly that ledger as `frozenLedgerSha256`;
+- leave frozen-ledger hashing to `recordReview` (object key order is not semantic);
 - select no more than one highest-importance material human-question candidate;
 - record source proposal IDs and concise dedup/merge notes.
 
 ```text
-Return a ConsolidationRecord only: definition-only frozenLedger, its SHA-256,
-selectedHumanQuestion (0 or 1), and source/dedup provenance. Do not classify,
+Return the ConsolidationRecord content except `frozenLedgerSha256`: definition-only
+frozenLedger, selectedHumanQuestion (0 or 1), and source/dedup provenance. The
+parent leaves the hash absent for `recordReview` to derive. Do not classify,
 run tools, ask the user, or mutate the frozen ledger.
 ```
 
@@ -240,9 +244,9 @@ answered or been marked unavailable.
 
 For every unreviewed target, launch **fresh** isolated reviewers in parallel using
 the selected reviewer profile. Do not reuse Pass-1 reviewers as the classification
-output. Give each exactly the same final blinded bundle:
-frozen ledger/hash, rendered transcript/diff manifest, and the target's human
-response (if any).
+output. Give each exactly the same final blinded bundle: frozen ledger, rendered
+transcript/diff manifest, and the target's human response (if any). State that the
+ledger hash will be derived canonically at record time.
 
 ```text
 You are the [first|second] Pass-4 classifier, requested from the selected profile's
@@ -345,16 +349,20 @@ confidence, or blocker penalties.
 ### Pass 6 — persist, explicitly close, then self-close
 
 For every unreviewed target, assemble and call `recordReview` with the complete
-schema-version-2 record: exact frozen ledger/hash and classified ledger;
-deterministic attainment/index; canonical vectors/human check/confidence; two
+schema-version-2 record except that `frozenLedgerSha256` may be omitted at the
+review root, consolidation, and provenance pipeline. `recordReview` derives the
+same canonical hash into all three locations. Include the exact frozen and
+classified ledgers; deterministic attainment/index; canonical vectors/human check/confidence; two
 Pass-1 proposals, consolidation, two Pass-4 components,
 disagreement/adjudication; evidence manifest; runtime pipeline IDs and requested/
 effective reviewer provenance; and `provenance.hostVersion` copied verbatim from
 the host's `PIE_EDITOR_VERSION` env var (or `null` when that var is unset — the
 reviewer never guesses a host version; it is re-validated against the host at
-record time). Verify status/reason, frozen-ledger/hash, tuple cardinality, and
-blinding invariants before writing. The
-canonical review record append is fsynced to disk before any `closeReviewed`
+record time). Verify status/reason, frozen-ledger equality, tuple cardinality, and
+blinding invariants before writing. For large records, generate one JSON object in
+an OS temporary file and pass its absolute path as `reviewPath` instead of
+re-authoring a large inline tool argument. The canonical review record append is
+fsynced to disk before any `closeReviewed`
 enqueue is allowed. If an ordinary duplicate is returned, use its existing
 `reviewId`; never attempt a second production record.
 
@@ -374,7 +382,7 @@ and end the turn; make no more tool calls.
 
 - [ ] Pass-0 partition was made once; self excluded; already-reviewed targets did not enter the review pipeline.
 - [ ] Every reviewer got the same target-specific blinded bundle; raw JSONL/model identity absent.
-- [ ] Both Pass-1 proposals and profile-matched coordination exist; frozen ledger/hash match exactly.
+- [ ] Both Pass-1 proposals and profile-matched coordination exist; frozen-ledger copies match exactly and hashes are omitted for `recordReview` to derive.
 - [ ] All human questions were asked sequentially after all consolidation; max one per affected target; inputs/results are embedded. Cancelled/unanswered responses omit the `answer` key (an explicit `answer: undefined` is rejected).
 - [ ] Fresh Pass-4 assessments matching the accepted reviewer profile classify every frozen definition exactly once.
 - [ ] Material disagreements were adjudicated; otherwise only permitted adjacent deterministic merges occurred; no spurious disputed fields are recorded.

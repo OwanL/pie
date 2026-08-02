@@ -41,6 +41,8 @@ import {
 	buildFeedbackMessage,
 	estimateToolTokens,
 	RECOVERY_TOOL_NAME,
+	ASK_USER_TOOL_NAME,
+	isAutonomousModeEnabled,
 } from "./pruning.js";
 
 export default function register(pi: ExtensionAPI) {
@@ -91,6 +93,14 @@ export default function register(pi: ExtensionAPI) {
 
 	// --- before_agent_start: skill + tool pruning ---
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
+		const autonomousMode = isAutonomousModeEnabled();
+		if (autonomousMode) {
+			const active = toolSeams.getActiveTools();
+			if (active.includes(ASK_USER_TOOL_NAME)) {
+				toolSeams.setActiveTools(active.filter((name) => name !== ASK_USER_TOOL_NAME));
+			}
+		}
+
 		const queuedCount = queuedPrompts.get(event.prompt) ?? 0;
 		if (queuedCount > 0) {
 			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
@@ -105,7 +115,9 @@ export default function register(pi: ExtensionAPI) {
 		// Queued continuations returned above intentionally retain the current one.
 		recordHiddenSkills(sessionId, []);
 		const configuredTools = toolSeams.getAllTools();
-		const activeToolNames = toolSeams.getActiveTools();
+		const blockedToolNames = new Set(autonomousMode ? [ASK_USER_TOOL_NAME] : []);
+		const activeToolNames = toolSeams.getActiveTools()
+			.filter((name) => !blockedToolNames.has(name));
 		// An explicit empty selected-tools list is the backend's authoritative
 		// signal that the user switched off the Tools system-prompt entry. Do not
 		// let this extension's restoration/selection calls re-expose those schemas.
@@ -114,14 +126,17 @@ export default function register(pi: ExtensionAPI) {
 		const previouslyPruned = getPrunedTools(sessionId);
 		const consideredToolNames = toolsManuallyDisabled
 			? new Set<string>()
-			: new Set([...activeToolNames, ...previouslyPruned]);
+			: new Set([...activeToolNames, ...previouslyPruned].filter((name) => !blockedToolNames.has(name)));
 		// Reconsider tools hidden by the preceding pruning decision, but never
 		// pull in every configured tool: tools made inactive by the user or another
 		// extension are outside skill-pruner's ownership.
-		const availableTools = configuredTools.filter((tool) => consideredToolNames.has(tool.name));
+		const availableTools = configuredTools.filter(
+			(tool) => consideredToolNames.has(tool.name) && !blockedToolNames.has(tool.name),
+		);
 		const restorePrunerOwnedTools = () => {
 			if (previouslyPruned.size === 0 || toolsManuallyDisabled) return;
-			const restored = [...new Set([...activeToolNames, ...previouslyPruned])];
+			const restored = [...new Set([...activeToolNames, ...previouslyPruned])]
+				.filter((name) => !blockedToolNames.has(name));
 			toolSeams.setActiveTools(restored);
 			recordPrunedTools(sessionId, []);
 		};

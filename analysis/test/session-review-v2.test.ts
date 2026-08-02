@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { hashCanonicalJson } from '../../extensions/session-reviewer/src/hash.ts';
 import type { ClassifiedCriterion, SourceAnalyticsPayload } from '../scripts/contracts.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import { coerceSessionReviewV2, deriveReviewAttainment } from '../scripts/review-analytics.ts';
@@ -100,6 +101,23 @@ test('portable source coercion keeps the first canonical production review', asy
   const source = coerceSourceAnalyticsPayload(payload);
   assert.deepEqual(source.sessionReviewsV2?.map((review) => review.reviewId), ['review-first']);
   assert.equal(source.sessionReviewV2Diagnostics.acceptedCount, 2);
+});
+
+test('V2 coercion accepts canonical frozen-ledger hashes after key reordering', () => {
+  const review = deepClone(RAW_V2_REVIEW);
+  const criterion = review.frozenLedger[0];
+  review.frozenLedger[0] = {
+    importance: criterion.importance,
+    statement: criterion.statement,
+    criterionId: criterion.criterionId,
+    taxonomy: { evidenceMode: criterion.taxonomy.evidenceMode, surface: criterion.taxonomy.surface, activity: criterion.taxonomy.activity },
+    origin: criterion.origin,
+  };
+  const canonicalHash = hashCanonicalJson(review.frozenLedger);
+  review.frozenLedgerSha256 = canonicalHash;
+  review.consolidation.frozenLedgerSha256 = canonicalHash;
+  review.provenance.pipeline.frozenLedgerSha256 = canonicalHash;
+  assert.ok(coerceSessionReviewV2(review));
 });
 
 test('V2 coercion enforces rubric and index versions', () => {

@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, PROTOCOL_VERSION, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type CustomMessagePayload, type DetailResult, type ErrorPayload, type LazyDetailRef, type MessageAbortedPayload, type ModelInfo, type ModelSettings, type PreflightFailedPayload, type RequestEnvelope, type SessionOpenedPayload, type SessionSummary, type TranscriptPageDirection, type TranscriptPagePayload } from '../shared/protocol';
+import { AUTONOMOUS_MODE_ENV } from '../../../shared/autonomous-mode.js';
 import { toErrorMessage } from '../shared/error-message';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import { enrichConnectionError } from '../shared/error-message';
@@ -172,6 +173,8 @@ export interface BackendRequestHandlerDeps {
     sessionPath: string,
     disabledEntries: readonly string[],
   ): Promise<void>;
+  /** Apply autonomous-mode tool exclusion to all live session runtimes. */
+  setAutonomousMode(enabled: boolean): void;
   loadTranscriptPage(
     sessionPath: string,
     direction: TranscriptPageDirection,
@@ -233,6 +236,10 @@ async function handleRuntimePrefsSet(
     process.env[SUBAGENT_PROVIDER_TOGGLES_ENV] = JSON.stringify(params.subagentProviderTogglesBySession);
   }
   process.env[EXTENSION_TOGGLES_ENV] = JSON.stringify(params.extensionToggles);
+  if (params.autonomousMode !== undefined) {
+    process.env[AUTONOMOUS_MODE_ENV] = params.autonomousMode ? '1' : '0';
+    deps.setAutonomousMode(params.autonomousMode);
+  }
   if (params.historyCompaction !== undefined) {
     process.env[HISTORY_COMPACTION_ENV] = JSON.stringify(params.historyCompaction);
   }

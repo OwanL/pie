@@ -1226,6 +1226,21 @@
   color: var(--panel-accent);
 }
 
+/* Autonomous mode is a durable behavior switch, so its pressed state remains
+   visible without requiring the tooltip. */
+.autonomous-mode-trigger.active {
+  border-color: color-mix(in srgb, var(--panel-accent) 48%, transparent);
+  background: var(--panel-accent-surface);
+  color: var(--panel-accent-strong);
+}
+
+.autonomous-mode-trigger.active:hover,
+.autonomous-mode-trigger.active:focus-visible {
+  border-color: color-mix(in srgb, var(--panel-accent) 68%, transparent);
+  background: var(--panel-accent-surface);
+  color: var(--panel-accent-strong);
+}
+
 /* Match the subagent provider trigger to the other bottom-bar icon controls. */
 .subagent-provider-trigger {
   justify-content: center;

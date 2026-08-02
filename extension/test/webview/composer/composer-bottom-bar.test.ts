@@ -95,8 +95,11 @@ test('composer controls render in the agreed bottom-bar order', () => {
     'aria-label="Subagent providers:',
     'aria-label="Toggle system prompts"',
     'aria-label="Compact context',
+    'aria-label="Enable autonomous mode',
     'class="composer-indicators"',
   ]);
+  assert.match(html, /aria-pressed="false"/);
+  assert.match(html, /autonomous-mode-trigger/);
 });
 
 test('composer uses the configured initial textarea rows and defaults to one', () => {

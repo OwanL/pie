@@ -264,7 +264,8 @@ export interface SessionReviewParams {
   sessionPath?: string;
   sessionId?: string;
   reviewId?: string;
-  review?: SessionReviewV2;
+  review?: SessionReviewV2 | string;
+  reviewPath?: string;
   reason?: string;
   maxTurns?: number;
   artifacts?: EvidenceArtifactInput[];
@@ -281,7 +282,14 @@ export const sessionReviewSchema = {
     sessionPath: { type: 'string', description: 'Absolute session JSONL path returned by listOpen/listSelected.' },
     sessionId: { type: 'string', description: 'Stable session-header ID (required for closeReviewed; checked against sessionPath when supplied).' },
     reviewId: { type: 'string', description: 'Persisted review ID required by closeReviewed.' },
-    review: { type: 'object', description: 'Complete SessionReviewV2 record for recordReview.', additionalProperties: true },
+    review: {
+      oneOf: [
+        { type: 'object', additionalProperties: true },
+        { type: 'string' },
+      ],
+      description: 'Complete SessionReviewV2 record for recordReview. Accepts an object or JSON string. recordReview derives the three frozenLedgerSha256 fields with key-order-independent canonical JSON hashing.',
+    },
+    reviewPath: { type: 'string', description: 'Absolute, non-symlink path inside the OS temporary directory to one UTF-8 SessionReviewV2 JSON object (max 1 MiB), as an alternative to inline review. The file is read but not deleted. recordReview derives the three frozenLedgerSha256 fields.' },
     reason: { type: 'string', description: 'Optional close reason.' },
     maxTurns: { type: 'integer', minimum: 1, maximum: 200, description: 'getEvidence transcript turn cap (default 40).' },
     artifacts: {

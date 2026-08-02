@@ -1,10 +1,14 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { buildBlindedEvidence, readSessionIdentity } from './src/evidence.js';
+import { hashCanonicalJson } from './src/hash.js';
 import { validateRuntimeProvenance } from './src/runtime-provenance.js';
 import { sessionReviewSchema } from './src/types.js';
-import type { EvidenceManifest, SessionReviewParams } from './src/types.js';
+import type { EvidenceManifest, SessionReviewParams, SessionReviewV2 } from './src/types.js';
 import { enqueueClosure, readOpenTabs, readReviewStore, recordReviewOnce } from './src/store.js';
 import { validateSessionReviewV2 } from './src/validation.js';
 
@@ -95,6 +99,52 @@ function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession
       };
     });
 }
+const MAX_REVIEW_FILE_BYTES = 1024 * 1024;
+function parseReviewJson(raw: string, source: string, exposeParserMessage = true): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (error) {
+    const detail = exposeParserMessage ? `: ${(error as Error).message}` : '.';
+    throw new Error(`${source} must contain one valid SessionReviewV2 JSON object${detail}`);
+  }
+}
+function safeTemporaryReviewPath(reviewPath: string): string {
+  if (!path.isAbsolute(reviewPath)) throw new Error('reviewPath must be absolute.');
+  const realTempRoot = fs.realpathSync(os.tmpdir());
+  const realReviewPath = fs.realpathSync(reviewPath);
+  const relative = path.relative(realTempRoot, realReviewPath);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('reviewPath must be inside the OS temporary directory.');
+  if (fs.lstatSync(reviewPath).isSymbolicLink()) throw new Error('reviewPath must not be a symbolic link.');
+  return realReviewPath;
+}
+function reviewInput(review: SessionReviewV2 | string | undefined, reviewPath: string | undefined): unknown {
+  if (review !== undefined && reviewPath !== undefined) throw new Error('recordReview accepts either review or reviewPath, not both.');
+  if (reviewPath !== undefined) {
+    const safePath = safeTemporaryReviewPath(reviewPath);
+    if (!fs.statSync(safePath).isFile()) throw new Error('reviewPath must identify a regular file.');
+    const bytes = fs.readFileSync(safePath);
+    if (bytes.byteLength > MAX_REVIEW_FILE_BYTES) throw new Error(`reviewPath exceeds the ${MAX_REVIEW_FILE_BYTES}-byte limit.`);
+    return parseReviewJson(bytes.toString('utf8'), 'reviewPath', false);
+  }
+  return typeof review === 'string' ? parseReviewJson(review, 'review') : review;
+}
+function normalizeFrozenLedgerHashes(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const review = structuredClone(value) as Record<string, unknown>;
+  if (!Array.isArray(review.frozenLedger)) return review;
+  const frozenLedgerSha256 = hashCanonicalJson(review.frozenLedger);
+  review.frozenLedgerSha256 = frozenLedgerSha256;
+  const consolidation = review.consolidation as Record<string, unknown> | undefined;
+  if (consolidation && typeof consolidation === 'object' && !Array.isArray(consolidation)) consolidation.frozenLedgerSha256 = frozenLedgerSha256;
+  const provenance = review.provenance as Record<string, unknown> | undefined;
+  const pipeline = provenance?.pipeline as Record<string, unknown> | undefined;
+  if (pipeline && typeof pipeline === 'object' && !Array.isArray(pipeline)) pipeline.frozenLedgerSha256 = frozenLedgerSha256;
+  return review;
+}
+function parseReviewParam(review: SessionReviewV2 | string | undefined, reviewPath: string | undefined): SessionReviewV2 {
+  return normalizeFrozenLedgerHashes(reviewInput(review, reviewPath)) as SessionReviewV2;
+}
+
 function renderList(items: ListedSession[], selectedOnly: boolean): string {
   if (!items.length) return selectedOnly ? 'No pinned sessions are selected.' : 'No open sessions are currently pushed from the host (PIE_OPEN_TABS empty/unset).';
   const rows = items.map((item) => {
@@ -111,7 +161,7 @@ export default function (pi: ExtensionAPI) {
     description: 'V2 session review: list open/pinned sessions, fetch blinded evidence, persist one validated canonical ledger review, and enqueue explicit closure actions.',
     promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'List before getEvidence. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. recordReview never closes a tab; use closeReviewed after persistence and closeSelf as the final action.',
+      'List before getEvidence. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. For large records, write one JSON object to a temporary file and call recordReview with reviewPath; recordReview derives frozen-ledger hashes and never closes a tab. Use closeReviewed after persistence and closeSelf as the final action.',
     ],
     parameters: sessionReviewSchema,
 
@@ -155,11 +205,11 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (p.action === 'recordReview') {
-        if (!p.review) return err('recordReview requires a complete review object.');
+        if (p.review === undefined && p.reviewPath === undefined) return err('recordReview requires review or reviewPath.');
         const scope = snapshotFor(ctx);
         if (!scope) return err('List targets in this reviewer session before recording.');
         try {
-          const review = validateSessionReviewV2(p.review);
+          const review = validateSessionReviewV2(parseReviewParam(p.review, p.reviewPath));
           const target = eligibleTarget(scope, review.sessionPathAtReview, review.sessionId);
           if (!target || !target.reviewEligible) return err('Review target is not an eligible unrated selected/open snapshot member.');
           const identity = readSessionIdentity(review.sessionPathAtReview);

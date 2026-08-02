@@ -60,6 +60,12 @@ test('DEFAULT_CHAT_PREFS shape', () => {
   assert.equal(DEFAULT_CHAT_PREFS.uiLinkColor, '');
 });
 
+test('resolveChatPrefs defaults and validates autonomous mode', () => {
+  assert.equal(resolveChatPrefs().autonomousMode, false);
+  assert.equal(resolveChatPrefs({ autonomousMode: true }).autonomousMode, true);
+  assert.equal(resolveChatPrefs({ autonomousMode: 'yes' as never }).autonomousMode, false);
+});
+
 test('resolveChatPrefs preserves valid composer rows and defaults malformed stored values to one', () => {
   assert.equal(resolveChatPrefs({ composerInitialRows: 6 }).composerInitialRows, 6);
   for (const invalid of [0, 7, 1.5, Number.NaN, '3']) {

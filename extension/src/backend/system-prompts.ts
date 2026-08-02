@@ -1,4 +1,5 @@
 import type { SystemPromptEntry } from '../shared/protocol';
+import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
 import { contextFilePathKey, prepareContextFiles } from './context-files';
 import type { ActiveModelInfo } from './session-metadata';
 import type { SdkBuildSystemPromptOptions, SdkContextFile, SdkSkill, SdkToolInfo } from './sdk';
@@ -270,6 +271,28 @@ export function installSystemPromptToolToggleGuard(
   session.setActiveToolsByName = function guardedSetActiveTools(toolNames: string[]): void {
     const toolsDisabled = getDisabledEntries().includes(TOOLS_ENTRY_ID);
     setActiveTools.call(this, toolsDisabled ? [] : toolNames);
+  };
+}
+
+/** Keep autonomous mode authoritative over every extension-driven tool update.
+ * Skill-pruner can reconsider previously hidden tools and request_capability can
+ * recover one at runtime, so filtering only once when the preference changes is
+ * insufficient: every later setActiveTools call must continue to exclude
+ * ask_user while autonomous mode is active. */
+export function installAutonomousModeToolGuard(
+  session: ToolToggleSession,
+  getAutonomousMode: () => boolean,
+): void {
+  const setActiveTools = session.setActiveToolsByName;
+  if (typeof setActiveTools !== 'function') return;
+
+  session.setActiveToolsByName = function guardedSetActiveTools(toolNames: string[]): void {
+    setActiveTools.call(
+      this,
+      getAutonomousMode()
+        ? toolNames.filter((name) => name !== ASK_USER_TOOL_NAME)
+        : toolNames,
+    );
   };
 }
 

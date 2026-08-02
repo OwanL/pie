@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { deriveAttainment } from '../src/attainment.js';
+import { hashCanonicalJson } from '../src/hash.js';
 import { hashJson } from '../src/evidence.js';
 import { validateSessionReviewV2 } from '../src/validation.js';
 import { assessment, proposal, validReview } from './fixtures.js';
@@ -38,6 +39,26 @@ test('rejects status/reason and frozen-definition invariant violations', () => {
   frozen.consolidation.frozenLedgerSha256 = frozen.frozenLedgerSha256;
   frozen.provenance.pipeline.frozenLedgerSha256 = frozen.frozenLedgerSha256;
   assert.throws(() => validateSessionReviewV2(frozen), /unclassified definition/);
+});
+
+test('accepts canonical frozen-ledger hashes independent of object key order', () => {
+  const review = validReview();
+  review.frozenLedger[0] = {
+    importance: review.frozenLedger[0]!.importance,
+    statement: review.frozenLedger[0]!.statement,
+    criterionId: review.frozenLedger[0]!.criterionId,
+    taxonomy: {
+      evidenceMode: review.frozenLedger[0]!.taxonomy.evidenceMode,
+      surface: review.frozenLedger[0]!.taxonomy.surface,
+      activity: review.frozenLedger[0]!.taxonomy.activity,
+    },
+    origin: review.frozenLedger[0]!.origin,
+  };
+  const canonicalHash = hashCanonicalJson(review.frozenLedger);
+  review.frozenLedgerSha256 = canonicalHash;
+  review.consolidation.frozenLedgerSha256 = canonicalHash;
+  review.provenance.pipeline.frozenLedgerSha256 = canonicalHash;
+  assert.equal(validateSessionReviewV2(review), review);
 });
 
 test('preserves strict hash, rubric, and index versions', () => {

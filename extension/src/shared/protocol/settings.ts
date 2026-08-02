@@ -371,6 +371,9 @@ export interface ChatPrefs {
   autoExpandSubagentCalls: boolean;
   suppressCompletionNotifications: boolean;
   showPruningMessages: boolean;
+  /** Hands-off operation: ask_user is removed from the pruning prepass and from
+   * every provider-visible main-agent tool set. */
+  autonomousMode: boolean;
   /** When true, sub-agents always use the parent's active model (skip bucket selection). */
   subagentAlwaysParentModel: boolean;
   /** When true, bucket selection softly routes around enabled providers whose
@@ -590,6 +593,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   autoExpandSubagentCalls: false,
   suppressCompletionNotifications: false,
   showPruningMessages: true,
+  autonomousMode: false,
   subagentAlwaysParentModel: false,
   subagentRouteAroundSaturatedProviders: false,
   subagentFallbackOnProviderFailure: true,
@@ -832,6 +836,9 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
   return {
     ...DEFAULT_CHAT_PREFS,
     ...prefs,
+    autonomousMode: typeof prefs?.autonomousMode === 'boolean'
+      ? prefs.autonomousMode
+      : DEFAULT_CHAT_PREFS.autonomousMode,
     composerInitialRows: normalizeComposerInitialRows(prefs?.composerInitialRows),
     extensionToggles: {
       ...DEFAULT_CHAT_PREFS.extensionToggles,
@@ -885,6 +892,7 @@ export function normalizeNestedBooleanMap(value: unknown): Record<string, Record
 
 export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
   providerToggles: Record<string, boolean>;
+  autonomousMode?: boolean;
   subagentProviderDefaults?: Record<string, boolean>;
   subagentProviderTogglesBySession?: Record<string, Record<string, boolean>>;
   extensionToggles: Record<string, boolean>;
@@ -908,6 +916,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): {
 } {
   return {
     providerToggles: prefs.providerToggles,
+    autonomousMode: prefs.autonomousMode,
     subagentProviderDefaults: prefs.subagentProviderDefaults,
     subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
     extensionToggles: prefs.extensionToggles,

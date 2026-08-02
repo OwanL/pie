@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 
+import { hashCanonicalJson } from '../../extensions/session-reviewer/src/hash.ts';
 import { validateSessionReviewV2 } from '../../extensions/session-reviewer/src/validation.ts';
 import { sha256Hex } from './hash.ts';
 import type {
@@ -147,7 +148,7 @@ function validateCanonicalEnvelope(value: Record<string, unknown>, ledger: Class
 
   const frozenRaw = value.frozenLedger;
   if (!Array.isArray(frozenRaw) || !frozenRaw.length || !validHash(value.frozenLedgerSha256)
-    || value.frozenLedgerSha256 !== hashJson(frozenRaw)) return false;
+    || (value.frozenLedgerSha256 !== hashCanonicalJson(frozenRaw) && value.frozenLedgerSha256 !== hashJson(frozenRaw))) return false;
   const frozen = frozenRaw.map(coerceDefinition);
   if (frozen.some((entry) => !entry) || !unique(frozen.map((entry) => entry!.criterionId))
     || !unique(ledger.map((entry) => entry.criterionId))) return false;

@@ -97,6 +97,9 @@ export function ComposerToolbar({
   ) ?? null;
   const fallbackModelLabel = modelEntries[0]?.selectedLabel ?? '';
   const selectedModelLabel = selectedModelEntry?.selectedLabel ?? (selectedModel || fallbackModelLabel);
+  const autonomousModeLabel = prefs.autonomousMode
+    ? 'Autonomous mode on — ask_user is unavailable'
+    : 'Enable autonomous mode — run without the ask_user tool';
   return (
     <>
       <div class="composer-controls">
@@ -151,6 +154,24 @@ export function ComposerToolbar({
           availability={!sessionPath ? 'no-session' : busy ? 'busy' : 'available'}
           onCompact={onCompact}
         />
+
+        <button
+          type="button"
+          class={`system-prompt-toggle-trigger autonomous-mode-trigger${prefs.autonomousMode ? ' active' : ''}`}
+          aria-label={autonomousModeLabel}
+          aria-pressed={prefs.autonomousMode}
+          title={autonomousModeLabel}
+          onClick={() => onSetPrefs({ autonomousMode: !prefs.autonomousMode })}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 2v2" />
+            <rect x="3" y="4" width="10" height="8" rx="2" />
+            <path d="M1.5 7.5v2M14.5 7.5v2M6 9h4" />
+            <circle cx="6" cy="7" r=".5" fill="currentColor" stroke="none" />
+            <circle cx="10" cy="7" r=".5" fill="currentColor" stroke="none" />
+            <path d="M5 14h6" />
+          </svg>
+        </button>
       </div>
 
       <div class="composer-indicators">

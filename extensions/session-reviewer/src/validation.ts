@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { deriveAttainment } from './attainment.js';
 import { deriveCanonicalFromComponents, resolutionString } from './canonical.js';
 import { materialDisagreementFields } from './disagreement.js';
-import { hashJson } from './hash.js';
+import { hashCanonicalJson, hashJson } from './hash.js';
 import type {
   ClassifiedCriterion, CriterionDefinition, CriterionReason, CriterionStatus, ReviewEvidenceVector,
   ReviewerAssessment, ReviewerRuntime, SessionReviewV2,
@@ -201,7 +201,9 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
   const frozen = v.frozenLedger.map((item, i) => definition(item, `review.frozenLedger[${i}]`, true));
   unique(frozen.map((c) => c.criterionId), 'review.frozenLedger');
   const frozenHash = hash(v.frozenLedgerSha256, 'review.frozenLedgerSha256');
-  if (frozenHash !== hashJson(v.frozenLedger)) fail('frozenLedgerSha256 does not match frozenLedger');
+  // New records use key-order-independent canonical JSON. Continue accepting
+  // legacy records hashed from their original JSON.stringify insertion order.
+  if (frozenHash !== hashCanonicalJson(v.frozenLedger) && frozenHash !== hashJson(v.frozenLedger)) fail('frozenLedgerSha256 does not match frozenLedger');
   if (!Array.isArray(v.ledger)) fail('ledger must be an array');
   const ledger = v.ledger.map((item, i) => classified(item, `review.ledger[${i}]`));
   validateClassifiesFrozen(ledger, frozen, 'review.ledger');

@@ -22,6 +22,7 @@ function installSdkResolverForTests(): void {
 	// These tests drive on/off/auto/shadow via config.mode and never exercise
 	// the toggle, so neutralize it for the duration of this test process.
 	delete process.env.PIE_EXTENSION_TOGGLES_JSON;
+	delete process.env.PIE_AUTONOMOUS_MODE;
 
 	const mockDir = mkdtempSync(path.join(tmpdir(), "skill-pruner-sdk-mock-"));
 
@@ -836,6 +837,41 @@ test("always-keep / pinned skills and tools are never sent to the prepass", asyn
 	}
 });
 
+test("autonomous mode excludes ask_user before the prepass even when always-keep protects it", async () => {
+	const previous = process.env.PIE_AUTONOMOUS_MODE;
+	process.env.PIE_AUTONOMOUS_MODE = "1";
+	let capturedPrepassContext = "";
+	const activeTools = [
+		...mockToolInfo,
+		{ name: "ask_user", description: "Ask the user a clarifying question", parameters: { type: "object", properties: {} } },
+	];
+	const applied: string[][] = [];
+	__setCompleteFn(async (_model: unknown, context: Array<{ role: string; content: string }>) => {
+		capturedPrepassContext = context.map((message) => message.content).join("\n");
+		return { text: '{"pruneSkills":[],"pruneTools":[]}' };
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { alwaysKeep: ["ask_user"] }));
+		__setToolSeams({
+			getAllTools: () => activeTools as any[],
+			getActiveTools: () => activeTools.map((tool) => tool.name),
+			setActiveTools: (names) => applied.push(names),
+		});
+
+		await runBeforeAgentStart(handlers, "implement this autonomously", realisticSkills);
+
+		assert.ok(applied.length > 0, "ask_user should be disabled before scoring");
+		assert.ok(!applied[0].includes("ask_user"));
+		assert.ok(!capturedPrepassContext.includes("ask_user"), "no prepass message may see the tool name");
+		assert.ok(!capturedPrepassContext.includes("Ask the user a clarifying question"), "no prepass message may see the tool description");
+	} finally {
+		if (previous === undefined) delete process.env.PIE_AUTONOMOUS_MODE;
+		else process.env.PIE_AUTONOMOUS_MODE = previous;
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
 test("off mode baseline: known skill read → skill_read; non-skill read → no event", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-integration-"));
 	const logPath = path.join(dir, "pruning.jsonl");
@@ -1109,6 +1145,33 @@ test("request_capability poll lists only names hidden by the latest decision", a
 		const result = await toolDef.execute("call-list", {}, undefined, undefined, { sessionManager: { getSessionId: () => "session-list" } }) as any;
 		assert.equal(result.content[0].text, "tools\tweb_search\nskills\t(none)");
 	} finally {
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("request_capability cannot reveal or recover ask_user in autonomous mode", async () => {
+	const previous = process.env.PIE_AUTONOMOUS_MODE;
+	process.env.PIE_AUTONOMOUS_MODE = "1";
+	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
+	const toolDef = registeredTools.get("request_capability");
+	assert.ok(toolDef);
+	let activated = false;
+	__setToolSeams({
+		getAllTools: () => [...mockToolInfo, { name: "ask_user", description: "Ask the user" }] as any[],
+		getActiveTools: () => ["read", "edit", "bash"],
+		setActiveTools: () => { activated = true; },
+	});
+	try {
+		recordPrunedTools("session-autonomous", ["ask_user"]);
+		const listed = await toolDef.execute("list", {}, undefined, undefined, { sessionManager: { getSessionId: () => "session-autonomous" } }) as any;
+		assert.equal(listed.content[0].text, "No capabilities are hidden by the latest pruning decision.");
+		const recovered = await toolDef.execute("recover", { capabilityType: "tool", capabilityName: "ask_user" }, undefined, undefined, { sessionManager: { getSessionId: () => "session-autonomous" } }) as any;
+		assert.equal(recovered.isError, true);
+		assert.match(recovered.content[0].text, /unavailable while autonomous mode/);
+		assert.equal(activated, false);
+	} finally {
+		if (previous === undefined) delete process.env.PIE_AUTONOMOUS_MODE;
+		else process.env.PIE_AUTONOMOUS_MODE = previous;
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });

@@ -287,6 +287,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'autoExpandSubagentCalls',
     'suppressCompletionNotifications',
     'showPruningMessages',
+    'autonomousMode',
     'subagentAlwaysParentModel',
     'subagentRouteAroundSaturatedProviders',
     'subagentFallbackOnProviderFailure',

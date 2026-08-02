@@ -63,6 +63,7 @@ import {
   buildSessionSystemPrompts,
   buildToggledSystemPrompt,
   captureOriginalSystemPromptOptions,
+  installAutonomousModeToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   normalizePromptText,
@@ -82,6 +83,7 @@ import { buildSessionOpenedPayload as buildSessionOpenedPayloadHelper, normalize
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts.js';
 import { findDurableDetail } from '../shared/lazy-details.js';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol.js';
+import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
 
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
@@ -175,6 +177,8 @@ export class BackendServer {
   private agentDir = '';
   private authStorage: unknown;
   private viewedSessionPath?: string;
+  /** Process-wide user preference mirrored by runtimePrefs.set. */
+  private autonomousMode = false;
   private readonly sessionContexts = new Map<string, SessionContext>();
   private readonly sessionCatalog = new SessionCatalog();
   /** Deduplicates concurrent opens/preloads for the same cold session. */
@@ -608,6 +612,7 @@ export class BackendServer {
         session,
         () => context.systemPromptDisabledEntries ?? [],
       );
+      installAutonomousModeToolGuard(session, () => this.autonomousMode);
 
       // Disabling Tools controls both prompt prose and the provider's separate
       // tool-schema field. Capture the initial active set so a later re-enable
@@ -621,6 +626,7 @@ export class BackendServer {
       if (persistedDisabled.length > 0) {
         await this.applySystemPromptTogglesToBasePrompt(context, persistedDisabled);
       }
+      this.applyAutonomousModeToContext(context, this.autonomousMode);
 
       return context;
       } catch (error) {
@@ -955,6 +961,64 @@ export class BackendServer {
     }
   }
 
+  /** Apply autonomous-mode tool visibility to one live SDK session. */
+  private applyAutonomousModeToContext(context: SessionContext, enabled: boolean): void {
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+
+    if (enabled) {
+      // Tools-off stores its prior provider schema outside the live active set.
+      // Preserve that latent ask_user ownership too: Tools may be switched back
+      // on while autonomous mode is still filtering the restoration call.
+      const askUserWasCapturedByToolsToggle = (
+        context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) === true
+        && context.systemPromptToolsBeforeDisable?.includes(ASK_USER_TOOL_NAME) === true
+      );
+      context.autonomousModeAskUserWasActive = (
+        active.includes(ASK_USER_TOOL_NAME) || askUserWasCapturedByToolsToggle
+      );
+      if (active.includes(ASK_USER_TOOL_NAME)) {
+        context.session.setActiveToolsByName?.(
+          active.filter((name) => name !== ASK_USER_TOOL_NAME),
+        );
+      }
+      return;
+    }
+
+    if (!context.autonomousModeAskUserWasActive) {
+      context.autonomousModeAskUserWasActive = undefined;
+      return;
+    }
+
+    // If the whole Tools entry is off, preserve the restoration intent in its
+    // captured set. The Tools guard intentionally reduces every live update to
+    // [], so restoring directly here would otherwise be forgotten.
+    if (context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID)) {
+      context.systemPromptToolsBeforeDisable = [
+        ...new Set([...(context.systemPromptToolsBeforeDisable ?? []), ASK_USER_TOOL_NAME]),
+      ];
+      context.autonomousModeAskUserWasActive = undefined;
+      return;
+    }
+
+    const configured = context.session.getAllTools?.().map((tool) => tool.name) ?? [];
+    if (configured.includes(ASK_USER_TOOL_NAME) && !active.includes(ASK_USER_TOOL_NAME)) {
+      context.session.setActiveToolsByName?.([...active, ASK_USER_TOOL_NAME]);
+    }
+    context.autonomousModeAskUserWasActive = undefined;
+  }
+
+  /** Update every live session immediately; newly created contexts read the
+   * process-wide field while installing their tool guard. */
+  private setAutonomousMode(enabled: boolean): void {
+    if (this.autonomousMode === enabled) return;
+    this.autonomousMode = enabled;
+    for (const context of this.sessionContexts.values()) {
+      this.applyAutonomousModeToContext(context, enabled);
+    }
+  }
+
   /** Apply a new disabled-entry set for a session: update the SessionContext,
    *  persist to the sidecar, rewrite the base prompt. (Re-emitting
    *  `session.opened` is the caller's responsibility — the RPC handler does it
@@ -1185,6 +1249,7 @@ export class BackendServer {
       applySystemPromptToggles: (sessionPath, disabledEntries) => (
         this.applySystemPromptToggles(sessionPath, disabledEntries)
       ),
+      setAutonomousMode: (enabled) => this.setAutonomousMode(enabled),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd)
       ),

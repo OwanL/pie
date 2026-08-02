@@ -118,6 +118,7 @@ function createHarness(overrides: {
     async applySystemPromptToggles(sessionPath, disabledEntries) {
       appliedToggles.push({ sessionPath, disabledEntries: [...disabledEntries] });
     },
+    setAutonomousMode: () => undefined,
     async loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd) {
       return { sessionPath, direction, loadedStart, loadedEnd } as any;
     },
@@ -1332,6 +1333,7 @@ test('session.truncateAfter re-applies the user\'s model when the truncate dropp
       setViewedSessionPath: () => undefined,
       async buildSessionOpenedPayload(p) { return { sessionPath: p, session: { path: p, modelId: reopenedSession.model?.id, thinkingLevel: reopenedSession.thinkingLevel } } as any; },
       async applySystemPromptToggles() { /* no-op */ },
+      setAutonomousMode: () => undefined,
       async loadTranscriptPage() { return {} as any; },
       emit: (event, payload) => emitted.push({ event, payload }),
       emitBusyChanged: () => undefined,
@@ -1397,6 +1399,7 @@ test('session.truncateAfter leaves the model untouched when the new context alre
       setViewedSessionPath: () => undefined,
       async buildSessionOpenedPayload(p) { return { sessionPath: p } as any; },
       async applySystemPromptToggles() { /* no-op */ },
+      setAutonomousMode: () => undefined,
       async loadTranscriptPage() { return {} as any; },
       emit: () => undefined,
       emitBusyChanged: () => undefined,

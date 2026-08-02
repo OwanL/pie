@@ -15,6 +15,7 @@ import {
   buildToggledSystemPrompt,
   captureOriginalSystemPromptOptions,
   contextFileEntryId,
+  installAutonomousModeToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   isSupersetSystemPromptOptions,
@@ -450,6 +451,22 @@ test('Tools toggle guard prevents extensions from re-exposing provider schemas',
   disabled = [];
   session.setActiveToolsByName(['read', 'bash']);
   assert.deepEqual(applied, [[], ['read', 'bash']]);
+});
+
+test('Autonomous mode guard prevents extensions from re-enabling ask_user', () => {
+  let autonomousMode = true;
+  const applied: string[][] = [];
+  const session = {
+    setActiveToolsByName(names: string[]) { applied.push(names); },
+  };
+
+  installAutonomousModeToolGuard(session, () => autonomousMode);
+  session.setActiveToolsByName(['read', 'ask_user', 'bash']);
+  assert.deepEqual(applied, [['read', 'bash']]);
+
+  autonomousMode = false;
+  session.setActiveToolsByName(['read', 'ask_user', 'bash']);
+  assert.deepEqual(applied.at(-1), ['read', 'ask_user', 'bash']);
 });
 
 test('Skills row remains toggleable while all tools are manually disabled', () => {

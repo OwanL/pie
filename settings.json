@@ -1,7 +1,7 @@
 {
-  "defaultModel": "gpt-5.6-sol",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "github-copilot",
+  "defaultModel": "gpt-5.6-terra",
+  "defaultThinkingLevel": "medium",
+  "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -35,7 +35,8 @@
         "edit",
         "read",
         "write",
-        "subagent"
+        "subagent",
+        "ask_user"
       ]
     },
     "autoSkipBelowTokens": null

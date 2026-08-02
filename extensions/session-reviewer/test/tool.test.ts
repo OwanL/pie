@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import registerSessionReviewer from '../index.js';
+import { hashCanonicalJson } from '../src/hash.js';
 import { sessionReviewSchema } from '../src/types.js';
 import type { ReviewerRuntime, SessionReviewV2 } from '../src/types.js';
 import { validReview } from './fixtures.js';
@@ -114,6 +115,85 @@ test('vertical slice lists selected, issues evidence, records once, then enqueue
     const actions = fs.readFileSync(path.join(dir, 'closure-actions.jsonl'), 'utf8').trim().split('\n').map((line: string) => JSON.parse(line));
     assert.deepEqual(actions.map((a: any) => a.kind), ['closeReviewed', 'closeSelf']);
     assert.equal(actions[1].reviewId, undefined);
+  } finally {
+    if (savedDir === undefined) delete process.env.PIE_REVIEWS_DIR; else process.env.PIE_REVIEWS_DIR = savedDir;
+    if (savedTabs === undefined) delete process.env.PIE_OPEN_TABS; else process.env.PIE_OPEN_TABS = savedTabs;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recordReview accepts JSON strings/files and derives key-order-independent frozen-ledger hashes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-review-string-'));
+  const sessionPath = path.join(dir, 'target.jsonl');
+  const selfPath = path.join(dir, 'self.jsonl');
+  fs.writeFileSync(sessionPath, `${JSON.stringify({ type: 'session', id: 'target-id' })}\n${JSON.stringify({ type: 'message', message: { role: 'user', content: 'do it' } })}\n`);
+  fs.writeFileSync(selfPath, `${JSON.stringify({ type: 'session', id: 'self-id' })}\n`);
+  const savedDir = process.env.PIE_REVIEWS_DIR;
+  const savedTabs = process.env.PIE_OPEN_TABS;
+  process.env.PIE_REVIEWS_DIR = dir;
+  process.env.PIE_OPEN_TABS = JSON.stringify([
+    { path: sessionPath, name: 'target', pinned: true, isRunning: false },
+    { path: selfPath, name: 'reviewer', pinned: true, isRunning: false },
+  ]);
+  let tool: any;
+  registerSessionReviewer({ registerTool(value: unknown) { tool = value; } } as any);
+  const ctx = { sessionManager: { getSessionFile: () => selfPath } };
+  try {
+    const listed = await tool.execute('1', { action: 'listSelected' }, undefined, undefined, ctx);
+    assert.equal(listed.isError, false);
+    const evidence = await tool.execute('2', { action: 'getEvidence', sessionPath }, undefined, undefined, ctx);
+    assert.equal(evidence.isError, false);
+    const review = validReview({
+      reviewId: 'string-review', sessionId: 'target-id', sessionPathAtReview: sessionPath,
+      provenance: { ...validReview().provenance, orchestratorSessionId: 'self-id', evidenceManifest: evidence.details.manifest },
+    });
+    appendRuntimeCalls(selfPath, review);
+    review.frozenLedger[0] = {
+      importance: review.frozenLedger[0]!.importance,
+      statement: review.frozenLedger[0]!.statement,
+      criterionId: review.frozenLedger[0]!.criterionId,
+      taxonomy: review.frozenLedger[0]!.taxonomy,
+      origin: review.frozenLedger[0]!.origin,
+    };
+    delete (review as unknown as Record<string, unknown>).frozenLedgerSha256;
+    delete (review.consolidation as unknown as Record<string, unknown>).frozenLedgerSha256;
+    delete (review.provenance.pipeline as unknown as Record<string, unknown>).frozenLedgerSha256;
+    const recorded = await tool.execute('3', { action: 'recordReview', review: JSON.stringify(review) }, undefined, undefined, ctx);
+    assert.equal(recorded.isError, false, recorded.content[0].text);
+    assert.match(recorded.content[0].text, /Recorded production V2 review string-review/);
+    const persisted = fs.readFileSync(path.join(dir, 'reviews.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
+    const expectedHash = hashCanonicalJson(review.frozenLedger);
+    assert.equal(persisted.frozenLedgerSha256, expectedHash);
+    assert.equal(persisted.consolidation.frozenLedgerSha256, expectedHash);
+    assert.equal(persisted.provenance.pipeline.frozenLedgerSha256, expectedHash);
+
+    const fileReview = validReview({
+      kind: 'calibration', reviewId: 'file-review', sessionId: 'target-id', sessionPathAtReview: sessionPath,
+      provenance: { ...validReview().provenance, orchestratorSessionId: 'self-id', evidenceManifest: evidence.details.manifest },
+    });
+    appendRuntimeCalls(selfPath, fileReview);
+    delete (fileReview as unknown as Record<string, unknown>).frozenLedgerSha256;
+    delete (fileReview.consolidation as unknown as Record<string, unknown>).frozenLedgerSha256;
+    delete (fileReview.provenance.pipeline as unknown as Record<string, unknown>).frozenLedgerSha256;
+    const reviewPath = path.join(dir, 'review.json');
+    fs.writeFileSync(reviewPath, JSON.stringify(fileReview));
+    const fromFile = await tool.execute('4', { action: 'recordReview', reviewPath }, undefined, undefined, ctx);
+    assert.equal(fromFile.isError, false, fromFile.content[0].text);
+    assert.match(fromFile.content[0].text, /Recorded calibration V2 review file-review/);
+
+    // Malformed JSON and ambiguous input are rejected with tool errors, not crashes.
+    const bad = await tool.execute('5', { action: 'recordReview', review: '{"schemaVersion": 2' }, undefined, undefined, ctx);
+    assert.equal(bad.isError, true);
+    const ambiguous = await tool.execute('6', { action: 'recordReview', review: '{}', reviewPath }, undefined, undefined, ctx);
+    assert.equal(ambiguous.isError, true);
+    const invalidPath = path.join(dir, 'invalid-review.json');
+    fs.writeFileSync(invalidPath, 'TOP_SECRET_VALUE_123456789');
+    const invalidFile = await tool.execute('7', { action: 'recordReview', reviewPath: invalidPath }, undefined, undefined, ctx);
+    assert.equal(invalidFile.isError, true);
+    assert.doesNotMatch(invalidFile.content[0].text, /TOP_SECRET/);
+    const outsideTemp = await tool.execute('8', { action: 'recordReview', reviewPath: path.resolve('package.json') }, undefined, undefined, ctx);
+    assert.equal(outsideTemp.isError, true);
+    assert.match(outsideTemp.content[0].text, /OS temporary directory/);
   } finally {
     if (savedDir === undefined) delete process.env.PIE_REVIEWS_DIR; else process.env.PIE_REVIEWS_DIR = savedDir;
     if (savedTabs === undefined) delete process.env.PIE_OPEN_TABS; else process.env.PIE_OPEN_TABS = savedTabs;
