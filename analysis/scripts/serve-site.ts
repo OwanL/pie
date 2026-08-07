@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseCliOptions, formatUsage } from './cli.ts';
 import { prepareSourceAnalytics } from './prepare.ts';
+import { listenOnLocalhost } from './serve-site-listen.ts';
 import { resolveSiteRequestPath } from './serve-site-paths.ts';
 import {
   buildSiteDataBundle,
@@ -152,10 +153,9 @@ async function main(): Promise<void> {
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    console.log(`pie analytics dashboard available at http://127.0.0.1:${port}`);
-    console.log('Press Ctrl+C to stop the local server.');
-  });
+  await listenOnLocalhost(server, port);
+  console.log(`pie analytics dashboard available at http://127.0.0.1:${port}`);
+  console.log('Press Ctrl+C to stop the local server.');
 }
 
 main().catch((error) => {

@@ -79,10 +79,18 @@ test('getRenderableSubagentResult unwraps nested details.results', () => {
   assert.equal(getRenderableSubagentResult(raw), nested);
 });
 
+test('getRenderableSubagentResult preserves legacy mode-less child results', () => {
+  const child = single({ agent: 'legacy' });
+  assert.deepEqual(getRenderableSubagentResult({ details: { results: [child] } }), {
+    mode: 'single',
+    results: [child],
+  });
+});
+
 test('getRenderableSubagentResult prefers top-level results over nested details.results', () => {
   const top = [single({ agent: 'top' })];
   const nested = [single({ agent: 'nested' })];
-  const raw = { results: top, details: { results: nested } };
+  const raw = { mode: 'single', results: top, details: { mode: 'single', results: nested } };
   assert.equal(getRenderableSubagentResult(raw), raw);
 });
 
@@ -96,6 +104,16 @@ test('getRenderableSubagentResult returns undefined for every malformed shape', 
   assert.equal(getRenderableSubagentResult({ details: 'nope' }), undefined);
   assert.equal(getRenderableSubagentResult({ details: {} }), undefined);
   assert.equal(getRenderableSubagentResult({ details: { results: [] } }), undefined);
+  assert.equal(getRenderableSubagentResult({
+    details: {
+      results: [{
+        index: 0,
+        sessionId: 'session-1',
+        reviewId: 'review-1',
+        status: 'pending',
+      }],
+    },
+  }), undefined, 'unrelated batch-result arrays must not be coerced into subagent results');
 });
 
 // --- getRenderableSubagentResultFromToolCall: completed/finished path ---

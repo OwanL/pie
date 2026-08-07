@@ -4,6 +4,7 @@ import Module from 'node:module';
 import test from 'node:test';
 
 import type { WebviewToHostMessage } from '../../../../src/shared/protocol';
+import { isPendingTabPath } from '../../../../src/shared/tab-behavior';
 import { setLogLevel } from '../../../../src/host/util/pie-logger';
 
 /**
@@ -242,6 +243,39 @@ test('an unexpected route failure on a non-send message surfaces a notice', asyn
     /could not be completed/,
     'the generic route-failure notice is surfaced',
   );
+});
+
+test('edit rejects an SDK-normalized pending pseudo-path before optimistic truncation', async () => {
+  const events: unknown[] = [];
+  const pseudoPath = 'C:\\workspace\\__pending__:1-abc';
+  const router = new MessageRouterCtor(
+    (event) => events.push(event),
+    () => ({
+      sessions: { activeSessionPath: pseudoPath, openTabPaths: [pseudoPath], runningSessionPaths: [], sessions: [] },
+      composer: { pendingComposerInputsBySession: {} },
+      transcript: { bySession: { [pseudoPath]: [] } },
+    } as never),
+    {} as never,
+    { reveal: () => undefined, postState: () => undefined, postImperative: () => undefined },
+    () => undefined,
+    (text: string) => ({ name: text, isPlaceholder: false }),
+    isPendingTabPath,
+  );
+
+  await router.handle({
+    type: 'editMessage',
+    sessionPath: pseudoPath,
+    messageId: 'user-1',
+    text: 'edited text',
+  } as never);
+
+  assert.equal(
+    events.some((event) => (event as { cmd?: { kind?: string } }).cmd?.kind === 'Edit'),
+    false,
+    'the pseudo-path must be rejected before the reducer can remove the edited row',
+  );
+  const notice = events.find((event) => (event as { kind?: string }).kind === 'NoticeShown') as { notice?: string } | undefined;
+  assert.match(notice?.notice ?? '', /still opening/);
 });
 
 test('a route failure on a send message keeps the original send-specific notice', async () => {

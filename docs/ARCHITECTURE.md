@@ -140,8 +140,11 @@ See git history (commit `d581d83`) for historical context on the migration from 
 - The host serializes all RPCs per session to prevent races.
 - The host normalizes one absolute agent/session storage authority and supplies
   it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; with neither
-  configured, the embedded SDK keeps its own defaults. The backend uses the
-  canonical session root for create and fork, and listing reads it (plus its
+  configured, the embedded SDK keeps its own defaults. The session root's parent
+  is the one machine-wide outcomes authority: reviews live in its
+  `session-reviews/` sibling and workspace-sharded run stores are aggregated from
+  that same root, never selected by cwd. The backend uses the canonical session
+  root for create and fork, and listing reads it (plus its
   per-cwd subdirectories) exclusively — the legacy `<agentDir>/sessions` root is
   retired once a canonical root is configured. The installer's verified copy/merge
   is the authority for legacy content, and `npm run doctor` detects any newly

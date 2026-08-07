@@ -66,6 +66,7 @@ export function handleReplaceQueueResult(state: ArchState, event: Extract<Event,
             if (op.queued && op.sessionPath === event.sessionPath) delete draft.pending.promoted[corrId];
           }
           draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+          delete draft.transcript.deferredWindowReplacementBySession[event.sessionPath];
           draft.settings.notice = 'The queued messages could not be restored and were cleared. Re-send them if they are still needed.';
           draft.settings.noticeKind = 'operational-error';
           draft.settings.noticeRaw = event.error;
@@ -100,6 +101,7 @@ export function handleReplaceQueueResult(state: ArchState, event: Extract<Event,
         pending.inputs = event.inputs;
       }
       draft.transcript.editingMessageIdBySession[event.sessionPath] = null;
+      delete draft.transcript.deferredWindowReplacementBySession[event.sessionPath];
     }),
     effects: [],
   };

@@ -7,9 +7,9 @@
   overflow-y: auto;
   overflow-x: hidden;
   overflow-anchor: none;
-  /* Programmatic bottom-follow smoothing is owned by the transcript rAF loop.
-     Keep native scroll behavior instant so manual wheel/keyboard input and
-     anchor restores never compete with a pending CSS scroll animation. */
+  /* Keep native scroll behavior instant so exact bottom pinning, manual
+     wheel/keyboard input, and anchor restores never compete with CSS scroll
+     animation. */
   overscroll-behavior: contain;
   padding: var(--panel-gap-md) var(--panel-gap-lg) 10px;
   display: flex;

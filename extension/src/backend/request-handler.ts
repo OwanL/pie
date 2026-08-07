@@ -397,9 +397,10 @@ async function handleSessionLoadDetail(
   if (!params || typeof params !== 'object') {
     throw new BackendError('INVALID_PARAMS', 'session.loadDetail requires an object payload.');
   }
-  const { sessionPath, ref } = params as { sessionPath?: unknown; ref?: unknown };
+  const { sessionPath } = validateSessionPath('session.loadDetail', params);
+  const { ref } = params as { ref?: unknown };
   const candidate = ref as Partial<LazyDetailRef> | undefined;
-  if (typeof sessionPath !== 'string' || !candidate
+  if (!candidate
     || typeof candidate.key !== 'string' || candidate.key.length === 0
     || candidate.sessionPath !== sessionPath
     || (candidate.kind !== 'tool-result' && candidate.kind !== 'reasoning')

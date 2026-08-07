@@ -321,6 +321,36 @@ function normalizeRenderableSubagentResult(
   return result;
 }
 
+function parseRenderableSubagentResult(value: unknown): SubagentResult | undefined {
+  if (!isRecord(value) || !Array.isArray(value.results) || value.results.length === 0) {
+    return undefined;
+  }
+
+  const validResults = value.results.every((candidate) => isRecord(candidate)
+    && typeof candidate.agent === 'string'
+    && candidate.agent.trim().length > 0
+    && typeof candidate.task === 'string'
+    && candidate.task.trim().length > 0
+    && typeof candidate.exitCode === 'number'
+    && Number.isFinite(candidate.exitCode)
+    && Array.isArray(candidate.messages));
+  if (!validResults) return undefined;
+
+  if (value.mode === 'single' || value.mode === 'parallel' || value.mode === 'chain') {
+    return value as unknown as SubagentResult;
+  }
+  if (value.mode !== undefined) return undefined;
+
+  // Historical terminal results predate the explicit mode field. Preserve
+  // those real child transcripts instead of falling through to a synthesized
+  // failure, while still requiring the complete child-result signature above.
+  return {
+    ...value,
+    mode: value.results.length > 1 ? 'parallel' : 'single',
+    results: value.results as SubagentSingleResult[],
+  };
+}
+
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
   const raw = rawResult as { kind?: unknown; mode?: unknown; children?: unknown; details?: unknown; results?: unknown } | undefined;
 
@@ -393,14 +423,11 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
     if (results.length > 0) return { mode, results };
   }
 
-  if (raw && typeof raw === 'object' && Array.isArray(raw.results) && raw.results.length > 0) {
-    return raw as SubagentResult;
-  }
+  const direct = parseRenderableSubagentResult(raw);
+  if (direct) return direct;
 
-  const nested = raw?.details as { results?: unknown } | undefined;
-  if (nested && typeof nested === 'object' && Array.isArray(nested.results) && nested.results.length > 0) {
-    return nested as SubagentResult;
-  }
+  const nested = parseRenderableSubagentResult(raw?.details);
+  if (nested) return nested;
 
   return undefined;
 }
@@ -532,8 +559,13 @@ function lifecycleSource(
 }
 
 export function getRenderableSubagentResultFromToolCall(
-  toolCall: Pick<ToolCall, 'input' | 'result' | 'status' | 'detailRef'>,
+  toolCall: Pick<ToolCall, 'input' | 'result' | 'status' | 'detailRef'> & Partial<Pick<ToolCall, 'name'>>,
 ): SubagentResult | undefined {
+  // Tool-result `details` is an open extension namespace. A different tool may
+  // legitimately return `{ details: { results: [...] } }`; never infer
+  // subagent ownership from that generic property name alone.
+  if (toolCall.name !== undefined && toolCall.name !== 'subagent') return undefined;
+
   const renderableResult = getRenderableSubagentResult(toolCall.result);
   if (renderableResult) {
     return normalizeRenderableSubagentResult(renderableResult, toolCall.status);

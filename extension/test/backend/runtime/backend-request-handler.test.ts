@@ -259,6 +259,13 @@ test('session.loadDetail validates and delegates bounded retrieval identity', as
   await assert.rejects(handleBackendRequest(harness.deps, {
     id: 'bad-detail', method: 'session.loadDetail', params: { sessionPath: '/repo/session.jsonl', ref: { key: '' } },
   }), /requires sessionPath and ref/);
+
+  const pendingPath = 'C:\\repo\\__pending__:1-abc';
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'pending-detail',
+    method: 'session.loadDetail',
+    params: { sessionPath: pendingPath, ref: { ...ref, sessionPath: pendingPath } },
+  }), /resolved session/);
 });
 
 test('session.create returns a session from the configured backend session directory', async () => {

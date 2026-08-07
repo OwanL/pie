@@ -12,6 +12,7 @@ export const DEFAULT_TOOL_CONFIG: ToolPruningConfig = {
 	dependencies: {
 		edit: ["read"],
 		subagent: ["bash"],
+		session_review: ["subagent", "ask_user"],
 	},
 	alwaysKeep: [],
 };

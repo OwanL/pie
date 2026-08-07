@@ -102,6 +102,7 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
       cwd: '/workspace',
       modifiedAt: new Date().toISOString(),
       messageCount: 0,
+      sessionId: 'stable-session-a',
       modelId: 'claude-3.7',
     
       } as SessionSummary);
@@ -165,6 +166,7 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
       kind: string;
       run: {
         runId: string;
+        sessionId?: string;
         taskGroupId: string;
         status: string;
         sendCount: number;
@@ -185,6 +187,7 @@ test('StatsService records run outcomes and persists snapshot metrics', async ()
     assert.equal(snapshotEntries.length, 1);
     assert.equal(snapshotEntries[0].kind, 'run_snapshot');
     assert.equal(snapshotEntries[0].run.runId, 'id-1');
+    assert.equal(snapshotEntries[0].run.sessionId, 'stable-session-a');
     assert.equal(snapshotEntries[0].run.taskGroupId, 'id-2');
     assert.equal(snapshotEntries[0].run.status, 'closed');
     assert.equal(snapshotEntries[0].run.sendCount, 1);

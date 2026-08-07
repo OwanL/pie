@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
+import { getReviewSidecarFingerprint, readReviews } from '../../../src/backend/session-review-store';
 import type { SessionContext } from '../../../src/backend/server-types';
 
 type PollingTestServer = {
@@ -13,8 +17,10 @@ type PollingTestServer = {
     invalidateIfInventoryChanged(agentDir: string, sessionDir?: string): Promise<boolean>;
   };
   emitSessionListChanged(): Promise<void>;
+  startReviewReconciliation(): void;
   startSessionCatalogPolling(intervalMs?: number): void;
   sessionCatalogPollTimer?: NodeJS.Timeout;
+  reviewSidecarFingerprint: string;
   pollSessionCatalog(): Promise<void>;
   dispose(): Promise<void>;
 };
@@ -119,6 +125,111 @@ test('session inventory polling is unrefed, overlap-safe, emits once, and stops 
   await server.dispose();
   await server.pollSessionCatalog();
   assert.equal(checks, 1, 'disposed polling cannot start another inventory check');
+});
+
+test('review reconciliation emits an unconditional startup refresh for a preseeded outbox', async () => {
+  const reviewsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-review-startup-'));
+  const previous = process.env.PIE_REVIEWS_DIR;
+  process.env.PIE_REVIEWS_DIR = reviewsDir;
+  fs.writeFileSync(path.join(reviewsDir, 'closure-actions.jsonl'), `${JSON.stringify({
+    actionId: 'preseeded-close', kind: 'closeSelf', targetSessionId: 'session-1',
+    targetSessionPath: '/missing/session-1.jsonl', status: 'pending', attempts: 0,
+    requestedAt: '2026-07-24T00:00:00.000Z',
+  })}\n`, 'utf8');
+
+  const server = createPollingTestServer();
+  let emissions = 0;
+  server.emitSessionListChanged = async () => { emissions += 1; };
+  try {
+    server.startReviewReconciliation();
+    assert.equal(emissions, 1, 'startup/restart reconciliation must not wait for a watcher event');
+    await server.pollSessionCatalog();
+    assert.equal(emissions, 2, 'an unchanged active action keeps reconciliation bounded after a transient list failure');
+  } finally {
+    await server.dispose();
+    if (previous === undefined) delete process.env.PIE_REVIEWS_DIR;
+    else process.env.PIE_REVIEWS_DIR = previous;
+    fs.rmSync(reviewsDir, { recursive: true, force: true });
+  }
+});
+
+test('unchanged sidecar fingerprint polls reuse cached active closure state without reparsing reviews', async () => {
+  const reviewsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-review-cache-'));
+  const previous = process.env.PIE_REVIEWS_DIR;
+  process.env.PIE_REVIEWS_DIR = reviewsDir;
+  fs.writeFileSync(
+    path.join(reviewsDir, 'reviews.jsonl'),
+    Array.from({ length: 100 }, (_, index) => JSON.stringify({ schemaVersion: 2, reviewId: `invalid-${index}` })).join('\n') + '\n',
+    'utf8',
+  );
+  fs.writeFileSync(path.join(reviewsDir, 'closure-actions.jsonl'), `${JSON.stringify({
+    actionId: 'cached-active-close', kind: 'closeSelf', targetSessionId: 'session-cache',
+    targetSessionPath: '/missing/session-cache.jsonl', status: 'pending', attempts: 0,
+    requestedAt: '2026-07-24T00:00:00.000Z',
+  })}\n`, 'utf8');
+
+  const server = createPollingTestServer();
+  server.sessionCatalog.invalidateIfInventoryChanged = async () => false;
+  let emissions = 0;
+  server.emitSessionListChanged = async () => {
+    emissions += 1;
+    readReviews();
+  };
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const originalRead = mutableFs.readFileSync;
+  let sidecarReads = 0;
+  mutableFs.readFileSync = ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (typeof file !== 'number' && path.dirname(path.resolve(String(file))) === path.resolve(reviewsDir)) {
+      sidecarReads += 1;
+    }
+    return Reflect.apply(originalRead, mutableFs, [file, ...args]);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+
+  try {
+    server.startReviewReconciliation();
+    const startupReads = sidecarReads;
+    assert.ok(startupReads > 0, 'startup establishes parsed closure state');
+    await server.pollSessionCatalog();
+    await server.pollSessionCatalog();
+    assert.equal(emissions, 3, 'the cached active action still drives bounded reconciliation retries');
+    assert.equal(sidecarReads, startupReads, 'unchanged polls and retry lists use fingerprint-keyed parsed state only');
+  } finally {
+    mutableFs.readFileSync = originalRead;
+    syncBuiltinESMExports();
+    await server.dispose();
+    if (previous === undefined) delete process.env.PIE_REVIEWS_DIR;
+    else process.env.PIE_REVIEWS_DIR = previous;
+    fs.rmSync(reviewsDir, { recursive: true, force: true });
+  }
+});
+
+test('sidecar fingerprint polling recovers a missed watcher event', async () => {
+  const reviewsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-review-poll-'));
+  const previous = process.env.PIE_REVIEWS_DIR;
+  process.env.PIE_REVIEWS_DIR = reviewsDir;
+  const server = createPollingTestServer();
+  server.sessionCatalog.invalidateIfInventoryChanged = async () => false;
+  let emissions = 0;
+  server.emitSessionListChanged = async () => { emissions += 1; };
+
+  try {
+    server.startSessionCatalogPolling(60_000);
+    // Establish the same baseline startup reconciliation records before the
+    // simulated watcher miss.
+    server.reviewSidecarFingerprint = getReviewSidecarFingerprint();
+    fs.appendFileSync(path.join(reviewsDir, 'closure-actions.jsonl'), '{"wake":true}\n', 'utf8');
+
+    await server.pollSessionCatalog();
+    assert.equal(emissions, 1, 'the bounded poll observes sidecar mutation without fs.watch');
+    await server.pollSessionCatalog();
+    assert.equal(emissions, 1, 'an unchanged fingerprint does not emit repeatedly');
+  } finally {
+    await server.dispose();
+    if (previous === undefined) delete process.env.PIE_REVIEWS_DIR;
+    else process.env.PIE_REVIEWS_DIR = previous;
+    fs.rmSync(reviewsDir, { recursive: true, force: true });
+  }
 });
 
 test('session inventory polling emits no list refresh when inventory inspection fails', async () => {

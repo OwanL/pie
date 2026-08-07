@@ -127,8 +127,8 @@ export function MessageRail({ rows, virtualizer, scrollRef, setAutoFollow, marke
   const handleJump = useCallback((rowIndex: number) => {
     const el = scrollRef.current;
     if (!el) return;
-    // Disengage auto-follow so the smooth-follow rAF loop doesn't immediately
-    // re-pin to the bottom and fight the jump. A scroll event from the
+    // Disengage auto-follow so exact pinning does not immediately return to the
+    // bottom and fight the jump. A scroll event from the
     // programmatic scroll disengages it for upward jumps anyway, but a forward
     // jump to a mid-content message leaves autoFollow true (no upward motion
     // detected by resolveAutoFollowState), so this explicit toggle is required.

@@ -8,15 +8,10 @@ import {
 export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
   const [isAtBottom, setIsAtBottom] = useState(true);
   // Reactive mirror of `autoFollowRef.current`. The ref gives synchronous
-  // reads inside the rAF loop / scroll handlers; this state is the reactive
-  // signal that lets `useSmoothAutoFollow`'s effect re-run (rebuilding the rAF
-  // loop) when auto-follow transitions false->true while fully idle — without
-  // it, scrolling back to the bottom (autoFollow false->true) while not
-  // streaming/positioning changes no reactive dep, so the stopped loop never
-  // restarts and a late non-busy height change (image/markdown load) drifts
-  // the view off the bottom. `setAutoFollow` only transitions the state on an
-  // actual boundary change, so per-scroll-event callers do not churn the state
-  // (and thus the effect) every frame.
+  // reads inside scroll/layout handlers; this state makes `useAutoFollow`
+  // re-run when follow transitions false->true while content is otherwise
+  // idle. `setAutoFollow` only updates state on an actual boundary change, so
+  // ordinary scroll events do not churn renders.
   const [autoFollow, setAutoFollowState] = useState(true);
   const autoFollowRef = useRef(true);
   const lastScrollTopRef = useRef(0);
@@ -25,11 +20,8 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
   // toward the live edge cannot be counteracted by streaming row remeasures.
   const isScrollingTowardBottomRef = useRef(false);
 
-  // Co-located setter: updates the ref (synchronous reads in the rAF loop's
-  // idle gate) AND the reactive state together, so the two never diverge.
-  // Gated on an actual value change: scroll events fire every frame, but
-  // `follow` only differs from the current value on a bottom-boundary
-  // crossing, so this never re-renders / rebuilds the rAF effect per-frame.
+  // Co-located setter: updates the synchronous ref and reactive state together
+  // so they never diverge. It is gated on actual boundary changes.
   const setAutoFollow = useCallback((next: boolean) => {
     if (autoFollowRef.current === next) return;
     autoFollowRef.current = next;
@@ -39,11 +31,7 @@ export function useScrollState(scrollRef: { current: HTMLDivElement | null }) {
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Jumps must be instant: force non-smooth behavior around the snap so an
-    // in-flight CSS smooth-scroll (or any `scroll-behavior: smooth` rule) can't
-    // turn this into a slow ease that the auto-follow loop would then interrupt
-    // and replace with frame-by-frame easing. Restored afterwards so the loop
-    // continues to own smoothness while streaming.
+    // Jumps must be instant regardless of theme or inherited scroll behavior.
     const prior = el.style.scrollBehavior;
     el.style.scrollBehavior = 'auto';
     el.scrollTop = el.scrollHeight;

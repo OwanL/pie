@@ -841,6 +841,73 @@ test('AggregateStatsService pricing signature invalidates completed cost accumul
   });
 });
 
+test('AggregateStatsService attributes retired Ollama cloud models from historical pricing and invalidates on history changes', async () => {
+  await withTempDir(async (root) => {
+    const agentDir = path.join(root, 'agent');
+    const analysisDir = path.join(agentDir, 'analysis');
+    await fs.mkdir(analysisDir, { recursive: true });
+    await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: {} }), 'utf8');
+    const historyPath = path.join(analysisDir, 'model-pricing-history.json');
+    const writeHistory = async (input: number, mtimeMs: number): Promise<void> => {
+      await fs.writeFile(historyPath, JSON.stringify({
+        models: [{
+          provider: 'ollama',
+          id: 'retired:cloud',
+          cost: { input, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }],
+      }), 'utf8');
+      await fs.utimes(historyPath, new Date(mtimeMs), new Date(mtimeMs));
+    };
+    const baseMtime = Date.now() - 60_000;
+    await writeHistory(1, baseMtime);
+
+    const now = new Date().toISOString();
+    const completed = {
+      ...validSnapshot('retired-cloud-run', now),
+      finalizedAt: now,
+      modelId: 'retired:cloud',
+      inputTokens: 1_000_000,
+    } as RunSnapshot;
+    let persistedQueries = 0;
+    let completedBuilds = 0;
+    const service = new AggregateStatsService({
+      getArchState: () => ({ sessions: { runningSessionPaths: [], openTabPaths: [] } }) as never,
+      statsService: {
+        getStorageDir: () => root,
+        queryPersistedRunAnalytics: async () => {
+          persistedQueries += 1;
+          return { completedRuns: [completed], openRuns: [] };
+        },
+        getOpenRuns: () => [],
+        getPendingCompletedRuns: () => [],
+      } as never,
+      tokenRateService: { getRates: () => ({}) } as never,
+      getAgentDir: () => agentDir,
+      fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
+      onChanged: () => undefined,
+      onAccumulatorBuilt: (scope) => { if (scope === 'completed') completedBuilds += 1; },
+      mtimeFn: (_path, cb) => cb(null, { mtimeMs: 100 }),
+    });
+
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalCost, 1);
+    assert.deepEqual(service.getAggregateStats().todayCostByProvider, [{
+      provider: 'ollama',
+      cost: 1,
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    }]);
+
+    await writeHistory(2, baseMtime + 30_000);
+    await recomputeAggregate(service);
+    assert.equal(service.getAggregateStats().totalCost, 2);
+    assert.equal(persistedQueries, 1, 'history invalidation reuses cached run snapshots');
+    assert.equal(completedBuilds, 2, 'history change rebuilds the priced completed accumulator');
+  });
+});
+
 test('AggregateStatsService preserves references for equal/live-only refreshes and replaces historical arrays', async () => {
   await withTempDir(async (storageDir) => {
     const now = new Date().toISOString();

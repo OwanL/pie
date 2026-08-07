@@ -1,14 +1,12 @@
 /**
  * Auto-follow drift / spurious-disengage harness for `useTranscriptScroll`.
  *
- * The sibling `perf/auto-follow-reflow.test.ts` proves the loop tracks the
- * cached target without per-frame reflows — but it deliberately stubs
- * `scrollTop` so writes do NOT dispatch scroll events. That leaves the
- * DISENGAGE path (`onScroll` → `resolveAutoFollowState` → autoFollow=false →
- * loop stops easing) completely unexercised. "Autoscroll drifts from the
- * bottom and gets stuck in the middle" is exactly that path firing spuriously:
- * once autoFollow flips false without a real user scroll-up, the loop stops
- * easing and the view is left mid-transcript while content keeps growing.
+ * The sibling `perf/auto-follow-reflow.test.ts` proves exact pinning tracks the
+ * cached target without repeated reflows, but it deliberately stubs
+ * `scrollTop` so writes do not dispatch scroll events. That leaves the
+ * ownership path (`onScroll` → `resolveAutoFollowState`) unexercised. A false
+ * disengage leaves the view stuck mid-transcript; a missed real disengage
+ * fights the reader by pulling them back to the bottom.
  *
  * This harness closes that gap: `scrollTop` writes mark a dirty flag, and a
  * coalesced `scroll` event is dispatched ONCE PER FRAME, AFTER the rAF batch —
@@ -73,25 +71,32 @@ function Probe({
   busy,
   transcript,
   hasNewer = false,
+  hasOlder = false,
+  pagingSuspended = false,
+  onLoadOlder = noop,
   onJumpToLatest = noop,
 }: {
   totalSize: number;
   busy: boolean;
   transcript?: readonly ChatMessage[];
   hasNewer?: boolean;
+  hasOlder?: boolean;
+  pagingSuspended?: boolean;
+  onLoadOlder?: () => void;
   onJumpToLatest?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const r = useTranscriptScroll({
     scrollRef,
     sessionKey: '/s',
-    transcriptWindow: { ...TRANSCRIPT_WINDOW, hasNewer },
+    transcriptWindow: { ...TRANSCRIPT_WINDOW, hasNewer, hasOlder },
     transcript: transcript ?? STABLE_TRANSCRIPT,
     transcriptLength: 1,
     busy,
-    onLoadOlder: noop,
+    onLoadOlder,
     onLoadNewer: noop,
     onJumpToLatest,
+    pagingSuspended,
     totalSize,
   });
   capture.r = r;
@@ -219,21 +224,18 @@ test('steady streaming growth: auto-follow stays engaged and tracks the bottom',
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
 
   // Simulate several streaming snapshots: content grows at the bottom each
-  // snapshot, transcript identity changes, totalSize grows. The loop should
-  // ease the viewport to the new bottom every time and autoFollow must NEVER
+  // snapshot, transcript identity changes, totalSize grows. Auto-follow should
+  // pin the viewport to the new bottom every time and autoFollow must NEVER
   // flip false (no user scroll-up).
   for (let i = 0; i < 20; i++) {
     scrollHeightValue += 40; // ~40px of new content per snapshot
-    rerender(true, 6, []);   // fresh transcript identity + flush easing frames
+    rerender(true, 6, []);   // fresh transcript identity + flush reset frames
     assert.equal(capture.r!.autoFollowRef.current, true, `autoFollow must stay true across snapshot ${i} (no user input)`);
-    assert.ok(
-      Math.abs(scrollTopValue - bottom()) <= 24,
-      `snapshot ${i}: scrollTop=${scrollTopValue} should track bottom=${bottom()} (within near-bottom threshold)`,
-    );
+    assert.equal(scrollTopValue, bottom(), `snapshot ${i}: follow should stay exactly pinned`);
   }
 });
 
-test('manual scroll-up stops the follow rAF even while the agent is busy', () => {
+test('manual scroll-up disables follow even while the agent is busy', () => {
   mountProbe(true);
   settle();
 
@@ -241,14 +243,13 @@ test('manual scroll-up stops the follow rAF even while the agent is busy', () =>
   el.dispatchEvent(new Event('scroll'));
   assert.equal(capture.r!.autoFollowRef.current, false, 'manual upward movement disengages follow');
 
-  // Flush the one callback scheduled by the restarted effect. It must not
-  // enqueue another merely because busy=true; that no-op 60fps loop made
-  // manual scrolling compete for main-thread time during active turns.
+  // Busy state must not create follow work after ownership transfers to the
+  // user. Only the bounded session-reset scheduler may have had a callback.
   act(() => flushFrames(1));
   assert.equal(rafMap.size, 0, 'no follow frame remains queued while scrolled up');
 });
 
-test('large burst growth (>snap threshold): auto-follow snaps and stays engaged', () => {
+test('large burst growth stays exactly pinned and keeps follow engaged', () => {
   mountProbe(true);
   settle();
   assert.equal(scrollTopValue, bottom());
@@ -257,7 +258,7 @@ test('large burst growth (>snap threshold): auto-follow snaps and stays engaged'
   scrollHeightValue += 600;
   rerender(true, 6, []);
   assert.equal(capture.r!.autoFollowRef.current, true, 'autoFollow must stay true after a large burst');
-  assert.ok(Math.abs(scrollTopValue - bottom()) <= 24, `scrollTop=${scrollTopValue} should be at bottom=${bottom()} after burst`);
+  assert.equal(scrollTopValue, bottom(), 'large growth should stay exactly pinned');
 });
 
 test('content shrink while pinned: clamp must NOT disengage auto-follow', () => {
@@ -275,22 +276,24 @@ test('content shrink while pinned: clamp must NOT disengage auto-follow', () => 
   assert.equal(scrollTopValue, bottom(), 'should be re-pinned to the new bottom');
 });
 
-test('content shrink while trailing (mid-ease): must not spuriously disengage', () => {
+test('manual scroll-up preserves the reading position while new content grows', () => {
   mountProbe(true);
   settle();
-  // Create a trailing gap: grow the bottom a lot in one step so the loop is
-  // mid-ease (not yet at the bottom) when the shrink lands.
-  scrollHeightValue += 400;
-  rerender(true, 1, []); // one frame: loop has eased only partway -> trailing
-  const trailing = scrollTopValue;
-  assert.ok(trailing < bottom(), 'sanity: should be trailing the bottom');
 
-  // Now shrink content slightly while trailing. Whatever happens, autoFollow
-  // must not flip false without a user scroll-up.
-  setScrollHeight(scrollHeightValue - 30);
+  // Stay inside the 24px visual near-bottom zone to prove even a small,
+  // deliberate upward scroll transfers ownership to the user.
+  scrollTopValue -= 8;
+  el.dispatchEvent(new Event('scroll'));
+  const readingPosition = scrollTopValue;
+  assert.equal(capture.r!.autoFollowRef.current, false, 'manual upward movement disengages follow');
+
+  // Streaming and expandable tool sections may continue growing after the
+  // reader takes control. Neither the content signal nor queued frames may
+  // pull the viewport back to the live edge.
+  scrollHeightValue += 400;
   rerender(true, 8, []);
-  assert.equal(capture.r!.autoFollowRef.current, true, 'shrink while trailing must not disengage auto-follow');
-  assert.ok(Math.abs(scrollTopValue - bottom()) <= 24, `should recover to bottom=${bottom()}, got ${scrollTopValue}`);
+  assert.equal(capture.r!.autoFollowRef.current, false, 'content growth must not re-engage follow');
+  assert.equal(scrollTopValue, readingPosition, 'the user-controlled reading position must be preserved');
 });
 
 test('animated close (gradual multi-frame shrink): auto-follow must NOT disengage', () => {
@@ -421,19 +424,52 @@ test('sending from a partial window requests the latest page', () => {
   assert.equal(capture.r!.autoFollowRef.current, true, 'send should re-engage follow while the latest page loads');
 });
 
-test('isAtBottom reflects real distance while auto-follow is catching up', () => {
+test('starting an inline edit clears an already-in-flight pagination loading latch', () => {
+  let olderRequests = 0;
+  tick = 1;
+  act(() => {
+    render(h(Probe, {
+      totalSize: tick,
+      busy: false,
+      hasOlder: true,
+      onLoadOlder: () => { olderRequests += 1; },
+    }), container);
+  });
+  el = container.querySelector('#scroll-host') as HTMLElement;
+  spyMetrics(el);
+
+  act(() => capture.r!.requestOlderPage());
+  assert.equal(olderRequests, 1);
+  assert.equal(capture.r!.isLoadingOlder, true);
+
+  tick += 1;
+  act(() => {
+    render(h(Probe, {
+      totalSize: tick,
+      busy: false,
+      hasOlder: true,
+      pagingSuspended: true,
+      onLoadOlder: () => { olderRequests += 1; },
+    }), container);
+  });
+
+  assert.equal(capture.r!.isLoadingOlder, false);
+
+  act(() => capture.r!.requestOlderPage());
+  act(() => { el.dispatchEvent(new Event('scroll')); });
+  assert.equal(olderRequests, 1, 'paging stays gated for the whole edit, not only at edit start');
+  assert.equal(capture.r!.isLoadingOlder, false);
+});
+
+test('isAtBottom remains true when followed content grows', () => {
   mountProbe(true);
   settle();
   assert.equal(capture.r!.isAtBottom, true, 'sanity: settled at bottom');
 
   scrollHeightValue += 400;
-  rerender(true, 1, []);
-  assert.ok(scrollTopValue < bottom() - 24, 'sanity: first ease frame is still away from bottom');
-  assert.equal(capture.r!.isAtBottom, false, 'jump control must remain visible while catching up');
-
-  act(() => flushFrames(8));
-  assert.equal(scrollTopValue, bottom(), 'follow should converge');
-  assert.equal(capture.r!.isAtBottom, true, 'bottom state should become true after convergence');
+  rerender(true, 0, []);
+  assert.equal(scrollTopValue, bottom(), 'follow should pin to growth in the same commit');
+  assert.equal(capture.r!.isAtBottom, true, 'the Bottom control must not flash while exact follow is active');
 });
 
 test('downward manual scrolling is exposed so the anchor can yield', () => {

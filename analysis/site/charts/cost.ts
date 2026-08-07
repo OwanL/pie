@@ -7,7 +7,7 @@ import {
   modelColorScale,
   modelFamilyKey,
 } from '../lib.ts';
-import type { PreparedRunRow } from '../../scripts/contracts.ts';
+import type { PreparedRunRow, PreparedTurnThroughputRow } from '../../scripts/contracts.ts';
 
 export interface CostByModelRow {
   model: string;
@@ -123,31 +123,69 @@ const COST_TREND_BY_PROVIDER_TOP_N = 8;
 
 /**
  * Daily estimated cost broken down by provider — one row per (day, provider)
- * with priced, non-open runs. Providers are ranked by total spend across the
- * filtered window; the long tail beyond the top {@link COST_TREND_BY_PROVIDER_TOP_N}
- * is folded into an 'Other' bucket so every day's spend stays representable
- * without drowning the legend in one-off providers. Missing (day, provider)
- * combinations are imputed to `$0` so each series is a continuous line, and the
- * rendered line uses monotone interpolation to round the corners between days.
- * Mirrors {@link costTrendRows}'s open-run / unpriced-run exclusion.
+ * with priced, non-open runs. When run-level provider identity is unavailable,
+ * per-turn provider telemetry is used to allocate the complete run cost by token
+ * share. Providers are ranked by total spend across the filtered window; the
+ * long tail beyond the top {@link COST_TREND_BY_PROVIDER_TOP_N} is folded into
+ * an 'Other' bucket so every day's spend stays representable without drowning
+ * the legend in one-off providers. Missing (day, provider) combinations are
+ * imputed to `$0` so each series is a continuous line, and the rendered line
+ * uses monotone interpolation to round the corners between days. Mirrors
+ * {@link costTrendRows}'s open-run / unpriced-run exclusion.
  */
-export function costTrendByProviderRows(runs: PreparedRunRow[]): CostTrendByProviderRow[] {
+export function costTrendByProviderRows(
+  runs: PreparedRunRow[],
+  turnThroughputRows: PreparedTurnThroughputRow[] = [],
+): CostTrendByProviderRow[] {
   const totalsByProvider = new Map<string, number>();
   const byDayProvider = new Map<string, Map<string, { total: number; count: number }>>();
+  const turnsByRunId = new Map<string, PreparedTurnThroughputRow[]>();
+  for (const row of turnThroughputRows) {
+    const rows = turnsByRunId.get(row.runId) ?? [];
+    rows.push(row);
+    turnsByRunId.set(row.runId, rows);
+  }
 
   for (const run of runs) {
     const cost = estimatedRunCostUsd(run);
     if (run.status === 'open' || cost === null) {
       continue;
     }
-    const provider = run.provider?.trim() || '(unknown)';
-    totalsByProvider.set(provider, (totalsByProvider.get(provider) ?? 0) + cost);
+
+    // Older run snapshots did not persist the selected provider at the run
+    // level, even though their per-turn telemetry often has it. For those
+    // legacy rows only, use token volume to split the complete run cost across
+    // observed providers instead of putting the entire (and often dominant)
+    // amount in '(unknown)'. A known run-level provider remains authoritative
+    // because per-turn rows can include nested or mid-run provider changes.
+    // `runCount` is consequently a weighted attributed share for split legacy
+    // runs, while remaining 1 for the usual single-provider case.
+    const providerWeights = new Map<string, number>();
+    const runProvider = run.provider?.trim();
+    if (runProvider) {
+      providerWeights.set(runProvider, 1);
+    } else {
+      for (const turn of turnsByRunId.get(run.runId) ?? []) {
+        const provider = turn.provider?.trim() || '(unknown)';
+        const tokenVolume = turn.inputTokens + turn.outputTokens + turn.cacheReadTokens + turn.cacheWriteTokens;
+        const weight = tokenVolume > 0 ? tokenVolume : 1;
+        providerWeights.set(provider, (providerWeights.get(provider) ?? 0) + weight);
+      }
+      if (providerWeights.size === 0) {
+        providerWeights.set('(unknown)', 1);
+      }
+    }
+    const totalWeight = [...providerWeights.values()].reduce((sum, weight) => sum + weight, 0);
 
     const dayMap = byDayProvider.get(run.startedDay) ?? new Map<string, { total: number; count: number }>();
-    const entry = dayMap.get(provider) ?? { total: 0, count: 0 };
-    entry.total += cost;
-    entry.count += 1;
-    dayMap.set(provider, entry);
+    for (const [provider, weight] of providerWeights) {
+      const share = weight / totalWeight;
+      totalsByProvider.set(provider, (totalsByProvider.get(provider) ?? 0) + cost * share);
+      const entry = dayMap.get(provider) ?? { total: 0, count: 0 };
+      entry.total += cost * share;
+      entry.count += share;
+      dayMap.set(provider, entry);
+    }
     byDayProvider.set(run.startedDay, dayMap);
   }
 
@@ -307,11 +345,11 @@ export const costCharts: ChartEntry[] = [
   {
     id: 'chart-cost-trend-by-provider',
     render: async (ctx: ChartContext) => {
-      const rows = costTrendByProviderRows(ctx.runs);
+      const rows = costTrendByProviderRows(ctx.runs, ctx.turnThroughputRows);
       const providerCount = new Set(rows.map((r) => r.provider)).size;
       ctx.setNote(
         'cost-trend-by-provider-note',
-        `Daily estimated spend split by provider; ${providerCount} provider${providerCount === 1 ? '' : 's'} shown (top ${COST_TREND_BY_PROVIDER_TOP_N} by spend, remainder folded into 'Other'). The line breaks into a gap on days a provider had no runs instead of plotting a fake $0. Estimated via token usage × model pricing.`,
+        `Daily estimated spend split by provider; ${providerCount} provider${providerCount === 1 ? '' : 's'} shown (top ${COST_TREND_BY_PROVIDER_TOP_N} by spend, remainder folded into 'Other'). Legacy runs use per-turn provider telemetry when available; the line breaks into a gap on days a provider had no runs instead of plotting a fake $0. Estimated via token usage × model pricing.`,
         ctx.renderToken,
       );
       const providers = [...new Set(rows.map((r) => r.provider))];
@@ -340,7 +378,7 @@ export const costCharts: ChartEntry[] = [
                 { field: 'provider', type: 'nominal' as const, title: 'Provider' },
                 { field: 'day', type: 'temporal' as const, title: 'Day', timeUnit: 'yearmonthdate' },
                 { field: 'totalCostUsd', type: 'quantitative' as const, title: 'Cost', format: '$.2f' },
-                { field: 'runCount', type: 'quantitative' as const, title: 'Runs' },
+                { field: 'runCount', type: 'quantitative' as const, title: 'Attributed run share' },
               ],
             },
           },

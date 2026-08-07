@@ -356,6 +356,24 @@ test("applyToolSelection: dependency of a kept tool is protected from pruning", 
 	assert.deepEqual(r.excludedToolNames, []);
 });
 
+test("applyToolSelection: kept session_review protects its workflow tools", () => {
+	const reviewTools = [
+		...allTools,
+		{ name: "session_review", description: "Review selected sessions" },
+		{ name: "ask_user", description: "Ask a human verification question" },
+	] as unknown as ToolInfo[];
+	const cfg = config({
+		tools: toolsConfig({ dependencies: {
+			edit: ["read"], subagent: ["bash"], session_review: ["subagent", "ask_user"],
+		} }),
+	});
+	const r = applyToolSelection(reviewTools, ["subagent", "ask_user", "bash"], cfg);
+	assert.ok(r.includedToolNames.includes("session_review"));
+	assert.ok(r.includedToolNames.includes("subagent"));
+	assert.ok(r.includedToolNames.includes("ask_user"));
+	assert.ok(r.includedToolNames.includes("bash"), "transitive subagent dependency survives");
+});
+
 test("applyToolSelection: pruning a tool does not drag out its own dependencies", () => {
 	// Pruning edit must not also remove read (read is kept independently).
 	const cfg = config({ tools: toolsConfig({ dependencies: { edit: ["read"] } }) });

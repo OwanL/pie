@@ -122,6 +122,28 @@ test('loadSourceAnalytics aggregates every run store under an outcomes root', as
   });
 });
 
+test('loadSourceAnalytics derives reviews from the selected outcomes root', async () => {
+  await withTempDir(async (outcomesRoot) => {
+    const fixture = await loadFixture();
+    const store = path.join(outcomesRoot, 'aaaaaaaaaaaaaaaa');
+    await fs.mkdir(store, { recursive: true });
+    await writeRunSnapshotsJsonl(store, [fixture.completedRuns[0]!]);
+
+    const reviewsDir = path.join(outcomesRoot, 'session-reviews');
+    await fs.mkdir(reviewsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(reviewsDir, 'reviews.jsonl'),
+      `${JSON.stringify({ schemaVersion: 2, kind: 'production' })}\n`,
+      'utf8',
+    );
+
+    const loaded = await loadSourceAnalytics({ outcomesRoot });
+    assert.equal(loaded.source.sessionReviewV2Diagnostics.rawProductionCount, 1);
+    assert.equal(loaded.source.sessionReviewV2Diagnostics.acceptedCount, 0);
+    assert.equal(loaded.source.sessionReviewV2Diagnostics.rejectedCount, 1);
+  });
+});
+
 test('loadSourceAnalytics dedupes the same runId across stores via prepare', async () => {
   await withTempDir(async (outcomesRoot) => {
     const fixture = await loadFixture();

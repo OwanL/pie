@@ -12,7 +12,13 @@ import {
   setSubagentProviderDefaultEnabled,
   toggleChatPref,
 } from '../chat-prefs';
-import { formatModelSpec, orderModelsForPicker, parseModelSpec } from './model-list';
+import {
+  addProviderQualifiedModelSpec,
+  filterEnabledProviders,
+  isModelSelectedBySpec,
+  orderModelsForPicker,
+  parseModelSpec,
+} from './model-list';
 import { PickerTag } from '../components/PickerTag';
 import { ModelPicker } from '../components/model-picker';
 import { UiGroupLabel } from './ui-appearance-settings';
@@ -67,16 +73,18 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
     const parsed = parseModelSpec(spec);
     const matches = availableModels.filter((model) =>
       model.id === parsed.id && (!parsed.provider || model.provider === parsed.provider));
-    const model = matches[0];
-    if (!model) return spec;
-    return `${model.provider} · ${model.name}`;
+    if (matches.length === 0) return spec;
+    if (!parsed.provider && matches.length > 1) {
+      return `Any enabled provider · ${parsed.id} (legacy)`;
+    }
+    return `${matches[0].provider} · ${matches[0].name}`;
   };
   const isSelected = (model: ModelInfo): boolean =>
-    selected.includes(formatModelSpec(model)) || selected.includes(model.id);
+    isModelSelectedBySpec(model, selected, availableModels);
 
   const availableOptions = useMemo(
     () => modelEntries.filter((entry) => !isSelected(entry.model)),
-    [modelEntries, selected],
+    [availableModels, modelEntries, selected],
   );
 
   // Optimistic specs just added but not yet reflected in the host-persisted
@@ -91,7 +99,7 @@ function BucketModelsEditor({ label, hint, selected, availableModels, modelEntri
   const addModel = (spec: string) => {
     if (!spec || selected.includes(spec) || pending.includes(spec)) return;
     setPending((cur) => [...cur, spec]);
-    onChange([...selected, spec]);
+    onChange(addProviderQualifiedModelSpec(selected, spec));
     window.setTimeout(() => setPending((cur) => cur.filter((x) => x !== spec)), 2000);
   };
   const removeModel = (spec: string) => onChange(selected.filter((x) => x !== spec));
@@ -201,7 +209,9 @@ interface SubagentSettingsProps {
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
   availableModels: ModelInfo[];
-  modelEntries: ReturnType<typeof orderModelsForPicker>;
+  /** Optional test/integration override. Production derives purpose-specific
+   * subagent entries rather than reusing generic settings-picker rows. */
+  modelEntries?: ReturnType<typeof orderModelsForPicker>;
 }
 
 /**
@@ -212,6 +222,12 @@ interface SubagentSettingsProps {
  * as the skill-pruner expansion.
  */
 export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntries }: SubagentSettingsProps) {
+  const bucketModelEntries = useMemo(
+    () => modelEntries ?? orderModelsForPicker(
+      filterEnabledProviders(availableModels, prefs.providerToggles),
+    ),
+    [availableModels, modelEntries, prefs.providerToggles],
+  );
   const subagentProviders = useMemo(
     () => getSubagentBucketProviders(prefs, availableModels),
     [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults],
@@ -321,7 +337,7 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels, modelEntri
           hint={def.hint}
           selected={prefs.subagentBuckets[def.key] ?? []}
           availableModels={availableModels}
-          modelEntries={modelEntries}
+          modelEntries={bucketModelEntries}
           onChange={(models) => onSetPrefs(setBucketModels(prefs, def.key, models))}
         />
       ))}

@@ -5,6 +5,7 @@ export interface PublishBackendReadyOptions {
   scheduleRender: () => void;
   openSession: (sessionPath: string) => void;
   preloadSessions: (sessionPaths: readonly string[]) => void;
+  isRestoredSessionOpen: (sessionPath: string) => boolean;
   restoredStartupPath: string | null;
   preloadPaths: readonly string[];
 }
@@ -18,8 +19,15 @@ export function publishBackendReady(options: PublishBackendReadyOptions): Error 
   }
 
   try {
-    options.openSession(options.restoredStartupPath);
-    options.preloadSessions(options.preloadPaths);
+    // Initial backend reconciliation can synchronously close an explicitly
+    // targeted restored tab before startup reaches this point. Re-check the
+    // authoritative host tabs so readiness cannot revive that target; apply
+    // the same guard to background restores.
+    if (options.isRestoredSessionOpen(options.restoredStartupPath)) {
+      options.openSession(options.restoredStartupPath);
+    }
+    const preloadPaths = options.preloadPaths.filter(options.isRestoredSessionOpen);
+    if (preloadPaths.length > 0) options.preloadSessions(preloadPaths);
     return null;
   } catch (error) {
     const failure = error instanceof Error ? error : new Error(String(error));

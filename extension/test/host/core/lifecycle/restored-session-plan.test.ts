@@ -36,6 +36,8 @@ test('filterRestorableStoredTabs drops missing restored tabs before startup plan
       { path: '/workspace/a.jsonl', name: 'Keep A' },
       { path: '/workspace/missing.jsonl', name: 'Missing' },
       '__pending__:1',
+      'C:\\workspace\\__pending__:2',
+      '/workspace/__pending__:3',
       '/workspace/b.jsonl',
       '/workspace/b.jsonl',
     ],

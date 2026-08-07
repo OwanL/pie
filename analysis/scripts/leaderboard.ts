@@ -134,6 +134,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
   const completed = prepared.runs.filter((run) => run.status !== 'open');
   const stable = completed.filter((run) => !run.mixedModelConfig && !run.mixedTreatmentConfig);
   const canonicalRepresentatives = latestByTaskAndFamily(stable);
+  const canonicalRepresentativeRunIds = new Set(canonicalRepresentatives.map((run) => run.runId));
 
   const preTasks: PreTaskComplexityTask[] = selectPreTaskComplexityRepresentativeRuns(stable).map((run) => ({
     taskId: `canonical:${taskOf(run)}`,
@@ -181,11 +182,19 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
   ]));
   for (const review of prepared.sessionReviewsV2) {
     const quality = review.attainment.qualityIndexV1;
-    if (quality === null || review.identityFallback || !review.blindingApplied) continue;
-    const matchedRuns = stableRunsBySessionId.get(review.sessionId) ?? [];
-    let attributions = historicalAttributionBySessionId.get(review.sessionId) ?? [];
+    if (quality === null || review.identityFallback || !review.blindingApplied || review.joinKey !== 'session_id') continue;
+    // Ranking evidence must attach to a stable canonical representative. This
+    // excludes unmatched reviews even when a historical transcript can name a
+    // model, and prevents reviews of superseded retries from double-counting a
+    // task that latestByTaskAndFamily already collapsed.
+    const matchedRuns = (stableRunsBySessionId.get(review.sessionId) ?? [])
+      .filter((run) => canonicalRepresentativeRunIds.has(run.runId));
+    if (!matchedRuns.length) continue;
+    const matchedFamilies = new Set(matchedRuns.map(familyOf).filter((family) => family !== '(unknown)'));
+    let attributions = (historicalAttributionBySessionId.get(review.sessionId) ?? [])
+      .filter((attribution) => matchedFamilies.has(attribution.family));
     if (!attributions.length) {
-      const families = [...new Set(matchedRuns.map(familyOf).filter((family) => family !== '(unknown)'))];
+      const families = [...matchedFamilies];
       attributions = families.map((family) => ({ family, share: 1 / families.length }));
     }
     const total = attributions.reduce((sum, attribution) => sum + attribution.share, 0);
@@ -312,7 +321,11 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
 
   const workload = computeWorkloadIntensityScores(completed);
   const eligibleReviewedSessionIds = new Set(prepared.sessionReviewsV2
-    .filter((review) => review.attainment.qualityIndexV1 !== null && !review.identityFallback && review.blindingApplied)
+    .filter((review) => review.attainment.qualityIndexV1 !== null
+      && !review.identityFallback
+      && review.blindingApplied
+      && review.joinKey === 'session_id'
+      && (stableRunsBySessionId.get(review.sessionId) ?? []).some((run) => canonicalRepresentativeRunIds.has(run.runId)))
     .map((review) => review.sessionId));
   const latentByFamily = new Map<string, number>();
   const rows: ModelLeaderboardRow[] = [];
@@ -432,7 +445,7 @@ function buildLeaderboard(prepared: Pick<PreparedAnalyticsData, 'runs' | 'sessio
     notes: [
       'Rows are canonical model families across all thinking levels. Only families with attributable canonical V2 review mass are ranked; other observed families remain visible as diagnostics.',
       'The model/harness rank is review-only: it uses only deterministically derived V2 qualityIndexV1 criterion attainment. Runtime process, coverage, confidence, blockers, cost, and latency have zero ranking weight.',
-      'V2 reviews join by stable sessionId; identityFallback or unblinded reviews are excluded from ranking. Mixed-model sessions use successful transcript token share when available and otherwise equal fractional family attribution; attribution shares sum to one review. Canonical retries collapse deterministically to the latest stable run per task and family.',
+      'V2 reviews join by stable sessionId; unmatched, path-fallback, identityFallback, or unblinded reviews are excluded from ranking. Mixed-model sessions use successful transcript token share when available and otherwise equal fractional family attribution; attribution shares sum to one review. Canonical retries collapse deterministically to the latest stable run per task and family.',
       'Accepted mixed-bucket and small-only V2 reviewer profiles participate under the same qualityIndexV1 rules.',
       'Ex-ante complexity bands remain diagnostic only. The V2 rank is not case-mix adjusted, so runtime population composition cannot change V2 quality strength.',
       'The 80% interval is an approximation: beta-style posterior variance for the V2 review channel is propagated through its standardized logit, then through the logistic transform with z=1.282. Rank ranges come from interval overlap.',

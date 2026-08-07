@@ -25,7 +25,7 @@ function appendRuntimeCalls(file: string, review: SessionReviewV2): void {
 }
 
 test('tool exposes only the V2 action surface', () => {
-  assert.deepEqual(sessionReviewSchema.properties.action.enum, ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'closeReviewed', 'closeSelf']);
+  assert.deepEqual(sessionReviewSchema.properties.action.enum, ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf']);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('setReview' as never), false);
   assert.equal(sessionReviewSchema.properties.action.enum.includes('getTranscript' as never), false);
 });
@@ -160,7 +160,7 @@ test('recordReview accepts JSON strings/files and derives key-order-independent 
     delete (review.provenance.pipeline as unknown as Record<string, unknown>).frozenLedgerSha256;
     const recorded = await tool.execute('3', { action: 'recordReview', review: JSON.stringify(review) }, undefined, undefined, ctx);
     assert.equal(recorded.isError, false, recorded.content[0].text);
-    assert.match(recorded.content[0].text, /Recorded production V2 review string-review/);
+    assert.match(recorded.content[0].text, /Recorded production review string-review/);
     const persisted = fs.readFileSync(path.join(dir, 'reviews.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
     const expectedHash = hashCanonicalJson(review.frozenLedger);
     assert.equal(persisted.frozenLedgerSha256, expectedHash);
@@ -179,7 +179,7 @@ test('recordReview accepts JSON strings/files and derives key-order-independent 
     fs.writeFileSync(reviewPath, JSON.stringify(fileReview));
     const fromFile = await tool.execute('4', { action: 'recordReview', reviewPath }, undefined, undefined, ctx);
     assert.equal(fromFile.isError, false, fromFile.content[0].text);
-    assert.match(fromFile.content[0].text, /Recorded calibration V2 review file-review/);
+    assert.match(fromFile.content[0].text, /Recorded calibration review file-review/);
 
     // Malformed JSON and ambiguous input are rejected with tool errors, not crashes.
     const bad = await tool.execute('5', { action: 'recordReview', review: '{"schemaVersion": 2' }, undefined, undefined, ctx);

@@ -33,3 +33,40 @@ test('loadModelPricing reads array models and Copilot modelOverrides', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('loadModelPricing merges retired cloud-model pricing without overriding active records', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pie-pricing-history-'));
+  try {
+    const modelsFile = path.join(dir, 'models.json');
+    const historyFile = path.join(dir, 'model-pricing-history.json');
+    writeFileSync(modelsFile, JSON.stringify({
+      providers: {
+        ollama: {
+          models: [
+            { id: 'still-active:cloud', cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 } },
+          ],
+        },
+      },
+    }));
+    writeFileSync(historyFile, JSON.stringify({
+      models: [
+        { provider: 'ollama', id: 'retired:cloud', cost: { input: 3, output: 4, cacheRead: 0.3, cacheWrite: 0 } },
+        { provider: 'ollama', id: 'still-active:cloud', cost: { input: 99, output: 99, cacheRead: 99, cacheWrite: 99 } },
+      ],
+    }));
+
+    const pricing = loadModelPricing(modelsFile, historyFile);
+
+    assert.deepEqual(pricing.get('retired:cloud'), [{
+      id: 'retired:cloud',
+      provider: 'ollama',
+      pricing: { input: 3, output: 4, cacheRead: 0.3, cacheWrite: 0 },
+    }]);
+    assert.deepEqual(pricing.get('still-active:cloud')?.[0]?.pricing, {
+      input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0,
+    });
+    assert.equal(pricing.get('still-active:cloud')?.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

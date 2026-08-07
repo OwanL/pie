@@ -227,6 +227,27 @@ test('SubagentSection keeps same-id models from different providers as distinct 
   assert.match(html, /Remove openai-codex · GPT-5\.6 SOL from Medium/);
 });
 
+test('SubagentSection labels ambiguous legacy ids without pretending they belong to one provider', () => {
+  const duplicateModels: ModelInfo[] = [
+    { id: 'shared', name: 'Copilot Shared', provider: 'github-copilot', reasoning: true, inputKinds: ['text'] },
+    { id: 'shared', name: 'Codex Shared', provider: 'openai-codex', reasoning: true, inputKinds: ['text'] },
+  ];
+  const html = renderToString(
+    h(SubagentSection, {
+      prefs: prefsWith({
+        subagentBuckets: { small: [], medium: [], frontier: ['shared'] },
+      }),
+      onSetPrefs: () => undefined,
+      availableModels: duplicateModels,
+      modelEntries: orderModelsForPicker(duplicateModels),
+    }),
+  );
+
+  assert.match(html, /Any enabled provider · shared \(legacy\)/);
+  assert.doesNotMatch(html, /github-copilot · Copilot Shared/);
+  assert.doesNotMatch(html, /openai-codex · Codex Shared/);
+});
+
 test('SubagentSection still labels a selected bucket chip whose provider is disabled (via full availableModels)', () => {
   // haiku's provider (anthropic) is disabled, but it's already in the bucket.
   // The chip should still render its display name (resolved from the full

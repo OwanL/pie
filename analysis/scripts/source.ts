@@ -1462,29 +1462,23 @@ async function queryAllRunAnalyticsStores(
   return { source, storeCount: candidates.length };
 }
 
-async function configuredSessionsDir(selection: SourceSelection): Promise<string | undefined> {
-  if (selection.configuredSessionsDir) return selection.configuredSessionsDir;
-  try {
-    const settings = parseJsonOrThrow<unknown>(await fs.readFile(path.join(CONFIG_ROOT, 'settings.json'), 'utf8'), 'settings.json');
-    if (isRecord(settings) && typeof settings.sessionDir === 'string' && settings.sessionDir.trim()) {
-      if (path.isAbsolute(settings.sessionDir)) return settings.sessionDir;
-      // The runtime resolves sessionDir from the repo/workspace root (CONFIG_ROOT),
-      // not from analysis/, so a relative `data/outcomes/sessions` resolves to the
-      // canonical <repoRoot>/data/outcomes/sessions store the backend uses.
-      return path.resolve(CONFIG_ROOT, settings.sessionDir);
-    }
-  } catch {
-    // Missing/invalid settings simply means no configured transcript root.
-  }
-  return undefined;
+function localOutcomesRoot(selection: SourceSelection): string {
+  if (selection.outcomesRoot) return path.resolve(selection.outcomesRoot);
+  if (selection.storageDir) return path.dirname(path.resolve(selection.storageDir));
+  return DEFAULT_OUTCOMES_ROOT;
 }
 
 async function attachLocalHistoricalSessions(source: SourceAnalyticsPayload, selection: SourceSelection): Promise<void> {
+  // Sessions, reviews, and workspace-sharded run stores are one machine-local
+  // outcomes authority. Derive every sidecar from the selected root so changing
+  // cwd/workspace cannot silently splice canonical runs with another store's
+  // reviews.
+  const outcomesRoot = localOutcomesRoot(selection);
+  const configuredSessionsDir = selection.configuredSessionsDir
+    ?? path.join(outcomesRoot, 'sessions');
   const reviewSidecarPath = selection.reviewSidecarPath
-    ?? path.join(CONFIG_ROOT, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl');
-  source.historicalSessions = await discoverHistoricalSessions({
-    configuredSessionsDir: await configuredSessionsDir(selection),
-  });
+    ?? path.join(outcomesRoot, 'session-reviews', 'reviews.jsonl');
+  source.historicalSessions = await discoverHistoricalSessions({ configuredSessionsDir });
   const sidecar = await readSessionReviewsV2(reviewSidecarPath);
   source.sessionReviewsV2 = sidecar.reviews;
   source.sessionReviewV2Diagnostics = sidecar.diagnostics;

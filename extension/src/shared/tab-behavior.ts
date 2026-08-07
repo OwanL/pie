@@ -8,7 +8,12 @@ export type HorizontalDropRect = {
 };
 
 export function isPendingTabPath(sessionPath: string): boolean {
-  return sessionPath.startsWith(PENDING_SESSION_PREFIX);
+  // A pending tab is a host sentinel, never a durable session file. The SDK
+  // normalizes a mistakenly-opened raw sentinel against the workspace cwd
+  // (for example `__pending__:1` -> `C:\\repo\\__pending__:1`), so checking
+  // only the start of the string lets that pseudo-path escape every guard and
+  // become persisted. Recognize the reserved sentinel at any path boundary.
+  return /(?:^|[\\/])__pending__:/.test(sessionPath);
 }
 
 export function readStoredOpenTabPath(value: unknown): string | null {

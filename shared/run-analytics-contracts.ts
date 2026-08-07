@@ -446,6 +446,8 @@ export interface FunctionalSettingsSnapshot {
 
 export interface RunSnapshot {
   sessionPath: string;
+  /** Stable ID from the session JSONL header. Optional for historical runs. */
+  sessionId?: string;
   runId: string;
   taskGroupId: string;
   status: ActiveRunStatus;

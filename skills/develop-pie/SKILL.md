@@ -1,6 +1,6 @@
 ---
 name: develop-pie
-description: Work effectively in the pie repository: its VS Code extension, custom Pi extensions, agents, skills, model catalog, settings, analytics, architecture, build commands, tests, and documentation. Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness.
+description: "Work effectively in the pie repository: its VS Code extension, custom Pi extensions, agents, skills, model catalog, settings, analytics, architecture, build commands, tests, and documentation. Use when implementing, debugging, reviewing, or documenting pie itself or its Pi-based configuration; do not load for unrelated repositories merely because pie is the active agent harness."
 ---
 
 # Develop pie

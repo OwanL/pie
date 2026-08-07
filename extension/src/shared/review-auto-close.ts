@@ -55,6 +55,17 @@ export const INITIAL_REVIEW_AUTO_CLOSE_STATE: ReviewAutoCloseState = {
   claimedActionIds: new Set(),
 };
 
+/** Choose a fresh-start default without racing an explicit active closure.
+ * Catalog-absent closure targets can be synthetic summaries, and opening one
+ * before the list event drains it would revive a path already being closed. */
+export function findStartupSessionToOpen(
+  sessions: ReadonlyArray<{ path: string; closureActions?: readonly ClosureAction[] }>,
+): string | undefined {
+  return sessions.find((session) => !session.closureActions?.some(
+    (action) => action.status === 'pending' || action.status === 'retrying',
+  ))?.path;
+}
+
 export function computeReviewAutoCloseClosures(
   prev: ReviewAutoCloseState,
   input: ReviewAutoCloseInput,

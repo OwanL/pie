@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import type { ChatMessage, TranscriptWindow } from '../../../shared/protocol';
 import { useJumpToLatest } from './use-transcript-scroll-jump';
@@ -10,8 +10,8 @@ import {
   useScrollState,
 } from './use-transcript-scroll-state';
 import {
+  useAutoFollow,
   useRefreshFollowTarget,
-  useSmoothAutoFollow,
 } from './use-transcript-smooth-follow';
 
 interface UseTranscriptScrollOptions {
@@ -26,6 +26,9 @@ interface UseTranscriptScrollOptions {
   onLoadOlder: () => void;
   onLoadNewer: () => void;
   onJumpToLatest: () => void;
+  /** True while an inline editor owns a row-local draft. Paging responses may
+   * be deferred by the host, so clear any webview-local loading latch. */
+  pagingSuspended?: boolean;
   /**
    * The live transcript array (reference identity matters, not contents).
    * The host posts a fresh JSON-deserialized array on every streaming snapshot
@@ -33,8 +36,8 @@ interface UseTranscriptScrollOptions {
    * timely, non-per-frame signal for {@link useRefreshFollowTarget} to re-read
    * the true bottom the moment content grows, instead of waiting up to a frame
    * for the virtualizer's deferred re-measurement (`totalSize`) to catch up.
-   * During the auto-follow rAF loop's own programmatic scrolls the transcript
-   * identity is stable, so this never adds a per-frame forced reflow.
+   * During auto-follow's own `scrollTop` write the transcript identity is
+   * stable, so this never adds repeated forced reflows.
    */
   transcript: readonly ChatMessage[];
   /**
@@ -90,8 +93,8 @@ interface UseTranscriptScrollResult {
   /** Recent downward manual-scroll signal used by the scrolled-up anchor. */
   isScrollingTowardBottomRef: { current: boolean };
   /** Reactive setter for auto-follow. Used by the user-message rail to
-   *  disengage stick-to-bottom before jumping to a prompt so the smooth-follow
-   *  rAF loop doesn't immediately re-pin to the bottom. */
+   *  disengage stick-to-bottom before jumping to a prompt so exact follow does
+   *  not immediately re-pin to the bottom. */
   setAutoFollow: (v: boolean) => void;
   isAtBottom: boolean;
   isInitialPositioning: boolean;
@@ -108,29 +111,24 @@ export function useTranscriptScroll({
   transcriptWindow,
   transcript,
   transcriptLength,
-  busy,
   onLoadOlder,
   onLoadNewer,
   onJumpToLatest,
+  pagingSuspended = false,
   totalSize,
 }: UseTranscriptScrollOptions): UseTranscriptScrollResult {
   const [isInitialPositioning, setIsInitialPositioning] = useState(true);
-  // Live mirror of `isInitialPositioning` readable inside the useSmoothAutoFollow
-  // rAF loop's tick (the positioning snap branch). `isInitialPositioning` (the
-  // state) is now also a dep of that effect so the loop restarts when the
-  // positioning window opens/closes; the ref still lets tick see the current
-  // value synchronously, within the same frame, before the effect re-runs.
+  // Live mirror used by the bounded post-session-switch positioning loop.
+  // Scroll events can synchronously cancel that loop when the user takes
+  // control before the virtualizer finishes measuring.
   const isInitialPositioningRef = useRef(true);
   const previousLoadedStartRef = useRef(transcriptWindow.loadedStart);
   const previousLoadedEndRef = useRef(transcriptWindow.loadedEnd);
   const pendingJumpToLatestSnapRef = useRef(false);
 
-  // The true bottom (scrollHeight - clientHeight) the auto-follow rAF loop
-  // eases toward. Refreshed by useRefreshFollowTarget on every content/viewport
-  // height change (keyed on totalSize + a container ResizeObserver), so the
-  // loop never reads scrollHeight/clientHeight itself — no per-frame forced
-  // reflow, and no stale target drifting a quarter-second behind tool/reasoning/
-  // preview growth.
+  // The true bottom (scrollHeight - clientHeight) used by exact auto-follow.
+  // Refreshed on every content/viewport height change (keyed on totalSize + a
+  // container ResizeObserver), then applied in the same layout commit.
   const cachedTargetRef = useRef(0);
 
   const {
@@ -151,11 +149,36 @@ export function useTranscriptScroll({
     loadingOlderRef,
     loadingNewerRef,
     pendingOlderAnchorRef,
-    requestOlderPage,
-    requestNewerPage,
+    requestOlderPage: requestOlderPageRaw,
+    requestNewerPage: requestNewerPageRaw,
   } = usePaginationState(scrollRef, onLoadOlder, onLoadNewer);
 
-  const jumpToLatest = useJumpToLatest(
+  const requestOlderPage = useCallback(() => {
+    if (!pagingSuspended) requestOlderPageRaw();
+  }, [pagingSuspended, requestOlderPageRaw]);
+  const requestNewerPage = useCallback(() => {
+    if (!pagingSuspended) requestNewerPageRaw();
+  }, [pagingSuspended, requestNewerPageRaw]);
+
+  useEffect(() => {
+    if (!pagingSuspended) return;
+    loadingOlderRef.current = false;
+    loadingNewerRef.current = false;
+    pendingOlderAnchorRef.current = null;
+    pendingJumpToLatestSnapRef.current = false;
+    setIsLoadingOlder(false);
+    setIsLoadingNewer(false);
+  }, [
+    loadingNewerRef,
+    loadingOlderRef,
+    pagingSuspended,
+    pendingJumpToLatestSnapRef,
+    pendingOlderAnchorRef,
+    setIsLoadingNewer,
+    setIsLoadingOlder,
+  ]);
+
+  const jumpToLatestRaw = useJumpToLatest(
     scrollRef,
     setAutoFollow,
     transcriptWindow.hasNewer,
@@ -163,6 +186,9 @@ export function useTranscriptScroll({
     scrollToBottom,
     pendingJumpToLatestSnapRef,
   );
+  const jumpToLatest = useCallback(() => {
+    if (!pagingSuspended) jumpToLatestRaw();
+  }, [jumpToLatestRaw, pagingSuspended]);
 
   useSessionResetEffect(
     sessionKey,
@@ -220,16 +246,13 @@ export function useTranscriptScroll({
 
   const followTargetRevision = useRefreshFollowTarget(scrollRef, totalSize, transcript, sessionKey, cachedTargetRef);
 
-  useSmoothAutoFollow(
+  useAutoFollow(
     scrollRef,
     autoFollowRef,
     autoFollow,
     lastScrollTopRef,
     setIsAtBottom,
     transcriptWindow.hasNewer,
-    isInitialPositioningRef,
-    isInitialPositioning,
-    busy,
     cachedTargetRef,
     followTargetRevision,
     totalSize,

@@ -5,10 +5,11 @@ import { isDeepStrictEqual } from 'node:util';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { buildBlindedEvidence, readSessionIdentity } from './src/evidence.js';
+import { compileReviewDraft, isSessionReviewDraft } from './src/draft.js';
 import { hashCanonicalJson } from './src/hash.js';
 import { validateRuntimeProvenance } from './src/runtime-provenance.js';
 import { sessionReviewSchema } from './src/types.js';
-import type { EvidenceManifest, SessionReviewParams, SessionReviewV2 } from './src/types.js';
+import type { EvidenceManifest, ReviewClosureTarget, SessionReviewDraft, SessionReviewParams, SessionReviewV2 } from './src/types.js';
 import { enqueueClosure, readOpenTabs, readReviewStore, recordReviewOnce } from './src/store.js';
 import { validateSessionReviewV2 } from './src/validation.js';
 
@@ -38,7 +39,7 @@ interface ListedSession {
   isRunning: boolean;
   isSelf: boolean;
   identityFallback: boolean;
-  reviewStatus: 'unrated' | 'reviewed-v2';
+  reviewStatus: 'unrated' | 'reviewed';
   reviewId?: string;
   reviewEligible: boolean;
   closureEligible: boolean;
@@ -80,8 +81,8 @@ function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession
     .filter((tab) => !selectedOnly || tab.pinned)
     .map((tab) => {
       const identity = readSessionIdentity(tab.path);
-      const v2 = snapshot.canonicalBySessionId.get(identity.sessionId);
-      const reviewStatus: ListedSession['reviewStatus'] = v2 ? 'reviewed-v2' : 'unrated';
+      const existingReview = snapshot.canonicalBySessionId.get(identity.sessionId);
+      const reviewStatus: ListedSession['reviewStatus'] = existingReview ? 'reviewed' : 'unrated';
       const isSelf = !!selfId && identity.sessionId === selfId;
       const alreadyRated = reviewStatus !== 'unrated';
       return {
@@ -93,19 +94,20 @@ function listSessions(ctx: ToolExecuteCtx, selectedOnly: boolean): ListedSession
         isSelf,
         identityFallback: identity.identityFallback,
         reviewStatus,
-        ...(v2 ? { reviewId: v2.reviewId } : {}),
+        ...(existingReview ? { reviewId: existingReview.reviewId } : {}),
         reviewEligible: !isSelf && !tab.isRunning && !alreadyRated,
-        closureEligible: !isSelf && !!v2,
+        closureEligible: !isSelf && !!existingReview,
       };
     });
 }
 const MAX_REVIEW_FILE_BYTES = 1024 * 1024;
+const MAX_REVIEW_BATCH_FILE_BYTES = 8 * 1024 * 1024;
 function parseReviewJson(raw: string, source: string, exposeParserMessage = true): unknown {
   try {
     return JSON.parse(raw) as unknown;
   } catch (error) {
     const detail = exposeParserMessage ? `: ${(error as Error).message}` : '.';
-    throw new Error(`${source} must contain one valid SessionReviewV2 JSON object${detail}`);
+    throw new Error(`${source} must contain valid review JSON${detail}`);
   }
 }
 function safeTemporaryReviewPath(reviewPath: string): string {
@@ -117,16 +119,23 @@ function safeTemporaryReviewPath(reviewPath: string): string {
   if (fs.lstatSync(reviewPath).isSymbolicLink()) throw new Error('reviewPath must not be a symbolic link.');
   return realReviewPath;
 }
-function reviewInput(review: SessionReviewV2 | string | undefined, reviewPath: string | undefined): unknown {
-  if (review !== undefined && reviewPath !== undefined) throw new Error('recordReview accepts either review or reviewPath, not both.');
-  if (reviewPath !== undefined) {
-    const safePath = safeTemporaryReviewPath(reviewPath);
-    if (!fs.statSync(safePath).isFile()) throw new Error('reviewPath must identify a regular file.');
-    const bytes = fs.readFileSync(safePath);
-    if (bytes.byteLength > MAX_REVIEW_FILE_BYTES) throw new Error(`reviewPath exceeds the ${MAX_REVIEW_FILE_BYTES}-byte limit.`);
-    return parseReviewJson(bytes.toString('utf8'), 'reviewPath', false);
-  }
+function readTemporaryJson(reviewPath: string, maxBytes: number, source: string): unknown {
+  const safePath = safeTemporaryReviewPath(reviewPath);
+  if (!fs.statSync(safePath).isFile()) throw new Error(`${source} must identify a regular file.`);
+  const bytes = fs.readFileSync(safePath);
+  if (bytes.byteLength > maxBytes) throw new Error(`${source} exceeds the ${maxBytes}-byte limit.`);
+  return parseReviewJson(bytes.toString('utf8'), source, false);
+}
+function reviewInput(review: unknown, reviewPath: string | undefined): unknown {
+  if (review !== undefined && reviewPath !== undefined) throw new Error('provide either review or reviewPath, not both.');
+  if (reviewPath !== undefined) return readTemporaryJson(reviewPath, MAX_REVIEW_FILE_BYTES, 'reviewPath');
   return typeof review === 'string' ? parseReviewJson(review, 'review') : review;
+}
+function reviewBatchInput(reviews: unknown, reviewsPath: string | undefined): unknown[] {
+  if (reviews !== undefined && reviewsPath !== undefined) throw new Error('provide either reviews or reviewsPath, not both.');
+  const value = reviewsPath === undefined ? reviews : readTemporaryJson(reviewsPath, MAX_REVIEW_BATCH_FILE_BYTES, 'reviewsPath');
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) throw new Error('recordReviews requires 1 to 100 reviews.');
+  return value;
 }
 function normalizeFrozenLedgerHashes(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
@@ -135,14 +144,29 @@ function normalizeFrozenLedgerHashes(value: unknown): unknown {
   const frozenLedgerSha256 = hashCanonicalJson(review.frozenLedger);
   review.frozenLedgerSha256 = frozenLedgerSha256;
   const consolidation = review.consolidation as Record<string, unknown> | undefined;
-  if (consolidation && typeof consolidation === 'object' && !Array.isArray(consolidation)) consolidation.frozenLedgerSha256 = frozenLedgerSha256;
+  if (consolidation && typeof consolidation === 'object' && !Array.isArray(consolidation) && Array.isArray(consolidation.frozenLedger)) consolidation.frozenLedgerSha256 = frozenLedgerSha256;
   const provenance = review.provenance as Record<string, unknown> | undefined;
   const pipeline = provenance?.pipeline as Record<string, unknown> | undefined;
   if (pipeline && typeof pipeline === 'object' && !Array.isArray(pipeline)) pipeline.frozenLedgerSha256 = frozenLedgerSha256;
   return review;
 }
-function parseReviewParam(review: SessionReviewV2 | string | undefined, reviewPath: string | undefined): SessionReviewV2 {
-  return normalizeFrozenLedgerHashes(reviewInput(review, reviewPath)) as SessionReviewV2;
+function parseReviewParam(review: unknown, reviewPath: string | undefined, scope: OrchestratorSnapshot): SessionReviewV2 {
+  const raw = reviewInput(review, reviewPath);
+  if (isSessionReviewDraft(raw)) {
+    const target = scope.targetsById.get(raw.sessionId);
+    const issued = scope.evidenceBySessionId.get(raw.sessionId) ?? [];
+    const evidenceManifest = raw.provenance.evidenceManifest ?? (issued.length === 1 ? issued[0] : undefined);
+    if (!evidenceManifest) throw new Error(`review draft ${raw.sessionId} must include the issued evidence manifest when multiple or no bundles exist`);
+    const draft = {
+      ...raw,
+      provenance: { ...raw.provenance, evidenceManifest },
+      sessionPathAtReview: raw.sessionPathAtReview || target?.sessionPath,
+      identityFallback: raw.identityFallback ?? target?.identityFallback,
+    } as SessionReviewDraft;
+    const orchestratorIdentity = readSessionIdentity(scope.orchestratorPath).sessionId;
+    return normalizeFrozenLedgerHashes(compileReviewDraft(draft, { orchestratorSessionId: orchestratorIdentity })) as SessionReviewV2;
+  }
+  return normalizeFrozenLedgerHashes(raw) as SessionReviewV2;
 }
 
 function renderList(items: ListedSession[], selectedOnly: boolean): string {
@@ -154,14 +178,52 @@ function renderList(items: ListedSession[], selectedOnly: boolean): string {
   return `${selectedOnly ? 'Selected' : 'Open'} sessions (${items.length}):\n${rows.join('\n')}`;
 }
 
+function validateReviewTarget(review: SessionReviewV2, scope: OrchestratorSnapshot): ListedSession {
+  const target = eligibleTarget(scope, review.sessionPathAtReview, review.sessionId);
+  if (!target || !target.reviewEligible) throw new Error('Review target is not an eligible unrated selected/open snapshot member.');
+  const identity = readSessionIdentity(review.sessionPathAtReview);
+  if (identity.sessionId !== review.sessionId || identity.identityFallback !== !!review.identityFallback) {
+    throw new Error('review session identity does not match the session JSONL header/path fallback.');
+  }
+  const snapshots = scope.evidenceBySessionId.get(review.sessionId) ?? [];
+  if (!snapshots.some((manifest) => isDeepStrictEqual(manifest, review.provenance.evidenceManifest))) {
+    throw new Error('review evidenceManifest was not issued by getEvidence in this reviewer session; fetch evidence before recording.');
+  }
+  validateRuntimeProvenance(review, scope.orchestratorPath);
+  return target;
+}
+
+function prepareReview(input: unknown, reviewPath: string | undefined, scope: OrchestratorSnapshot): SessionReviewV2 {
+  return validateSessionReviewV2(parseReviewParam(input, reviewPath, scope));
+}
+
+function compactRecordResult(review: SessionReviewV2, result: Awaited<ReturnType<typeof recordReviewOnce>>) {
+  return {
+    sessionId: review.sessionId,
+    reviewId: result.written ? review.reviewId : result.reviewId,
+    written: result.written,
+    file: result.file,
+  };
+}
+
+function batchResponse(label: string, results: Array<Record<string, unknown> & { error?: string }>) {
+  const failures = results.filter((result) => result.error);
+  const text = `${label}: ${results.length - failures.length} succeeded, ${failures.length} failed.`;
+  return {
+    content: [{ type: 'text' as const, text }],
+    details: { results },
+    isError: failures.length > 0,
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_review',
     label: 'Session review',
-    description: 'V2 session review: list open/pinned sessions, fetch blinded evidence, persist one validated canonical ledger review, and enqueue explicit closure actions.',
+    description: 'Session evaluation: list open/pinned sessions, fetch blinded evidence, compile and persist canonical reviews, and enqueue explicit closure actions.',
     promptSnippet: 'List, inspect, and review open app sessions.',
     promptGuidelines: [
-      'List before getEvidence. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. For large records, write one JSON object to a temporary file and call recordReview with reviewPath; recordReview derives frozen-ledger hashes and never closes a tab. Use closeReviewed after persistence and closeSelf as the final action.',
+      'List before getEvidence. Review only selected targets, exclude (self), and do not re-rate already-reviewed sessions. Prefer compact drafts or a temporary JSON file; use recordReviews and closeReviewedBatch for independent batches. Persistence never closes a target; use closeReviewed after recording and closeSelf as the final action.',
     ],
     parameters: sessionReviewSchema,
 
@@ -209,23 +271,32 @@ export default function (pi: ExtensionAPI) {
         const scope = snapshotFor(ctx);
         if (!scope) return err('List targets in this reviewer session before recording.');
         try {
-          const review = validateSessionReviewV2(parseReviewParam(p.review, p.reviewPath));
-          const target = eligibleTarget(scope, review.sessionPathAtReview, review.sessionId);
-          if (!target || !target.reviewEligible) return err('Review target is not an eligible unrated selected/open snapshot member.');
-          const identity = readSessionIdentity(review.sessionPathAtReview);
-          if (identity.sessionId !== review.sessionId || identity.identityFallback !== !!review.identityFallback) {
-            return err('review session identity does not match the session JSONL header/path fallback.');
-          }
-          const snapshots = scope.evidenceBySessionId.get(review.sessionId) ?? [];
-          if (!snapshots.some((manifest) => isDeepStrictEqual(manifest, review.provenance.evidenceManifest))) {
-            return err('review evidenceManifest was not issued by getEvidence in this reviewer session; fetch evidence before recording.');
-          }
-          validateRuntimeProvenance(review, scope.orchestratorPath);
+          const review = prepareReview(p.review, p.reviewPath, scope);
+          validateReviewTarget(review, scope);
           const result = await recordReviewOnce(review);
           if (!result.written) {
             return ok(`Session ${review.sessionId} already has canonical production review ${result.reviewId}; no duplicate was written.`, result);
           }
-          return ok(`Recorded ${review.kind} V2 review ${review.reviewId} for session ${review.sessionId}.\nStored in ${result.file}. No closure action was written.`, result);
+          return ok(`Recorded ${review.kind} review ${review.reviewId} for session ${review.sessionId}.\nStored in ${result.file}. No closure action was written.`, result);
+        } catch (error) { return err((error as Error).message); }
+      }
+
+      if (p.action === 'recordReviews') {
+        const scope = snapshotFor(ctx);
+        if (!scope) return err('List targets in this reviewer session before recording.');
+        try {
+          const inputs = reviewBatchInput(p.reviews, p.reviewsPath);
+          const results = await Promise.all(inputs.map(async (input, index) => {
+            try {
+              const review = prepareReview(input, undefined, scope);
+              validateReviewTarget(review, scope);
+              const result = await recordReviewOnce(review);
+              return { index, ...compactRecordResult(review, result) };
+            } catch (error) {
+              return { index, error: (error as Error).message };
+            }
+          }));
+          return batchResponse('Recorded review batch', results);
         } catch (error) { return err((error as Error).message); }
       }
 
@@ -246,6 +317,30 @@ export default function (pi: ExtensionAPI) {
           const result = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: p.sessionId, targetSessionPath: target.sessionPath, reviewId: p.reviewId });
           return ok(`${result.existing ? 'Reused' : 'Enqueued'} closeReviewed action ${result.action.actionId} (${result.action.status}).\nOutbox: ${result.file}. reviews.jsonl was not modified.`, result);
         } catch (error) { return err((error as Error).message); }
+      }
+
+      if (p.action === 'closeReviewedBatch') {
+        if (!p.closures?.length) return err('closeReviewedBatch requires at least one closure target.');
+        const scope = snapshotFor(ctx);
+        if (!scope) return err('List targets in this reviewer session before closing.');
+        const snapshot = readReviewStore();
+        const results = await Promise.all(p.closures.map(async (closure: ReviewClosureTarget, index) => {
+          try {
+            const target = closureEligibleTarget(scope, closure.sessionPath, closure.sessionId);
+            if (!target) throw new Error('Closure target is not an eligible selected/open snapshot member (self is excluded).');
+            const review = snapshot.canonicalBySessionId.get(closure.sessionId);
+            if (!review || review.reviewId !== closure.reviewId) throw new Error('closure requires a matching persisted canonical review.');
+            if (closure.sessionPath) {
+              const identity = readSessionIdentity(closure.sessionPath);
+              if (identity.sessionId !== closure.sessionId) throw new Error('closure sessionPath does not match sessionId.');
+            }
+            const result = await enqueueClosure({ kind: 'closeReviewed', targetSessionId: closure.sessionId, targetSessionPath: target.sessionPath, reviewId: closure.reviewId });
+            return { index, sessionId: closure.sessionId, reviewId: closure.reviewId, actionId: result.action.actionId, status: result.action.status, existing: result.existing };
+          } catch (error) {
+            return { index, sessionId: closure.sessionId, reviewId: closure.reviewId, error: (error as Error).message };
+          }
+        }));
+        return batchResponse('Requested closure batch', results);
       }
 
       if (p.action === 'closeSelf') {

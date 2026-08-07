@@ -24,15 +24,21 @@ export { parseModelPricing } from '../../../shared/pricing-core.js';
 export type { ModelPricingRecord, ModelTokenPricing } from '../../../shared/pricing-core.js';
 
 /**
- * Load pricing records from `models.json`.
+ * Load pricing records from `models.json` and, when supplied, the generated
+ * historical pricing catalog.
  *
  * Returns a Map keyed by model id, with values being arrays of
  * {@link ModelPricingRecord} (one per provider the model appears under).
- * Returns an empty Map when the file is missing or unreadable.
+ * Returns an empty Map when `models.json` is missing or unreadable. A missing
+ * or malformed history file is ignored.
  *
  * Models with missing, invalid, or negative pricing are silently skipped.
+ * Active `models.json` records win exact provider/model collisions with history.
  */
-export function loadModelPricing(modelsJsonPath: string): Map<string, ModelPricingRecord[]> {
+export function loadModelPricing(
+  modelsJsonPath: string,
+  historicalPricingPath?: string,
+): Map<string, ModelPricingRecord[]> {
   const map = new Map<string, ModelPricingRecord[]>();
 
   let raw: string;
@@ -90,6 +96,30 @@ export function loadModelPricing(modelsJsonPath: string): Map<string, ModelPrici
         addRecord(providerName, id, model as Record<string, unknown>);
       }
     }
+  }
+
+  if (!historicalPricingPath) return map;
+
+  let historical: unknown;
+  try {
+    historical = parseJsonOrThrow<unknown>(
+      require('node:fs').readFileSync(historicalPricingPath, 'utf-8'),
+      historicalPricingPath,
+    );
+  } catch {
+    return map;
+  }
+  if (!historical || typeof historical !== 'object' || Array.isArray(historical)) return map;
+  const historicalModels = (historical as Record<string, unknown>).models;
+  if (!Array.isArray(historicalModels)) return map;
+
+  for (const model of historicalModels) {
+    if (!model || typeof model !== 'object' || Array.isArray(model)) continue;
+    const record = model as Record<string, unknown>;
+    if (typeof record.provider !== 'string' || typeof record.id !== 'string') continue;
+    const activeRecords = map.get(record.id);
+    if (activeRecords?.some((entry) => entry.provider === record.provider)) continue;
+    addRecord(record.provider, record.id, record);
   }
 
   return map;

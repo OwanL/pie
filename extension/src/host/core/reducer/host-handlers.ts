@@ -150,6 +150,41 @@ export function handleTranscriptPageLoaded(
   state: ArchState,
   event: TranscriptPageLoadedEvent,
 ): ReducerResult {
+  const editingMessageId = state.transcript.editingMessageIdBySession[event.sessionPath];
+  const localTranscript = state.transcript.bySession[event.sessionPath] ?? [];
+  if (
+    editingMessageId
+    && localTranscript.some((message) => message.id === editingMessageId)
+    && !event.transcript.some((message) => message.id === editingMessageId)
+  ) {
+    // The inline editor's live keystroke buffer is intentionally webview-local.
+    // Replacing the loaded window without its row would unmount the editor and
+    // destroy that buffer. Defer the latest authoritative replacement until
+    // Cancel; Save discards it because the edit operation establishes a newer
+    // authority of its own.
+    return {
+      state: {
+        ...state,
+        transcript: {
+          ...state.transcript,
+          deferredWindowReplacementBySession: {
+            ...state.transcript.deferredWindowReplacementBySession,
+            [event.sessionPath]: {
+              transcript: event.transcript,
+              transcriptWindow: event.transcriptWindow,
+            },
+          },
+        },
+      },
+      effects: [],
+    };
+  }
+
+  const nextDeferredWindowReplacements = {
+    ...state.transcript.deferredWindowReplacementBySession,
+  };
+  delete nextDeferredWindowReplacements[event.sessionPath];
+
   return {
     state: {
       ...state,
@@ -163,6 +198,7 @@ export function handleTranscriptPageLoaded(
           ...state.transcript.windowBySession,
           [event.sessionPath]: event.transcriptWindow,
         },
+        deferredWindowReplacementBySession: nextDeferredWindowReplacements,
       },
     },
     effects: [],

@@ -214,6 +214,55 @@ test('three accepted V2 reviews are review-backed and excluded reviews cannot ra
   assert.equal(unranked.rank, null);
 });
 
+test('unmatched V2 reviews with transcript attribution do not enter ranking evidence', async () => {
+  const run = makeRun({ runId: 'joined', modelId: 'reviewed-model', sessionId: 'joined-session' });
+  const orphanRun = makeRun({ runId: 'orphan', modelId: 'reviewed-model', sessionId: 'orphan-session' });
+  const orphanReview = makeReview(orphanRun, 'orphan-review', 100, [reviewer('small-orphan', 'small')], {
+    joinKey: 'unmatched', unmatchedReason: 'no_run_for_identity', runIds: [], modelFamilies: [],
+  });
+  const prepared = await preparedForLeaderboard([run], [orphanReview]);
+  prepared.historicalSessions = [{
+    sessionId: orphanRun.sessionId,
+    sessionPathHash: 'orphan-session-path-hash',
+    startedAt: '2026-05-10T12:00:00.000Z', endedAt: '2026-05-10T12:05:00.000Z',
+    firstUserMessageChars: 100,
+    attributions: [{
+      modelId: orphanRun.modelId!, modelFamily: orphanRun.modelFamily!, thinkingLevel: 'high',
+      share: 1, successfulAssistantTurns: 1, attributedTokens: 100,
+    }],
+    successfulAssistantTurns: 1, errorAssistantTurns: 0, abortedAssistantTurns: 0,
+    inputTokens: 100, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0,
+    reportedCostUsd: null, toolCallCount: 0, toolErrorCount: 0, terminalStatus: 'success',
+    mixedModel: false, sourceProvenance: ['configured'], matchedCanonical: false, transcriptOnly: true,
+  }];
+
+  const row = createModelLeaderboard(prepared).rows.find((candidate) => candidate.modelId === 'reviewed-model')!;
+  assert.equal(row.reviewEvidenceMass, 0);
+  assert.equal(row.scoringCoverage, 0);
+  assert.equal(row.rank, null);
+});
+
+test('reviews of superseded canonical retries do not double-count one task', async () => {
+  const older = makeRun({
+    runId: 'retry-old', modelId: 'reviewed-model', sessionId: 'retry-old-session',
+    taskGroupId: 'shared-task', startedAt: '2026-05-10T12:00:00.000Z',
+  });
+  const latest = makeRun({
+    runId: 'retry-new', modelId: 'reviewed-model', sessionId: 'retry-new-session',
+    taskGroupId: 'shared-task', startedAt: '2026-05-10T12:10:00.000Z',
+  });
+  const reviews = [
+    makeReview(older, 'retry-old-review', 20, [reviewer('small-old', 'small')]),
+    makeReview(latest, 'retry-new-review', 100, [reviewer('small-new', 'small')]),
+  ];
+
+  const row = createModelLeaderboard(await preparedForLeaderboard([older, latest], reviews)).rows[0]!;
+  assert.equal(row.canonicalTaskCount, 1);
+  assert.equal(row.reviewEvidenceMass, 1);
+  assert.equal(row.scoringCoverage, 1);
+  assert.equal(row.meanQualityIndexV1, 100);
+});
+
 test('dimension native bounds: all dimension values stay within their native ranges', () => {
   const runs: PreparedRunRow[] = [];
   for (let i = 0; i < 5; i++) {

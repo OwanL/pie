@@ -98,8 +98,14 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // Keep the existing transcript + window rather than replacing with the empty
   // incoming snapshot. Metadata (session summary, busy, analytics, models,
   // contextUsage, systemPrompts) is still applied below.
-  const skipped = payload.transcriptSkipped === true
-    && state.transcript.windowBySession[sessionPath] !== undefined;
+  const existingWindow = state.transcript.windowBySession[sessionPath];
+  const skipped = payload.transcriptSkipped === true && existingWindow !== undefined;
+  const editingMessageId = state.transcript.editingMessageIdBySession[sessionPath];
+  const preserveInlineEdit = payload.transcriptSkipped !== true
+    && existingWindow !== undefined
+    && !!editingMessageId
+    && localTranscript.some((message) => message.id === editingMessageId)
+    && !payload.transcript.some((message) => message.id === editingMessageId);
   // Mirror the preserve decision made in attach.resolveAndDispatch: the
   // backend's `busy` flag is false during an EDIT's intermediate truncate
   // snapshot (emitted right after `session.truncateAfter` rewrites the file,
@@ -112,12 +118,28 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // after BusyChanged(false), so hostRunning is false there and the final
   // transcript still replaces cleanly.
   const hostRunning = state.sessions.runningSessionPaths.includes(sessionPath);
+  const deferredInlineEditResolution = preserveInlineEdit
+    ? resolveSessionOpenedTranscript({
+        busy: false,
+        incomingTranscript: payload.transcript,
+        incomingTranscriptWindow: payload.transcriptWindow,
+        localTranscript: [],
+      })
+    : null;
   const {
     transcript: resolvedTranscript,
     transcriptWindow: resolvedWindow,
     aliases: resolvedAliases,
-  } = skipped
-    ? { transcript: localTranscript, transcriptWindow: state.transcript.windowBySession[sessionPath]!, aliases: [] as Array<{ aliasId: string; canonicalId: string }> }
+  } = skipped || preserveInlineEdit
+    // An inline editor owns an uncommitted per-keystroke buffer in the
+    // webview. Keep its loaded window stable when an authoritative tail
+    // refresh omits that historical row; replacing it would unmount the
+    // editor and silently reset the user's draft.
+    ? {
+        transcript: localTranscript,
+        transcriptWindow: existingWindow!,
+        aliases: [] as Array<{ aliasId: string; canonicalId: string }>,
+      }
     : resolveSessionOpenedTranscript({
         busy: payload.busy || hostRunning,
         incomingTranscript: payload.transcript,
@@ -170,6 +192,18 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
     nextMessageIdAlias[aliasId] = { canonicalId, sessionPath };
   }
 
+  const nextDeferredWindowReplacements = {
+    ...state.transcript.deferredWindowReplacementBySession,
+  };
+  if (deferredInlineEditResolution) {
+    nextDeferredWindowReplacements[sessionPath] = {
+      transcript: deferredInlineEditResolution.transcript,
+      transcriptWindow: deferredInlineEditResolution.transcriptWindow,
+    };
+  } else if (!skipped) {
+    delete nextDeferredWindowReplacements[sessionPath];
+  }
+
   next = {
     ...next,
     sessions: {
@@ -215,6 +249,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         ...next.transcript.windowBySession,
         [sessionPath]: resolvedWindow,
       },
+      deferredWindowReplacementBySession: nextDeferredWindowReplacements,
       ...(payload.sessionUsage && {
         sessionUsageBySession: {
           ...next.transcript.sessionUsageBySession,

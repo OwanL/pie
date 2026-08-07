@@ -26,6 +26,9 @@ export interface SessionReviewSidecar {
   closureActionsBySessionId: Map<string, ClosureAction[]>;
 }
 
+let cachedReviewsFingerprint: string | undefined;
+let cachedReviews: SessionReviewSidecar | undefined;
+
 export interface SessionIdentity {
   sessionId: string;
   identityFallback: boolean;
@@ -34,6 +37,26 @@ export interface SessionIdentity {
 export function getReviewsDir(): string | undefined {
   const dir = process.env[REVIEWS_DIR_ENV]?.trim();
   return dir || undefined;
+}
+
+/** Cheap recovery fingerprint for the append-only review/closure sidecars.
+ * `fs.watch` is only a latency optimization; the backend poll compares this
+ * fingerprint so a missed/coalesced watcher event is repaired within a
+ * bounded interval. */
+export function getReviewSidecarFingerprint(): string {
+  const dir = getReviewsDir();
+  if (!dir) return 'disabled';
+
+  const files = [REVIEWS_FILE, REVIEW_CLOSURE_ACTIONS_FILE].map((fileName) => {
+    try {
+      const stat = fs.statSync(path.join(dir, fileName), { bigint: true });
+      return `${fileName}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return `${fileName}:${code === 'ENOENT' ? 'missing' : `unavailable:${code ?? 'unknown'}`}`;
+    }
+  }).join('|');
+  return `${path.resolve(dir)}|${files}`;
 }
 
 function getSidecarFilePath(fileName: string): string | undefined {
@@ -144,8 +167,14 @@ function normalizeV2Review(value: unknown): ReviewReference | undefined {
   };
 }
 
-/** Read V2 review records and the separate closure-action outbox. */
+/** Read V2 review records and the separate closure-action outbox. Parsed state
+ * is immutable-by-convention and cached against the append-only files' cheap
+ * fingerprint, so active-action retry lists do not revalidate growing review
+ * history every polling interval. */
 export function readReviews(): SessionReviewSidecar {
+  const fingerprint = getReviewSidecarFingerprint();
+  if (cachedReviews && cachedReviewsFingerprint === fingerprint) return cachedReviews;
+
   const productionBySessionId = new Map<string, ProductionReviewReference>();
   for (const value of readJsonLines(getSidecarFilePath(REVIEWS_FILE))) {
     const review = normalizeV2Review(value);
@@ -170,7 +199,19 @@ export function readReviews(): SessionReviewSidecar {
     closureActionsBySessionId.set(action.targetSessionId, actions);
   }
 
-  return { productionBySessionId, closureActionsBySessionId };
+  cachedReviewsFingerprint = fingerprint;
+  cachedReviews = { productionBySessionId, closureActionsBySessionId };
+  return cachedReviews;
+}
+
+/** True while at least one valid outbox action still needs host settlement.
+ * Polling uses this to retry reconciliation after a transient list failure,
+ * even when neither the session inventory nor sidecar fingerprint changes. */
+export function hasActiveReviewClosureActions(): boolean {
+  for (const actions of readReviews().closureActionsBySessionId.values()) {
+    if (actions.some((action) => action.status === 'pending' || action.status === 'retrying')) return true;
+  }
+  return false;
 }
 
 function normalizeClosureAction(value: unknown): ClosureAction | undefined {
@@ -215,6 +256,52 @@ export function mergeReviewIntoSummary(summary: SessionSummary, reviews: Session
     } : {}),
     ...(closureActions && closureActions.length > 0 ? { closureActions } : {}),
   };
+}
+
+/** Merge review state and expose active closure targets that are absent from
+ * the SDK catalog. Enqueued actions carry the path captured from the reviewed
+ * snapshot, so the host can run its idempotent close/persist lifecycle even if
+ * the session file disappeared before reconciliation. Terminal actions never
+ * create synthetic catalog entries. */
+export function mergeReviewsIntoSummaries(
+  summaries: readonly SessionSummary[],
+  reviews: SessionReviewSidecar,
+): SessionSummary[] {
+  const merged = summaries.map((summary) => mergeReviewIntoSummary(summary, reviews));
+  const representedSessionIds = new Set(merged.map((summary) => summary.sessionId).filter((id): id is string => !!id));
+  const representedPaths = new Set(merged.map((summary) => summary.path));
+
+  for (const [sessionId, actions] of reviews.closureActionsBySessionId) {
+    if (representedSessionIds.has(sessionId)) continue;
+    const activeActions = actions.filter((action) => action.status === 'pending' || action.status === 'retrying');
+    const targetPath = activeActions.find((action) => action.targetSessionPath?.trim())?.targetSessionPath;
+    if (!targetPath || representedPaths.has(targetPath)) continue;
+
+    const review = reviews.productionBySessionId.get(sessionId);
+    merged.push({
+      path: targetPath,
+      name: path.basename(targetPath, path.extname(targetPath)) || 'Session',
+      cwd: path.dirname(targetPath),
+      modifiedAt: activeActions.reduce(
+        (latest, action) => action.requestedAt > latest ? action.requestedAt : latest,
+        activeActions[0]?.requestedAt ?? new Date(0).toISOString(),
+      ),
+      messageCount: 0,
+      sessionId,
+      isPlaceholder: true,
+      ...(review ? {
+        reviewed: true,
+        reviewId: review.reviewId,
+        reviewedAt: review.reviewedAt,
+        ...(review.identityFallback === true ? { identityFallback: true } : {}),
+      } : {}),
+      closureActions: actions,
+    });
+    representedSessionIds.add(sessionId);
+    representedPaths.add(targetPath);
+  }
+
+  return merged;
 }
 
 export function ensureReviewsDir(): void {

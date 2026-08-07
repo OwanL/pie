@@ -12,6 +12,7 @@ import {
   validateSessionOpen,
   validateSessionPath,
   validateSettingsSet,
+  validateSystemPromptTogglesSet,
   validateTruncateAfter,
 } from '../../../src/backend/rpc';
 
@@ -21,9 +22,11 @@ test('parseArgs reads sdkPath and cwd and errors when sdkPath is missing', () =>
   assert.throws(() => parseArgs(['--cwd', '/repo']), /Missing required --sdkPath argument/);
 });
 
-test('validateSessionPath handles required path form', () => {
+test('validateSessionPath handles required path form and rejects pending pseudo-paths', () => {
   assert.deepEqual(validateSessionPath('session.open', { sessionPath: '/repo/session.jsonl' }), { sessionPath: '/repo/session.jsonl' });
   assert.throws(() => validateSessionPath('session.open', { sessionPath: '' }), /requires a string sessionPath/);
+  assert.throws(() => validateSessionPath('session.open', { sessionPath: '__pending__:1-abc' }), /resolved session/);
+  assert.throws(() => validateSessionPath('session.open', { sessionPath: 'C:\\repo\\__pending__:1-abc' }), /resolved session/);
 });
 
 test('session create/open validators reject invalid payloads and selection tokens', () => {
@@ -57,15 +60,21 @@ test('transcript page and truncation validators cover range edge cases', () => {
     () => validateLoadTranscriptPage({ sessionPath: '/repo/session.jsonl', direction: 'older', loadedStart: 5, loadedEnd: 4 }),
     /loadedStart must be less than or equal to loadedEnd/,
   );
+  assert.throws(
+    () => validateLoadTranscriptPage({ sessionPath: 'C:\\repo\\__pending__:1-abc', direction: 'latest' }),
+    /resolved session/,
+  );
   assert.deepEqual(validateTruncateAfter({ sessionPath: '/repo/session.jsonl', entryId: 'entry-1' }), {
     sessionPath: '/repo/session.jsonl',
     entryId: 'entry-1',
   });
   assert.throws(() => validateTruncateAfter({ sessionPath: '', entryId: 'entry-1' }), /requires a string sessionPath/);
+  assert.throws(() => validateTruncateAfter({ sessionPath: 'C:\\repo\\__pending__:1-abc', entryId: 'entry-1' }), /resolved session/);
   assert.throws(() => validateTruncateAfter({ sessionPath: '/repo/session.jsonl', entryId: '' }), /requires a string entryId/);
 });
 
 test('validateMessageSend rejects malformed attachment payloads and invalid arrays', () => {
+  assert.throws(() => validateMessageSend({ sessionPath: 'C:\\repo\\__pending__:1-abc', text: 'hello' }), /resolved session/);
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: {} }), /inputs must be an array/);
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [null] }), /inputs\[0\] must be an object/);
   assert.throws(() => validateMessageSend({ sessionPath: '/repo/session.jsonl', text: 'hello', inputs: [{ kind: 'filesystemPathRef' }] }), /inputs\[0\]\.id must be a non-empty string/);
@@ -88,6 +97,11 @@ test('runtime prefs and settings validators reject invalid object shapes', () =>
   assert.throws(() => validateRuntimePrefsSet('invalid'), /expected an object/);
   assert.throws(() => validateRuntimePrefsSet({ providerToggles: [] }), /providerToggles must be an object/);
   assert.throws(() => validateSettingsSet({ sessionPath: '' }), /sessionPath must be a non-empty string/);
+  assert.throws(() => validateSettingsSet({ sessionPath: 'C:\\repo\\__pending__:1-abc' }), /resolved session/);
+  assert.throws(
+    () => validateSystemPromptTogglesSet({ sessionPath: 'C:\\repo\\__pending__:1-abc', disabledEntries: [] }),
+    /resolved session/,
+  );
   assert.throws(() => validateSettingsSet({ defaultModel: 123 }), /defaultModel must be a string/);
   assert.throws(() => validateSettingsSet({ defaultThinkingLevel: 'max' }), /defaultThinkingLevel must be one of/);
 });

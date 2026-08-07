@@ -123,7 +123,7 @@ Notes:
 - `npm run build-db` and `npm run export-site-data` build from the fixture when no explicit source is provided (with a warning).
 - `npm run query` reuses an existing `analysis/data/usage.duckdb` when present.
 - `npm run validate-site-data` validates existing generated site data when present; otherwise it validates a temporary build from the selected source.
-- `npm run serve` auto-refreshes `analysis/site/data/` from your local run store by default (prefers the current workspace hash under `../data/outcomes/`).
+- `npm run serve` auto-refreshes `analysis/site/data/` from the machine-wide `../data/outcomes/` authority by default, aggregating every workspace-sharded run store together with that root's sessions and global V2 review sidecar.
 
 For real local data, use one of these explicit inputs:
 
@@ -150,13 +150,13 @@ npm run export-site-data -- --storage-dir ../data/outcomes/<workspace-hash>
 
 ### Historical transcript evidence (analysis-only)
 
-Local source modes also discover content-free summaries from both the historical
-`../sessions/**/*.jsonl` tree and the `sessionDir` configured in
-`../settings.json` (resolved from the runtime workspace/root). Overlapping paths
-are normalized case- and slash-insensitively on Windows and loaded once. An
-explicit portable analytics export is never supplemented by scanning local
-transcripts; it may carry an optional serialized `historicalSessions` summary
-array instead.
+Local source modes derive transcripts and V2 reviews from the same selected
+outcomes root as the run stores: `<outcomes>/sessions/**/*.jsonl` and
+`<outcomes>/session-reviews/reviews.jsonl`. This prevents cwd/workspace changes
+from splicing runs with a different review sidecar. Paths are normalized case-
+and slash-insensitively on Windows and loaded once. An explicit portable
+analytics export is never supplemented by scanning local transcripts; it may
+carry an optional serialized `historicalSessions` summary array instead.
 
 The reader reconstructs only the active `id`/`parentId` branch and attributes
 successful assistant work (`stop` or `toolUse`) by reported token share, falling
@@ -239,11 +239,12 @@ npm run serve
 
 `npm run serve` will:
 
-1. auto-detect your local run store under `../data/outcomes/`,
-2. regenerate dashboard-ready `analysis/site/data/*.json`,
-3. start the localhost dashboard server.
+1. aggregate every run store under the machine-wide `../data/outcomes/` authority,
+2. join its global V2 review sidecar and canonical session summaries,
+3. regenerate dashboard-ready `analysis/site/data/*.json`,
+4. start the localhost dashboard server.
 
-If multiple run stores exist and none matches the current workspace hash, `serve` will ask for an explicit source. You can always force one with:
+To inspect one workspace shard or a portable export instead, use:
 
 ```bash
 npm run serve -- --storage-dir ../data/outcomes/<workspace-hash>

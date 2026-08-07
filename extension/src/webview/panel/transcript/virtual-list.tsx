@@ -393,11 +393,12 @@ export function TranscriptVirtualList({
     onLoadOlder,
     onLoadNewer,
     onJumpToLatest,
+    pagingSuspended: editingId !== null,
     totalSize,
   });
 
   // Disable tanstack virtual's built-in scroll-position correction. Scroll
-  // ownership must be exclusive: bottom-follow is handled by the rAF loop and
+  // ownership must be exclusive: bottom-follow is handled by exact pinning and
   // the scrolled-up viewport is handled by useTranscriptScrollAnchor below.
   // Leaving tanstack's overflow-anchor-like correction enabled while scrolled
   // up makes both systems apply the same row-size delta, which causes the

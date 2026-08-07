@@ -124,9 +124,14 @@ export class SessionRunStateManager {
     const nowIso = this.isoNow();
     const currentConfig = this.getCurrentModelConfig(sessionPath);
     const shouldStartNewTaskGroup = state.nextTaskIntent === 'new_task' || !state.lastRun?.taskGroupId;
+    const sessionSummary = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath);
+    const stableSessionId = sessionSummary?.identityFallback === true
+      ? undefined
+      : sessionSummary?.sessionId?.trim() || undefined;
 
     return {
       sessionPath,
+      ...(stableSessionId ? { sessionId: stableSessionId } : {}),
       runId: this.createId(),
       taskGroupId: shouldStartNewTaskGroup ? this.createId() : (state.lastRun?.taskGroupId ?? this.createId()),
       status: 'open',

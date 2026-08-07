@@ -141,7 +141,20 @@ export async function enqueueClosure(input: {
   return withFileLock(file, () => {
     const actions = readClosureActions();
     const existing = actions.find((action) => action.kind === input.kind && action.targetSessionId === input.targetSessionId && (action.status === 'succeeded' || action.status === 'pending' || action.status === 'retrying'));
-    if (existing) return { action: existing, existing: true, file };
+    if (existing) {
+      // Reusing an active action remains idempotent by actionId. Wake host
+      // reconciliation with a state-neutral record: another process may append
+      // a terminal action after our read, so re-appending this stale active
+      // snapshot could otherwise make it authoritative again.
+      if (existing.status === 'pending' || existing.status === 'retrying') {
+        appendLineDurable(file, {
+          recordType: 'wake',
+          actionId: existing.actionId,
+          wokenAt: new Date().toISOString(),
+        });
+      }
+      return { action: existing, existing: true, file };
+    }
     const action: ClosureAction = {
       actionId: randomUUID(),
       kind: input.kind,

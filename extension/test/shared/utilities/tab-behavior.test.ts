@@ -6,6 +6,7 @@ import {
   getNextVisibleTabPathOnClose,
   getVisibleTabPaths,
   insertTabRespectingPinnedPrefix,
+  isPendingTabPath,
   moveOpenTabPath,
   normalizeStoredTabPaths,
   pinTab,
@@ -136,10 +137,20 @@ test('closing the only visible tab returns null', () => {
   assert.equal(nextPath, null);
 });
 
+test('pending-tab detection survives SDK path normalization', () => {
+  assert.equal(isPendingTabPath('__pending__:1-abc'), true);
+  assert.equal(isPendingTabPath('/workspace/__pending__:1-abc'), true);
+  assert.equal(isPendingTabPath('C:\\workspace\\__pending__:1-abc'), true);
+  assert.equal(isPendingTabPath('/workspace/session.jsonl'), false);
+  assert.equal(isPendingTabPath('/workspace/not__pending__:1-abc'), false);
+});
+
 test('normalizeStoredTabPaths removes transient and duplicate tabs', () => {
   const paths = normalizeStoredTabPaths([
     '/workspace/a',
     '__pending__:1',
+    'C:\\workspace\\__pending__:2',
+    '/workspace/__pending__:3',
     '/workspace/a',
     '',
     null,

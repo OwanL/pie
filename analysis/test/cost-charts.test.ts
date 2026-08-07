@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { PreparedRunRow } from '../scripts/contracts.ts';
+import type { PreparedRunRow, PreparedTurnThroughputRow } from '../scripts/contracts.ts';
 import { costTrendByProviderRows, groupCostByModel, groupCostPerSessionByModel } from '../site/charts/cost.ts';
 
 /**
@@ -27,8 +27,12 @@ function mkRun(
 }
 
 /** Like {@link mkRun} but also sets the fields `costTrendByProviderRows` reads (`startedDay`, `provider`). */
-function mkProviderRun(day: string, provider: string | null, cost: number | null, status = 'completed'): PreparedRunRow {
-  return { status, startedDay: day, provider, estimatedCostUsd: cost, totalEstimatedCostUsd: cost, sessionPathHash: 's', modelId: 'm', modelFamily: 'm' } as unknown as PreparedRunRow;
+function mkProviderRun(day: string, provider: string | null, cost: number | null, status = 'completed', runId = 'provider-run'): PreparedRunRow {
+  return { runId, status, startedDay: day, provider, estimatedCostUsd: cost, totalEstimatedCostUsd: cost, sessionPathHash: 's', modelId: 'm', modelFamily: 'm' } as unknown as PreparedRunRow;
+}
+
+function mkTurn(runId: string, provider: string | null, inputTokens: number, outputTokens = 0): PreparedTurnThroughputRow {
+  return { runId, provider, inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 } as unknown as PreparedTurnThroughputRow;
 }
 
 function approx(actual: number, expected: number, epsilon = 1e-9): void {
@@ -165,6 +169,50 @@ test('costTrendByProviderRows groups daily cost by provider and sums across runs
   approx(d2Anthropic.totalCostUsd, 0.40);
   approx(d2Openai.totalCostUsd, 0);
   assert.equal(d2Openai.runCount, 0);
+});
+
+test('costTrendByProviderRows uses per-turn providers for legacy runs without run-level attribution', () => {
+  const rows = costTrendByProviderRows(
+    [mkProviderRun('2026-01-01', null, 10, 'completed', 'legacy-run')],
+    [
+      mkTurn('legacy-run', 'openai-codex', 100),
+      mkTurn('legacy-run', 'ollama', 300),
+    ],
+  );
+  assert.equal(rows.length, 2);
+  const codex = rows.find((r) => r.provider === 'openai-codex')!;
+  const ollama = rows.find((r) => r.provider === 'ollama')!;
+  approx(codex.totalCostUsd, 2.5);
+  approx(ollama.totalCostUsd, 7.5);
+  approx(codex.runCount, 0.25);
+  approx(ollama.runCount, 0.75);
+  assert.equal(rows.some((r) => r.provider === '(unknown)'), false);
+});
+
+test('costTrendByProviderRows keeps a known run-level provider authoritative', () => {
+  const rows = costTrendByProviderRows(
+    [mkProviderRun('2026-01-01', 'parent-provider', 10, 'completed', 'known-run')],
+    [mkTurn('known-run', 'nested-provider', 1000)],
+  );
+  assert.deepEqual(rows.map((row) => row.provider), ['parent-provider']);
+  approx(rows[0]!.totalCostUsd, 10);
+  assert.equal(rows[0]!.runCount, 1);
+});
+
+test('costTrendByProviderRows keeps an unattributed residual for legacy turns', () => {
+  const rows = costTrendByProviderRows(
+    [mkProviderRun('2026-01-01', null, 10, 'completed', 'partially-attributed-run')],
+    [
+      mkTurn('partially-attributed-run', 'openai-codex', 100),
+      mkTurn('partially-attributed-run', null, 900),
+    ],
+  );
+  const codex = rows.find((r) => r.provider === 'openai-codex')!;
+  const unknown = rows.find((r) => r.provider === '(unknown)')!;
+  approx(codex.totalCostUsd, 1);
+  approx(unknown.totalCostUsd, 9);
+  approx(codex.runCount, 0.1);
+  approx(unknown.runCount, 0.9);
 });
 
 test('costTrendByProviderRows excludes open runs, unpriced runs, and attributes null provider to (unknown)', () => {

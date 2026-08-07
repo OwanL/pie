@@ -408,6 +408,16 @@ test('coerceRunSnapshot coerces turn-latency fields on throughput samples, defau
   assert.equal(c.providerLatencyMs, null);
 });
 
+test('coerceRunSnapshot preserves a stable session ID compatibly', () => {
+  const legacy = makeRunSnapshot();
+  delete legacy.sessionId;
+  assert.equal(coerceRunSnapshot(legacy)?.sessionId, undefined);
+
+  const current = makeRunSnapshot();
+  current.sessionId = '  stable-session-id  ';
+  assert.equal(coerceRunSnapshot(current)?.sessionId, 'stable-session-id');
+});
+
 test('coerceRunSnapshot preserves privacy-safe initial message size compatibly', () => {
   const legacy = makeRunSnapshot();
   delete legacy.initialUserMessageChars;

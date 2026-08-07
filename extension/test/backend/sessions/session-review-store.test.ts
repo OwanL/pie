@@ -8,6 +8,7 @@ import {
   REVIEWS_DIR_ENV,
   appendClosureActionRecords,
   mergeReviewIntoSummary,
+  mergeReviewsIntoSummaries,
   readReviews,
   resolveSessionIdentity,
 } from '../../../src/backend/session-review-store';
@@ -146,6 +147,39 @@ test('closure outbox latest state is attached by sessionId', () => {
   assert.equal(merged.closureActions?.length, 1);
   assert.equal(merged.closureActions?.[0]?.status, 'retrying');
   assert.equal(merged.closureActions?.[0]?.attempts, 1);
+});
+
+test('active closure target absent from the SDK catalog is exposed for bounded host reconciliation', () => {
+  writeLines(REVIEW_CLOSURE_ACTIONS_FILE, [{
+    actionId: 'missing-target-close',
+    kind: 'closeSelf',
+    targetSessionId: SESSION_ID,
+    targetSessionPath: path.join(dir, 'already-missing.jsonl'),
+    status: 'pending',
+    attempts: 0,
+    requestedAt: '2026-07-24T00:00:00.000Z',
+  }]);
+
+  const merged = mergeReviewsIntoSummaries([], readReviews());
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.sessionId, SESSION_ID);
+  assert.equal(merged[0]?.isPlaceholder, true);
+  assert.equal(merged[0]?.closureActions?.[0]?.actionId, 'missing-target-close');
+});
+
+test('terminal closure target absent from the SDK catalog does not create a synthetic summary', () => {
+  writeLines(REVIEW_CLOSURE_ACTIONS_FILE, [{
+    actionId: 'settled-missing-target',
+    kind: 'closeSelf',
+    targetSessionId: SESSION_ID,
+    targetSessionPath: path.join(dir, 'already-missing.jsonl'),
+    status: 'failed',
+    attempts: 3,
+    requestedAt: '2026-07-24T00:00:00.000Z',
+    settledAt: '2026-07-24T00:01:00.000Z',
+  }]);
+
+  assert.deepEqual(mergeReviewsIntoSummaries([], readReviews()), []);
 });
 
 test('closeReviewed action without its linked canonical review is not drained', () => {

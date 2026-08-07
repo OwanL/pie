@@ -326,6 +326,9 @@ export function handleEdit(state: ArchState, cmd: Extract<Command, { kind: 'Edit
   const nextState = produce(state, (draft) => {
     draft.transcript.editingMessageIdBySession[cmd.sessionPath] = null;
     delete draft.transcript.editingDraftBySession[cmd.sessionPath];
+    // The edit operation establishes a newer authority than any page/tail
+    // replacement deferred while the user was typing.
+    delete draft.transcript.deferredWindowReplacementBySession[cmd.sessionPath];
     // Optimistically truncate the edited message + everything after it (the
     // old user message, agent reply, and any continuation turns) so the UI
     // reflects the edit instantly. The removed tail is captured on the pending

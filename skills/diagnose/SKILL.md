@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Disciplined evidence-first diagnosis for hard, unclear, intermittent, or performance bugs: reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when the user asks for diagnosis/debugging or the cause is genuinely uncertain; not for straightforward fixes with an obvious failing line and remedy.
+description: "Disciplined evidence-first diagnosis for hard, unclear, intermittent, or performance bugs: reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when the user asks for diagnosis/debugging or the cause is genuinely uncertain; not for straightforward fixes with an obvious failing line and remedy."
 ---
 
 # Diagnose

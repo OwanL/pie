@@ -67,6 +67,12 @@ export interface TranscriptState {
   editingMessageIdBySession: Record<string, string | null>;
   /** Submitted content for an inline editor reopened after an edit rollback. */
   editingDraftBySession: Record<string, InlineEditDraft | null>;
+  /** Latest authoritative replacement deferred because it omitted the row
+   * whose inline editor still owns an uncommitted webview-local draft. */
+  deferredWindowReplacementBySession: Record<string, {
+    transcript: ChatMessage[];
+    transcriptWindow: TranscriptWindow;
+  }>;
   /**
    * Per-session corrId of the in-flight transcript paging request
    * (loadOlder/loadNewer/jumpToLatest), or absent when none is in flight.
@@ -452,6 +458,7 @@ export function createInitialArchState(): ArchState {
       sessionUsageBySession: {},
       editingMessageIdBySession: {},
       editingDraftBySession: {},
+      deferredWindowReplacementBySession: {},
       pagingInFlightBySession: {},
     },
     sessions: {

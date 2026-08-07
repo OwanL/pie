@@ -90,6 +90,27 @@ export class SessionTabActions {
   }
 
   openSession(sessionPath: string): void {
+    // Pending paths are host-only sentinels. A tab click may race the
+    // create/duplicate response; select the existing optimistic tab, but never
+    // pass its sentinel to session.open. The SDK would otherwise normalize it
+    // against cwd and turn it into a durable-looking pseudo-path.
+    if (isPendingTabPath(sessionPath)) {
+      if (this.getArchState().sessions.openTabPaths.includes(sessionPath)) {
+        this.dispatchArch({
+          kind: 'Command',
+          cmd: {
+            kind: 'SelectSession',
+            corrId: crypto.randomUUID(),
+            sessionPath,
+          },
+        });
+      } else {
+        this.dispatchArch({ kind: 'NoticeShown', notice: 'Cannot open: the session is still being created.' });
+      }
+      this.scheduleRender();
+      return;
+    }
+
     // Host-side entry: generate the impure bits the reducer can't (the data
     // epoch + Date.now placeholder modifiedAt + the selection token), then
     // dispatch the OpenSession Command. The reducer owns the optimistic tab

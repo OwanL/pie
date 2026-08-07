@@ -311,6 +311,7 @@ function validateOptionalNumbers(candidate: Partial<RunSnapshot>): boolean {
 function validateOptionalStrings(candidate: Partial<RunSnapshot>): boolean {
   return (
     (candidate.finalizedAt === undefined || typeof candidate.finalizedAt === 'string') &&
+    (candidate.sessionId === undefined || typeof candidate.sessionId === 'string') &&
     (candidate.modelId === undefined || typeof candidate.modelId === 'string') &&
     (candidate.thinkingLevel === undefined || typeof candidate.thinkingLevel === 'string')
   );
@@ -347,6 +348,9 @@ function buildRunSnapshot(candidate: Partial<RunSnapshot>): RunSnapshot {
   const finalizationReason = c.finalizationReason;
   return {
     sessionPath: c.sessionPath,
+    ...(typeof candidate.sessionId === 'string' && candidate.sessionId.trim()
+      ? { sessionId: candidate.sessionId.trim() }
+      : {}),
     runId: c.runId,
     taskGroupId: c.taskGroupId,
     status,

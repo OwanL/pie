@@ -165,6 +165,7 @@ export function evictSession(
   const { [sp]: _usage, ...remainingSessionUsage } = state.transcript.sessionUsageBySession ?? {};
   const { [sp]: _e, ...remainingEditing } = state.transcript.editingMessageIdBySession;
   const { [sp]: _ed, ...remainingEditingDrafts } = state.transcript.editingDraftBySession;
+  const { [sp]: _deferred, ...remainingDeferredWindowReplacements } = state.transcript.deferredWindowReplacementBySession;
   const { [sp]: _pf, ...remainingPagingInFlight } = state.transcript.pagingInFlightBySession;
   const { [sp]: _i, ...remainingInterrupts } = state.sessions.interruptInFlightBySession;
   const { [sp]: _rtry, ...remainingRetryStatus } = state.sessions.retryStatusBySession;
@@ -282,6 +283,7 @@ export function evictSession(
         sessionUsageBySession: remainingSessionUsage,
         editingMessageIdBySession: remainingEditing,
         editingDraftBySession: remainingEditingDrafts,
+        deferredWindowReplacementBySession: remainingDeferredWindowReplacements,
         pagingInFlightBySession: remainingPagingInFlight,
       },
       sessions: {
@@ -360,11 +362,16 @@ export function enforceLoadedWindowBudget(draft: ArchState, sessionPath: string)
   if (!transcript || transcript.length === 0) return;
 
   const transcriptWindow = ensureSessionWindow(draft, sessionPath);
-  const activeTurnMessageId = transcript[transcript.length - 1]?.id;
+  // The virtualizer can pin an editor only while its row remains in the host's
+  // loaded window. Prefer that row over the tail while a local draft is active;
+  // the window may temporarily exceed its soft budget rather than destroying
+  // uncommitted user input.
+  const pinnedMessageId = draft.transcript.editingMessageIdBySession[sessionPath]
+    ?? transcript[transcript.length - 1]?.id;
   const culled = cullTranscriptWindowAroundActiveTurn({
     transcript,
     transcriptWindow,
-    activeTurnMessageId,
+    activeTurnMessageId: pinnedMessageId,
     maxLoadedCount: TRANSCRIPT_WINDOW_BUDGETS.maxLoadedCount,
   });
 

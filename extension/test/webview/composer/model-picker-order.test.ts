@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { filterEnabledProviders, orderModelsForPicker } from '../../../src/webview/panel/composer/model-list';
+import {
+  addProviderQualifiedModelSpec,
+  filterEnabledProviders,
+  isModelSelectedBySpec,
+  orderModelsForPicker,
+} from '../../../src/webview/panel/composer/model-list';
 import type { ModelInfo } from '../../../src/shared/protocol';
 
 function model(id: string, overrides: Partial<ModelInfo> = {}): ModelInfo {
@@ -15,17 +20,17 @@ function model(id: string, overrides: Partial<ModelInfo> = {}): ModelInfo {
   };
 }
 
-test('orderModelsForPicker sorts by name and pushes ineligible models to the bottom', () => {
+test('orderModelsForPicker sorts every model alphabetically while retaining eligibility warnings', () => {
   const models: ModelInfo[] = [
     model('beta', { name: 'Beta', subagent: { eligible: true } }),
     model('ineligible-zulu', { name: 'Zulu', subagent: { eligible: false, disabledReason: 'incompatible' } }),
     model('alpha', { name: 'Alpha', subagent: { eligible: true } }),
     model('unprofiled', { name: 'Charlie' }),
-    model('ineligible-delta', { name: 'Delta', subagent: { eligible: false } }),
+    model('ineligible-aaron', { name: 'Aaron', subagent: { eligible: false } }),
   ];
 
   const ordered = orderModelsForPicker(models).map((entry) => entry.model.id);
-  assert.deepEqual(ordered, ['alpha', 'beta', 'unprofiled', 'ineligible-delta', 'ineligible-zulu']);
+  assert.deepEqual(ordered, ['ineligible-aaron', 'alpha', 'beta', 'unprofiled', 'ineligible-zulu']);
 });
 
 test('orderModelsForPicker decorates ineligible options with a warning prefix and reason in the tooltip', () => {
@@ -40,7 +45,7 @@ test('orderModelsForPicker decorates ineligible options with a warning prefix an
   assert.match(bad.label, /^⚠ /);
   assert.equal(bad.selectedLabel, '⚠ Bad Model');
   assert.match(bad.title, /^Bad Model/);
-  assert.match(bad.title, /Disabled for subagent use: broken/);
+  assert.match(bad.title, /Subagent eligibility warning: broken/);
   assert.equal(good.ineligible, false);
   assert.equal(good.label, 'test · Good Model');
   assert.equal(good.selectedLabel, 'Good Model');
@@ -64,7 +69,7 @@ test('orderModelsForPicker does not treat subagent ineligibility as a parent-cha
   assert.deepEqual(ordered.map((entry) => entry.model.provider), ['openai-codex', 'github-copilot']);
   assert.ok(ordered.every((entry) => !entry.ineligible));
   assert.ok(ordered.every((entry) => !entry.label.startsWith('⚠')));
-  assert.ok(ordered.every((entry) => !entry.title.includes('Disabled for subagent use')));
+  assert.ok(ordered.every((entry) => !entry.title.includes('Subagent eligibility warning')));
 });
 
 test('orderModelsForPicker strips provider text only from the compact selected label', () => {
@@ -106,6 +111,43 @@ test('orderModelsForPicker includes pricing and image support in entries', () =>
   assert.equal(free.tokenInPrice, '');
   assert.equal(free.tokenOutPrice, '');
   assert.equal(free.supportsImages, false);
+});
+
+test('legacy bare selections keep duplicate provider-qualified choices available for upgrade', () => {
+  const catalog = [
+    model('shared', { provider: 'github-copilot' }),
+    model('shared', { provider: 'openai-codex' }),
+    model('unique', { provider: 'ollama' }),
+  ];
+
+  assert.equal(isModelSelectedBySpec(catalog[0], ['shared'], catalog), false);
+  assert.equal(isModelSelectedBySpec(catalog[1], ['shared'], catalog), false);
+  assert.equal(isModelSelectedBySpec(catalog[2], ['unique'], catalog), true);
+  assert.equal(
+    isModelSelectedBySpec(catalog[0], ['github-copilot/shared'], catalog),
+    true,
+  );
+  assert.equal(
+    isModelSelectedBySpec(catalog[1], ['github-copilot/shared'], catalog),
+    false,
+  );
+});
+
+test('provider-qualified choices replace the matching legacy bare selection', () => {
+  assert.deepEqual(
+    addProviderQualifiedModelSpec(
+      ['other', 'shared'],
+      'github-copilot/shared',
+    ),
+    ['other', 'github-copilot/shared'],
+  );
+  assert.deepEqual(
+    addProviderQualifiedModelSpec(
+      ['github-copilot/shared'],
+      'github-copilot/shared',
+    ),
+    ['github-copilot/shared'],
+  );
 });
 
 test('filterEnabledProviders drops models whose provider is toggled off', () => {

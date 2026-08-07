@@ -103,8 +103,16 @@ if [[ "$actual_npm" != "$pinned_npm" ]]; then
   npm install -g "npm@$pinned_npm"
 fi
 
-# Keep session history local to this checkout and migrate legacy stores safely.
+# Keep all session outcomes global to this checkout, independent of cwd. If an
+# older environment points elsewhere, merge its reviews, completed run snapshots,
+# closure events, and transcripts before switching the authority.
+previous_session_dir="${PI_CODING_AGENT_SESSION_DIR:-}"
 session_dir="$repo_root/data/outcomes/sessions"
+if [[ -n "$previous_session_dir" ]]; then
+  node "$repo_root/scripts/migrate-outcomes-store.mjs" \
+    --source-session-dir "$previous_session_dir" \
+    --dest "$repo_root/data/outcomes"
+fi
 export PI_CODING_AGENT_SESSION_DIR="$session_dir"
 persist_session_env_var() {
   local rc="$1"

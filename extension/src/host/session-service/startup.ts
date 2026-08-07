@@ -17,6 +17,7 @@ import {
 import { resolveAgentDir } from '../../shared/agent-dir-resolution';
 import { buildRuntimePrefsPayload } from '../../shared/protocol';
 import type { ChatPrefs, SessionSummary } from '../../shared/protocol';
+import { findStartupSessionToOpen } from '../../shared/review-auto-close';
 import { SessionService } from './service';
 import { SessionServiceEvents } from './events';
 import { SessionServiceState } from './state';
@@ -439,7 +440,10 @@ async function listAndOpenFirstSession(options: StartSessionBackendOptions): Pro
     options.dispatchArch({ kind: 'SessionSummariesReplaced', summaries: sessions });
     options.scheduleRender();
 
-    const toOpen = sessions[0]?.path;
+    // An active closure target can be synthesized when its file is absent from
+    // the SDK catalog. Do not race reconciliation by opening that target as the
+    // default startup session; the host list event will drain it instead.
+    const toOpen = findStartupSessionToOpen(sessions);
     if (toOpen) {
       options.openSession(toOpen);
     }
@@ -554,6 +558,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     scheduleRender: options.scheduleRender,
     openSession: options.openSession,
     preloadSessions: (sessionPaths) => options.state.preloadSessions(sessionPaths),
+    isRestoredSessionOpen: (sessionPath) => options.getArchState().sessions.openTabPaths.includes(sessionPath),
     restoredStartupPath,
     preloadPaths,
   });

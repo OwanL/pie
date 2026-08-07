@@ -83,7 +83,6 @@ function ExtensionItem({ ext, prefs, onSetPrefs, isExpanded, setExpandedExt, pru
           prefs={prefs}
           onSetPrefs={onSetPrefs}
           availableModels={availableModels}
-          modelEntries={modelEntries}
         />
       )}
       {hasSettings && expanded && ext.id === 'tool-result-pruner' && (

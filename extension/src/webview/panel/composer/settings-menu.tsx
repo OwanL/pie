@@ -568,12 +568,14 @@ export function ComposerSettingsMenu({ prefs, pruningSettings, pruningCatalog, p
   const [activeTab, setActiveTab] = useState<SettingsTab>('chat');
   const [query, setQuery] = useState('');
   const modelEntries = useMemo(
-    // Exclude models whose provider is toggled off in the Providers section —
-    // they're filtered out of the subagent/pruning selection pools at runtime,
-    // so offering them in the picker is misleading. The full `availableModels`
-    // list is still passed through for label/selected-model resolution (e.g. a
-    // bucket chip whose provider was just disabled).
-    () => orderModelsForPicker(filterEnabledProviders(availableModels, prefs.providerToggles)),
+    // Generic settings pickers (history summaries and the skill-pruning
+    // prepass) must not inherit subagent-specific eligibility warnings or
+    // ordering. Provider toggles still apply because disabled providers cannot
+    // execute these configured model calls.
+    () => orderModelsForPicker(
+      filterEnabledProviders(availableModels, prefs.providerToggles),
+      { useSubagentEligibility: false },
+    ),
     [availableModels, prefs.providerToggles],
   );
   const [expandedExt, setExpandedExt] = useState<string | null>(null);

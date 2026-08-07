@@ -12,7 +12,7 @@ import type { SdkModule, SdkSessionInfo } from './sdk';
 import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
 import { summarizeSession, type SessionEntryLike } from './transcript';
-import { mergeReviewIntoSummary, readReviews } from './session-review-store';
+import { mergeReviewIntoSummary, mergeReviewsIntoSummaries, readReviews } from './session-review-store';
 import { backendTrace } from './log';
 import { backendSessionPathKey } from './session-directory';
 
@@ -121,8 +121,7 @@ export async function discoverSessionSummaries(
 }
 
 export function applySessionReviews(summaries: readonly SessionSummary[]): SessionSummary[] {
-  const reviews = readReviews();
-  return summaries.map((summary) => mergeReviewIntoSummary(summary, reviews));
+  return mergeReviewsIntoSummaries(summaries, readReviews());
 }
 
 export async function listSessions(

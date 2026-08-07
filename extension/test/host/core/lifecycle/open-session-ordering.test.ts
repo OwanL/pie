@@ -90,6 +90,45 @@ test('openSession mints the selection token before the reducer activates the ope
   assert.notEqual(request?.previousActivePath, NEW);
 });
 
+test('openSession selects an existing pending tab without opening its sentinel path in the backend', () => {
+  const backend = { request: async () => ({}) } as any;
+  const context = createExtensionContext();
+  const OLD = '/workspace/old.jsonl';
+  const PENDING = '__pending__:1-abc';
+  const oldSummary: SessionSummary = {
+    path: OLD, name: 'Old', cwd: '/w', modifiedAt: '2024-01-01T00:00:00.000Z', messageCount: 1,
+  };
+  const pendingSummary: SessionSummary = {
+    path: PENDING, name: 'Creating', cwd: '/w', modifiedAt: '2024-01-01T00:00:01.000Z', messageCount: 0, isPlaceholder: true,
+  };
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    sessions: {
+      ...createInitialArchState().sessions,
+      sessions: [oldSummary, pendingSummary],
+      openTabPaths: [OLD, PENDING],
+      activeSessionPath: OLD,
+    },
+  };
+  const getArchState = () => archState;
+  const commands: string[] = [];
+  const dispatchArch = (event: Event) => {
+    if (event.kind === 'Command') commands.push(event.cmd.kind);
+    archState = reducer(archState, event).state;
+  };
+  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const tabs = new SessionTabActions({
+    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    state, getArchState, dispatchArch,
+  });
+
+  tabs.openSession(PENDING);
+
+  assert.equal(archState.sessions.activeSessionPath, PENDING);
+  assert.deepEqual(commands, ['SelectSession']);
+  assert.equal(state.getSelectionRequest('selection:1'), null);
+});
+
 test('openSession -> backend session.open rejection -> handleSelectionFailure restores the pre-open state (e2e through the EffectRunner)', async () => {
   // Glues the whole riskiest chain in one test: optimistic setup (reducer) ->
   // backend RPC rejection (runner) -> handleSelectionFailure (host) -> reducer

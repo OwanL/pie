@@ -69,9 +69,8 @@ export function useScrollEventsEffect(
       });
       setAutoFollow(follow);
       lastScrollTopRef.current = next;
-      // `autoFollow` means the viewport is trying to follow, not that it has
-      // already arrived. Keep this metric-based so the jump-to-bottom control
-      // remains visible while a long transcript is still catching up.
+      // Keep the visual bottom state metric-based rather than equating it with
+      // follow ownership; the user can be detached while still near the edge.
       setIsAtBottom(isNearBottom(metrics));
       if (el.scrollTop <= 120 && hasOlderRef.current) requestOlderPageRef.current();
     };

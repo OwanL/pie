@@ -31,13 +31,38 @@ export function filterEnabledProviders(
   return models.filter((m) => providerToggles[m.provider] !== false);
 }
 
+export function isModelSelectedBySpec(
+  model: Pick<ModelInfo, 'provider' | 'id'>,
+  selectedSpecs: string[],
+  catalog: ModelInfo[],
+): boolean {
+  if (selectedSpecs.includes(formatModelSpec(model))) return true;
+  if (!selectedSpecs.includes(model.id)) return false;
+
+  // A legacy bare id represented one runtime-resolved model. Preserve that
+  // behaviour only when the catalog has a single declaration. When providers
+  // share an id, keep every exact provider/id option available so the user can
+  // replace the ambiguous legacy entry with the provider they actually want.
+  return catalog.filter((candidate) => candidate.id === model.id).length === 1;
+}
+
+/** Replace the matching legacy bare id when a provider-qualified choice is
+ * made. This upgrades old bucket configuration instead of leaving a broad bare
+ * id beside a redundant exact provider/id entry. */
+export function addProviderQualifiedModelSpec(selectedSpecs: string[], spec: string): string[] {
+  const parsed = parseModelSpec(spec);
+  if (!parsed.provider) return selectedSpecs.includes(spec) ? selectedSpecs : [...selectedSpecs, spec];
+  if (selectedSpecs.includes(spec)) return selectedSpecs;
+  return [...selectedSpecs.filter((selected) => selected !== parsed.id), spec];
+}
+
 export interface ModelPickerEntry {
   model: ModelInfo;
-  /** Display label for the dropdown row — prefixed with ⚠ when ineligible as subagent. */
+  /** Display label for the dropdown row — prefixed with ⚠ when the subagent profile warns against the model. */
   label: string;
   /** Compact closed-state label shown in the toolbar after selection. */
   selectedLabel: string;
-  /** True for models that are explicitly ineligible as subagent targets. */
+  /** True for models whose subagent profile carries an eligibility warning. */
   ineligible: boolean;
   /** Tooltip text describing pricing and ineligibility when applicable. */
   title: string;
@@ -59,16 +84,17 @@ function stripProviderPrefix(name: string): string {
 }
 
 /**
- * Order models for the picker:
- *   1. Eligible / unprofiled first, then ineligible (subagent-disabled).
- *   2. Within each group, sort by display name, then id.
+ * Order models for the picker alphabetically by display name, then id and
+ * provider. Subagent eligibility is an annotation, not a hidden second section:
+ * keeping warned models in their expected alphabetical position makes the
+ * searchable catalog behave consistently across picker surfaces.
  *
- * The returned entries carry display affordances (warning prefix, tooltip) so the
- * toolbar can render without re-deriving eligibility logic.
+ * The returned entries carry display affordances (warning prefix, tooltip) so
+ * consumers do not need to re-derive eligibility metadata.
  */
 export interface ModelPickerOrderOptions {
-  /** Apply subagent eligibility warnings/demotion. Disable this for the parent
-   * chat picker: subagent eligibility is not a recommendation about chat use. */
+  /** Apply subagent eligibility warnings. Disable this for non-subagent
+   * pickers: subagent eligibility is not a recommendation about those uses. */
   useSubagentEligibility?: boolean;
 }
 
@@ -86,10 +112,11 @@ export function orderModelsForPicker(
   });
 
   decorated.sort((a, b) => {
-    if (a.ineligible !== b.ineligible) return a.ineligible ? 1 : -1;
     const byName = a.model.name.localeCompare(b.model.name);
     if (byName !== 0) return byName;
-    return a.model.id.localeCompare(b.model.id);
+    const byId = a.model.id.localeCompare(b.model.id);
+    if (byId !== 0) return byId;
+    return a.model.provider.localeCompare(b.model.provider);
   });
 
   return decorated.map((entry) => {
@@ -114,7 +141,7 @@ export function orderModelsForPicker(
 
     if (ineligible) {
       const reason = model.subagent?.disabledReason;
-      titleParts.push(reason ? `Disabled for subagent use: ${reason}` : 'Disabled for subagent use');
+      titleParts.push(reason ? `Subagent eligibility warning: ${reason}` : 'Subagent eligibility warning');
     }
     const supportsImages = model.inputKinds.includes('image');
 

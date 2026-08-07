@@ -49,8 +49,9 @@ export interface AggregateStatsServiceDeps {
   getArchState: () => ArchState;
   statsService: StatsService;
   tokenRateService: TokenRateService;
-  /** Resolve the agent dir containing `models.json`. Called each tick so a
-   *  runtime `pie.agentDir` change is picked up. Returns null when unresolved. */
+  /** Resolve the agent dir containing `models.json` and the generated
+   *  historical pricing catalog. Called each tick so a runtime `pie.agentDir`
+   *  change is picked up. Returns null when unresolved. */
   getAgentDir: () => string | null;
   /** Poll live provider-gate concurrency metrics from the backend
    *  (in-memory `ProviderGate` read via the `provider_gate.metrics` RPC).
@@ -415,12 +416,13 @@ export class AggregateStatsService {
     });
   }
 
-  /** Load + cache pricing by agent-dir + `models.json` stat signature. */
+  /** Load + cache active and historical pricing by their stat signatures. */
   private loadPricingCached(): PricingCache {
     const agentDir = this.deps.getAgentDir();
     if (!agentDir) return this.cachePricing('unresolved', new Map());
 
     const modelsJsonPath = path.join(agentDir, 'models.json');
+    const historicalPricingPath = path.join(agentDir, 'analysis', 'model-pricing-history.json');
     let signature: string;
     try {
       const stat = fs.statSync(modelsJsonPath);
@@ -431,8 +433,16 @@ export class AggregateStatsService {
       });
       return this.cachePricing(`missing:${modelsJsonPath}`, new Map());
     }
+    try {
+      const stat = fs.statSync(historicalPricingPath);
+      signature += `:${historicalPricingPath}:${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      // History is optional for portable/custom agent dirs. Keep its absence in
+      // the signature so creating the generated file invalidates the cache.
+      signature += `:missing:${historicalPricingPath}`;
+    }
     if (this.pricingCache?.signature === signature) return this.pricingCache;
-    return this.cachePricing(signature, loadModelPricing(modelsJsonPath));
+    return this.cachePricing(signature, loadModelPricing(modelsJsonPath, historicalPricingPath));
   }
 
   private cachePricing(signature: string, map: Map<string, ModelPricingRecord[]>): PricingCache {

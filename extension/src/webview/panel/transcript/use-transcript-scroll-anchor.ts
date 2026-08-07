@@ -46,8 +46,8 @@ function buildCandidates(items: ReadonlyArray<VirtualItem>): ScrollAnchorCandida
  * In-place scroll anchoring for the scrolled-up case.
  *
  * The transcript disables the browser's native `overflow-anchor` (incompatible
- * with the virtualizer's absolutely-positioned rows), and the auto-follow rAF
- * loop (`useSmoothAutoFollow`) only acts when the user is pinned to the bottom.
+ * with the virtualizer's absolutely-positioned rows), and `useAutoFollow`
+ * only acts when the user is pinned to the bottom.
  * So when the user has scrolled UP to read earlier content and a tool body
  * ABOVE the viewport grows or shrinks (streaming output, expand/collapse),
  * the viewport content would visibly shift with no correction — a "jump".
@@ -56,7 +56,7 @@ function buildCandidates(items: ReadonlyArray<VirtualItem>): ScrollAnchorCandida
  * that row's key + viewport-relative offset (on scroll and after each layout
  * commit), and whenever the total height changes while NOT auto-following (and
  * not paginating) it re-pins the row by adjusting `scrollTop` by the row's
- * shift. Bottom-following is left entirely to `useSmoothAutoFollow`; the two
+ * shift. Bottom-following is left entirely to `useAutoFollow`; the two
  * regimes are mutually exclusive (autoFollow true → bottom-follow; false →
  * anchor).
  *

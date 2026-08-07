@@ -12,7 +12,7 @@
 //     mutating real User env / VS Code settings / npm globals.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -121,6 +121,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     cpSync(installBat, path.join(tRepo, 'install.bat'));
     cpSync(path.join(repoRoot, 'scripts', 'install'), path.join(tRepo, 'scripts', 'install'), { recursive: true });
     cpSync(path.join(repoRoot, 'scripts', 'toolchain.mjs'), path.join(tRepo, 'scripts', 'toolchain.mjs'));
+    cpSync(path.join(repoRoot, 'scripts', 'migrate-outcomes-store.mjs'), path.join(tRepo, 'scripts', 'migrate-outcomes-store.mjs'));
     cpSync(path.join(repoRoot, 'scripts', 'lib', 'sdk-version.mjs'), path.join(tRepo, 'scripts', 'lib', 'sdk-version.mjs'));
     // Pins: node matches the REAL node running the test (so the node check
     // passes); npm/pi match the shim-reported "9.9.9".
@@ -141,9 +142,30 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     const shimLog = path.join(tmp, 'shim.log');
     const crlf = (s) => s.replace(/\n/g, '\r\n');
     writeFileSync(path.join(shims, 'setx.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo setx %*\nexit /b 0\n'));
+    writeFileSync(path.join(shims, 'reg.cmd'), crlf('@echo off\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_SESSION_DIR" if defined MOCK_USER_SESSION_DIR echo PI_CODING_AGENT_SESSION_DIR    REG_SZ    %MOCK_USER_SESSION_DIR%\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'npm.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo npm %*\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'pi.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo pi %*\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'code.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo code %*\nexit /b 0\n'));
+
+    // Distinct process- and HKCU-level authorities must both be migrated.
+    const createDisplacedAuthority = (name) => {
+      const outcomes = path.join(tmp, name, 'data', 'outcomes');
+      const sessions = path.join(outcomes, 'sessions');
+      mkdirSync(sessions, { recursive: true });
+      writeFileSync(
+        path.join(sessions, `${name}.jsonl`),
+        `${JSON.stringify({ type: 'session', id: `${name}-session`, cwd: 'C:/workspace', timestamp: '2026-08-02T00:00:00.000Z' })}\n`,
+      );
+      const reviews = path.join(outcomes, 'session-reviews');
+      mkdirSync(reviews, { recursive: true });
+      writeFileSync(
+        path.join(reviews, 'reviews.jsonl'),
+        `${JSON.stringify({ schemaVersion: 2, kind: 'production', sessionId: `${name}-session`, reviewId: `${name}-review` })}\n`,
+      );
+      return sessions;
+    };
+    const processSessions = createDisplacedAuthority('process-displaced');
+    const userSessions = createDisplacedAuthority('user-displaced');
 
     // --- isolated env: all mutations land under tmp ---
     const sysRoot = process.env.SystemRoot || 'C:\\Windows';
@@ -160,6 +182,8 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
       USERDOMAIN: process.env.USERDOMAIN || 'DOMAIN',
       USERNAME: process.env.USERNAME || 'user',
       SHIM_LOG: shimLog,
+      PI_CODING_AGENT_SESSION_DIR: processSessions,
+      MOCK_USER_SESSION_DIR: userSessions,
     };
 
     const bat = path.win32.normalize(path.join(tRepo, 'install.bat'));
@@ -187,6 +211,17 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     const settings = JSON.parse(readFileSync(path.join(tRepo, 'settings.json'), 'utf8'));
     assert.equal(settings.sessionDir, 'data/outcomes/sessions');
     assert.ok(!existsSync(path.join(tRepo, 'settings.json.session-dir')), 'no settings.json backup was created');
+    const canonicalSessions = path.join(tRepo, 'data', 'outcomes', 'sessions');
+    assert.ok(
+      readdirSync(canonicalSessions, { recursive: true }).some((entry) => String(entry).endsWith('displaced.jsonl')),
+      'displaced sessions were migrated',
+    );
+    const migratedSessionNames = readdirSync(canonicalSessions, { recursive: true }).map(String);
+    assert.ok(migratedSessionNames.some((entry) => entry.endsWith('process-displaced.jsonl')));
+    assert.ok(migratedSessionNames.some((entry) => entry.endsWith('user-displaced.jsonl')));
+    const migratedReviews = readFileSync(path.join(tRepo, 'data', 'outcomes', 'session-reviews', 'reviews.jsonl'), 'utf8');
+    assert.match(migratedReviews, /process-displaced-review/);
+    assert.match(migratedReviews, /user-displaced-review/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -71,8 +71,56 @@ test('closure actions are separate, idempotent while active, and never append a 
   assert.equal(second.existing, true);
   assert.equal(second.action.actionId, first.action.actionId);
   assert.equal(readClosureActions().length, 1);
+  const wakeRecords = fs.readFileSync(path.join(dir, 'closure-actions.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(wakeRecords.length, 2, 'active reuse appends a durable reconciliation wake record');
+  assert.equal(wakeRecords[1]?.recordType, 'wake', 'the wake is state-neutral');
+  assert.equal(wakeRecords[1]?.actionId, first.action.actionId, 'reuse never creates a new action ID');
   assert.equal(fs.readFileSync(reviewFile, 'utf8'), before);
   assert.ok(fs.existsSync(path.join(dir, 'closure-actions.jsonl')));
+});
+
+test('a concurrent host terminal append cannot be reactivated by an active-action wake', async () => {
+  const initial = await enqueueClosure({ kind: 'closeSelf', targetSessionId: 'racing-reviewer' });
+  const outbox = path.join(dir, 'closure-actions.jsonl');
+  const terminal = {
+    ...initial.action,
+    status: 'succeeded' as const,
+    attempts: 1,
+    settledAt: '2026-07-24T10:21:00.000Z',
+  };
+
+  const mutableFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const originalOpen = mutableFs.openSync;
+  const originalWrite = mutableFs.writeSync;
+  const originalFsync = mutableFs.fsyncSync;
+  const originalClose = mutableFs.closeSync;
+  let injected = false;
+  mutableFs.openSync = ((file: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+    if (!injected && path.resolve(String(file)) === path.resolve(outbox) && flags === 'a') {
+      injected = true;
+      const descriptor = originalOpen(file, 'a');
+      try {
+        originalWrite(descriptor, `${JSON.stringify(terminal)}\n`, undefined, 'utf8');
+        originalFsync(descriptor);
+      } finally {
+        originalClose(descriptor);
+      }
+    }
+    return originalOpen(file, flags, mode);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  try {
+    const reused = await enqueueClosure({ kind: 'closeSelf', targetSessionId: 'racing-reviewer' });
+    assert.equal(reused.existing, true);
+  } finally {
+    mutableFs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
+
+  assert.equal(injected, true, 'the terminal append lands between the enqueue read and wake append');
+  assert.equal(readClosureActions()[0]?.status, 'succeeded', 'the later wake cannot overwrite terminal state');
+  const records = fs.readFileSync(outbox, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(records[records.length - 1]?.recordType, 'wake');
 });
 
 test('initial closure append is fsynced before enqueue resolves', async () => {

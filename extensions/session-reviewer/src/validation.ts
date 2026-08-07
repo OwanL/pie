@@ -154,7 +154,7 @@ function validateAssessment(value: unknown, path: string, frozen: CriterionDefin
   processVector(classifications.process, `${path}.classifications.process`);
   evidenceVector(classifications.evidence, `${path}.classifications.evidence`);
   member(classifications.confidence, confidenceValues, `${path}.classifications.confidence`);
-  member(classifications.proposedOverall, overallValues, `${path}.classifications.proposedOverall`);
+  if (classifications.proposedOverall !== undefined) member(classifications.proposedOverall, overallValues, `${path}.classifications.proposedOverall`);
   return v as unknown as ReviewerAssessment;
 }
 function componentFieldValue(component: ReviewerAssessment, field: string): unknown {
@@ -226,8 +226,11 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
   string(consolidation.consolidationId, 'review.consolidation.consolidationId'); date(consolidation.consolidatedAt, 'review.consolidation.consolidatedAt');
   if (consolidation.rubricVersion !== v.rubricVersion) fail('review.consolidation.rubricVersion mismatch');
   if (consolidation.selectedHumanQuestion !== undefined) humanQuestionCandidate(consolidation.selectedHumanQuestion, 'review.consolidation.selectedHumanQuestion');
-  hash(consolidation.frozenLedgerSha256, 'review.consolidation.frozenLedgerSha256');
-  if (!isDeepStrictEqual(consolidation.frozenLedger, v.frozenLedger) || consolidation.frozenLedgerSha256 !== frozenHash) fail('consolidation frozen ledger/hash must exactly match canonical frozen ledger/hash');
+  if (consolidation.frozenLedger !== undefined || consolidation.frozenLedgerSha256 !== undefined) {
+    if (!Array.isArray(consolidation.frozenLedger)) fail('review.consolidation.frozenLedger must be an array when supplied');
+    hash(consolidation.frozenLedgerSha256, 'review.consolidation.frozenLedgerSha256');
+    if (!isDeepStrictEqual(consolidation.frozenLedger, v.frozenLedger) || consolidation.frozenLedgerSha256 !== frozenHash) fail('consolidation frozen ledger/hash must exactly match canonical frozen ledger/hash');
+  }
   const consolidationProvenance = object(consolidation.provenance, 'review.consolidation.provenance');
   if (!Array.isArray(consolidationProvenance.fromProposals) || consolidationProvenance.fromProposals.length !== 2) fail('consolidation provenance must reference two proposals');
   stringArray(consolidationProvenance.dedupNotes, 'review.consolidation.provenance.dedupNotes');
@@ -281,8 +284,10 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
     if (resolvedFieldNames.size !== expectedResolvedFields.size || [...expectedResolvedFields].some((field) => !resolvedFieldNames.has(field))) {
       fail('adjudication resolvedFields must exactly match computed material fields');
     }
-    const canonicalOverall = object(adjudication.canonicalOverall, 'review.adjudication.canonicalOverall');
-    member(canonicalOverall.deliveredOverall, overallValues, 'review.adjudication.canonicalOverall.deliveredOverall'); member(canonicalOverall.controllableOverall, overallValues, 'review.adjudication.canonicalOverall.controllableOverall');
+    if (adjudication.canonicalOverall !== undefined) {
+      const canonicalOverall = object(adjudication.canonicalOverall, 'review.adjudication.canonicalOverall');
+      member(canonicalOverall.deliveredOverall, overallValues, 'review.adjudication.canonicalOverall.deliveredOverall'); member(canonicalOverall.controllableOverall, overallValues, 'review.adjudication.canonicalOverall.controllableOverall');
+    }
   }
 
   let canonical;
@@ -304,7 +309,7 @@ export function validateSessionReviewV2(value: unknown): SessionReviewV2 {
 
   const attainment = object(v.attainment, 'review.attainment'); const derivedAttainment = deriveAttainment(ledger);
   if (!isDeepStrictEqual(attainment, derivedAttainment)) fail('attainment does not match deterministic derivation');
-  if (v.adjudication && !isDeepStrictEqual((v.adjudication as unknown as Record<string, unknown>).canonicalOverall, { deliveredOverall: derivedAttainment.deliveredOverall, controllableOverall: derivedAttainment.controllableOverall })) fail('adjudication canonicalOverall does not match deterministic derivation');
+  if (v.adjudication && (v.adjudication as unknown as Record<string, unknown>).canonicalOverall !== undefined && !isDeepStrictEqual((v.adjudication as unknown as Record<string, unknown>).canonicalOverall, { deliveredOverall: derivedAttainment.deliveredOverall, controllableOverall: derivedAttainment.controllableOverall })) fail('adjudication canonicalOverall does not match deterministic derivation');
 
   const provenance = object(v.provenance, 'review.provenance');
   string(provenance.orchestratorSessionId, 'review.provenance.orchestratorSessionId');

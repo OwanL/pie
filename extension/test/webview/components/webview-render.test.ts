@@ -412,6 +412,37 @@ test('rendered tool-call components cover collapsed summaries, expanded bodies, 
   assert.match(fallbackSubagentHtml, /Too many parallel tasks/);
 });
 
+test('session-review batch results do not render as failed subagents', async () => {
+  const { ToolCallItem } = await loadWebviewModules();
+  const html = renderToString(h(ToolCallItem, {
+    toolCall: toolCall({
+      id: 'review-close-batch',
+      name: 'session_review',
+      input: { action: 'closeReviewedBatch' },
+      result: {
+        content: [{ type: 'text', text: 'Requested closure batch: 2 succeeded, 0 failed.' }],
+        details: {
+          results: [
+            { index: 0, sessionId: 'session-1', reviewId: 'review-1', status: 'pending' },
+            { index: 1, sessionId: 'session-2', reviewId: 'review-2', status: 'pending' },
+          ],
+        },
+      },
+      status: 'completed',
+    }),
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandToolCalls: true },
+    workingDirectory: '/repo',
+    onOpenFile: noop,
+    onContextMenu: noopContextMenu,
+    renderToolCall: () => null,
+  }));
+
+  assert.match(html, /Requested closure batch: 2 succeeded, 0 failed/);
+  assert.doesNotMatch(html, /tool-call-subagent/);
+  assert.doesNotMatch(html, /context task only/);
+  assert.doesNotMatch(html, />Failed</);
+});
+
 test('rendered ToolCallItem hides subagent model-selection badges in collapsed headers', async () => {
   const { ToolCallItem } = await loadWebviewModules();
 
@@ -458,7 +489,7 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.doesNotMatch(html, /subagent-model-tag/);
 });
 
-test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent branches', async () => {
+test('rendered ToolCallItem covers collapsed and parallel subagent branches without inferring from foreign results', async () => {
   const { ToolCallItem } = await loadWebviewModules();
 
   const collapsedHtml = renderToString(h(ToolCallItem, {
@@ -498,9 +529,9 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
   assert.match(collapsedHtml, /subagent-model-label/);
   assert.doesNotMatch(collapsedHtml, /subagent-messages/);
 
-  const inferredSubagentHtml = renderToString(h(ToolCallItem, {
+  const foreignResultHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({
-      id: 'sub-inferred',
+      id: 'foreign-results',
       name: 'bash',
       input: { command: 'echo delegate' },
       result: {
@@ -522,11 +553,8 @@ test('rendered ToolCallItem covers collapsed, inferred, and parallel subagent br
     renderToolCall: () => null,
   }));
 
-  assert.match(inferredSubagentHtml, /tool-call-subagent/);
-  assert.match(inferredSubagentHtml, /planner/);
-  assert.doesNotMatch(inferredSubagentHtml, /subagent-primary-meta/);
-  assert.doesNotMatch(inferredSubagentHtml, /subagent-secondary-meta/);
-  assert.doesNotMatch(inferredSubagentHtml, /status-chip-running|status-chip-failed/);
+  assert.match(foreignResultHtml, />bash</);
+  assert.doesNotMatch(foreignResultHtml, /tool-call-subagent|context task only/);
 
   const failedParentHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({

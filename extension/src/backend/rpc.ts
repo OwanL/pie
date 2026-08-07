@@ -2,6 +2,7 @@ import type { ComposerInput, ExtensionUIResponsePayload, FilesystemPathComposerI
 import { ALL_NESTED_BUCKETS_ALLOWED, DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
+import { isPendingTabPath } from '../shared/tab-behavior.js';
 import { BackendError } from './server-io';
 
 export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
@@ -141,11 +142,19 @@ function readSelectionToken(method: string, params: Record<string, unknown>): st
   return selectionToken as string | undefined;
 }
 
+function rejectPendingSessionPath(method: string, sessionPath: string): void {
+  if (isPendingTabPath(sessionPath)) {
+    fail(method, 'sessionPath must reference a resolved session');
+  }
+}
+
 export function validateSessionPath(method: string, params: unknown): SessionPathParams {
   if (!isObj(params) || typeof params['sessionPath'] !== 'string' || !params['sessionPath']) {
     fail(method, 'requires a string sessionPath');
   }
-  return { sessionPath: params['sessionPath'] as string };
+  const sessionPath = params['sessionPath'] as string;
+  rejectPendingSessionPath(method, sessionPath);
+  return { sessionPath };
 }
 
 export function validateSessionCreate(params: unknown): SessionCreateParams {
@@ -192,6 +201,7 @@ export function validateLoadTranscriptPage(params: unknown): LoadTranscriptPageP
   if (typeof sessionPath !== 'string' || !sessionPath) {
     fail('session.loadTranscriptPage', 'requires a string sessionPath');
   }
+  rejectPendingSessionPath('session.loadTranscriptPage', sessionPath);
 
   const direction = params['direction'];
   if (typeof direction !== 'string' || !TRANSCRIPT_PAGE_DIRECTIONS.includes(direction as TranscriptPageDirection)) {
@@ -231,11 +241,10 @@ export interface TruncateAfterParams {
 
 export function validateTruncateAfter(params: unknown): TruncateAfterParams {
   if (!isObj(params)) fail('session.truncateAfter', 'expected an object');
-  const sp = (params as Record<string, unknown>)['sessionPath'];
-  if (typeof sp !== 'string' || !sp) fail('session.truncateAfter', 'requires a string sessionPath');
+  const { sessionPath } = validateSessionPath('session.truncateAfter', params);
   const eid = (params as Record<string, unknown>)['entryId'];
   if (typeof eid !== 'string' || !eid) fail('session.truncateAfter', 'requires a string entryId');
-  return { sessionPath: sp as string, entryId: eid as string };
+  return { sessionPath, entryId: eid as string };
 }
 
 export interface ExtensionUiResponseParams {
@@ -353,6 +362,7 @@ export function validateMessageSend(params: unknown): MessageSendParams {
   if (typeof sp !== 'string' || !sp) {
     fail('message.send', 'requires a string sessionPath');
   }
+  rejectPendingSessionPath('message.send', sp);
 
   const rawInputs = (params as Record<string, unknown>)['inputs'];
   let inputs: ComposerInput[] = [];
@@ -753,6 +763,7 @@ export function validateSettingsSet(params: unknown): SettingsSetParams {
     if (typeof sessionPath !== 'string' || !sessionPath) {
       fail('settings.set', 'sessionPath must be a non-empty string when provided');
     }
+    rejectPendingSessionPath('settings.set', sessionPath);
     out.sessionPath = sessionPath;
   }
   const dm = (params as Record<string, unknown>)['defaultModel'];
@@ -791,6 +802,7 @@ export function validateSystemPromptTogglesSet(params: unknown): SystemPromptTog
   if (typeof sessionPath !== 'string' || !sessionPath) {
     fail('systemPromptToggles.set', 'sessionPath must be a non-empty string');
   }
+  rejectPendingSessionPath('systemPromptToggles.set', sessionPath);
   const rawEntries = (params as Record<string, unknown>)['disabledEntries'];
   if (!Array.isArray(rawEntries)) {
     fail('systemPromptToggles.set', 'disabledEntries must be an array of strings');

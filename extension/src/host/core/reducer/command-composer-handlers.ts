@@ -73,6 +73,15 @@ export function handleSetEditingMessage(state: ArchState, cmd: Extract<Command, 
     state: produce(state, (draft) => {
       draft.transcript.editingMessageIdBySession[cmd.sessionPath] = cmd.messageId;
       delete draft.transcript.editingDraftBySession[cmd.sessionPath];
+
+      const deferred = draft.transcript.deferredWindowReplacementBySession[cmd.sessionPath];
+      if (cmd.messageId === null && deferred) {
+        // Cancel commits no edit, so the newest authoritative page/tail that
+        // was held back to protect the local buffer can now replace the view.
+        draft.transcript.bySession[cmd.sessionPath] = deferred.transcript;
+        draft.transcript.windowBySession[cmd.sessionPath] = deferred.transcriptWindow;
+      }
+      delete draft.transcript.deferredWindowReplacementBySession[cmd.sessionPath];
     }),
     effects: [],
   };

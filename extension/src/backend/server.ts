@@ -35,7 +35,12 @@ import {
   resolveActiveModel,
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
-import { ensureReviewsDir, startReviewWatcher } from './session-review-store';
+import {
+  ensureReviewsDir,
+  getReviewSidecarFingerprint,
+  hasActiveReviewClosureActions,
+  startReviewWatcher,
+} from './session-review-store';
 import {
   readSystemPromptTogglesForSession,
   writeSystemPromptTogglesForSession,
@@ -189,6 +194,12 @@ export class BackendServer {
   private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
   private sessionCatalogPollingActive = false;
   private sessionCatalogPollInFlight = false;
+  /** Last cheap snapshot of the append-only review/closure files. Used by the
+   * catalog poll to recover when fs.watch drops or coalesces an event. */
+  private reviewSidecarFingerprint = getReviewSidecarFingerprint();
+  /** Cached active-action state belongs to `reviewSidecarFingerprint`; an
+   * unchanged poll must not synchronously reparse the growing sidecars. */
+  private reviewClosureReconciliationPending = false;
   private stopProviderProgressObserver?: () => void;
   private stopProviderIncidentObserver?: () => void;
   /** Captures request+turn ownership at an attempt's first synchronous gate
@@ -447,15 +458,7 @@ export class BackendServer {
       authPath,
     });
 
-    // Ensure the session-review sidecar dir exists and watch it so a review
-    // written by the `session_review` tool is reflected in the session list
-    // (and thus the host UI) promptly. Best-effort: if watching fails, changes
-    // are still picked up on the next any-cause `session.list.changed`.
-    ensureReviewsDir();
-    this.stopReviewWatcher = startReviewWatcher(() => {
-      void this.emitSessionListChanged();
-    });
-    this.startSessionCatalogPolling();
+    this.startReviewReconciliation();
   }
 
   private createRuntimeFactory() {
@@ -1127,6 +1130,33 @@ export class BackendServer {
     return await this.sessionCatalog.list(this.sdk, this.getSessionDir(), liveSummaries, this.agentDir);
   }
 
+  /** Start durable closure reconciliation. The watcher is a low-latency hint;
+   * an unconditional startup list and the bounded sidecar fingerprint poll are
+   * the correctness paths, including after a backend restart. */
+  private startReviewReconciliation(): void {
+    ensureReviewsDir();
+    this.refreshReviewSidecarState(true);
+    this.stopReviewWatcher = startReviewWatcher(() => {
+      this.refreshReviewSidecarState();
+      void this.emitSessionListChanged();
+    });
+    this.startSessionCatalogPolling();
+    void this.emitSessionListChanged();
+  }
+
+  /** Refresh parsed closure state only when its cheap file fingerprint moves.
+   * `force` establishes the startup baseline even when construction happened
+   * after PIE_REVIEWS_DIR was already configured. */
+  private refreshReviewSidecarState(force = false): boolean {
+    const fingerprint = getReviewSidecarFingerprint();
+    const changed = fingerprint !== this.reviewSidecarFingerprint;
+    if (force || changed) {
+      this.reviewSidecarFingerprint = fingerprint;
+      this.reviewClosureReconciliationPending = hasActiveReviewClosureActions();
+    }
+    return changed;
+  }
+
   private startSessionCatalogPolling(intervalMs = SESSION_CATALOG_POLL_INTERVAL_MS): void {
     if (this.sessionCatalogPollTimer) return;
     this.sessionCatalogPollingActive = true;
@@ -1139,16 +1169,27 @@ export class BackendServer {
   private async pollSessionCatalog(): Promise<void> {
     if (!this.sessionCatalogPollingActive || this.sessionCatalogPollInFlight) return;
     this.sessionCatalogPollInFlight = true;
+    let catalogChanged = false;
     try {
-      const changed = await this.sessionCatalog.invalidateIfInventoryChanged(
+      catalogChanged = await this.sessionCatalog.invalidateIfInventoryChanged(
         this.agentDir,
         this.getSessionDir(),
       );
-      if (changed && this.sessionCatalogPollingActive) await this.emitSessionListChanged();
     } catch (error) {
       backendWarn('backend-session', 'catalogInventoryPoll.failed', {
         error: toErrorMessage(error),
       });
+    }
+
+    try {
+      const sidecarChanged = this.refreshReviewSidecarState();
+      // Cached active actions force a bounded retry even when a prior list scan
+      // failed after the watcher/fingerprint wake was consumed. The cache is
+      // reparsed only when the append-only sidecar fingerprint changes.
+      if ((catalogChanged || sidecarChanged || this.reviewClosureReconciliationPending)
+        && this.sessionCatalogPollingActive) {
+        await this.emitSessionListChanged();
+      }
     } finally {
       this.sessionCatalogPollInFlight = false;
     }

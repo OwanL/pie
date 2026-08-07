@@ -1,10 +1,10 @@
 /**
- * Auto-follow target-refresh harness for `useSmoothAutoFollow`.
+ * Auto-follow target-refresh harness for exact bottom pinning.
  *
- * The loop eases `scrollTop` toward a cached *bottom* target
- * (`scrollHeight - clientHeight`) that `useRefreshFollowTarget` keeps fresh.
- * It NEVER reads `scrollHeight`/`clientHeight` itself (no per-frame forced
- * reflow). The target is re-read exactly once per content-height change, keyed
+ * `useRefreshFollowTarget` keeps a cached *bottom* target
+ * (`scrollHeight - clientHeight`) fresh, and `useAutoFollow` applies it in the
+ * same layout commit. The pinning effect never reads `scrollHeight` or
+ * `clientHeight`; the target is re-read exactly once per content-height change, keyed
  * on the virtualizer's `totalSize` — which changes for EVERY height-relevant
  * mutation (streaming markdown, tool-body output, reasoning/preview
  * expand-collapse, late image/table loads, drag-resizes), because each measured
@@ -20,9 +20,9 @@
  * and reading them is free — so the *forced-reflow* cost can't be measured
  * here (that needs a real browser). What this harness DOES prove, faithfully:
  *   (1) auto-follow tracks growth (correctness) — a `totalSize` change re-reads
- *       `scrollHeight` exactly once and advances `scrollTop` toward the new
- *       bottom, for ANY growth source (totalSize is source-agnostic);
- *   (2) settled stable content leaves ZERO rAF callbacks queued and reads
+ *       `scrollHeight` exactly once and pins `scrollTop` to the new bottom in
+ *       the same commit, for ANY growth source (totalSize is source-agnostic);
+ *   (2) settled stable content leaves ZERO follow callbacks queued and reads
  *       `scrollHeight` zero times (no idle main-thread churn or reflow);
  *   (3) every `totalSize` change re-pins IMMEDIATELY — there is no timed
  *       fallback cadence anymore (no `Date.now` dependency), so a late image /
@@ -164,11 +164,11 @@ function spyMetrics(el: HTMLElement): void {
     configurable: true,
   });
   // Own-property scrollTop so writes don't dispatch a real scroll event (which
-  // would perturb autoFollow via the scroll listener) and the value is
-  // observable.
+  // would perturb autoFollow via the scroll listener). Clamp like a browser:
+  // `scrollTop = scrollHeight` resolves to `scrollHeight - clientHeight`.
   Object.defineProperty(el, 'scrollTop', {
     get() { return scrollTopValue; },
-    set(v: number) { scrollTopValue = v; },
+    set(v: number) { scrollTopValue = Math.max(0, Math.min(v, bottom())); },
     configurable: true,
   });
 }
@@ -215,13 +215,13 @@ function mountProbe(busy: boolean): void {
 }
 
 /** Let the mount-time positioning window settle (clear `isInitialPositioning`)
- *  and ease `scrollTop` to the cached bottom, then reset the read counter so
+ *  and pin `scrollTop` to the cached bottom, then reset the read counter so
  *  subsequent reads are attributable to the behavior under test.
  *
  *  The rerender here is load-bearing: `mountProbe` spies metrics AFTER the
  *  initial render, so the mount-time layout effect seeded the target with
  *  happy-dom's un-spied 0. Bumping `totalSize` forces the layout effect to
- *  re-run under the spy, seeding the real bottom before the ease. */
+ *  re-run under the spy, seeding the real bottom before the pin. */
 function settle(): void {
   rerender(true, 12);
   // The positioning-state update flushes effects at the end of the render
@@ -243,21 +243,35 @@ test('auto-follow tracks totalSize growth and reads scrollHeight only once per c
 
   // Grow content: totalSize changes (the source-agnostic signal for ANY row
   // growth — streaming markdown, tool-body output, reasoning, previews, late
-  // loads) + scrollHeight grows. The totalSize-keyed layout effect re-reads
-  // scrollHeight exactly once; the loop then eases scrollTop toward the new
-  // bottom without reading scrollHeight itself.
+  // loads) + scrollHeight grows. The totalSize-keyed layout effects re-read
+  // scrollHeight exactly once and pin to the new bottom before paint.
   scrollHeightValue = 1500;
   rerender(true, 1);
   assert.equal(scrollHeightReads, 1, 'a totalSize change should trigger exactly one scrollHeight read');
   assert.ok(scrollTopValue > scrollTopBefore, `scrollTop should advance toward the grown bottom (got ${scrollTopValue})`);
 
-  // Stable frames: totalSize unchanged → the layout effect doesn't re-run and
-  // the loop reuses the cached target, so NO new scrollHeight reads, while the
-  // ease still advances scrollTop toward it.
+  // Stable frames: totalSize unchanged → the layout effects don't re-run, so
+  // there are no new scrollHeight reads or follow callbacks.
   const readsBeforeStable = scrollHeightReads;
   act(() => flushFrames(40));
   assert.equal(scrollHeightReads, readsBeforeStable, 'stable-content frames must not re-read scrollHeight (no forced reflow)');
-  assert.equal(scrollTopValue, bottom(), 'scrollTop should have eased to the cached bottom (auto-follow tracks growth)');
+  assert.equal(scrollTopValue, bottom(), 'scrollTop should remain pinned to the cached bottom');
+});
+
+test('a pinned transcript stays exactly at the bottom across ordinary tool-section growth', () => {
+  mountProbe(true);
+  settle();
+  assert.equal(scrollTopValue, bottom(), 'sanity: pinned before the section expands');
+
+  // A single bash/tool section typically adds less than the old 480px snap
+  // threshold. Auto-follow must still preserve the bottom invariant in the
+  // layout that observes the growth; easing behind creates a temporary gap
+  // that repeated streaming/expand updates can turn into a stuck transcript.
+  scrollHeightValue += 320;
+  rerender(true, 0);
+
+  assert.equal(scrollTopValue, bottom(), 'pinned follow must remain at the exact bottom without waiting for animation frames');
+  assert.equal(rafMap.size, 0, 'exact pinning should not leave catch-up work queued');
 });
 
 test('settled idle follow leaves the rAF queue empty even while busy', () => {
@@ -300,8 +314,8 @@ test('a fresh transcript snapshot re-reads the bottom at commit time — no meas
   // streaming snapshot. That identity change is the timely signal the follow
   // target refresh keys on (in addition to the lagged totalSize): it re-reads
   // scrollHeight at commit — the moment the DOM grew — instead of waiting up to
-  // a frame for the virtualizer's deferred re-measurement. Without it the loop
-  // eased toward a ~16ms-stale target on every snapshot, trailing the latest
+  // a frame for the virtualizer's deferred re-measurement. Without it follow
+  // targeted a ~16ms-stale bottom on every snapshot, trailing the latest
   // content during regular agent work.
   mountProbe(true);
   settle();
@@ -324,7 +338,7 @@ test('a fresh transcript snapshot re-reads the bottom at commit time — no meas
   assert.ok(scrollTopValue > scrollTopBefore, 'scrollTop should advance toward the grown bottom the same frame');
 });
 
-test('container resize wakes quiescent follow and settles back to an empty rAF queue', () => {
+test('container resize re-pins quiescent follow without catch-up frames', () => {
   mountProbe(true);
   settle();
   assert.equal(scrollTopValue, bottom(), 'sanity: pinned to the bottom');
@@ -332,16 +346,13 @@ test('container resize wakes quiescent follow and settles back to an empty rAF q
 
   // A viewport resize changes the true bottom without changing transcript or
   // virtualizer totalSize. The container observer must refresh the target and
-  // explicitly wake the otherwise-empty follow scheduler.
+  // trigger a commit-time re-pin.
   scrollHeightValue += 120;
   const readsBefore = scrollHeightReads;
   const scrollTopBefore = scrollTopValue;
   act(() => notifyResizeObservers());
   assert.equal(scrollHeightReads, readsBefore + 1, 'resize should refresh the cached bottom once');
-  assert.ok(rafMap.size > 0, 'resize should wake the settled follow effect');
-
-  act(() => flushFrames(40));
-  assert.ok(scrollTopValue > scrollTopBefore, 'resize-triggered follow should advance toward the new bottom');
-  assert.equal(scrollTopValue, bottom(), 'resize-triggered follow should settle at the new bottom');
-  assert.equal(rafMap.size, 0, 'follow should quiesce again after handling resize');
+  assert.ok(scrollTopValue > scrollTopBefore, 'resize-triggered follow should advance to the new bottom');
+  assert.equal(scrollTopValue, bottom(), 'resize-triggered follow should pin to the new bottom immediately');
+  assert.equal(rafMap.size, 0, 'resize pinning should not schedule catch-up frames');
 });

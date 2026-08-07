@@ -81,6 +81,8 @@ if exist "%OLD_AUTH%" (
 )
 
 REM --- session store env var (User scope) + warn if it points elsewhere ------
+REM Capture both authorities: an invoking shell may override the User value.
+set "PROCESS_SESSION_DIR=%PI_CODING_AGENT_SESSION_DIR%"
 set "NEW_SESSIONS=%REPO_ROOT%\data\outcomes\sessions"
 call :read_user_env PI_CODING_AGENT_SESSION_DIR
 set "EXISTING_SESSION_DIR=%USER_ENV_VALUE%"
@@ -98,10 +100,17 @@ call :check_node
 if "%NODE_MISSING%"=="1" goto :no_node
 where npm >nul 2>nul || goto :no_npm
 
-REM --- settings.json#sessionDir rewrite + legacy session migration -----------
-REM  Batch cannot parse/rewrite JSON; the shared runner owns this (mirrors the
-REM  former install.ps1 session block: default roots recursive, configured dir
-REM  flat, de-duplicated, conflict-backup preserved).
+REM --- settings.json#sessionDir rewrite + global outcomes migration ----------
+REM  Preserve reviews and run analytics alongside transcripts when repairing a
+REM  displaced session authority. Derived exports/open checkpoints are rebuilt.
+if defined PROCESS_SESSION_DIR (
+  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+)
+if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
+  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+)
+REM  Batch cannot parse/rewrite JSON; the shared runner owns legacy transcript
+REM  migration and the canonical settings.json rewrite.
 node "%RUNNER%" configure-sessions "%REPO_ROOT%" || goto :error
 
 REM --- pinned Node/npm/pi versions ------------------------------------------
@@ -277,7 +286,7 @@ call :readiness_check
 echo.
 echo ==^> Would-do - run install.bat without --check to perform these:
 echo   - setx PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR at User scope
-echo   - configure sessions: settings.json sessionDir + legacy migration
+echo   - configure global outcomes: sessions + reviews + completed run analytics
 echo   - repair extension paths in settings.json
 echo   - relocate/merge auth.json if present
 echo   - npm install -g pinned npm/pi if drifted

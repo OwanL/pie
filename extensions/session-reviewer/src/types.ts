@@ -1,6 +1,6 @@
-/** V2 contracts for the `session_review` tool. */
+/** Contracts for the `session_review` tool. */
 
-export type ReviewAction = 'listOpen' | 'listSelected' | 'getEvidence' | 'recordReview' | 'closeReviewed' | 'closeSelf';
+export type ReviewAction = 'listOpen' | 'listSelected' | 'getEvidence' | 'recordReview' | 'recordReviews' | 'closeReviewed' | 'closeReviewedBatch' | 'closeSelf';
 
 export interface OpenTabSummary {
   path: string;
@@ -87,8 +87,10 @@ export interface ConsolidationRecord extends Omit<ReviewerRuntime, 'requestedBuc
   consolidationId: string;
   requestedBucket: ReviewerBucket;
   consolidatedAt: string;
-  frozenLedger: CriterionDefinition[];
-  frozenLedgerSha256: string;
+  /** Optional in compact input; the compiler derives it from the root ledger. */
+  frozenLedger?: CriterionDefinition[];
+  /** Optional in compact input; the compiler derives it at record time. */
+  frozenLedgerSha256?: string;
   selectedHumanQuestion?: ReviewHumanQuestionCandidate;
   provenance: { fromProposals: [string, string]; dedupNotes: string[] };
 }
@@ -141,7 +143,8 @@ export interface ReviewerAssessment extends ReviewerRuntime {
     process: ReviewProcessVector;
     evidence: ReviewEvidenceVector;
     confidence: ReviewConfidence;
-    proposedOverall: OverallAttainment;
+    /** Comparison-only; canonical attainment is derived from classifications. */
+    proposedOverall?: OverallAttainment;
   };
 }
 export interface DisputedField {
@@ -157,7 +160,8 @@ export interface ReviewerAdjudication extends Omit<ReviewerRuntime, 'requestedBu
   requestedBucket: ReviewerBucket;
   assessedAt: string;
   resolvedFields: { field: string; value: string; rationale: string; evidenceRefs: string[] }[];
-  canonicalOverall: { deliveredOverall: OverallAttainment; controllableOverall: OverallAttainment };
+  /** Optional comparison output; canonical attainment is derived from the ledger. */
+  canonicalOverall?: { deliveredOverall: OverallAttainment; controllableOverall: OverallAttainment };
 }
 
 export interface BlindingSummary { stripped: string[]; redactedTurnFields: string[]; notes: string[] }
@@ -211,6 +215,32 @@ export interface ReviewProvenance {
   hostVersion: string | null;
 }
 
+export type ReviewerProposalDraft = Omit<ReviewerProposal, 'rubricVersion' | 'proposalId' | 'proposedAt'> & Partial<Pick<ReviewerProposal, 'rubricVersion' | 'proposalId' | 'proposedAt'>>;
+export type ReviewerAssessmentDraft = Omit<ReviewerAssessment, 'rubricVersion' | 'assessmentId' | 'assessedAt'> & Partial<Pick<ReviewerAssessment, 'rubricVersion' | 'assessmentId' | 'assessedAt'>>;
+export type ConsolidationDraft = Omit<ConsolidationRecord, 'rubricVersion' | 'consolidationId' | 'consolidatedAt' | 'frozenLedger' | 'frozenLedgerSha256' | 'provenance'> & Partial<Pick<ConsolidationRecord, 'rubricVersion' | 'consolidationId' | 'consolidatedAt' | 'frozenLedger' | 'frozenLedgerSha256' | 'provenance'>>;
+export type ReviewerAdjudicationDraft = Omit<ReviewerAdjudication, 'rubricVersion' | 'adjudicationId' | 'assessedAt' | 'canonicalOverall'> & Partial<Pick<ReviewerAdjudication, 'rubricVersion' | 'adjudicationId' | 'assessedAt' | 'canonicalOverall'>>;
+export type ReviewProvenanceDraft = Omit<ReviewProvenance, 'orchestratorSessionId' | 'rubricVersion' | 'indexVersion' | 'blindingApplied' | 'diversityAchieved' | 'pipeline' | 'hostVersion' | 'evidenceManifest'> & Partial<Pick<ReviewProvenance, 'orchestratorSessionId' | 'rubricVersion' | 'indexVersion' | 'blindingApplied' | 'diversityAchieved' | 'pipeline' | 'hostVersion' | 'evidenceManifest'>>;
+
+/** Compact evaluator input. Deterministic fields and transport metadata are filled by the extension. */
+export interface SessionReviewDraft {
+  schemaVersion?: number;
+  kind?: ReviewKind;
+  reviewId?: string;
+  sessionId: string;
+  sessionPathAtReview: string;
+  identityFallback?: boolean;
+  rubricVersion?: string;
+  indexVersion?: string;
+  reviewedAt?: string;
+  frozenLedger: CriterionDefinition[];
+  proposals: [ReviewerProposalDraft, ReviewerProposalDraft];
+  consolidation: ConsolidationDraft;
+  components: [ReviewerAssessmentDraft, ReviewerAssessmentDraft];
+  humanCheck?: ReviewHumanCheck;
+  adjudication?: ReviewerAdjudicationDraft;
+  provenance: ReviewProvenanceDraft;
+}
+
 export interface SessionReviewV2 {
   schemaVersion: number;
   kind: ReviewKind;
@@ -244,6 +274,12 @@ export interface SessionReviewV2 {
   provenance: ReviewProvenance;
 }
 
+export interface ReviewClosureTarget {
+  sessionId: string;
+  reviewId: string;
+  sessionPath?: string;
+}
+
 export type ClosureActionKind = 'closeReviewed' | 'closeSelf';
 export type ClosureActionStatus = 'pending' | 'succeeded' | 'failed' | 'retrying';
 export interface ClosureAction {
@@ -264,8 +300,12 @@ export interface SessionReviewParams {
   sessionPath?: string;
   sessionId?: string;
   reviewId?: string;
-  review?: SessionReviewV2 | string;
+  review?: SessionReviewV2 | SessionReviewDraft | string;
   reviewPath?: string;
+  reviews?: Array<SessionReviewV2 | SessionReviewDraft | string>;
+  reviewsPath?: string;
+  closures?: ReviewClosureTarget[];
+  /** Retained for callers that attach a human-readable closure reason; the outbox currently ignores it. */
   reason?: string;
   maxTurns?: number;
   artifacts?: EvidenceArtifactInput[];
@@ -276,8 +316,8 @@ export const sessionReviewSchema = {
   properties: {
     action: {
       type: 'string',
-      enum: ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'closeReviewed', 'closeSelf'],
-      description: 'V2 review action. listSelected returns pinned targets; getEvidence returns a blinded bundle; recording and closure are separate.',
+      enum: ['listOpen', 'listSelected', 'getEvidence', 'recordReview', 'recordReviews', 'closeReviewed', 'closeReviewedBatch', 'closeSelf'],
+      description: 'Session review action. listSelected returns pinned targets; getEvidence returns a blinded bundle; recording and closure are separate.',
     },
     sessionPath: { type: 'string', description: 'Absolute session JSONL path returned by listOpen/listSelected.' },
     sessionId: { type: 'string', description: 'Stable session-header ID (required for closeReviewed; checked against sessionPath when supplied).' },
@@ -287,10 +327,32 @@ export const sessionReviewSchema = {
         { type: 'object', additionalProperties: true },
         { type: 'string' },
       ],
-      description: 'Complete SessionReviewV2 record for recordReview. Accepts an object or JSON string. recordReview derives the three frozenLedgerSha256 fields with key-order-independent canonical JSON hashing.',
+      description: 'Canonical review or compact review draft for recordReview. Accepts an object or JSON string; the extension compiles compact drafts and derives deterministic fields.',
     },
-    reviewPath: { type: 'string', description: 'Absolute, non-symlink path inside the OS temporary directory to one UTF-8 SessionReviewV2 JSON object (max 1 MiB), as an alternative to inline review. The file is read but not deleted. recordReview derives the three frozenLedgerSha256 fields.' },
-    reason: { type: 'string', description: 'Optional close reason.' },
+    reviewPath: { type: 'string', description: 'Absolute, non-symlink path inside the OS temporary directory to one UTF-8 review object (max 1 MiB), as an alternative to inline review.' },
+    reviews: {
+      type: 'array',
+      maxItems: 100,
+      description: 'Compact review drafts or canonical review objects for recordReviews.',
+      items: { oneOf: [{ type: 'object', additionalProperties: true }, { type: 'string' }] },
+    },
+    reviewsPath: { type: 'string', description: 'Absolute, non-symlink path inside the OS temporary directory to one UTF-8 JSON array of review drafts or canonical review objects (max 8 MiB).' },
+    reason: { type: 'string', description: 'Optional closure reason retained for compatibility; persistence does not interpret it.' },
+    closures: {
+      type: 'array',
+      maxItems: 100,
+      description: 'Independent reviewed-target closure requests for closeReviewedBatch.',
+      items: {
+        type: 'object',
+        properties: {
+          sessionId: { type: 'string' },
+          reviewId: { type: 'string' },
+          sessionPath: { type: 'string' },
+        },
+        required: ['sessionId', 'reviewId'],
+        additionalProperties: false,
+      },
+    },
     maxTurns: { type: 'integer', minimum: 1, maximum: 200, description: 'getEvidence transcript turn cap (default 40).' },
     artifacts: {
       type: 'array',

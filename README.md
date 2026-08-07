@@ -254,9 +254,10 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 
 ## Persistence and storage
 
-- Session history is canonical JSONL under each checkout's `data/outcomes/sessions/`. Both installers pin `PI_CODING_AGENT_SESSION_DIR` to that machine-local path.
-- `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same session directory.
-- Both installers migrate legacy session files (`~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/`), prefer newer transcripts on conflict, and preserve the loser as `.conflict.*.bak`.
+- `data/outcomes/` is the machine-wide authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL, one global V2 review sidecar, and workspace-sharded run stores that analytics aggregates globally.
+- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`; `PIE_REVIEWS_DIR` is derived as the sibling `data/outcomes/session-reviews/` directory rather than selected per cwd.
+- `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same outcomes authority.
+- When an existing session environment points elsewhere, both installers merge its durable transcripts, reviews, closure events, and completed run snapshots into the canonical authority. Conflicting reviews are appended only as later fallback candidates and audited under `data/outcomes/migration-conflicts/`; consumers retain the first valid canonical review.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations
@@ -265,7 +266,8 @@ Other analytics helpers from the repo root: `analytics:build-db`, `analytics:que
 |---|---|---|
 | Auth tokens | `%LOCALAPPDATA%\pie\auth.json` (Win) / `~/.config/pie/auth.json` (macOS/Linux) | `PI_CODING_AGENT_AUTH_DIR` |
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
-| Run analytics | `data/outcomes/<id>/` or `PIE_ANALYTICS_DIR` override | `PIE_ANALYTICS_DIR` |
+| V2 reviews | `data/outcomes/session-reviews/reviews.jsonl` | Derived from the session authority |
+| Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |
 
 The backend logs resolved storage paths on startup via the `backend.ready` event.
 
