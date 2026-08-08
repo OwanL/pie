@@ -8,7 +8,7 @@ import type {
   WebviewToHostMessage,
 } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
-import useUndo from 'use-undo';
+import { useUndo } from './use-undo';
 import { shouldHandleGlobalComposerPaste } from './affordances';
 import {
   canAcceptComposerTransfer,
@@ -77,13 +77,13 @@ export function useComposerInput({
   // switch. See the [sessionPath] seed effect below.
   const prevSessionPathRef = useRef<string | null>(null);
   // Word-processor-style undo/redo history for the composer text. It lives in a
-  // dedicated past/present/future store (use-undo) so it survives the
+  // dedicated past/present/future store so it survives the
   // programmatic clear on send — letting Ctrl+Z step back to a prompt that was
   // deleted or already sent. The live `text` state still drives the controlled
   // textarea; history.present only advances on debounced checkpoints so undo
   // groups typing bursts instead of stepping per character.
   const [history, { set: setHistory, reset: resetHistory, undo, redo, canUndo, canRedo }] =
-    useUndo<string>('', { useCheckpoints: true });
+    useUndo<string>('');
   const checkpointTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearCheckpointTimer = useCallback(() => {

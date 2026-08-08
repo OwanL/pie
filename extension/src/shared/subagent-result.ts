@@ -351,6 +351,25 @@ function parseRenderableSubagentResult(value: unknown): SubagentResult | undefin
   };
 }
 
+/**
+ * Return the raw child-result entries used by accounting consumers.
+ *
+ * Billing data can outlive (or be more compact than) the render payload: a
+ * persisted subagent result may retain model/usage/attempt records while
+ * omitting UI-only fields such as `task`, `exitCode`, or `messages`. Do not use
+ * the stricter render parser for accounting, or valid historical cost samples
+ * disappear merely because their child transcript was compacted.
+ */
+export function getSubagentResultEntries(rawResult: unknown): Record<string, unknown>[] {
+  if (!isRecord(rawResult)) return [];
+  const direct = Array.isArray(rawResult.results)
+    ? rawResult.results
+    : isRecord(rawResult.details) && Array.isArray(rawResult.details.results)
+      ? rawResult.details.results
+      : [];
+  return direct.filter((entry): entry is Record<string, unknown> => isRecord(entry));
+}
+
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
   const raw = rawResult as { kind?: unknown; mode?: unknown; children?: unknown; details?: unknown; results?: unknown } | undefined;
 

@@ -1,6 +1,0 @@
-{
-  "name": "react",
-  "version": "18.3.1",
-  "description": "Local shim: redirects `react` to preact/compat so react-ecosystem hooks (e.g. use-undo) run under the Preact renderer in the pie webview and its tsx tests. The vite build additionally aliases react -> preact/compat directly.",
-  "main": "index.cjs"
-}

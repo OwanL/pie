@@ -183,12 +183,10 @@
     "postcss": "^8.5.15",
     "preact": "^10.29.1",
     "preact-render-to-string": "^6.6.7",
-    "react": "file:./shims/react",
     "tailwindcss": "^4.3.0",
     "tsx": "^4.19.3",
     "typescript": "^5.4.0",
     "typescript-eslint": "^8.32.0",
-    "use-undo": "^1.2.0",
     "vite": "^6.0.0"
   },
   "dependencies": {

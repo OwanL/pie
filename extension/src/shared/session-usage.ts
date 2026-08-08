@@ -1,6 +1,6 @@
 import type { AssistantUsage, ChatMessage, PruningDetails, ToolCall } from './protocol';
 import { formatToolResult } from './tool-result-format';
-import { getRenderableSubagentResult, type RawMessage } from './subagent-result';
+import { getSubagentResultEntries, type RawMessage } from './subagent-result';
 import { isRecord } from './type-guards';
 
 export type SessionUsageKind = 'assistant' | 'subagent' | 'skill_pruning_prepass';
@@ -154,10 +154,10 @@ function addSubagentToolSamples(
   depth: number,
 ): void {
   if (toolCall.status === 'failed' || depth > 8) return;
-  const renderable = getRenderableSubagentResult(toolCall.result);
-  if (!renderable) return;
+  const results = getSubagentResultEntries(toolCall.result);
+  if (results.length === 0) return;
 
-  for (const [resultIndex, result] of renderable.results.entries()) {
+  for (const [resultIndex, result] of results.entries()) {
     const rawResult = result as unknown;
     if (!isRecord(rawResult)) continue;
     const resultModelId = typeof rawResult.model === 'string'

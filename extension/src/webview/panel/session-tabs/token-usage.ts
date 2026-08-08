@@ -1,6 +1,6 @@
 import type { AssistantUsage, ChatMessage, ContextWindowUsage, PruningDetails, ToolCall } from '../../../shared/protocol';
 import { formatToolResult } from '../../../shared/tool-result-format';
-import { getRenderableSubagentResult, type RawMessage } from '../../../shared/subagent-result';
+import { getSubagentResultEntries, type RawMessage } from '../../../shared/subagent-result';
 import { estimateLiveAssistantOutputTokens } from '../../../shared/token-rate';
 import {
   assistantUsageFromSample,
@@ -427,10 +427,10 @@ function addSubagentToolCallCost(
   pricingForModel?: TokenPricingResolver,
 ): void {
   if (toolCall.status === 'failed') return;
-  const subagentResult = getRenderableSubagentResult(toolCall.result);
-  if (!subagentResult) return;
+  const results = getSubagentResultEntries(toolCall.result);
+  if (results.length === 0) return;
 
-  for (const result of subagentResult.results) {
+  for (const result of results) {
     const rawResult = result as unknown;
     if (!isRecord(rawResult)) continue;
 
